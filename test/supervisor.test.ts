@@ -1,0 +1,191 @@
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { Effect, Layer } from "effect";
+import { Recapper } from "../src/recap.js";
+import { Store, makeStore } from "../src/store.js";
+import { createStatus, readiness, refreshTelegramStatus, runSupervisor } from "../src/supervisor.js";
+import { T3Client, type T3ClientShape } from "../src/t3.js";
+import { TelegramClient } from "../src/telegram.js";
+import type { Projection, SupervisorConfig, ThreadInfo } from "../src/types.js";
+
+const excluded = "af0e5160-07d2-46c9-b60b-a329d6951d83";
+const teamsThread = "9fbd0b1f-5f41-4708-85db-a3cf736789a7";
+
+for (const mode of ["normal", "settling", "rejected", "skipped", "continued", "telegram"] as const) test(`coordinator handles ${mode} completion without duplicate or premature delivery`, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "supervisor-coordinator-"));
+  const config: SupervisorConfig = {
+    dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "/unused",
+    mcpxUrl: "http://unused", cxCommand: "unused", cxHome: "/unused", cxSeedFile: "/unused",
+    excludedThreadIds: [excluded, teamsThread], healthPort: 0, modelTimeoutMs: 100,
+  };
+  const status = createStatus();
+  const fetched: string[] = [];
+  const contexts: string[] = [];
+  const deliveries: Array<{ key: string; text: string }> = [];
+  let completed!: () => void;
+  const delivered = new Promise<void>((resolve) => { completed = resolve; });
+  let projection!: Projection;
+  let projectionReads = 0;
+
+  const source: T3ClientShape = {
+    descriptor: () => Effect.succeed({ environmentId: "environment-test", orchestrationProtocolVersion: 2, serverVersion: "test" }),
+    projection: (threadId) => Effect.sync(() => {
+      fetched.push(threadId);
+      projectionReads += 1;
+      return { snapshotSequence: 1, projection: mode === "settling" && projectionReads === 1
+        ? { ...projection, subagents: [{ status: "completed", completionDelivery: { state: "claimed" } }] }
+        : projection };
+    }),
+    watch: (_cursor, onItem) => Effect.gen(function* () {
+      const completedAt = new Date(Date.now() + 100).toISOString();
+      const thread: ThreadInfo = {
+        id: "main-thread", title: "Service deployment", projectId: "project",
+        lineage: { parentThreadId: null, relationshipToParent: null },
+        latestRunCompletedAt: completedAt, status: "completed",
+        activeRunId: null, activityRunStatus: null, pendingRuntimeRequest: null, pendingBackgroundTasks: [],
+      };
+      projection = {
+        thread,
+        nodes: [
+          { id: "root", kind: "root_turn", threadId: thread.id, runId: "run", rootNodeId: "root", parentNodeId: null, providerThreadId: "provider", status: "completed" },
+          { id: "answer-node", kind: "assistant_message", threadId: thread.id, runId: "run", rootNodeId: "root", parentNodeId: "root", providerThreadId: "provider", status: "completed" },
+        ],
+        runs: [{ id: "run", threadId: thread.id, providerThreadId: "provider", ordinal: 1, status: "completed", requestedAt: completedAt, startedAt: completedAt, completedAt, rootNodeId: "root" }],
+        messages: [{ id: "answer", threadId: thread.id, runId: "run", nodeId: "answer-node", role: "assistant", text: "Configured restart unless stopped; the service works.", streaming: false, createdAt: completedAt, updatedAt: completedAt }],
+      };
+      if (mode === "telegram") {
+        const requestId = "message:mcp:90d829bb-aada-40db-b243-797c00ac8f36:thread-send:telegram-route-135456335";
+        projection.runs[0]!.userMessageId = requestId;
+        projection.messages.unshift({
+          id: requestId, threadId: thread.id, runId: "run", nodeId: "root", role: "user", text: "Just confirm?",
+          streaming: false, createdAt: completedAt, updatedAt: completedAt,
+        });
+        projection.messages[1]!.text = "Yes, exactly. " + "Every word stays in the original answer. ".repeat(10);
+      }
+      if (mode === "continued") {
+        projection.thread = { ...thread, activeRunId: "next-run", activityRunStatus: "running" };
+        projection.runs.push({
+          id: "next-run", threadId: thread.id, providerThreadId: "provider", ordinal: 2,
+          status: "running", requestedAt: completedAt, startedAt: completedAt, completedAt: null, rootNodeId: "next-root",
+        });
+        projection.turnItems = [{ type: "dynamic_tool", status: "running", runId: "next-run" }];
+      }
+      yield* onItem({ stream: "active", item: { kind: "snapshot", snapshot: {
+        schemaVersion: 2, snapshotSequence: 1,
+        projects: [{ id: "project", title: "Homelab", workspaceRoot: "/work" }],
+        threads: [mode === "settling" ? { ...thread, activityRunStatus: "running", activeRunId: "run" } : thread,
+          { ...thread, id: excluded }, { ...thread, id: teamsThread, title: "TEAMS" },
+          { ...thread, id: "child", lineage: { parentThreadId: thread.id, relationshipToParent: "subagent" } }], archivedThreads: [],
+      } } });
+      if (mode !== "settling") yield* onItem({ stream: "active", item: { kind: "thread.updated", sequence: 2, thread } });
+      return yield* Effect.never;
+    }),
+  };
+  const layers = Layer.mergeAll(
+    makeStore(directory),
+    Layer.succeed(T3Client, source),
+    Layer.succeed(Recapper, { recap: (context) => Effect.sync(() => {
+      contexts.push(context.finalAnswer);
+      if (mode === "skipped") {
+        completed();
+        return null;
+      }
+      return "Configured restart behavior and verified the service.";
+    }) }),
+    Layer.succeed(TelegramClient, {
+      getBotInfo: () => Effect.succeed({ id: 1, isBot: true, firstName: "Bot", username: null }),
+      getDeliveryStatus: () => Effect.succeed({ state: "not_found" }),
+      sendMessage: (key, text) => Effect.sync(() => {
+        deliveries.push({ key, text });
+        completed();
+        return mode === "rejected"
+          ? { kind: "rejected", reason: "telegram_rejected", telegramCode: 403 }
+          : { kind: "sent", messageId: 123 };
+      }),
+    }),
+  );
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* Store;
+      yield* Effect.forkScoped(runSupervisor(config, status));
+      yield* Effect.tryPromise(async () => {
+        let timeout: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([delivered, new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error("coordinator never completed its send attempt")), 20_000);
+          })]);
+        } finally {
+          if (timeout) clearTimeout(timeout);
+        }
+      });
+      yield* Effect.sleep("100 millis");
+      const stats = yield* store.stats();
+      assert.equal(stats.jobs.sent, mode === "rejected" || mode === "skipped" ? 0 : 1);
+      assert.equal(stats.identities, 1);
+      if (mode === "skipped") {
+        assert.equal(stats.jobs.pending, 0);
+        assert.equal(stats.jobs.ready, 0);
+        assert.equal(status.modelState, "ready");
+        assert.ok(status.lastModelSuccessAt);
+      }
+      if (mode === "rejected") {
+        assert.equal(status.deliveryState, "degraded");
+        yield* refreshTelegramStatus(status);
+        assert.equal(status.telegramState, "ready");
+        assert.equal(status.deliveryState, "degraded");
+        assert.equal(readiness(status, config).ready, false);
+      }
+    }).pipe(Effect.provide(layers), Effect.scoped));
+    assert.equal(fetched.every((id) => id === "main-thread"), true);
+    assert.equal(projectionReads, mode === "settling" ? 2 : 1);
+    assert.equal(contexts.length, mode === "telegram" ? 0 : 1);
+    if (mode === "telegram") {
+      assert.ok(deliveries[0]?.text.endsWith(projection.messages[1]!.text));
+      assert.match(deliveries[0]?.key ?? "", /-answer-1$/u);
+    }
+    assert.equal(deliveries.length, mode === "skipped" ? 0 : 1);
+    if (mode !== "skipped") {
+      assert.match(deliveries[0]!.text, /Homelab/u);
+      assert.match(deliveries[0]!.text, /main-thread/u);
+    }
+    assert.equal(status.lastDeliveryAt !== null, mode !== "rejected" && mode !== "skipped");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("readiness distinguishes process liveness from failed dependencies and stalled workers", () => {
+  const status = createStatus();
+  const config = { modelTimeoutMs: 1000 } as SupervisorConfig;
+  assert.equal(readiness(status, config).alive, true);
+  assert.equal(readiness(status, config).ready, false);
+  status.activation = new Date().toISOString();
+  status.t3Connected = true;
+  status.storeState = "ready";
+  status.telegramState = "ready";
+  assert.equal(readiness(status, config).ready, true);
+  status.inputState = "starting";
+  assert.equal(readiness(status, config).ready, false);
+  status.inputState = "ready";
+  status.inputHeartbeat = Date.now() - 130_000;
+  assert.equal(readiness(status, config).ready, false);
+  status.inputHeartbeat = Date.now();
+  assert.equal(readiness(status, config).ready, true);
+  status.inputState = "degraded";
+  assert.equal(readiness(status, config).ready, false);
+  status.inputState = "disabled";
+  status.modelState = "degraded";
+  assert.equal(readiness(status, config).ready, false);
+  status.modelState = "ready";
+  status.storeState = "degraded";
+  assert.equal(readiness(status, config).ready, false);
+  status.storeState = "ready";
+  status.scanHeartbeat = Date.now() - 130_000;
+  assert.equal(readiness(status, config).ready, false);
+  status.scanHeartbeat = Date.now();
+  status.deliveryBusySince = Date.now() - 63_000;
+  assert.equal(readiness(status, config).ready, false);
+});

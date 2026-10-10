@@ -1,0 +1,56 @@
+name: t3-supervisor
+
+services:
+  t3-supervisor:
+    build: .
+    image: t3-supervisor:0.1.0
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "${LOCAL_UID:-501}:${LOCAL_GID:-20}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 768m
+    environment:
+      T3_URL: http://host.docker.internal:3773
+      T3_TOKEN_FILE: /run/secrets/t3-read-token
+      INPUT_ENABLED: "true"
+      T3_INPUT_TOKEN_FILE: /run/secrets/t3-input-token
+      INPUT_POLL_MS: "1000"
+      MCPX_URL: http://mcpx:9000/mcp/lazy
+      DATA_DIRECTORY: /data
+      CX_COMMAND: /usr/local/bin/cx
+      CX_HOME: /data/runtime-auth
+      CX_SEED_FILE: /run/secrets/codex-auth.json
+      EXCLUDED_THREAD_IDS: "${EXCLUDED_THREAD_IDS:-}"
+      HEALTH_PORT: "9007"
+      MODEL_TIMEOUT_MS: "360000"
+      UI_PORT: "9008"
+      UI_HOST: "0.0.0.0"
+      T3_GUIDANCE_TOKEN_FILE: /run/secrets/t3-guidance-token
+      T3_MANAGED_SCRATCH_ROOT: "${T3_MANAGED_SCRATCH_ROOT:-/tmp/t3-scratch}"
+    volumes:
+      - state:/data
+      - ${SUPERVISOR_SECRETS_DIR:?set SUPERVISOR_SECRETS_DIR}:/run/secrets:ro
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    ports: ["127.0.0.1:9007:9007", "127.0.0.1:9008:9008"]
+    networks: [gateway]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9007/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "3"}
+
+volumes:
+  state:
+
+networks:
+  gateway:
+    external: true
+    name: lunar-mcpx_default
