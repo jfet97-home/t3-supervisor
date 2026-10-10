@@ -3,16 +3,15 @@
 Open http://127.0.0.1:9008. The supervisor, rather than T3, serves this interface.
 It uses Effect v4 HttpApi and React with Effect Atom, built by Vite.
 
-Generate an owner login code locally:
+The dashboard opens directly without a login code or expiring owner login.
+The Docker port is published only on the Mac's `127.0.0.1`. Local processes are
+trusted; other devices cannot access this listener. Exact Host/Origin checks
+and a CSRF token still protect API writes from other websites. The browser loads
+that token automatically; there is no authentication command to run.
 
-```sh
-docker --context desktop-linux compose -f ~/.config/mcpx/t3-supervisor.compose.yaml exec t3-supervisor npm run ui:login-code
-```
-
-Enter that code in the login form. It expires after 15 minutes and can be used once.
-The owner session lasts eight hours. Codes and credentials never enter service logs.
-Access is limited to the exact loopback origin; write requests also require a session
-CSRF token. Serve the UI through this address, rather than exposing it publicly.
+User-initiated top-level links from other sites may open the dashboard. Cross-site
+API requests, embedded pages and wrong Host/Origin requests remain rejected.
+Keep the port bound to loopback; this access model is for the local Mac only.
 
 ## Rules
 

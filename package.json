@@ -10,8 +10,7 @@
     "build": "tsc -p tsconfig.build.json && vite build",
     "test": "tsx --test test/*.test.ts",
     "start": "node dist/main.js",
-    "dev:ui": "vite build --watch",
-    "ui:login-code": "node dist/ui-login-code.js"
+    "dev:ui": "vite build --watch"
   },
   "dependencies": {
     "@effect/atom-react": "4.0.1",

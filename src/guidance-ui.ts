@@ -3,17 +3,12 @@ import { HttpApiBuilder } from "effect/http-api";
 import { HttpRouter, HttpServer } from "effect/http";
 import { createServer, type IncomingMessage } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { readFile, writeFile, rm, stat } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { extname, join, resolve, sep } from "node:path";
 import { SupervisorApi, UiError } from "./guidance-contract.js";
 import type { GuidanceRuntime } from "./guidance.js";
 import type { SupervisorConfig } from "./types.js";
 
-export const createUiLoginCode = async (directory: string): Promise<string> => {
-  const code = randomBytes(24).toString("base64url");
-  await writeFile(join(directory, "ui-login-code"), code, { mode: 0o600 });
-  return code;
-};
 const equal = (a: string, b: string) => {
   const x = Buffer.from(a);
   const y = Buffer.from(b);
@@ -166,24 +161,30 @@ export const startGuidanceUi = async (
     Layer.provide(HttpServer.layerServices),
   );
   const web = HttpRouter.toWebHandler(routes, { disableLogger: true });
-  const sessions = new Map<string, { csrf: string; expires: number }>();
+  const csrf = randomBytes(32).toString("base64url");
   const activeRequests = new Set<AbortController>();
-  const loginAttempts = new Map<string, { at: number; count: number }>();
   const assets = resolve(config.uiAssetsDirectory ?? "ui-dist");
-  const codePath = join(config.dataDirectory, "ui-login-code");
-  await createUiLoginCode(config.dataDirectory);
+  await rm(join(config.dataDirectory, "ui-login-code"), { force: true });
   const server = createServer((request, response) => {
     void (async () => {
       const address = server.address();
       const port =
         typeof address === "object" && address ? address.port : config.uiPort;
       const origin = `http://127.0.0.1:${port}`;
+      const url = new URL(request.url ?? "/", origin);
+      const navigation =
+        request.method === "GET" &&
+        (url.pathname === "/" || url.pathname === "/index.html") &&
+        request.headers["sec-fetch-mode"] === "navigate" &&
+        request.headers["sec-fetch-dest"] === "document" &&
+        request.headers["sec-fetch-user"] === "?1";
       const headers: Record<string, string> = {
         "Cache-Control": "no-store",
         "X-Content-Type-Options": "nosniff",
         "X-Frame-Options": "DENY",
         "Referrer-Policy": "no-referrer",
         "Cross-Origin-Resource-Policy": "same-origin",
+        Vary: "Sec-Fetch-Dest, Sec-Fetch-Mode, Sec-Fetch-Site, Sec-Fetch-User",
       };
       const reject = (status: number, message: string) => {
         response.writeHead(status, {
@@ -195,102 +196,32 @@ export const startGuidanceUi = async (
       if (
         request.headers.host !== `127.0.0.1:${port}` ||
         (request.headers.origin && request.headers.origin !== origin) ||
-        request.headers["sec-fetch-site"] === "cross-site"
+        (request.headers["sec-fetch-site"] === "cross-site" && !navigation)
       )
         return reject(403, "Open the supervisor through its loopback address.");
-      const url = new URL(request.url ?? "/", origin);
-      if (url.pathname === "/api/login") {
-        if (
-          request.method !== "POST" ||
-          request.headers.origin !== origin ||
-          request.headers["content-type"] !== "application/json"
-        )
-          return reject(403, "Use the owner login form.");
-        const key = request.socket.remoteAddress ?? "local";
-        const prior = loginAttempts.get(key);
-        const attempt =
-          prior && Date.now() - prior.at < 60_000
-            ? prior
-            : { at: Date.now(), count: 0 };
-        attempt.count++;
-        loginAttempts.set(key, attempt);
-        if (attempt.count > 10)
-          return reject(429, "Wait a minute before trying again.");
-        const parsed: unknown = JSON.parse(await body(request));
-        const input =
-          typeof parsed === "object" && parsed !== null && "code" in parsed
-            ? parsed.code
-            : null;
-        let code: string;
-        let modified: number;
-        try {
-          code = (await readFile(codePath, "utf8")).trim();
-          modified = (await stat(codePath)).mtimeMs;
-        } catch {
-          return reject(401, "Generate a new local login code.");
-        }
-        if (
-          typeof input !== "string" ||
-          Date.now() - modified > 15 * 60_000 ||
-          !equal(input, code)
-        )
-          return reject(401, "Code invalid or expired.");
-        const id = randomBytes(32).toString("base64url");
-        const csrf = randomBytes(24).toString("base64url");
-        if (sessions.size >= 20) sessions.clear();
-        sessions.set(id, { csrf, expires: Date.now() + 8 * 3600_000 });
-        await rm(codePath, { force: true });
-        response.writeHead(200, {
-          ...headers,
-          "Content-Type": "application/json",
-          "Set-Cookie": `supervisor_owner=${id}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800`,
-        });
-        response.end(JSON.stringify({ csrf }));
-        return;
-      }
       if (url.pathname.startsWith("/api/")) {
-        const id = request.headers.cookie
-          ?.split(";")
-          .map((p) => p.trim())
-          .find((p) => p.startsWith("supervisor_owner="))
-          ?.slice("supervisor_owner=".length);
-        const session = id ? sessions.get(id) : undefined;
-        if (!session || session.expires < Date.now()) {
-          if (id) sessions.delete(id);
-          return reject(401, "Owner login required.");
-        }
         if (
           request.method !== "GET" &&
           (request.headers.origin !== origin ||
-            request.headers["x-csrf-token"] !== session.csrf)
+            typeof request.headers["x-csrf-token"] !== "string" ||
+            !equal(request.headers["x-csrf-token"], csrf))
         )
           return reject(
             403,
-            "Refresh the owner session before changing settings.",
+            "Refresh the local dashboard before changing settings.",
           );
         if (
           request.method !== "GET" &&
-          url.pathname !== "/api/logout" &&
           !request.headers["content-type"]?.startsWith("application/json")
         )
           return reject(415, "Use JSON for supervisor mutations.");
-        if (url.pathname === "/api/session" && request.method === "GET") {
+        if (url.pathname === "/api/csrf" && request.method === "GET") {
           response.writeHead(200, {
             ...headers,
             "Content-Type": "application/json",
+            "Set-Cookie": "supervisor_owner=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
           });
-          response.end(JSON.stringify({ csrf: session.csrf }));
-          return;
-        }
-        if (url.pathname === "/api/logout" && request.method === "POST") {
-          sessions.delete(id!);
-          response
-            .writeHead(204, {
-              ...headers,
-              "Set-Cookie":
-                "supervisor_owner=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
-            })
-            .end();
+          response.end(JSON.stringify({ csrf }));
           return;
         }
         const input =
@@ -369,7 +300,6 @@ export const startGuidanceUi = async (
       for(const controller of activeRequests)controller.abort();
       await new Promise<void>((res) => {server.close(() => res());server.closeAllConnections();});
       await web.dispose();
-      sessions.clear();
     },
   };
 };

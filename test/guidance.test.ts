@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "node:http";
+import { createServer, get } from "node:http";
 import { WebSocketServer } from "ws";
 import { Effect } from "effect";
 import { GuidanceStore } from "../src/guidance-store.js";
@@ -281,13 +281,14 @@ test("restart before dispatch marker is not uncertain and settings pause invalid
   }
 });
 
-test("typed API requires owner session, exact origin and CSRF and rejects stale-tab writes", async () => {
+test("local UI opens without login while enforcing host, origin, CSRF and stale-tab checks", async () => {
   const directory = await mkdtemp(join(tmpdir(), "guidance-ui-test-"));
   const guidance = new GuidanceStore(directory);
   await writeFile(
     join(directory, "index.html"),
     '<html><script src="/app.js"></script></html>',
   );
+  await writeFile(join(directory, "ui-login-code"), "retired-test-code");
   try {
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -321,6 +322,13 @@ test("typed API requires owner session, exact origin and CSRF and rejects stale-
             const address = ui.server.address();
             assert.ok(address && typeof address === "object");
             const origin = `http://127.0.0.1:${address.port}`;
+            const browserStatus = (path: string, headers: Record<string, string>) =>
+              new Promise<number>((resolve, reject) => {
+                get(origin + path, { headers }, response => {
+                  response.resume();
+                  resolve(response.statusCode ?? 0);
+                }).on("error", reject);
+              });
             const root = await fetch(origin);
             assert.equal(root.status, 200);
             assert.match(
@@ -328,35 +336,38 @@ test("typed API requires owner session, exact origin and CSRF and rejects stale-
               /frame-ancestors 'none'/,
             );
             assert.match(await root.text(), /nonce=/);
+            await assert.rejects(readFile(join(directory, "ui-login-code")), { code: "ENOENT" });
+            const navigation = {
+              "Sec-Fetch-Site": "cross-site",
+              "Sec-Fetch-Mode": "navigate",
+              "Sec-Fetch-Dest": "document",
+              "Sec-Fetch-User": "?1",
+            };
+            assert.equal(await browserStatus("/", navigation), 200);
+            assert.equal(await browserStatus("/index.html", navigation), 200);
+            assert.equal(await browserStatus("/", { ...navigation, "Sec-Fetch-Dest": "iframe" }), 403);
+            assert.equal(await browserStatus("/", { ...navigation, "Sec-Fetch-User": "?0" }), 403);
+            assert.equal(await browserStatus("/", { Host: "attacker.invalid" }), 403);
+            assert.equal(await browserStatus("/api/guidance/snapshot", navigation), 403);
+            assert.equal(await browserStatus("/api/csrf", navigation), 403);
             assert.equal(
               (await fetch(origin + "/api/guidance/snapshot")).status,
-              401,
-            );
-            const code = await readFile(
-              join(directory, "ui-login-code"),
-              "utf8",
+              200,
             );
             assert.equal(
               (
-                await fetch(origin + "/api/login", {
-                  method: "POST",
+                await fetch(origin + "/api/csrf", {
                   headers: {
                     Origin: "http://attacker.invalid",
-                    "Content-Type": "application/json",
                   },
-                  body: JSON.stringify({ code }),
                 })
               ).status,
               403,
             );
-            const login = await fetch(origin + "/api/login", {
-              method: "POST",
-              headers: { Origin: origin, "Content-Type": "application/json" },
-              body: JSON.stringify({ code }),
-            });
-            assert.equal(login.status, 200);
-            const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
-            const session: unknown = await login.json();
+            const access = await fetch(origin + "/api/csrf");
+            assert.equal(access.status, 200);
+            assert.match(access.headers.get("set-cookie")!, /Max-Age=0/);
+            const session: unknown = await access.json();
             assert.ok(
               typeof session === "object" &&
                 session !== null &&
@@ -364,11 +375,13 @@ test("typed API requires owner session, exact origin and CSRF and rejects stale-
                 typeof session.csrf === "string",
             );
             const headers = {
-              Cookie: cookie,
               Origin: origin,
               "Content-Type": "application/json",
               "x-csrf-token": session.csrf,
             };
+            assert.equal((await fetch(origin + "/api/login", { method: "POST", headers, body: "{}" })).status, 404);
+            assert.equal((await fetch(origin + "/api/guidance/rules", { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify(newRule) })).status, 403);
+            assert.equal((await fetch(origin + "/api/guidance/rules", { method: "POST", headers: { ...headers, Origin: "http://attacker.invalid" }, body: JSON.stringify(newRule) })).status, 403);
             assert.equal(
               (
                 await fetch(origin + "/api/guidance/rules", {
@@ -413,7 +426,6 @@ test("typed API requires owner session, exact origin and CSRF and rejects stale-
             );
             const snapshotResponse = await fetch(
               origin + "/api/guidance/snapshot",
-              { headers: { Cookie: cookie } },
             );
             assert.equal(snapshotResponse.status, 200);
             const snapshot =

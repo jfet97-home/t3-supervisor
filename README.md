@@ -20,11 +20,8 @@ configuring guidance, and handling Telegram notifications and input.
 
 ## Dashboard
 
-Open **[http://127.0.0.1:9008](http://127.0.0.1:9008)**. Generate a one-use login code:
-
-```sh
-docker --context desktop-linux compose -f ~/.config/mcpx/t3-supervisor.compose.yaml exec t3-supervisor npm run ui:login-code
-```
+Open **[http://127.0.0.1:9008](http://127.0.0.1:9008)**. The dashboard opens directly,
+without a login code. Its Docker port is published only on the Mac's loopback address.
 
 The UI includes **Rules**, **Activity**, **Recaps and Telegram**, and **Settings**.
 Start rules in **Observe** mode. Sending guidance requires its dedicated credential

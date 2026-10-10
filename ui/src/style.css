@@ -589,15 +589,11 @@ nav button[aria-current="page"] {
   color: var(--quiet);
   margin-top: 4px;
 }
-.login {
+.connecting {
   max-width: 500px;
   margin: 48px auto;
   display: grid;
   gap: 18px;
-}
-.login form {
-  display: grid;
-  gap: 12px;
 }
 .eyebrow {
   letter-spacing: 0.12em;
@@ -634,7 +630,7 @@ dialog pre {
   .audit article {
     flex-direction: column;
   }
-  .login {
+  .connecting {
     margin: 16px auto;
   }
 }

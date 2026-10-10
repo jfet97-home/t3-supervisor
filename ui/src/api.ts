@@ -7,8 +7,8 @@ import {
 } from "../../src/guidance-contract.js";
 
 let csrf = "";
-export const loadSession = async (): Promise<boolean> => {
-  const response = await fetch("/api/session", { credentials: "same-origin" });
+export const loadAccess = async (): Promise<boolean> => {
+  const response = await fetch("/api/csrf", { credentials: "same-origin" });
   if (!response.ok) return false;
   const value: unknown = await response.json();
   if (
@@ -20,27 +20,6 @@ export const loadSession = async (): Promise<boolean> => {
     return false;
   csrf = value.csrf;
   return true;
-};
-export const login = async (code: string): Promise<void> => {
-  const response = await fetch("/api/login", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code }),
-  });
-  if (!response.ok)
-    throw new Error(
-      "Code invalid, expired or rate limited. Generate a new local code if needed.",
-    );
-  if (!(await loadSession())) throw new Error("Owner session unavailable.");
-};
-export const logout = async () => {
-  await fetch("/api/logout", {
-    method: "POST",
-    headers: { "x-csrf-token": csrf },
-    credentials: "same-origin",
-  });
-  csrf = "";
 };
 export class ApiClient extends AtomHttpApi.Service<ApiClient>()(
   "SupervisorUiApi",

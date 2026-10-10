@@ -19,9 +19,7 @@ import {
   actionAtom,
   classifyAtom,
   draftAtom,
-  loadSession,
-  login,
-  logout,
+  loadAccess,
   muteAtom,
   previewAtom,
   saveRuleAtom,
@@ -63,57 +61,6 @@ const inputOf = (rule: GuidanceRule): GuidanceRuleInput => ({
   ...rule,
   expectedGeneration: rule.generation,
 });
-function Login({ onLogin }: { onLogin: () => void }) {
-  const [code, setCode] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      await login(code);
-      setCode("");
-      onLogin();
-    } catch {
-      setError(
-        "Code invalid or expired. Generate a fresh local code and try again.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <main className="login panel">
-      <p className="eyebrow">LOCAL OWNER ACCESS</p>
-      <h1>Your supervisor</h1>
-      <p>Manage guidance and see what happened with recaps and Telegram.</p>
-      <form onSubmit={submit}>
-        <label htmlFor="code">Local login code</label>
-        <input
-          id="code"
-          type="password"
-          autoComplete="one-time-code"
-          required
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-        />
-        <button className="primary" disabled={busy}>
-          {busy ? "Connecting…" : "Open supervisor"}
-        </button>
-      </form>
-      <p role="alert">{error}</p>
-      <details>
-        <summary>Where do I get the code?</summary>
-        <p>
-          Run the local <code>ui:login-code</code> command in the supervisor
-          container. The code expires after 15 minutes and works once. T3
-          credentials stay on the server.
-        </p>
-      </details>
-    </main>
-  );
-}
 function History({
   items,
   title,
@@ -738,7 +685,7 @@ function Settings({ data }: { data: GuidanceSnapshot }) {
     </section>
   );
 }
-function Dashboard({ onLogout }: { onLogout: () => void }) {
+function Dashboard() {
   const snapshot = useAtomValue(snapshotAtom);
   const refresh = useAtomRefresh(snapshotAtom);
   const [view, setView] = useState("rules");
@@ -763,11 +710,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         <h1>Supervisor</h1>
         <p>
           {snapshot._tag === "Failure"
-            ? "Connection or owner session unavailable."
+            ? "Supervisor connection unavailable."
             : "Connecting…"}
         </p>
-        <button onClick={refresh}>Retry</button>
-        <button onClick={onLogout}>Owner login</button>
+        <button onClick={() => { void loadAccess().then(refresh, refresh); }}>
+          Retry
+        </button>
       </main>
     );
   const data = snapshot.value;
@@ -815,14 +763,6 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               ? "Resume guidance"
               : "Pause guidance"}
           </button>
-          <button
-            onClick={async () => {
-              await logout();
-              onLogout();
-            }}
-          >
-            Log out
-          </button>
         </div>
       </header>
       <p role="alert">{pauseError}</p>
@@ -863,18 +803,29 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   );
 }
 function App() {
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [ready, setReady] = useState<boolean | null>(null);
+  const connect = () => {
+    setReady(null);
+    void loadAccess()
+      .then(setReady)
+      .catch(() => setReady(false));
+  };
   useEffect(() => {
-    void loadSession()
-      .then(setAuthenticated)
-      .catch(() => setAuthenticated(false));
+    let active = true;
+    void loadAccess()
+      .then(value => { if (active) setReady(value); })
+      .catch(() => { if (active) setReady(false); });
+    return () => { active = false; };
   }, []);
-  return authenticated === null ? (
-    <p>Opening supervisor…</p>
-  ) : authenticated ? (
-    <Dashboard onLogout={() => setAuthenticated(false)} />
-  ) : (
-    <Login onLogin={() => setAuthenticated(true)} />
+  if (ready) return <Dashboard />;
+  return (
+    <main className="connecting panel">
+      <h1>Supervisor</h1>
+      <p role={ready === false ? "alert" : "status"}>
+        {ready === null ? "Opening supervisor…" : "Could not connect to the local supervisor."}
+      </p>
+      {ready === false && <button onClick={connect}>Retry</button>}
+    </main>
   );
 }
 const root = document.getElementById("root");
