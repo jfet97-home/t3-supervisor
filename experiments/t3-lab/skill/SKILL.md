@@ -40,10 +40,11 @@ The SSH alias is in `~/.ssh/config`, before general Host rules, and includes
 guest username and Lima key. Do not edit it; Lima regenerates it.
 The key is `~/.lima/_config/user`; do not read, print, or commit its contents.
 
-`IdentityAgent none` makes this alias use Lima's key rather than the Mac's
-1Password agent. `ForwardAgent no` separately prevents forwarding an agent
-socket into the guest. Other host SSH entries retain their existing settings.
-Changing this authentication choice requires the user's instruction.
+The alias selects the Mac's 1Password agent and enables `ForwardAgent yes`.
+Lima's generated `IdentityFile` and `IdentitiesOnly yes` still select Lima's key for
+VM login. Other host SSH entries retain their existing settings. Forwarding exposes
+the agent's available keys for signing and authentication subject to 1Password
+authorization; private keys remain on the Mac. Changes require the user's instruction.
 
 Automatic startup is configured at user login with
 `limactl autostart enable --condition=login t3-lab`, not before login at system
@@ -77,8 +78,23 @@ Git is installed in the guest, and its global commit name and email match the Ma
 personal identity. A local test commit verified author and committer values.
 Keep identity configuration separate from GitHub authentication and commit signing.
 Do not copy the Mac's Git configuration wholesale: its credential helpers and
-1Password signing executable refer to host-only facilities. This Git setup did not
-configure repository authentication or signing in the guest.
+1Password signing executable refer to host-only facilities. Repository authentication
+has not been configured or tested.
+
+Guest Git signing uses `~/.local/bin/git-ssh-sign`, installed from this experiment's
+versioned `git-ssh-sign`. It points `SSH_AUTH_SOCK` at the stable guest symlink
+`~/.ssh/1password-agent.sock`. A dedicated SSH session maintains that symlink, managed
+on the Mac by `io.t3-lab.signing-agent` at user login. Its forwarding script and
+LaunchAgent source are versioned alongside the README; error logs stay under
+`~/.lima/t3-lab/`. This arrangement supports detached T3 processes without an
+inherited agent environment or a T3 restart.
+
+Global `gpg.format=ssh`, `commit.gpgsign=true`, the existing public signing key and
+`gpg.ssh.program` configure signing. `~/.ssh/t3-lab-allowed-signers` enables local
+verification. A signed guest commit was verified with the usual agent environment
+removed. Signing fails if the bridge is unavailable; do not silently disable it.
+Inspect the bridge with `launchctl print gui/$(id -u)/io.t3-lab.signing-agent` and
+use the README's reconnect command when needed. A fresh login remains untested.
 
 ## Provider CLIs
 

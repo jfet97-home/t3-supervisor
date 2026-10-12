@@ -12,9 +12,10 @@ The [V1 architecture plan](architecture-v1.md) records the agreed design and sco
 - The architecture plan is stored in this repository's experiment folder.
 - `t3-lab` was created and booted with Lima 2.2.1 on 12 October 2026.
 - The VM runs Ubuntu 24.04 ARM with 4 CPUs, 8 GiB RAM, and a 60 GiB virtual disk.
-- No host folders are mounted, and SSH agent forwarding is disabled.
+- No host folders are mounted; explicit SSH forwarding exposes the Mac's 1Password agent.
 - Git and `libatomic1` are installed inside the VM and provisioned by the template.
 - Git commit identity matches the Mac's personal identity; a local commit was verified.
+- Git commit signing uses the Mac's existing 1Password signing key; a signed commit was verified.
 - The desktop-managed T3 server is installed and connected over SSH as `lima-t3-lab`.
 - Codex CLI and Claude Code are installed in the VM.
 - Codex ChatGPT sign-in is verified; Claude Code authentication remains pending.
@@ -29,10 +30,12 @@ Apple's native virtualization (`vz`) and a dated Ubuntu image verified by SHA-25
 The image URL and digest come from Lima 2.2.1's official Ubuntu 24.04 template.
 If the dated image is retired upstream, update its URL and digest together.
 
-Lima plain mode disables host mounts, dynamic port forwarding, bundled containerd,
-and SSH agent forwarding. Host proxy environment propagation and importing the
-Mac's existing SSH public keys are also disabled. Network egress is available;
-this setup does not yet implement the architecture's network policy or gates.
+The Lima template uses plain mode and disables host mounts, dynamic port forwarding,
+bundled containerd and Lima-managed SSH agent forwarding. A separate host SSH
+connection now forwards the 1Password agent for Git signing. Host proxy environment
+propagation and importing the Mac's existing SSH public keys remain disabled.
+Network egress is available; this setup does not yet implement the architecture's
+network policy or gates.
 
 The VM disk, generated SSH keys, runtime state, and logs stay under Lima's local
 data directory, outside this repository. Automatic startup at Mac user login is
@@ -76,9 +79,9 @@ git config --global user.name "<your commit name>"
 git config --global user.email "<your commit email>"
 ```
 
-This step configured local commits only. GitHub authentication and commit signing
-are separate; the Mac's credential helpers and 1Password signing configuration were
-not copied into the VM.
+The initial identity step configured local commits only. Signing was configured
+separately as documented below. GitHub authentication has not been set up or tested;
+the Mac's credential helpers were not copied into the VM.
 
 ## SSH authentication
 
@@ -87,10 +90,96 @@ not copied into the VM.
 supplies the current loopback SSH port and guest username. Lima regenerates that
 included file; do not edit it manually.
 
-This connection uses Lima's generated key at `~/.lima/_config/user`.
-`IdentityAgent none` disables the host's 1Password SSH agent for this alias only;
-other SSH entries keep their existing agent settings. `ForwardAgent no` separately
-prevents forwarding an agent socket into the VM. Private keys are not stored here.
+The generated include retains Lima's key at `~/.lima/_config/user` and
+`IdentitiesOnly yes` for VM login. The host block selects the Mac's 1Password agent
+with `IdentityAgent` and enables `ForwardAgent yes` for this alias. Other host
+entries are unchanged. Private keys are not stored here.
+
+## Git commit signing through 1Password
+
+On 12 October 2026, forwarding and guest Git signing were configured using the
+existing Mac signing key. The private key stays in 1Password; only its public key
+and local verification configuration were written into the guest.
+
+The setup has three versioned parts:
+
+- [SSH configuration](ssh-config) enables forwarding for `lima-t3-lab`.
+- [Forwarding connection](forward-signing-agent.sh) keeps a dedicated SSH session
+  alive and links its guest socket to `~/.ssh/1password-agent.sock`.
+- [Git signer](git-ssh-sign) sets `SSH_AUTH_SOCK` to that stable path and invokes
+  the guest's `/usr/bin/ssh-keygen`.
+
+T3's already-running server has no forwarded agent environment. The dedicated
+session makes signing work for detached processes without restarting T3. It uses
+its own SSH connection instead of reusing an older connection created without
+forwarding. Ordinary SSH sessions still use the alias's normal settings.
+
+The signer is installed at guest `~/.local/bin/git-ssh-sign`. The guest's global Git
+configuration sets `gpg.format=ssh`, `commit.gpgsign=true`, the existing public
+`user.signingkey`, and `gpg.ssh.program` to that signer. Local signature verification
+uses `gpg.ssh.allowedSignersFile=~/.ssh/t3-lab-allowed-signers`, containing the guest's
+commit email and the public signing key. These user-specific values stay outside
+the repository.
+
+The host [LaunchAgent](io.t3-lab.signing-agent.plist) is installed as
+`~/Library/LaunchAgents/io.t3-lab.signing-agent.plist`. It starts at user login and
+retries a failed connection with a ten-second launchd throttle, including when the
+VM has not booted yet. Its configured paths refer to this Mac's canonical checkout;
+adjust them when setting up another machine. Errors go to
+`~/.lima/t3-lab/signing-agent.log`. The job was verified running; a fresh login has
+not been tested.
+
+Verification created an empty commit in a temporary guest repository with both
+`SSH_AUTH_SOCK` and `SSH_TTY` removed from the command environment. `git verify-commit`
+accepted the signature and Git reported status `G`. The fingerprint matched the
+Mac's existing signing key. No repository was pushed or cloned.
+
+Forwarding makes the agent's exposed keys usable from the guest subject to
+1Password authorization, including for authentication. It is not restricted to
+commit signing and does not provide the planned protected-operation gates. Signing
+depends on the dedicated SSH session, a running VM and an available Mac agent.
+If that connection is unavailable, signed commits fail rather than falling back
+to unsigned commits. See the official
+[1Password forwarding documentation](https://www.1password.dev/ssh/agent/forwarding).
+
+To inspect or reconnect the dedicated session from the Mac:
+
+```sh
+launchctl print "gui/$(id -u)/io.t3-lab.signing-agent"
+launchctl kickstart -k "gui/$(id -u)/io.t3-lab.signing-agent"
+```
+
+The LaunchAgent source, forwarding script and signer are part of this experiment;
+the Lima creation template does not provision this signing setup automatically.
+
+To reproduce it on a fresh setup, first install the SSH block above. Then run
+these commands from the Mac's repository root, after configuring guest Git identity:
+
+```sh
+scp experiments/t3-lab/git-ssh-sign lima-t3-lab:.local/bin/git-ssh-sign
+git config --global --get user.signingkey | ssh lima-t3-lab '
+  set -eu
+  IFS= read -r task_signing_public_key
+  chmod 0755 "$HOME/.local/bin/git-ssh-sign"
+  git config --global gpg.format ssh
+  git config --global commit.gpgsign true
+  git config --global user.signingkey "$task_signing_public_key"
+  git config --global gpg.ssh.program "$HOME/.local/bin/git-ssh-sign"
+  printf "%s %s\n" "$(git config --global user.email)" "$task_signing_public_key" \
+    > "$HOME/.ssh/t3-lab-allowed-signers"
+  chmod 0600 "$HOME/.ssh/t3-lab-allowed-signers"
+  git config --global gpg.ssh.allowedSignersFile "$HOME/.ssh/t3-lab-allowed-signers"
+'
+cp experiments/t3-lab/io.t3-lab.signing-agent.plist \
+  "$HOME/Library/LaunchAgents/io.t3-lab.signing-agent.plist"
+launchctl bootstrap "gui/$(id -u)" \
+  "$HOME/Library/LaunchAgents/io.t3-lab.signing-agent.plist"
+```
+
+The forwarded agent becomes available once the dedicated session connects.
+To stop that session, use `launchctl bootout "gui/$(id -u)/io.t3-lab.signing-agent"`.
+This does not alter the alias's forwarding setting or prevent the installed
+LaunchAgent from starting again at the next login.
 
 ## T3 connection and version alignment
 
@@ -181,7 +270,8 @@ aligned when the environment changes.
 The initial boot completed and guest commands confirmed `Linux aarch64`,
 Ubuntu 24.04, 4 CPUs, and the configured memory and disk. No `virtiofs`, `9p`, or
 SSHFS host mounts were present; the Mac's home path and an SSH agent socket were
-absent. Cloud-init completed successfully. T3 was absent at initial boot and was
+absent at that initial check. Agent forwarding was later enabled explicitly for
+commit signing. Cloud-init completed successfully. T3 was absent at initial boot and was
 subsequently installed by the desktop's managed SSH connection.
 Git installation was subsequently verified with `git --version` (2.43.0).
 The T3 native binary's version was checked after installing `libatomic1`, and the
