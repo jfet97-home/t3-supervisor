@@ -30,7 +30,9 @@ Mac's existing SSH public keys are also disabled. Network egress is available;
 this setup does not yet implement the architecture's network policy or gates.
 
 The VM disk, generated SSH keys, runtime state, and logs stay under Lima's local
-data directory, outside this repository. No login autostart was configured.
+data directory, outside this repository. Automatic startup at Mac user login is
+enabled through Lima; it does not start at system boot before login. The generated
+LaunchAgent file was verified, but a fresh login has not yet been tested.
 
 Run these commands from the repository root:
 
@@ -42,6 +44,9 @@ limactl create --name=t3-lab --yes experiments/t3-lab/lima.yaml
 # start an existing VM and enter it without forwarding the host environment
 limactl start --yes t3-lab
 limactl shell --workdir=/tmp t3-lab
+
+# enable automatic startup at user login on this Mac
+limactl autostart enable --condition=login t3-lab
 
 # inspect or stop the VM
 limactl list t3-lab
@@ -66,7 +71,8 @@ or connecting T3 requires a separate approved step.
 
 ## Working agreement
 
-Describe one concrete step, wait for explicit approval, perform only that step,
-and report its result before proposing the next one. Update this status as work
-progresses. Installation, VM startup, T3 configuration, commits, and pushes are
-separate steps.
+Describe one concrete setup step, wait for explicit approval, perform only that
+step, and report its result before proposing the next one. Update this status as
+work progresses and commit completed changes without requesting separate approval.
+Installation, VM startup, T3 configuration, and pushes remain separately approved
+actions unless explicitly authorized together.
