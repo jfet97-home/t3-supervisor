@@ -13,9 +13,11 @@ The [V1 architecture plan](architecture-v1.md) records the agreed design and sco
 - `t3-lab` was created and booted with Lima 2.2.1 on 12 October 2026.
 - The VM runs Ubuntu 24.04 ARM with 4 CPUs, 8 GiB RAM, and a 60 GiB virtual disk.
 - No host folders are mounted, and SSH agent forwarding is disabled.
-- Git is installed inside the VM; the creation template provisions it too.
-- T3 and provider CLIs have not been installed or connected inside the VM.
-- The existing T3 environment and running supervisor have not been changed.
+- Git and `libatomic1` are installed inside the VM and provisioned by the template.
+- The desktop-managed T3 server is installed and connected over SSH as `lima-t3-lab`.
+- Provider CLIs and authentication have not been configured in the VM.
+- Existing chats remain in their original environments; automatic load balancing is off.
+- The local T3 server and running supervisor have not been migrated or restarted.
 - The initial architecture documents have been published to the repository.
 
 ## VM configuration
@@ -58,18 +60,58 @@ Changing the repository YAML does not automatically update an existing instance.
 Inspect and apply changes deliberately; do not delete the VM to reapply settings
 without first accounting for its data.
 
+## SSH authentication
+
+[ssh-config](ssh-config) records the block placed before general Host rules in
+`~/.ssh/config`. It includes Lima's generated `~/.lima/t3-lab/ssh.config`, which
+supplies the current loopback SSH port and guest username. Lima regenerates that
+included file; do not edit it manually.
+
+This connection uses Lima's generated key at `~/.lima/_config/user`.
+`IdentityAgent none` disables the host's 1Password SSH agent for this alias only;
+other SSH entries keep their existing agent settings. `ForwardAgent no` separately
+prevents forwarding an agent socket into the VM. Private keys are not stored here.
+
+## T3 connection and version alignment
+
+In the desktop application, the connection was added through Settings →
+Connections → Add environment → SSH, using `lima-t3-lab` and the defaults from
+the SSH alias. The desktop downloads and runs its exact app version in the guest's
+`~/.t3/runtime/versions/` directory. This setup uses the managed SSH launcher,
+without a separately installed T3 background service.
+
+After a desktop update, the next managed SSH launch selects the matching server
+archive. Existing conversations remain on their original environment. A new task
+must explicitly target the VM; automatic load balancing is currently off.
+
+The initial native binary failed with a missing `libatomic.so.1` error on the
+minimal Ubuntu image. Installing `libatomic1` fixed the verified binary failure;
+the creation template now includes it. The connected server initially matched
+desktop version `0.0.46-nightly.20261011.2994`.
+
+## Global operating skill
+
+The maintained [skill source](skill/SKILL.md) is versioned in this folder.
+`~/.agents/skills/t3-lab` is a symlink to that source directory, making it available
+globally without duplicating its instructions. Keep the skill and this setup note
+aligned when the environment changes.
+
 ## Verified setup
 
 The initial boot completed and guest commands confirmed `Linux aarch64`,
 Ubuntu 24.04, 4 CPUs, and the configured memory and disk. No `virtiofs`, `9p`, or
 SSHFS host mounts were present; the Mac's home path and an SSH agent socket were
-absent. Cloud-init completed successfully, and no `t3` executable was installed.
+absent. Cloud-init completed successfully. T3 was absent at initial boot and was
+subsequently installed by the desktop's managed SSH connection.
 Git installation was subsequently verified with `git --version` (2.43.0).
+The T3 native binary's version was checked after installing `libatomic1`, and the
+desktop Connections screen showed `lima-t3-lab` as Connected. This does not yet
+prove provider authentication or a successful task inside the VM.
 
 ## Next task
 
-Review how to install and authenticate the T3 server inside this VM. Installing
-or connecting T3 requires a separate approved step.
+Choose and configure one provider inside the VM, then verify a disposable task
+executes there. Provider installation and authentication require approval.
 
 ## Working agreement
 

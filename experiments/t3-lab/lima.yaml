@@ -23,11 +23,11 @@ ssh:
   forwardAgent: false
 propagateProxyEnv: false
 
-# install the baseline source-control tool when provisioning a new VM
+# install Git and the native T3 runtime's required atomic library
 provision:
   - mode: system
     script: |
       #!/bin/sh
       set -eu
       apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git libatomic1

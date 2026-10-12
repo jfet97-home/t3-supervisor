@@ -1,0 +1,6 @@
+# place this block before general Host rules in ~/.ssh/config
+Host lima-t3-lab
+  IdentityAgent none
+  ForwardAgent no
+
+Include ~/.lima/t3-lab/ssh.config
