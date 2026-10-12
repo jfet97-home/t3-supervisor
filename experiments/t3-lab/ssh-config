@@ -1,6 +1,0 @@
-# place this block before general Host rules in ~/.ssh/config
-Host lima-t3-lab
-  IdentityAgent "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
-  ForwardAgent yes
-
-Include ~/.lima/t3-lab/ssh.config
