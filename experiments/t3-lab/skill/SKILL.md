@@ -79,6 +79,14 @@ Their installers manage `~/.local/bin/codex` and `~/.local/bin/claude`; guest
 SSH sessions. Consult the README for installation commands and verified versions.
 Inspect existing launchers before changing them; do not overwrite unrelated tools.
 
-No synchronization with the Mac's provider installations is configured. Provider
-authentication and a model task remain unverified. CLI installation does not
-authorize logging in, copying host credentials or starting an agent task.
+No synchronization with the Mac's provider installations is configured. Codex
+ChatGPT sign-in was verified on 12 October 2026; Claude Code sign-in and a model
+task remain unverified. Check current Codex authentication with guest
+`codex login status`, never by printing its credential cache. CLI installation
+does not authorize logging in, copying host credentials or starting an agent task.
+
+For an authorized Codex sign-in, run `codex login --device-auth` inside the VM.
+The user completes the displayed link and code in their own browser. Device-code
+login must be enabled in ChatGPT security settings; if enabled during an attempt,
+cancel that attempt before starting a new one. Preserve credentials only in the
+guest's authentication storage, outside the versioned setup notes.

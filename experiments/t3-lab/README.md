@@ -15,7 +15,8 @@ The [V1 architecture plan](architecture-v1.md) records the agreed design and sco
 - No host folders are mounted, and SSH agent forwarding is disabled.
 - Git and `libatomic1` are installed inside the VM and provisioned by the template.
 - The desktop-managed T3 server is installed and connected over SSH as `lima-t3-lab`.
-- Codex CLI and Claude Code are installed in the VM; provider authentication remains pending.
+- Codex CLI and Claude Code are installed in the VM.
+- Codex ChatGPT sign-in is verified; Claude Code authentication remains pending.
 - Existing chats remain in their original environments; automatic load balancing is off.
 - The local T3 server and running supervisor have not been migrated or restarted.
 - The initial architecture documents have been published to the repository.
@@ -125,8 +126,29 @@ so repeating these commands later may install different versions. See the offici
 [Claude Code installation guide](https://code.claude.com/docs/en/setup).
 
 Both commands passed version and help checks, including `codex app-server --help`.
-Both also ran with a minimal PATH of `/usr/local/bin:/usr/bin:/bin`. No provider
-login, host credential transfer or model task was performed.
+Both also ran with a minimal PATH of `/usr/local/bin:/usr/bin:/bin`. During
+installation, no provider login, host credential transfer or model task was performed.
+
+## Codex authentication
+
+Codex was authenticated inside the VM on 12 October 2026 using ChatGPT device-code
+sign-in. The login completed successfully, and a separate guest
+`codex login status` check returned `Logged in using ChatGPT`.
+
+For an authorized sign-in, run this from the Mac:
+
+```sh
+ssh lima-t3-lab 'codex login --device-auth'
+```
+
+Complete the link and one-time code shown by the CLI in your Mac's browser. Device
+code sign-in must be enabled in ChatGPT security settings before starting the flow.
+If you enable it after an attempt has started, cancel that attempt and start again.
+Verify the result with `ssh lima-t3-lab 'codex login status'`. See the official
+[authentication guide](https://learn.chatgpt.com/docs/auth).
+
+No host credential cache was copied. Keep authentication data outside the
+repository and do not print it. Claude Code sign-in and a model task remain pending.
 
 ## Global operating skill
 
@@ -144,13 +166,13 @@ absent. Cloud-init completed successfully. T3 was absent at initial boot and was
 subsequently installed by the desktop's managed SSH connection.
 Git installation was subsequently verified with `git --version` (2.43.0).
 The T3 native binary's version was checked after installing `libatomic1`, and the
-desktop Connections screen showed `lima-t3-lab` as Connected. This does not yet
-prove provider authentication or a successful task inside the VM.
+desktop Connections screen showed `lima-t3-lab` as Connected. Codex authentication
+was subsequently verified separately; a successful model task remains untested.
 
 ## Next task
 
-Authenticate one installed provider inside the VM, then verify a disposable task
-executes there. Authentication and running that task require approval.
+Authenticate Claude Code, or verify a disposable Codex task executes inside the VM.
+Either next step requires approval.
 
 ## Working agreement
 
