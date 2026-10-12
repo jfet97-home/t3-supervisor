@@ -15,7 +15,8 @@ services:
     environment:
       T3_URL: http://host.docker.internal:3773
       T3_TOKEN_FILE: /run/secrets/t3-read-token
-      INPUT_ENABLED: "true"
+      TELEGRAM_ENABLED: "${TELEGRAM_ENABLED:-false}"
+      INPUT_ENABLED: "${INPUT_ENABLED:-false}"
       T3_INPUT_TOKEN_FILE: /run/secrets/t3-input-token
       INPUT_POLL_MS: "1000"
       MCPX_URL: http://mcpx:9000/mcp/lazy
@@ -36,7 +37,6 @@ services:
     tmpfs:
       - /tmp:size=128m,mode=1777
     ports: ["127.0.0.1:9007:9007", "127.0.0.1:9008:9008"]
-    networks: [gateway]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9007/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
@@ -49,8 +49,3 @@ services:
 
 volumes:
   state:
-
-networks:
-  gateway:
-    external: true
-    name: lunar-mcpx_default

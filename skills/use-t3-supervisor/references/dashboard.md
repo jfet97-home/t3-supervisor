@@ -40,7 +40,7 @@ follow-up turn if the active turn finishes during delivery. It is tied to the
 observed T3 build and may need acceptance again after a build change. Enable this
 only within the user's authorization for guidance delivery.
 
-Pause guidance stops guidance delivery while observation, recaps and questionnaires
+Pause guidance stops guidance delivery while observation and any enabled Telegram recaps and questionnaires
 continue. Pause monitoring stops evaluations and their model cost. Save changes and
 verify the resulting state. Daily reserved token budget is a reservation estimate,
 not billed usage or an exact cap on every provider token.

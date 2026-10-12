@@ -65,6 +65,7 @@ export interface StoreShape {
   catalog(): Effect.Effect<{ projects: Array<{ project: ProjectInfo; available: boolean }>; threads: ThreadInfo[] }, StoreError>;
   history(): Effect.Effect<GuidanceActivity[], StoreError>;
   activate(environmentId: string, now: number): Effect.Effect<number, StoreError>;
+  configureTelegram(environmentId: string, enabled: boolean, now: number): Effect.Effect<number, StoreError>;
   ingest(source: SourceItem): Effect.Effect<void, StoreError>;
   cursor(stream: SourceItem["stream"]): Effect.Effect<number, StoreError>;
   dueHints(now?: number, limit?: number): Effect.Effect<ThreadHint[], StoreError>;
@@ -97,7 +98,7 @@ export interface StoreShape {
   rejectSend(id: string, error: string, now: number, delayMs?: number): Effect.Effect<boolean, StoreError>;
   retry(id: string, error: string, now: number, delayMs?: number): Effect.Effect<boolean, StoreError>;
   recoverSending(now: number): Effect.Effect<number, StoreError>;
-  prune(now: number): Effect.Effect<{ contexts: number; sentMetadata: number }, StoreError>;
+  prune(now: number, expireContexts?: boolean): Effect.Effect<{ contexts: number; sentMetadata: number }, StoreError>;
   stats(): Effect.Effect<StoreStats, StoreError>;
 }
 
@@ -248,6 +249,11 @@ const schema = `
     id INTEGER PRIMARY KEY CHECK(id=1),
     environment_id TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS telegram_configuration (
+    environment_id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+    notifications_after INTEGER NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS cursors (
     stream TEXT PRIMARY KEY CHECK(stream IN ('active', 'archive')),
     sequence INTEGER NOT NULL
@@ -386,6 +392,24 @@ class SqliteStore implements StoreShape {
         .run(environment, activatedAt);
       const row = getRow(this.db, "SELECT activated_at FROM activations WHERE environment_id=?", environment);
       return rowNumber(row, "activated_at");
+    });
+  });
+
+  configureTelegram = (environmentId: string, enabled: boolean, now: number): Effect.Effect<number, StoreError> => runStoreOperation(() => {
+    const environment = readString(environmentId, "environment id");
+    const at = readNow(now);
+    return this.transaction(() => {
+      const activation = getRow(this.db, "SELECT activated_at FROM activations WHERE environment_id=?", environment);
+      if (!activation) throw new StoreError("activate the environment before configuring Telegram");
+      const previous = getRow(this.db, "SELECT enabled,notifications_after FROM telegram_configuration WHERE environment_id=?", environment);
+      const notificationsAfter = enabled
+        ? previous === undefined ? rowNumber(activation, "activated_at")
+          : rowNumber(previous, "enabled") === 1 ? rowNumber(previous, "notifications_after") : at
+        : at;
+      this.db.prepare(`INSERT INTO telegram_configuration VALUES(?,?,?)
+        ON CONFLICT(environment_id) DO UPDATE SET enabled=excluded.enabled,notifications_after=excluded.notifications_after`)
+        .run(environment, enabled ? 1 : 0, notificationsAfter);
+      return notificationsAfter;
     });
   });
 
@@ -682,13 +706,16 @@ class SqliteStore implements StoreShape {
     `).run(at + defaultReconcileBackoffMs, at).changes));
   });
 
-  prune = (now: number): Effect.Effect<{ contexts: number; sentMetadata: number }, StoreError> => runStoreOperation(() => {
+  prune = (now: number, expireContexts = true): Effect.Effect<{ contexts: number; sentMetadata: number }, StoreError> => runStoreOperation(() => {
     const at = readNow(now);
     return this.transaction(() => {
-      const contexts = Number(this.db.prepare(`
+      const contexts = expireContexts ? Number(this.db.prepare(`
         UPDATE jobs SET context=NULL, error='recap context expired after seven days'
-        WHERE context IS NOT NULL AND created_at<?
-      `).run(at - contextRetentionMs).changes);
+        WHERE context IS NOT NULL AND MAX(created_at, COALESCE(
+          (SELECT notifications_after FROM telegram_configuration WHERE environment_id=jobs.environment_id),
+          created_at
+        ))<?
+      `).run(at - contextRetentionMs).changes) : 0;
       const sentMetadata = Number(this.db.prepare(`
         DELETE FROM jobs WHERE state='sent' AND updated_at<?
       `).run(at - sentRetentionMs).changes);

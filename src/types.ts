@@ -96,6 +96,7 @@ export interface SupervisorConfig {
   excludedThreadIds: string[];
   healthPort: number;
   modelTimeoutMs: number;
+  telegramEnabled?: boolean;
   inputEnabled?: boolean;
   inputTokenFile?: string;
   inputPollMs?: number;

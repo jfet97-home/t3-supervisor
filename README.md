@@ -1,7 +1,7 @@
 # T3 Supervisor
 
 A local dashboard and background service for **continuously monitoring T3 agents**,
-configuring guidance, and handling Telegram notifications and input.
+configuring guidance, and optionally handling Telegram notifications and input.
 
 ## Main features
 
@@ -39,9 +39,41 @@ docker --context desktop-linux compose -f ~/.config/mcpx/t3-supervisor.compose.y
 The repository's [Compose template](compose.yaml) is portable; configure private
 credential mounts and instance settings using [.env.example](.env.example).
 Before a fresh image build, run `node scripts/fetch-runtime.mjs` to fetch the pinned
-runtime. The service connects to T3's orchestration API and to Telegram through MCPX.
+runtime. The service connects to T3's orchestration API; Telegram uses MCPX only when enabled.
 Its private `t3-supervisor_state` volume retains settings and delivery evidence.
 Health: [http://127.0.0.1:9007/health](http://127.0.0.1:9007/health).
+
+### Optional Telegram integration
+
+Telegram is disabled by default. Set `TELEGRAM_ENABLED=true` to enable completion
+recaps and Telegram-originated answers. Set `INPUT_ENABLED=true` as well to enable
+Telegram input relay. The Telegram master setting overrides the input setting.
+Apply configuration changes by restarting the service.
+
+The base Compose template does not require MCPX or its Docker network. To enable
+Telegram with the bundled MCPX network settings, use the Telegram override:
+
+```sh
+docker compose -f compose.yaml -f compose.telegram.yaml up -d
+```
+
+The override connects to the existing `lunar-mcpx_default` network. A custom
+deployment can instead configure its own reachable MCPX URL. Existing installations
+that use Telegram must explicitly set the master flag before upgrading.
+
+With Telegram disabled, the service does not initialize the Telegram client, poll
+the bot, process deliveries, generate completion recaps or relay input. T3
+observation, the dashboard and guidance remain available. Telegram credentials,
+its MCP connection and the input responder credential are unnecessary, and disabled
+Telegram workers do not affect readiness. Guidance model authentication remains
+independent of Telegram.
+
+Existing delivery records and uncertain outcomes are retained; disabling Telegram
+does not mark them sent or clear them. Re-enabling resumes existing queued work,
+without collecting completions from the disabled period. Pending recap context does
+not expire while disabled and gets a fresh seven-day retention window on re-enable.
+Completions not queued before disabling are not collected retrospectively.
+Historical delivery evidence remains visible in the dashboard.
 
 ## Development
 

@@ -45,6 +45,8 @@ do not reset an episode or repeat a send merely to see whether it works.
 
 Recaps and Telegram history is read-only. It cannot resend a notification or answer
 a questionnaire. Keep those requests on their supported user-facing paths.
+Telegram is an optional deployment integration. Monitoring and guidance do not
+require it; historical records can remain visible after it is disabled.
 
 Report the scope and saved behavior, what was actually observed, and any unavailable
 evidence. Usage does not authorize changes to T3, the supervisor service or its state.

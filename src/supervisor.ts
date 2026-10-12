@@ -1,4 +1,4 @@
-import { Cause, Effect, Schedule } from "effect";
+import { Cause, Effect, Option, Schedule } from "effect";
 import { createServer } from "node:http";
 import { buildContext, formatReplyParts, telegramRouteUpdateId, eligibleRuns, formatMessage, isMainThread, timestampMs } from "./domain.js";
 import { Recapper } from "./recap.js";
@@ -15,9 +15,9 @@ export interface SupervisorStatus {
   environmentId: string | null;
   t3Connected: boolean;
   storeState: "starting" | "ready" | "degraded";
-  modelState: "idle" | "ready" | "degraded";
-  telegramState: "starting" | "ready" | "degraded";
-  deliveryState: "idle" | "ready" | "degraded";
+  modelState: "disabled" | "idle" | "ready" | "degraded";
+  telegramState: "disabled" | "starting" | "ready" | "degraded";
+  deliveryState: "disabled" | "idle" | "ready" | "degraded";
   heartbeat: number;
   scanHeartbeat: number;
   deliveryHeartbeat: number;
@@ -39,11 +39,13 @@ export interface SupervisorStatus {
   store: StoreStats | null;
 }
 
-export const createStatus = (): SupervisorStatus => ({
+export const createStatus = (config?: Pick<SupervisorConfig, "telegramEnabled">): SupervisorStatus => ({
   inputReplyCleanupExpired: 0,
   startedAt: new Date().toISOString(), activation: null, environmentId: null,
-  t3Connected: false, storeState: "starting", modelState: "idle", telegramState: "starting",
-  deliveryState: "idle",
+  t3Connected: false, storeState: "starting",
+  modelState: config?.telegramEnabled ? "idle" : "disabled",
+  telegramState: config?.telegramEnabled ? "starting" : "disabled",
+  deliveryState: config?.telegramEnabled ? "idle" : "disabled",
   heartbeat: Date.now(), scanHeartbeat: Date.now(), deliveryHeartbeat: Date.now(), deliveryBusySince: null,
   model: "gpt-6-luna", reasoning: "max",
   lastModelSuccessAt: null, lastDeliveryAt: null, lastErrorPhase: null, store: null,
@@ -65,16 +67,18 @@ const guard = <A, E, R>(effect: Effect.Effect<A, E, R>, phase: string, status: S
 export const readiness = (status: SupervisorStatus, config: SupervisorConfig, now = Date.now()) => {
   const alive = now - status.heartbeat < 60_000;
   const scanProgress = now - status.scanHeartbeat < 120_000;
-  const inputProgress = status.inputState === "disabled" ||
+  const inputProgress = !config.telegramEnabled || status.inputState === "disabled" ||
     (status.inputState === "ready" && now - status.inputHeartbeat < 120_000);
-  const deliveryProgress = status.deliveryBusySince === null
+  const deliveryProgress = !config.telegramEnabled || (status.deliveryBusySince === null
     ? now - status.deliveryHeartbeat < 120_000
-    : now - status.deliveryBusySince < config.modelTimeoutMs * 2 + 60_000;
+    : now - status.deliveryBusySince < config.modelTimeoutMs * 2 + 60_000);
+  const notificationsReady = !config.telegramEnabled || (
+    status.telegramState === "ready" && status.modelState !== "degraded" &&
+    status.deliveryState !== "degraded" && (status.store?.jobs.unknown ?? 0) === 0 &&
+    (status.store?.deferredHints ?? 0) === 0
+  );
   const ready = alive && scanProgress && deliveryProgress && inputProgress && status.activation !== null &&
-    status.t3Connected && status.storeState === "ready" && status.telegramState === "ready" &&
-    status.modelState !== "degraded" && status.deliveryState !== "degraded" &&
-    (status.store?.jobs.unknown ?? 0) === 0 &&
-    (status.store?.deferredHints ?? 0) === 0;
+    status.t3Connected && status.storeState === "ready" && notificationsReady;
   return { alive, ready, scanProgress, deliveryProgress, inputProgress };
 };
 
@@ -113,16 +117,20 @@ export const refreshTelegramStatus = (status: SupervisorStatus) => Effect.gen(fu
 export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus) => Effect.gen(function* () {
   const store = yield* Store;
   const t3 = yield* T3Client;
-  const recapper = yield* Recapper;
-  const telegram = yield* TelegramClient;
+  const recapper = config.telegramEnabled ? Option.getOrThrow(yield* Effect.serviceOption(Recapper)) : null;
+  const telegram = config.telegramEnabled ? Option.getOrThrow(yield* Effect.serviceOption(TelegramClient)) : null;
   yield* healthServer(config, status);
-  yield* store.recoverSending(Date.now());
-  yield* log("supervisor_started", { model: status.model, reasoning: status.reasoning });
+  if (config.telegramEnabled) yield* store.recoverSending(Date.now());
+  yield* log("supervisor_started", {
+    model: status.model, reasoning: status.reasoning,
+    telegramEnabled: config.telegramEnabled === true,
+    inputEnabled: config.telegramEnabled === true && config.inputEnabled === true,
+  });
 
   const maintenance = Effect.gen(function* () {
     status.heartbeat = Date.now();
     status.store = yield* store.stats();
-    yield* store.prune(Date.now());
+    if (status.activation !== null) yield* store.prune(Date.now(), config.telegramEnabled === true);
     status.storeState = "ready";
     if (readiness(status, config).ready) status.lastErrorPhase = null;
     yield* Effect.sleep("30 seconds");
@@ -134,6 +142,7 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
     Effect.retry(Schedule.spaced("10 seconds")),
   );
   const activatedAt = yield* store.activate(descriptor.environmentId, Date.now());
+  const notificationsAfter = yield* store.configureTelegram(descriptor.environmentId, config.telegramEnabled === true, Date.now());
   status.environmentId = descriptor.environmentId;
   status.activation = new Date(activatedAt).toISOString();
   if (config.uiPort !== undefined) yield* Effect.forkScoped(runGuidanceApplication(config,store,t3));
@@ -154,14 +163,14 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
     const hints = yield* store.dueHints(Date.now(), 20);
     for (const hint of hints) {
       yield* Effect.gen(function* () {
-        if (config.excludedThreadIds.includes(hint.threadId) || (hint.shell && !isMainThread(hint.shell))) {
+        if (!config.telegramEnabled || config.excludedThreadIds.includes(hint.threadId) || (hint.shell && !isMainThread(hint.shell))) {
           yield* store.doneHint(hint.threadId, hint.revision);
           return;
         }
         const snapshot = yield* t3.projection(hint.threadId);
         const projection = snapshot.projection;
         const project = yield* store.project(hint.threadId);
-        for (const run of eligibleRuns(projection, activatedAt)) {
+        for (const run of eligibleRuns(projection, notificationsAfter)) {
           if (yield* store.hasIdentity(descriptor.environmentId, hint.threadId, run.id)) continue;
           const updateId = telegramRouteUpdateId(projection, run);
           if (updateId !== null) {
@@ -177,7 +186,7 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
         let waitingForCompletion = false;
         for (const run of projection.runs) {
           const completedAt = timestampMs(run.completedAt);
-          if (run.status === "completed" && completedAt !== null && completedAt > activatedAt &&
+          if (run.status === "completed" && completedAt !== null && completedAt > notificationsAfter &&
             !(yield* store.hasIdentity(descriptor.environmentId, hint.threadId, run.id))) {
             waitingForCompletion = true;
             break;
@@ -202,6 +211,7 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
   }).pipe((effect) => guard(effect, "scan", status), Effect.forever);
 
   const deliver = Effect.gen(function* () {
+    if (!telegram || !recapper) return;
     status.deliveryHeartbeat = Date.now();
     const jobs = yield* store.dueJobs(Date.now(), ["pending", "ready", "unknown"], 10);
     for (const job of jobs) {
@@ -279,9 +289,10 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
   }).pipe((effect) => guard(effect, "delivery", status), Effect.forever);
 
   const checkTelegram = Effect.gen(function* () {
-    yield* refreshTelegramStatus(status);
+    if (!telegram) return;
+    yield* refreshTelegramStatus(status).pipe(Effect.provideService(TelegramClient, telegram));
     yield* Effect.sleep("30 seconds");
   }).pipe(Effect.forever);
 
-  yield* Effect.all([watch, scan, deliver, checkTelegram], { concurrency: "unbounded", discard: true });
+  yield* Effect.all(config.telegramEnabled ? [watch, scan, deliver, checkTelegram] : [watch, scan], { concurrency: "unbounded", discard: true });
 });

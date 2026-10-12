@@ -396,7 +396,7 @@ export class GuidanceRuntime {
     }
     if(this.budgetHold===`${new Date().toISOString().slice(0,10)}:${settings.generation}`){this.coverage="Daily monitoring budget reserved; evaluation paused until the next day or a settings change.";return;}
     if (settings.monitoringPaused) {
-      this.coverage = "Monitoring paused; recaps and questions continue.";
+      this.coverage = "Monitoring paused; catalog and history remain available.";
       return;
     }
     const catalog = await Effect.runPromise(this.source.catalog());

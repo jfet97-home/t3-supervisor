@@ -35,7 +35,7 @@ export const runGuidanceApplication = (
         Effect.sync(() => {
           runtime.connected = false;
           runtime.coverage =
-            "Observation/model unavailable or budget exhausted. Recaps and native questions continue.";
+            "Guidance monitoring unavailable or budget exhausted. T3 observation continues.";
         }),
       ),
       Effect.andThen(Effect.sleep("5 seconds")),

@@ -14,12 +14,12 @@ import { makeT3Client } from "./t3.js";
 import { telegramClientLayer } from "./telegram.js";
 
 const config = loadConfig();
-const status = createStatus();
+const status = createStatus(config);
 
 NodeRuntime.runMain(Effect.gen(function* () {
   yield* initializeRuntimeAuth(config);
   const token = yield* Effect.tryPromise(() => readFile(config.t3TokenFile, "utf8"));
-  if (config.inputEnabled) {
+  if (config.telegramEnabled && config.inputEnabled) {
     status.inputState = "starting";
     const inputWorker = Effect.gen(function* () {
       const responseToken = yield* Effect.tryPromise(() => readFile(config.inputTokenFile!, "utf8"));
@@ -75,8 +75,9 @@ NodeRuntime.runMain(Effect.gen(function* () {
   const services = Layer.mergeAll(
     makeStore(config.dataDirectory),
     makeT3Client({ baseUrl: config.t3Url, token: token.trim() }),
-    recapperLayer(config),
-    telegramClientLayer(config.mcpxUrl),
+    config.telegramEnabled
+      ? Layer.mergeAll(recapperLayer(config), telegramClientLayer(config.mcpxUrl))
+      : Layer.empty,
   );
   yield* runSupervisor(config, status).pipe(Effect.provide(services));
 }).pipe(Effect.scoped));

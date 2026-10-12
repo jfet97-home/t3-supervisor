@@ -1,0 +1,10 @@
+services:
+  t3-supervisor:
+    environment:
+      TELEGRAM_ENABLED: "true"
+    networks: [gateway]
+
+networks:
+  gateway:
+    external: true
+    name: lunar-mcpx_default

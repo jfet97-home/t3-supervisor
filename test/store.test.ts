@@ -45,6 +45,46 @@ const withTemporaryDirectory = async <A>(run: (directory: string) => Promise<A>)
   }
 };
 
+test("Telegram enablement survives reopen and excludes disabled-period completions without resetting source activation", async () => {
+  await withTemporaryDirectory(async (directory) => {
+    await withStore(directory, (store) => store.activate("environment-1", 1_000));
+    assert.equal(await withStore(directory, (store) => store.configureTelegram("environment-1", true, 2_000)), 1_000);
+    assert.equal(await withStore(directory, (store) => store.configureTelegram("environment-1", true, 3_000)), 1_000);
+    assert.equal(await withStore(directory, (store) => store.configureTelegram("environment-1", false, 4_000)), 4_000);
+    assert.equal(await withStore(directory, (store) => store.configureTelegram("environment-1", false, 5_000)), 5_000);
+    assert.equal(await withStore(directory, (store) => store.configureTelegram("environment-1", true, 6_000)), 6_000);
+    assert.equal(await withStore(directory, (store) => store.configureTelegram("environment-1", true, 7_000)), 6_000);
+    assert.equal(await withStore(directory, (store) => store.activate("environment-1", 8_000)), 1_000);
+    await assert.rejects(withStore(directory, (store) => store.configureTelegram("other-environment", true, 9_000)));
+  });
+});
+
+test("pending recap context survives a long Telegram pause and receives a fresh retention window", async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const day = 24 * 60 * 60 * 1_000;
+    const id = await withStore(directory, (store) => Effect.gen(function* () {
+      yield* store.activate("environment-1", 1_000);
+      yield* store.configureTelegram("environment-1", true, 1_000);
+      const id = yield* store.enqueue("environment-1", "thread-1", "run-1", recapContext, 2_000);
+      yield* store.configureTelegram("environment-1", false, 3_000);
+      return id;
+    }));
+    assert.ok(id);
+    await withStore(directory, (store) => Effect.gen(function* () {
+      assert.equal((yield* store.prune(30 * day, false)).contexts, 0);
+      assert.deepEqual((yield* store.getJob(id))?.context, recapContext);
+      yield* store.configureTelegram("environment-1", true, 30 * day);
+      assert.equal((yield* store.prune(30 * day)).contexts, 0);
+      assert.equal((yield* store.prune(36 * day)).contexts, 0);
+      assert.deepEqual((yield* store.getJob(id))?.context, recapContext);
+      assert.equal((yield* store.prune(38 * day)).contexts, 1);
+      assert.equal((yield* store.getJob(id))?.context, null);
+      assert.equal((yield* store.getJob(id))?.state, "pending");
+      assert.equal(yield* store.hasIdentity("environment-1", "thread-1", "run-1"), true);
+    }));
+  });
+});
+
 test("activation, thread hints, and stream cursors survive reopen with private file modes", async () => {
   await withTemporaryDirectory(async (directory) => {
     const activatedAt = await withStore(directory, (store) => store.activate("environment-1", 1_000));
