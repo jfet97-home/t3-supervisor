@@ -13,6 +13,7 @@ The [V1 architecture plan](architecture-v1.md) records the agreed design and sco
 - `t3-lab` was created and booted with Lima 2.2.1 on 12 October 2026.
 - The VM runs Ubuntu 24.04 ARM with 4 CPUs, 8 GiB RAM, and a 60 GiB virtual disk.
 - No host folders are mounted, and SSH agent forwarding is disabled.
+- Git is installed inside the VM; the creation template provisions it too.
 - T3 and provider CLIs have not been installed or connected inside the VM.
 - The existing T3 environment and running supervisor have not been changed.
 - The initial architecture documents have been published to the repository.
@@ -63,6 +64,7 @@ The initial boot completed and guest commands confirmed `Linux aarch64`,
 Ubuntu 24.04, 4 CPUs, and the configured memory and disk. No `virtiofs`, `9p`, or
 SSHFS host mounts were present; the Mac's home path and an SSH agent socket were
 absent. Cloud-init completed successfully, and no `t3` executable was installed.
+Git installation was subsequently verified with `git --version` (2.43.0).
 
 ## Next task
 

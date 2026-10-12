@@ -22,3 +22,12 @@ ssh:
   loadDotSSHPubKeys: false
   forwardAgent: false
 propagateProxyEnv: false
+
+# install the baseline source-control tool when provisioning a new VM
+provision:
+  - mode: system
+    script: |
+      #!/bin/sh
+      set -eu
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git
