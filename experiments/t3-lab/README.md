@@ -14,6 +14,7 @@ The [V1 architecture plan](architecture-v1.md) records the agreed design and sco
 - The VM runs Ubuntu 24.04 ARM with 4 CPUs, 8 GiB RAM, and a 60 GiB virtual disk.
 - No host folders are mounted, and SSH agent forwarding is disabled.
 - Git and `libatomic1` are installed inside the VM and provisioned by the template.
+- Git commit identity matches the Mac's personal identity; a local commit was verified.
 - The desktop-managed T3 server is installed and connected over SSH as `lima-t3-lab`.
 - Codex CLI and Claude Code are installed in the VM.
 - Codex ChatGPT sign-in is verified; Claude Code authentication remains pending.
@@ -60,6 +61,24 @@ limactl stop t3-lab
 Changing the repository YAML does not automatically update an existing instance.
 Inspect and apply changes deliberately; do not delete the VM to reapply settings
 without first accounting for its data.
+
+## Git commit identity
+
+The guest user's global `user.name` and `user.email` were configured to match the
+Mac's effective personal Git identity on 12 October 2026. An empty commit in a
+temporary guest repository verified both the author and committer identities.
+
+These are per-user settings, not values embedded in the Lima template. To configure
+them on another guest, run Git inside that guest:
+
+```sh
+git config --global user.name "<your commit name>"
+git config --global user.email "<your commit email>"
+```
+
+This step configured local commits only. GitHub authentication and commit signing
+are separate; the Mac's credential helpers and 1Password signing configuration were
+not copied into the VM.
 
 ## SSH authentication
 

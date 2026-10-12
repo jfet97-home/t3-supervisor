@@ -71,6 +71,15 @@ Lima plain mode disables host mounts and dynamic forwarding. It does not impleme
 the planned network policy or protected-operation gates. Report those separately
 from basic VM isolation and successful T3 connection.
 
+## Git
+
+Git is installed in the guest, and its global commit name and email match the Mac's
+personal identity. A local test commit verified author and committer values.
+Keep identity configuration separate from GitHub authentication and commit signing.
+Do not copy the Mac's Git configuration wholesale: its credential helpers and
+1Password signing executable refer to host-only facilities. This Git setup did not
+configure repository authentication or signing in the guest.
+
 ## Provider CLIs
 
 Codex CLI and Claude Code have separate native Linux installations in the guest.
