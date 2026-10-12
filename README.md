@@ -45,6 +45,10 @@ Health: [http://127.0.0.1:9007/health](http://127.0.0.1:9007/health).
 
 ## Development
 
+The [usage skill](skills/use-t3-supervisor/SKILL.md) packages dashboard workflows for
+installation in an agent's skills directory. It includes its own references and
+does not require this source checkout for ordinary use.
+
 ```sh
 npm ci
 npm run autofix
