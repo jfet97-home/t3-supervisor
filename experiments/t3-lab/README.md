@@ -15,7 +15,7 @@ The [V1 architecture plan](architecture-v1.md) records the agreed design and sco
 - No host folders are mounted, and SSH agent forwarding is disabled.
 - Git and `libatomic1` are installed inside the VM and provisioned by the template.
 - The desktop-managed T3 server is installed and connected over SSH as `lima-t3-lab`.
-- Provider CLIs and authentication have not been configured in the VM.
+- Codex CLI and Claude Code are installed in the VM; provider authentication remains pending.
 - Existing chats remain in their original environments; automatic load balancing is off.
 - The local T3 server and running supervisor have not been migrated or restarted.
 - The initial architecture documents have been published to the repository.
@@ -89,6 +89,45 @@ minimal Ubuntu image. Installing `libatomic1` fixed the verified binary failure;
 the creation template now includes it. The connected server initially matched
 desktop version `0.0.46-nightly.20261011.2994`.
 
+## Provider CLI installation
+
+Codex CLI and Claude Code were installed separately inside the VM on 12 October
+2026 using their official native Linux installers. The verified versions were
+Codex CLI `0.162.1` and Claude Code `2.1.296`. These installations are independent
+of the Mac's installations; no version synchronization has been configured.
+
+The native installers manage each command under the guest user's `~/.local/bin`.
+Symlinks in `/usr/local/bin` make them available to non-interactive SSH sessions
+and processes whose existing PATH does not include `~/.local/bin`. The Lima
+creation template does not install providers automatically.
+
+To repeat the installation on a fresh VM, enter the guest first:
+
+```sh
+ssh lima-t3-lab
+
+# install as the guest user, not as root
+curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh
+curl -fsSL https://claude.ai/install.sh | bash
+
+# expose the user-managed launchers through the existing server PATH
+sudo ln -s "$HOME/.local/bin/codex" /usr/local/bin/codex
+sudo ln -s "$HOME/.local/bin/claude" /usr/local/bin/claude
+
+codex --version
+claude --version
+```
+
+For existing installations, inspect the launchers before creating symlinks;
+do not overwrite unrelated commands. The installers select their current releases,
+so repeating these commands later may install different versions. See the official
+[Codex installation guide](https://learn.chatgpt.com/docs/codex/cli) and
+[Claude Code installation guide](https://code.claude.com/docs/en/setup).
+
+Both commands passed version and help checks, including `codex app-server --help`.
+Both also ran with a minimal PATH of `/usr/local/bin:/usr/bin:/bin`. No provider
+login, host credential transfer or model task was performed.
+
 ## Global operating skill
 
 The maintained [skill source](skill/SKILL.md) is versioned in this folder.
@@ -110,8 +149,8 @@ prove provider authentication or a successful task inside the VM.
 
 ## Next task
 
-Choose and configure one provider inside the VM, then verify a disposable task
-executes there. Provider installation and authentication require approval.
+Authenticate one installed provider inside the VM, then verify a disposable task
+executes there. Authentication and running that task require approval.
 
 ## Working agreement
 

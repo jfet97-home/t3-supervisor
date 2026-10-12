@@ -70,3 +70,15 @@ a successful task. Keep pairing credentials and runtime credential files private
 Lima plain mode disables host mounts and dynamic forwarding. It does not implement
 the planned network policy or protected-operation gates. Report those separately
 from basic VM isolation and successful T3 connection.
+
+## Provider CLIs
+
+Codex CLI and Claude Code have separate native Linux installations in the guest.
+Their installers manage `~/.local/bin/codex` and `~/.local/bin/claude`; guest
+`/usr/local/bin` symlinks expose them to the existing server PATH and non-interactive
+SSH sessions. Consult the README for installation commands and verified versions.
+Inspect existing launchers before changing them; do not overwrite unrelated tools.
+
+No synchronization with the Mac's provider installations is configured. Provider
+authentication and a model task remain unverified. CLI installation does not
+authorize logging in, copying host credentials or starting an agent task.
