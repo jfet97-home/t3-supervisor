@@ -2,7 +2,8 @@
 
 Supervisor can load declarative definitions from the working directory of a T3
 project, using T3's native file API. It does not need repository mounts inside its
-container, execute definitions, or grant itself permissions.
+container, execute definitions, or grant itself permissions. A separately configured writer can save existing
+project rule files through the same native API.
 
 ## Files
 
@@ -73,7 +74,7 @@ conversation's worktree when present. Caller-supplied filesystem paths are not
 accepted. Workspace and definition-directory metadata are checked before listing,
 so missing folders do not depend on native serialized error details.
 
-The result contains `projectId`, `threadId`, `workspaceRoot`, `rules`, `blocks` and
+The result contains `projectId`, `threadId`, `workspaceRoot`, `revision`, `editingAvailable`, `rules`, `blocks` and
 `issues`. Its status is one of:
 
 - `ready`: the definitions are valid and all required block references resolve.
@@ -102,7 +103,7 @@ block paths. T3 rejects reads resolving outside that workspace, but this is not
 a guarantee against symlinks targeting other files within the same workspace.
 These are working-tree reads, not immutable or authoritative policy attestations.
 
-The dashboard's **Projects** section shows these definitions read-only. Select a
+The dashboard's **Projects** section shows rules, reusable blocks and validation. Select a
 project, then optionally a conversation to use its working directory. The
 conversation selector includes only available chats belonging to that project.
 Required-block buttons open the corresponding reusable block and focus its
@@ -119,7 +120,67 @@ working directory must be selected; the page does not silently fall back to the
 project root. Invalid collections never imply that unreadable rules or their
 block references are absent.
 
-These definitions are separate from **Guidance rules**, the existing
-condition/message reminders. Loading does not interpret rule applicability or
-activate a workflow. Block creation/review and workflow negotiation are subsequent
-work; make definition changes in the repository.
+## Editing project rules
+
+Choose **Edit project rules** to add, rename, change or remove rules. Select required
+blocks from the valid Markdown blocks already in this working directory. Saving
+an empty collection explicitly writes `rules: []`. Block authoring remains a
+repository operation in this step.
+
+The UI writes the same `.supervisor/rules.yaml` that manual repository edits use;
+there is no second database of active rules. YAML Document nodes preserve comments
+on retained rules/fields where possible; whitespace and YAML formatting may change.
+The output is reparsed to verify the intended normalized rules.
+
+The owner confirms the exact working-tree target before each save, including when
+it belongs to an active conversation. Drafts survive section navigation and
+connection failures. Changing selection, refreshing or cancelling a dirty editor
+requires confirmation. Conflicts and uncertain writes keep the draft and block
+another save until explicit reload; there are no automatic write retries. A rejected
+CSRF session or request-format/size guard means definitely not saved. Session
+refresh keeps the draft editable and requires a new explicit Save, rather than
+automatically repeating the write. Access is also refreshed after reconnection.
+
+`POST /api/guidance/project-rules` accepts `projectId`, nullable `threadId`,
+`expectedRevision` and the complete `rules` list. Host/Origin and CSRF checks apply.
+Its result distinguishes saved, conflict, invalid, permission_required, unavailable
+and uncertain. The endpoint caps JSON payloads at 256 KiB (413 when exceeded);
+the serialized YAML remains limited to 64 KiB.
+
+The revision hashes normalized workspace and conversation binding, raw file reads,
+byte lengths and sorted listings/truncation flags. The server rechecks it against
+fresh definitions, validates required blocks, serializes saves per workspace and
+rechecks the conversation binding immediately before writing. It verifies identical
+written text/bytes, regular-file listings and a fresh definition readback.
+
+T3's native writer is a non-atomic truncate/write without compare-and-swap and can
+follow symlinks. Consequently this editor only writes an **existing regular
+rules.yaml in an existing regular .supervisor directory**, checked through native
+listings immediately before and after writing. Missing, malformed or incompletely
+read files/blocks must be prepared or repaired in the repository first; the UI never
+creates missing paths. A complete collection with missing block references can be
+repaired by removing those references or selecting valid existing blocks.
+
+An external filesystem change between native preflight and write is not prevented;
+concurrent external editors and deliberate symlink swaps are outside this V1 write
+contract. A reader can observe partial contents during the native write. Readback
+failure means unknown saved state, not success or a safe retry.
+
+Trusted setup supplies a separate private native session with `filesystem:read`
+and `filesystem:write` at `T3_PROJECT_WRITE_TOKEN_FILE` (default mounted file:
+`/run/secrets/t3-project-write-token`). The permission covers the T3 environment;
+Supervisor restricts its writer to the fixed rules-file path. The service does not
+issue credentials or upgrade the read/operate sessions. Missing writer setup
+leaves project inspection available and reports editing unavailable.
+
+## Legacy reminder retirement
+
+The separate Guidance rules editor and automatic condition/message evaluations
+are retired. Production no longer calls their execution cycle or preview model;
+stale clients cannot modify legacy rules/settings, preview, mute, classify or reset
+old episodes. SQLite history and uncertain notices are retained, without automatic
+reconciliation or retry. The remaining connection poll performs no model calls.
+
+Project definitions are not yet interpreted for applicability or workflow execution.
+Dynamic workflows will compose existing project blocks, with required blocks supplied
+by project rules. Block authoring/review and workflow negotiation follow this step.

@@ -23,6 +23,7 @@ export const loadConfig = (): SupervisorConfig => ({
   uiHost: process.env.UI_HOST ?? "127.0.0.1",
   uiAssetsDirectory: process.env.UI_ASSETS_DIRECTORY ?? "/app/ui-dist",
   guidanceTokenFile: process.env.T3_GUIDANCE_TOKEN_FILE ?? "/run/secrets/t3-guidance-token",
+  projectWriteTokenFile: process.env.T3_PROJECT_WRITE_TOKEN_FILE ?? "/run/secrets/t3-project-write-token",
   ...(process.env.T3_MANAGED_SCRATCH_ROOT ? { managedScratchRoot: process.env.T3_MANAGED_SCRATCH_ROOT } : {}),
 });
 

@@ -9,19 +9,21 @@ import { SupervisorApi, UiError } from "./guidance-contract.js";
 import type { GuidanceRuntime } from "./guidance.js";
 import type { SupervisorConfig } from "./types.js";
 import type { ProjectDefinitionLoader } from "./project-definitions.js";
+import type { ProjectRuleEditor } from "./project-rule-editor.js";
 
 const equal = (a: string, b: string) => {
   const x = Buffer.from(a);
   const y = Buffer.from(b);
   return x.length === y.length && timingSafeEqual(x, y);
 };
-const body = async (request: IncomingMessage): Promise<string> => {
+class BodyLimitError extends Error {}
+const body = async (request: IncomingMessage, limit = 64_000): Promise<string> => {
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of request) {
+  for await (const chunk of request.iterator({destroyOnReturn: false})) {
     const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
     size += part.length;
-    if (size > 64_000) throw new Error("body_limit");
+    if (size > limit) {request.resume();throw new BodyLimitError("body_limit");}
     chunks.push(part);
   }
   return Buffer.concat(chunks).toString("utf8");
@@ -31,29 +33,37 @@ export const startGuidanceUi = async (
   config: SupervisorConfig,
   runtime: GuidanceRuntime,
   definitions?: ProjectDefinitionLoader,
+  editor?: ProjectRuleEditor,
 ) => {
+  const requireLegacy = () => {if (runtime.retired !== false) throw new Error("Legacy guidance rules are retired. Edit project rules in Projects.");};
+  const legacyMessage = (fallback: string) => runtime.retired !== false ? "Legacy guidance rules are retired. Edit project rules in Projects." : fallback;
   const handlers = HttpApiBuilder.group(SupervisorApi, "guidance", (h) =>
     h.handleAll({
       snapshot: () => Effect.promise(() => runtime.snapshot()),
       projectDefinitions: ({query}) => Effect.tryPromise({
         try: (signal) => {
           if (!definitions) throw new Error("Project definition access is not configured.");
-          return definitions.load(query.projectId, query.threadId ?? null, signal);
+          return definitions.load(query.projectId, query.threadId ?? null, signal).then(result => ({...result, editingAvailable: Boolean(editor)}));
         },
         catch: () => new UiError({message: "Project definition access is unavailable."}),
       }),
+      saveProjectRules: ({payload}) => Effect.tryPromise({
+        try: signal => editor ? editor.save(payload, signal) : Promise.resolve({status: "permission_required" as const, message: "Project editing needs a dedicated filesystem:read/filesystem:write credential through deployment setup.", definitions: null}),
+        catch: () => new UiError({message: "The save outcome could not be confirmed. Refresh and inspect rules.yaml before retrying."}),
+      }),
       saveRule: ({ payload }) =>
         Effect.try({
-          try: () => runtime.store.saveRule(payload),
+          try: () => {requireLegacy();return runtime.store.saveRule(payload);},
           catch: () =>
             new UiError({
               message:
-                "Rule invalid or changed in another tab. Reload and check its fields.",
+                "Legacy guidance rules are retired, or the rule changed. Edit project rules in Projects.",
             }),
         }),
       settings: ({ payload }) =>
         Effect.try({
           try: () => {
+            requireLegacy();
             const previous=runtime.store.settings();
             if (
               payload.allowFollowupRace &&
@@ -68,7 +78,7 @@ export const startGuidanceUi = async (
           catch: () =>
             new UiError({
               message:
-                "Settings invalid, T3 version changed or another tab saved first. Reload first.",
+                legacyMessage("Settings invalid, T3 version changed or another tab saved first. Reload first."),
             }),
         }),
       threadPolicy: ({ payload }) => Effect.tryPromise({
@@ -86,20 +96,21 @@ export const startGuidanceUi = async (
       mute: ({ payload }) =>
         Effect.try({
           try: () =>
-            runtime.store.mute(
+            (requireLegacy(), runtime.store.mute(
               payload.ruleId,
               payload.scopeId,
               payload.muted,
               payload.expectedGeneration,
-            ),
+            )),
           catch: () =>
             new UiError({
-              message: "Cannot change mute: reload the global rule first.",
+              message: legacyMessage("Cannot change mute: reload the global rule first."),
             }),
         }),
       classify: ({ payload }) =>
         Effect.tryPromise({
           try: async () => {
+            requireLegacy();
             const snapshot = await runtime.snapshot();
             if (
               !snapshot.projects.some(
@@ -115,12 +126,13 @@ export const startGuidanceUi = async (
           },
           catch: () =>
             new UiError({
-              message: "Project unavailable or settings changed. Reload first.",
+              message: legacyMessage("Project unavailable or settings changed. Reload first."),
             }),
         }),
       action: ({ payload }) =>
         Effect.try({
           try: () => {
+            requireLegacy();
             const activity = runtime.store
               .activities()
               .find((a) => a.id === payload.id);
@@ -149,12 +161,13 @@ export const startGuidanceUi = async (
           catch: () =>
             new UiError({
               message:
-                "Cannot reset: the operation is unavailable, still in flight or requires accepting uncertainty.",
+                legacyMessage("Cannot reset: the operation is unavailable, still in flight or requires accepting uncertainty."),
             }),
         }),
       preview: ({ payload }) =>
         Effect.tryPromise({
           try: (signal) => {
+            requireLegacy();
             if (
               !payload.condition.trim() ||
               !payload.evidence.trim() ||
@@ -172,7 +185,7 @@ export const startGuidanceUi = async (
           catch: () =>
             new UiError({
               message:
-                "Preview unavailable. Check the evidence, model connection and monitoring budget.",
+                legacyMessage("Preview unavailable. Check the evidence, model connection and monitoring budget."),
             }),
         }),
     }),
@@ -246,7 +259,7 @@ export const startGuidanceUi = async (
           return;
         }
         const input =
-          request.method === "GET" ? undefined : await body(request);
+          request.method === "GET" ? undefined : await body(request, url.pathname === "/api/guidance/project-rules" ? 256 * 1024 : 64_000);
         const init: RequestInit = {
           method: request.method ?? "GET",
           headers: { "Content-Type": "application/json" },
@@ -300,14 +313,14 @@ export const startGuidanceUi = async (
         );
       response.writeHead(200, headers);
       response.end(bytes);
-    })().catch(() => {
+    })().catch(error => {
       if (!response.headersSent)
-        response.writeHead(500, {
+        response.writeHead(error instanceof BodyLimitError ? 413 : 500, {
           "Content-Type": "application/json",
           "Cache-Control": "no-store",
         });
       response.end(
-        JSON.stringify({ message: "Supervisor operation unavailable." }),
+        JSON.stringify({ message: error instanceof BodyLimitError ? "The request payload is too large. Reduce its size before retrying." : "Supervisor operation unavailable." }),
       );
     });
   });

@@ -1,5 +1,6 @@
 import { Effect } from "effect";
 import { posix } from "node:path";
+import { createHash } from "node:crypto";
 import { parseDocument } from "yaml";
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
@@ -77,8 +78,26 @@ export const parseDefinitionBlock = (id: string, contents: string): ProjectDefin
 export class ProjectDefinitionLoader {
   constructor(readonly source: Pick<StoreShape, "catalog">, readonly t3: Pick<T3ClientShape, "projection">, readonly files: ProjectFiles) {}
 
-  async load(projectId: string, threadId: string | null = null, parentSignal?: AbortSignal): Promise<ProjectDefinitionSnapshot> {
-    const result: MutableSnapshot = {projectId, threadId, workspaceRoot: "", status: "unavailable", rules: [], blocks: [], issues: []};
+  async currentWorkspace(projectId: string, threadId: string | null, signal: AbortSignal): Promise<string | null> {
+    const catalog = await Effect.runPromise(this.source.catalog(), {signal});
+    const project = catalog.projects.find(p => p.project.id === projectId && p.available);
+    if (!project) return null;
+    let root = project.project.workspaceRoot;
+    if (threadId !== null) {
+      const thread = (await Effect.runPromise(this.t3.projection(threadId), {signal})).projection.thread;
+      if (thread.id !== threadId || thread.projectId !== projectId || thread.deletedAt || thread.archivedAt || thread.worktreePath === undefined) return null;
+      if (thread.worktreePath !== null) {
+        if (!text(thread.worktreePath, 4096)) return null;
+        root = thread.worktreePath;
+      }
+    }
+    return text(root, 4096) && posix.isAbsolute(root) && !root.includes("\0") && !root.includes("\\") ? posix.normalize(root) : null;
+  }
+
+  async load(projectId: string, threadId: string | null = null, parentSignal?: AbortSignal, rulesSource?: (contents: string) => void): Promise<ProjectDefinitionSnapshot> {
+    const result: MutableSnapshot = {projectId, threadId, workspaceRoot: "", revision: null, editingAvailable: false, status: "unavailable", rules: [], blocks: [], issues: []};
+    const inputs: unknown[] = [];
+    const revision = () => createHash("sha256").update(JSON.stringify([projectId, threadId, result.workspaceRoot, inputs])).digest("hex");
     const deadline = AbortSignal.timeout(30_000);
     const signal = parentSignal ? AbortSignal.any([deadline, parentSignal]) : deadline;
     const issue = (path: string, code: string, message: string) => result.issues.push({path, code, message});
@@ -102,6 +121,7 @@ export class ProjectDefinitionLoader {
       if (!text(root, 4096) || !posix.isAbsolute(root) || root.includes("\0") || root.includes("\\")) {
         issue("", "workspace_invalid", "T3 must supply an absolute Mac or Linux workspace path."); return result;
       }
+      root = posix.normalize(root);
       result.workspaceRoot = root;
       if (!await this.files.directoryExists(root, signal)) {issue("", "workspace_missing", "The T3 workspace directory is unavailable."); return result;}
       if (!await this.files.directoryExists(posix.join(root, ".supervisor"), signal)) {
@@ -116,8 +136,10 @@ export class ProjectDefinitionLoader {
         throw error;
       }
       let bytes = 0;
+      inputs.push({...entries, entries: [...entries.entries].sort((a, b) => a.path.localeCompare(b.path))});
       const read = async (path: string) => {
         const file = await this.files.read(root, path, signal);
+        inputs.push([path, file]);
         const decodedBytes = Buffer.byteLength(file.contents, "utf8");
         bytes += file.byteLength;
         if (bytes > MAX_TOTAL_BYTES) throw new DefinitionReadLimit("Definition files exceed the 512 KiB total limit.");
@@ -136,10 +158,11 @@ export class ProjectDefinitionLoader {
       };
       if (entries.truncated) issue(".supervisor", "listing_truncated", "The definition directory listing is incomplete.");
       if (entries.entries.some(e => e.path === ".supervisor/rules.yaml" && e.kind === "file"))
-        await parseFile(".supervisor/rules.yaml", contents => {result.rules = [...parseDefinitionRules(contents)];});
+        await parseFile(".supervisor/rules.yaml", contents => {result.rules = [...parseDefinitionRules(contents)];rulesSource?.(contents);});
       else issue(".supervisor/rules.yaml", "rules_missing", "Add rules.yaml with a rules list; use rules: [] for no requirements.");
       if (entries.entries.some(e => e.path === ".supervisor/blocks" && e.kind === "directory")) {
         const blocks = await this.files.list(root, ".supervisor/blocks", signal);
+        inputs.push({...blocks, entries: [...blocks.entries].sort((a, b) => a.path.localeCompare(b.path))});
         if (blocks.truncated || blocks.entries.length > MAX_FILES || new Set(blocks.entries.map(e => e.path)).size !== blocks.entries.length)
           issue(".supervisor/blocks", "block_limit", "The block listing is incomplete, duplicated or exceeds 100 entries.");
         for (const entry of blocks.entries.slice(0, MAX_FILES).sort((a, b) => a.path.localeCompare(b.path))) {
@@ -154,6 +177,7 @@ export class ProjectDefinitionLoader {
         if (!ids.has(id)) issue(".supervisor/rules.yaml", "block_reference_missing", `Rule ${rule.name} references missing or invalid block ${id}.`);
       }
       result.status = result.issues.length ? "invalid" : "ready";
+      if (result.issues.every(i => i.code === "block_reference_missing")) result.revision = revision();
     } catch (error) {
       result.rules = []; result.blocks = [];
       result.status = error instanceof DefinitionReadLimit ? "invalid" : error instanceof ProjectFileError && error.code === "permission_required" ? "permission_required" : "unavailable";

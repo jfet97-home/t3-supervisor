@@ -669,3 +669,9 @@ dialog pre {
   overflow-wrap: anywhere;
   min-width: 0;
 }
+
+.project-rule-editor fieldset { min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+.project-rule-editor label:not(.toggle) { display: grid; gap: 6px; }
+.project-rule-editor .toggle { min-height: 48px; }
+.project-rule-editor input:user-invalid, .project-rule-editor textarea:user-invalid { border-color: #b02a37; }
+.project-rule-editor [tabindex="-1"]:focus { outline: 2px solid var(--blue); outline-offset: 4px; }

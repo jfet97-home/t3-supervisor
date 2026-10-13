@@ -177,7 +177,9 @@ export class GuidanceRuntime {
     if (path && existsSync(path))
       this.token = readFileSync(path, "utf8").trim() || null;
   }
+  retired = true;
   sendingReason(): string {
+    if (this.retired) return "Project rules are available; workflow supervision is not connected yet. Legacy reminders are retired.";
     if (!this.token)
       return "A separate T3 guidance operate credential is not configured.";
     if (!this.store.settings().allowFollowupRace)
@@ -192,7 +194,7 @@ export class GuidanceRuntime {
   }
   sendingReady(): boolean {
     return (
-      this.token !== null &&
+      !this.retired && this.token !== null &&
       this.connected &&
       this.store.settings().allowFollowupRace &&
       this.store.settings().verifiedServerVersion ===
@@ -354,6 +356,7 @@ export class GuidanceRuntime {
       : normal && !normalMuted;
   }
   async runOnce(signal: AbortSignal): Promise<void> {
+    if (this.retired) {this.coverage = this.sendingReason();return;}
     const current = await Effect.runPromise(this.t3.descriptor());
     this.store.bind(current.environmentId);
     const initialSettings=this.store.settings();

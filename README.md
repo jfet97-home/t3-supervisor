@@ -1,36 +1,35 @@
 # T3 Supervisor
 
-A local dashboard and background service for **continuously monitoring T3 agents**,
-configuring guidance, and optionally handling Telegram notifications and input.
+A local dashboard and background service for inspecting T3 projects, editing
+repository-defined rules, and optionally handling Telegram notifications and input.
 
 ## Main features
 
-- **Agent monitoring and guidance:** watch active main-agent work against conditions
-  written in ordinary language. Configure global, project-specific or no-project
-  rules; preview them, observe matches, pause monitoring, or enable delivery of an
-  exact guidance message to the relevant T3 conversation.
-- **Control dashboard:** manage rules, scopes, monitoring budget and delivery settings;
-  inspect decisions, holds, uncertain deliveries and activity history.
-- **Project definitions:** inspect repository rules, reusable Markdown blocks and
-  validation problems in the read-only Projects section. Use a project root or a
-  conversation's working directory, and refresh after file changes. Definitions
-  are loaded through T3; see [project definitions](docs/project-definitions.md).
-- **Telegram completion notifications:** send concise recaps for substantial work.
-  Routine exchanges stay silent. Telegram-originated work returns its full answer,
-  and replies to recaps can be routed back to the original conversation.
-- **Telegram input:** mirror native T3 questionnaires into the configured Telegram
-  conversation and submit answers back to T3. Other eligible chats receive plain
-  input-needed notices.
+- **Project rules:** edit names, descriptions and required blocks in the selected
+  project's existing `.supervisor/rules.yaml`. The UI and repository use one rule
+  model; there is no separate reminder-rule editor.
+- **Reusable blocks:** inspect Markdown instructions, expected results and rule
+  references. Select a project root or a conversation's worktree and see validation
+  problems and the actual source path. See [project definitions](docs/project-definitions.md).
+- **T3 observation and history:** project and chat inventories sync automatically;
+  existing supervision and notification history remain inspectable.
+- **Telegram completion notifications:** optional concise recaps for substantial
+  work, with full answers for Telegram-originated tasks.
+- **Telegram input:** optional native T3 questionnaires and answers through Telegram.
+
+Workflow negotiation and semantic execution of project rules are not connected
+yet. The earlier condition/message reminders are retired; their stored history
+and uncertain outcomes remain available without automatic retries.
 
 ## Dashboard
 
 Open **[http://127.0.0.1:9008](http://127.0.0.1:9008)**. The dashboard opens directly,
 without a login code. Its Docker port is published only on the Mac's loopback address.
 
-The UI includes **Guidance rules**, **Projects**, **Activity**, **Recaps and Telegram**, and **Settings**.
-Start rules in **Observe** mode. Sending guidance requires its dedicated credential
-and the owner opt-in in Settings. Detection is advisory: a target finishing during
-message delivery can cause a follow-up turn. See [dashboard and guidance setup](docs/guidance.md).
+The UI includes **Projects**, **Activity**, **Recaps and Telegram**, and **Settings**.
+Open Projects, select a workspace, then Edit project rules. Saving requires a
+separate native T3 filesystem read/write credential supplied through trusted setup.
+No credential can be entered or upgraded through the dashboard.
 
 ## Local deployment
 
@@ -90,7 +89,7 @@ that use Telegram must explicitly set the master flag before upgrading.
 
 With Telegram disabled, the service does not initialize the Telegram client, poll
 the bot, process deliveries, generate completion recaps or relay input. T3
-observation, the dashboard and guidance remain available. Telegram credentials,
+observation and the project dashboard remain available. Telegram credentials,
 its MCP connection and the input responder credential are unnecessary, and disabled
 Telegram workers do not affect readiness. Guidance model authentication remains
 independent of Telegram.

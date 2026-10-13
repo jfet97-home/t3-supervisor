@@ -6,21 +6,9 @@ import {
   type GuidanceRuleInput,
 } from "../../src/guidance-contract.js";
 
-let csrf = "";
-export const loadAccess = async (): Promise<boolean> => {
-  const response = await fetch("/api/csrf", { credentials: "same-origin" });
-  if (!response.ok) return false;
-  const value: unknown = await response.json();
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    !("csrf" in value) ||
-    typeof value.csrf !== "string"
-  )
-    return false;
-  csrf = value.csrf;
-  return true;
-};
+import { getCsrfToken } from "./access.js";
+export { getCsrfToken, loadAccess } from "./access.js";
+
 export class ApiClient extends AtomHttpApi.Service<ApiClient>()(
   "SupervisorUiApi",
   {
@@ -36,7 +24,7 @@ export class ApiClient extends AtomHttpApi.Service<ApiClient>()(
     transformClient: (client) =>
       client.pipe(
         HttpClient.mapRequest((request) =>
-          HttpClientRequest.setHeader(request, "x-csrf-token", csrf),
+          HttpClientRequest.setHeader(request, "x-csrf-token", getCsrfToken()),
         ),
       ),
   },

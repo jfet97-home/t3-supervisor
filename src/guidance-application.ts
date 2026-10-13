@@ -6,8 +6,10 @@ import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import type { SupervisorConfig } from "./types.js";
 import { readFile } from "node:fs/promises";
-import { makeProjectFiles } from "./project-files.js";
+import { makeProjectFiles, makeProjectWriter } from "./project-files.js";
 import { ProjectDefinitionLoader } from "./project-definitions.js";
+import { ProjectRuleEditor } from "./project-rule-editor.js";
+import { existsSync } from "node:fs";
 
 export const runGuidanceApplication = (
   config: SupervisorConfig,
@@ -28,19 +30,30 @@ export const runGuidanceApplication = (
     );
     const readToken = yield* Effect.tryPromise(() => readFile(config.t3TokenFile, "utf8"));
     const definitions = new ProjectDefinitionLoader(source, t3, makeProjectFiles(config.t3Url, readToken.trim()));
+    const writePath = config.projectWriteTokenFile;
+    const writeToken = writePath && existsSync(writePath) ? yield* Effect.tryPromise(() => readFile(writePath, "utf8")) : "";
+    const editor = writeToken.trim() ? new ProjectRuleEditor(definitions, makeProjectWriter(config.t3Url, writeToken.trim())) : undefined;
+    runtime.retired = true;
     yield* Effect.acquireRelease(
-      Effect.promise(() => startGuidanceUi(config, runtime, definitions)),
+      Effect.promise(() => startGuidanceUi(config, runtime, definitions, editor)),
       (ui) => Effect.promise(() => ui.close()),
     );
     const cycle = Effect.tryPromise({
-      try: (signal) => runtime.runOnce(signal),
+      try: async () => {
+        runtime.descriptor = await Effect.runPromise(t3.descriptor());
+        store.bind(runtime.descriptor.environmentId);
+        store.prune();
+        runtime.connected = true;
+        runtime.lastCycleAt = Date.now();
+        runtime.coverage = runtime.sendingReason();
+      },
       catch: () => new Error("monitor_cycle_failed"),
     }).pipe(
       Effect.catch(() =>
         Effect.sync(() => {
           runtime.connected = false;
           runtime.coverage =
-            "Guidance monitoring unavailable or budget exhausted. T3 observation continues.";
+            "T3 connection unavailable. Project editing needs a working T3 connection.";
         }),
       ),
       Effect.andThen(Effect.sleep("5 seconds")),

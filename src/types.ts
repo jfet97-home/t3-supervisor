@@ -106,5 +106,6 @@ export interface SupervisorConfig {
   uiHost?: string;
   uiAssetsDirectory?: string;
   guidanceTokenFile?: string;
+  projectWriteTokenFile?: string;
   managedScratchRoot?: string;
 }

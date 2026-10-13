@@ -1,5 +1,5 @@
 import { ThreadPolicy } from "./thread-policy-contract.js";
-import { ProjectDefinitions } from "./project-definitions-contract.js";
+import { ProjectDefinitions, ProjectRuleSaveInput, ProjectRuleSaveResult } from "./project-definitions-contract.js";
 import { Schema } from "effect";
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/http-api";
 
@@ -126,6 +126,11 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
       HttpApiEndpoint.get("projectDefinitions", "/project-definitions", {
         query: {projectId: Text, threadId: Schema.optional(Text)},
         success: ProjectDefinitions,
+        error: UiError,
+      }),
+      HttpApiEndpoint.post("saveProjectRules", "/project-rules", {
+        payload: ProjectRuleSaveInput,
+        success: ProjectRuleSaveResult,
         error: UiError,
       }),
       HttpApiEndpoint.post("saveRule", "/rules", {

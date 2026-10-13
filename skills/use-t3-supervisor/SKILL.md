@@ -1,63 +1,61 @@
 ---
 name: use-t3-supervisor
-description: Use an existing T3 Supervisor dashboard to inspect project rules and reusable blocks, configure guidance and scopes, preview conditions, inspect activity and notification history, or adjust monitoring settings. For product usage, not source development, deployment, credentials provisioning, or Lima VM setup.
+description: Use an existing T3 Supervisor dashboard to inspect and edit repository project rules, inspect reusable workflow blocks and validation, view activity and notification history, or adjust chat settings. For product usage, not source development, deployment, credentials provisioning, or Lima VM setup.
 ---
 
 # Use T3 Supervisor
 
-T3 Supervisor provides an owner dashboard for monitoring active T3 work, sending
-configured guidance, and inspecting Telegram notification and questionnaire history.
-Its semantic guidance is advisory; it does not enforce protected operations.
+The dashboard uses one project rule model backed by `.supervisor/rules.yaml` and
+reusable Markdown blocks. Legacy condition/message reminders are retired. Workflow
+negotiation and semantic execution of the new rules are not connected yet.
 
-## Connect to the dashboard
+## Connect
 
-Use the dashboard URL supplied by the user or configured for the current environment.
-The existing Mac installation uses `http://127.0.0.1:9008`. This address refers to
-the machine running the browser or HTTP client; it does not reach the Mac from a VM.
-If the dashboard is unavailable, report the access problem rather than changing
-network exposure, deployment or credentials as part of ordinary usage.
+Use the environment's supplied dashboard URL. Mac default is
+http://127.0.0.1:9008; the Lima lab is http://127.0.0.1:19008 through its existing
+forwarder. Loopback refers to the client machine. Inspect current controls before
+acting; the dashboard handles CSRF automatically and needs no login code.
 
-Use the available browser interface and inspect current controls before acting.
-The local dashboard opens directly and handles write protection automatically.
-There is no supervisor MCP tool to invent or T3 orchestration command to substitute.
+Usage does not authorize changing network exposure, T3, deployment or credentials.
+There is no Supervisor MCP endpoint to invent.
 
-## Inspect project definitions
+## Inspect and edit project rules
 
-Open Projects and choose a registered project. Select Project root, or an available
-conversation to inspect its current working directory. Check the displayed source
-path and load time; use Refresh definitions after repository or workspace changes.
-Required-block buttons open reusable instructions and expected results. Validation
-problems and missing references remain visible; a valid individual block does not
-make an invalid collection complete. This view is read-only and does not negotiate
-or activate workflows. Edit definitions in the repository; a missing file-reading
-permission is a deployment issue, not authorization to provision credentials here.
+Open Projects and select a registered project root or a matching conversation's
+working directory. Check the source path, load time and validation issues.
+Required-block buttons open instructions and expected results. A valid individual
+item does not make an invalid collection complete.
 
-## Configure guidance
+Within the user's requested scope, choose Edit project rules. Each rule has a
+unique name, a description explaining applicability, and one or more required
+blocks selected from that working directory's valid existing blocks. Add, edit or
+remove rules, then Save project rules and confirm the exact working-tree target.
+An empty saved collection explicitly removes requirements with `rules: []`.
 
-Read [dashboard workflows](references/dashboard.md) for rule editing, scope selection,
-delivery settings, history inspection and ambiguous outcomes.
+The UI edits the repository file, not a separate configuration database. It preserves
+comments on retained YAML nodes where possible; formatting may change. Blocks
+remain repository-authored Markdown files in this step.
 
-For a new rule, capture the observable condition, exact guidance text and intended
-scope. Use Observe only unless the user has authorized sending. Evaluate examples
-with the preview before enabling delivery; preview consumes detector budget but
-sends no messages. Read back the saved rule and its actual mode after a change.
+Missing/malformed files, invalid block files, symlinks or incomplete listings must
+be repaired in the repository first. The editor only writes existing regular rule
+files. A missing write credential is a trusted deployment-setup task, not authority
+to provision or retrieve it through ordinary dashboard usage.
 
-Sending requires the dashboard to report write readiness and the owner's acceptance
-of the documented delivery race. Existing authorization should be respected; do not
-ask again for a change the user has already requested. Missing write capability is
-an installation issue, not permission to retrieve or provision credentials here.
+## Interpret saves and history
 
-## Interpret results
+Read [dashboard workflows](references/dashboard.md) for drafts, conflicts, refresh
+and history. Confirm saved state through the returned definitions. A conflict or
+unknown write keeps the draft: inspect the actual file before explicit reload and
+never repeat the write automatically. Native writes are non-atomic; this V1 does
+not prevent external edits between preflight and write.
 
-Activity distinguishes detection, holds, delivery acceptance and message visibility.
-None proves that the target followed the instruction. A finishing target may receive
-a follow-up turn instead of an interruption. Unknown delivery must be reconciled;
-do not reset an episode or repeat a send merely to see whether it works.
+Activity and Recaps and Telegram are read-only history. Acceptance, visible messages
+and compliance remain separate facts. Retired uncertain notices stay uncertain;
+there are no reset, resend or model-preview controls.
 
-Recaps and Telegram history is read-only. It cannot resend a notification or answer
-a questionnaire. Keep those requests on their supported user-facing paths.
-Telegram is an optional deployment integration. Monitoring and guidance do not
-require it; historical records can remain visible after it is disabled.
+Settings manages persisted chat exclusions and optional Telegram interaction.
+Telegram is optional. Answer native questionnaires through their existing T3 or
+Telegram paths; ordinary messages do not replace questionnaire answers.
 
-Report the scope and saved behavior, what was actually observed, and any unavailable
-evidence. Usage does not authorize changes to T3, the supervisor service or its state.
+Report the selected project/workspace, actual saved result and any unavailable
+verification. Do not claim that saving rules activates workflow supervision.

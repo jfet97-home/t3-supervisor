@@ -9,10 +9,14 @@ import { createServer, get } from "node:http";
 import { WebSocketServer } from "ws";
 import { Effect } from "effect";
 import { GuidanceStore } from "../src/guidance-store.js";
-import { GuidanceRuntime, liveEvidence,makeGuidanceModel } from "../src/guidance.js";
+import { GuidanceRuntime as RetiredGuidanceRuntime, liveEvidence,makeGuidanceModel } from "../src/guidance.js";
 import { readStructuredModelOutput } from "../src/recap.js";
 import { dispatchGuidance } from "../src/guidance-native.js";
 import { startGuidanceUi } from "../src/guidance-ui.js";
+// legacy transport fixtures remain useful; production defaults to retired execution
+class GuidanceRuntime extends RetiredGuidanceRuntime {
+  constructor(...args: ConstructorParameters<typeof RetiredGuidanceRuntime>) {super(...args);this.retired = false;}
+}
 import { makeStore, Store } from "../src/store.js";
 import type {
   GuidanceRuleInput,
@@ -729,4 +733,30 @@ test("disabled native worker can display history from before the cleanup audit m
       assert.equal(snapshot.history.some(item => item.threadId === "thread" && item.state === "accepted"), true);
     }).pipe(Effect.provide(makeStore(join(directory, "source"))), Effect.scoped));
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("retired reminders cannot evaluate, send or claim sending readiness", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "retired-guidance-"));const store = new GuidanceStore(directory);
+  try {
+    store.saveRule({...newRule, mode: "send"});
+    const runtime = new GuidanceRuntime(config(directory), store, {} as never, t3, {decide: async () => {throw new Error("A retired reminder must not evaluate");}});
+    runtime.retired = true;
+    await runtime.runOnce(AbortSignal.timeout(1000));
+    assert.equal(runtime.sendingReady(), false);assert.match(runtime.sendingReason(), /retired/);assert.equal(store.rules().length, 1);
+    assert.equal(store.notices().length, 0);
+    const ui = await startGuidanceUi(config(directory), runtime);
+    try {
+      const address = ui.server.address();assert.ok(address && typeof address !== "string");const origin = `http://127.0.0.1:${address.port}`;
+      const csrf = (await (await fetch(origin + "/api/csrf")).json()).csrf;
+      const headers = {Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf};
+      const rule = await fetch(origin + "/api/guidance/rules", {method: "POST", headers, body: JSON.stringify(newRule)});
+      assert.equal(rule.status, 400);
+      const preview = await fetch(origin + "/api/guidance/preview", {method: "POST", headers, body: JSON.stringify({condition: "Notice publication", message: "Review", evidence: "I will publish"})});
+      assert.equal(preview.status, 400);assert.equal(store.rules().length, 1);
+      const missingWrite = await fetch(origin + "/api/guidance/project-rules", {method: "POST", headers, body: JSON.stringify({projectId: "project", threadId: null, expectedRevision: "a".repeat(64), rules: []})});
+      assert.equal((await missingWrite.json()).status, "permission_required");
+      const large = await fetch(origin + "/api/guidance/project-rules", {method: "POST", headers, body: JSON.stringify({padding: "x".repeat(256 * 1024)})});
+      assert.equal(large.status, 413);
+    } finally {await ui.close();}
+  } finally {store.close();await rm(directory, {recursive: true, force: true});}
 });

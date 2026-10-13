@@ -2,9 +2,9 @@ import WebSocket from "ws";
 
 export type FileFailure = "missing" | "invalid_file" | "permission_required" | "unavailable";
 export class ProjectFileError extends Error {
-  constructor(readonly code: FileFailure) {
+  constructor(readonly code: FileFailure, scope: "read" | "write" = "read") {
     super(code === "permission_required"
-      ? "Enable filesystem:read on the Supervisor read credential through deployment setup."
+      ? `Enable filesystem:${scope} on the Supervisor ${scope} credential through deployment setup.`
       : code === "missing" ? "The requested project path does not exist."
         : code === "invalid_file" ? "Definitions must be readable UTF-8 text files, not binary files or directories."
         : "T3 project file access is unavailable.");
@@ -14,6 +14,10 @@ export interface ProjectFiles {
   directoryExists(root: string, signal: AbortSignal): Promise<boolean>;
   list(root: string, path: string, signal: AbortSignal): Promise<{ entries: Array<{path: string; kind: "file" | "directory"}>; truncated: boolean }>;
   read(root: string, path: string, signal: AbortSignal): Promise<{contents: string; byteLength: number; truncated: boolean}>;
+}
+export interface ProjectWriter {
+  checkRulesFile(root: string, signal: AbortSignal): Promise<boolean>;
+  writeRules(root: string, contents: string, signal: AbortSignal): Promise<void>;
 }
 const record = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const validPath = (path: string): boolean => path.startsWith(".supervisor/") && !path.includes("\\") && !path.includes("\0") &&
@@ -32,7 +36,7 @@ const failure = (value: unknown, depth = 0): FileFailure => {
 };
 
 /** Uses native T3 read RPCs; it never reads project content from the container filesystem. */
-export const makeProjectFiles = (baseUrl: string, token: string): ProjectFiles => {
+const makeProjectRpc = (baseUrl: string, token: string, scope: "read" | "write" = "read") => {
   const rpc = (tag: string, payload: Record<string, unknown>, signal: AbortSignal): Promise<unknown> => new Promise((resolve, reject) => {
     if (signal.aborted) return reject(new ProjectFileError("unavailable"));
     const url = new URL("/ws?orchestrationProtocol=2", baseUrl);
@@ -67,11 +71,31 @@ export const makeProjectFiles = (baseUrl: string, token: string): ProjectFiles =
           if (frame._tag !== "Exit" || frame.requestId !== "definitions") continue;
           if (!record(frame.exit)) return abort();
           if (frame.exit._tag === "Success") finish(undefined, frame.exit.value);
-          else finish(new ProjectFileError(failure(frame.exit)));
+          else finish(new ProjectFileError(failure(frame.exit), scope));
         }
       } catch {abort();}
     });
   });
+  return rpc;
+};
+
+export const makeProjectWriter = (baseUrl: string, token: string): ProjectWriter => {
+  const rpc = makeProjectRpc(baseUrl, token, "write");
+  return {async checkRulesFile(root, signal) {
+    const rootEntries = await rpc("projects.listEntries", {cwd: root, directoryPath: ""}, signal);
+    const includes = (value: unknown, path: string, kind: string) => record(value) && value.truncated === false && Array.isArray(value.entries) &&
+      value.entries.some(e => record(e) && e.path === path && e.kind === kind);
+    if (!includes(rootEntries, ".supervisor", "directory")) return false;
+    const folder = await rpc("projects.listEntries", {cwd: root, directoryPath: ".supervisor"}, signal);
+    return Boolean(includes(folder, ".supervisor/rules.yaml", "file"));
+  }, async writeRules(root, contents, signal) {
+    const result = await rpc("projects.writeFile", {cwd: root, relativePath: ".supervisor/rules.yaml", contents}, signal);
+    if (!record(result) || result.relativePath !== ".supervisor/rules.yaml") throw new ProjectFileError("unavailable", "write");
+  }};
+};
+
+export const makeProjectFiles = (baseUrl: string, token: string): ProjectFiles => {
+  const rpc = makeProjectRpc(baseUrl, token);
   return {
     async directoryExists(root, signal) {
       const v = await rpc("filesystem.getMetadata", {paths: [root]}, signal);

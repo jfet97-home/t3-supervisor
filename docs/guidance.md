@@ -1,3 +1,7 @@
+> Historical implementation: the condition/message reminder editor and execution
+> are retired. Use Projects to edit repository rules; see [project definitions](project-definitions.md).
+> The configuration instructions below describe the earlier implementation.
+
 # Intent guidance and activity UI
 
 Open http://127.0.0.1:9008. The supervisor, rather than T3, serves this interface.

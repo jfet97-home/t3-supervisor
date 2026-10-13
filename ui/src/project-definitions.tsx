@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { GuidanceSnapshot } from "../../src/guidance-contract.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import { loadProjectDefinitions } from "./project-definitions-api.js";
+import { ProjectRulesEditor } from "./project-rules-editor.js";
 
 const statusText: Record<ProjectDefinitionSnapshot["status"], string> = {
   ready: "Definitions valid",
@@ -65,20 +66,28 @@ export function DefinitionsContent({definitions}: {definitions: ProjectDefinitio
   </div>;
 }
 
-export function ProjectDefinitionsPanel({data}: {data: GuidanceSnapshot}) {
+export function ProjectDefinitionsPanel({data, csrfToken = "", onDirtyChange}: {data: GuidanceSnapshot; csrfToken?: string; onDirtyChange?: (dirty: boolean) => void}) {
   const [selection, setSelection] = useState({projectId: "", threadId: ""});
   const [revision, setRevision] = useState(0);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedMessage, setSavedMessage] = useState("");
+  const editState = useRef({dirty, saving});
+  editState.current = {dirty, saving};
+  const reportDirty = useCallback((value: boolean) => setDirty(value), []);
+  useEffect(() => {onDirtyChange?.(dirty || saving);}, [dirty, saving, onDirtyChange]);
   const projects = data.projects.filter(p => p.available);
   const projectId = projects.some(p => p.id === selection.projectId) ? selection.projectId : "";
   const threads = data.threads.filter(t => t.available && t.projectId === projectId);
   const threadUnavailable = Boolean(projectId && selection.threadId && !threads.some(t => t.id === selection.threadId));
   const threadId = selection.threadId;
-  const canLoad = Boolean(projectId && !threadUnavailable);
+  const canLoad = Boolean(projectId && !threadUnavailable && data.connected);
   const key = JSON.stringify([projectId, threadId, revision, canLoad]);
   const [state, setState] = useState<{key: string; result: ProjectDefinitionSnapshot | null; error: boolean; loadedAt: number | null}>({key: "", result: null, error: false, loadedAt: null});
   useEffect(() => {
-    setState({key, result: null, error: false, loadedAt: null});
+    if (editState.current.dirty || editState.current.saving) return;
     if (!canLoad) return;
+    setState({key, result: null, error: false, loadedAt: null});
     const controller = new AbortController();
     void loadProjectDefinitions(projectId, threadId || null, controller.signal).then(result => {
       if (!controller.signal.aborted) setState({key, result, error: false, loadedAt: Date.now()});
@@ -89,22 +98,32 @@ export function ProjectDefinitionsPanel({data}: {data: GuidanceSnapshot}) {
   }, [projectId, threadId, key, canLoad]);
   const current = state.key === key ? state : null;
   const busy = Boolean(canLoad && !current?.result && !current?.error);
+  const discard = () => {
+    if (saving || dirty && !confirm("Discard unsaved project-rule changes and reload definitions?")) return false;
+    reportDirty(false);setSavedMessage("");setState({key: "", result: null, error: false, loadedAt: null});return true;
+  };
   return <section className="stack project-definitions" aria-labelledby="definition-title">
-    <div><h2 id="definition-title">Project definitions</h2><p className="muted">Read project rules and reusable blocks. Changes are made in the repository.</p></div>
+    <div><h2 id="definition-title">Project definitions</h2><p className="muted">Edit project rules and inspect reusable blocks. Files in the repository are the source of truth.</p></div>
     <div className="panel definition-controls">
-      <label>Project<select value={projectId} onChange={event => setSelection({projectId: event.target.value, threadId: ""})}>
+      <label>Project<select value={projectId} disabled={saving} onChange={event => {if (discard()) setSelection({projectId: event.target.value, threadId: ""});}}>
         <option value="">Select a project</option>{projects.map(project => <option key={project.id} value={project.id}>{project.title}</option>)}
       </select></label>
-      <label>Working directory<select value={threadId} disabled={!projectId} onChange={event => setSelection(previous => ({...previous, threadId: event.target.value}))}>
+      <label>Working directory<select value={threadId} disabled={!projectId || saving} onChange={event => {if (discard()) setSelection(previous => ({...previous, threadId: event.target.value}));}}>
         {threadUnavailable && <option value={threadId} disabled>Conversation unavailable</option>}
         <option value="">Project root</option>{threads.map(thread => <option key={thread.id} value={thread.id}>{thread.title}</option>)}
       </select></label>
-      <button type="button" disabled={!canLoad || busy} onClick={() => setRevision(n => n + 1)}>Refresh definitions</button>
+      <button type="button" disabled={!canLoad || busy || saving} onClick={() => {if (discard()) setRevision(n => n + 1);}}>Refresh definitions</button>
     </div>
     {!projectId && <p className="panel muted">{projects.length ? "Select a project to inspect its definitions." : "No available T3 projects. Add a project in T3 to inspect its definitions here."}</p>}
     {threadUnavailable && <p className="panel" role="status">The selected conversation is no longer available in this project. Choose another working directory.</p>}
+    {!data.connected && <p className="panel" role="status">T3 is disconnected. Any unsaved draft is kept.</p>}
     {busy && <p className="panel" role="status">Reading project definitions…</p>}
     {canLoad && current?.error && <p className="panel" role="alert">Could not load definitions. Refresh to try again or check the Supervisor connection.</p>}
+    {savedMessage && <p role="status">{savedMessage}</p>}
+    {state.result && <div hidden={!canLoad || state.key !== key}>
+      <ProjectRulesEditor key={JSON.stringify([state.result.projectId, state.result.threadId, state.result.revision, revision])} definitions={state.result} csrfToken={csrfToken} onDirtyChange={reportDirty} onSavingChange={setSaving}
+        onSaved={result => {setState({key, result, error: false, loadedAt: Date.now()});setSavedMessage("Saved project rules to .supervisor/rules.yaml.");}}/>
+    </div>}
     {canLoad && current?.result && <>
       <p className="muted small" role="status">Loaded {new Date(current.loadedAt!).toLocaleTimeString()}. Refresh after repository changes.</p>
       <DefinitionsContent key={key} definitions={current.result}/>
