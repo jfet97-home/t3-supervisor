@@ -52,7 +52,8 @@ the settings database is first created; they never override saved UI choices.
 
 An obsolete questionnaire deletion with no confirmed receipt is retained as
 `expired` with reason `deletion_unconfirmed_expired` after its 24-hour cleanup TTL. This does not claim deletion or replay it. It no longer blocks readiness;
-uncertain sends and native submissions remain frozen and visible.
+uncertain sends and native submissions remain frozen and visible. Expired deletion
+audit entries contain metadata only and are retained for 30 days, up to 1,000 entries.
 
 ```sh
 docker --context desktop-linux compose -f ~/.config/t3-supervisor/compose.yaml up -d

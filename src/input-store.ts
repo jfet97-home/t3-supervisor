@@ -205,6 +205,10 @@ export class InputStoreError extends Error {
 }
 
 const schema = `
+  CREATE TABLE IF NOT EXISTS input_cleanup_history (
+    delivery_key TEXT PRIMARY KEY, cleanup_key TEXT, message_id INTEGER, thread_id TEXT,
+    state TEXT NOT NULL, reason TEXT NOT NULL, message_created_at INTEGER NOT NULL, recorded_at INTEGER NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS input_environment (
     id INTEGER PRIMARY KEY CHECK(id=1),
     environment_id TEXT NOT NULL
@@ -1461,13 +1465,19 @@ export class InputStore implements InputStoreApi {
     return Number(result.changes) > 0;
   }));
 
-  expireUnknownDeletion = (deliveryKey: string, now: number): boolean => this.operation(() => {
+  expireUnknownDeletion = (deliveryKey: string, now: number): boolean => this.operation(() => this.transaction(() => {
     this.validateNow(now);
+    this.db.prepare(`INSERT OR IGNORE INTO input_cleanup_history
+      SELECT m.delivery_key,m.cleanup_key,m.message_id,r.thread_id,'expired','deletion_unconfirmed_expired',m.created_at,?
+      FROM input_messages m LEFT JOIN input_requests r ON m.input_id=r.input_id AND m.request_revision=r.request_revision
+      WHERE m.delivery_key=? AND m.cleanup_state='unknown'
+      AND COALESCE(NULLIF(m.delete_window_at,0),m.created_at)<=?`).run(now, deliveryKey, now - INPUT_CLEANUP_UNCERTAINTY_TTL_MS);
     const result = this.db.prepare(`UPDATE input_messages SET cleanup_state='expired',
       cleanup_error='deletion_unconfirmed_expired' WHERE delivery_key=? AND cleanup_state='unknown'
       AND COALESCE(NULLIF(delete_window_at,0),created_at)<=?`).run(deliveryKey, now - INPUT_CLEANUP_UNCERTAINTY_TTL_MS);
+    this.db.prepare("DELETE FROM input_cleanup_history WHERE recorded_at<? OR delivery_key IN (SELECT delivery_key FROM input_cleanup_history ORDER BY recorded_at DESC,delivery_key LIMIT -1 OFFSET 1000)").run(now - 30 * 24 * 60 * 60 * 1000);
     return Number(result.changes) > 0;
-  });
+  }));
 
   recordMessageDeleteUnknown = (deliveryKey: string, error: string, now: number): boolean => this.operation(() => {
     this.validateNow(now);

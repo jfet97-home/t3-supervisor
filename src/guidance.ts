@@ -267,7 +267,13 @@ export class GuidanceRuntime {
     if (!existsSync(actual)) return [];
     const db = new DatabaseSync(actual, { readOnly: true });
     try {
-      return db
+      const archived: GuidanceActivity[] = db.prepare("SELECT * FROM input_cleanup_history ORDER BY recorded_at DESC LIMIT 100").all().map(row => ({
+        id: `cleanup:${String(row.delivery_key)}`, kind: "native_question_cleanup", threadId: row.thread_id === null ? null : String(row.thread_id),
+        ruleId: null, runId: null, state: "cleanup_expired", reason: String(row.reason),
+        detail: JSON.stringify({ deliveryKey: row.delivery_key, cleanupKey: row.cleanup_key, messageId: row.message_id, messageCreatedAt: row.message_created_at, deletionConfirmed: false }),
+        createdAt: Number(row.recorded_at),
+      }));
+      const current = db
         .prepare(
           `SELECT r.thread_id,r.native_request_id,r.submission_state,r.lifecycle,r.updated_at,
         m.delivery_key,m.state,m.cleanup_state,m.cleanup_error,m.message_id FROM input_requests r LEFT JOIN input_messages m
@@ -295,6 +301,7 @@ export class GuidanceRuntime {
           }),
           createdAt: Number(row.updated_at),
         }));
+      return [...archived, ...current];
     } catch {
       return [
         {

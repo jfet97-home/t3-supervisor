@@ -1048,3 +1048,28 @@ test("unknown send becomes a cleanup obligation when its late Telegram id is rec
     assert.ok(recovered.cleanupKey);
   });
 });
+
+
+test("expired deletion audit survives payload compaction without claiming success", async () => {
+  await withStore((store, directory) => {
+    const tracked = prepareSentGeneration(store, 1000);
+    store.invalidateRequest(tracked.inputId, tracked.requestRevision, 2000);
+    const message = store.dueCleanupMessages(2000)[0]!;
+    store.beginMessageDeletion(message.deliveryKey, 2000);
+    store.recordMessageDeleteUnknown(message.deliveryKey, "invalid_response", 2000);
+    const later = 1000 + 24 * 60 * 60 * 1000 + 100;
+    assert.equal(store.expireUnknownDeletion(message.deliveryKey, later), true);
+    store.setRequestTerminal(tracked.inputId, tracked.requestRevision, later);
+    store.beginRetirement(tracked.inputId, tracked.requestRevision, "retire", later);
+    store.recordRetirement(tracked.inputId, tracked.requestRevision, "sent", later);
+    store.dueCleanupMessages(later);
+    const db = new DatabaseSync(join(directory, "telegram-input.sqlite3"), { readOnly: true });
+    try {
+      const history = db.prepare("SELECT * FROM input_cleanup_history WHERE delivery_key=?").get(message.deliveryKey)!;
+      assert.equal(history.state, "expired");
+      assert.equal(history.reason, "deletion_unconfirmed_expired");
+      assert.equal(history.cleanup_key, message.cleanupKey);
+      assert.equal(history.message_id, message.messageId);
+    } finally { db.close(); }
+  });
+});
