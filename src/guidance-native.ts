@@ -80,6 +80,7 @@ export const dispatchGuidance = (options: {
               threadId: options.threadId,
               text: options.text,
               attachments: [],
+              createdBy: "system",
               creationSource: "server",
               dispatchMode: {
                 type: "steer_active",

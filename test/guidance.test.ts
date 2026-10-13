@@ -514,6 +514,8 @@ test("native adapter uses stable targeted message.dispatch, never an answer or d
     assert.equal(receipt.outcome, "accepted");
     assert.equal(receipt.messageId, "supervisor-notice:unique");
     assert.equal(payload?.type, "message.dispatch");
+    assert.equal(payload?.createdBy, "system");
+    assert.equal(payload?.creationSource, "server");
     assert.deepEqual(payload?.dispatchMode, {
       type: "steer_active",
       targetRunId: "run",
