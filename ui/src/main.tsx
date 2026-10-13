@@ -38,6 +38,8 @@ const labels: Record<string, string> = {
   needs_context: "Needs context",
   uncertain: "Delivery uncertain",
   cleanup_uncertain: "Cleanup uncertain",
+  cleanup_expired: "Cleanup expired (not confirmed)",
+  deletion_unconfirmed_expired: "Deletion unconfirmed; 24-hour cleanup TTL expired",
   sent: "Confirmed sent",
   visible: "Visible in chat",
   accepted: "Accepted by T3",

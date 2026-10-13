@@ -105,7 +105,7 @@ const projection = (overrides: Partial<Projection> = {}): Projection => {
   return current;
 };
 
-test("main-thread filtering excludes only the configured thread and subagent lineage", () => {
+test("main-thread filtering rejects deleted chats and subagents without hardcoded chat IDs", () => {
   assert.equal(isMainThread(thread()), true);
   assert.equal(isMainThread(thread({ lineage: { parentThreadId: "parent", relationshipToParent: "fork" } })), true);
   assert.equal(isMainThread(thread({ lineage: { parentThreadId: "parent", relationshipToParent: "subagent" } })), false);

@@ -267,7 +267,9 @@ export class GuidanceRuntime {
     if (!existsSync(actual)) return [];
     const db = new DatabaseSync(actual, { readOnly: true });
     try {
-      const archived: GuidanceActivity[] = db.prepare("SELECT * FROM input_cleanup_history ORDER BY recorded_at DESC LIMIT 100").all().map(row => ({
+      const archivedRows = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='input_cleanup_history'").get()
+        ? db.prepare("SELECT * FROM input_cleanup_history ORDER BY recorded_at DESC LIMIT 100").all() : [];
+      const archived: GuidanceActivity[] = archivedRows.map(row => ({
         id: `cleanup:${String(row.delivery_key)}`, kind: "native_question_cleanup", threadId: row.thread_id === null ? null : String(row.thread_id),
         ruleId: null, runId: null, state: "cleanup_expired", reason: String(row.reason),
         detail: JSON.stringify({ deliveryKey: row.delivery_key, cleanupKey: row.cleanup_key, messageId: row.message_id, messageCreatedAt: row.message_created_at, deletionConfirmed: false }),

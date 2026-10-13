@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { canResetActivity,guidanceScopeForSelection,guidanceScopeAfterClassification } from "../src/guidance-contract.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -708,4 +709,24 @@ test("a delayed classification completion preserves the owner's newer scope sele
  selected="project-b";complete();await applying;assert.equal(selected,"project-b");
  assert.equal(guidanceScopeAfterClassification("project-a","project-a"),"scratch");
  assert.equal(guidanceScopeAfterClassification("global","project-a"),"global");
+});
+
+
+test("disabled native worker can display history from before the cleanup audit migration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "guidance-old-input-"));
+  const store = new GuidanceStore(directory);
+  const db = new DatabaseSync(join(directory, "telegram-input.sqlite3"));
+  db.exec(`CREATE TABLE input_requests(thread_id TEXT,native_request_id TEXT,submission_state TEXT,lifecycle TEXT,updated_at INTEGER,input_id TEXT,request_revision TEXT);
+    CREATE TABLE input_messages(delivery_key TEXT,state TEXT,cleanup_state TEXT,cleanup_error TEXT,message_id INTEGER,input_id TEXT,request_revision TEXT);
+    INSERT INTO input_requests VALUES('thread','old-request','accepted','retired',1000,'input','revision');`);
+  db.close();
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const source = yield* Store;
+      const runtime = new GuidanceRuntime(config(directory), store, source, t3, { decide: async () => { throw new Error("No evaluation requested"); } });
+      const snapshot = yield* Effect.promise(() => runtime.snapshot());
+      assert.equal(snapshot.history.some(item => item.state === "unavailable"), false);
+      assert.equal(snapshot.history.some(item => item.threadId === "thread" && item.state === "accepted"), true);
+    }).pipe(Effect.provide(makeStore(join(directory, "source"))), Effect.scoped));
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });
