@@ -184,7 +184,7 @@ test("restart_active preserves source and citation messages on interrupted histo
   assert.equal(parseProjectDefinitionDecisionRecord(decisionRecord(), current, observed, rolledBack), null);
 });
 
-test("forwarded, scheduled, source-tagged, streaming, failed, and non-main user messages cannot authorize definitions", () => {
+test("forwarded, scheduled, source-tagged, streaming, rolled-back and non-root user messages cannot authorize definitions", () => {
   const current = task();
   const observed = definitions({revision: newRevision});
   const rejected: UserFixture[] = [
@@ -194,12 +194,22 @@ test("forwarded, scheduled, source-tagged, streaming, failed, and non-main user 
     {id: "assistant-authored", text: userText, createdBy: "assistant"},
     {id: "other-origin", text: userText, creationSource: "import"},
     {id: "streaming", text: userText, streaming: true},
-    {id: "failed-run", text: userText, runStatus: "failed"},
+    {id: "rolled-back-run", text: userText, runStatus: "rolled_back"},
     {id: "off-root-node", text: userText, nodeId: "off-root-user-node"},
     {id: "wrong-root-kind", text: userText, rootKind: "subagent"},
   ];
   for (const user of rejected) {
     assert.equal(parseProjectDefinitionDecisionRecord(decisionRecord({userMessageIds: [user.id]}), current, observed, agentProjection([user])), null, user.id);
+  }
+});
+
+test("stopped, failed and cancelled runs retain their real user request and authorization history", () => {
+  for (const status of ["interrupted", "failed", "cancelled"]) {
+    const projection = agentProjection([{id: "user-1", text: userText, runStatus: status}], status);
+    const source = projection.messages[0]!;const sourceRun = projection.runs.find(run => run.id === source.runId)!;
+    assert.equal(nativeUserMessageVisible(projection, sourceRun, source), true, status);
+    assert.ok(parseProjectDefinitionDecisionRecord(decisionRecord(), task(), definitions({revision: newRevision}), projection), status);
+    assert.ok(buildProjectDefinitionReviewRequest(task(), definitions(), definitions({revision: newRevision}), projection, "Stopped history marker"), status);
   }
 });
 

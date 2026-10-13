@@ -103,12 +103,10 @@ export const mainRunNodeReader = (projection: Projection, run: RunInfo) => {
     isMainRootNode(projection,run,nodeId,nodes,false) ? nodes.get(nodeId) : undefined;
 };
 
-const failedNativeUserRunStates = new Set(["failed", "interrupted", "cancelled", "rolled_back"]);
-
 /** Matches a native primary user message to its retained root_turn node, including after restart. */
 export const nativeUserMessageVisible = (projection: Projection, run: RunInfo, message: MessageInfo): boolean => {
   if (run.threadId !== projection.thread.id || message.threadId !== projection.thread.id || message.runId !== run.id ||
-    typeof message.nodeId !== "string" || message.role !== "user" || message.streaming !== false || failedNativeUserRunStates.has(run.status)) return false;
+    typeof message.nodeId !== "string" || message.role !== "user" || message.streaming !== false || run.status === "rolled_back") return false;
   const root = Array.isArray(projection.nodes) ? projection.nodes.find(node => isRecord(node) && node.id === message.nodeId) : undefined;
   return isRecord(root) && root.kind === "root_turn" && root.id === root.rootNodeId && root.threadId === projection.thread.id &&
     root.runId === run.id && (root.parentNodeId === null || root.parentNodeId === undefined) && root.status !== "rolled_back";

@@ -405,6 +405,12 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
         return { sequence: -1 };
       }
       const dispatchMode = payload.dispatchMode as Record<string, unknown> | undefined;
+      if (dispatchMode?.type === "queue_after_active" && !operativeTarget.runs.some(candidate => ["running", "waiting", "starting", "queued"].includes(candidate.status))) {
+        appendRun({projection: operativeTarget, id: `operative-notice-run-${calls.length}`,
+          ordinal: Math.max(0, ...operativeTarget.runs.map(candidate => candidate.ordinal)) + 1, status: "running",
+          messageId: String(payload.messageId), text: String(payload.text), createdBy: "user", creationSource: "server", now: clock.now});
+        return {sequence: calls.length};
+      }
       const runId = String(dispatchMode?.targetRunId ?? operativeTarget.thread.activeRunId ?? "operative-active-run");
       const run = operativeTarget.runs.find(candidate => candidate.id === runId);
       assert.ok(run);
@@ -1596,6 +1602,44 @@ test("a restarted operative run keeps its steered introduction historical for fr
   assert.equal(rolledBackTask.agreement?.status, "stale", "proof attached to a rolled-back root cannot remain agreed");
   assert.equal(rolledBackTask.workflow?.status, "stale");
   assert.equal(rollbackFixture.operative.messages.find(message => message.id === rollbackIntroduction.messageId)?.nodeId, rolledBackRootId);
+});
+
+test("a stopped source still receives supervision and a stopped introduction permits fresh agreement in a later run", async t => {
+  const clock = {now: baseTime};const fixture = await makeFixture(clock, {operativeActive: false});t.after(fixture.cleanup);
+  const sourceRun = fixture.operative.runs.find(run => run.id === fixture.task.sourceRunId)!;
+  sourceRun.status = "interrupted";fixture.operative.thread.activeRunId = null;
+  nodesOf(fixture.operative).find(node => node.id === sourceRun.rootNodeId)!.status = "interrupted";
+  await fixture.run();
+  const context = fixture.conversation.requests.pending(projectId)!;
+  assert.equal(context.kind, "context");
+  const contextRun = fixture.supervisor.runs.find(run => run.userMessageId === context.messageId)!;
+  completeRun(fixture.supervisor, contextRun, `Ready. ${context.completionMarker}`, clock.now + 1);
+  await fixture.run();await fixture.run();
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "accepted");
+
+  const laterClock = {now: baseTime + 1_000_000};const later = await makeFixture(laterClock);t.after(later.cleanup);
+  const intro = appendNoticeToOperative(later);
+  const original = workflowRecord(later.task, later.task.id);
+  appendSupervisorProposal(later, later.task.id, original.workflow, laterClock.now);
+  appendOperativeAcceptance(later, original, laterClock.now + 1);
+  await observeAgreement(later, laterClock.now + 30_000);
+  assert.equal(later.projectStore.task(operativeThreadId)?.agreement?.status, "agreed");
+  const introRun = later.operative.runs.find(run => run.id === intro.targetRunId)!;
+  introRun.status = "interrupted";
+  nodesOf(later.operative).find(node => node.id === introRun.rootNodeId)!.status = "interrupted";
+  await observeAgreement(later, laterClock.now + 60_000);
+  assert.equal(later.projectStore.task(operativeThreadId)?.agreement?.status, "stale");
+  const current = later.projectStore.task(operativeThreadId)!;
+  const freshId = "stopped-run-fresh-plan";const plan = workflowPlan(current);
+  appendSupervisorProposal(later, freshId, plan, laterClock.now + 60_001, current);
+  const continued = appendRun({projection: later.operative, id: "continued-after-stop", ordinal: 3, status: "running",
+    messageId: "continued-after-stop-input", text: "Continue the task.", now: laterClock.now + 60_001});
+  later.operative.thread.activeRunId = continued.id;
+  const acceptance = appendOperativeAcceptance(later, workflowRecord(current, freshId, plan), laterClock.now + 60_002);
+  await observeAgreement(later, laterClock.now + 90_000);
+  assert.equal(later.projectStore.task(operativeThreadId)?.agreement?.status, "agreed");
+  assert.equal(later.projectStore.task(operativeThreadId)?.agreement?.agentMessageId, acceptance.id);
+  assert.equal(later.conversation.requests.introduction(later.task.id)?.state, "sent");
 });
 
 test("bare, self-reported, streaming and child records cannot create agreement", async t => {

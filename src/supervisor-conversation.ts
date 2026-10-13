@@ -96,8 +96,8 @@ export class SupervisorConversation {
         if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== task.projectId) {
           this.markWorkflowStale(task, "The operative conversation is no longer eligible for this workflow agreement.", now);continue;
         }
-        this.monitor.observe({projectId: task.projectId, threadId: task.threadId, sourceOrdinal: task.sourceOrdinal, projection: agent, now,
-          excludedIds: new Set(introduction ? [introduction.messageId] : [])});
+        if (introduction?.state === "sent") this.monitor.observe({projectId: task.projectId, threadId: task.threadId, sourceOrdinal: task.sourceOrdinal, projection: agent, now,
+          excludedIds: new Set([introduction.messageId])});
         let supervisor = supervisorProjections.get(task.projectId);
         if (supervisor === undefined) {
           try {supervisor = await this.projection(task.supervisorThreadId, signal);}
@@ -336,7 +336,7 @@ export class SupervisorConversation {
     const message = agent.messages.find(item => item.id === introduction.messageId && item.threadId === introduction.threadId &&
       item.role === "user" && item.text === introduction.text && item.creationSource === "server");
     const run = message?.runId ? agent.runs.find(item => item.id === message.runId && item.threadId === introduction.threadId &&
-      !failedRunStates.has(item.status)) : undefined;
+      item.status !== "rolled_back") : undefined;
     return Boolean(message && run && nativeUserMessageVisible(agent, run, message));
   }
   private afterIntroduction(agent: Projection, introduction: WorkflowIntroduction, messageId: string): boolean {
@@ -344,9 +344,9 @@ export class SupervisorConversation {
       message.role === "user" && message.text === introduction.text && message.creationSource === "server");
     const accepted = agent.messages.find(message => message.id === messageId && message.threadId === introduction.threadId);
     const introRun = intro?.runId ? agent.runs.find(run => run.id === intro.runId && run.threadId === introduction.threadId &&
-      !failedRunStates.has(run.status)) : undefined;
+      run.status !== "rolled_back") : undefined;
     const acceptedRun = accepted?.runId ? agent.runs.find(run => run.id === accepted.runId && run.threadId === introduction.threadId &&
-      !failedRunStates.has(run.status)) : undefined;
+      run.status !== "rolled_back") : undefined;
     if (!intro || !accepted || !introRun || !acceptedRun) return false;
     if (!this.completedAssistantMessages(agent, introduction.threadId).some(message => message.messageId === messageId && message.runId === acceptedRun.id)) return false;
     if (!this.introductionVisible(agent, introduction)) return false;
