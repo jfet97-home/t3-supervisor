@@ -37,6 +37,7 @@ NodeRuntime.runMain(Effect.gen(function* () {
         replyCleanup,
         routerOnlyInput: true,
         interactiveThreadId: config.inputInteractiveThreadId ?? "af0e5160-07d2-46c9-b60b-a329d6951d83",
+        excludedThreadIds: config.excludedThreadIds,
         native: makeNativeInputIntegration({ baseUrl: config.t3Url, readToken: token.trim(), responseToken: responseToken.trim() }),
         telegram: makeInputTelegramClient(config.mcpxUrl, {
           onReceiptFailure: (deliveryKey) => console.log(JSON.stringify({ event: "input_receipt_unconfirmed", deliveryKey })),

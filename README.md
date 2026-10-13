@@ -30,7 +30,20 @@ message delivery can cause a follow-up turn. See [dashboard and guidance setup](
 
 ## Local deployment
 
-The Mac installation uses `~/.config/mcpx/t3-supervisor.compose.yaml`:
+The Mac installation uses `~/.config/mcpx/t3-supervisor.compose.yaml`.
+
+This is a private deployment-file convention shared with the Mac's MCP services;
+Supervisor remains its own Compose project and state volume. The source checkout's
+Compose files are portable templates. The Lima lab uses a separate Dokploy-managed
+Compose deployment, not this Mac configuration directory.
+
+`EXCLUDED_THREAD_IDS` is a comma-separated list of exact T3 chat IDs. It suppresses
+new completion notifications and guidance for those chats, plus native input-needed
+notices. `INPUT_INTERACTIVE_THREAD_ID` is an intentional input-only exception: that
+chat can still receive interactive Telegram questionnaires while remaining excluded
+from completion recaps and guidance. Existing forms for other newly excluded chats
+are retired; their native questions are not answered, and unresolved delivery evidence
+is reconciled under its original keys. Exclusion does not delete catalog or history.
 
 ```sh
 docker --context desktop-linux compose -f ~/.config/mcpx/t3-supervisor.compose.yaml up -d

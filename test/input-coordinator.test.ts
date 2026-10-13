@@ -194,7 +194,7 @@ const withHarness = async <A>(
     status: () => ReturnType<ReturnType<typeof makeInputCoordinator>["status"]>;
     store: ReturnType<typeof makeInputStore>;
   }) => Promise<A>,
-  policy: { routerOnlyInput?: boolean; interactiveThreadId?: string } = {},
+  policy: { routerOnlyInput?: boolean; interactiveThreadId?: string; excludedThreadIds?: readonly string[] } = {},
 ): Promise<A> => {
   const directory = await mkdtemp(join(tmpdir(), "t3-input-coordinator-"));
   const native = new FakeNative();
@@ -214,6 +214,54 @@ const withHarness = async <A>(
 };
 
 const allViews = (telegram: FakeTelegram): SentMessage[] => [...telegram.sends, ...telegram.edits];
+
+test("excluded chats do not produce input notices while the explicit router remains interactive", async () => {
+  await withHarness(async ({ native, telegram, store, runOnce }) => {
+    native.threads.push({ id: "teams-thread", kind: "main", active: true });
+    native.requests.set("teams-thread", [{ ...makeRequest(), threadId: "teams-thread" }]);
+    await runOnce();
+    assert.ok(!native.listRequestCalls.includes("teams-thread"));
+    assert.equal(store.getRequest(makeInputId("environment-1", "teams-thread", "request-1"), "revision-1"), null);
+    assert.equal(telegram.sends.length, 1);
+    assert.equal(telegram.sends[0]!.inputId, makeInputId("environment-1", "router-thread", "request-1"));
+    assert.ok(telegram.sends[0]!.message.buttons.length > 0);
+  }, { routerOnlyInput: true, interactiveThreadId: "router-thread", excludedThreadIds: ["router-thread", "teams-thread"] });
+});
+
+test("saved forms from an excluded chat are retired without answering its native request", async () => {
+  await withHarness(async ({ native, telegram, store, now, runOnce }) => {
+    const request = { ...makeRequest(), threadId: "teams-thread" };
+    native.threads.push({ id: "teams-thread", kind: "main", active: true });
+    native.requests.set("teams-thread", [request]);
+    const tracked = store.upsertRequest("environment-1", request, now());
+    const message = store.ensurePresentation(tracked.inputId, request.revisionHash, 0, 0,
+      initialInputPresentation(), renderInputCard({ request, answers: {}, presentation: initialInputPresentation(), draftRevision: 0, presentationRevision: 0 }), now())!;
+    store.beginMessageSend(message.deliveryKey, now());
+    store.recordMessagePresented(message.deliveryKey, 999, now(), null, null);
+    telegram.inbox = [{ eventId: "excluded-submit", updateId: 10, messageId: 999,
+      inputId: tracked.inputId, requestRevision: request.revisionHash, draftRevision: 0,
+      questionId: null, action: "submit", deliveryKey: message.deliveryKey }];
+    await runOnce();
+    assert.equal(native.responseCalls.length, 0);
+    assert.ok(!native.readCalls.some((call) => call.startsWith("teams-thread:")));
+    assert.ok(telegram.deletes.some((deleted) => deleted.messageId === 999));
+    assert.equal(telegram.inbox.length, 0);
+    assert.notEqual(store.getRequest(tracked.inputId, request.revisionHash)?.lifecycle, "active");
+  }, { excludedThreadIds: ["teams-thread"] });
+});
+
+test("nonexcluded chats still produce plain input-needed notices", async () => {
+  await withHarness(async ({ native, telegram, runOnce }) => {
+    native.threads.push({ id: "other-thread", kind: "main", active: true });
+    native.requests.set("other-thread", [{ ...makeRequest(), threadId: "other-thread", displayTitle: "Another chat" }]);
+    const inputId = makeInputId("environment-1", "other-thread", "request-1");
+    telegram.notificationRequest = { inputId, requestRevision: "revision-1", draftRevision: 0 };
+    await runOnce();
+    const notice = telegram.sends.find((message) => message.inputId === inputId)!;
+    assert.match(notice.message.text, /Input needed in: Another chat/u);
+    assert.deepEqual(notice.message.buttons, []);
+  }, { routerOnlyInput: true, interactiveThreadId: "router-thread", excludedThreadIds: ["router-thread", "teams-thread"] });
+});
 
 const currentQuestionMessage = (telegram: FakeTelegram, questionId: string, inputId = makeInputId("environment-1", "router-thread", "request-1"), revision = "revision-1") =>
   allViews(telegram).reverse().find((message) => message.inputId === inputId && message.requestRevision === revision && message.message.questionId === questionId)!;

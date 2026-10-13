@@ -53,6 +53,7 @@ export interface InputCoordinatorDependencies {
   readonly replyCleanup?: InputReplyCleanup;
   readonly routerOnlyInput?: boolean;
   readonly interactiveThreadId?: string;
+  readonly excludedThreadIds?: readonly string[];
   readonly now?: () => number;
   readonly pollIntervalMs?: number;
   readonly refreshPresentationOnStart?: boolean;
@@ -123,7 +124,11 @@ export const makeInputCoordinator = (dependencies: InputCoordinatorDependencies)
   let lastErrorPhase: string | null = null;
   let cycleHadErrors = false;
   let lastDiscoveryAt: number | null = null;
-  let routerThreadId: string | null = null;
+  let routerThreadId: string | null = dependencies.interactiveThreadId ?? null;
+  const excludedThreadIds = new Set(dependencies.excludedThreadIds ?? []);
+  const isEligibleThread = (thread: InputThread): boolean =>
+    isEligibleInputThread(thread) &&
+    (thread.id === routerThreadId || !excludedThreadIds.has(thread.id));
   let refreshPresentationOnStart = dependencies.refreshPresentationOnStart === true;
 
   const status = (): InputCoordinatorStatus => {
@@ -174,7 +179,7 @@ export const makeInputCoordinator = (dependencies: InputCoordinatorDependencies)
     }
     const seen = new Set<string>();
     for (const thread of threads.values()) {
-      if (!isEligibleInputThread(thread)) continue;
+      if (!isEligibleThread(thread)) continue;
       phase = "native_requests";
       let requests: readonly NativeInputRequest[];
       try { requests = await dependencies.native.listRequests(thread.id); }
@@ -241,7 +246,7 @@ export const makeInputCoordinator = (dependencies: InputCoordinatorDependencies)
       if (tracked.environmentId !== environmentId || tracked.nativeTerminal ||
         seen.has(requestKey(tracked.inputId, tracked.requestRevision))) continue;
       const thread = threads.get(tracked.threadId);
-      if (thread && !isEligibleInputThread(thread)) {
+      if (thread && !isEligibleThread(thread)) {
         dependencies.store.invalidateRequest(tracked.inputId, tracked.requestRevision, now());
         continue;
       }
@@ -262,7 +267,7 @@ export const makeInputCoordinator = (dependencies: InputCoordinatorDependencies)
         else dependencies.store.invalidateRequest(tracked.inputId, tracked.requestRevision, now());
         continue;
       }
-      if (thread && isEligibleInputThread(thread)) {
+      if (thread && isEligibleThread(thread)) {
         dependencies.store.upsertRequest(environmentId, current, now());
       } else if (!thread) {
         dependencies.store.invalidateRequest(tracked.inputId, tracked.requestRevision, now());
@@ -533,7 +538,7 @@ export const makeInputCoordinator = (dependencies: InputCoordinatorDependencies)
       const listed = await dependencies.native.listThreads();
       if (!Array.isArray(listed) || listed.length > MAX_THREADS) throw new InputDomainError("native thread list exceeds its bound");
       eligibleThreads = new Set(listed.map((thread) => normalizeThread(thread, routerThreadId))
-        .filter((thread): thread is InputThread => thread !== null && isEligibleInputThread(thread)).map((thread) => thread.id));
+        .filter((thread): thread is InputThread => thread !== null && isEligibleThread(thread)).map((thread) => thread.id));
     } catch {
       reportError("native_event_threads");
       return;
