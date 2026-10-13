@@ -20,7 +20,8 @@
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "scheduler": "0.27.0",
-    "ws": "8.18.3"
+    "ws": "8.18.3",
+    "yaml": "2.9.1"
   },
   "overrides": {
     "@effect/platform-node-shared": "4.0.1"

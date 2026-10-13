@@ -8,6 +8,7 @@ import { extname, join, resolve, sep } from "node:path";
 import { SupervisorApi, UiError } from "./guidance-contract.js";
 import type { GuidanceRuntime } from "./guidance.js";
 import type { SupervisorConfig } from "./types.js";
+import type { ProjectDefinitionLoader } from "./project-definitions.js";
 
 const equal = (a: string, b: string) => {
   const x = Buffer.from(a);
@@ -29,10 +30,18 @@ const body = async (request: IncomingMessage): Promise<string> => {
 export const startGuidanceUi = async (
   config: SupervisorConfig,
   runtime: GuidanceRuntime,
+  definitions?: ProjectDefinitionLoader,
 ) => {
   const handlers = HttpApiBuilder.group(SupervisorApi, "guidance", (h) =>
     h.handleAll({
       snapshot: () => Effect.promise(() => runtime.snapshot()),
+      projectDefinitions: ({query}) => Effect.tryPromise({
+        try: (signal) => {
+          if (!definitions) throw new Error("Project definition access is not configured.");
+          return definitions.load(query.projectId, query.threadId ?? null, signal);
+        },
+        catch: () => new UiError({message: "Project definition access is unavailable."}),
+      }),
       saveRule: ({ payload }) =>
         Effect.try({
           try: () => runtime.store.saveRule(payload),

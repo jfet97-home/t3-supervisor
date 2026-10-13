@@ -5,6 +5,9 @@ import { startGuidanceUi } from "./guidance-ui.js";
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import type { SupervisorConfig } from "./types.js";
+import { readFile } from "node:fs/promises";
+import { makeProjectFiles } from "./project-files.js";
+import { ProjectDefinitionLoader } from "./project-definitions.js";
 
 export const runGuidanceApplication = (
   config: SupervisorConfig,
@@ -23,8 +26,10 @@ export const runGuidanceApplication = (
       t3,
       makeGuidanceModel(config, store),
     );
+    const readToken = yield* Effect.tryPromise(() => readFile(config.t3TokenFile, "utf8"));
+    const definitions = new ProjectDefinitionLoader(source, t3, makeProjectFiles(config.t3Url, readToken.trim()));
     yield* Effect.acquireRelease(
-      Effect.promise(() => startGuidanceUi(config, runtime)),
+      Effect.promise(() => startGuidanceUi(config, runtime, definitions)),
       (ui) => Effect.promise(() => ui.close()),
     );
     const cycle = Effect.tryPromise({

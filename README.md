@@ -11,6 +11,10 @@ configuring guidance, and optionally handling Telegram notifications and input.
   exact guidance message to the relevant T3 conversation.
 - **Control dashboard:** manage rules, scopes, monitoring budget and delivery settings;
   inspect decisions, holds, uncertain deliveries and activity history.
+- **Project definitions read API:** load `.supervisor/rules.yaml` and Markdown
+  blocks through T3, validate required references and report permission or content
+  problems. See [project definitions](docs/project-definitions.md). Project browsing
+  and workflow negotiation are subsequent work.
 - **Telegram completion notifications:** send concise recaps for substantial work.
   Routine exchanges stay silent. Telegram-originated work returns its full answer,
   and replies to recaps can be routed back to the original conversation.
