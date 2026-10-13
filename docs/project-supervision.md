@@ -183,8 +183,11 @@ that approved snapshot automatically. The Supervisor receives the prior snapshot
 observed definitions and real operative user messages. It checks whether the user
 explicitly requested the change and records the cited message identities. The
 service checks those messages' native provenance and revalidates the definitions
-before adopting a user-authorized revision. Explicit rule-editor saves retain a
-separate exact-content user-save record and also require a replacement workflow.
+before adopting a user-authorized revision. Explicit rule-editor saves retain the
+saved rules, edited revision and save time. They can authorize only those rules,
+after the current review began and while blocks still match the approved snapshot.
+Independent block changes still require the Supervisor's user-message review.
+Every adopted revision requires a replacement workflow.
 
 For unrequested edits attributable to the operative agent, the Supervisor asks that
 agent to restore its own changes while preserving user edits. It does not perform a

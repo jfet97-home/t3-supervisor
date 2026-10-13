@@ -7,7 +7,7 @@ import type { ProjectDefinitionSnapshot, ProjectRuleSave, ProjectRuleSaveOutcome
 export class ProjectRuleEditor {
   private readonly active = new Map<string, Promise<void>>();
   constructor(readonly loader: ProjectDefinitionLoader, readonly writer: ProjectWriter,
-    readonly onSaved?: (definitions: ProjectDefinitionSnapshot) => void) {}
+    readonly onSaved?: (definitions: ProjectDefinitionSnapshot, expectedRevision: string) => void) {}
 
   async save(input: ProjectRuleSave, parentSignal?: AbortSignal): Promise<ProjectRuleSaveOutcome> {
     const signal = parentSignal ? AbortSignal.any([parentSignal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
@@ -79,10 +79,10 @@ export class ProjectRuleEditor {
       if (verified.workspaceRoot !== root || !verified.revision || JSON.stringify(verified.rules) !== JSON.stringify(parseDefinitionRules(contents)))
         return outcome("uncertain", "T3 accepted the write, but readback could not confirm it. Refresh and inspect rules.yaml before retrying.", verified);
       if (verified.status === "ready") {
-        try {this.onSaved?.(verified);}
+        try {this.onSaved?.(verified, input.expectedRevision);}
         catch {return outcome("uncertain", "The file was saved, but its user-authorization record could not be retained. Refresh before retrying.", verified);}
       }
-      return outcome("saved", "Saved .supervisor/rules.yaml. Active workflows will be renegotiated against these user-authorized definitions.", verified);
+      return outcome("saved", "Saved .supervisor/rules.yaml. Rule changes are recorded as user input; independent block changes still require review.", verified);
     } finally {
       release();
       if (this.active.get(root) === queued) this.active.delete(root);

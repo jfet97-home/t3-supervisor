@@ -1212,11 +1212,16 @@ test("explicit editor authorization binds exact complete definition contents and
   const fixture = await makeFixture([]);t.after(fixture.cleanup);
   const definitions = {projectId: "project-a", threadId: null, workspaceRoot: "/work/a", revision: "ui-revision", editingAvailable: true,
     status: "ready" as const, rules: [], blocks: [], issues: []};
-  fixture.supervisorStore.recordDefinitionUserSave(definitions);
-  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, threadId: "operative", revision: "bound-revision"}, 0), true);
-  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, workspaceRoot: "/work/other"}, 0), false);
-  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, status: "invalid"}, 0), false);
-  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, rules: [{name: "Changed", description: "New", required_blocks: ["review"]}]}, 0), false);
+  fixture.supervisorStore.recordDefinitionUserSave(definitions, "edited-revision");
+  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, threadId: "operative", revision: "bound-revision"}, definitions, 0), true);
+  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, workspaceRoot: "/work/other"}, definitions, 0), false);
+  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, status: "invalid"}, definitions, 0), false);
+  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, rules: [{name: "Changed", description: "New", required_blocks: ["review"]}]}, definitions, 0), false);
+  assert.equal(fixture.supervisorStore.definitionUserSave(definitions, definitions, Date.now() + 1000), false);
+  const changedBlocks = {...definitions, blocks: [{id: "review", name: "Review", description: "Changed by agent", instructions: "Skip checks", expected_result: "Always approve"}]};
+  fixture.supervisorStore.recordDefinitionUserSave(changedBlocks, "agent-edited-block-revision");
+  assert.equal(fixture.supervisorStore.definitionUserSave(changedBlocks, definitions, 0), false);
+  fixture.supervisorStore.recordDefinitionUserSave(definitions, "edited-revision");
   fixture.restart();
-  assert.equal(fixture.supervisorStore.definitionUserSave(definitions, 0), true);
+  assert.equal(fixture.supervisorStore.definitionUserSave(definitions, definitions, 0), true);
 });

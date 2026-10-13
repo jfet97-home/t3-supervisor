@@ -39,8 +39,10 @@ export class ProjectSupervisorStore {
       CREATE TABLE IF NOT EXISTS supervisor_project_settings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS supervisor_task_interpretations(thread_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,updated_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS supervisor_definition_user_saves(project_id TEXT NOT NULL,workspace_root TEXT NOT NULL,signature TEXT NOT NULL,saved_at INTEGER NOT NULL,PRIMARY KEY(project_id,workspace_root));
+      CREATE TABLE IF NOT EXISTS supervisor_definition_user_saves(project_id TEXT NOT NULL,workspace_root TEXT NOT NULL,signature TEXT NOT NULL,saved_at INTEGER NOT NULL,expected_revision TEXT NOT NULL,PRIMARY KEY(project_id,workspace_root));
       CREATE INDEX IF NOT EXISTS supervisor_tasks_project ON supervisor_task_interpretations(project_id);`);
+    if (!store.db.prepare("PRAGMA table_info(supervisor_definition_user_saves)").all().some(row => row.name === "expected_revision"))
+      store.db.exec("ALTER TABLE supervisor_definition_user_saves ADD COLUMN expected_revision TEXT NOT NULL DEFAULT ''");
     for (const row of store.db.prepare("SELECT id FROM supervisor_owned_threads").all()) ownedIds.add(String(row.id));
   }
   private read<T>(table: string, key: string, id: string): T | null {
@@ -145,15 +147,28 @@ export class ProjectSupervisorStore {
     if (!this.task(task.threadId) && (Number(this.store.db.prepare("SELECT count(*) AS n FROM supervisor_task_interpretations").get()?.n) >= 10_000 || this.tasks(task.projectId).filter(t => ["queued","dispatching","waiting"].includes(t.status)).length >= 100)) throw new Error("supervisor_task_capacity");
     this.store.db.prepare("INSERT INTO supervisor_task_interpretations VALUES(?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET document=excluded.document,updated_at=excluded.updated_at").run(task.threadId, task.projectId, JSON.stringify(task), task.updatedAt);
   }
-  recordDefinitionUserSave(definitions: ProjectDefinitionSnapshot): void {
-    if (definitions.status !== "ready" || !definitions.revision) return;
-    this.store.db.prepare("INSERT INTO supervisor_definition_user_saves VALUES(?,?,?,?) ON CONFLICT(project_id,workspace_root) DO UPDATE SET signature=excluded.signature,saved_at=excluded.saved_at")
-      .run(definitions.projectId, definitions.workspaceRoot, definitionContentsHash(definitions), Date.now());
+  recordDefinitionUserSave(definitions: ProjectDefinitionSnapshot, expectedRevision: string): void {
+    if (definitions.status !== "ready" || !definitions.revision || !expectedRevision) return;
+    const now = Date.now();
+    this.store.transaction(() => {
+      this.store.db.prepare("INSERT INTO supervisor_definition_user_saves VALUES(?,?,?,?,?) ON CONFLICT(project_id,workspace_root) DO UPDATE SET signature=excluded.signature,saved_at=excluded.saved_at,expected_revision=excluded.expected_revision")
+        .run(definitions.projectId, definitions.workspaceRoot, fingerprint(definitions.rules), now, expectedRevision);
+      for (const task of this.tasks(definitions.projectId)) {
+        if (task.status !== "inferred" || !task.workflow?.revision || task.workflow.workspaceRoot !== definitions.workspaceRoot) continue;
+        this.saveTask({...task, workflow: {...task.workflow, status: "stale", message: "Project rules were saved through the dashboard; the old plan needs revalidation."},
+          ...(task.agreement ? {agreement: {...task.agreement, status: "stale", message: "Rules were explicitly saved; this agreement is retained as history."}} : {}),
+          definitionReview: {status: "checking", message: "An explicit rule save is recorded. Independent block edits remain subject to authorization review.",
+            expectedRevision: task.workflow.revision, observedRevision: task.threadId === definitions.threadId ? definitions.revision : null,
+            supervisorMessageId: null, userMessageIds: [], updatedAt: now}, updatedAt: now});
+      }
+    });
   }
-  definitionUserSave(definitions: ProjectDefinitionSnapshot, after: number): boolean {
-    const row = this.store.db.prepare("SELECT signature,saved_at FROM supervisor_definition_user_saves WHERE project_id=? AND workspace_root=?")
+  definitionUserSave(definitions: ProjectDefinitionSnapshot, approved: ProjectDefinitionSnapshot, after: number): boolean {
+    const row = this.store.db.prepare("SELECT signature,saved_at,expected_revision FROM supervisor_definition_user_saves WHERE project_id=? AND workspace_root=?")
       .get(definitions.projectId, definitions.workspaceRoot);
-    return definitions.status === "ready" && row?.signature === definitionContentsHash(definitions) && Number(row.saved_at) >= after;
+    return definitions.status === "ready" && approved.status === "ready" && approved.projectId === definitions.projectId &&
+      approved.workspaceRoot === definitions.workspaceRoot && fingerprint(definitions.blocks) === fingerprint(approved.blocks) &&
+      Boolean(row?.expected_revision) && row?.signature === fingerprint(definitions.rules) && Number(row.saved_at) >= after;
   }
   prune(now: number): string[] {
     const expiredIds: string[] = [];
@@ -171,9 +186,6 @@ export class ProjectSupervisorStore {
     return expiredIds;
   }
 }
-
-const definitionContentsHash = (definitions: ProjectDefinitionSnapshot): string =>
-  fingerprint({rules: definitions.rules, blocks: definitions.blocks});
 
 const normalizeMonitoringSettings = (value: SupervisorMonitoringSettings | undefined): SupervisorMonitoringSettings => value
   ? {enabled: value.enabled, intervalMinutes: value.intervalMinutes, activityThreshold: value.activityThreshold}

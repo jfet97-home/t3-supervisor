@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { nativeUserMessageVisible } from "../src/domain.js";
 import { fingerprint } from "../src/guidance-store.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions, extractProjectDefinitionDecisionRecords, parseProjectDefinitionDecisionRecord } from "../src/supervisor-definition-review.js";
@@ -59,34 +60,27 @@ const task = (overrides: Partial<TaskRecord> = {}): TaskRecord => {
   };
 };
 
-type UserFixture = {id: string; text: string; runStatus?: string; nodeKind?: string; nodeStatus?: string; streaming?: boolean;
+type UserFixture = {id: string; text: string; runStatus?: string; rootKind?: string; rootStatus?: string; nodeId?: string; streaming?: boolean;
   createdBy?: string; creationSource?: string; senderThreadId?: string | null; scheduledTaskId?: string | null; source?: string | null};
 
-const agentProjection = (users: UserFixture[] = [{id: "user-1", text: userText}]): Projection => {
-  const messages = [{id: "source-0", runId: "operative-run-1", nodeId: "source-node", role: "user", text: sourceText, streaming: false,
+const agentProjection = (users: UserFixture[] = [{id: "user-1", text: userText}], sourceRunStatus = "completed"): Projection => {
+  const messages = [{id: "source-0", runId: "operative-run-1", nodeId: "root-operative-run-1", role: "user", text: sourceText, streaming: false,
     createdAt: "2026-10-13T10:00:00.000Z", updatedAt: "2026-10-13T10:00:00.000Z", createdBy: "user", creationSource: "web", threadId: operativeThreadId},
-  ...users.map((user, index) => ({id: user.id, runId: `operative-run-${index + 2}`, nodeId: `user-node-${user.id}`, role: "user", text: user.text,
+  ...users.map((user, index) => ({id: user.id, runId: `operative-run-${index + 2}`, nodeId: user.nodeId ?? `root-operative-run-${index + 2}`, role: "user", text: user.text,
     streaming: user.streaming ?? false, createdAt: `2026-10-13T10:${String(index + 1).padStart(2, "0")}:00.000Z`, updatedAt: "2026-10-13T10:30:00.000Z",
     createdBy: user.createdBy ?? "user", creationSource: user.creationSource ?? "web", senderThreadId: user.senderThreadId,
     scheduledTaskId: user.scheduledTaskId, source: user.source, threadId: operativeThreadId}))];
   const runs = [
-    {id: "operative-run-1", threadId: operativeThreadId, ordinal: 1, status: "completed", requestedAt: "2026-10-13T10:00:00.000Z",
-      startedAt: "2026-10-13T10:00:00.000Z", completedAt: "2026-10-13T10:00:30.000Z", rootNodeId: "root-operative-run-1", providerThreadId: "provider"},
+    {id: "operative-run-1", threadId: operativeThreadId, ordinal: 1, status: sourceRunStatus, requestedAt: "2026-10-13T10:00:00.000Z",
+      startedAt: "2026-10-13T10:00:00.000Z", completedAt: sourceRunStatus === "completed" ? "2026-10-13T10:00:30.000Z" : null,
+      rootNodeId: "root-operative-run-1", providerThreadId: "provider"},
     ...users.map((user, index) => ({id: `operative-run-${index + 2}`, threadId: operativeThreadId, ordinal: index + 2,
       status: user.runStatus ?? "running", requestedAt: "2026-10-13T10:01:00.000Z", startedAt: "2026-10-13T10:01:00.000Z",
       completedAt: null, rootNodeId: `root-operative-run-${index + 2}`, providerThreadId: "provider"})),
   ];
-  const nodes = runs.flatMap((run, index) => {
-    const messageId = index === 0 ? "source-0" : users[index - 1]!.id;
-    const nodeId = index === 0 ? "source-node" : `user-node-${messageId}`;
-    return [
-      {id: run.rootNodeId!, kind: "root_turn", threadId: operativeThreadId, runId: run.id, rootNodeId: run.rootNodeId,
-        providerThreadId: "provider", status: "completed", parentNodeId: null},
-      {id: nodeId, kind: index === 0 ? "user_message" : users[index - 1]!.nodeKind ?? "user_message", threadId: operativeThreadId,
-        runId: run.id, rootNodeId: run.rootNodeId, providerThreadId: "provider", status: index === 0 ? "completed" : users[index - 1]!.nodeStatus ?? "completed",
-        parentNodeId: run.rootNodeId},
-    ];
-  });
+  const nodes = runs.map((run, index) => ({id: run.rootNodeId!, kind: index === 0 ? "root_turn" : users[index - 1]!.rootKind ?? "root_turn",
+    threadId: operativeThreadId, runId: run.id, rootNodeId: run.rootNodeId, providerThreadId: "provider",
+    status: index === 0 ? sourceRunStatus : users[index - 1]!.rootStatus ?? users[index - 1]!.runStatus ?? "running", parentNodeId: null}));
   return {thread: {id: operativeThreadId, title: "Task", projectId, workspaceRoot: root,
     lineage: {parentThreadId: null, relationshipToParent: null}}, runs, messages, nodes};
 };
@@ -124,7 +118,7 @@ test("decision fences are exact and bounded by message and record caps", () => {
   assert.equal(extractProjectDefinitionDecisionRecords(tooMany).length, 20);
 });
 
-test("authorized decisions require exact current revisions and completed main-graph external user messages", () => {
+test("authorized decisions require exact revisions and native main-root external user messages", () => {
   const current = task();
   const agent = agentProjection();
   const parsed = parseProjectDefinitionDecisionRecord(decisionRecord(), current, definitions({revision: newRevision}), agent);
@@ -144,6 +138,17 @@ test("authorized decisions require exact current revisions and completed main-gr
     issues: [{path: ".supervisor/rules.yaml", code: "invalid_definition", message: "Incomplete rules."}]}), agent), null);
 });
 
+test("native primary user messages use the running root_turn node", () => {
+  const projection = agentProjection([{id: "user-1", text: userText, runStatus: "waiting", rootStatus: "starting"}], "running");
+  const source = projection.messages[0]!;
+  const sourceRun = projection.runs.find(run => run.id === source.runId)!;
+  const user = projection.messages[1]!;
+  const userRun = projection.runs.find(run => run.id === user.runId)!;
+  assert.equal(nativeUserMessageVisible(projection, sourceRun, source), true);
+  assert.equal(nativeUserMessageVisible(projection, userRun, user), true);
+  assert.equal(buildProjectDefinitionReviewRequest(task(), definitions(), definitions({revision: newRevision}), projection, "Running marker") !== null, true);
+});
+
 test("forwarded, scheduled, source-tagged, streaming, failed, and non-main user messages cannot authorize definitions", () => {
   const current = task();
   const observed = definitions({revision: newRevision});
@@ -155,8 +160,8 @@ test("forwarded, scheduled, source-tagged, streaming, failed, and non-main user 
     {id: "other-origin", text: userText, creationSource: "import"},
     {id: "streaming", text: userText, streaming: true},
     {id: "failed-run", text: userText, runStatus: "failed"},
-    {id: "child-node", text: userText, nodeKind: "subagent"},
-    {id: "incomplete-node", text: userText, nodeStatus: "running"},
+    {id: "off-root-node", text: userText, nodeId: "off-root-user-node"},
+    {id: "wrong-root-kind", text: userText, rootKind: "subagent"},
   ];
   for (const user of rejected) {
     assert.equal(parseProjectDefinitionDecisionRecord(decisionRecord({userMessageIds: [user.id]}), current, observed, agentProjection([user])), null, user.id);

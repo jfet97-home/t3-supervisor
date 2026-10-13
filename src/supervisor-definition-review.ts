@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { fingerprint } from "./guidance-store.js";
-import { mainRunNodeReader, timestampMs } from "./domain.js";
+import { nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { record } from "./supervisor-native.js";
 import { redact } from "./supervisor-workflow.js";
 import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
@@ -13,7 +13,6 @@ const MAX_FILES = 100;
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_TOTAL_BYTES = 512 * 1024;
 const MAX_USER_REFERENCES = 100;
-const failedRunStates = new Set(["failed", "interrupted", "cancelled", "rolled_back"]);
 const decisionFields = ["taskId", "expectedRevision", "observedRevision", "decision", "userMessageIds", "reason"];
 const definitionEnvelopeStart = "UNTRUSTED_WORKFLOW_ENVELOPE";
 const definitionEnvelopeEnd = "END_UNTRUSTED_WORKFLOW_ENVELOPE";
@@ -183,9 +182,7 @@ const validExternalUserMessage = (projection: Projection, task: TaskRecord, mess
     !absent(message.scheduledTaskId) || !absent(message.source) || typeof message.text !== "string" ||
     message.text.trim().length === 0 || message.text.length > MAX_MESSAGE_CHARS || typeof message.runId !== "string" || typeof message.nodeId !== "string") return null;
   const run = projection.runs.find((item: RunInfo) => item.id === message.runId && item.threadId === task.threadId);
-  if (!run || typeof run.status !== "string" || failedRunStates.has(run.status)) return null;
-  const node = mainRunNodeReader(projection, run)(message.nodeId);
-  if (node?.kind !== "user_message" || node.status !== "completed") return null;
+  if (!run || typeof run.status !== "string" || !nativeUserMessageVisible(projection, run, message)) return null;
   return {messageId, text: message.text};
 };
 
@@ -244,7 +241,7 @@ const safeSnapshot = (value: ProjectDefinitionSnapshot): unknown => ({
   issues: value.issues.map(issue => ({path: redact(issue.path), code: issue.code, message: redact(issue.message)})),
 });
 
-const completedExternalUserMessages = (agent: Projection, task: TaskRecord): Array<{messageId: string; runId: string; text: string; ordinal: number; createdAt: number | null}> => {
+const externalUserMessages = (agent: Projection, task: TaskRecord): Array<{messageId: string; runId: string; text: string; ordinal: number; createdAt: number | null}> => {
   const result: Array<{messageId: string; runId: string; text: string; ordinal: number; createdAt: number | null}> = [];
   for (const message of agent.messages) {
     if (message.role !== "user" || message.streaming !== false || message.createdBy !== "user" ||
@@ -253,9 +250,7 @@ const completedExternalUserMessages = (agent: Projection, task: TaskRecord): Arr
       message.text.trim().length === 0 || message.text.length > MAX_MESSAGE_CHARS || typeof message.runId !== "string" ||
       typeof message.nodeId !== "string" || message.threadId !== task.threadId) continue;
     const run = agent.runs.find((item: RunInfo) => item.id === message.runId && item.threadId === task.threadId);
-    if (!run || typeof run.status !== "string" || failedRunStates.has(run.status)) continue;
-    const node = mainRunNodeReader(agent, run)(message.nodeId);
-    if (node?.kind !== "user_message" || node.status !== "completed") continue;
+    if (!run || typeof run.status !== "string" || !nativeUserMessageVisible(agent, run, message)) continue;
     result.push({messageId: message.id, runId: run.id, text: redact(message.text), ordinal: run.ordinal, createdAt: timestampMs(message.createdAt)});
   }
   return result.sort((a, b) => a.ordinal - b.ordinal || (a.createdAt ?? 0) - (b.createdAt ?? 0) || a.messageId.localeCompare(b.messageId));
@@ -279,7 +274,7 @@ export const buildProjectDefinitionReviewRequest = (
   const sourceRun = agent.runs.find(run => run.id === task.sourceRunId && run.threadId === task.threadId);
   if (!sourceRun || sourceRun.id !== agent.messages.find(item => item.id === source.messageId)?.runId) return null;
 
-  const userMessages = completedExternalUserMessages(agent, task);
+  const userMessages = externalUserMessages(agent, task);
   const sourceIncluded = userMessages.some(item => item.messageId === source.messageId);
   if (!sourceIncluded) userMessages.push({messageId: source.messageId, runId: sourceRun.id, text: redact(source.text), ordinal: sourceRun.ordinal,
     createdAt: timestampMs(agent.messages.find(item => item.id === source.messageId)?.createdAt)});

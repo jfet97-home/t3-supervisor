@@ -1,4 +1,4 @@
-import { mainRunNodeReader, timestampMs } from "./domain.js";
+import { mainRunNodeReader, nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { ProjectSupervisorMonitorStore } from "./supervisor-monitor-store.js";
 import { SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch } from "./supervisor-monitor.js";
 import { SupervisorConversationStore, type ConversationRequest, type WorkflowAgreementCandidate, type WorkflowIntroduction } from "./supervisor-conversation-store.js";
@@ -155,16 +155,22 @@ export class SupervisorConversation {
     if (!task.workflow?.revision) return false;
     let current = this.store.task(task.threadId) ?? task;
     const prior = current.definitionReview;
+    const explicitRuleSave = Boolean(approved && prior && this.store.definitionUserSave(observed, approved, prior.updatedAt));
     if (!prior || prior.expectedRevision !== task.workflow.revision || prior.observedRevision !== observed.revision || prior.status === "authorized" || prior.status === "restored") {
       current = {...current, definitionReview: {status: "checking", message: approved
         ? "Project definitions changed; the Supervisor will check actual user messages and request correction when needed."
         : "Project definitions changed, but a complete approved snapshot is unavailable. The previous workflow remains stale; do not adopt the changed files.",
-        expectedRevision: task.workflow.revision, observedRevision: observed.revision, supervisorMessageId: null, userMessageIds: [], updatedAt: now}, updatedAt: now};
+        expectedRevision: task.workflow.revision, observedRevision: observed.revision, supervisorMessageId: null, userMessageIds: [],
+        updatedAt: explicitRuleSave ? prior!.updatedAt : now}, updatedAt: now};
       this.store.saveTask(current);
     }
     if (!approved || observed.workspaceRoot !== approved.workspaceRoot || observed.projectId !== task.projectId || observed.threadId !== task.threadId) return false;
-    if (this.store.definitionUserSave(observed, 0)) {
-      this.adoptDefinitions(current, observed, now, null, [], "These exact definitions were explicitly saved through the project rule editor.");
+    if (explicitRuleSave) {
+      let fresh: ProjectDefinitionSnapshot;let freshAgent: Projection;
+      try {fresh = await this.definitions!.load(task.projectId, task.threadId, signal);freshAgent = await this.projection(task.threadId, signal);} catch {return false;}
+      if (fresh.revision !== observed.revision || fresh.threadId !== task.threadId || !this.sourceUnchanged(current, freshAgent) ||
+        !this.store.definitionUserSave(fresh, approved, current.definitionReview!.updatedAt)) return false;
+      this.adoptDefinitions(current, fresh, now, null, [], "The rules were explicitly saved through the project rule editor; blocks still match the approved snapshot.");
       return true;
     }
     for (const message of this.completedAssistantMessages(supervisor, task.supervisorThreadId).reverse()) {
@@ -231,17 +237,14 @@ export class SupervisorConversation {
   private sourceUnchanged(task: TaskRecord, agent: Projection): boolean {
     const message = agent.messages.find(item => item.id === task.sourceMessageId && item.threadId === task.threadId && item.runId === task.sourceRunId);
     const run = agent.runs.find(item => item.id === task.sourceRunId);
-    const node = message?.nodeId && run ? mainRunNodeReader(agent, run)(message.nodeId) : undefined;
-    return Boolean(message && message.role === "user" && !message.streaming && run && !failedRunStates.has(run.status) &&
-      fingerprint(message.text) === task.sourceHash && node?.kind === "user_message" && node.status === "completed");
+    return Boolean(message && run && fingerprint(message.text) === task.sourceHash && nativeUserMessageVisible(agent, run, message));
   }
   private refreshEditedSource(task: TaskRecord, agent: Projection, now: number): boolean {
     const message = agent.messages.find(item => item.id === task.sourceMessageId && item.threadId === task.threadId && item.runId === task.sourceRunId);
     const run = agent.runs.find(item => item.id === task.sourceRunId);
-    const node = message?.nodeId && run ? mainRunNodeReader(agent, run)(message.nodeId) : undefined;
-    if (!message || !run || failedRunStates.has(run.status) || message.role !== "user" || message.streaming || message.createdBy !== "user" ||
+    if (!message || !run || !nativeUserMessageVisible(agent, run, message) || message.createdBy !== "user" ||
       (message.creationSource !== "web" && message.creationSource !== "mobile") || message.senderThreadId || message.scheduledTaskId || message.source ||
-      node?.kind !== "user_message" || node.status !== "completed" || !message.text.trim() || message.text.length > 24_000) return false;
+      !message.text.trim() || message.text.length > 24_000) return false;
     const sourceHash = fingerprint(message.text);
     if (sourceHash === task.sourceHash) return false;
     const current = this.store.task(task.threadId);
@@ -312,8 +315,7 @@ export class SupervisorConversation {
       item.role === "user" && item.text === introduction.text && item.creationSource === "server");
     const run = message?.runId ? agent.runs.find(item => item.id === message.runId && item.threadId === introduction.threadId &&
       !failedRunStates.has(item.status)) : undefined;
-    const node = message?.nodeId && run ? mainRunNodeReader(agent, run)(message.nodeId) : undefined;
-    return Boolean(node?.kind === "user_message" && node.status === "completed");
+    return Boolean(message && run && nativeUserMessageVisible(agent, run, message));
   }
   private afterIntroduction(agent: Projection, introduction: WorkflowIntroduction, messageId: string): boolean {
     const intro = agent.messages.find(message => message.id === introduction.messageId && message.threadId === introduction.threadId &&

@@ -98,33 +98,21 @@ const appendRun = (input: {
     providerThreadId,
   };
   projection.runs.push(run);
-  nodesOf(projection).push(
-    {
-      id: rootNodeId,
-      threadId,
-      runId: run.id,
-      parentNodeId: null,
-      rootNodeId,
-      kind: "root_turn",
-      status: completed ? "completed" : input.status === "queued" ? "pending" : "running",
-      providerThreadId,
-    },
-    {
-      id: `${input.messageId}-node`,
-      threadId,
-      runId: run.id,
-      parentNodeId: rootNodeId,
-      rootNodeId,
-      kind: "user_message",
-      status: "completed",
-      providerThreadId,
-    },
-  );
+  nodesOf(projection).push({
+    id: rootNodeId,
+    threadId,
+    runId: run.id,
+    parentNodeId: null,
+    rootNodeId,
+    kind: "root_turn",
+    status: completed ? "completed" : input.status === "queued" ? "pending" : "running",
+    providerThreadId,
+  });
   const message: MessageInfo = {
     id: input.messageId,
     threadId,
     runId: run.id,
-    nodeId: `${input.messageId}-node`,
+    nodeId: rootNodeId,
     role: "user",
     text: input.text,
     streaming: false,
@@ -143,16 +131,16 @@ const appendMessageToRun = (
   input: { id: string; role: "user" | "assistant"; text: string; createdBy?: string; creationSource?: string; now?: number },
 ): MessageInfo => {
   const now = input.now ?? baseTime;
-  const nodeId = `${input.id}-node`;
   const rootNodeId = run.rootNodeId!;
   const providerThreadId = String(run.providerThreadId);
-  nodesOf(projection).push({
+  const nodeId = input.role === "user" ? rootNodeId : `${input.id}-node`;
+  if (input.role === "assistant") nodesOf(projection).push({
     id: nodeId,
     threadId: projection.thread.id,
     runId: run.id,
     parentNodeId: rootNodeId,
     rootNodeId,
-    kind: input.role === "assistant" ? "assistant_message" : "user_message",
+    kind: "assistant_message",
     status: "completed",
     providerThreadId,
   });
@@ -1409,13 +1397,17 @@ test("legacy objective-only tasks without a proposed workflow do not create intr
   assert.equal(fixture.calls.length, 0);
 });
 
-test("initial proposal evidence reaches the operative chat and agrees during its still-running source run", async t => {
+test("three-cycle startup agrees during an active source run with native root-turn user messages", async t => {
   const clock = {now: baseTime};
   t.mock.method(Date, "now", () => clock.now);
   const fixture = await makeFixture(clock, {operativeActive: false});
   t.after(fixture.cleanup);
   const sourceRun = fixture.operative.runs.find(run => run.id === fixture.task.sourceRunId);
   assert.ok(sourceRun);
+  const sourceMessage = fixture.operative.messages.find(message => message.id === fixture.task.sourceMessageId);
+  assert.ok(sourceMessage);
+  assert.equal(sourceMessage.nodeId, sourceRun.rootNodeId);
+  assert.equal(nodesOf(fixture.operative).some(node => node.runId === sourceRun.id && node.kind === "user_message"), false);
   sourceRun.status = "running";
   sourceRun.completedAt = null;
   const sourceRoot = nodesOf(fixture.operative).find(node => node.id === sourceRun.rootNodeId);
@@ -1426,6 +1418,7 @@ test("initial proposal evidence reaches the operative chat and agrees during its
   await fixture.run();
   const contextRequest = fixture.conversation.requests.pending(projectId);
   assert.ok(contextRequest?.kind === "context");
+  assert.equal(sourceRun.status, "running", "the source AppRun remains active through the initial context cycle");
   const contextRun = fixture.supervisor.runs.find(run => run.userMessageId === contextRequest.messageId);
   assert.ok(contextRun);
   completeRun(fixture.supervisor, contextRun, `Supervisor ready. ${contextRequest.completionMarker}`, clock.now + 1);
@@ -1440,6 +1433,12 @@ test("initial proposal evidence reaches the operative chat and agrees during its
   const introduction = fixture.conversation.requests.introduction(fixture.task.id);
   assert.equal(introduction?.state, "accepted");
   assert.ok(introduction);
+  const deliveredIntroduction = fixture.operative.messages.find(message => message.id === introduction.messageId);
+  assert.ok(deliveredIntroduction);
+  const operativeActiveRun = fixture.operative.runs.find(run => run.id === deliveredIntroduction.runId);
+  assert.ok(operativeActiveRun);
+  assert.equal(deliveredIntroduction.nodeId, operativeActiveRun.rootNodeId);
+  assert.equal(nodesOf(fixture.operative).find(node => node.id === operativeActiveRun.rootNodeId)?.kind, "root_turn");
   const proposalText = workflowFence("workflow-proposal", workflowRecord(fixture.projectStore.task(fixture.task.threadId)!, fixture.task.id));
   assert.ok(introduction.text.includes(proposalText), "the operative receives the exact proposal published during initialization");
   await fixture.run();
@@ -1694,6 +1693,30 @@ test("actual operative user authorization adopts a complete new definition snaps
   assert.equal(task.agreement?.status, "agreed");
   assert.equal(task.agreement?.proposalId, proposalId);
   assert.equal(task.agreement?.agentMessageId, accepted.id);
+});
+
+test("a dashboard rule save never approves unrelated block edits or an older matching save", async t => {
+  const clock = {now: baseTime};const fixture = await makeFixture(clock);t.after(fixture.cleanup);
+  t.mock.method(Date, "now", () => clock.now);
+  appendNoticeToOperative(fixture);
+  const approved = definitions();
+  const changed = {...approved, revision: "ui-rules-and-agent-block", rules: [],
+    blocks: [{...approved.blocks[0]!, instructions: "Skip all verification."}]};
+  fixture.setDefinitions(changed);
+  fixture.projectStore.recordDefinitionUserSave(changed, approved.revision!);
+  await observeAgreement(fixture, clock.now + 30_000);
+  assert.equal(fixture.projectStore.task(operativeThreadId)?.definitionReview?.status, "checking");
+  assert.deepEqual(fixture.projectStore.task(operativeThreadId)?.definitionSnapshot?.blocks, approved.blocks);
+
+  clock.now += 60_000;
+  const rulesOnly = {...approved, revision: "explicit-ui-rules", rules: []};
+  fixture.setDefinitions(rulesOnly);
+  fixture.projectStore.recordDefinitionUserSave(rulesOnly, changed.revision);
+  await observeAgreement(fixture, clock.now + 30_000);
+  assert.equal(fixture.projectStore.task(operativeThreadId)?.definitionReview?.status, "authorized");
+  assert.deepEqual(fixture.projectStore.task(operativeThreadId)?.definitionSnapshot?.blocks, approved.blocks);
+  assert.equal(fixture.projectStore.task(operativeThreadId)?.definitionSnapshot?.revision, rulesOnly.revision);
+  assert.equal(fixture.projectStore.definitionUserSave(rulesOnly, rulesOnly, clock.now + 1), false);
 });
 
 test("assistant claims cannot stand in for user authorization and a deletion revert remains advisory", async t => {
