@@ -556,6 +556,94 @@ test("acknowledged closed runs advance the source floor and release per-thread h
   });
 });
 
+test("a rollback before review releases obsolete metadata and does not pin later closed runs", async () => {
+  await withStore((monitor, store) => {
+    const bounded = new ProjectSupervisorMonitorStore(store, 100);
+    const thread = "rollback-lifetime";
+    const rolledBackEvents = Array.from({ length: 49 }, (_, index) =>
+      event(`rolled-back-${index}`, now - 60_000 + index),
+    );
+    const beforeRollback = makeProjection({ threadId: thread, events: rolledBackEvents });
+    beforeRollback.runs[0]!.status = "completed";
+    beforeRollback.runs[0]!.completedAt = new Date(now).toISOString();
+    bounded.observe({ projectId, threadId: thread, sourceOrdinal: 1, projection: beforeRollback, now });
+    assert.equal(Number(store.db
+      .prepare("SELECT COUNT(*) AS count FROM supervisor_monitor_items WHERE project_id=? AND thread_id=?")
+      .get(projectId, thread)?.count ?? 0), 50);
+
+    const rolledBack = makeProjection({ threadId: thread, events: rolledBackEvents });
+    rolledBack.runs[0]!.status = "rolled_back";
+    rolledBack.nodes = (rolledBack.nodes as Array<Record<string, unknown>>).map((node) =>
+      node.id === "root-1" ? { ...node, status: "rolled_back" } : node,
+    );
+    const rollbackObservation = bounded.observe({
+      projectId,
+      threadId: thread,
+      sourceOrdinal: 1,
+      projection: rolledBack,
+      now: now + 1,
+    });
+    assert.equal(rollbackObservation.sourceOrdinal, 2);
+    assert.equal(rollbackObservation.saturated, false);
+    assert.equal(Number(store.db
+      .prepare("SELECT COUNT(*) AS count FROM supervisor_monitor_items WHERE project_id=? AND thread_id=?")
+      .get(projectId, thread)?.count ?? 0), 0);
+
+    let events = rolledBackEvents.map((item) => ({ ...item, runOrdinal: 1 }));
+    for (let ordinal = 2; ordinal <= 7; ordinal++) {
+      events = [...events, { ...event(`later-${ordinal}`), runOrdinal: ordinal }];
+      const projection = makeProjection({ threadId: thread, events });
+      for (const run of projection.runs) {
+        run.status = run.ordinal === 1 ? "rolled_back" : "completed";
+        run.completedAt = run.ordinal === 1 ? null : new Date(now + run.ordinal).toISOString();
+      }
+      projection.nodes = (projection.nodes as Array<Record<string, unknown>>).map((node) =>
+        node.runId === "run-1" ? { ...node, status: "rolled_back" } : node,
+      );
+      const observedAt = now + ordinal * 1000;
+      const observation = bounded.observe({
+        projectId,
+        threadId: thread,
+        sourceOrdinal: 1,
+        projection,
+        now: observedAt,
+      });
+      assert.equal(observation.saturated, false);
+      const batch = bounded.select(
+        projectId,
+        { ...defaultMonitoringSettings, activityThreshold: 1 },
+        observedAt,
+        null,
+      );
+      assert.ok(batch);
+      bounded.acknowledge(batch, observedAt + 1);
+    }
+
+    const latest = makeProjection({ threadId: thread, events });
+    for (const run of latest.runs) {
+      run.status = run.ordinal === 1 ? "rolled_back" : "completed";
+      run.completedAt = run.ordinal === 1 ? null : new Date(now + run.ordinal).toISOString();
+    }
+    latest.nodes = (latest.nodes as Array<Record<string, unknown>>).map((node) =>
+      node.runId === "run-1" ? { ...node, status: "rolled_back" } : node,
+    );
+    bounded.observe({
+      projectId,
+      threadId: thread,
+      sourceOrdinal: 1,
+      projection: latest,
+      now: now + 8_000,
+    });
+    const state = bounded.state(projectId, thread);
+    assert.equal(state.sourceOrdinal, 8);
+    assert.equal(state.saturated, false);
+    assert.equal(state.untrackedCount, 0);
+    assert.equal(Number(store.db
+      .prepare("SELECT COUNT(*) AS count FROM supervisor_monitor_items WHERE project_id=? AND thread_id=?")
+      .get(projectId, thread)?.count ?? 0), 0);
+  });
+});
+
 test("a later unfinished run blocks floor advancement until its same item completes", async () => {
   await withStore((monitor) => {
     const first = makeProjection({ events: [{ ...event("first-reply"), runOrdinal: 1 }] });
@@ -679,6 +767,46 @@ test("a live current-graph restart of a pruned run rewinds only to its activatio
   });
 });
 
+test("an old frozen batch cannot acknowledge a restored item under a changed root", async () => {
+  await withStore((monitor) => {
+    const events = [event("same-root-item")];
+    const completed = makeProjection({ events });
+    completed.runs[0]!.status = "completed";
+    completed.runs[0]!.completedAt = new Date(now).toISOString();
+    monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: completed, now });
+    const oldBatch = monitor.select(projectId, defaultMonitoringSettings, now, null)!;
+    const oldItem = oldBatch.threads[0]!.items.find((item) => item.id === "message:message-same-root-item")!;
+    monitor.acknowledge(oldBatch, now + 1);
+    monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: completed, now: now + 2 });
+    assert.equal(monitor.state(projectId, threadId).sourceOrdinal, 2);
+
+    const restarted = makeProjection({ events });
+    restarted.runs[0]!.status = "running";
+    restarted.runs[0]!.activeAttemptId = "replacement-attempt";
+    restarted.runs[0]!.rootNodeId = "root-restarted";
+    const nodes = restarted.nodes as Array<Record<string, unknown>>;
+    for (const node of nodes) {
+      if (node.id === "root-1") {
+        node.id = "root-restarted";
+        node.rootNodeId = "root-restarted";
+        node.status = "running";
+      } else if (node.runId === "run-1") {
+        node.rootNodeId = "root-restarted";
+        if (node.parentNodeId === "root-1") node.parentNodeId = "root-restarted";
+      }
+    }
+    monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: restarted, now: now + 3 });
+    const restored = monitor.pending(projectId, threadId).find((item) => item.id === oldItem.id);
+    assert.ok(restored);
+    assert.notEqual(restored.version, oldItem.version);
+
+    const result = monitor.acknowledge(oldBatch, now + 4);
+    assert.equal(result.acknowledged, 0);
+    assert.equal(result.stale, oldBatch.threads[0]!.items.length);
+    assert.ok(monitor.pending(projectId, threadId).some((item) => item.id === oldItem.id));
+  });
+});
+
 test("a hundred-command burst freezes all revisions and previews only a bounded sample", async () => {
   await withStore((monitor, store) => {
     const initialEvents = Array.from({ length: 100 }, (_, index) => ({
@@ -711,6 +839,49 @@ test("a hundred-command burst freezes all revisions and previews only a bounded 
     assert.equal(result.stale, 1);
     const pending = monitor.pending(projectId, threadId);
     assert.deepEqual(pending.map((item) => item.id).sort(), ["turn-item-arrived-during-review", "turn-item-command-0"]);
+  });
+});
+
+test("rollback cleanup restores complete current coverage and clears saturation", async () => {
+  await withStore((monitor, store) => {
+    const bounded = new ProjectSupervisorMonitorStore(store, 2);
+    const initialEvents = [
+      { ...event("tracked-a", now - 30_000), type: "command_execution" },
+      { ...event("rolled-out-b", now - 20_000), type: "command_execution" },
+      { ...event("untracked-c", now - 10_000), type: "command_execution" },
+    ];
+    const initial = makeProjection({ events: initialEvents });
+    const saturated = bounded.observe({ projectId, threadId, sourceOrdinal: 1, projection: initial, now });
+    assert.equal(saturated.saturated, true);
+    assert.equal(saturated.untrackedCount, 1);
+    assert.deepEqual(bounded.pending(projectId, threadId).map((item) => item.id).sort(), [
+      "turn-item-rolled-out-b",
+      "turn-item-tracked-a",
+    ]);
+
+    const afterRollback = makeProjection({
+      events: [initialEvents[0]!, initialEvents[2]!],
+    });
+    const restored = bounded.observe({
+      projectId,
+      threadId,
+      sourceOrdinal: 1,
+      projection: afterRollback,
+      now: now + 1,
+    });
+    assert.equal(restored.saturated, false);
+    assert.equal(restored.untrackedCount, 0);
+    assert.deepEqual(bounded.pending(projectId, threadId).map((item) => item.id).sort(), [
+      "turn-item-tracked-a",
+      "turn-item-untracked-c",
+    ]);
+    const state = bounded.state(projectId, threadId);
+    assert.equal(state.saturated, false);
+    assert.equal(state.saturationAt, null);
+    assert.equal(state.untrackedCount, 0);
+    assert.equal(Number(store.db
+      .prepare("SELECT COUNT(*) AS count FROM supervisor_monitor_items WHERE project_id=? AND thread_id=?")
+      .get(projectId, threadId)?.count ?? 0), 2);
   });
 });
 

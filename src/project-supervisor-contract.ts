@@ -50,6 +50,7 @@ export const MonitoringStatus = Schema.Struct({
   pendingItems: Schema.Number,
   nextReviewAt: Schema.NullOr(Schema.Number),
   lastNoticeAt: Schema.NullOr(Schema.Number),
+  retryable: Schema.optionalKey(Schema.Boolean),
 });
 export type SupervisorMonitoringStatus = typeof MonitoringStatus.Type;
 export const TaskInterpretation = Schema.Struct({

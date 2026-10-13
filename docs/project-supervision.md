@@ -188,9 +188,17 @@ Completed request history retains the latest 100 entries per project for up to
 30 days; unfinished and unacknowledged failed reviews are preserved separately.
 Activity metadata is capped at 1,000 rows per chat. Fully acknowledged closed runs
 advance the source floor and release their reviewed metadata, so ordinary completed
-runs do not consume a lifetime quota. A single dense active run can still reach
+runs do not consume a lifetime quota. Complete native projections also release
+obsolete rows removed from the current main graph by rollback; this is not an
+acknowledgement of those rows. Restored activity is observed again; item versions
+include their root identity so old in-flight reviews cannot clear a changed run. Saturation
+clears only when a complete current observation has no untracked items.
+A single dense active run can still reach
 the ceiling; overflow and incomplete coverage are reported and prevent floor
-advancement. Native reactivation of a previously closed run rewinds the floor to
+advancement, potentially preventing later activity in that chat from being tracked
+even after the dense run closes. Native retry cannot repair this capacity limit;
+the status identifies the affected chat and does not offer retry for saturation
+alone. Native reactivation of a previously closed run rewinds the floor to
 that live main-graph run, within the original activation boundary. A batch freezes
 at most 10,000 item revisions across 100 chats.
 

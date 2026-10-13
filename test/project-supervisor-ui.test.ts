@@ -226,6 +226,48 @@ test("native retries are explicit for pending ready bindings and uncertain proje
   assert.equal(shouldOfferNativeRetry({...beforeFirstTask, tasks: [uncertainTask]}), true);
 });
 
+test("monitoring retry suggestions respect saturation while preserving independent recovery actions", () => {
+  const saturationOnly: ProjectSupervisorInfo = {
+    ...snapshot,
+    settings: {...snapshot.settings, pending: false},
+    monitoringStatus: {
+      state: "unavailable",
+      message: "Monitoring is at capacity.",
+      pendingItems: 10,
+      nextReviewAt: null,
+      lastNoticeAt: null,
+      retryable: false,
+    },
+  };
+  const renderRecoveryView = (value: ProjectSupervisorInfo) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
+    snapshot: value, selection, monitoring, connected: true, saving: false, fieldsBusy: false, blocked: false,
+    dirty: false, canSave: false, shouldOfferRetry: shouldOfferNativeRetry(value), retryButtonLabel: "Retry native access", canRetry: false,
+    onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+  }));
+
+  assert.equal(shouldOfferNativeRetry(saturationOnly), false);
+  const saturationHtml = renderRecoveryView(saturationOnly);
+  assert.doesNotMatch(saturationHtml, /Native Supervisor access|Retry native access/);
+
+  const concurrentUncertainTask = {...snapshot.tasks[0]!, threadId: "other-thread", status: "uncertain" as const};
+  const taskRecovery = {...saturationOnly, tasks: [...saturationOnly.tasks, concurrentUncertainTask]};
+  assert.equal(shouldOfferNativeRetry(taskRecovery), true);
+  assert.match(renderRecoveryView(taskRecovery), /Retry native access/);
+
+  const bindingRecovery = {...saturationOnly, binding: {...saturationOnly.binding!, state: "uncertain" as const}};
+  assert.equal(shouldOfferNativeRetry(bindingRecovery), true);
+  assert.match(renderRecoveryView(bindingRecovery), /Retry native access/);
+
+  const legacyMonitoringFailure = {...saturationOnly, monitoringStatus: {
+    state: "uncertain" as const,
+    message: "The monitoring review is uncertain.",
+    pendingItems: 1,
+    nextReviewAt: null,
+    lastNoticeAt: null,
+  }};
+  assert.equal(shouldOfferNativeRetry(legacyMonitoringFailure), true);
+});
+
 test("project task recovery remains visible but disabled until a bound conversation exists", () => {
   const unboundSnapshot = {...snapshot, binding: null};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {

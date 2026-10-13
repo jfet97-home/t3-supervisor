@@ -144,9 +144,10 @@ const recordVersion = (
   updatedAt: string | null,
   priority: SupervisorMonitorPriority | null,
   nodeId: string | null,
+  rootNodeId: string | null,
 ): string =>
   createHash("sha256")
-    .update(JSON.stringify([id, type, status, ordinal, updatedAt, priority, nodeId]))
+    .update(JSON.stringify([id, type, status, ordinal, updatedAt, priority, nodeId, rootNodeId]))
     .digest("hex");
 
 export const isCurrentMainGraphRun = (projection: Projection, run: RunInfo): boolean => {
@@ -179,6 +180,7 @@ const activity = (input: {
   updatedAt: string | null;
   priority: SupervisorMonitorPriority | null;
   nodeId: string | null;
+  rootNodeId: string | null;
 }): SupervisorMonitorActivity => ({
   id: input.id,
   readItemId: input.readItemId,
@@ -194,6 +196,7 @@ const activity = (input: {
     input.updatedAt,
     input.priority,
     input.nodeId,
+    input.rootNodeId,
   ),
   priority: input.priority,
 });
@@ -218,6 +221,7 @@ const runActivity = (
     updatedAt,
     priority,
     nodeId: run.rootNodeId,
+    rootNodeId: run.rootNodeId,
   });
 };
 
@@ -262,6 +266,7 @@ const messageActivity = (
         : null
       : null,
     nodeId,
+    rootNodeId: run.rootNodeId,
   });
 };
 
@@ -317,6 +322,7 @@ const turnItemActivity = (
     updatedAt,
     priority,
     nodeId,
+    rootNodeId: run.rootNodeId,
   });
 };
 
@@ -443,6 +449,7 @@ export const collectSupervisorActivity = (
           updatedAt,
           priority,
           nodeId,
+          rootNodeId: context.run.rootNodeId,
         }),
       );
     }

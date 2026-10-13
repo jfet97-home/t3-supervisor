@@ -107,13 +107,16 @@ const withReasoningValue = (selection: SupervisorModelSelection, model: Supervis
   }),
 });
 
-export const shouldOfferNativeRetry = (snapshot: ProjectSupervisorInfo) =>
-  snapshot.monitoringStatus?.state === "uncertain" || snapshot.monitoringStatus?.state === "unavailable" ||
-  snapshot.binding?.state === "uncertain" ||
-  snapshot.binding?.state === "rejected" ||
-  snapshot.binding?.state === "missing" ||
-  snapshot.tasks.some(task => task.status === "uncertain") ||
-  snapshot.settings.pending && snapshot.binding?.state === "ready";
+export const shouldOfferNativeRetry = (snapshot: ProjectSupervisorInfo) => {
+  const monitoringNeedsRetry = (snapshot.monitoringStatus?.state === "uncertain" || snapshot.monitoringStatus?.state === "unavailable") &&
+    snapshot.monitoringStatus.retryable !== false;
+  return monitoringNeedsRetry ||
+    snapshot.binding?.state === "uncertain" ||
+    snapshot.binding?.state === "rejected" ||
+    snapshot.binding?.state === "missing" ||
+    snapshot.tasks.some(task => task.status === "uncertain") ||
+    snapshot.settings.pending && snapshot.binding?.state === "ready";
+}
 
 function WorkflowProposalView({workflow}: {workflow: WorkflowProposalInfo | null | undefined}) {
   if (workflow == null) return <section className="stack" aria-labelledby="workflow-proposal-title">

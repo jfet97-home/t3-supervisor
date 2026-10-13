@@ -276,6 +276,15 @@ export class ProjectSupervisorMonitorStore {
         input.excludedIds,
         trackedIds,
       );
+      this.store.db
+        .prepare("UPDATE supervisor_monitor_items SET active=0 WHERE project_id=? AND thread_id=?")
+        .run(input.projectId, input.threadId);
+      const activateItem = this.store.db.prepare(`UPDATE supervisor_monitor_items SET active=1
+        WHERE project_id=? AND thread_id=? AND item_id=?`);
+      for (const item of activity) activateItem.run(input.projectId, input.threadId, item.id);
+      this.store.db
+        .prepare("DELETE FROM supervisor_monitor_items WHERE project_id=? AND thread_id=? AND active=0")
+        .run(input.projectId, input.threadId);
       const sourceOrdinal = this.advanceSourceOrdinal(
         input.projectId,
         input.threadId,
@@ -291,12 +300,9 @@ export class ProjectSupervisorMonitorStore {
       this.store.db
         .prepare(`DELETE FROM supervisor_monitor_items
           WHERE project_id=? AND thread_id=? AND ordinal<?
-          AND reviewed_version=version`)
+          AND (reviewed_version=version OR active=0)`)
         .run(input.projectId, input.threadId, sourceOrdinal);
       const currentActivity = activity.filter((item) => item.ordinal >= sourceOrdinal);
-      this.store.db
-        .prepare("UPDATE supervisor_monitor_items SET active=0 WHERE project_id=? AND thread_id=?")
-        .run(input.projectId, input.threadId);
       let inserted = 0;
       let updated = 0;
       let untrackedCount = 0;
@@ -370,12 +376,19 @@ export class ProjectSupervisorMonitorStore {
         inserted++;
       }
 
-      if (untrackedCount > 0)
+      if (untrackedCount > 0) {
         this.store.db
           .prepare(`UPDATE supervisor_monitor_threads SET saturated=1,
-            saturation_at=COALESCE(saturation_at,?),untracked_count=MAX(untracked_count,?)
+            saturation_at=COALESCE(saturation_at,?),untracked_count=?
             WHERE project_id=? AND thread_id=?`)
           .run(now, untrackedCount, input.projectId, input.threadId);
+      } else {
+        this.store.db
+          .prepare(`UPDATE supervisor_monitor_threads SET saturated=0,
+            saturation_at=NULL,untracked_count=0
+            WHERE project_id=? AND thread_id=?`)
+          .run(input.projectId, input.threadId);
+      }
 
       const pending = this.pending(input.projectId, input.threadId);
       const state = this.threadRow(input.projectId, input.threadId)!;
@@ -438,22 +451,13 @@ export class ProjectSupervisorMonitorStore {
         const row = this.itemRow(projectId, threadId, item.id);
         if (
           !row ||
+          Number(row.eligible) !== 1 ||
           String(row.version) !== item.version ||
           row.reviewed_version !== item.version
         ) {
           fullyAcknowledged = false;
           break;
         }
-      }
-      if (fullyAcknowledged) {
-        const unresolved = this.store.db
-          .prepare(`SELECT item_id FROM supervisor_monitor_items
-            WHERE project_id=? AND thread_id=? AND ordinal=? AND eligible=1
-              AND (reviewed_version IS NULL OR reviewed_version<>version)
-              AND (status IN ('completed','failed','cancelled','interrupted','resolved','expired')
-                OR priority='waiting_input') LIMIT 1`)
-          .get(projectId, threadId, run.ordinal);
-        if (unresolved) fullyAcknowledged = false;
       }
       if (!fullyAcknowledged) break;
       floor = run.ordinal + 1;

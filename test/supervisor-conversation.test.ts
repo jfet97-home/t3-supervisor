@@ -810,6 +810,47 @@ test("a deleted operative introduction is blocked while another operative chat s
   assert.ok(supervisorRequestCall(fixture, "review"));
 });
 
+test("an unreadable introduced chat does not stop a healthy chat review or acknowledge unread activity", async t => {
+  const clock = { now: baseTime };
+  t.mock.method(Date, "now", () => clock.now);
+  const projectionFailures: Array<{ label: string; error: Error }> = [
+    { label: "projection error", error: new Error("projection unavailable") },
+    { label: "deleted thread", error: new T3TransportError("deleted", 404) },
+  ];
+  for (const [index, failure] of projectionFailures.entries()) {
+    const fixture = await makeFixture(clock, { settings: { enabled: true, intervalMinutes: 5, activityThreshold: 3 } });
+    t.after(fixture.cleanup);
+    const healthy = fixture.addOperative("operative-b", `proposal-healthy-${index}`);
+    appendNoticeToOperative(fixture);
+    appendNoticeForTask(fixture, healthy.task, healthy.projection);
+    for (let item = 1; item <= 3; item++) {
+      addCommandActivity(fixture.operative, `unreadable-${index}-${item}`, `PRIVATE_UNREADABLE_${item}`, clock.now - item * 1_000);
+      addCommandActivity(healthy.projection, `healthy-${index}-${item}`, `PRIVATE_HEALTHY_${item}`, clock.now - item * 1_000);
+    }
+    await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
+    fixture.setProjectionFailure(operativeThreadId, failure.error);
+
+    await fixture.run();
+
+    const request = fixture.conversation.requests.pending(projectId);
+    assert.equal(request?.kind, "review", failure.label);
+    assert.deepEqual(request?.batch?.threads.map(thread => thread.threadId), [healthy.task.threadId], failure.label);
+    const reviewRun = fixture.supervisor.runs.find(run => run.userMessageId === request?.messageId);
+    assert.ok(reviewRun);
+    completeRun(fixture.supervisor, reviewRun, `Healthy chat review complete. ${request?.completionMarker}`, clock.now + 1);
+    clock.now++;
+    await fixture.run();
+
+    const unreadablePendingIds = new Set(fixture.conversation.monitor.pending(projectId, operativeThreadId).map(item => item.id));
+    const healthyPendingIds = new Set(fixture.conversation.monitor.pending(projectId, healthy.task.threadId).map(item => item.id));
+    for (let item = 1; item <= 3; item++) {
+      assert.ok(unreadablePendingIds.has(`unreadable-${index}-${item}`), `${failure.label} must retain unread activity`);
+      assert.equal(healthyPendingIds.has(`healthy-${index}-${item}`), false, `${failure.label} must not prevent healthy activity acknowledgement`);
+    }
+    clock.now += 60_001;
+  }
+});
+
 test("starting and waiting operative runs are queued instead of actively steered", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);

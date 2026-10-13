@@ -59,11 +59,12 @@ export class SupervisorConversation {
     const blocked = introductions.find(intro => ["blocked", "uncertain"].includes(intro.state));
     const starting = introductions.some(intro => ["context", "ready", "sending", "accepted"].includes(intro.state));
     const failed = this.requests.requests(projectId).find(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged);
-    const saturated = tasks.some(task => this.monitor.state(projectId, task.threadId)?.saturated);
+    const saturated = tasks.find(task => this.monitor.state(projectId, task.threadId)?.saturated);
     const misses = this.requests.reviewMisses(projectId);
     const state = !settings.enabled ? "paused" : request?.state === "uncertain" || blocked?.state === "uncertain" ? "uncertain" : blocked || failed || saturated ? "unavailable" : request || starting ? "busy" : "idle";
     return {state, pendingItems, lastNoticeAt, nextReviewAt: settings.enabled ? nextReviewAt : null,
-      message: !settings.enabled ? "Monitoring sends are paused; pending activity is retained." : request?.error ?? blocked?.error ?? failed?.error ?? (saturated ? "Activity capacity reached. Checkpointed pending items are retained, but overflow activity could not be checkpointed; complete coverage is unavailable." : null) ??
+      retryable: Boolean(request?.state === "uncertain" || blocked || failed),
+      message: !settings.enabled ? "Monitoring sends are paused; pending activity is retained." : request?.error ?? blocked?.error ?? failed?.error ?? (saturated ? `Activity capacity reached in chat ${saturated.threadId}. Checkpointed items are retained, but overflow and later activity may remain untracked. Retry native access cannot repair this capacity limit.` : null) ??
         (request ? "Waiting for this specific Supervisor request; changes are being collected." : starting ? "Preparing the proposal introduction and waiting for native visibility." : misses ? `The last check-in was not confirmed (${misses}/3); pending changes will be checked again after the cooldown.` : "Existing T3 activity is batched by age or count. No startup barrier or deterministic gate is applied.")};
   }
   async observe(threads: readonly ThreadInfo[], signal: AbortSignal, now = Date.now()): Promise<void> {
@@ -75,13 +76,13 @@ export class SupervisorConversation {
     for (const task of candidates) {
       if (signal.aborted) return;
       if (now - (this.observedAt.get(task.threadId) ?? 0) < 30_000) continue;
+      this.observedAt.set(task.threadId, now);
       try {
         const projection = await this.projection(task.threadId, signal);
         if (!this.eligible(projection.thread, threads) || projection.thread.projectId !== task.projectId) continue;
         const introduction = this.requests.introduction(task.id)!;
         this.monitor.observe({projectId: task.projectId, threadId: task.threadId, sourceOrdinal: task.sourceOrdinal, projection, now,
           excludedIds: new Set([introduction.messageId])});
-        this.observedAt.set(task.threadId, now);
       } catch { /* Read failures preserve the pending checkpoint for a later cycle. */ }
     }
   }
@@ -148,7 +149,8 @@ export class SupervisorConversation {
     for (const chat of batch.threads) {
       const task = this.store.task(chat.threadId);
       if (!task || !tasks.some(candidate => candidate.id === task.id)) continue;
-      const agent = await this.projection(chat.threadId, signal);
+      let agent: Projection;
+      try {agent = await this.projection(chat.threadId, signal);} catch {continue;}
       if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== binding.projectId || !canSupervisorContact(supervisor.thread, agent.thread)) continue;
       included.push({...chat, proposalId: task.id, objective: redact(task.objective ?? ""), draft: task.workflow});
     }
