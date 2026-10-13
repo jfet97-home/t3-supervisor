@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { GuidanceStore } from "./guidance-store.js";
 import type { SupervisorMonitorBatch } from "./supervisor-monitor.js";
+import type { WorkflowProposalInfo } from "./project-supervisor-contract.js";
 
 export type ConversationRequest = {
   id: string;
@@ -36,6 +37,20 @@ export type WorkflowIntroduction = {
   rejectedAttempts?: Array<{messageId: string; commandId: string; dispatchMode: WorkflowIntroduction["dispatchMode"]}>;
   error: string | null;
 };
+export type WorkflowAgreementCandidate = {
+  taskId: string;
+  projectId: string;
+  proposalId: string;
+  planHash: string;
+  workflow: WorkflowProposalInfo;
+  supervisorMessageId: string;
+  supervisorRunId: string;
+  supervisorRunOrdinal: number;
+  supervisorTextHash: string;
+  proposedAt: number;
+  agentMessageId?: string;
+  agentTextHash?: string;
+};
 
 /** Keeps native request identities and unacknowledged activity through restarts. */
 export class SupervisorConversationStore {
@@ -43,6 +58,8 @@ export class SupervisorConversationStore {
     store.db.exec(`CREATE TABLE IF NOT EXISTS supervisor_conversation_requests(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS supervisor_conversation_project ON supervisor_conversation_requests(project_id);
       CREATE TABLE IF NOT EXISTS supervisor_workflow_introductions(task_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS supervisor_workflow_agreement_candidates(task_id TEXT NOT NULL,proposal_id TEXT NOT NULL,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(task_id,proposal_id));
+      CREATE INDEX IF NOT EXISTS supervisor_workflow_agreement_project ON supervisor_workflow_agreement_candidates(project_id);
       CREATE TABLE IF NOT EXISTS supervisor_monitor_project_clock(project_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL,review_misses INTEGER NOT NULL DEFAULT 0);`);
     if (!store.db.prepare("PRAGMA table_info(supervisor_monitor_project_clock)").all().some(row => row.name === "review_misses")) store.db.exec("ALTER TABLE supervisor_monitor_project_clock ADD COLUMN review_misses INTEGER NOT NULL DEFAULT 0");
   }
@@ -75,6 +92,38 @@ export class SupervisorConversationStore {
   saveIntroduction(introduction: WorkflowIntroduction): void {
     this.store.db.prepare("INSERT INTO supervisor_workflow_introductions VALUES(?,?,?) ON CONFLICT(task_id) DO UPDATE SET document=excluded.document")
       .run(introduction.taskId, introduction.projectId, JSON.stringify(introduction));
+  }
+  agreementCandidates(taskId: string): WorkflowAgreementCandidate[] {
+    return this.store.db.prepare("SELECT document FROM supervisor_workflow_agreement_candidates WHERE task_id=? ORDER BY created_at,rowid").all(taskId)
+      .map(row => JSON.parse(String(row.document)) as WorkflowAgreementCandidate);
+  }
+  agreementCandidate(taskId: string, proposalId: string): WorkflowAgreementCandidate | null {
+    const row = this.store.db.prepare("SELECT document FROM supervisor_workflow_agreement_candidates WHERE task_id=? AND proposal_id=?").get(taskId, proposalId);
+    return row ? JSON.parse(String(row.document)) as WorkflowAgreementCandidate : null;
+  }
+  saveAgreementCandidate(candidate: WorkflowAgreementCandidate): "saved" | "same" | "conflict" | "full" {
+    const existing = this.agreementCandidate(candidate.taskId, candidate.proposalId);
+    if (existing) return existing.planHash === candidate.planHash ? "same" : "conflict";
+    const taskCount = Number(this.store.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_agreement_candidates WHERE task_id=?").get(candidate.taskId)?.n ?? 0);
+    const projectCount = Number(this.store.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_agreement_candidates WHERE project_id=?").get(candidate.projectId)?.n ?? 0);
+    if (taskCount >= 50 || projectCount >= 5000) return "full";
+    this.store.db.prepare("INSERT INTO supervisor_workflow_agreement_candidates VALUES(?,?,?,?,?)")
+      .run(candidate.taskId, candidate.proposalId, candidate.projectId, JSON.stringify(candidate), candidate.proposedAt);
+    return "saved";
+  }
+  saveAgreementEvidence(taskId: string, proposalId: string, agentMessageId: string, agentTextHash: string): void {
+    const candidate = this.agreementCandidate(taskId, proposalId);
+    if (!candidate || candidate.agentMessageId && (candidate.agentMessageId !== agentMessageId || candidate.agentTextHash !== agentTextHash)) return;
+    this.store.db.prepare("UPDATE supervisor_workflow_agreement_candidates SET document=? WHERE task_id=? AND proposal_id=?")
+      .run(JSON.stringify({...candidate, agentMessageId, agentTextHash}), taskId, proposalId);
+  }
+  clearAgreementCandidates(taskId: string): void {
+    this.store.db.prepare("DELETE FROM supervisor_workflow_agreement_candidates WHERE task_id=?").run(taskId);
+  }
+  pruneAgreementCandidates(taskIds: readonly string[]): void {
+    if (taskIds.length === 0) return;
+    const placeholders = taskIds.map(() => "?").join(",");
+    this.store.db.prepare(`DELETE FROM supervisor_workflow_agreement_candidates WHERE task_id IN (${placeholders})`).run(...taskIds);
   }
   lastNotice(projectId: string): number | null {
     const row = this.store.db.prepare("SELECT last_notice_at FROM supervisor_monitor_project_clock WHERE project_id=?").get(projectId);

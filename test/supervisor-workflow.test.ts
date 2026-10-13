@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { interpretationPrompt, parseWorkflowInterpretation, prepareWorkflowRequest } from "../src/supervisor-workflow.js";
+import { interpretationPrompt, parseWorkflowInterpretation, prepareWorkflowRequest, validateWorkflowPlan, redact } from "../src/supervisor-workflow.js";
 
 const threadId = "operational-thread";
 const sourceId = "source-message";
+
+test("credential redaction stays stable when complete plans are echoed and revalidated", () => {
+  const once = redact("secret=github_pat_12345678901234567890 token=[redacted credential] password=hidden Bearer sample-credential");
+  assert.equal(redact(once), once);
+  assert.equal(once.includes("credential] credential]"), false);
+  assert.equal(once.includes("hidden"), false);
+});
 
 const definitions = (overrides: Partial<ProjectDefinitionSnapshot> = {}): ProjectDefinitionSnapshot => ({
   projectId: "project-a",
@@ -59,6 +66,8 @@ test("ready definitions enter the prompt with the exact worktree, revision, rule
   assert.match(prepared.requestText, /Existing consumers still compile\./u);
   assert.match(prepared.requestText, /"required_blocks":\["test-plan"\]/u);
   assert.match(prepared.requestText, /Add export support/u);
+  assert.match(prepared.requestText, /Ordinary task-specific plan steps may be free-text/u);
+  assert.match(prepared.requestText, /Project blocks are optional references/u);
 });
 
 test("non-ready, incomplete, or worktree-mismatched definitions never become an empty rule set", () => {
@@ -184,4 +193,147 @@ test("malformed workflow proposals retain a valid objective while source identit
   assert.equal(redacted.reason.includes("abcdefghijklmnopqrstuvwxyz123456"), false);
   assert.equal(redacted.workflow.rules[0]?.reason, "password=[redacted]");
   assert.equal(redacted.workflow.steps[0]?.reason, "api_key=[redacted]");
+});
+
+test("mixed task steps and project blocks normalize names from canonical definitions", () => {
+  const prepared = prepareWorkflowRequest(threadId, sourceId, "Add export support", definitions());
+  assert.ok(prepared.context);
+  const plan = validateWorkflowPlan({
+    rules: [
+      { index: 0, name: "Model rule label", applies: true, reason: "This task needs focused checks." },
+      { index: 1, applies: false, reason: "The public API does not change." },
+    ],
+    steps: [
+      { blockId: "test-plan", name: "Model block label", reason: "Use the project's required test instructions." },
+      { blockId: null, name: "Inspect current behavior", reason: "Map the existing export path before changing it." },
+    ],
+  }, prepared.context);
+
+  assert.deepEqual(plan, {
+    rules: [
+      { index: 0, name: "Tests first", applies: true, reason: "This task needs focused checks." },
+      { index: 1, name: "API compatibility", applies: false, reason: "The public API does not change." },
+    ],
+    steps: [
+      { blockId: "test-plan", name: "Test plan", reason: "Use the project's required test instructions." },
+      { blockId: null, name: "Inspect current behavior", reason: "Map the existing export path before changing it." },
+    ],
+  });
+
+  const parsed = parseWorkflowInterpretation(JSON.stringify({
+    ...validInterpretation(),
+    workflow: {
+      rules: [
+        { index: 0, applies: true, reason: "The behavior needs focused checks." },
+        { index: 1, applies: false, reason: "No public contract change." },
+      ],
+      steps: [
+        { blockId: "test-plan", reason: "Follow the required test plan." },
+        { blockId: null, name: "Review the existing export path", reason: "Understand current behavior." },
+      ],
+    },
+  }), sourceId, prepared.context);
+  assert.equal(parsed.workflow.status, "proposed");
+  assert.deepEqual(parsed.workflow.steps.map((step) => [step.blockId, step.name]), [
+    ["test-plan", "Test plan"],
+    [null, "Review the existing export path"],
+  ]);
+});
+
+test("a ready empty project collection still accepts an all-free task plan", () => {
+  const prepared = prepareWorkflowRequest(threadId, sourceId, "Add a regression test", definitions({ rules: [], blocks: [] }));
+  assert.ok(prepared.context);
+  assert.deepEqual(prepared.context.rules, []);
+  assert.deepEqual(prepared.context.blocks, []);
+
+  const parsed = parseWorkflowInterpretation(JSON.stringify({
+    objective: "Add a regression test",
+    reason: "The request is a concrete code change.",
+    sourceMessageIds: [sourceId],
+    workflow: {
+      rules: [],
+      steps: [{ blockId: null, name: "Add a regression test", reason: "Capture the reported behavior." }],
+    },
+  }), sourceId, prepared.context);
+  assert.equal(parsed.workflow.status, "proposed");
+  assert.deepEqual(parsed.workflow.steps, [{ blockId: null, name: "Add a regression test", reason: "Capture the reported behavior." }]);
+});
+
+test("a free test step cannot satisfy an applicable rule's required E2E block", () => {
+  const context = {
+    workspaceRoot: "/workspace/feature-branch",
+    revision: "revision-e2e",
+    rules: [{ name: "Browser coverage", required_blocks: ["e2e-check"] }],
+    blocks: [{ id: "e2e-check", name: "Required E2E check" }],
+  };
+
+  assert.equal(validateWorkflowPlan({
+    rules: [{ index: 0, applies: true, reason: "The change affects the user flow." }],
+    steps: [{ blockId: null, name: "Run a generic test", reason: "Check the feature locally." }],
+  }, context), null);
+});
+
+test("unknown and duplicate project block references are rejected", () => {
+  const prepared = prepareWorkflowRequest(threadId, sourceId, "Add export support", definitions());
+  assert.ok(prepared.context);
+  const rules = [
+    { index: 0, applies: true, reason: "The feature needs focused checks." },
+    { index: 1, applies: false, reason: "The public API remains stable." },
+  ];
+
+  assert.equal(validateWorkflowPlan({
+    rules,
+    steps: [
+      { blockId: "test-plan", reason: "Required block." },
+      { blockId: "missing-block", reason: "Unknown reference." },
+    ],
+  }, prepared.context), null);
+  assert.equal(validateWorkflowPlan({
+    rules,
+    steps: [
+      { blockId: "test-plan", reason: "First reference." },
+      { blockId: "test-plan", reason: "Duplicate reference." },
+    ],
+  }, prepared.context), null);
+  assert.equal(validateWorkflowPlan({
+    rules,
+    steps: [{ blockId: "test-plan", reason: "Unknown fields are rejected.", unexpected: true }],
+  }, prepared.context), null);
+});
+
+test("workflow plans enforce the 100-step, name, and reason caps and redact free text", () => {
+  const context = { workspaceRoot: "/workspace/feature-branch", revision: "revision-empty", rules: [], blocks: [] };
+  const steps = Array.from({ length: 100 }, (_, index) => ({ blockId: null, name: `Step ${index + 1}`, reason: "A bounded reason." }));
+  const hundredSteps = validateWorkflowPlan({ rules: [], steps }, context);
+  assert.equal(hundredSteps?.steps.length, 100);
+  assert.equal(validateWorkflowPlan({ rules: [], steps: [...steps, { blockId: null, name: "Extra step", reason: "Too many steps." }] }, context), null);
+  assert.equal(validateWorkflowPlan({ rules: [], steps: [{ blockId: null, name: "n".repeat(201), reason: "Too long." }] }, context), null);
+  assert.equal(validateWorkflowPlan({ rules: [], steps: [{ blockId: null, name: "Valid name", reason: "r".repeat(1001) }] }, context), null);
+  assert.equal(validateWorkflowPlan({ rules: [], steps: [{ blockId: null, name: "n".repeat(200), reason: "r".repeat(1000) }] }, context)?.steps.length, 1);
+
+  const redacted = validateWorkflowPlan({ rules: [], steps: [{
+    blockId: null,
+    name: "token=secret-step-name",
+    reason: "Bearer abcdefghijklmnopqrstuvwxyz123456",
+  }] }, context);
+  assert.deepEqual(redacted?.steps, [{ blockId: null, name: "token=[redacted]", reason: "[redacted credential]" }]);
+});
+
+test("requiredRuleIndexes keep previously applicable rules applicable", () => {
+  const context = {
+    workspaceRoot: "/workspace/feature-branch",
+    revision: "revision-required",
+    rules: [{ name: "Browser coverage", required_blocks: ["e2e-check"] }],
+    blocks: [{ id: "e2e-check", name: "Required E2E check" }],
+  };
+
+  assert.equal(validateWorkflowPlan({
+    rules: [{ index: 0, applies: false, reason: "The agent negotiated this rule away." }],
+    steps: [],
+  }, context, new Set([0])), null);
+  assert.equal(validateWorkflowPlan({
+    rules: [{ index: 0, applies: true, reason: "The agreed rule still applies." }],
+    steps: [{ blockId: "e2e-check", reason: "The agreed E2E instructions remain required." }],
+  }, context, new Set([0]))?.rules[0]?.applies, true);
+  assert.equal(validateWorkflowPlan({ rules: [{ index: 0, applies: true, reason: "Applicable." }], steps: [] }, context, new Set([1])), null);
 });

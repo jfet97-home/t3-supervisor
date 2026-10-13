@@ -86,7 +86,8 @@ export class ProjectSupervisor {
     if (binding?.state === "rejected" && binding.creationMessage) message = binding.creationMessage;
     if (!binding && models.length && !validModelSelection(current.modelSelection, models)) message = "Default Supervisor model unavailable. Choose an available T3 model; no fallback will run.";
     return {projectId, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: current.pending, monitoring: current.monitoring}, monitoringStatus: this.conversation.status(projectId), binding: this.store.binding(projectId), modelSelection: selection, models, available, message,
-      tasks: this.store.tasks(projectId).slice(-200).reverse().map(({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow}) => ({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow: workflow ?? null}))};
+      tasks: this.store.tasks(projectId).slice(-200).reverse().map(({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview}) => ({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow: workflow ?? null,
+        ...(workflowProposalId ? {workflowProposalId} : {}), agreement: agreement ?? null, ...(definitionReview ? {definitionReview} : {})}))};
   }
   async save(input: ProjectSupervisorSaveInput, signal: AbortSignal): Promise<ProjectSupervisorSaveOutcome> {
     return this.serial(input.projectId, async () => {
@@ -194,7 +195,7 @@ export class ProjectSupervisor {
   async runOnce(signal: AbortSignal = AbortSignal.timeout(120_000)): Promise<void> {
     if (!this.operateRpc) return;
     if (this.store.baseline() === null) this.store.baseline(await this.activationSnapshot(signal));
-    this.store.prune(Date.now());
+    this.conversation.requests.pruneAgreementCandidates(this.store.prune(Date.now()));
     const catalog = await Effect.runPromise(this.source.catalog());
     const threads = catalog.threads.filter(t => this.eligible(t, catalog.threads));
     const candidates = [...threads.slice(this.offset), ...threads.slice(0,this.offset)].slice(0,20);this.offset = threads.length ? (this.offset + 20) % threads.length : 0;
@@ -257,15 +258,19 @@ export class ProjectSupervisor {
     if (!this.currentSource(job, source)) {this.complete(job, "unavailable", null, "The task source changed or became unavailable.");return;}
     if (this.definitions && job.definitionContext === undefined) {
       try {
-        const definitions = await this.definitions.load(job.projectId, job.threadId, signal);
+        let definitions = await this.definitions.load(job.projectId, job.threadId, signal);
         if (definitions.projectId !== job.projectId || definitions.threadId !== job.threadId) throw new Error("definition_binding_mismatch");
+        if (job.definitionSnapshot?.status === "ready" && definitions.workspaceRoot === job.definitionSnapshot.workspaceRoot &&
+          definitions.revision !== job.definitionSnapshot.revision && definitions.status !== "unavailable" && definitions.status !== "permission_required")
+          definitions = job.definitionSnapshot;
         if (definitions.status === "unavailable") {
           job = {...job, definitionReadAttempts: (job.definitionReadAttempts ?? 0) + 1};
           if (job.definitionReadAttempts! < 3) {this.store.saveTask({...job, reason: "Project definitions are temporarily unavailable; workflow preparation will retry with a bounded budget.", updatedAt: Date.now()});return;}
         }
         const task = taskSource(source, job.sourceOrdinal - 1)!;
         const prepared = prepareWorkflowRequest(job.threadId, job.sourceMessageId, task.message.text, definitions);
-        job = {...job, requestText: prepared.requestText, definitionContext: prepared.context, workflow: prepared.workflow};
+        job = {...job, requestText: prepared.requestText, definitionContext: prepared.context, workflow: prepared.workflow,
+          definitionSnapshot: definitions.status === "ready" && prepared.context ? definitions : null};
       } catch {
         job = {...job, definitionReadAttempts: (job.definitionReadAttempts ?? 0) + 1};
         if (job.definitionReadAttempts! < 3) {this.store.saveTask({...job, reason: "Project definitions could not be read; workflow preparation will retry with a bounded budget.", updatedAt: Date.now()});return;}

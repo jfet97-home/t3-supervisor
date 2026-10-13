@@ -173,13 +173,23 @@ const appendMessageToRun = (
   return message;
 };
 
-const completeRun = (projection: Projection, run: RunInfo, text: string, now = baseTime): void => {
+const completeRun = (projection: Projection, run: RunInfo, response: string, now = baseTime): void => {
   run.status = "completed";
   run.completedAt = iso(now);
   const root = nodesOf(projection).find(node => node.id === run.rootNodeId);
   assert.ok(root);
   root.status = "completed";
-  appendMessageToRun(projection, run, { id: `assistant-${run.id}`, role: "assistant", text, now });
+  const request = projection.messages.find(message => message.id === run.userMessageId);
+  const envelope = request?.text.match(/UNTRUSTED_CONTEXT_ENVELOPE\n([\s\S]*?)\nEND_UNTRUSTED_CONTEXT_ENVELOPE/u)?.[1];
+  if (envelope && request?.text.includes("This initializes supervision")) {
+    try {
+      const value = JSON.parse(envelope) as {requestId?: string; workflowProposalId?: string; draft?: {workspaceRoot?: string; revision?: string; rules?: unknown[]; steps?: unknown[]}};
+      const proposal = {taskId: value.requestId, proposalId: value.workflowProposalId ?? value.requestId, workspaceRoot: value.draft?.workspaceRoot,
+        revision: value.draft?.revision, workflow: {rules: value.draft?.rules, steps: value.draft?.steps}};
+      response = `\`\`\`workflow-proposal\n${JSON.stringify(proposal)}\n\`\`\`\n${response}`;
+    } catch { /* retain the supplied test response when its context envelope is malformed */ }
+  }
+  appendMessageToRun(projection, run, { id: `assistant-${run.id}`, role: "assistant", text: response, now });
 };
 
 const addCommandActivity = (projection: Projection, id: string, input: string, now: number): void => {
@@ -270,6 +280,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
   supervisor.thread.modelSelection = defaultSupervisorModel;
   const projections = new Map([[operativeThreadId, operative], [binding.threadId, supervisor]]);
   const projectionFailures = new Map<string, Error>();
+  let definitionSnapshot = definitions();
   const task: TaskRecord = {
     id: "proposal-1",
     threadId: operativeThreadId,
@@ -284,6 +295,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     updatedAt: clock.now,
     requestText: "",
     supervisorThreadId: binding.threadId,
+    definitionSnapshot: definitions(),
     messageId: "supervisor-objective:proposal-1",
     dispatchedAt: null,
     replayCount: 0,
@@ -380,7 +392,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
   };
   const definitionLoader: Pick<ProjectDefinitionLoader, "load"> = {
     load: async (loadedProjectId, threadId) => {
-      const snapshot = definitions();
+      const snapshot = definitionSnapshot;
       return { ...snapshot, projectId: loadedProjectId, threadId: threadId ?? null };
     },
   };
@@ -480,7 +492,8 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     rejectNextIntroduction: (count = 1) => { introductionsToReject += count; },
     makeProjectSupervisor: () => projectSupervisor,
     returnInvalidNextIntroductionReceipt: () => { returnInvalidNextIntroductionReceipt = true; },
-    setProjectionFailure: (threadId: string, failure: Error) => { projectionFailures.set(threadId, failure); },
+    setDefinitions: (snapshot: ProjectDefinitionSnapshot) => { definitionSnapshot = snapshot; },
+    setProjectionFailure: (threadId: string, failure: Error | null) => { if (failure) projectionFailures.set(threadId, failure); else projectionFailures.delete(threadId); },
     projection: (threadId: string) => projections.get(threadId) ?? null,
     operative,
     projectStore,
@@ -514,7 +527,7 @@ const appendNoticeForTask = (
     id: introduction.messageId,
     role: "user",
     text: introduction.text,
-    createdBy: "system",
+    createdBy: "user",
     creationSource: "server",
   });
   return introduction;
@@ -526,6 +539,73 @@ const appendNoticeToOperative = (fixture: Awaited<ReturnType<typeof makeFixture>
 const supervisorRequestCall = (fixture: Awaited<ReturnType<typeof makeFixture>>, kind?: "context" | "review") =>
   fixture.calls.find(call => call.payload.threadId === fixture.binding.threadId &&
     (kind === undefined || String(call.payload.text).includes(kind === "context" ? "This initializes supervision" : "Review this factual change index.")));
+
+const workflowPlan = (task: TaskRecord, steps = task.workflow!.steps) => ({rules: task.workflow!.rules, steps});
+const workflowRecord = (task: TaskRecord, proposalId: string, workflow = workflowPlan(task)) => ({
+  taskId: task.id,
+  proposalId,
+  workspaceRoot: task.workflow!.workspaceRoot,
+  revision: task.workflow!.revision,
+  workflow,
+});
+const workflowFence = (kind: "workflow-proposal" | "workflow-acceptance", value: unknown) => "```" + kind + "\n" + JSON.stringify(value) + "\n```";
+const projectDefinitionDecisionFence = (value: unknown) => `\`\`\`project-definition-decision\n${JSON.stringify(value)}\n\`\`\``;
+
+const projectDefinitionDecision = (task: TaskRecord, observedRevision: string, decision: "authorized" | "revert_requested",
+  userMessageIds: readonly string[], reason: string) => ({taskId: task.id, expectedRevision: task.workflow!.revision, observedRevision, decision, userMessageIds, reason});
+
+const appendActualUserMessage = (projection: Projection, id: string, text: string, now: number): MessageInfo => {
+  const ordinal = projection.runs.reduce((value, run) => Math.max(value, run.ordinal), 0) + 1;
+  const run = appendRun({projection, id: `${id}-run`, ordinal, status: "completed", messageId: id, text, now});
+  return projection.messages.find(message => message.id === run.userMessageId)!;
+};
+
+const appendDefinitionDecision = (fixture: Awaited<ReturnType<typeof makeFixture>>, value: unknown, now: number) =>
+  appendAssistantTurn(fixture.supervisor, `definition-decision-${fixture.supervisor.runs.length}`, projectDefinitionDecisionFence(value), now);
+
+const appendAssistantTurn = (projection: Projection, id: string, text: string, now: number, options: {
+  runStatus?: string;
+  streaming?: boolean;
+  nodeKind?: string;
+} = {}) => {
+  const ordinal = projection.runs.reduce((value, run) => Math.max(value, run.ordinal), 0) + 1;
+  const run = appendRun({projection, id: `${id}-run`, ordinal, status: options.runStatus ?? "completed", messageId: `${id}-input`, text: "Review this workflow.", now});
+  const message = appendMessageToRun(projection, run, {id: `${id}-answer`, role: "assistant", text, now});
+  if (options.streaming) message.streaming = true;
+  if (options.nodeKind) {
+    const node = nodesOf(projection).find(candidate => candidate.id === message.nodeId);
+    assert.ok(node);
+    node.kind = options.nodeKind;
+  }
+  return {run, message};
+};
+
+const appendSupervisorProposal = (fixture: Awaited<ReturnType<typeof makeFixture>>, proposalId = fixture.task.id,
+  workflow = workflowPlan(fixture.task), now = baseTime, recordTask = fixture.task) => appendAssistantTurn(fixture.supervisor,
+  `supervisor-proposal-${proposalId}-${fixture.supervisor.runs.length}`,
+  `I propose this workflow.\n${workflowFence("workflow-proposal", workflowRecord(recordTask, proposalId, workflow))}`, now);
+
+const appendOperativeAcceptance = (fixture: Awaited<ReturnType<typeof makeFixture>>, value: unknown, now: number, options: {
+  text?: string;
+  streaming?: boolean;
+  nodeKind?: string;
+  run?: RunInfo;
+} = {}) => {
+  const run = options.run ?? fixture.operative.runs.find(item => item.id === fixture.operative.thread.activeRunId);
+  assert.ok(run);
+  const message = appendMessageToRun(fixture.operative, run, {id: `operative-acceptance-${fixture.operative.messages.length}`,
+    role: "assistant", text: options.text ?? workflowFence("workflow-acceptance", value), now});
+  if (options.streaming) message.streaming = true;
+  if (options.nodeKind) {
+    const node = nodesOf(fixture.operative).find(candidate => candidate.id === message.nodeId);
+    assert.ok(node);
+    node.kind = options.nodeKind;
+  }
+  return message;
+};
+
+const observeAgreement = (fixture: Awaited<ReturnType<typeof makeFixture>>, now: number) =>
+  fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), now);
 
 test("context bootstrap is queued atomically, correlated to its own run, and only then steers the operative run", async t => {
   const clock = { now: baseTime };
@@ -1327,4 +1407,411 @@ test("legacy objective-only tasks without a proposed workflow do not create intr
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id), null);
   assert.equal(fixture.conversation.requests.pending(projectId), null);
   assert.equal(fixture.calls.length, 0);
+});
+
+test("initial proposal evidence reaches the operative chat and agrees during its still-running source run", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock, {operativeActive: false});
+  t.after(fixture.cleanup);
+  const sourceRun = fixture.operative.runs.find(run => run.id === fixture.task.sourceRunId);
+  assert.ok(sourceRun);
+  sourceRun.status = "running";
+  sourceRun.completedAt = null;
+  const sourceRoot = nodesOf(fixture.operative).find(node => node.id === sourceRun.rootNodeId);
+  assert.ok(sourceRoot);
+  sourceRoot.status = "running";
+  fixture.operative.thread.activeRunId = sourceRun.id;
+
+  await fixture.run();
+  const contextRequest = fixture.conversation.requests.pending(projectId);
+  assert.ok(contextRequest?.kind === "context");
+  const contextRun = fixture.supervisor.runs.find(run => run.userMessageId === contextRequest.messageId);
+  assert.ok(contextRun);
+  completeRun(fixture.supervisor, contextRun, `Supervisor ready. ${contextRequest.completionMarker}`, clock.now + 1);
+  clock.now++;
+
+  await fixture.run();
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "ready");
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.workflowProposalId, fixture.task.id);
+  assert.ok(fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id));
+
+  await fixture.run();
+  const introduction = fixture.conversation.requests.introduction(fixture.task.id);
+  assert.equal(introduction?.state, "accepted");
+  assert.ok(introduction);
+  const proposalText = workflowFence("workflow-proposal", workflowRecord(fixture.projectStore.task(fixture.task.threadId)!, fixture.task.id));
+  assert.ok(introduction.text.includes(proposalText), "the operative receives the exact proposal published during initialization");
+  await fixture.run();
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "sent");
+  const nativeIntroduction = fixture.operative.messages.find(message => message.id === introduction.messageId);
+  assert.ok(nativeIntroduction);
+  nativeIntroduction.createdBy = "user";
+  assert.equal(nativeIntroduction.creationSource, "server");
+
+  const task = fixture.projectStore.task(fixture.task.threadId)!;
+  appendOperativeAcceptance(fixture, workflowRecord(task, fixture.task.id), clock.now + 1);
+  await observeAgreement(fixture, clock.now + 30_000);
+  const agreed = fixture.projectStore.task(fixture.task.threadId)?.agreement;
+  assert.equal(agreed?.status, "agreed");
+  assert.equal(agreed?.proposalId, fixture.task.id);
+  assert.equal(agreed?.supervisorMessageId, fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id)?.supervisorMessageId);
+  assert.ok(agreed?.agentMessageId);
+  assert.equal(fixture.operative.runs.find(run => run.id === sourceRun.id)?.status, "running");
+
+  const beforeRestart = structuredClone(agreed);
+  const restarted = new SupervisorConversation(fixture.projectStore, null, async threadId => {
+    const projection = fixture.projection(threadId);
+    if (!projection) throw new Error(`missing test projection ${threadId}`);
+    return projection;
+  }, fixture.conversation.definitions, thread => thread.id.startsWith("operative-") && thread.projectId === projectId);
+  await restarted.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now + 60_000);
+  assert.deepEqual(fixture.projectStore.task(fixture.task.threadId)?.agreement, beforeRestart);
+});
+
+test("bare, self-reported, streaming and child records cannot create agreement", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  appendNoticeToOperative(fixture);
+  const record = workflowRecord(fixture.task, fixture.task.id);
+  appendSupervisorProposal(fixture, fixture.task.id, record.workflow, clock.now);
+  appendAssistantTurn(fixture.supervisor, "supervisor-self-report", "The operative has agreed.", clock.now + 1);
+  appendOperativeAcceptance(fixture, record, clock.now + 1, {text: "yes"});
+  appendOperativeAcceptance(fixture, record, clock.now + 2, {streaming: true});
+  appendOperativeAcceptance(fixture, record, clock.now + 3, {nodeKind: "subagent"});
+
+  await observeAgreement(fixture, clock.now + 30_000);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement, undefined);
+
+  appendOperativeAcceptance(fixture, record, clock.now + 4);
+  await observeAgreement(fixture, clock.now + 60_000);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "agreed");
+});
+
+test("an old acceptance cannot confirm a revised candidate, and duplicate records keep the first evidence pointers", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const introduction = appendNoticeToOperative(fixture);
+  const original = workflowRecord(fixture.task, fixture.task.id);
+  const sourceRun = fixture.operative.runs[0];
+  assert.ok(sourceRun);
+  appendOperativeAcceptance(fixture, original, clock.now - 10_000, {run: sourceRun});
+  appendSupervisorProposal(fixture, fixture.task.id, original.workflow, clock.now);
+  await observeAgreement(fixture, clock.now + 1);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement, undefined, "the response predates its introduction");
+
+  const firstAcceptance = appendOperativeAcceptance(fixture, original, clock.now + 1);
+  await observeAgreement(fixture, clock.now + 30_001);
+  const firstAgreement = fixture.projectStore.task(fixture.task.threadId)?.agreement;
+  assert.equal(firstAgreement?.status, "agreed");
+  assert.equal(firstAgreement?.agentMessageId, firstAcceptance.id);
+
+  const revisedPlan = workflowPlan(fixture.task, [...fixture.task.workflow!.steps, {blockId: null, name: "Review the handoff", reason: "A useful project step."}]);
+  const revisedProposalId = "workflow-revision-2";
+  appendSupervisorProposal(fixture, revisedProposalId, revisedPlan, clock.now + 2);
+  await observeAgreement(fixture, clock.now + 60_002);
+  let current = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(current.workflowProposalId, revisedProposalId);
+  assert.equal(current.agreement?.proposalId, fixture.task.id, "the last agreement is retained while the revision is pending");
+  assert.deepEqual(current.agreement?.workflow.steps, fixture.task.workflow?.steps);
+
+  const revised = workflowRecord(current, revisedProposalId, workflowPlan(current));
+  const revisedAcceptance = appendOperativeAcceptance(fixture, revised, clock.now + 3);
+  await observeAgreement(fixture, clock.now + 90_003);
+  current = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(current.agreement?.status, "agreed");
+  assert.equal(current.agreement?.proposalId, revisedProposalId);
+  assert.equal(current.agreement?.agentMessageId, revisedAcceptance.id);
+
+  appendOperativeAcceptance(fixture, revised, clock.now + 4);
+  await observeAgreement(fixture, clock.now + 120_004);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.agentMessageId, revisedAcceptance.id);
+  assert.equal(introduction.state, "sent");
+});
+
+test("same proposal ID cannot be reused for a changed plan and required blocks cannot be omitted", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  appendNoticeToOperative(fixture);
+  const original = workflowRecord(fixture.task, fixture.task.id);
+  const changedPlan = workflowPlan(fixture.task, [...fixture.task.workflow!.steps, {blockId: null, name: "Extra", reason: "A changed plan."}]);
+  appendSupervisorProposal(fixture, fixture.task.id, original.workflow, clock.now);
+  appendSupervisorProposal(fixture, fixture.task.id, changedPlan, clock.now + 1);
+  appendOperativeAcceptance(fixture, workflowRecord(fixture.task, fixture.task.id, changedPlan), clock.now + 2);
+  await observeAgreement(fixture, clock.now + 30_000);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement, undefined);
+  assert.equal(fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id)?.workflow.steps.length, 1);
+
+  appendOperativeAcceptance(fixture, original, clock.now + 3);
+  await observeAgreement(fixture, clock.now + 60_000);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "agreed");
+
+  const invalidFixture = await makeFixture({now: baseTime});
+  t.after(invalidFixture.cleanup);
+  appendNoticeToOperative(invalidFixture);
+  const invalid = workflowPlan(invalidFixture.task, [{blockId: null, name: "Skip verification", reason: "No required block."}]);
+  appendSupervisorProposal(invalidFixture, invalidFixture.task.id, invalid, baseTime);
+  appendOperativeAcceptance(invalidFixture, workflowRecord(invalidFixture.task, invalidFixture.task.id, invalid), baseTime + 1);
+  await observeAgreement(invalidFixture, baseTime + 30_000);
+  assert.equal(invalidFixture.conversation.requests.agreementCandidate(invalidFixture.task.id, invalidFixture.task.id), null);
+  assert.equal(invalidFixture.projectStore.task(invalidFixture.task.threadId)?.agreement, undefined);
+});
+
+test("source or definitions changes and edited native evidence make an agreement stale", async t => {
+  const scenarios = ["source", "definitions", "supervisor", "operative"] as const;
+  for (const [index, scenario] of scenarios.entries()) {
+    const clock = {now: baseTime + index * 1_000_000};
+    const fixture = await makeFixture(clock);
+    t.after(fixture.cleanup);
+    appendNoticeToOperative(fixture);
+    const record = workflowRecord(fixture.task, fixture.task.id);
+    const proposal = appendSupervisorProposal(fixture, fixture.task.id, record.workflow, clock.now);
+    const acceptance = appendOperativeAcceptance(fixture, record, clock.now + 1);
+    await observeAgreement(fixture, clock.now + 30_000);
+    assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "agreed");
+
+    if (scenario === "source") fixture.operative.messages.find(message => message.id === fixture.task.sourceMessageId)!.text += " changed";
+    if (scenario === "definitions") fixture.setDefinitions({...definitions(), revision: "rules-revision-8"});
+    if (scenario === "supervisor") proposal.message.text += " edited";
+    if (scenario === "operative") acceptance.text += " edited";
+    await observeAgreement(fixture, clock.now + 60_000);
+    assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "stale", scenario);
+  }
+});
+
+test("changed definitions stay unapproved, trigger one bounded recovery review, and can recover in the same chats after restoration", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  appendNoticeToOperative(fixture);
+  const originalDefinitions = definitions();
+  const original = workflowRecord(fixture.task, fixture.task.id);
+  appendSupervisorProposal(fixture, fixture.task.id, original.workflow, clock.now);
+  appendOperativeAcceptance(fixture, original, clock.now + 1);
+  clock.now += 30_000;
+  await observeAgreement(fixture, clock.now);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "agreed");
+
+  const changedDefinitions = {...definitions(), revision: "rules-revision-8", rules: [{...definitions().rules[0]!, name: "Expanded verification"}]};
+  fixture.setDefinitions(changedDefinitions);
+  clock.now += 30_000;
+  await observeAgreement(fixture, clock.now);
+  let task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.agreement?.status, "stale");
+  assert.equal(task.definitionReview?.status, "checking");
+  assert.deepEqual(task.definitionSnapshot, originalDefinitions, "the saved approved baseline is retained while changed files are reviewed");
+
+  await fixture.run();
+  const request = fixture.conversation.requests.pending(projectId);
+  assert.equal(request?.kind, "review");
+  assert.equal(request?.taskId, fixture.task.id);
+  assert.match(request?.text ?? "", /Review the approved and observed \.supervisor snapshots/u);
+  const recoveryCalls = fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId);
+  assert.equal(recoveryCalls.length, 1, "the definition recovery review runs without new tool activity");
+  const requestRun = fixture.supervisor.runs.find(run => run.userMessageId === request?.messageId);
+  assert.ok(requestRun);
+  completeRun(fixture.supervisor, requestRun, `Reviewed the definition change. ${request!.completionMarker}`, clock.now + 1);
+  clock.now++;
+  await fixture.run();
+  assert.equal(fixture.conversation.requests.requests(projectId).find(item => item.id === request?.id)?.state, "completed");
+  await fixture.run();
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId).length, 1,
+    "a confirmed check-in is not repeated for the same revision");
+
+  fixture.setDefinitions(originalDefinitions);
+  clock.now += 30_000;
+  await observeAgreement(fixture, clock.now);
+  task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.definitionReview?.status, "restored");
+  assert.equal(task.agreement?.status, "stale");
+
+  const restoredProposalId = "restored-definition-proposal";
+  const restoredPlan = workflowPlan(task);
+  appendSupervisorProposal(fixture, restoredProposalId, restoredPlan, clock.now + 1);
+  clock.now += 30_000;
+  await observeAgreement(fixture, clock.now);
+  task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.workflowProposalId, restoredProposalId);
+  const accepted = appendOperativeAcceptance(fixture, workflowRecord(task, restoredProposalId, workflowPlan(task)), clock.now + 1);
+  clock.now += 30_000;
+  await observeAgreement(fixture, clock.now);
+  task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.agreement?.status, "agreed");
+  assert.equal(task.agreement?.proposalId, restoredProposalId);
+  assert.equal(task.agreement?.agentMessageId, accepted.id);
+  assert.equal(fixture.projectStore.binding(projectId)?.threadId, fixture.binding.threadId);
+  assert.ok(fixture.calls.every(call => call.payload.threadId === fixture.binding.threadId || call.payload.threadId === operativeThreadId));
+});
+
+test("actual operative user authorization adopts a complete new definition snapshot and supports fresh agreement", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  appendNoticeToOperative(fixture);
+  const original = workflowRecord(fixture.task, fixture.task.id);
+  appendSupervisorProposal(fixture, fixture.task.id, original.workflow, clock.now);
+  appendOperativeAcceptance(fixture, original, clock.now + 1);
+  await observeAgreement(fixture, clock.now + 30_000);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "agreed");
+  const originalDefinitions = fixture.projectStore.task(fixture.task.threadId)?.definitionSnapshot;
+  assert.ok(originalDefinitions);
+
+  const userMessage = appendActualUserMessage(fixture.operative, "user-authorizes-definition-revision",
+    "I authorize the updated project verification rule and required block set.", clock.now + 31_000);
+  const updatedDefinitions = {...definitions(), revision: "rules-revision-8", rules: [{...definitions().rules[0]!, name: "Expanded verification"}]};
+  fixture.setDefinitions(updatedDefinitions);
+  await observeAgreement(fixture, clock.now + 60_000);
+  let task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.definitionReview?.status, "checking");
+  assert.equal(task.agreement?.status, "stale");
+
+  const decision = projectDefinitionDecision(task, updatedDefinitions.revision!, "authorized", [userMessage.id], "The user explicitly authorized this complete definition update.");
+  const supervisorEvidence = appendDefinitionDecision(fixture, decision, clock.now + 61_000);
+  await observeAgreement(fixture, clock.now + 90_000);
+  task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.definitionReview?.status, "authorized");
+  assert.equal(task.definitionReview?.supervisorMessageId, supervisorEvidence.message.id);
+  assert.deepEqual(task.definitionReview?.userMessageIds, [userMessage.id]);
+  assert.deepEqual(task.definitionSnapshot, updatedDefinitions);
+  assert.equal(task.workflow?.status, "stale");
+  assert.equal(task.workflow?.revision, updatedDefinitions.revision);
+  assert.equal(task.agreement?.status, "stale", "authorization keeps the old agreement as stale history");
+
+  const proposalId = "authorized-definition-proposal";
+  const updatedPlan = {rules: [{index: 0, name: updatedDefinitions.rules[0]!.name, applies: true, reason: "The updated rule applies."}],
+    steps: [{blockId: "test-plan", name: "Test plan", reason: "Verify the authorized change."}]};
+  appendSupervisorProposal(fixture, proposalId, updatedPlan, clock.now + 91_000, task);
+  await observeAgreement(fixture, clock.now + 120_000);
+  task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.workflowProposalId, proposalId);
+  const accepted = appendOperativeAcceptance(fixture, workflowRecord(task, proposalId, updatedPlan), clock.now + 121_000);
+  await observeAgreement(fixture, clock.now + 150_000);
+  task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.agreement?.status, "agreed");
+  assert.equal(task.agreement?.proposalId, proposalId);
+  assert.equal(task.agreement?.agentMessageId, accepted.id);
+});
+
+test("assistant claims cannot stand in for user authorization and a deletion revert remains advisory", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  appendNoticeToOperative(fixture);
+  const original = workflowRecord(fixture.task, fixture.task.id);
+  appendSupervisorProposal(fixture, fixture.task.id, original.workflow, clock.now);
+  appendOperativeAcceptance(fixture, original, clock.now + 1);
+  await observeAgreement(fixture, clock.now + 30_000);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "agreed");
+  const approvedSnapshot = fixture.projectStore.task(fixture.task.threadId)?.definitionSnapshot;
+  assert.ok(approvedSnapshot);
+
+  const deletedBlockDefinitions = {...definitions(), revision: "rules-revision-8", status: "invalid" as const, blocks: [],
+    issues: [{path: ".supervisor/blocks/test-plan.md", code: "missing", message: "Required project block was deleted."}]};
+  fixture.setDefinitions(deletedBlockDefinitions);
+  await observeAgreement(fixture, clock.now + 60_000);
+  let task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.definitionReview?.status, "checking");
+  assert.equal(task.agreement?.status, "stale");
+  assert.deepEqual(task.definitionSnapshot, approvedSnapshot);
+
+  const forwardedClaim = appendAssistantTurn(fixture.operative, "operative-forwarded-user-claim",
+    "An MCP-forwarded claim says the user approved deleting the required block.", clock.now + 61_000);
+  const invalidAuthorization = projectDefinitionDecision(task, deletedBlockDefinitions.revision!, "authorized", [forwardedClaim.message.id],
+    "The user authorized this deletion.");
+  appendDefinitionDecision(fixture, invalidAuthorization, clock.now + 62_000);
+  await observeAgreement(fixture, clock.now + 90_000);
+  task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.definitionReview?.status, "checking", "an assistant-authored claim is not actual user authorization");
+  assert.deepEqual(task.definitionSnapshot, approvedSnapshot);
+  assert.equal(task.workflow?.revision, revision);
+
+  const userRevert = appendActualUserMessage(fixture.operative, "user-requests-definition-revert",
+    "Please restore the approved required block that disappeared.", clock.now + 91_000);
+  const revert = projectDefinitionDecision(task, deletedBlockDefinitions.revision!, "revert_requested", [userRevert.id],
+    "The missing required block was not authorized; request that the operative restore the approved definition.");
+  appendDefinitionDecision(fixture, revert, clock.now + 92_000);
+  await observeAgreement(fixture, clock.now + 120_000);
+  task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.definitionReview?.status, "revert_requested");
+  assert.equal(task.definitionReview?.message, revert.reason);
+  assert.notEqual(task.definitionReview?.status, "authorized");
+  assert.deepEqual(task.definitionSnapshot, approvedSnapshot, "the advisory does not write or adopt changed definitions");
+  assert.deepEqual(fixture.projectStore.task(fixture.task.threadId)?.definitionSnapshot, approvedSnapshot);
+  assert.equal((await fixture.conversation.definitions!.load(projectId, operativeThreadId, AbortSignal.timeout(5_000))).revision,
+    deletedBlockDefinitions.revision, "the definition source remains untouched until its owner changes it");
+});
+
+test("temporary operative projection and definition failures preserve a valid agreement", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  appendNoticeToOperative(fixture);
+  const record = workflowRecord(fixture.task, fixture.task.id);
+  appendSupervisorProposal(fixture, fixture.task.id, record.workflow, clock.now);
+  appendOperativeAcceptance(fixture, record, clock.now + 1);
+  await observeAgreement(fixture, clock.now + 30_000);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "agreed");
+
+  fixture.setProjectionFailure(operativeThreadId, new Error("temporary chat read failure"));
+  await observeAgreement(fixture, clock.now + 60_000);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "agreed");
+  fixture.setProjectionFailure(operativeThreadId, null);
+  fixture.setDefinitions({...definitions(), status: "unavailable", revision: null});
+  await observeAgreement(fixture, clock.now + 90_000);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "agreed");
+});
+
+test("stale evidence can be renegotiated with a fresh ID in the same chats after a bounded recovery review", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  appendNoticeToOperative(fixture);
+  const original = workflowRecord(fixture.task, fixture.task.id);
+  const originalProposal = appendSupervisorProposal(fixture, fixture.task.id, original.workflow, clock.now);
+  appendOperativeAcceptance(fixture, original, clock.now + 1);
+  await observeAgreement(fixture, clock.now + 30_000);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "agreed");
+
+  for (let index = 0; index < 3; index++) addCommandActivity(fixture.operative, `stale-recovery-command-${index}`, `command ${index}`, clock.now + index);
+  originalProposal.message.text += " edited";
+  await observeAgreement(fixture, clock.now + 60_000);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "stale");
+  clock.now += 60_000;
+
+  await fixture.conversation.run(fixture.binding, fixture.supervisor, fixture.threadList, AbortSignal.timeout(5_000));
+  const request = fixture.conversation.requests.pending(projectId);
+  assert.equal(request?.kind, "review");
+  assert.equal(request?.taskId, fixture.task.id);
+  assert.match(request?.text ?? "", /Reassess the real task/u);
+  const reviewRun = fixture.supervisor.runs.find(run => run.userMessageId === request?.messageId);
+  assert.ok(reviewRun);
+  completeRun(fixture.supervisor, reviewRun, `I reviewed the stale evidence. ${request!.completionMarker}`, clock.now + 1);
+  clock.now++;
+  await fixture.run();
+  assert.equal(fixture.conversation.requests.requests(projectId).find(item => item.id === request?.id)?.state, "completed");
+  const envelope = request!.text.match(/UNTRUSTED_PROJECT_DEFINITION_REVIEW_ENVELOPE\n([\s\S]*?)\nEND_UNTRUSTED_PROJECT_DEFINITION_REVIEW_ENVELOPE/u)?.[1];
+  assert.ok(envelope);
+  const proposalId = (JSON.parse(envelope) as {proposalTemplate: {proposalId: string}}).proposalTemplate.proposalId;
+  assert.ok(proposalId);
+  appendSupervisorProposal(fixture, proposalId, original.workflow, clock.now + 4);
+  await observeAgreement(fixture, clock.now + 30_000);
+  let task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.workflowProposalId, proposalId);
+  assert.equal(task.agreement?.status, "stale", "the old agreement remains stale while recovery is pending");
+
+  const recoveryAcceptance = appendOperativeAcceptance(fixture, workflowRecord(task, proposalId, workflowPlan(task)), clock.now + 5);
+  await observeAgreement(fixture, clock.now + 60_000);
+  task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.agreement?.status, "agreed");
+  assert.equal(task.agreement?.proposalId, proposalId);
+  assert.equal(task.agreement?.agentMessageId, recoveryAcceptance.id);
+
+  appendOperativeAcceptance(fixture, original, clock.now + 6);
+  await observeAgreement(fixture, clock.now + 90_000);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.proposalId, proposalId);
 });

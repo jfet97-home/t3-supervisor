@@ -34,6 +34,23 @@ test("edits existing project rules, preserves YAML comments and verifies the res
   assert.deepEqual(parseDefinitionRules(text), result.definitions?.rules);
 });
 
+test("records explicit user saves only after exact successful definition readback", async () => {
+  const f = fixture();const authorized: string[] = [];
+  const editor = new ProjectRuleEditor(f.loader, f.writer, definitions => authorized.push(definitions.revision!));
+  const input = await f.input();
+  assert.equal((await editor.save(input)).status, "saved");
+  assert.deepEqual(authorized, [(await f.loader.load("project")).revision]);
+  assert.equal((await editor.save(input)).status, "conflict");
+  assert.equal(authorized.length, 1);
+});
+
+test("a failed authorization record reports an uncertain save without repeating the write", async () => {
+  const f = fixture();const editor = new ProjectRuleEditor(f.loader, f.writer, () => {throw new Error("storage unavailable");});
+  const result = await editor.save(await f.input());
+  assert.equal(result.status, "uncertain");assert.equal(f.writes(), 1);
+  assert.equal(result.definitions?.rules[0]?.description, "New requirements.");
+});
+
 test("adds, renames and removes rules including an explicit empty rules list", async () => {
   const f = fixture();let input = await f.input();input.rules = [{name: "null: yes", description: " - false\nA second line", required_blocks: ["review"]}];
   assert.equal((await f.editor.save(input)).status, "saved");

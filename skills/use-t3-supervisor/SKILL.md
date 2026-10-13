@@ -7,10 +7,11 @@ description: Use an existing T3 Supervisor dashboard to edit repository project 
 
 The dashboard uses one project rule model backed by `.supervisor/rules.yaml` and
 reusable Markdown blocks. Legacy condition/message reminders are retired. The Supervisor
-proposes draft workflows from project rules and blocks, introduces valid new drafts
+proposes draft workflows mixing ordinary task steps with project rules and blocks, introduces valid new drafts
 through active steering, and discusses them using native T3 messages. Ongoing
-check-ins use the existing T3 activity source. A draft is not a recorded agreement
-or proof of compliance.
+check-ins use the existing T3 activity source. Matching structured confirmations
+from both chats produce a saved agreement; neither a draft nor an agreement proves
+that its steps were executed or that the code complies.
 Task interpretation uses an automatically created T3 conversation per project.
 
 ## Connect
@@ -69,7 +70,12 @@ permit T3 reading/messaging, but those instructions do not enforce a tool sandbo
 
 Select an operational conversation to inspect its interpreted objective and status.
 Inspect the draft workflow, ordered block steps, rule applicability decisions and
-source workspace/revision. A proposed workflow is not agreed or executed. Missing
+source workspace/revision. Ordinary steps show a name and reason without a block
+reference. Required project blocks remain explicit references in the plan.
+Inspect the current draft separately from the last agreed workflow, including its
+acceptance time and native message evidence. A stale agreement is retained as
+history. Chat confirmation records, rather than a dashboard approval button,
+establish agreement; a casual yes does not save it. Missing
 or invalid definitions leave the proposal unavailable; changed definitions produce
 a stale result. Legacy objective-only records are not automatically reprocessed.
 The first stage handles native web/mobile user tasks, not scheduled/imported/MCP
@@ -93,4 +99,14 @@ Telegram is optional. Answer native questionnaires through their existing T3 or
 Telegram paths; ordinary messages do not replace questionnaire answers.
 
 Report the selected project/workspace, actual saved result and any unavailable
-verification. Do not claim that a draft proposal means agent negotiation or rule compliance.
+verification. Source means the original task prompt and workspace/definitions;
+ordinary implementation-code edits do not invalidate a workflow. Do not claim
+that draft or agreed plans prove execution or rule compliance.
+
+Project definition review is advisory: no dashboard approval is required. The
+Supervisor uses the same two chats to check actual user authorization, request
+restoration of unrequested agent edits, and negotiate a fresh plan. Changed files
+do not automatically replace the active task's saved definitions. Explicit rule
+editor saves are user input and still stale the old agreement. Inspect Checking,
+Revert requested, Authorized or Restored states and their evidence details. This
+does not prevent filesystem writes or provide GitHub comment escalation.

@@ -32,8 +32,11 @@ this stage; scheduled, imported and MCP-originated requests are excluded.
 Before dispatch, the service loads `.supervisor/rules.yaml` and all valid Markdown
 blocks from the operational conversation's actual working directory through T3.
 A ready, complete collection is included with the bounded task in the project's
-Supervisor prompt. The model assesses each rule, selects an ordered workflow from
-available block IDs, and explains its applicability decisions.
+Supervisor prompt. The model assesses each rule and proposes an ordered plan with
+ordinary task-specific steps and optional references to project blocks. A project
+does not need blocks called implement, research or test. A block supplies reusable
+project instructions or a special check; applicable rules can make it required.
+The model explains its applicability decisions.
 The service accepts only a completed, source-linked structured response. A greeting or unclear
 request produces no objective; a later qualifying user request can provide context.
 The first accepted objective is retained for that operational conversation.
@@ -44,7 +47,8 @@ can be interpreted when they become the presented run.
 Select the conversation under Projects to see its interpretation status and result.
 The result includes a draft workflow when definitions are available. Each referenced
 block must exist, every rule must be assessed, and all required blocks for rules
-the model considers applicable must be included. Applicability remains a semantic
+the model considers applicable must be included. A free-text step cannot substitute
+for a required block, even if its name mentions that check. Applicability remains a semantic
 judgment, not deterministic enforcement. Before accepting a proposal, the service
 reloads the definitions and checks their revision and workspace identity. Changed
 or unavailable definitions produce a stale proposal; the interpreted objective
@@ -132,9 +136,68 @@ with queue mode, its operative thread ID and proposal ID. The Supervisor can rea
 the operative conversation and send contextual guidance using auto mode, which
 steers a supported active turn or queues when necessary. If the agent lacks that
 tool, its finished reply remains available for the next check-in. T3 stores the
-dialogue; there is no separate transcript database. The dashboard continues to
-show an unconfirmed draft. Structured acceptance, agreed-workflow storage and
-per-block execution state remain future work.
+dialogue; there is no separate transcript database. The dashboard separates the
+current draft from the last recorded agreement. An agreement records the accepted
+plan and native evidence pointers; it is not proof that any step has been executed.
+Per-block execution state remains future work.
+
+## Flexible plans and saved agreement
+
+A plan may mix ordinary steps with project block references. For example, inspect
+the existing export code and implement CSV export can be ordinary steps, followed
+by the project's compatibility check and E2E conventions as named blocks. Ordinary
+steps have their own name and reason; project block names remain canonical.
+A complete valid collection with rules: [] and no blocks can still produce an
+ordinary plan. Missing or invalid definitions retain their existing error behavior.
+
+The Supervisor publishes a structured proposal and the operative agent publishes
+a structured acceptance of the same proposal and complete plan. A casual yes or
+the Supervisor saying that agreement was reached is insufficient. The service
+reads completed main assistant messages from the two bound native conversations,
+checks their source and current workspace definitions, validates known blocks and
+required rules, and saves only matching confirmations. Streaming text, quoted
+user/tool content and subagent messages cannot establish agreement.
+
+The current draft can change while the last agreed workflow remains available.
+Old or mismatched confirmations do not approve a newer candidate. Source or
+definition changes invalidate the saved agreement's applicability, with its
+accepted plan retained as history. Temporary read failures preserve the record.
+The Projects view shows ordinary steps, project blocks, proposal identity,
+acceptance time and source evidence. Legacy tasks without confirmation remain drafts.
+This recording uses existing observation and state storage; it does not introduce
+a new supervising model, startup interruption or protected-operation gate.
+
+## Stale plans and project definition changes
+
+Recovery uses the same Supervisor and operative conversations. A stale agreement
+is kept as history; a replacement needs a fresh proposal identity and a matching
+complete operative acceptance. A detected stale agreement or definition change
+can request one bounded recovery check-in without waiting for further tool activity.
+The existing project cooldown and single in-flight request still apply. An edited
+original user request can be reinterpreted when it remains a valid completed native
+user message; deleted or rolled-back source evidence cannot be treated as a new task.
+
+The service retains the complete definitions used for the active task in its private
+database. Working-tree rule or block edits mark the plan stale and do not replace
+that approved snapshot automatically. The Supervisor receives the prior snapshot,
+observed definitions and real operative user messages. It checks whether the user
+explicitly requested the change and records the cited message identities. The
+service checks those messages' native provenance and revalidates the definitions
+before adopting a user-authorized revision. Explicit rule-editor saves retain a
+separate exact-content user-save record and also require a replacement workflow.
+
+For unrequested edits attributable to the operative agent, the Supervisor asks that
+agent to restore its own changes while preserving user edits. It does not perform a
+blind revert. Restoration keeps the previous agreement stale until the two chats
+negotiate and accept a fresh plan. The dashboard shows the change review and outcome
+as an advisory history; it requires no approval decision and need not stay open.
+Ambiguous authorship is reported as uncertainty, without accusations.
+
+This is semantic detection and correction, not filesystem write prevention. The
+initial ready definition collection is the active task's trust starting point;
+the service does not establish a protected repository policy version or prevent
+an agent editing files between checks. GitHub comment escalation is not implemented
+in this version. No deterministic gate is added by this recovery flow.
 
 Unknown native effects retain their exact message/command identities and original
 bytes. They are reconciled from the relevant conversation, with an explicit Retry

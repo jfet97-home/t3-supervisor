@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState, type FormEvent } from "react";
 import type {
   ProjectSupervisorInfo,
+  DefinitionReviewInfo,
   SupervisorModelInfo,
   SupervisorModelSelection,
   SupervisorMonitoringSettings,
+  WorkflowAgreementInfo,
   WorkflowProposalInfo,
 } from "../../src/project-supervisor-contract.js";
 import { defaultMonitoringSettings } from "../../src/project-supervisor-contract.js";
@@ -118,28 +120,21 @@ export const shouldOfferNativeRetry = (snapshot: ProjectSupervisorInfo) => {
     snapshot.settings.pending && snapshot.binding?.state === "ready";
 }
 
-function WorkflowProposalView({workflow}: {workflow: WorkflowProposalInfo | null | undefined}) {
-  if (workflow == null) return <section className="stack" aria-labelledby="workflow-proposal-title">
-    <h4 id="workflow-proposal-title">Workflow proposal</h4>
-    <p className="muted">No workflow proposal was recorded for this task. Earlier objective-only records are not automatically reprocessed.</p>
-  </section>;
+const formatWorkflowAgreementTime = (timestamp: number) => {
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
 
+function WorkflowDetails({workflow, stepHeading, emptyStepsMessage}: {
+  workflow: WorkflowProposalInfo;
+  stepHeading: string;
+  emptyStepsMessage: string;
+}) {
   const orderedRules = [...workflow.rules].sort((left, right) => left.index - right.index);
 
-  return <section className="stack" aria-labelledby="workflow-proposal-title">
-    <h4 id="workflow-proposal-title">Workflow proposal</h4>
-    <p><strong>Status:</strong> {workflow.status}</p>
-    <p>{workflow.message}</p>
-    {workflow.status === "proposed" && <p className="muted">This is an advisory draft. It has not been accepted or executed.</p>}
-
+  return <>
     <div className="stack">
-      <h5>Provenance</h5>
-      <p><strong>Workspace root:</strong> {workflow.workspaceRoot === null ? "Not recorded" : <code>{workflow.workspaceRoot}</code>}</p>
-      <p><strong>Rules revision:</strong> {workflow.revision === null ? "Not recorded" : <code>{workflow.revision}</code>}</p>
-    </div>
-
-    <div className="stack">
-      <h5>Rule applicability</h5>
+      <h6>Rule applicability</h6>
       {orderedRules.length > 0
         ? <ol className="stack">{orderedRules.map(rule => <li key={`${rule.index}:${rule.name}`}>
           <strong>{rule.name}</strong>
@@ -150,15 +145,117 @@ function WorkflowProposalView({workflow}: {workflow: WorkflowProposalInfo | null
     </div>
 
     <div className="stack">
-      <h5>Proposed steps</h5>
+      <h6>{stepHeading}</h6>
       {workflow.steps.length > 0
-        ? <ol className="stack">{workflow.steps.map((step, index) => <li key={`${step.blockId}:${index}`}>
+        ? <ol className="stack">{workflow.steps.map((step, index) => <li key={`${step.blockId ?? "task-specific"}:${step.name}:${index}`}>
           <strong>Step {index + 1}: {step.name}</strong>
-          <p><strong>Block ID:</strong> <code>{step.blockId}</code></p>
+          {step.blockId === null
+            ? <p className="muted">Task-specific step</p>
+            : <p><strong>Block ID:</strong> <code>{step.blockId}</code></p>}
           <p>{step.reason}</p>
         </li>)}</ol>
-        : <p className="muted">{workflow.status === "proposed" ? "No workflow steps were proposed." : "No workflow steps are available for this proposal."}</p>}
+        : <p className="muted">{emptyStepsMessage}</p>}
     </div>
+  </>;
+}
+
+function WorkflowAgreementView({agreement}: {agreement: WorkflowAgreementInfo}) {
+  const agreedAt = formatWorkflowAgreementTime(agreement.agreedAt);
+  const stale = agreement.status === "stale";
+
+  return <section className="stack">
+    <h5>{stale ? "Previous agreement (stale)" : "Agreed workflow"}</h5>
+    <p><strong>Agreement status:</strong> {stale ? "Stale" : "Agreed"}</p>
+    <p>{agreement.message}</p>
+    {stale
+      ? <p className="muted">This agreement is retained as history and is not the current agreed workflow.</p>
+      : <p className="muted">Agreement records an accepted plan; it does not verify that any steps were completed.</p>}
+    <WorkflowDetails
+      workflow={agreement.workflow}
+      stepHeading={stale ? "Steps in this historical agreement" : "Agreed steps"}
+      emptyStepsMessage="No workflow steps are recorded in this agreement." />
+    <details className="stack">
+      <summary>{stale ? "Historical agreement details" : "Agreement details"}</summary>
+      <p><strong>Proposal ID:</strong> <code>{agreement.proposalId}</code></p>
+      <p><strong>Agreed at:</strong> {agreedAt
+        ? <time dateTime={agreedAt.toISOString()}>{agreedAt.toLocaleString()}</time>
+        : "Unknown"}</p>
+      <p><strong>Workspace root:</strong> {agreement.workflow.workspaceRoot === null ? "Not recorded" : <code>{agreement.workflow.workspaceRoot}</code>}</p>
+      <p><strong>Rules revision:</strong> {agreement.workflow.revision === null ? "Not recorded" : <code>{agreement.workflow.revision}</code>}</p>
+      <p><strong>Supervisor message ID:</strong> <code>{agreement.supervisorMessageId}</code></p>
+      <p><strong>Agent message ID:</strong> <code>{agreement.agentMessageId}</code></p>
+    </details>
+  </section>;
+}
+
+const definitionReviewMessages: Record<DefinitionReviewInfo["status"], string> = {
+  checking: "Project definitions changed; Supervisor is checking user authorization.",
+  revert_requested: "Unrequested changes: revert requested.",
+  authorized: "User-authorized definitions adopted.",
+  restored: "Approved definitions restored; renegotiation needed.",
+};
+
+function DefinitionReviewView({review}: {review: DefinitionReviewInfo}) {
+  const outcome = review.status === "authorized" || review.status === "restored";
+  const updatedAt = formatWorkflowAgreementTime(review.updatedAt);
+
+  return <section className="stack" aria-labelledby="workflow-definition-review-title">
+    <h5 id="workflow-definition-review-title">Project definition review</h5>
+    <p><strong>Status:</strong> {definitionReviewMessages[review.status]}</p>
+    {review.message && <p>{review.message}</p>}
+    {outcome && <details className="stack">
+      <summary>Definition review details</summary>
+      <p><strong>Expected revision:</strong> <code>{review.expectedRevision}</code></p>
+      <p><strong>Observed revision:</strong> {review.observedRevision === null ? "Not recorded" : <code>{review.observedRevision}</code>}</p>
+      <p><strong>Supervisor message ID:</strong> {review.supervisorMessageId === null ? "Not recorded" : <code>{review.supervisorMessageId}</code>}</p>
+      <div className="stack">
+        <strong>User message IDs</strong>
+        {review.userMessageIds.length > 0
+          ? <ol className="stack">{review.userMessageIds.map(messageId => <li key={messageId}><code>{messageId}</code></li>)}</ol>
+          : <p className="muted">No user message IDs were recorded.</p>}
+      </div>
+      <p><strong>Updated:</strong> {updatedAt
+        ? <time dateTime={updatedAt.toISOString()}>{updatedAt.toLocaleString()}</time>
+        : "Unknown"}</p>
+    </details>}
+  </section>;
+}
+
+function WorkflowProposalView({workflow, proposalId, agreement, definitionReview}: {
+  workflow: WorkflowProposalInfo | null | undefined;
+  proposalId: string | undefined;
+  agreement: WorkflowAgreementInfo | null | undefined;
+  definitionReview: DefinitionReviewInfo | null | undefined;
+}) {
+  const hasAgreement = agreement != null;
+  const sameAsActiveAgreement = agreement?.status === "agreed" && proposalId !== undefined && proposalId === agreement.proposalId;
+  const noWorkflowRecord = workflow == null && agreement == null;
+
+  return <section className="stack" aria-labelledby="workflow-proposal-title">
+    <h4 id="workflow-proposal-title">Workflow proposal</h4>
+    {definitionReview != null && <DefinitionReviewView review={definitionReview} />}
+    {noWorkflowRecord && <p className="muted">No workflow proposal was recorded for this task. Earlier objective-only records are not automatically reprocessed.</p>}
+    {hasAgreement && <WorkflowAgreementView agreement={agreement} />}
+    {workflow != null && !sameAsActiveAgreement && <section className="stack">
+      <h5>Current workflow draft</h5>
+      <p><strong>Draft status:</strong> {workflow.status}</p>
+      {proposalId && <p><strong>Proposal ID:</strong> <code>{proposalId}</code></p>}
+      <p>{workflow.message}</p>
+      {workflow.status === "proposed" && <p className="muted">This is a draft. No agreement is recorded for this proposal.</p>}
+      {workflow.status === "pending" && <p className="muted">This proposal is still being prepared; no agreement is recorded for it.</p>}
+
+      <div className="stack">
+        <h6>Provenance</h6>
+        <p><strong>Workspace root:</strong> {workflow.workspaceRoot === null ? "Not recorded" : <code>{workflow.workspaceRoot}</code>}</p>
+        <p><strong>Rules revision:</strong> {workflow.revision === null ? "Not recorded" : <code>{workflow.revision}</code>}</p>
+      </div>
+      <WorkflowDetails
+        workflow={workflow}
+        stepHeading="Proposed steps"
+        emptyStepsMessage={workflow.status === "proposed" ? "No workflow steps were proposed." : "No workflow steps are available for this proposal."} />
+    </section>}
+    {workflow == null && agreement?.status === "stale" && <p className="muted">No current workflow draft is recorded for this task.</p>}
+    {sameAsActiveAgreement && <p className="muted">The latest proposal is the agreed workflow shown above.</p>}
   </section>;
 }
 
@@ -320,7 +417,7 @@ export function ProjectSupervisorView({
       <p><strong>Status:</strong> {selectedTask.status}</p>
       {selectedTask.objective && <p><strong>Interpreted task:</strong> {selectedTask.objective}</p>}
       <p>{selectedTask.reason}</p>
-      <WorkflowProposalView workflow={selectedTask.workflow} />
+      <WorkflowProposalView workflow={selectedTask.workflow} proposalId={selectedTask.workflowProposalId} agreement={selectedTask.agreement} definitionReview={selectedTask.definitionReview} />
     </section>}
   </div>;
 }

@@ -6,7 +6,8 @@ import type { ProjectDefinitionSnapshot, ProjectRuleSave, ProjectRuleSaveOutcome
 /** Saves only project rules; native T3 resolves the fixed path within the selected workspace. */
 export class ProjectRuleEditor {
   private readonly active = new Map<string, Promise<void>>();
-  constructor(readonly loader: ProjectDefinitionLoader, readonly writer: ProjectWriter) {}
+  constructor(readonly loader: ProjectDefinitionLoader, readonly writer: ProjectWriter,
+    readonly onSaved?: (definitions: ProjectDefinitionSnapshot) => void) {}
 
   async save(input: ProjectRuleSave, parentSignal?: AbortSignal): Promise<ProjectRuleSaveOutcome> {
     const signal = parentSignal ? AbortSignal.any([parentSignal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
@@ -77,7 +78,11 @@ export class ProjectRuleEditor {
       } catch {return outcome("uncertain", "The write was accepted, but the file could not be confirmed. Refresh before retrying.", verified);}
       if (verified.workspaceRoot !== root || !verified.revision || JSON.stringify(verified.rules) !== JSON.stringify(parseDefinitionRules(contents)))
         return outcome("uncertain", "T3 accepted the write, but readback could not confirm it. Refresh and inspect rules.yaml before retrying.", verified);
-      return outcome("saved", "Saved .supervisor/rules.yaml. These definitions will be used by workflow supervision when it is connected.", verified);
+      if (verified.status === "ready") {
+        try {this.onSaved?.(verified);}
+        catch {return outcome("uncertain", "The file was saved, but its user-authorization record could not be retained. Refresh before retrying.", verified);}
+      }
+      return outcome("saved", "Saved .supervisor/rules.yaml. Active workflows will be renegotiated against these user-authorized definitions.", verified);
     } finally {
       release();
       if (this.active.get(root) === queued) this.active.delete(root);

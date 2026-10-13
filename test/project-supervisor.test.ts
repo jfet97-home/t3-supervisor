@@ -3,11 +3,12 @@ import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { parseInterpretation, ProjectSupervisor } from "../src/project-supervisor.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type SupervisorBaseline } from "../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../src/project-supervisor-contract.js";
+import { ProjectSupervisorSnapshot } from "../src/project-supervisor-contract.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
@@ -1163,4 +1164,59 @@ test("queued and not-yet-started Supervisor runs do not time out from stale disp
   run.startedAt = new Date(Date.now() - 301_000).toISOString();
   await supervisor.runOnce();
   assert.equal(fixture.supervisorStore.task("source-thread")?.status, "unavailable");
+});
+
+test("agreement snapshots preserve mixed plans through restart and mark replaced ownership stale", async (t) => {
+  const fixture = await makeFixture([{threadId: "agreement-source", projectId: "project-a", turns: [{id: "agreement-task", sequence: 11, text: "Add CSV export"}]}]);
+  t.after(fixture.cleanup);
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  const task = fixture.supervisorStore.task("agreement-source")!;
+  const workflow = {status: "proposed" as const, message: "Current draft", workspaceRoot: "/work/a", revision: "definitions-1", rules: [],
+    steps: [{blockId: null, name: "Implement CSV export", reason: "Add the requested feature"}]};
+  const agreement = {status: "agreed" as const, message: "Both conversations confirmed the plan", proposalId: "csv-1", agreedAt: Date.now(),
+    supervisorMessageId: "supervisor-proof", agentMessageId: "operative-proof", workflow};
+  fixture.supervisorStore.saveTask({...task, status: "inferred", objective: "Add CSV export", workflow, workflowProposalId: "csv-2", agreement});
+  fixture.restart();
+  const restored = fixture.makeSupervisor();
+  const snapshot = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(await restored.snapshot("project-a", new AbortController().signal));
+  assert.equal(snapshot.tasks[0]?.workflowProposalId, "csv-2");
+  assert.deepEqual(snapshot.tasks[0]?.agreement, agreement);
+  assert.equal(snapshot.tasks[0]?.workflow?.steps[0]?.blockId, null);
+  const binding = fixture.supervisorStore.binding("project-a")!;
+  fixture.supervisorStore.setBinding({...binding, state: "missing"});
+  fixture.supervisorStore.replaceMissingBinding({...binding, state: "missing"}, defaultSupervisorModel);
+  const stale = fixture.supervisorStore.task("agreement-source")?.agreement;
+  assert.equal(stale?.status, "stale");
+  assert.equal(stale?.supervisorMessageId, "supervisor-proof");
+  assert.deepEqual(stale?.workflow, workflow);
+});
+
+test("task payload expiry clears retained agreement plans and current proposal identity", async (t) => {
+  const fixture = await makeFixture([{threadId: "expiry-source", projectId: "project-a", turns: [{id: "expiry-task", sequence: 11, text: "Add CSV export"}]}]);
+  t.after(fixture.cleanup);
+  await fixture.makeSupervisor().runOnce();
+  const task = fixture.supervisorStore.task("expiry-source")!;
+  const workflow = {status: "proposed" as const, message: "Draft", workspaceRoot: "/work/a", revision: "definitions-1", rules: [], steps: []};
+  fixture.supervisorStore.saveTask({...task, status: "inferred", workflow, workflowProposalId: "csv-1", updatedAt: 1,
+    agreement: {status: "agreed", message: "Accepted", proposalId: "csv-1", agreedAt: 1, supervisorMessageId: "supervisor-proof", agentMessageId: "operative-proof", workflow}});
+  fixture.supervisorStore.prune(32 * day);
+  const expired = fixture.supervisorStore.task("expiry-source");
+  assert.equal(expired?.status, "expired");
+  assert.equal(expired?.agreement, null);
+  assert.equal(expired?.workflow, null);
+  assert.equal(expired?.workflowProposalId, undefined);
+});
+
+test("explicit editor authorization binds exact complete definition contents and workspace", async t => {
+  const fixture = await makeFixture([]);t.after(fixture.cleanup);
+  const definitions = {projectId: "project-a", threadId: null, workspaceRoot: "/work/a", revision: "ui-revision", editingAvailable: true,
+    status: "ready" as const, rules: [], blocks: [], issues: []};
+  fixture.supervisorStore.recordDefinitionUserSave(definitions);
+  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, threadId: "operative", revision: "bound-revision"}, 0), true);
+  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, workspaceRoot: "/work/other"}, 0), false);
+  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, status: "invalid"}, 0), false);
+  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, rules: [{name: "Changed", description: "New", required_blocks: ["review"]}]}, 0), false);
+  fixture.restart();
+  assert.equal(fixture.supervisorStore.definitionUserSave(definitions, 0), true);
 });

@@ -37,9 +37,9 @@ export const runGuidanceApplication = (
     const definitions = new ProjectDefinitionLoader(source, t3, makeProjectFiles(config.t3Url, readToken.trim()));
     const writePath = config.projectWriteTokenFile;
     const writeToken = writePath && existsSync(writePath) ? yield* Effect.tryPromise(() => readFile(writePath, "utf8")) : "";
-    const editor = writeToken.trim() ? new ProjectRuleEditor(definitions, makeProjectWriter(config.t3Url, writeToken.trim())) : undefined;
     const owned = config.supervisorOwnedThreadIds ??= loadSupervisorOwnership(config.dataDirectory);
     const supervisionStore = new ProjectSupervisorStore(store, owned);
+    const editor = writeToken.trim() ? new ProjectRuleEditor(definitions, makeProjectWriter(config.t3Url, writeToken.trim()), snapshot => supervisionStore.recordDefinitionUserSave(snapshot)) : undefined;
     const operateToken = config.guidanceTokenFile && existsSync(config.guidanceTokenFile) ? yield* Effect.tryPromise(() => readFile(config.guidanceTokenFile!, "utf8")) : "";
     const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, makeSupervisorRpc(config.t3Url, readToken.trim()),
       operateToken.trim() ? makeSupervisorRpc(config.t3Url, operateToken.trim()) : null, readSupervisorBaseline(config.t3Url, readToken.trim()), definitions);

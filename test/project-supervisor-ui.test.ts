@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { Schema } from "effect";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { defaultMonitoringSettings, ProjectSupervisorSave, ProjectSupervisorSnapshot, type ProjectSupervisorInfo, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput, type SupervisorModelSelection } from "../src/project-supervisor-contract.js";
+import { defaultMonitoringSettings, ProjectSupervisorSave, ProjectSupervisorSnapshot, type DefinitionReviewInfo, type ProjectSupervisorInfo, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput, type SupervisorModelSelection, type WorkflowAgreementInfo, type WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import { ProjectSupervisorView, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
 import { loadProjectSupervisor, ProjectSupervisorRequestError, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
 
@@ -34,6 +34,35 @@ const snapshot: ProjectSupervisorInfo = {
 
 const input: ProjectSupervisorSaveInput = {projectId: "project", expectedGeneration: 7, modelSelection: selection};
 const monitoring = {enabled: true, intervalMinutes: "5", activityThreshold: "10"};
+const workflow = (overrides: Partial<WorkflowProposalInfo> = {}): WorkflowProposalInfo => ({
+  status: "proposed",
+  message: "A workflow was drafted from the current project rules.",
+  workspaceRoot: "/workspace/project",
+  revision: "rules-revision-12",
+  rules: [{index: 0, name: "Project setup", applies: true, reason: "This task changes project code."}],
+  steps: [{blockId: "inspect-source", name: "Inspect source", reason: "Review the existing implementation."}],
+  ...overrides,
+});
+const agreement = (overrides: Partial<WorkflowAgreementInfo> = {}): WorkflowAgreementInfo => ({
+  status: "agreed",
+  message: "The Supervisor and agent agreed on this plan.",
+  proposalId: "proposal-1",
+  agreedAt: 1_800_000_000_000,
+  supervisorMessageId: "supervisor-message-1",
+  agentMessageId: "agent-message-1",
+  workflow: workflow(),
+  ...overrides,
+});
+const definitionReview = (overrides: Partial<DefinitionReviewInfo> = {}): DefinitionReviewInfo => ({
+  status: "checking",
+  message: "The change is being checked against the recorded authorization.",
+  expectedRevision: "rules-revision-12",
+  observedRevision: null,
+  supervisorMessageId: null,
+  userMessageIds: [],
+  updatedAt: 1_800_000_000_000,
+  ...overrides,
+});
 
 const renderTaskView = (task: ProjectSupervisorInfo["tasks"][number]) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
   snapshot: {...snapshot, tasks: [task]}, selection, monitoring, threadId: task.threadId, connected: true,
@@ -91,6 +120,7 @@ test("monitoring settings default sensibly and remain optional for legacy snapsh
   const decodedInput = Schema.decodeUnknownSync(ProjectSupervisorSave)(input);
   assert.equal(decodedSnapshot.settings.monitoring, undefined);
   assert.equal(decodedInput.monitoring, undefined);
+  assert.equal(decodedSnapshot.tasks[0]?.definitionReview, undefined);
 });
 
 test("invalid monitoring drafts expose associated accessible errors", () => {
@@ -119,25 +149,180 @@ test("workflow proposal shows ordered rule decisions, workspace provenance and u
       ],
       steps: [
         {blockId: "inspect-source", name: "Inspect source", reason: "Review the existing implementation."},
+        {blockId: null, name: "Resolve a task-specific issue", reason: "Handle the detail unique to this request."},
         {blockId: "validate-change", name: "Validate the change", reason: "<script>proposal only</script>"},
       ],
     },
+    workflowProposalId: "proposal-draft-12",
   };
   const html = renderTaskView(task);
   assert.match(html, /Workflow proposal/);
-  assert.match(html, /Status:<\/strong> proposed/);
+  assert.match(html, /Draft status:<\/strong> proposed/);
   assert.match(html, /A workflow was drafted from the current project rules/);
-  assert.match(html, /This is an advisory draft\. It has not been accepted or executed/);
+  assert.match(html, /This is a draft\. No agreement is recorded for this proposal/);
+  assert.match(html, /Proposal ID:<\/strong> <code>proposal-draft-12<\/code>/);
   assert.match(html, /Workspace root:<\/strong> <code>\/workspace\/project<\/code>/);
   assert.match(html, /Rules revision:<\/strong> <code>rules-revision-12<\/code>/);
   assert.ok(html.indexOf("Project setup") < html.indexOf("Verification"));
   assert.match(html, /Decision:<\/strong> Applies/);
   assert.match(html, /Decision:<\/strong> Does not apply/);
-  assert.ok(html.indexOf("Inspect source") < html.indexOf("Validate the change"));
+  assert.ok(html.indexOf("Inspect source") < html.indexOf("Resolve a task-specific issue"));
+  assert.ok(html.indexOf("Resolve a task-specific issue") < html.indexOf("Validate the change"));
+  assert.match(html, /Task-specific step/);
+  assert.match(html, /Handle the detail unique to this request/);
   assert.match(html, /Block ID:<\/strong> <code>validate-change<\/code>/);
+  assert.doesNotMatch(html, /Block ID:<\/strong> <code>null<\/code>/);
   assert.match(html, /&lt;script&gt;proposal only&lt;\/script&gt;/);
   assert.doesNotMatch(html, /<script>proposal only<\/script>/);
   assert.doesNotMatch(html, /Accept workflow|Send workflow/i);
+});
+
+test("all task-specific workflow steps show their names and reasons without project block IDs", () => {
+  const task: ProjectSupervisorInfo["tasks"][number] = {
+    ...snapshot.tasks[0]!,
+    workflow: workflow({steps: [
+      {blockId: null, name: "Collect missing context", reason: "Ask for the deployment target."},
+      {blockId: null, name: "Summarize the decision", reason: "Record the agreed outcome."},
+    ]}),
+  };
+  const html = renderTaskView(task);
+  assert.match(html, /Step 1: Collect missing context/);
+  assert.match(html, /Ask for the deployment target/);
+  assert.match(html, /Step 2: Summarize the decision/);
+  assert.match(html, /Record the agreed outcome/);
+  assert.equal((html.match(/Task-specific step/g) ?? []).length, 2);
+  assert.doesNotMatch(html, /Block ID:/);
+  assert.doesNotMatch(html, /\[null\]/);
+});
+
+test("a pending revised draft remains separate from the prior agreed workflow", () => {
+  const prior = workflow({
+    message: "The previous plan was accepted.",
+    workspaceRoot: "/workspace/previous",
+    revision: "rules-revision-11",
+    steps: [{blockId: "release-check", name: "Check the release", reason: "Use the earlier agreed block."}],
+  });
+  const task: ProjectSupervisorInfo["tasks"][number] = {
+    ...snapshot.tasks[0]!,
+    workflow: workflow({status: "pending", message: "The revised workflow is being prepared.", steps: []}),
+    workflowProposalId: "proposal-2",
+    agreement: agreement({proposalId: "proposal-1", workflow: prior}),
+  };
+  const html = renderTaskView(task);
+  assert.match(html, /Agreed workflow/);
+  assert.match(html, /Agreement status:<\/strong> Agreed/);
+  assert.match(html, /Check the release/);
+  assert.match(html, /Current workflow draft/);
+  assert.match(html, /Draft status:<\/strong> pending/);
+  assert.match(html, /revised workflow is being prepared/);
+  assert.match(html, /This proposal is still being prepared; no agreement is recorded for it/);
+  assert.match(html, /Proposal ID:<\/strong> <code>proposal-2<\/code>/);
+  assert.ok(html.indexOf("Agreed workflow") < html.indexOf("Current workflow draft"));
+});
+
+test("an active agreement is primary when the latest proposal has the same ID and exposes reviewable evidence", () => {
+  const unsafeWorkflow = workflow({
+    message: "<script>proposal message</script>",
+    workspaceRoot: "/workspace/<project>",
+    revision: "revision-&-one",
+    steps: [{blockId: "inspect", name: "Inspect safely", reason: "<img src=x onerror=alert(1)>", }],
+  });
+  const task: ProjectSupervisorInfo["tasks"][number] = {
+    ...snapshot.tasks[0]!,
+    workflow: unsafeWorkflow,
+    workflowProposalId: "proposal-<1>",
+    agreement: agreement({
+      message: "<script>agreement message</script>",
+      proposalId: "proposal-<1>",
+      supervisorMessageId: "supervisor-<2>",
+      agentMessageId: "agent-&-3",
+      workflow: unsafeWorkflow,
+    }),
+  };
+  const html = renderTaskView(task);
+  assert.match(html, /Agreed workflow/);
+  assert.match(html, /Agreement status:<\/strong> Agreed/);
+  assert.match(html, /The latest proposal is the agreed workflow shown above/);
+  assert.equal((html.match(/Step 1: Inspect safely/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /Current workflow draft/);
+  assert.match(html, /Agreement details/);
+  assert.match(html, /Proposal ID:<\/strong> <code>proposal-&lt;1&gt;<\/code>/);
+  assert.match(html, /dateTime="2027-01-15T08:00:00\.000Z"/);
+  assert.match(html, /Workspace root:<\/strong> <code>\/workspace\/&lt;project&gt;<\/code>/);
+  assert.match(html, /Rules revision:<\/strong> <code>revision-&amp;-one<\/code>/);
+  assert.match(html, /Supervisor message ID:<\/strong> <code>supervisor-&lt;2&gt;<\/code>/);
+  assert.match(html, /Agent message ID:<\/strong> <code>agent-&amp;-3<\/code>/);
+  assert.match(html, /&lt;script&gt;agreement message&lt;\/script&gt;/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(html, /<script>|<img src=x/);
+  assert.match(html, /it does not verify that any steps were completed/);
+  assert.doesNotMatch(html, /compliance confirmed|compliant/i);
+});
+
+test("a stale agreement is clearly historical while a newer proposal stays a draft", () => {
+  const task: ProjectSupervisorInfo["tasks"][number] = {
+    ...snapshot.tasks[0]!,
+    workflow: workflow({message: "A new proposal is ready for discussion."}),
+    workflowProposalId: "proposal-2",
+    agreement: agreement({status: "stale", message: "The agreed rules revision is out of date."}),
+  };
+  const html = renderTaskView(task);
+  assert.match(html, /Previous agreement \(stale\)/);
+  assert.match(html, /Agreement status:<\/strong> Stale/);
+  assert.match(html, /retained as history and is not the current agreed workflow/);
+  assert.match(html, /Steps in this historical agreement/);
+  assert.match(html, /Current workflow draft/);
+  assert.match(html, /A new proposal is ready for discussion/);
+  assert.doesNotMatch(html, /<h5>Agreed workflow<\/h5>/);
+  assert.doesNotMatch(html, /The agreed workflow is current/i);
+});
+
+test("definition authorization and revert checks stay advisory beside the workflow", () => {
+  for (const [status, message, expectedText] of [
+    ["checking", "Authorization evidence is being checked.", "Project definitions changed; Supervisor is checking user authorization."],
+    ["revert_requested", "The observed change was not authorized.", "Unrequested changes: revert requested."],
+  ] as const) {
+    const task: ProjectSupervisorInfo["tasks"][number] = {
+      ...snapshot.tasks[0]!,
+      workflow: workflow({status: "proposed"}),
+      definitionReview: definitionReview({status, message}),
+    };
+    const html = renderTaskView(task);
+    const reviewMarkup = html.match(/<section class="stack" aria-labelledby="workflow-definition-review-title">([\s\S]*?)<\/section>/)?.[1];
+    assert.ok(reviewMarkup);
+    assert.ok(reviewMarkup.includes(expectedText));
+    assert.ok(reviewMarkup.includes(message));
+    assert.doesNotMatch(reviewMarkup, /<(?:button|input|select|textarea)\b/i);
+    assert.match(html, /Current workflow draft/);
+  }
+});
+
+test("authorized and restored definition review outcomes expose escaped source details", () => {
+  for (const [status, expectedText] of [
+    ["authorized", "User-authorized definitions adopted."],
+    ["restored", "Approved definitions restored; renegotiation needed."],
+  ] as const) {
+    const review = definitionReview({
+      status,
+      message: "<script>review message</script>",
+      expectedRevision: "<expected-revision>",
+      observedRevision: "observed-&-revision",
+      supervisorMessageId: "supervisor-<message>",
+      userMessageIds: ["user-<one>", "user-&-two"],
+    });
+    const html = renderTaskView({...snapshot.tasks[0]!, definitionReview: review});
+    assert.ok(html.includes(expectedText));
+    assert.match(html, /Definition review details/);
+    assert.match(html, /Expected revision:<\/strong> <code>&lt;expected-revision&gt;<\/code>/);
+    assert.match(html, /Observed revision:<\/strong> <code>observed-&amp;-revision<\/code>/);
+    assert.match(html, /Supervisor message ID:<\/strong> <code>supervisor-&lt;message&gt;<\/code>/);
+    assert.match(html, /user-&lt;one&gt;/);
+    assert.match(html, /user-&amp;-two/);
+    assert.match(html, /dateTime="2027-01-15T08:00:00\.000Z"/);
+    assert.match(html, /&lt;script&gt;review message&lt;\/script&gt;/);
+    assert.doesNotMatch(html, /<script>|<code><expected-revision>/);
+    assert.doesNotMatch(html, /compliant|compliance confirmed/i);
+  }
 });
 
 test("empty workflow proposals and legacy tasks state why no steps are shown", () => {
@@ -156,7 +341,7 @@ test("empty workflow proposals and legacy tasks state why no steps are shown", (
     workflow: {status: "stale", message: "Project rules changed after this proposal was created.", workspaceRoot: "/workspace/project", revision: "old-revision", rules: [], steps: []},
   };
   const staleHtml = renderTaskView(staleProposalTask);
-  assert.match(staleHtml, /Status:<\/strong> stale/);
+  assert.match(staleHtml, /Draft status:<\/strong> stale/);
   assert.match(staleHtml, /Project rules changed after this proposal was created/);
   assert.match(staleHtml, /No workflow steps are available for this proposal/);
 
@@ -164,6 +349,7 @@ test("empty workflow proposals and legacy tasks state why no steps are shown", (
   const legacyHtml = renderTaskView(snapshot.tasks[0]!);
   assert.match(nullWorkflowHtml, /No workflow proposal was recorded for this task\. Earlier objective-only records are not automatically reprocessed/);
   assert.match(legacyHtml, /No workflow proposal was recorded for this task\. Earlier objective-only records are not automatically reprocessed/);
+  assert.doesNotMatch(legacyHtml, /Project definition review/);
 });
 
 test("workflow proposal status and message remain visible across every contract state", () => {
@@ -173,7 +359,7 @@ test("workflow proposal status and message remain visible across every contract 
       workflow: {status, message: `Explanation for ${status}.`, workspaceRoot: null, revision: null, rules: [], steps: []},
     };
     const html = renderTaskView(task);
-    assert.match(html, new RegExp(`Status:<\\/strong> ${status}`));
+    assert.match(html, new RegExp(`Draft status:<\\/strong> ${status}`));
     assert.match(html, new RegExp(`Explanation for ${status}\\.`));
   }
 });

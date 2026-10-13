@@ -41,9 +41,29 @@ export const WorkflowProposal = Schema.Struct({
   workspaceRoot: Schema.NullOr(Schema.String),
   revision: Schema.NullOr(Schema.String),
   rules: Schema.Array(Schema.Struct({index: Schema.Number, name: Schema.String, applies: Schema.Boolean, reason: Schema.String})),
-  steps: Schema.Array(Schema.Struct({blockId: Schema.String, name: Schema.String, reason: Schema.String})),
+  steps: Schema.Array(Schema.Struct({blockId: Schema.NullOr(Schema.String), name: Schema.String, reason: Schema.String})),
 });
 export type WorkflowProposalInfo = typeof WorkflowProposal.Type;
+export const WorkflowAgreement = Schema.Struct({
+  status: Schema.Literals(["agreed", "stale"]),
+  message: Schema.String,
+  proposalId: Schema.String,
+  agreedAt: Schema.Number,
+  supervisorMessageId: Schema.String,
+  agentMessageId: Schema.String,
+  workflow: WorkflowProposal,
+});
+export type WorkflowAgreementInfo = typeof WorkflowAgreement.Type;
+export const DefinitionReview = Schema.Struct({
+  status: Schema.Literals(["checking", "revert_requested", "authorized", "restored"]),
+  message: Schema.String,
+  expectedRevision: Schema.String,
+  observedRevision: Schema.NullOr(Schema.String),
+  supervisorMessageId: Schema.NullOr(Schema.String),
+  userMessageIds: Schema.Array(Schema.String),
+  updatedAt: Schema.Number,
+});
+export type DefinitionReviewInfo = typeof DefinitionReview.Type;
 export const MonitoringStatus = Schema.Struct({
   state: Schema.Literals(["idle", "busy", "paused", "unavailable", "uncertain"]),
   message: Schema.String,
@@ -63,6 +83,9 @@ export const TaskInterpretation = Schema.Struct({
   reason: Schema.String,
   updatedAt: Schema.Number,
   workflow: Schema.optionalKey(Schema.NullOr(WorkflowProposal)),
+  agreement: Schema.optionalKey(Schema.NullOr(WorkflowAgreement)),
+  workflowProposalId: Schema.optionalKey(Schema.String),
+  definitionReview: Schema.optionalKey(Schema.NullOr(DefinitionReview)),
 });
 export type TaskInterpretationInfo = typeof TaskInterpretation.Type;
 export const ProjectSupervisorSnapshot = Schema.Struct({
