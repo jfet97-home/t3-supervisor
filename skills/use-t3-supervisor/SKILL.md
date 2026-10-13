@@ -1,13 +1,16 @@
 ---
 name: use-t3-supervisor
-description: Use an existing T3 Supervisor dashboard to inspect and edit repository project rules, inspect reusable workflow blocks and validation, configure each project's Supervisor model and reasoning, view task interpretations, draft workflows and notification history, or adjust chat settings. For product usage, not source development, deployment, credentials provisioning, or Lima VM setup.
+description: Use an existing T3 Supervisor dashboard to edit repository project rules, inspect workflow blocks, configure project model/reasoning and live monitoring thresholds, inspect draft workflows and steering availability, or adjust chat settings. For product usage, not source development, deployment, credentials provisioning, or Lima VM setup.
 ---
 
 # Use T3 Supervisor
 
 The dashboard uses one project rule model backed by `.supervisor/rules.yaml` and
-reusable Markdown blocks. Legacy condition/message reminders are retired. The Supervisor proposes draft workflows from project rules and blocks. Dialogue
-with the operational agent and workflow progress monitoring are not connected yet.
+reusable Markdown blocks. Legacy condition/message reminders are retired. The Supervisor
+proposes draft workflows from project rules and blocks, introduces valid new drafts
+through active steering, and discusses them using native T3 messages. Ongoing
+check-ins use the existing T3 activity source. A draft is not a recorded agreement
+or proof of compliance.
 Task interpretation uses an automatically created T3 conversation per project.
 
 ## Connect
@@ -50,6 +53,19 @@ The service creates and reuses a Supervisor conversation automatically for the f
 new task; no manual launch is needed. Saved and current selections differ while a
 change waits for the Supervisor to become idle. Unavailable models remain visible
 without a fallback. Refresh to verify the actual T3 selection after a change.
+
+Configure ongoing monitoring in the same form: pause/resume, maximum pending age
+(default five minutes) and finalized activities per operative chat (default ten).
+Saving applies these limits on the next service check without losing pending
+changes or restarting the service. The fixed project cooldown is sixty seconds;
+only one service-originated check-in runs at a time. A busy supervising chat can
+delay an otherwise due check-in.
+
+Inspect monitoring status and pending counts before Retry native access. Existing
+Supervisor conversations keep their native modes; a mode mismatch requires an
+explicit change in T3's conversation controls, then retry. Newly created chats
+use full-access/default for native messaging parity. Their role instructions only
+permit T3 reading/messaging, but those instructions do not enforce a tool sandbox.
 
 Select an operational conversation to inspect its interpreted objective and status.
 Inspect the draft workflow, ordered block steps, rule applicability decisions and

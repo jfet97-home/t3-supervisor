@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { Schema } from "effect";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ProjectSupervisorInfo, ProjectSupervisorRetryInput, ProjectSupervisorSaveInput, SupervisorModelSelection } from "../src/project-supervisor-contract.js";
+import { defaultMonitoringSettings, ProjectSupervisorSave, ProjectSupervisorSnapshot, type ProjectSupervisorInfo, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput, type SupervisorModelSelection } from "../src/project-supervisor-contract.js";
 import { ProjectSupervisorView, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
 import { loadProjectSupervisor, ProjectSupervisorRequestError, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
 
@@ -32,22 +33,28 @@ const snapshot: ProjectSupervisorInfo = {
 };
 
 const input: ProjectSupervisorSaveInput = {projectId: "project", expectedGeneration: 7, modelSelection: selection};
+const monitoring = {enabled: true, intervalMinutes: "5", activityThreshold: "10"};
 
 const renderTaskView = (task: ProjectSupervisorInfo["tasks"][number]) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
-  snapshot: {...snapshot, tasks: [task]}, selection, threadId: task.threadId, connected: true,
+  snapshot: {...snapshot, tasks: [task]}, selection, monitoring, threadId: task.threadId, connected: true,
   saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false, shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false,
-  onSelectionChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+  onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
 }));
 
 test("Supervisor settings markup explains automatic conversation reuse and separates saved, current and task state", () => {
+  const monitoringSnapshot = {
+    ...snapshot,
+    monitoringStatus: {state: "busy" as const, message: "A monitoring review is running.", pendingItems: 4, nextReviewAt: 1_800_000_000_000, lastNoticeAt: null},
+  };
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
-    snapshot: {...snapshot, message: '<img src=x onerror="alert(1)">'}, selection, threadId: "task-thread", connected: true,
+    snapshot: {...monitoringSnapshot, message: '<img src=x onerror="alert(1)">'}, selection, monitoring, threadId: "task-thread", connected: true,
     saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false, shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false,
-    onSelectionChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+    onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
   }));
   assert.match(html, /Bound conversation/);
   assert.match(html, /t3-thread:\/\/v1\/exact-thread-123/);
   assert.match(html, /Saving settings does not start a conversation/);
+  assert.match(html, /Role instructions limit it to reading and messaging through T3, but those instructions do not enforce tool restrictions/);
   assert.match(html, /creates the Supervisor conversation for the first task that needs it/);
   assert.match(html, /reuses that conversation for later tasks/);
   assert.match(html, /Saved Supervisor model/);
@@ -56,10 +63,46 @@ test("Supervisor settings markup explains automatic conversation reuse and separ
   assert.match(html, /Task interpretation for the selected conversation/);
   assert.match(html, /&lt;script&gt;task&lt;\/script&gt;/);
   assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
-  assert.match(html, /<label>Model/);
-  assert.match(html, /<label>Reasoning/);
+  assert.match(html, /<label for="supervisor-model">Model/);
+  assert.match(html, /<label for="supervisor-reasoning">Reasoning/);
   assert.doesNotMatch(html, /<label>Temperature/);
+  assert.match(html, /label for="supervisor-monitoring-enabled"/);
+  assert.match(html, /id="supervisor-monitoring-enabled"/);
+  assert.match(html, /name="monitoringEnabled"/);
+  assert.match(html, /id="supervisor-monitoring-interval" type="number" min="1" max="60" step="1" required=""/);
+  assert.match(html, /name="intervalMinutes"/);
+  assert.match(html, /id="supervisor-monitoring-threshold" type="number" min="3" max="100" step="1" required=""/);
+  assert.match(html, /name="activityThreshold"/);
+  assert.match(html, /aria-describedby="supervisor-monitoring-interval-help supervisor-monitoring-interval-error"/);
+  assert.match(html, /Project cooldown:<\/strong> 60 seconds between monitoring sends/);
+  assert.match(html, /Current monitoring status/);
+  assert.match(html, /Status:<\/strong> busy/);
+  assert.match(html, /Pending activities:<\/strong> 4/);
+  assert.match(html, /Next review:<\/strong>/);
+  assert.match(html, /Last notice:<\/strong> Not scheduled/);
+  assert.match(html, /A monitoring review is running/);
+  assert.match(html, /existing objective-only tasks are not reprocessed/);
   assert.doesNotMatch(html, /Create conversation/);
+});
+
+test("monitoring settings default sensibly and remain optional for legacy snapshots and saves", () => {
+  assert.deepEqual(defaultMonitoringSettings, {enabled: true, intervalMinutes: 5, activityThreshold: 10});
+  const decodedSnapshot = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(snapshot);
+  const decodedInput = Schema.decodeUnknownSync(ProjectSupervisorSave)(input);
+  assert.equal(decodedSnapshot.settings.monitoring, undefined);
+  assert.equal(decodedInput.monitoring, undefined);
+});
+
+test("invalid monitoring drafts expose associated accessible errors", () => {
+  const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+    snapshot, selection, monitoring: {enabled: true, intervalMinutes: "1.5", activityThreshold: "101"}, connected: true,
+    saving: false, fieldsBusy: false, blocked: false, dirty: true, canSave: false, shouldOfferRetry: false,
+    retryButtonLabel: "Retry native access", canRetry: false, onSelectionChange: () => {}, onMonitoringChange: () => {},
+    onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+  }));
+  assert.match(html, /aria-invalid="true" aria-describedby="supervisor-monitoring-interval-help supervisor-monitoring-interval-error"/);
+  assert.match(html, /Enter a whole number for maximum pending activity age in minutes/);
+  assert.match(html, /Enter finalized activity threshold from 3 to 100/);
 });
 
 test("workflow proposal shows ordered rule decisions, workspace provenance and unapplied draft steps", () => {
@@ -140,9 +183,9 @@ test("unavailable saved models remain visible and disabled while an available mo
   const unavailableSelection: SupervisorModelSelection = {instanceId: unavailable.instanceId, model: unavailable.model, options: [{id: "thinking", value: true}]};
   const savedSnapshot = {...snapshot, settings: {...snapshot.settings, modelSelection: unavailableSelection}};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
-    snapshot: savedSnapshot, selection: unavailableSelection, connected: true,
+    snapshot: savedSnapshot, selection: unavailableSelection, monitoring, connected: true,
     saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false, shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false,
-    onSelectionChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+    onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
   }));
   assert.match(html, /Saved Supervisor model:<\/strong> Provider Two · Quick \(quick-model\) — unavailable/);
   assert.match(html, /Quick \(quick-model\) — unavailable/);
@@ -152,9 +195,9 @@ test("unavailable saved models remain visible and disabled while an available mo
 test("an uncertain result from another project thread exposes retry only after the draft is resolved", () => {
   const uncertainTask = {...snapshot.tasks[0]!, threadId: "other-thread", status: "uncertain" as const};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
-    snapshot: {...snapshot, tasks: [...snapshot.tasks, uncertainTask]}, selection, threadId: "task-thread", connected: true,
+    snapshot: {...snapshot, tasks: [...snapshot.tasks, uncertainTask]}, selection, monitoring, threadId: "task-thread", connected: true,
     saving: false, fieldsBusy: false, blocked: false, dirty: true, canSave: true, shouldOfferRetry: true,
-    retryButtonLabel: "Retry native access", canRetry: false, onSelectionChange: () => {}, onDiscard: () => {}, onRetry: () => {},
+    retryButtonLabel: "Retry native access", canRetry: false, onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {},
     onSubmit: event => event.preventDefault(),
   }));
   assert.match(html, /Retry native access/);
@@ -166,9 +209,9 @@ test("an uncertain result from another project thread exposes retry only after t
 test("a deleted binding has a distinct explicit replacement action and no live link to the deleted thread", () => {
   const missingSnapshot = {...snapshot, binding: {...snapshot.binding!, state: "missing" as const}};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
-    snapshot: missingSnapshot, selection, connected: true, saving: false, fieldsBusy: false, blocked: false,
+    snapshot: missingSnapshot, selection, monitoring, connected: true, saving: false, fieldsBusy: false, blocked: false,
     dirty: false, canSave: false, shouldOfferRetry: true, retryButtonLabel: "Replace deleted Supervisor conversation", canRetry: true,
-    onSelectionChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+    onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
   }));
   assert.match(html, /Deleted Supervisor conversation/);
   assert.match(html, /Replace deleted Supervisor conversation/);
@@ -186,9 +229,9 @@ test("native retries are explicit for pending ready bindings and uncertain proje
 test("project task recovery remains visible but disabled until a bound conversation exists", () => {
   const unboundSnapshot = {...snapshot, binding: null};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
-    snapshot: unboundSnapshot, selection, connected: true, saving: false, fieldsBusy: false, blocked: false,
+    snapshot: unboundSnapshot, selection, monitoring, connected: true, saving: false, fieldsBusy: false, blocked: false,
     dirty: false, canSave: false, shouldOfferRetry: true, retryButtonLabel: "Retry native access", canRetry: false,
-    onSelectionChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+    onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
   }));
   assert.match(html, /No bound Supervisor conversation is available to retry yet/);
   assert.match(html, /<button type="button" disabled="">Retry native access<\/button>/);
@@ -240,6 +283,23 @@ test("a save response for another project is treated as an unknown outcome", asy
       return new Response(JSON.stringify({status: "saved", message: "Saved", snapshot: {...snapshot, projectId: "another-project"}}), {status: 200});
     };
     await assert.rejects(saveProjectSupervisor(input, "token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
+  } finally {globalThis.fetch = original;}
+});
+
+test("Supervisor settings saves send live monitoring values with the model selection", async () => {
+  const original = globalThis.fetch;
+  const monitoredInput: ProjectSupervisorSaveInput = {
+    ...input,
+    monitoring: {enabled: false, intervalMinutes: 12, activityThreshold: 35},
+  };
+  try {
+    globalThis.fetch = async (url, init) => {
+      assert.equal(String(url), "/api/guidance/project-supervisor");
+      assert.equal(init?.method, "POST");
+      assert.deepEqual(JSON.parse(String(init?.body)), monitoredInput);
+      return new Response(JSON.stringify({status: "saved", message: "Settings saved.", snapshot}), {status: 200});
+    };
+    assert.equal((await saveProjectSupervisor(monitoredInput, "token")).status, "saved");
   } finally {globalThis.fetch = original;}
 });
 

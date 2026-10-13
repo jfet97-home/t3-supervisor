@@ -6,6 +6,13 @@ export const ModelSelection = Schema.Struct({
   options: Schema.Array(Schema.Struct({id: Schema.String, value: Schema.Union([Schema.String, Schema.Boolean])})),
 });
 export type SupervisorModelSelection = typeof ModelSelection.Type;
+export const MonitoringSettings = Schema.Struct({
+  enabled: Schema.Boolean,
+  intervalMinutes: Schema.Number,
+  activityThreshold: Schema.Number,
+});
+export type SupervisorMonitoringSettings = typeof MonitoringSettings.Type;
+export const defaultMonitoringSettings: SupervisorMonitoringSettings = {enabled: true, intervalMinutes: 5, activityThreshold: 10};
 export const SupervisorModel = Schema.Struct({
   instanceId: Schema.String,
   model: Schema.String,
@@ -37,6 +44,14 @@ export const WorkflowProposal = Schema.Struct({
   steps: Schema.Array(Schema.Struct({blockId: Schema.String, name: Schema.String, reason: Schema.String})),
 });
 export type WorkflowProposalInfo = typeof WorkflowProposal.Type;
+export const MonitoringStatus = Schema.Struct({
+  state: Schema.Literals(["idle", "busy", "paused", "unavailable", "uncertain"]),
+  message: Schema.String,
+  pendingItems: Schema.Number,
+  nextReviewAt: Schema.NullOr(Schema.Number),
+  lastNoticeAt: Schema.NullOr(Schema.Number),
+});
+export type SupervisorMonitoringStatus = typeof MonitoringStatus.Type;
 export const TaskInterpretation = Schema.Struct({
   threadId: Schema.String,
   projectId: Schema.String,
@@ -51,10 +66,11 @@ export const TaskInterpretation = Schema.Struct({
 export type TaskInterpretationInfo = typeof TaskInterpretation.Type;
 export const ProjectSupervisorSnapshot = Schema.Struct({
   projectId: Schema.String,
-  settings: Schema.Struct({generation: Schema.Number, modelSelection: ModelSelection, pending: Schema.Boolean}),
+  settings: Schema.Struct({generation: Schema.Number, modelSelection: ModelSelection, pending: Schema.Boolean, monitoring: Schema.optionalKey(MonitoringSettings)}),
   binding: Schema.NullOr(ProjectSupervisorBinding),
   modelSelection: Schema.NullOr(ModelSelection),
   models: Schema.Array(SupervisorModel),
+  monitoringStatus: Schema.optionalKey(MonitoringStatus),
   available: Schema.Boolean,
   message: Schema.String,
   tasks: Schema.Array(TaskInterpretation),
@@ -64,6 +80,7 @@ export const ProjectSupervisorSave = Schema.Struct({
   projectId: Schema.String,
   expectedGeneration: Schema.Number,
   modelSelection: ModelSelection,
+  monitoring: Schema.optionalKey(MonitoringSettings),
 });
 export type ProjectSupervisorSaveInput = typeof ProjectSupervisorSave.Type;
 export const ProjectSupervisorRetry = Schema.Struct({

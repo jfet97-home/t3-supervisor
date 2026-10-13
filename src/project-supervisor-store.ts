@@ -3,13 +3,13 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { GuidanceStore } from "./guidance-store.js";
-import type { SupervisorBinding, SupervisorModelSelection, TaskInterpretationInfo } from "./project-supervisor-contract.js";
+import { defaultMonitoringSettings, type SupervisorBinding, type SupervisorModelSelection, type SupervisorMonitoringSettings, type TaskInterpretationInfo } from "./project-supervisor-contract.js";
 import type { Projection, SupervisorConfig } from "./types.js";
 import { sameModel } from "./supervisor-native.js";
 import type { ProposalContext } from "./supervisor-workflow.js";
 
 export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "codex", model: "gpt-6-luna", options: [{id: "reasoningEffort", value: "high"}]};
-export type ProjectModelSettings = {projectId: string; generation: number; modelSelection: SupervisorModelSelection; pending: boolean; applyAttempts?: number; applicationMessage?: string | null};
+export type ProjectModelSettings = {projectId: string; generation: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; applyAttempts?: number; applicationMessage?: string | null};
 export type BindingRecord = SupervisorBinding & {enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string};
 export type SupervisorBaseline = {version?: 2; snapshotSequence: number; threads: Array<{id: string; latestRunId: string | null}>};
 export type TaskRecord = TaskInterpretationInfo & {id: string; sourceHash: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionReadAttempts?: number; revalidationAttempts?: number};
@@ -66,13 +66,27 @@ export class ProjectSupervisorStore {
     return projection.runs.find(run => run.id === anchor && run.threadId === threadId)?.ordinal ?? null;
   }
   settings(projectId: string): ProjectModelSettings {
-    return this.read<ProjectModelSettings>("supervisor_project_settings", "project_id", projectId) ?? {projectId, generation: 0, modelSelection: defaultSupervisorModel, pending: false};
+    const stored = this.read<Omit<ProjectModelSettings, "monitoring"> & {monitoring?: SupervisorMonitoringSettings}>("supervisor_project_settings", "project_id", projectId);
+    return stored ? {...stored, monitoring: normalizeMonitoringSettings(stored.monitoring)} : {
+      projectId, generation: 0, modelSelection: defaultSupervisorModel, pending: false, monitoring: {...defaultMonitoringSettings},
+    };
   }
-  saveSettings(projectId: string, expected: number, selection: SupervisorModelSelection): ProjectModelSettings {
+  saveSettings(projectId: string, expected: number, selection: SupervisorModelSelection, monitoring?: SupervisorMonitoringSettings): ProjectModelSettings {
     return this.store.transaction(() => {
       const old = this.settings(projectId);
       if (old.generation !== expected) throw new Error("project_settings_conflict");
-      const next = {projectId, generation: expected + 1, modelSelection: selection, pending: true, applyAttempts: 0, applicationMessage: null};
+      const nextMonitoring = normalizeMonitoringSettings(monitoring ?? old.monitoring);
+      if (!validMonitoringSettings(nextMonitoring)) throw new Error("invalid_monitoring_settings");
+      const modelChanged = !sameModel(old.modelSelection, selection);
+      const next: ProjectModelSettings = {
+        ...old,
+        projectId,
+        generation: expected + 1,
+        modelSelection: selection,
+        monitoring: nextMonitoring,
+        pending: modelChanged ? true : old.pending,
+        ...(modelChanged ? {applyAttempts: 0, applicationMessage: null} : {}),
+      };
       this.store.db.prepare("INSERT INTO supervisor_project_settings VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET document=excluded.document").run(projectId, JSON.stringify(next));
       return next;
     });
@@ -129,3 +143,11 @@ export class ProjectSupervisorStore {
     }
   }
 }
+
+const normalizeMonitoringSettings = (value: SupervisorMonitoringSettings | undefined): SupervisorMonitoringSettings => value
+  ? {enabled: value.enabled, intervalMinutes: value.intervalMinutes, activityThreshold: value.activityThreshold}
+  : {...defaultMonitoringSettings};
+
+const validMonitoringSettings = (value: SupervisorMonitoringSettings): boolean =>
+  typeof value.enabled === "boolean" && Number.isInteger(value.intervalMinutes) && value.intervalMinutes >= 1 && value.intervalMinutes <= 60 &&
+  Number.isInteger(value.activityThreshold) && value.activityThreshold >= 3 && value.activityThreshold <= 100;

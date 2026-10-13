@@ -13,7 +13,9 @@ repository-defined rules, and optionally handling Telegram notifications and inp
   problems and the actual source path. See [project definitions](docs/project-definitions.md).
 - **Project Supervisor:** choose a T3 model and reasoning per project. A reusable
   conversation is created automatically to interpret new tasks and propose draft
-  workflows from their workspace rules and blocks. See
+  workflows from their workspace rules and blocks, introduce them through active
+  steering and discuss them through T3 messages. Configure live check-in timing
+  and activity thresholds per project. See
   [project supervision](docs/project-supervision.md).
 - **T3 observation and history:** project and chat inventories sync automatically;
   existing supervision and notification history remain inspectable.
@@ -21,8 +23,9 @@ repository-defined rules, and optionally handling Telegram notifications and inp
   work, with full answers for Telegram-originated tasks.
 - **Telegram input:** optional native T3 questionnaires and answers through Telegram.
 
-Workflow negotiation and semantic execution of project rules are not connected
-yet. The earlier condition/message reminders are retired; their stored history
+Supervising conversations can discuss workflows and read completed activity on
+demand. The service still records a draft, not a confirmed workflow or proof of
+block execution. The earlier condition/message reminders are retired; their stored history
 and uncertain outcomes remain available without automatic retries.
 
 ## Dashboard

@@ -3,16 +3,27 @@ import type {
   ProjectSupervisorInfo,
   SupervisorModelInfo,
   SupervisorModelSelection,
+  SupervisorMonitoringSettings,
   WorkflowProposalInfo,
 } from "../../src/project-supervisor-contract.js";
+import { defaultMonitoringSettings } from "../../src/project-supervisor-contract.js";
 import { loadProjectSupervisor, ProjectSupervisorRequestError, retryProjectSupervisor, saveProjectSupervisor } from "./project-supervisor-api.js";
+
+type MonitoringDraft = {
+  enabled: boolean;
+  intervalMinutes: string;
+  activityThreshold: string;
+};
 
 type Draft = {
   projectId: string;
-  value: SupervisorModelSelection;
-  baseline: SupervisorModelSelection;
+  modelValue: SupervisorModelSelection;
+  modelBaseline: SupervisorModelSelection;
+  monitoringValue: MonitoringDraft;
+  monitoringBaseline: MonitoringDraft;
   expectedGeneration: number;
 };
+type Drafts = Record<string, Draft>;
 
 type SnapshotState = {projectId: string; snapshot: ProjectSupervisorInfo};
 type LoadState = {key: string; status: "idle" | "loading" | "error"};
@@ -24,6 +35,30 @@ const copySelection = (selection: SupervisorModelSelection): SupervisorModelSele
   model: selection.model,
   options: selection.options.map(option => ({...option})),
 });
+const copyMonitoringDraft = (monitoring: MonitoringDraft): MonitoringDraft => ({...monitoring});
+const monitoringDraft = (monitoring: SupervisorMonitoringSettings): MonitoringDraft => ({
+  enabled: monitoring.enabled,
+  intervalMinutes: String(monitoring.intervalMinutes),
+  activityThreshold: String(monitoring.activityThreshold),
+});
+const copyMonitoringSettings = (monitoring: SupervisorMonitoringSettings): SupervisorMonitoringSettings => ({...monitoring});
+const sameMonitoring = (left: MonitoringDraft, right: MonitoringDraft) =>
+  left.enabled === right.enabled && left.intervalMinutes === right.intervalMinutes && left.activityThreshold === right.activityThreshold;
+const readMonitoring = (snapshot: ProjectSupervisorInfo) => copyMonitoringSettings(snapshot.settings.monitoring ?? defaultMonitoringSettings);
+const readMonitoringDraft = (snapshot: ProjectSupervisorInfo) => monitoringDraft(readMonitoring(snapshot));
+const formatMonitoringTime = (value: number | null) => value === null ? "Not scheduled" : new Date(value).toLocaleString();
+const monitoringError = (value: string, minimum: number, maximum: number, field: string) => {
+  if (!value.trim()) return `Enter ${field} from ${minimum} to ${maximum}.`;
+  const number = Number(value);
+  if (!Number.isInteger(number)) return `Enter a whole number for ${field}.`;
+  if (number < minimum || number > maximum) return `Enter ${field} from ${minimum} to ${maximum}.`;
+  return "";
+};
+const parseMonitoringDraft = (value: MonitoringDraft): SupervisorMonitoringSettings | null => {
+  if (monitoringError(value.intervalMinutes, 1, 60, "maximum pending activity age in minutes") ||
+    monitoringError(value.activityThreshold, 3, 100, "finalized activity threshold")) return null;
+  return {enabled: value.enabled, intervalMinutes: Number(value.intervalMinutes), activityThreshold: Number(value.activityThreshold)};
+};
 const modelKey = (model: Pick<SupervisorModelInfo, "instanceId" | "model">) => JSON.stringify([model.instanceId, model.model]);
 const selectedModelKey = (selection: SupervisorModelSelection) => JSON.stringify([selection.instanceId, selection.model]);
 const encodeChoice = (value: string | boolean) => JSON.stringify(value);
@@ -73,6 +108,7 @@ const withReasoningValue = (selection: SupervisorModelSelection, model: Supervis
 });
 
 export const shouldOfferNativeRetry = (snapshot: ProjectSupervisorInfo) =>
+  snapshot.monitoringStatus?.state === "uncertain" || snapshot.monitoringStatus?.state === "unavailable" ||
   snapshot.binding?.state === "uncertain" ||
   snapshot.binding?.state === "rejected" ||
   snapshot.binding?.state === "missing" ||
@@ -126,6 +162,7 @@ function WorkflowProposalView({workflow}: {workflow: WorkflowProposalInfo | null
 export function ProjectSupervisorView({
   snapshot,
   selection,
+  monitoring,
   threadId,
   connected,
   saving,
@@ -137,12 +174,14 @@ export function ProjectSupervisorView({
   retryButtonLabel,
   canRetry,
   onSelectionChange,
+  onMonitoringChange,
   onDiscard,
   onRetry,
   onSubmit,
 }: {
   snapshot: ProjectSupervisorInfo;
   selection: SupervisorModelSelection;
+  monitoring: MonitoringDraft;
   threadId?: string;
   connected: boolean;
   saving: boolean;
@@ -154,6 +193,7 @@ export function ProjectSupervisorView({
   retryButtonLabel: string;
   canRetry: boolean;
   onSelectionChange: (selection: SupervisorModelSelection) => void;
+  onMonitoringChange: (monitoring: MonitoringDraft) => void;
   onDiscard: () => void;
   onRetry: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -167,6 +207,8 @@ export function ProjectSupervisorView({
   const providerGroups = [...new Set(snapshot.models.map(model => model.providerName))];
   const selectedTask = threadId ? snapshot.tasks.find(task => task.threadId === threadId && task.projectId === snapshot.projectId) : undefined;
   const fieldsDisabled = !connected || !snapshot.available || fieldsBusy || blocked;
+  const intervalError = monitoringError(monitoring.intervalMinutes, 1, 60, "maximum pending activity age in minutes");
+  const thresholdError = monitoringError(monitoring.activityThreshold, 3, 100, "finalized activity threshold");
   const modelCanChange = !fieldsDisabled;
   const reasoningCanChange = !fieldsDisabled && Boolean(selected?.available && reasoning?.choices.length);
 
@@ -182,6 +224,7 @@ export function ProjectSupervisorView({
           ? <p>Bound conversation: <a href={`t3-thread://v1/${encodeURIComponent(snapshot.binding.threadId)}`}>Open in T3</a> <code>{snapshot.binding.threadId}</code></p>
         : <p>No Supervisor conversation is bound yet.</p>}
       <p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses that conversation for later tasks.</p>
+      <p className="muted">Supervisor work runs in the project root. Role instructions limit it to reading and messaging through T3, but those instructions do not enforce tool restrictions.</p>
       <p>{snapshot.message}</p>
       <p><strong>Saved Supervisor model:</strong> {formatModel(snapshot, snapshot.settings.modelSelection)}</p>
       <p><strong>Current model observed in T3:</strong> {formatModel(snapshot, snapshot.modelSelection)}</p>
@@ -193,8 +236,8 @@ export function ProjectSupervisorView({
     <form className="panel stack" onSubmit={onSubmit} aria-label="Supervisor settings">
       <fieldset disabled={fieldsDisabled} className="stack">
         <legend>Model selection</legend>
-        <label>Model
-          <select value={selectedModelKey(selection)} disabled={!modelCanChange} onChange={event => {
+        <label htmlFor="supervisor-model">Model</label>
+        <select id="supervisor-model" name="model" value={selectedModelKey(selection)} disabled={!modelCanChange} onChange={event => {
             const next = parseModelKey(event.target.value);
             const model = snapshot.models.find(candidate => candidate.instanceId === next.instanceId && candidate.model === next.model);
             if (model?.available) onSelectionChange(withModelDefaults(model));
@@ -205,17 +248,55 @@ export function ProjectSupervisorView({
                 {model.name} ({model.model}){model.available ? "" : " — unavailable"}
               </option>)}
             </optgroup>)}
-          </select>
-        </label>
-        {reasoning && reasoning.choices.length > 0 && <label>{reasoning.label}
-          <select value={encodeChoice(reasoningValue!)} disabled={!reasoningCanChange} onChange={event => {
+        </select>
+        {reasoning && reasoning.choices.length > 0 && <>
+          <label htmlFor="supervisor-reasoning">{reasoning.label}</label>
+          <select id="supervisor-reasoning" name="reasoning" value={encodeChoice(reasoningValue!)} disabled={!reasoningCanChange} onChange={event => {
             const value = parseChoice(event.target.value);
             onSelectionChange(withReasoningValue(selection, selected!, reasoning.id, value));
           }}>
             {!reasoningIsAdvertised && <option value={encodeChoice(reasoningValue!)} disabled>Stored value: {String(reasoningValue)}</option>}
             {reasoning.choices.map(choice => <option key={encodeChoice(choice.value)} value={encodeChoice(choice.value)}>{choice.label}</option>)}
           </select>
-        </label>}
+        </>}
+      </fieldset>
+      <fieldset disabled={fieldsDisabled} className="stack">
+        <legend>Ongoing monitoring</legend>
+        <p className="muted">Monitoring wakes the project’s ordinary Supervisor chat when pending activity reaches its maximum age or the finalized activity threshold. Defaults apply to new task workflows; existing objective-only tasks are not reprocessed.</p>
+        {snapshot.monitoringStatus && <section className="stack" aria-labelledby="supervisor-monitoring-status-title">
+          <h4 id="supervisor-monitoring-status-title">Current monitoring status</h4>
+          <p><strong>Status:</strong> {snapshot.monitoringStatus.state}</p>
+          <p><strong>Pending activities:</strong> {snapshot.monitoringStatus.pendingItems}</p>
+          <p><strong>Next review:</strong> {formatMonitoringTime(snapshot.monitoringStatus.nextReviewAt)}</p>
+          <p><strong>Last notice:</strong> {formatMonitoringTime(snapshot.monitoringStatus.lastNoticeAt)}</p>
+          <p>{snapshot.monitoringStatus.message}</p>
+        </section>}
+        <div className="stack">
+          <label htmlFor="supervisor-monitoring-enabled">Enable ongoing monitoring</label>
+          <input id="supervisor-monitoring-enabled" name="monitoringEnabled" type="checkbox" checked={monitoring.enabled}
+            aria-describedby="supervisor-monitoring-enabled-help" onChange={event => onMonitoringChange({...monitoring, enabled: event.target.checked})} />
+          <span id="supervisor-monitoring-enabled-help" className="small muted">Turn this off to pause monitoring sends for this project.</span>
+        </div>
+        <div className="stack">
+          <label htmlFor="supervisor-monitoring-interval">Maximum pending activity age (minutes)</label>
+          <input id="supervisor-monitoring-interval" name="intervalMinutes" type="number" min={1} max={60} step={1} required
+            value={monitoring.intervalMinutes} aria-invalid={intervalError ? true : undefined}
+            aria-describedby="supervisor-monitoring-interval-help supervisor-monitoring-interval-error"
+            onChange={event => onMonitoringChange({...monitoring, intervalMinutes: event.target.value})} />
+          <span id="supervisor-monitoring-interval-help" className="small muted">Enter a whole number from 1 to 60 minutes.</span>
+          <span id="supervisor-monitoring-interval-error" className="small" aria-live="polite">{intervalError}</span>
+        </div>
+        <div className="stack">
+          <label htmlFor="supervisor-monitoring-threshold">Finalized activities per operative chat</label>
+          <input id="supervisor-monitoring-threshold" name="activityThreshold" type="number" min={3} max={100} step={1} required
+            value={monitoring.activityThreshold} aria-invalid={thresholdError ? true : undefined}
+            aria-describedby="supervisor-monitoring-threshold-help supervisor-monitoring-threshold-error"
+            onChange={event => onMonitoringChange({...monitoring, activityThreshold: event.target.value})} />
+          <span id="supervisor-monitoring-threshold-help" className="small muted">Enter a whole number from 3 to 100 finalized activities.</span>
+          <span id="supervisor-monitoring-threshold-error" className="small" aria-live="polite">{thresholdError}</span>
+        </div>
+        <p><strong>Project cooldown:</strong> 60 seconds between monitoring sends.</p>
+        <p><strong>Model review limit:</strong> one in-flight review per project.</p>
       </fieldset>
       <button type="submit" disabled={!canSave || saving || blocked}>{saving ? "Saving…" : "Save Supervisor settings"}</button>
       {dirty && <button type="button" disabled={saving || blocked} onClick={onDiscard}>Discard draft</button>}
@@ -250,7 +331,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
   onSavingChange?: (saving: boolean) => void;
 }) {
   const [snapshotState, setSnapshotState] = useState<SnapshotState | null>(null);
-  const [draft, setDraft] = useState<Draft | null>(null);
+  const [drafts, setDrafts] = useState<Drafts>({});
   const [loadState, setLoadState] = useState<LoadState>({key: "", status: "idle"});
   const [panelMessage, setPanelMessage] = useState<PanelMessage>(null);
   const [revision, setRevision] = useState(0);
@@ -258,22 +339,25 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
   const [saving, setSaving] = useState(false);
   const [blocked, setBlocked] = useState(false);
   const activeProject = useRef(projectId);
-  const draftRef = useRef(draft);
+  const draftRef = useRef(drafts);
   const savingRef = useRef(false);
   const activeLoadKey = useRef("");
   const completedLoadKey = useRef("");
   activeProject.current = projectId;
-  draftRef.current = draft;
+  draftRef.current = drafts;
 
   const activeSnapshot = snapshotState?.projectId === projectId ? snapshotState.snapshot : null;
-  const activeDraft = draft?.projectId === projectId ? draft : null;
-  const dirty = Boolean(activeDraft && selectionKey(activeDraft.value) !== selectionKey(activeDraft.baseline));
+  const activeDraft = drafts[projectId] ?? null;
+  const modelDirty = Boolean(activeDraft && selectionKey(activeDraft.modelValue) !== selectionKey(activeDraft.modelBaseline));
+  const monitoringDirty = Boolean(activeDraft && !sameMonitoring(activeDraft.monitoringValue, activeDraft.monitoringBaseline));
+  const dirty = modelDirty || monitoringDirty;
   const requestKey = JSON.stringify([projectId, revision]);
   const isLoading = connected && loadState.key === requestKey && loadState.status === "loading";
   const loadError = loadState.key === requestKey && loadState.status === "error";
   const fieldsBusy = saving || isLoading;
-  const selectedModel = activeSnapshot && activeDraft ? findModel(activeSnapshot, activeDraft.value) : undefined;
-  const canSave = Boolean(activeSnapshot?.available && selectedModel?.available && activeDraft && dirty && connected && !fieldsBusy && !blocked);
+  const selectedModel = activeSnapshot && activeDraft ? findModel(activeSnapshot, activeDraft.modelValue) : undefined;
+  const validMonitoring = activeDraft ? parseMonitoringDraft(activeDraft.monitoringValue) : null;
+  const canSave = Boolean(activeSnapshot?.available && activeDraft && dirty && validMonitoring && (!modelDirty || selectedModel?.available) && connected && !fieldsBusy && !blocked);
   const needsRetry = Boolean(activeSnapshot && shouldOfferNativeRetry(activeSnapshot));
   const retryButtonLabel = activeSnapshot?.binding?.state === "missing" ? "Replace deleted Supervisor conversation" : "Retry native access";
   const canRetry = Boolean(needsRetry && activeSnapshot?.available && activeSnapshot.binding && activeDraft && !dirty && connected && !fieldsBusy && !blocked);
@@ -283,25 +367,29 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
 
   useEffect(() => {
     if (!projectId || !connected || saving) return;
-    if (!forceRefresh && dirty) return;
+    if (!forceRefresh && dirty && activeSnapshot) return;
     if (!forceRefresh && completedLoadKey.current === requestKey) return;
     const controller = new AbortController();
     activeLoadKey.current = requestKey;
     setLoadState({key: requestKey, status: "loading"});
     void loadProjectSupervisor(projectId, controller.signal).then(snapshot => {
       if (controller.signal.aborted || activeLoadKey.current !== requestKey || activeProject.current !== projectId) return;
-      const priorDraft = draftRef.current?.projectId === projectId ? draftRef.current : null;
-      const priorWasDirty = Boolean(priorDraft && selectionKey(priorDraft.value) !== selectionKey(priorDraft.baseline));
-      const baseline = copySelection(snapshot.settings.modelSelection);
-      const value = priorWasDirty ? copySelection(priorDraft!.value) : copySelection(baseline);
+      const priorDraft = draftRef.current[projectId] ?? null;
+      const priorModelWasDirty = Boolean(priorDraft && selectionKey(priorDraft.modelValue) !== selectionKey(priorDraft.modelBaseline));
+      const priorMonitoringWasDirty = Boolean(priorDraft && !sameMonitoring(priorDraft.monitoringValue, priorDraft.monitoringBaseline));
+      const modelBaseline = copySelection(snapshot.settings.modelSelection);
+      const modelValue = priorModelWasDirty ? copySelection(priorDraft!.modelValue) : copySelection(modelBaseline);
+      const monitoringBaseline = readMonitoringDraft(snapshot);
+      const monitoringValue = priorMonitoringWasDirty ? copyMonitoringDraft(priorDraft!.monitoringValue) : copyMonitoringDraft(monitoringBaseline);
       completedLoadKey.current = requestKey;
       setSnapshotState({projectId, snapshot});
-      setDraft({projectId, value, baseline, expectedGeneration: snapshot.settings.generation});
+      setDrafts(current => ({...current, [projectId]: {projectId, modelValue, modelBaseline, monitoringValue, monitoringBaseline, expectedGeneration: snapshot.settings.generation}}));
       setLoadState({key: requestKey, status: "idle"});
       setBlocked(false);
       if (forceRefresh) setPanelMessage({
         projectId,
-        text: priorWasDirty && selectionKey(value) !== selectionKey(baseline)
+        text: (priorModelWasDirty && selectionKey(modelValue) !== selectionKey(modelBaseline)) ||
+          (priorMonitoringWasDirty && !sameMonitoring(monitoringValue, monitoringBaseline))
           ? "Supervisor settings refreshed. Your unsaved draft was kept against the latest saved generation."
           : "Supervisor settings refreshed from T3.",
         alert: false,
@@ -317,7 +405,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
       controller.abort();
       if (activeLoadKey.current === requestKey) activeLoadKey.current = "";
     };
-  }, [projectId, connected, saving, dirty, forceRefresh, requestKey]);
+  }, [projectId, connected, saving, dirty, activeSnapshot, forceRefresh, requestKey]);
 
   const refresh = () => {
     if (!projectId || !connected || saving || isLoading) return;
@@ -326,24 +414,43 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
   };
 
   const updateSelection = (selection: SupervisorModelSelection) => {
-    setDraft(current => current?.projectId === projectId ? {...current, value: copySelection(selection)} : current);
+    setDrafts(current => {
+      const currentDraft = current[projectId];
+      return currentDraft ? {...current, [projectId]: {...currentDraft, modelValue: copySelection(selection)}} : current;
+    });
+    setPanelMessage(null);
+  };
+
+  const updateMonitoring = (monitoring: MonitoringDraft) => {
+    setDrafts(current => {
+      const currentDraft = current[projectId];
+      return currentDraft ? {...current, [projectId]: {...currentDraft, monitoringValue: copyMonitoringDraft(monitoring)}} : current;
+    });
     setPanelMessage(null);
   };
 
   const discardDraft = () => {
     if (saving || blocked) return;
-    setDraft(current => current?.projectId === projectId ? {...current, value: copySelection(current.baseline)} : current);
+    setDrafts(current => {
+      const currentDraft = current[projectId];
+      return currentDraft ? {...current, [projectId]: {
+        ...currentDraft,
+        modelValue: copySelection(currentDraft.modelBaseline),
+        monitoringValue: copyMonitoringDraft(currentDraft.monitoringBaseline),
+      }} : current;
+    });
     setPanelMessage(null);
   };
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (savingRef.current || !canSave || !activeDraft || !activeSnapshot) return;
+    if (savingRef.current || !canSave || !activeDraft || !activeSnapshot || !validMonitoring) return;
     const targetProject = projectId;
     const input = {
       projectId: targetProject,
       expectedGeneration: activeDraft.expectedGeneration,
-      modelSelection: copySelection(activeDraft.value),
+      modelSelection: copySelection(activeDraft.modelValue),
+      monitoring: copyMonitoringSettings(validMonitoring),
     };
     savingRef.current = true;
     setSaving(true);
@@ -354,12 +461,30 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
       if (result.status === "saved") {
         if (result.snapshot) {
           const canonical = copySelection(result.snapshot.settings.modelSelection);
+          const canonicalMonitoring = readMonitoring(result.snapshot);
+          const canonicalMonitoringDraft = monitoringDraft(canonicalMonitoring);
           setSnapshotState({projectId: targetProject, snapshot: result.snapshot});
-          setDraft({projectId: targetProject, value: canonical, baseline: copySelection(canonical), expectedGeneration: result.snapshot.settings.generation});
+          setDrafts(current => ({...current, [targetProject]: {
+            projectId: targetProject,
+            modelValue: canonical,
+            modelBaseline: copySelection(canonical),
+            monitoringValue: copyMonitoringDraft(canonicalMonitoringDraft),
+            monitoringBaseline: copyMonitoringDraft(canonicalMonitoringDraft),
+            expectedGeneration: result.snapshot!.settings.generation,
+          }}));
           setBlocked(false);
           setPanelMessage({projectId: targetProject, text: result.message, alert: false});
         } else {
-          setDraft(current => current?.projectId === targetProject ? {...current, value: copySelection(input.modelSelection), baseline: copySelection(input.modelSelection)} : current);
+          setDrafts(current => {
+            const currentDraft = current[targetProject];
+            return currentDraft ? {...current, [targetProject]: {
+              ...currentDraft,
+              modelValue: copySelection(input.modelSelection),
+              modelBaseline: copySelection(input.modelSelection),
+              monitoringValue: monitoringDraft(input.monitoring),
+              monitoringBaseline: monitoringDraft(input.monitoring),
+            }} : current;
+          });
           setBlocked(true);
           setPanelMessage({projectId: targetProject, text: `${result.message} Refresh Supervisor settings before making another change.`, alert: false});
         }
@@ -367,9 +492,18 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
         setBlocked(true);
         setPanelMessage({projectId: targetProject, text: result.message, alert: true});
       } else if (result.snapshot) {
-        const baseline = copySelection(result.snapshot.settings.modelSelection);
+        const modelBaseline = copySelection(result.snapshot.settings.modelSelection);
+        const monitoringBaseline = readMonitoringDraft(result.snapshot);
         setSnapshotState({projectId: targetProject, snapshot: result.snapshot});
-        setDraft(current => current?.projectId === targetProject ? {...current, baseline, expectedGeneration: result.snapshot!.settings.generation} : current);
+        setDrafts(current => {
+          const currentDraft = current[targetProject];
+          return currentDraft ? {...current, [targetProject]: {
+            ...currentDraft,
+            modelBaseline,
+            monitoringBaseline,
+            expectedGeneration: result.snapshot!.settings.generation,
+          }} : current;
+        });
         setBlocked(false);
         setPanelMessage({projectId: targetProject, text: result.message, alert: result.status === "invalid"});
       } else {
@@ -416,8 +550,16 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
         setPanelMessage({projectId: targetProject, text: result.message, alert: true});
       } else if (result.snapshot) {
         const canonical = copySelection(result.snapshot.settings.modelSelection);
+        const canonicalMonitoring = readMonitoringDraft(result.snapshot);
         setSnapshotState({projectId: targetProject, snapshot: result.snapshot});
-        setDraft({projectId: targetProject, value: canonical, baseline: copySelection(canonical), expectedGeneration: result.snapshot.settings.generation});
+        setDrafts(current => ({...current, [targetProject]: {
+          projectId: targetProject,
+          modelValue: canonical,
+          modelBaseline: copySelection(canonical),
+          monitoringValue: copyMonitoringDraft(canonicalMonitoring),
+          monitoringBaseline: copyMonitoringDraft(canonicalMonitoring),
+          expectedGeneration: result.snapshot!.settings.generation,
+        }}));
         setBlocked(false);
         setPanelMessage({projectId: targetProject, text: result.message, alert: result.status === "invalid"});
       } else {
@@ -457,7 +599,8 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
     {projectId && connected && loadError && <p className="panel" role="alert">Could not load Supervisor settings. Refresh to try again or check the T3 connection.</p>}
     {projectId && activeSnapshot && activeDraft && <ProjectSupervisorView
       snapshot={activeSnapshot}
-      selection={activeDraft.value}
+      selection={activeDraft.modelValue}
+      monitoring={activeDraft.monitoringValue}
       {...(threadId === undefined ? {} : {threadId})}
       connected={connected}
       saving={saving}
@@ -469,6 +612,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
       retryButtonLabel={retryButtonLabel}
       canRetry={canRetry}
       onSelectionChange={updateSelection}
+      onMonitoringChange={updateMonitoring}
       onDiscard={discardDraft}
       onRetry={() => {void retryNativeAccess();}}
       onSubmit={save}

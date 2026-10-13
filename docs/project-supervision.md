@@ -49,7 +49,10 @@ judgment, not deterministic enforcement. Before accepting a proposal, the servic
 reloads the definitions and checks their revision and workspace identity. Changed
 or unavailable definitions produce a stale proposal; the interpreted objective
 remains available. The dashboard shows the ordered steps, rule decisions and source
-revision. It does not send the proposal to the agent or interrupt its execution.
+revision. A valid new draft can then be introduced to the operational agent
+through native active steering, after the supervising conversation has received
+its dialogue context. This can arrive after implementation has already started;
+it does not create a startup barrier or undo earlier edits.
 
 Missing, invalid, unreadable or oversized definitions keep objective interpretation
 available but produce an explicit unavailable workflow. Rules and blocks are never
@@ -67,11 +70,15 @@ permanently in the existing private state database. They and their descendants a
 excluded from further task interpretation, completion recaps and native-input relay.
 The service does not answer questions or approvals raised by a Supervisor run.
 
-The conversation initially uses T3 approval-required and plan modes, plus a
-structured interpretation/proposal prompt. These are runtime conventions, not a guarantee that
-provider tools are disabled. Tool-approval requests in a Supervisor conversation
-are outside this stage and should remain unapproved. No deterministic safety
-boundary is claimed here.
+New supervising conversations use full-access/default modes so that T3's native
+messaging permission checks allow contact with ordinary development conversations.
+Interpretation turns retain their no-tools contract. Dialogue and check-in turns
+instruct the model to use only `t3_thread_read` and `t3_thread_send`, and to avoid
+repository edits, commands, delegation and settings changes. The conversation
+runs in the project root: these role instructions are not an enforced tool sandbox.
+Existing conversations retain their modes and are never automatically upgraded.
+If their modes cannot contact an operative chat, the dashboard reports the mismatch;
+change the modes explicitly in that conversation's T3 controls and Retry native access.
 
 ## Saves and availability
 
@@ -103,12 +110,64 @@ The deployment needs its existing T3 read credential and a separate read/operate
 credential for native conversation/model operations. Neither can be supplied or
 upgraded from the dashboard. Telegram remains optional and independent.
 
-## Next stage
+## Dialogue and active steering
 
-Project definitions now feed draft workflow proposals. Sending a contextual proposal
-to the operational agent, observing its replies, negotiating changes and monitoring
-execution are subsequent steps. This feature does not
-execute required blocks, attest compliance or enforce protected operations.
+After validating a new draft, the service initializes the supervising conversation
+with the task, complete project definitions and proposal identity. It then sends
+one introduction to the operative conversation using native `steer_active` when
+a run is active. The introduction explains the Supervisor's role, the proposed
+steps, the `.supervisor` paths and how to reply or suggest other available blocks.
+With an idle target, native queue/start semantics can start a follow-up. A run
+that finishes during steering can also receive a follow-up under T3's own behavior.
+
+The agent replies directly to the supervising conversation using `t3_thread_send`
+with queue mode, its operative thread ID and proposal ID. The Supervisor can read
+the operative conversation and send contextual guidance using auto mode, which
+steers a supported active turn or queues when necessary. If the agent lacks that
+tool, its finished reply remains available for the next check-in. T3 stores the
+dialogue; there is no separate transcript database. The dashboard continues to
+show an unconfirmed draft. Structured acceptance, agreed-workflow storage and
+per-block execution state remain future work.
+
+Unknown native effects retain their exact message/command identities and original
+bytes. They are reconciled from the relevant conversation, with an explicit Retry
+native access action before replay. A receipt establishes acceptance; a projection
+establishes that the introduction is visible. Neither proves that the agent followed it.
+Completed objective-only records are not retrospectively activated.
+
+## Ongoing check-ins
+
+The service reuses T3's shell inventory and full active conversation projections;
+it does not install another monitor. It checks introduced conversations in bounded
+batches, normally no more often than every 30 seconds per conversation.
+Only finalized activity contributes: completed commands/tools, messages, plans and
+file changes. Thinking, partial streamed text and the service's own introductions
+do not trigger check-ins. Pending input and run finish/failure are priority changes.
+
+For each operative chat, a check-in becomes due when its oldest unreviewed activity
+is five minutes old, ten activities have completed, or there is a priority event.
+There is a fixed 60-second gap between service notices to one project's supervising
+chat, and one service request in flight. Busy chats accumulate activity for later;
+five minutes is a scheduling threshold, not a guaranteed response deadline.
+Counts are per operative chat, with bounded fair selection across chats.
+
+Notices contain typed counts, statuses and native item references, plus the task's
+draft context. They do not contain command outputs or streamed text, and are not
+model summaries. The supervising model reads relevant messages/items on demand
+and decides whether to intervene. Frozen activity revisions are acknowledged only
+after the specific native request completes with its completion marker and no
+intervening user message. Changes observed during the review remain pending.
+
+Projects exposes a pause control, an interval of 1–60 minutes and an activity
+threshold of 3–100. Changes apply on the next service check without a restart or
+discarding the backlog. A lower limit can make one combined notice due after the
+cooldown; it does not generate a burst. Model changes still wait for an idle run.
+Metadata and native requests persist in the existing private guidance database.
+Capacity limits and unresolved deliveries are surfaced rather than silently
+discarding unreviewed activity. A failed check-in needs explicit native recovery.
+
+This feature does not execute required blocks, attest compliance or enforce
+protected operations. Deterministic gates remain deferred.
 
 ## Startup timing
 
