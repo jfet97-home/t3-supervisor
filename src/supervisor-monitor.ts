@@ -8,6 +8,8 @@ export const SUPERVISOR_MONITOR_COOLDOWN_MS = 60_000;
 export const SUPERVISOR_MONITOR_MAX_ITEMS_PER_THREAD = 1000;
 export const SUPERVISOR_MONITOR_MAX_BATCH_ITEMS = 100;
 export const SUPERVISOR_MONITOR_MAX_ITEMS_PER_CHAT = 20;
+export const SUPERVISOR_MONITOR_MAX_FROZEN_ITEMS_PER_BATCH = 10_000;
+export const SUPERVISOR_MONITOR_MAX_SELECTED_THREADS = 100;
 
 export type SupervisorMonitorPriority =
   | "user_instruction"
@@ -45,6 +47,7 @@ export interface SupervisorMonitorThreadBatch {
   saturated: boolean;
   untrackedCount: number;
   items: SupervisorMonitorActivityItem[];
+  previewItems: SupervisorMonitorActivityItem[];
 }
 
 export interface SupervisorMonitorBatch {
@@ -145,6 +148,17 @@ const recordVersion = (
   createHash("sha256")
     .update(JSON.stringify([id, type, status, ordinal, updatedAt, priority, nodeId]))
     .digest("hex");
+
+export const isCurrentMainGraphRun = (projection: Projection, run: RunInfo): boolean => {
+  if (
+    run.threadId !== projection.thread.id ||
+    typeof run.rootNodeId !== "string" ||
+    run.status === "rolled_back"
+  )
+    return false;
+  const root = mainRunNodeReader(projection, run)(run.rootNodeId);
+  return Boolean(root && root.kind === "root_turn" && root.status !== "rolled_back");
+};
 
 const isExcluded = (
   id: string,
@@ -317,7 +331,7 @@ export const collectSupervisorActivity = (
   const ordinal = Number.isSafeInteger(sourceOrdinal) && sourceOrdinal >= 0 ? sourceOrdinal : 0;
   const runs = new Map<string, { run: RunInfo; nodeFor: (nodeId: string) => RecordLike | undefined; root: RecordLike }>();
   for (const run of projection.runs) {
-    if (run.threadId !== projection.thread.id || typeof run.rootNodeId !== "string" || run.status === "rolled_back") continue;
+    if (!isCurrentMainGraphRun(projection, run) || typeof run.rootNodeId !== "string") continue;
     const nodeFor = mainRunNodeReader(projection, run);
     const root = nodeFor(run.rootNodeId);
     if (root?.kind === "root_turn" && root.status !== "rolled_back") runs.set(run.id, { run, nodeFor, root });

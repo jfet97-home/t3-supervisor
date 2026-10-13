@@ -4,9 +4,12 @@ import {
   compareMonitorPriority,
   compareMonitorTrigger,
   evaluateSupervisorMonitoring,
+  isCurrentMainGraphRun,
   SUPERVISOR_MONITOR_MAX_BATCH_ITEMS,
+  SUPERVISOR_MONITOR_MAX_FROZEN_ITEMS_PER_BATCH,
   SUPERVISOR_MONITOR_MAX_ITEMS_PER_CHAT,
   SUPERVISOR_MONITOR_MAX_ITEMS_PER_THREAD,
+  SUPERVISOR_MONITOR_MAX_SELECTED_THREADS,
   type SupervisorMonitorActivity,
   type SupervisorMonitorBatch,
   type SupervisorMonitorPriority,
@@ -19,6 +22,7 @@ interface MonitorThreadRow {
   project_id: unknown;
   thread_id: unknown;
   source_ordinal: unknown;
+  activation_ordinal: unknown;
   saturated: unknown;
   saturation_at: unknown;
   last_acknowledged_at: unknown;
@@ -64,6 +68,8 @@ export interface SupervisorMonitorThreadState {
 export interface SupervisorMonitorSelectOptions {
   maxItems?: number;
   maxItemsPerThread?: number;
+  maxThreads?: number;
+  maxFrozenItems?: number;
   eligibleThreadIds?: ReadonlySet<string>;
 }
 
@@ -80,6 +86,8 @@ const isFinalized = (item: Pick<SupervisorMonitorActivity, "status">): boolean =
 
 const isReviewable = (item: SupervisorMonitorActivity): boolean =>
   isFinalized(item) || item.priority === "waiting_input";
+
+const liveRunStatuses = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 
 const asActivity = (row: MonitorItemRow): SupervisorMonitorActivity => ({
   id: String(row.item_id),
@@ -124,11 +132,13 @@ const threadSort = (
 const threadBatch = (
   threadId: string,
   activities: SupervisorMonitorActivity[],
+  previewItems: SupervisorMonitorActivity[],
   decision: ReturnType<typeof evaluateSupervisorMonitoring>,
   saturated: boolean,
   untrackedCount: number,
 ): SupervisorMonitorThreadBatch => {
   const ordered = [...activities].sort(compareMonitorPriority);
+  const preview = [...previewItems].sort(compareMonitorPriority);
   const priorities = [...new Set(ordered.flatMap((item) => item.priority ? [item.priority] : []))];
   return {
     threadId,
@@ -141,6 +151,7 @@ const threadBatch = (
     saturated,
     untrackedCount,
     items: ordered,
+    previewItems: preview,
   };
 };
 
@@ -161,6 +172,7 @@ export class ProjectSupervisorMonitorStore {
         project_id TEXT NOT NULL,
         thread_id TEXT NOT NULL,
         source_ordinal INTEGER NOT NULL,
+        activation_ordinal INTEGER NOT NULL,
         saturated INTEGER NOT NULL DEFAULT 0,
         saturation_at INTEGER,
         last_acknowledged_at INTEGER,
@@ -188,6 +200,11 @@ export class ProjectSupervisorMonitorStore {
         ON supervisor_monitor_items(project_id, thread_id, eligible, reviewed_version);
     `);
     const threadColumns = store.db.prepare("PRAGMA table_info(supervisor_monitor_threads)").all();
+    if (!threadColumns.some((column) => column.name === "activation_ordinal")) {
+      store.db.exec("ALTER TABLE supervisor_monitor_threads ADD COLUMN activation_ordinal INTEGER");
+      store.db.exec(`UPDATE supervisor_monitor_threads SET activation_ordinal=source_ordinal
+        WHERE activation_ordinal IS NULL`);
+    }
     if (!threadColumns.some((column) => column.name === "untracked_count"))
       store.db.exec("ALTER TABLE supervisor_monitor_threads ADD COLUMN untracked_count INTEGER NOT NULL DEFAULT 0");
     const itemColumns = store.db.prepare("PRAGMA table_info(supervisor_monitor_items)").all();
@@ -218,18 +235,33 @@ export class ProjectSupervisorMonitorStore {
 
     return this.store.transaction(() => {
       this.store.db
-        .prepare(`INSERT INTO supervisor_monitor_threads(project_id,thread_id,source_ordinal)
-          VALUES(?,?,?) ON CONFLICT(project_id,thread_id) DO UPDATE SET
-          source_ordinal=MAX(source_ordinal,excluded.source_ordinal)`)
-        .run(input.projectId, input.threadId, input.sourceOrdinal);
+        .prepare(`INSERT INTO supervisor_monitor_threads(project_id,thread_id,source_ordinal,activation_ordinal)
+          VALUES(?,?,?,?) ON CONFLICT(project_id,thread_id) DO UPDATE SET
+          source_ordinal=MAX(source_ordinal,excluded.source_ordinal),
+          activation_ordinal=MIN(activation_ordinal,excluded.activation_ordinal)`)
+        .run(input.projectId, input.threadId, input.sourceOrdinal, input.sourceOrdinal);
       const thread = this.threadRow(input.projectId, input.threadId)!;
-      const sourceOrdinal = Number(thread.source_ordinal);
-
-      this.store.db
-        .prepare(`DELETE FROM supervisor_monitor_items
-          WHERE project_id=? AND thread_id=? AND ordinal<?
-          AND reviewed_version=version`)
-        .run(input.projectId, input.threadId, sourceOrdinal);
+      const currentFloor = Number(thread.source_ordinal);
+      const activationOrdinal = Number(thread.activation_ordinal ?? input.sourceOrdinal);
+      const reactivatedOrdinal = input.projection.runs
+        .filter(
+          (run) =>
+            run.threadId === input.threadId &&
+            run.ordinal >= activationOrdinal &&
+            run.ordinal < currentFloor &&
+            liveRunStatuses.has(run.status) &&
+            isCurrentMainGraphRun(input.projection, run),
+        )
+        .reduce<number | null>(
+          (lowest, run) => (lowest === null ? run.ordinal : Math.min(lowest, run.ordinal)),
+          null,
+        );
+      const collectionFloor = reactivatedOrdinal ?? currentFloor;
+      if (collectionFloor < currentFloor)
+        this.store.db
+          .prepare(`UPDATE supervisor_monitor_threads SET source_ordinal=?
+            WHERE project_id=? AND thread_id=?`)
+          .run(collectionFloor, input.projectId, input.threadId);
 
       const trackedIds = new Set(
         this.store.db
@@ -239,11 +271,29 @@ export class ProjectSupervisorMonitorStore {
       );
       const activity = collectSupervisorActivity(
         input.projection,
-        sourceOrdinal,
+        collectionFloor,
         now,
         input.excludedIds,
         trackedIds,
       );
+      const sourceOrdinal = this.advanceSourceOrdinal(
+        input.projectId,
+        input.threadId,
+        collectionFloor,
+        input.projection,
+        activity,
+      );
+      if (sourceOrdinal !== collectionFloor)
+        this.store.db
+          .prepare(`UPDATE supervisor_monitor_threads SET source_ordinal=?
+            WHERE project_id=? AND thread_id=?`)
+          .run(sourceOrdinal, input.projectId, input.threadId);
+      this.store.db
+        .prepare(`DELETE FROM supervisor_monitor_items
+          WHERE project_id=? AND thread_id=? AND ordinal<?
+          AND reviewed_version=version`)
+        .run(input.projectId, input.threadId, sourceOrdinal);
+      const currentActivity = activity.filter((item) => item.ordinal >= sourceOrdinal);
       this.store.db
         .prepare("UPDATE supervisor_monitor_items SET active=0 WHERE project_id=? AND thread_id=?")
         .run(input.projectId, input.threadId);
@@ -257,7 +307,7 @@ export class ProjectSupervisorMonitorStore {
             .get(input.projectId, input.threadId)?.count ?? 0,
         );
 
-      for (const item of activity) {
+      for (const item of currentActivity) {
         const current = this.itemRow(input.projectId, input.threadId, item.id);
         if (current) {
           if (String(current.version) === item.version) {
@@ -367,6 +417,50 @@ export class ProjectSupervisorMonitorStore {
     };
   }
 
+  private advanceSourceOrdinal(
+    projectId: string,
+    threadId: string,
+    currentFloor: number,
+    projection: Projection,
+    activity: readonly SupervisorMonitorActivity[],
+  ): number {
+    let floor = currentFloor;
+    const runs = projection.runs
+      .filter((run) => run.threadId === threadId && run.ordinal >= currentFloor)
+      .sort((left, right) => left.ordinal - right.ordinal);
+    for (const run of runs) {
+      if (run.ordinal !== floor) break;
+      if (liveRunStatuses.has(run.status) && isCurrentMainGraphRun(projection, run)) break;
+      const runActivity = activity.filter((item) => item.ordinal === run.ordinal);
+      let fullyAcknowledged = true;
+      for (const item of runActivity) {
+        if (!isReviewable(item)) continue;
+        const row = this.itemRow(projectId, threadId, item.id);
+        if (
+          !row ||
+          String(row.version) !== item.version ||
+          row.reviewed_version !== item.version
+        ) {
+          fullyAcknowledged = false;
+          break;
+        }
+      }
+      if (fullyAcknowledged) {
+        const unresolved = this.store.db
+          .prepare(`SELECT item_id FROM supervisor_monitor_items
+            WHERE project_id=? AND thread_id=? AND ordinal=? AND eligible=1
+              AND (reviewed_version IS NULL OR reviewed_version<>version)
+              AND (status IN ('completed','failed','cancelled','interrupted','resolved','expired')
+                OR priority='waiting_input') LIMIT 1`)
+          .get(projectId, threadId, run.ordinal);
+        if (unresolved) fullyAcknowledged = false;
+      }
+      if (!fullyAcknowledged) break;
+      floor = run.ordinal + 1;
+    }
+    return floor;
+  }
+
   select(
     projectId: string,
     settings: SupervisorMonitoringSettings,
@@ -380,11 +474,21 @@ export class ProjectSupervisorMonitorStore {
       typeof optionsOrLimit === "number"
         ? { maxItems: optionsOrLimit, eligibleThreadIds }
         : { ...optionsOrLimit, eligibleThreadIds: eligibleThreadIds ?? optionsOrLimit.eligibleThreadIds };
-    const maxItems = boundedInteger(options.maxItems, SUPERVISOR_MONITOR_MAX_BATCH_ITEMS, 500);
-    const maxItemsPerThread = boundedInteger(
+    const maxPreviewItems = boundedInteger(
+      options.maxItems,
+      SUPERVISOR_MONITOR_MAX_BATCH_ITEMS,
+      SUPERVISOR_MONITOR_MAX_BATCH_ITEMS,
+    );
+    const maxPreviewItemsPerThread = boundedInteger(
       options.maxItemsPerThread,
-      SUPERVISOR_MONITOR_MAX_ITEMS_PER_CHAT,
-      maxItems,
+      Math.min(SUPERVISOR_MONITOR_MAX_ITEMS_PER_CHAT, maxPreviewItems),
+      Math.min(SUPERVISOR_MONITOR_MAX_ITEMS_PER_CHAT, maxPreviewItems),
+    );
+    const maxThreads = boundedInteger(options.maxThreads, SUPERVISOR_MONITOR_MAX_SELECTED_THREADS, SUPERVISOR_MONITOR_MAX_SELECTED_THREADS);
+    const maxFrozenItems = boundedInteger(
+      options.maxFrozenItems,
+      SUPERVISOR_MONITOR_MAX_FROZEN_ITEMS_PER_BATCH,
+      SUPERVISOR_MONITOR_MAX_FROZEN_ITEMS_PER_BATCH,
     );
     const rows = this.store.db
       .prepare("SELECT * FROM supervisor_monitor_threads WHERE project_id=? ORDER BY thread_id")
@@ -412,30 +516,50 @@ export class ProjectSupervisorMonitorStore {
       .sort(threadSort);
     if (!due.length) return null;
 
-    const selected = new Map<string, SupervisorMonitorActivity[]>();
-    let remaining = maxItems;
-    while (remaining > 0) {
+    const selectedCandidates: typeof due = [];
+    let frozenCount = 0;
+    let skippedDueChats = false;
+    for (const candidate of due) {
+      if (selectedCandidates.length >= maxThreads) {
+        skippedDueChats = true;
+        break;
+      }
+      if (candidate.reviewable.length > maxFrozenItems - frozenCount) {
+        skippedDueChats = true;
+        continue;
+      }
+      selectedCandidates.push(candidate);
+      frozenCount += candidate.reviewable.length;
+    }
+    if (!selectedCandidates.length) return null;
+
+    const previewByThread = new Map<string, SupervisorMonitorActivity[]>();
+    let previewRemaining = maxPreviewItems;
+    while (previewRemaining > 0) {
       let progressed = false;
-      for (const candidate of due) {
-        const current = selected.get(candidate.threadId) ?? [];
-        if (current.length >= maxItemsPerThread || current.length >= candidate.reviewable.length) continue;
+      for (const candidate of selectedCandidates) {
+        const current = previewByThread.get(candidate.threadId) ?? [];
+        if (
+          current.length >= maxPreviewItemsPerThread ||
+          current.length >= candidate.reviewable.length
+        )
+          continue;
         current.push(candidate.reviewable[current.length]!);
-        selected.set(candidate.threadId, current);
-        remaining--;
+        previewByThread.set(candidate.threadId, current);
+        previewRemaining--;
         progressed = true;
-        if (remaining === 0) break;
+        if (previewRemaining === 0) break;
       }
       if (!progressed) break;
     }
 
     const threads: SupervisorMonitorThreadBatch[] = [];
-    for (const candidate of due) {
-      const items = selected.get(candidate.threadId) ?? [];
-      if (items.length === 0 && !candidate.saturated) continue;
+    for (const candidate of selectedCandidates) {
       threads.push(
         threadBatch(
           candidate.threadId,
-          items,
+          candidate.reviewable,
+          previewByThread.get(candidate.threadId) ?? [],
           candidate.decision,
           candidate.saturated,
           candidate.untrackedCount,
@@ -443,19 +567,19 @@ export class ProjectSupervisorMonitorStore {
       );
     }
     if (threads.length === 0) return null;
-    const allItems = threads.flatMap((thread) => thread.items);
     const trigger = [...threads]
       .map((thread) => thread.trigger)
       .sort(compareMonitorTrigger)[0]!;
     const totalPending = due.reduce((sum, candidate) => sum + candidate.decision.pendingItemCount, 0);
     const totalFinalized = due.reduce((sum, candidate) => sum + candidate.decision.finalizedActivityCount, 0);
+    const previewCount = threads.reduce((sum, thread) => sum + thread.previewItems.length, 0);
     return {
       projectId,
       createdAt: now,
       trigger,
       finalizedActivityCount: totalFinalized,
       pendingItemCount: totalPending,
-      truncated: allItems.length < totalPending || threads.length < due.length,
+      truncated: skippedDueChats || previewCount < frozenCount,
       threads,
     };
   }

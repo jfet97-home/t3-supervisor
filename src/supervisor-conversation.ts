@@ -9,11 +9,13 @@ import type { ProjectDefinitionLoader } from "./project-definitions.js";
 import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 import type { SupervisorMonitoringStatus, WorkflowProposalInfo } from "./project-supervisor-contract.js";
 import { fingerprint } from "./guidance-store.js";
+import { T3TransportError } from "./t3.js";
 import type { Projection, ThreadInfo } from "./types.js";
 
 const busy = (projection: Projection) => projection.runs.some(run => ["preparing", "queued", "starting", "running", "waiting"].includes(run.status));
 const rank = (mode: unknown) => ["approval-required", "auto-accept-edits", "auto", "full-access"].indexOf(String(mode));
 const acceptedReceipt = (value: unknown): boolean => record(value) && Number.isSafeInteger(value.sequence) && Number(value.sequence) >= 0;
+export const hasCompletionMarker = (text: string, marker: string): boolean => text.trim().replace(/[\s`*_.,!?:;'"()]+$/u, "").endsWith(marker);
 export const canSupervisorContact = (supervisor: ThreadInfo, agent: ThreadInfo): boolean =>
   rank(supervisor.runtimeMode) >= 0 && rank(agent.runtimeMode) >= 0 && rank(supervisor.runtimeMode) >= rank(agent.runtimeMode) &&
   (supervisor.interactionMode === "default" || supervisor.interactionMode === "plan" && agent.interactionMode === "plan") &&
@@ -53,14 +55,16 @@ export class SupervisorConversation {
       return items.some(item => item.priority !== null) || items.filter(item => !item.type.startsWith("run_")).length >= settings.activityThreshold;
     });
     const nextReviewAt = oldestAt === null ? null : Math.max(earlyDue ? Date.now() : oldestAt + settings.intervalMinutes * 60_000, (lastNoticeAt ?? 0) + SUPERVISOR_MONITOR_COOLDOWN_MS);
-    const blocked = this.requests.introductions(projectId).find(intro => ["blocked", "uncertain"].includes(intro.state));
-    const starting = this.requests.introductions(projectId).some(intro => ["context", "ready", "sending", "accepted"].includes(intro.state));
+    const introductions = this.requests.introductions(projectId).filter(intro => tasks.some(task => task.id === intro.taskId));
+    const blocked = introductions.find(intro => ["blocked", "uncertain"].includes(intro.state));
+    const starting = introductions.some(intro => ["context", "ready", "sending", "accepted"].includes(intro.state));
     const failed = this.requests.requests(projectId).find(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged);
     const saturated = tasks.some(task => this.monitor.state(projectId, task.threadId)?.saturated);
+    const misses = this.requests.reviewMisses(projectId);
     const state = !settings.enabled ? "paused" : request?.state === "uncertain" || blocked?.state === "uncertain" ? "uncertain" : blocked || failed || saturated ? "unavailable" : request || starting ? "busy" : "idle";
     return {state, pendingItems, lastNoticeAt, nextReviewAt: settings.enabled ? nextReviewAt : null,
       message: !settings.enabled ? "Monitoring sends are paused; pending activity is retained." : request?.error ?? blocked?.error ?? failed?.error ?? (saturated ? "Activity capacity reached. Checkpointed pending items are retained, but overflow activity could not be checkpointed; complete coverage is unavailable." : null) ??
-        (request ? "Waiting for this specific Supervisor request; changes are being collected." : starting ? "Preparing the proposal introduction and waiting for native visibility." : "Existing T3 activity is batched by age or count. No startup barrier or deterministic gate is applied.")};
+        (request ? "Waiting for this specific Supervisor request; changes are being collected." : starting ? "Preparing the proposal introduction and waiting for native visibility." : misses ? `The last check-in was not confirmed (${misses}/3); pending changes will be checked again after the cooldown.` : "Existing T3 activity is batched by age or count. No startup barrier or deterministic gate is applied.")};
   }
   async observe(threads: readonly ThreadInfo[], signal: AbortSignal, now = Date.now()): Promise<void> {
     this.requests.prune(now);
@@ -94,15 +98,24 @@ export class SupervisorConversation {
   async run(binding: BindingRecord, supervisor: Projection, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
     const inflight = this.requests.pending(binding.projectId);
     if (inflight) {await this.reconcile(inflight, supervisor, signal);return;}
-    if (!this.rpc || busy(supervisor) || !this.store.settings(binding.projectId).monitoring.enabled) return;
+    if (!this.rpc) return;
+    const enabled = this.store.settings(binding.projectId).monitoring.enabled;
     const tasks = this.store.tasks(binding.projectId).filter(task => task.status === "inferred" && task.workflow?.status === "proposed" && task.supervisorThreadId === binding.threadId);
     for (const task of tasks) {
       const previous = this.requests.introduction(task.id);
       if (previous?.state === "ready" || previous?.state === "sending" || previous?.state === "accepted" || previous?.state === "uncertain") {
-        await this.sendIntroduction(task, previous, threads, signal);return;
+        if (!enabled && previous.state === "ready") continue;
+        try {await this.sendIntroduction(task, previous, threads, signal);}
+        catch (cause) {
+          this.requests.saveIntroduction({...previous, state: cause instanceof T3TransportError && cause.httpStatus === 404 ? "blocked" : previous.state,
+            error: cause instanceof T3TransportError && cause.httpStatus === 404 ? "The operative conversation was deleted; other conversations remain supervised." : "This introduction could not be checked; other conversations remain supervised."});
+        }
+        continue;
       }
       if (previous) continue;
-      const agent = await this.projection(task.threadId, signal);
+      if (!enabled || busy(supervisor)) continue;
+      let agent: Projection;
+      try {agent = await this.projection(task.threadId, signal);} catch {continue;}
       if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== binding.projectId || !this.sourceUnchanged(task, agent)) continue;
       if (Date.now() - (this.requests.lastNotice(binding.projectId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
       const text = workflowIntroductionText(task);
@@ -125,6 +138,7 @@ export class SupervisorConversation {
       });
       await this.dispatch(this.requests.pending(binding.projectId)!, signal);return;
     }
+    if (!enabled || busy(supervisor)) return;
     const settings = this.store.settings(binding.projectId).monitoring;
     if (this.requests.requests(binding.projectId).some(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged)) return;
     const eligibleThreadIds = new Set(tasks.filter(task => threads.some(thread => thread.id === task.threadId && this.eligible(thread, threads))).map(task => task.threadId));
@@ -140,8 +154,9 @@ export class SupervisorConversation {
     }
     if (!included.length) return;
     const selected = {...batch, threads: batch.threads.filter(chat => included.some(item => item.threadId === chat.threadId))};
+    const preview = included.map(({items: _items, previewItems, ...chat}) => ({...chat, items: previewItems}));
     const completionMarker = `Supervisor check-in monitor:${batch.createdAt} completed`;
-    const prompt = `${role}\nReview this factual change index. Read relevant finished messages and items through T3. For t3_thread_read(itemId), use only a non-null readItemId from this index. Canonical id fields and synthetic run/request keys are metadata identities, not native read item IDs; when readItemId is null, use a bounded messages read and run metadata instead. Avoid raw activity dumps that would include thinking and large tool outputs. The index contains no message or command bodies and no model summary. Do not assume listed changes prove completion. Reference the proposal ID when messaging the agent. If no intervention is needed, finish with a short observation; do not send a redundant message. End your final response with this exact marker: ${completionMarker}.\nUNTRUSTED_MONITOR_ENVELOPE\n${JSON.stringify({threadId: binding.threadId, requestId: `monitor:${batch.createdAt}`, ...selected, threads: included})}\nEND_UNTRUSTED_MONITOR_ENVELOPE`;
+    const prompt = `${role}\nReview this factual change index. Its counts cover the complete frozen pending scope for each included chat; item IDs are a bounded preview. Read beyond that preview when needed using bounded native activity pagination. Your final marker acknowledges consideration of the whole included scope, not only the sampled IDs. Read relevant finished messages and items through T3. For t3_thread_read(itemId), use only a non-null readItemId from this index. Canonical id fields and synthetic run/request keys are metadata identities, not native read item IDs; when readItemId is null, use a bounded messages read and run metadata instead. Avoid raw activity dumps that would include thinking and large tool outputs. The index contains no message or command bodies and no model summary. Do not assume listed changes prove completion. Reference the proposal ID when messaging the agent. If no intervention is needed, finish with a short observation; do not send a redundant message. End your final response with this exact marker: ${completionMarker}.\nUNTRUSTED_MONITOR_ENVELOPE\n${JSON.stringify({threadId: binding.threadId, requestId: `monitor:${batch.createdAt}`, ...selected, threads: preview})}\nEND_UNTRUSTED_MONITOR_ENVELOPE`;
     if (prompt.length > 120_000) return;
     const request = this.requests.prepare({projectId: binding.projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: null, text: prompt, batch: selected, completionMarker}, Date.now());
     await this.dispatch(request, signal);
@@ -169,22 +184,26 @@ export class SupervisorConversation {
     if (request.supervisorThreadId !== supervisor.thread.id) {
       this.requests.saveRequest({...request, state: "failed", error: "The bound Supervisor changed; the old request identity was retained."});return;
     }
-    const message = supervisor.messages.find(item => item.id === request.messageId && item.threadId === request.supervisorThreadId && item.text === request.text);
-    const run = message ? supervisor.runs.find(item => item.id === message.runId && item.threadId === request.supervisorThreadId && item.userMessageId === request.messageId) : undefined;
+    const message = supervisor.messages.find(item => item.id === request.messageId && item.threadId === request.supervisorThreadId);
+    const run = supervisor.runs.find(item => item.threadId === request.supervisorThreadId && (item.id === message?.runId || item.id === request.runId || item.userMessageId === request.messageId));
     if (!run) {
-      if (request.state === "prepared") await this.dispatch(request, signal);
-      else if (request.state !== "uncertain") this.requests.saveRequest({...request, state: "uncertain", error: "The native request has no confirmed matching run yet. Its identity and pending activity are retained."});
+      if (request.state === "prepared") {
+        if (this.store.settings(request.projectId).monitoring.enabled) await this.dispatch(request, signal);
+      } else if (request.state !== "uncertain") this.requests.saveRequest({...request, state: "uncertain", error: "The native request has no confirmed matching run yet. Its identity and pending activity are retained."});
       return;
     }
     if (request.runId !== run.id) {request = {...request, runId: run.id};this.requests.saveRequest(request);}
     if (!["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(run.status)) return;
-    const contaminated = supervisor.messages.some(item => item.runId === run.id && item.role === "user" && item.id !== request.messageId);
+    const contaminated = supervisor.messages.some(item => item.runId === run.id && item.role === "user" && item.id !== request.messageId && typeof item.senderThreadId !== "string");
     const answers = supervisor.messages.filter(item => item.threadId === request.supervisorThreadId && item.runId === run.id && item.role === "assistant" && !item.streaming &&
       item.nodeId && mainRunNodeReader(supervisor, run)(item.nodeId)?.kind === "assistant_message")
       .sort((a, b) => (timestampMs(a.updatedAt) ?? timestampMs(a.createdAt) ?? 0) - (timestampMs(b.updatedAt) ?? timestampMs(b.createdAt) ?? 0));
-    const validCompletion = run.status === "completed" && !contaminated && answers.at(-1)?.text.trim().endsWith(request.completionMarker) === true;
+    const validCompletion = run.status === "completed" && message?.text === request.text && run.userMessageId === request.messageId && !contaminated && hasCompletionMarker(answers.at(-1)?.text ?? "", request.completionMarker);
     this.store.store.transaction(() => {
-      this.requests.saveRequest({...request, state: validCompletion ? "completed" : "failed", error: validCompletion ? null : "The supervising run did not complete; pending activity is retained."});
+      const misses = !validCompletion && run.status === "completed" && request.kind === "review" ? this.requests.missedReview(request.projectId) : 0;
+      const retryableMiss = request.kind === "review" && run.status === "completed" && misses < 3;
+      this.requests.saveRequest({...request, state: validCompletion || retryableMiss ? "completed" : "failed", error: validCompletion ? null : retryableMiss ? "The check-in output was not confirmed; pending activity will be checked again after the cooldown." : "The check-in could not be confirmed. Pending activity is retained; Retry native access to recover."});
+      if (validCompletion && request.kind === "review") this.requests.reviewMisses(request.projectId, true);
       if (validCompletion && request.batch) this.monitor.acknowledgeInTransaction(request.batch);
       if (request.taskId) {
         const introduction = this.requests.introduction(request.taskId);
@@ -196,7 +215,12 @@ export class SupervisorConversation {
     const agent = await this.projection(task.threadId, signal);
     const visible = agent.messages.find(message => message.id === introduction.messageId && message.threadId === task.threadId && message.text === introduction.text);
     if (visible) {this.requests.saveIntroduction({...introduction, state: "sent", error: null});return;}
-    if (introduction.state === "accepted") return;
+    if (introduction.state === "accepted") {
+      const misses = (introduction.visibilityMisses ?? 0) + 1;
+      const blocked = Date.now() - (introduction.acceptedAt ?? 0) > 60_000 && misses >= 3;
+      this.requests.saveIntroduction({...introduction, visibilityMisses: misses, state: blocked ? "blocked" : "accepted",
+        error: blocked ? "T3 accepted this introduction, but it was not found unchanged. It may have been cancelled or edited; other conversations remain supervised." : null});return;
+    }
     if (introduction.state === "sending" || introduction.state === "uncertain") {
       this.requests.saveIntroduction({...introduction, state: "uncertain", error: "Proposal delivery is uncertain; its message identity is retained. Retry native access rather than sending another proposal."});return;
     }
@@ -205,27 +229,42 @@ export class SupervisorConversation {
     }
     const supervisor = await this.projection(task.supervisorThreadId, signal);
     if (!canSupervisorContact(supervisor.thread, agent.thread)) {this.blockIntroduction(task.id, "The Supervisor's native modes cannot contact this operative chat. Adjust its T3 modes and Retry native access.");return;}
-    const target = agent.runs.filter(run => ["starting", "running", "waiting"].includes(run.status)).sort((a, b) => b.ordinal - a.ordinal)[0];
+    const target = agent.runs.filter(run => run.status === "running").sort((a, b) => b.ordinal - a.ordinal)[0];
     const dispatchMode = introduction.dispatchMode ?? (target ? {type: "steer_active" as const, targetRunId: target.id} : {type: "queue_after_active" as const});
     const sending = {...introduction, state: "sending" as const, dispatchMode, targetRunId: dispatchMode.type === "steer_active" ? dispatchMode.targetRunId : null};this.requests.saveIntroduction(sending);
     try {
-      const receipt = await this.rpc!("orchestration.dispatchCommand", {type: "message.dispatch", commandId: `supervisor-workflow:${task.id}`, messageId: introduction.messageId,
+      const receipt = await this.rpc!("orchestration.dispatchCommand", {type: "message.dispatch", commandId: introduction.commandId ?? `supervisor-workflow:${task.id}`, messageId: introduction.messageId,
         threadId: task.threadId, text: introduction.text, attachments: [], createdBy: "system", creationSource: "server",
         dispatchMode}, signal);
       if (!acceptedReceipt(receipt)) throw new SupervisorRpcError("uncertain");
-      this.requests.saveIntroduction({...sending, state: "accepted"});
+      this.requests.saveIntroduction({...sending, state: "accepted", acceptedAt: Date.now(), visibilityMisses: 0});
     } catch (cause) {
       const definite = cause instanceof SupervisorRpcError && cause.definiteRejection;
-      this.requests.saveIntroduction({...sending, state: definite ? "blocked" : "uncertain", error: definite ? "T3 rejected the proposal; it was not retried." : "Proposal delivery is uncertain. Its exact message identity is retained."});
+      if (definite && dispatchMode.type === "steer_active") {
+        const queued: WorkflowIntroduction = {...sending, state: "ready", messageId: `supervisor-notice:workflow:${task.id}:queue`, commandId: `supervisor-workflow:${task.id}:queue`,
+          dispatchMode: {type: "queue_after_active"}, targetRunId: null, error: null,
+          rejectedAttempts: [...(sending.rejectedAttempts ?? []), {messageId: sending.messageId, commandId: sending.commandId ?? `supervisor-workflow:${task.id}`, dispatchMode}]};
+        this.requests.saveIntroduction(queued);return;
+      }
+      this.requests.saveIntroduction({...sending, state: definite ? "blocked" : "uncertain", definiteRejection: definite, error: definite ? "T3 rejected the proposal. Retry native access after correcting the rejection." : "Proposal delivery is uncertain. Its exact message identity is retained."});
     }
   }
   retry(projectId: string): void {
+    this.requests.reviewMisses(projectId, true);
     const request = this.requests.pending(projectId);
     if (request?.state === "uncertain") this.requests.saveRequest({...request, state: "prepared", error: null});
     for (const failed of this.requests.requests(projectId).filter(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged)) this.requests.saveRequest({...failed, failureAcknowledged: true});
     for (const introduction of this.requests.introductions(projectId)) {
       if (introduction.state === "uncertain") this.requests.saveIntroduction({...introduction, state: "ready", error: null});
       if (introduction.state === "blocked" && !introduction.dispatchMode) this.store.store.db.prepare("DELETE FROM supervisor_workflow_introductions WHERE task_id=?").run(introduction.taskId);
+      if (introduction.state === "blocked" && introduction.definiteRejection) {
+        const rejectedAttempts = [...(introduction.rejectedAttempts ?? []), {messageId: introduction.messageId, commandId: introduction.commandId ?? `supervisor-workflow:${introduction.taskId}`, dispatchMode: introduction.dispatchMode}];
+        const suffix = `retry:${rejectedAttempts.length}`;
+        this.requests.saveIntroduction({...introduction, state: "ready", definiteRejection: false, dispatchMode: {type: "queue_after_active"}, targetRunId: null,
+          messageId: `supervisor-notice:workflow:${introduction.taskId}:${suffix}`, commandId: `supervisor-workflow:${introduction.taskId}:${suffix}`, rejectedAttempts, error: null});
+      } else if (introduction.state === "blocked" && introduction.acceptedAt !== undefined) {
+        this.requests.saveIntroduction({...introduction, state: "accepted", error: null});
+      }
     }
   }
 }

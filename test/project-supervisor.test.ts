@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { parseInterpretation, ProjectSupervisor } from "../src/project-supervisor.js";
-import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../src/project-supervisor-store.js";
+import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type SupervisorBaseline } from "../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../src/project-supervisor-contract.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
@@ -715,6 +715,56 @@ test("unknown model updates stop after three attempts until explicit retry reuse
   assert.equal(fixture.supervisorStore.task("second-thread")?.status, "waiting");
 });
 
+test("monitoring-only saves preserve unknown model command identity through explicit retry", async (t) => {
+  const fixture = await makeFixture([]);
+  t.after(fixture.cleanup);
+  const supervisor = fixture.makeSupervisor();
+  const binding = {...fixture.supervisorStore.reserve("project-a", "Project A", defaultSupervisorModel, activationSequence, Date.now()), state: "ready" as const};
+  fixture.supervisorStore.setBinding(binding);
+  const projection = emptySupervisorProjection(binding.threadId, "project-a", defaultSupervisorModel);
+  fixture.projections.set(binding.threadId, projection);
+  const selection = {...defaultSupervisorModel, options: [{id: "reasoningEffort", value: "low"}]};
+  const saved = await supervisor.save({projectId: "project-a", expectedGeneration: 0, modelSelection: selection}, AbortSignal.timeout(1000));
+  assert.equal(saved.status, "saved");
+  fixture.setUnknownModelUpdates(3);
+  const applyModel = (supervisor as unknown as {applyModel: (binding: BindingRecord, projection: Projection, signal: AbortSignal) => Promise<void>}).applyModel.bind(supervisor);
+
+  await assert.rejects(applyModel(binding, projection, AbortSignal.timeout(1000)), /simulated lost model update response/);
+  const firstSettings = fixture.supervisorStore.settings("project-a");
+  const firstCommandId = fixture.operations.find(call => call.payload.type === "thread.model-selection.set")?.payload.commandId;
+  assert.equal(firstSettings.generation, 1);
+  assert.equal(firstSettings.modelMutationGeneration, 1);
+  assert.equal(firstSettings.pending, true);
+  assert.equal(firstSettings.applyAttempts, 1);
+  assert.ok(firstCommandId);
+
+  const monitoringSaved = await supervisor.save({
+    projectId: "project-a",
+    expectedGeneration: firstSettings.generation,
+    modelSelection: firstSettings.modelSelection,
+    monitoring: {enabled: true, intervalMinutes: 6, activityThreshold: 10},
+  }, AbortSignal.timeout(1000));
+  assert.equal(monitoringSaved.status, "saved");
+  const afterMonitoring = fixture.supervisorStore.settings("project-a");
+  assert.equal(afterMonitoring.generation, 2, "the shared generation still protects settings CAS");
+  assert.equal(afterMonitoring.modelMutationGeneration, 1);
+  assert.equal(afterMonitoring.pending, true);
+  assert.equal(afterMonitoring.applyAttempts, 1, "monitoring saves do not reset the native attempt budget");
+  assert.equal(fixture.operations.filter(call => call.payload.type === "thread.model-selection.set").length, 1);
+
+  await assert.rejects(applyModel(binding, projection, AbortSignal.timeout(1000)), /simulated lost model update response/);
+  assert.equal(fixture.supervisorStore.settings("project-a").applyAttempts, 2);
+  const retry = await supervisor.retry(retryInput("project-a", afterMonitoring.generation, binding, "retry"), AbortSignal.timeout(1000));
+  assert.equal(retry.snapshot?.settings.generation, afterMonitoring.generation);
+  assert.equal(retry.snapshot?.settings.pending, true);
+  const updates = fixture.operations.filter(call => call.payload.type === "thread.model-selection.set");
+  assert.equal(updates.length, 3);
+  assert.ok(updates.every(call => call.payload.commandId === firstCommandId));
+  assert.equal(fixture.supervisorStore.settings("project-a").modelMutationGeneration, 1);
+  assert.equal(fixture.supervisorStore.settings("project-a").pending, true);
+  assert.equal(fixture.supervisorStore.settings("project-a").applyAttempts, 1, "explicit retry resets the budget before its new attempt");
+});
+
 test("unknown dispatch survives restart and retention with the original native identities", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "source-task", sequence: 11, text: "Create a migration plan" }] },
@@ -1074,6 +1124,7 @@ test("interrupted and stalled Supervisor runs become unavailable without answers
   const secondRun = supervisorProjection.runs.find((run) => run.userMessageId === second.messageId);
   assert.ok(secondRun);
   secondRun.status = "waiting";
+  secondRun.startedAt = new Date(Date.now() - 301_000).toISOString();
   fixture.supervisorStore.saveTask({ ...second, dispatchedAt: Date.now() - 301_000 });
   await supervisor.runOnce();
 
@@ -1082,4 +1133,34 @@ test("interrupted and stalled Supervisor runs become unavailable without answers
   assert.equal(fixture.operations.filter((call) => call.payload.type === "message.dispatch").length, 2);
   assert.equal(fixture.operations.some((call) => ["runtime-request.respond", "thread.interrupt", "runtime-request.interrupt"].includes(String(call.payload.type))), false);
   assert.equal(fixture.projections.get("source-thread")?.messages.length, 2);
+});
+
+test("queued and not-yet-started Supervisor runs do not time out from stale dispatch time", async (t) => {
+  const fixture = await makeFixture([
+    { threadId: "source-thread", projectId: "project-a", turns: [{ id: "first-task", sequence: 11, text: "Review the release" }] },
+  ]);
+  t.after(fixture.cleanup);
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  const binding = fixture.supervisorStore.binding("project-a");
+  const task = fixture.supervisorStore.task("source-thread");
+  assert.ok(binding && task);
+  const supervisorProjection = fixture.projections.get(binding.threadId);
+  assert.ok(supervisorProjection);
+  const run = supervisorProjection.runs.find((candidate) => candidate.userMessageId === task.messageId);
+  assert.ok(run);
+
+  fixture.supervisorStore.saveTask({ ...task, dispatchedAt: Date.now() - 301_000 });
+  run.status = "queued";
+  run.startedAt = null;
+  await supervisor.runOnce();
+  assert.equal(fixture.supervisorStore.task("source-thread")?.status, "waiting");
+
+  run.status = "running";
+  await supervisor.runOnce();
+  assert.equal(fixture.supervisorStore.task("source-thread")?.status, "waiting");
+
+  run.startedAt = new Date(Date.now() - 301_000).toISOString();
+  await supervisor.runOnce();
+  assert.equal(fixture.supervisorStore.task("source-thread")?.status, "unavailable");
 });

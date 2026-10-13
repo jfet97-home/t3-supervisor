@@ -87,6 +87,10 @@ connection failures and stay available after conflicts. Unknown save outcomes
 require an explicit refresh; rejected session guards refresh access without
 repeating the write automatically. Model changes apply only when the Supervisor
 is idle, and existing requests retain their original identity through uncertainty.
+Monitoring-only saves advance the dashboard save generation but preserve the
+separate model-mutation generation, so an unresolved model update keeps its native
+command identity. Interpretation timeouts start at the native run's actual start;
+time spent queued is not counted as model execution time.
 
 Retry native access reconciles an uncertain creation, model update or request
 with its original identity. Resolve dirty settings drafts first. A confirmed deleted
@@ -115,7 +119,10 @@ upgraded from the dashboard. Telegram remains optional and independent.
 After validating a new draft, the service initializes the supervising conversation
 with the task, complete project definitions and proposal identity. It then sends
 one introduction to the operative conversation using native `steer_active` when
-a run is active. The introduction explains the Supervisor's role, the proposed
+a compatible run is running. Starting and waiting runs use queue delivery. A
+definite steering rejection permits one queued attempt with new message/command
+identities, retaining the rejected attempt; an uncertain effect never triggers
+that fallback. The introduction explains the Supervisor's role, the proposed
 steps, the `.supervisor` paths and how to reply or suggest other available blocks.
 With an idle target, native queue/start semantics can start a follow-up. A run
 that finishes during steering can also receive a follow-up under T3's own behavior.
@@ -133,6 +140,10 @@ Unknown native effects retain their exact message/command identities and origina
 bytes. They are reconciled from the relevant conversation, with an explicit Retry
 native access action before replay. A receipt establishes acceptance; a projection
 establishes that the introduction is visible. Neither proves that the agent followed it.
+An accepted introduction that remains invisible is reported after a bounded wait;
+it does not stall other operative conversations. Deleted targets are reported
+separately. Explicit recovery rechecks accepted effects rather than duplicating
+them; a confirmed rejection can be retried with fresh identities.
 Completed objective-only records are not retrospectively activated.
 
 ## Ongoing check-ins
@@ -156,7 +167,13 @@ draft context. They do not contain command outputs or streamed text, and are not
 model summaries. The supervising model reads relevant messages/items on demand
 and decides whether to intervene. Frozen activity revisions are acknowledged only
 after the specific native request completes with its completion marker and no
-intervening user message. Changes observed during the review remain pending.
+intervening human message. Native peer replies do not invalidate a check-in by
+themselves. If a peer restart replaces the request's primary message, the request
+settles without acknowledging its activity. Changes observed during the review
+remain pending. Each included chat freezes its entire pending scope; the model
+receives a fair preview of up to 20 item references per chat and 100 per project,
+with counts and instructions to read further where needed. A large burst is not
+split into repeated notices solely because its preview is smaller.
 
 Projects exposes a pause control, an interval of 1–60 minutes and an activity
 threshold of 3–100. Changes apply on the next service check without a restart or
@@ -164,7 +181,18 @@ discarding the backlog. A lower limit can make one combined notice due after the
 cooldown; it does not generate a burst. Model changes still wait for an idle run.
 Metadata and native requests persist in the existing private guidance database.
 Capacity limits and unresolved deliveries are surfaced rather than silently
-discarding unreviewed activity. A failed check-in needs explicit native recovery.
+discarding unreviewed activity. Completed check-ins with unconfirmed output retain
+their activity and retry after the cooldown, stopping after three consecutive
+misses. Other failed or uncertain effects need explicit native recovery.
+Completed request history retains the latest 100 entries per project for up to
+30 days; unfinished and unacknowledged failed reviews are preserved separately.
+Activity metadata is capped at 1,000 rows per chat. Fully acknowledged closed runs
+advance the source floor and release their reviewed metadata, so ordinary completed
+runs do not consume a lifetime quota. A single dense active run can still reach
+the ceiling; overflow and incomplete coverage are reported and prevent floor
+advancement. Native reactivation of a previously closed run rewinds the floor to
+that live main-graph run, within the original activation boundary. A batch freezes
+at most 10,000 item revisions across 100 chats.
 
 This feature does not execute required blocks, attest compliance or enforce
 protected operations. Deterministic gates remain deferred.

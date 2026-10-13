@@ -9,7 +9,7 @@ import { sameModel } from "./supervisor-native.js";
 import type { ProposalContext } from "./supervisor-workflow.js";
 
 export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "codex", model: "gpt-6-luna", options: [{id: "reasoningEffort", value: "high"}]};
-export type ProjectModelSettings = {projectId: string; generation: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; applyAttempts?: number; applicationMessage?: string | null};
+export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; applyAttempts?: number; applicationMessage?: string | null};
 export type BindingRecord = SupervisorBinding & {enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string};
 export type SupervisorBaseline = {version?: 2; snapshotSequence: number; threads: Array<{id: string; latestRunId: string | null}>};
 export type TaskRecord = TaskInterpretationInfo & {id: string; sourceHash: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionReadAttempts?: number; revalidationAttempts?: number};
@@ -66,9 +66,9 @@ export class ProjectSupervisorStore {
     return projection.runs.find(run => run.id === anchor && run.threadId === threadId)?.ordinal ?? null;
   }
   settings(projectId: string): ProjectModelSettings {
-    const stored = this.read<Omit<ProjectModelSettings, "monitoring"> & {monitoring?: SupervisorMonitoringSettings}>("supervisor_project_settings", "project_id", projectId);
-    return stored ? {...stored, monitoring: normalizeMonitoringSettings(stored.monitoring)} : {
-      projectId, generation: 0, modelSelection: defaultSupervisorModel, pending: false, monitoring: {...defaultMonitoringSettings},
+    const stored = this.read<Omit<ProjectModelSettings, "monitoring" | "modelMutationGeneration"> & {monitoring?: SupervisorMonitoringSettings; modelMutationGeneration?: number}>("supervisor_project_settings", "project_id", projectId);
+    return stored ? {...stored, modelMutationGeneration: stored.modelMutationGeneration ?? stored.generation, monitoring: normalizeMonitoringSettings(stored.monitoring)} : {
+      projectId, generation: 0, modelMutationGeneration: 0, modelSelection: defaultSupervisorModel, pending: false, monitoring: {...defaultMonitoringSettings},
     };
   }
   saveSettings(projectId: string, expected: number, selection: SupervisorModelSelection, monitoring?: SupervisorMonitoringSettings): ProjectModelSettings {
@@ -82,6 +82,7 @@ export class ProjectSupervisorStore {
         ...old,
         projectId,
         generation: expected + 1,
+        modelMutationGeneration: old.modelMutationGeneration + (modelChanged ? 1 : 0),
         modelSelection: selection,
         monitoring: nextMonitoring,
         pending: modelChanged ? true : old.pending,
@@ -94,8 +95,10 @@ export class ProjectSupervisorStore {
   observeModel(projectId: string, selection: SupervisorModelSelection, appliedGeneration?: number, message?: string | null): void {
     const old = this.settings(projectId);
     if (old.pending && old.generation !== appliedGeneration) return;
+    const modelChanged = !sameModel(old.modelSelection, selection);
     const next = {...old, modelSelection: selection, pending: false, applicationMessage: message === undefined ? old.applicationMessage ?? null : message,
-      generation: old.generation + (!old.pending && !sameModel(old.modelSelection, selection) ? 1 : 0)};
+      modelMutationGeneration: old.modelMutationGeneration + (modelChanged ? 1 : 0),
+      generation: old.generation + (!old.pending && modelChanged ? 1 : 0)};
     this.store.db.prepare("INSERT INTO supervisor_project_settings VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET document=excluded.document").run(projectId, JSON.stringify(next));
   }
   modelAttempt(projectId: string, reset = false): void {

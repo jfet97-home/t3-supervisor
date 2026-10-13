@@ -173,7 +173,7 @@ export class ProjectSupervisor {
       if ((settings.applyAttempts ?? 0) >= 3) return;
       this.store.modelAttempt(binding.projectId);
       try {
-        await this.operateRpc!("orchestration.dispatchCommand", {type: "thread.model-selection.set", commandId: `supervisor-model:${binding.threadId}:${settings.generation}`, threadId: binding.threadId, modelSelection: settings.modelSelection}, signal);
+        await this.operateRpc!("orchestration.dispatchCommand", {type: "thread.model-selection.set", commandId: `supervisor-model:${binding.threadId}:${settings.modelMutationGeneration}`, threadId: binding.threadId, modelSelection: settings.modelSelection}, signal);
       } catch (cause) {
         if (!(cause instanceof SupervisorRpcError) || !cause.definiteRejection) throw cause;
         const result = modelSelection((await this.projection(binding.threadId, signal)).thread.modelSelection);
@@ -248,7 +248,7 @@ export class ProjectSupervisor {
     const inflight = jobs.find(t => ["dispatching","waiting","uncertain"].includes(t.status));
     if (inflight) {await this.reconcile(inflight, projection, signal);return;}
     if (this.conversation.hasInflight(binding.projectId)) {await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
-    if (active(projection)) return;
+    if (active(projection)) {await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
     await this.applyModel(binding, projection, signal);
     if (this.store.settings(binding.projectId).pending) return;
     let job = jobs.find(t => t.status === "queued");
@@ -311,7 +311,7 @@ export class ProjectSupervisor {
     if (job.supervisorRunId !== run.id) {job = {...job, supervisorRunId: run.id};this.store.saveTask(job);}
     if (run.status !== "completed") {
       if (["failed","interrupted","cancelled","rolled_back"].includes(run.status)) this.complete(job, "unavailable", null, "The interpretation run did not complete successfully.");
-      else if (Date.now() - (job.dispatchedAt ?? Date.now()) > 300_000) this.complete(job, "unavailable", null, "The interpretation timed out or requires input. The service does not answer or interrupt Supervisor runs.");
+      else if (run.status !== "queued" && run.status !== "preparing" && timestampMs(run.startedAt) !== null && Date.now() - timestampMs(run.startedAt)! > 300_000) this.complete(job, "unavailable", null, "The interpretation timed out or requires input. The service does not answer or interrupt Supervisor runs.");
       return;
     }
     if (!this.currentSource(job, await this.projection(job.threadId, signal))) {this.complete(job, "unavailable", null, "The task source changed before the interpretation completed.");return;}

@@ -483,6 +483,24 @@ test("batch selection interleaves due chats under a global cap and reports expli
     assert.ok(fair);
     assert.deepEqual(fair.threads.map((thread) => thread.threadId), ["chat-a", "chat-b"]);
     assert.equal(fair.truncated, true);
+    assert.equal(fair.threads[0]?.items.length, 2);
+
+    const frozenLimit = monitor.select(projectId, settings, now, null, {
+      maxItems: 2,
+      maxItemsPerThread: 1,
+      maxFrozenItems: 2,
+    });
+    assert.ok(frozenLimit);
+    assert.deepEqual(frozenLimit.threads.map((thread) => thread.threadId), ["chat-a"]);
+    assert.equal(frozenLimit.threads[0]?.items.length, 2);
+    monitor.acknowledge(frozenLimit, now + 1);
+    const remaining = monitor.select(projectId, settings, now + 2, null, {
+      maxItems: 2,
+      maxItemsPerThread: 1,
+      maxFrozenItems: 2,
+    });
+    assert.ok(remaining);
+    assert.deepEqual(remaining.threads.map((thread) => thread.threadId), ["chat-b"]);
 
     const limited = new ProjectSupervisorMonitorStore(monitor.store, 1);
     const saturated = limited.observe({
@@ -498,5 +516,237 @@ test("batch selection interleaves due chats under a global cap and reports expli
     assert.equal(saturated.saturated, true);
     assert.equal(saturated.untrackedCount, 1);
     assert.equal(limited.state(projectId, "chat-c").activities.length, 1);
+  });
+});
+
+test("acknowledged closed runs advance the source floor and release per-thread history capacity", async () => {
+  await withStore((monitor, store) => {
+    const bounded = new ProjectSupervisorMonitorStore(store, 4);
+    let events: EventInput[] = [];
+    for (let ordinal = 1; ordinal <= 12; ordinal++) {
+      events = [...events, { ...event(`run-${ordinal}-reply`), runOrdinal: ordinal }];
+      const projection = makeProjection({ events });
+      for (const run of projection.runs) {
+        run.status = "completed";
+        run.completedAt = new Date(now + run.ordinal).toISOString();
+      }
+      const observedAt = now + ordinal * 1000;
+      const observation = bounded.observe({ projectId, threadId, sourceOrdinal: 1, projection, now: observedAt });
+      assert.equal(observation.saturated, false);
+      const batch = bounded.select(projectId, defaultMonitoringSettings, observedAt, null);
+      assert.ok(batch);
+      assert.equal(batch.threads[0]?.items.length, 2);
+      bounded.acknowledge(batch, observedAt + 1);
+      const stored = Number(store.db
+        .prepare("SELECT COUNT(*) AS count FROM supervisor_monitor_items WHERE project_id=? AND thread_id=?")
+        .get(projectId, threadId)?.count ?? 0);
+      assert.ok(stored <= 4);
+    }
+    const latest = makeProjection({ events });
+    for (const run of latest.runs) {
+      run.status = "completed";
+      run.completedAt = new Date(now + run.ordinal).toISOString();
+    }
+    bounded.observe({ projectId, threadId, sourceOrdinal: 1, projection: latest, now: now + 13_000 });
+    assert.equal(bounded.state(projectId, threadId).sourceOrdinal, 13);
+    assert.equal(bounded.state(projectId, threadId).saturated, false);
+    assert.equal(Number(store.db
+      .prepare("SELECT COUNT(*) AS count FROM supervisor_monitor_items WHERE project_id=? AND thread_id=?")
+      .get(projectId, threadId)?.count ?? 0), 0);
+  });
+});
+
+test("a later unfinished run blocks floor advancement until its same item completes", async () => {
+  await withStore((monitor) => {
+    const first = makeProjection({ events: [{ ...event("first-reply"), runOrdinal: 1 }] });
+    first.runs[0]!.status = "completed";
+    first.runs[0]!.completedAt = new Date(now).toISOString();
+    monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: first, now });
+    const firstBatch = monitor.select(projectId, defaultMonitoringSettings, now, null)!;
+    monitor.acknowledge(firstBatch, now + 1);
+
+    const running = makeProjection({ events: [
+      { ...event("first-reply"), runOrdinal: 1 },
+      { id: "later-operation", type: "dynamic_tool", status: "running", runOrdinal: 2 },
+    ] });
+    running.runs[0]!.status = "completed";
+    running.runs[0]!.completedAt = new Date(now).toISOString();
+    running.runs[1]!.status = "running";
+    monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: running, now: now + 2 });
+    assert.equal(monitor.state(projectId, threadId).sourceOrdinal, 2);
+    assert.equal(monitor.pending(projectId, threadId).length, 0);
+
+    const completed = makeProjection({ events: [
+      { ...event("first-reply"), runOrdinal: 1 },
+      { id: "later-operation", type: "dynamic_tool", status: "completed", runOrdinal: 2, updatedAt: now + 3 },
+    ] });
+    completed.runs[0]!.status = "completed";
+    completed.runs[0]!.completedAt = new Date(now).toISOString();
+    completed.runs[1]!.status = "completed";
+    completed.runs[1]!.completedAt = new Date(now + 3).toISOString();
+    monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: completed, now: now + 3 });
+    assert.ok(monitor.pending(projectId, threadId).some((item) => item.id === "turn-item-later-operation" && item.status === "completed"));
+  });
+});
+
+test("pending and changed revisions of a closed run hold the source floor until acknowledged", async () => {
+  await withStore((monitor) => {
+    const projection = makeProjection({ events: [event("closed-editable-reply")] });
+    projection.runs[0]!.status = "completed";
+    projection.runs[0]!.completedAt = new Date(now).toISOString();
+    monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection, now });
+    assert.equal(monitor.state(projectId, threadId).sourceOrdinal, 1);
+    const firstBatch = monitor.select(
+      projectId,
+      { ...defaultMonitoringSettings, activityThreshold: 1 },
+      now,
+      null,
+    )!;
+    monitor.acknowledge(firstBatch, now + 1);
+
+    projection.messages[0]!.text = "revised after the first review";
+    projection.messages[0]!.updatedAt = new Date(now + 2).toISOString();
+    projection.turnItems![0]!.text = "revised after the first review";
+    projection.turnItems![0]!.updatedAt = new Date(now + 2).toISOString();
+    monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection, now: now + 2 });
+    assert.equal(monitor.state(projectId, threadId).sourceOrdinal, 1);
+    assert.ok(monitor.pending(projectId, threadId).some((item) => item.id === "message:message-closed-editable-reply"));
+
+    const revisedBatch = monitor.select(
+      projectId,
+      { ...defaultMonitoringSettings, activityThreshold: 1 },
+      now + 2,
+      null,
+    )!;
+    monitor.acknowledge(revisedBatch, now + 3);
+    monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection, now: now + 4 });
+    assert.equal(monitor.state(projectId, threadId).sourceOrdinal, 2);
+    assert.equal(monitor.pending(projectId, threadId).length, 0);
+  });
+});
+
+test("a live current-graph restart of a pruned run rewinds only to its activation floor", async () => {
+  await withStore((monitor) => {
+    const completed = makeProjection({ events: [event("before-restart")] });
+    completed.runs[0]!.status = "completed";
+    completed.runs[0]!.completedAt = new Date(now).toISOString();
+    monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: completed, now });
+    const completedBatch = monitor.select(projectId, defaultMonitoringSettings, now, null)!;
+    monitor.acknowledge(completedBatch, now + 1);
+    const pruned = monitor.observe({
+      projectId,
+      threadId,
+      sourceOrdinal: 1,
+      projection: completed,
+      now: now + 2,
+    });
+    assert.equal(pruned.sourceOrdinal, 2);
+    assert.equal(monitor.state(projectId, threadId).activities.length, 0);
+
+    const restarted = makeProjection({ events: [event("after-restart", now + 3)] });
+    restarted.runs[0]!.status = "running";
+    restarted.runs[0]!.activeAttemptId = "attempt-restarted";
+    (restarted.nodes as Array<Record<string, unknown>>)[0]!.status = "running";
+    const resumed = monitor.observe({
+      projectId,
+      threadId,
+      sourceOrdinal: 1,
+      projection: restarted,
+      now: now + 3,
+    });
+    assert.equal(resumed.sourceOrdinal, 1);
+    assert.ok(monitor.pending(projectId, threadId).some((item) => item.id === "message:message-after-restart"));
+
+    const olderActive = makeProjection({ threadId: "late-activation", events: [
+      { ...event("older-run-work"), runOrdinal: 1 },
+      { ...event("activation-run-work"), runOrdinal: 2 },
+    ] });
+    olderActive.runs[0]!.status = "running";
+    olderActive.runs[0]!.activeAttemptId = "older-attempt";
+    olderActive.runs[1]!.status = "completed";
+    olderActive.runs[1]!.completedAt = new Date(now).toISOString();
+    (olderActive.nodes as Array<Record<string, unknown>>)[0]!.status = "running";
+    monitor.observe({
+      projectId,
+      threadId: "late-activation",
+      sourceOrdinal: 2,
+      projection: olderActive,
+      now: now + 4,
+    });
+    const baselineGuard = monitor.state(projectId, "late-activation");
+    assert.equal(baselineGuard.sourceOrdinal, 2);
+    assert.ok(baselineGuard.activities.every((item) => item.ordinal >= 2));
+  });
+});
+
+test("a hundred-command burst freezes all revisions and previews only a bounded sample", async () => {
+  await withStore((monitor, store) => {
+    const initialEvents = Array.from({ length: 100 }, (_, index) => ({
+      id: `command-${index}`,
+      type: "command_execution",
+      status: "completed",
+      updatedAt: now - 30_000,
+      text: `run command ${index}`,
+    }));
+    const initial = makeProjection({ events: initialEvents });
+    monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: initial, now });
+    const frozen = monitor.select(projectId, defaultMonitoringSettings, now, null)!;
+    assert.equal(frozen.pendingItemCount, 100);
+    assert.equal(frozen.threads[0]?.pendingItemCount, 100);
+    assert.equal(frozen.threads[0]?.items.length, 100);
+    assert.equal(frozen.threads[0]?.previewItems.length, 20);
+    assert.equal(frozen.truncated, true);
+
+    const whileBusy = makeProjection({ events: [
+      ...initialEvents.map((item, index) => ({
+        ...item,
+        updatedAt: index === 0 ? now + 1 : item.updatedAt,
+        text: index === 0 ? "updated command" : item.text,
+      })),
+      { id: "arrived-during-review", type: "command_execution", status: "completed", updatedAt: now + 1, text: "new command" },
+    ] });
+    monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: whileBusy, now: now + 1 });
+    const result = store.transaction(() => monitor.acknowledgeInTransaction(frozen, now + 2));
+    assert.equal(result.acknowledged, 99);
+    assert.equal(result.stale, 1);
+    const pending = monitor.pending(projectId, threadId);
+    assert.deepEqual(pending.map((item) => item.id).sort(), ["turn-item-arrived-during-review", "turn-item-command-0"]);
+  });
+});
+
+test("an over-cap active run reports saturation and blocks its closed-run floor", async () => {
+  await withStore((monitor, store) => {
+    const bounded = new ProjectSupervisorMonitorStore(store, 1);
+    const projection = makeProjection({ events: [
+      event("tracked-before-cap"),
+      event("untracked-after-cap"),
+    ] });
+    const first = bounded.observe({ projectId, threadId, sourceOrdinal: 1, projection, now });
+    assert.equal(first.saturated, true);
+    assert.equal(first.untrackedCount, 1);
+    const firstBatch = bounded.select(
+      projectId,
+      { ...defaultMonitoringSettings, activityThreshold: 1 },
+      now,
+      null,
+    )!;
+    bounded.acknowledge(firstBatch, now + 1);
+
+    projection.runs[0]!.status = "completed";
+    projection.runs[0]!.completedAt = new Date(now + 2).toISOString();
+    const closed = bounded.observe({
+      projectId,
+      threadId,
+      sourceOrdinal: 1,
+      projection,
+      now: now + 2,
+    });
+    assert.equal(closed.sourceOrdinal, 1);
+    assert.equal(closed.saturated, true);
+    assert.equal(closed.untrackedCount, 2);
+    assert.equal(bounded.state(projectId, threadId).activities.length, 0);
+    assert.equal(Number(store.db
+      .prepare("SELECT COUNT(*) AS count FROM supervisor_monitor_items WHERE project_id=? AND thread_id=?")
+      .get(projectId, threadId)?.count ?? 0), 1);
   });
 });
