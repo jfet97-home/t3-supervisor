@@ -38,7 +38,7 @@ and block errors must be repaired before editing. Native target checks reject
 symlinked paths and incomplete listings; external changes racing the actual native
 write remain outside the V1 contract.
 
-## Supervisor model and task interpretation
+## Supervisor model, task interpretation and workflow drafts
 
 Supervisor preferences belong to the project, independently of the rule editor's
 selected working directory. Model and reasoning choices come from native T3
@@ -64,3 +64,9 @@ Settings → Chat settings controls excluded chats and the interactive Telegram 
 Changes apply live and persist in the instance state volume. Mac and Lima policies
 are independent. The interactive chat can answer questionnaires even when excluded
 from other notifications. The Telegram integration is completely optional.
+
+Select an operational conversation to inspect its workflow proposal. The ordered
+steps identify existing project blocks; rule decisions explain their applicability.
+The workspace and definition revision identify the snapshot used. Unavailable,
+invalid or stale proposals do not become agreed workflows. Legacy objective-only
+records remain unchanged. This stage does not send the draft to the agent.

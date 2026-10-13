@@ -1,13 +1,13 @@
 ---
 name: use-t3-supervisor
-description: Use an existing T3 Supervisor dashboard to inspect and edit repository project rules, inspect reusable workflow blocks and validation, configure each project's Supervisor model and reasoning, view task interpretation and notification history, or adjust chat settings. For product usage, not source development, deployment, credentials provisioning, or Lima VM setup.
+description: Use an existing T3 Supervisor dashboard to inspect and edit repository project rules, inspect reusable workflow blocks and validation, configure each project's Supervisor model and reasoning, view task interpretations, draft workflows and notification history, or adjust chat settings. For product usage, not source development, deployment, credentials provisioning, or Lima VM setup.
 ---
 
 # Use T3 Supervisor
 
 The dashboard uses one project rule model backed by `.supervisor/rules.yaml` and
-reusable Markdown blocks. Legacy condition/message reminders are retired. Workflow
-negotiation and semantic execution of the new rules are not connected yet.
+reusable Markdown blocks. Legacy condition/message reminders are retired. The Supervisor proposes draft workflows from project rules and blocks. Dialogue
+with the operational agent and workflow progress monitoring are not connected yet.
 Task interpretation uses an automatically created T3 conversation per project.
 
 ## Connect
@@ -52,7 +52,10 @@ change waits for the Supervisor to become idle. Unavailable models remain visibl
 without a fallback. Refresh to verify the actual T3 selection after a change.
 
 Select an operational conversation to inspect its interpreted objective and status.
-An inferred objective is not an agreed workflow or proof that rules were followed.
+Inspect the draft workflow, ordered block steps, rule applicability decisions and
+source workspace/revision. A proposed workflow is not agreed or executed. Missing
+or invalid definitions leave the proposal unavailable; changed definitions produce
+a stale result. Legacy objective-only records are not automatically reprocessed.
 The first stage handles native web/mobile user tasks, not scheduled/imported/MCP
 requests. The bound Supervisor conversation can be opened in T3; it is excluded
 from ordinary monitoring and notifications.
@@ -74,4 +77,4 @@ Telegram is optional. Answer native questionnaires through their existing T3 or
 Telegram paths; ordinary messages do not replace questionnaire answers.
 
 Report the selected project/workspace, actual saved result and any unavailable
-verification. Do not claim that saving rules activates workflow supervision.
+verification. Do not claim that a draft proposal means agent negotiation or rule compliance.

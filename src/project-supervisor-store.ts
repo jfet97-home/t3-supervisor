@@ -6,12 +6,13 @@ import type { GuidanceStore } from "./guidance-store.js";
 import type { SupervisorBinding, SupervisorModelSelection, TaskInterpretationInfo } from "./project-supervisor-contract.js";
 import type { Projection, SupervisorConfig } from "./types.js";
 import { sameModel } from "./supervisor-native.js";
+import type { ProposalContext } from "./supervisor-workflow.js";
 
 export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "codex", model: "gpt-6-luna", options: [{id: "reasoningEffort", value: "high"}]};
 export type ProjectModelSettings = {projectId: string; generation: number; modelSelection: SupervisorModelSelection; pending: boolean; applyAttempts?: number; applicationMessage?: string | null};
 export type BindingRecord = SupervisorBinding & {enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string};
 export type SupervisorBaseline = {version?: 2; snapshotSequence: number; threads: Array<{id: string; latestRunId: string | null}>};
-export type TaskRecord = TaskInterpretationInfo & {id: string; sourceHash: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number};
+export type TaskRecord = TaskInterpretationInfo & {id: string; sourceHash: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionReadAttempts?: number; revalidationAttempts?: number};
 
 /** Loads permanent ownership before any notification or input worker starts. */
 export const loadSupervisorOwnership = (directory: string): Set<string> => {
@@ -124,7 +125,7 @@ export class ProjectSupervisorStore {
     for (const row of this.store.db.prepare("SELECT document FROM supervisor_task_interpretations WHERE updated_at<?").all(now - 30 * 86400_000)) {
       const task = JSON.parse(String(row.document)) as TaskRecord;
       if (!["inferred","needs_context","unavailable","expired"].includes(task.status)) continue;
-      this.saveTask({...task, status: "expired", objective: null, reason: "Interpretation evidence expired.", requestText: "", updatedAt: now});
+      this.saveTask({...task, status: "expired", objective: null, reason: "Interpretation evidence expired.", requestText: "", definitionContext: null, workflow: null, updatedAt: now});
     }
   }
 }

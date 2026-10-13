@@ -42,7 +42,7 @@ export const runGuidanceApplication = (
     const supervisionStore = new ProjectSupervisorStore(store, owned);
     const operateToken = config.guidanceTokenFile && existsSync(config.guidanceTokenFile) ? yield* Effect.tryPromise(() => readFile(config.guidanceTokenFile!, "utf8")) : "";
     const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, makeSupervisorRpc(config.t3Url, readToken.trim()),
-      operateToken.trim() ? makeSupervisorRpc(config.t3Url, operateToken.trim()) : null, readSupervisorBaseline(config.t3Url, readToken.trim()));
+      operateToken.trim() ? makeSupervisorRpc(config.t3Url, operateToken.trim()) : null, readSupervisorBaseline(config.t3Url, readToken.trim()), definitions);
     runtime.retired = true;
     yield* Effect.acquireRelease(
       Effect.promise(() => startGuidanceUi(config, runtime, definitions, editor, supervision)),

@@ -12,7 +12,8 @@ repository-defined rules, and optionally handling Telegram notifications and inp
   references. Select a project root or a conversation's worktree and see validation
   problems and the actual source path. See [project definitions](docs/project-definitions.md).
 - **Project Supervisor:** choose a T3 model and reasoning per project. A reusable
-  conversation is created automatically for new task interpretation. See
+  conversation is created automatically to interpret new tasks and propose draft
+  workflows from their workspace rules and blocks. See
   [project supervision](docs/project-supervision.md).
 - **T3 observation and history:** project and chat inventories sync automatically;
   existing supervision and notification history remain inspectable.

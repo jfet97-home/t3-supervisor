@@ -181,6 +181,8 @@ stale clients cannot modify legacy rules/settings, preview, mute, classify or re
 old episodes. SQLite history and uncertain notices are retained, without automatic
 reconciliation or retry. The remaining connection poll performs no model calls.
 
-Project definitions are not yet interpreted for applicability or workflow execution.
-Dynamic workflows will compose existing project blocks, with required blocks supplied
-by project rules. Block authoring/review and workflow negotiation follow this step.
+New task interpretation now supplies complete valid definitions to the project
+Supervisor to propose ordered workflows and assess rule applicability. Proposals
+compose existing blocks and include required blocks for applicable rules. See
+[project supervision](project-supervision.md) for validation and availability.
+Block authoring/review, agent dialogue and workflow execution monitoring remain later steps.

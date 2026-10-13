@@ -165,7 +165,7 @@ function Settings({data}: {data: GuidanceSnapshot}) {
   return <section className="stack"><h2>Supervisor settings</h2><ChatSettings data={data}/>
     <div className="panel stack"><h3>T3 connection</h3><p>{data.connected ? "Connected" : "Disconnected"} · Build: {data.serverVersion ?? "Unavailable"}</p><p>{data.coverage}</p>
       <h3>Project file editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .supervisor/rules.yaml in the selected working directory.</p>
-      <p>Legacy reminders are retired. Their history is retained; uncertain deliveries are not retried or resolved automatically. Workflow supervision will use project rules and existing blocks when it is connected.</p>
+      <p>Legacy reminders are retired. Their history is retained; uncertain deliveries are not retried or resolved automatically. Workflow drafts use project rules and existing blocks; agent dialogue and execution monitoring remain pending.</p>
     </div></section>;
 }
 function Dashboard() {
@@ -241,7 +241,7 @@ function Dashboard() {
       )}
       {view === "settings" && <Settings data={data} />}
       <footer>
-        Project files define the rules. Workflow supervision is not connected yet.
+        Project files define the rules and workflow blocks. Agent dialogue is not connected yet.
         Projects and chats sync automatically.
       </footer>
     </main>

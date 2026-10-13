@@ -28,6 +28,15 @@ export const ProjectSupervisorBinding = Schema.Struct({
   state: Schema.Literals(["creating", "ready", "uncertain", "rejected", "missing"]),
 });
 export type SupervisorBinding = typeof ProjectSupervisorBinding.Type;
+export const WorkflowProposal = Schema.Struct({
+  status: Schema.Literals(["pending", "proposed", "unavailable", "stale", "invalid"]),
+  message: Schema.String,
+  workspaceRoot: Schema.NullOr(Schema.String),
+  revision: Schema.NullOr(Schema.String),
+  rules: Schema.Array(Schema.Struct({index: Schema.Number, name: Schema.String, applies: Schema.Boolean, reason: Schema.String})),
+  steps: Schema.Array(Schema.Struct({blockId: Schema.String, name: Schema.String, reason: Schema.String})),
+});
+export type WorkflowProposalInfo = typeof WorkflowProposal.Type;
 export const TaskInterpretation = Schema.Struct({
   threadId: Schema.String,
   projectId: Schema.String,
@@ -37,6 +46,7 @@ export const TaskInterpretation = Schema.Struct({
   objective: Schema.NullOr(Schema.String),
   reason: Schema.String,
   updatedAt: Schema.Number,
+  workflow: Schema.optionalKey(Schema.NullOr(WorkflowProposal)),
 });
 export type TaskInterpretationInfo = typeof TaskInterpretation.Type;
 export const ProjectSupervisorSnapshot = Schema.Struct({

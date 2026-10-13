@@ -33,6 +33,12 @@ const snapshot: ProjectSupervisorInfo = {
 
 const input: ProjectSupervisorSaveInput = {projectId: "project", expectedGeneration: 7, modelSelection: selection};
 
+const renderTaskView = (task: ProjectSupervisorInfo["tasks"][number]) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
+  snapshot: {...snapshot, tasks: [task]}, selection, threadId: task.threadId, connected: true,
+  saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false, shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false,
+  onSelectionChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+}));
+
 test("Supervisor settings markup explains automatic conversation reuse and separates saved, current and task state", () => {
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
     snapshot: {...snapshot, message: '<img src=x onerror="alert(1)">'}, selection, threadId: "task-thread", connected: true,
@@ -54,6 +60,79 @@ test("Supervisor settings markup explains automatic conversation reuse and separ
   assert.match(html, /<label>Reasoning/);
   assert.doesNotMatch(html, /<label>Temperature/);
   assert.doesNotMatch(html, /Create conversation/);
+});
+
+test("workflow proposal shows ordered rule decisions, workspace provenance and unapplied draft steps", () => {
+  const task: ProjectSupervisorInfo["tasks"][number] = {
+    ...snapshot.tasks[0]!,
+    workflow: {
+      status: "proposed",
+      message: "A workflow was drafted from the current project rules.",
+      workspaceRoot: "/workspace/project",
+      revision: "rules-revision-12",
+      rules: [
+        {index: 4, name: "Verification", applies: false, reason: "The task does not request a release."},
+        {index: 0, name: "Project setup", applies: true, reason: "This task changes project code."},
+      ],
+      steps: [
+        {blockId: "inspect-source", name: "Inspect source", reason: "Review the existing implementation."},
+        {blockId: "validate-change", name: "Validate the change", reason: "<script>proposal only</script>"},
+      ],
+    },
+  };
+  const html = renderTaskView(task);
+  assert.match(html, /Workflow proposal/);
+  assert.match(html, /Status:<\/strong> proposed/);
+  assert.match(html, /A workflow was drafted from the current project rules/);
+  assert.match(html, /This is an advisory draft\. It has not been accepted or executed/);
+  assert.match(html, /Workspace root:<\/strong> <code>\/workspace\/project<\/code>/);
+  assert.match(html, /Rules revision:<\/strong> <code>rules-revision-12<\/code>/);
+  assert.ok(html.indexOf("Project setup") < html.indexOf("Verification"));
+  assert.match(html, /Decision:<\/strong> Applies/);
+  assert.match(html, /Decision:<\/strong> Does not apply/);
+  assert.ok(html.indexOf("Inspect source") < html.indexOf("Validate the change"));
+  assert.match(html, /Block ID:<\/strong> <code>validate-change<\/code>/);
+  assert.match(html, /&lt;script&gt;proposal only&lt;\/script&gt;/);
+  assert.doesNotMatch(html, /<script>proposal only<\/script>/);
+  assert.doesNotMatch(html, /Accept workflow|Send workflow/i);
+});
+
+test("empty workflow proposals and legacy tasks state why no steps are shown", () => {
+  const emptyProposalTask: ProjectSupervisorInfo["tasks"][number] = {
+    ...snapshot.tasks[0]!,
+    workflow: {status: "proposed", message: "No rules matched a workflow block.", workspaceRoot: null, revision: null, rules: [], steps: []},
+  };
+  const emptyHtml = renderTaskView(emptyProposalTask);
+  assert.match(emptyHtml, /No workflow steps were proposed/);
+  assert.match(emptyHtml, /No rules were evaluated for this proposal/);
+  assert.match(emptyHtml, /Workspace root:<\/strong> Not recorded/);
+  assert.match(emptyHtml, /Rules revision:<\/strong> Not recorded/);
+
+  const staleProposalTask: ProjectSupervisorInfo["tasks"][number] = {
+    ...snapshot.tasks[0]!,
+    workflow: {status: "stale", message: "Project rules changed after this proposal was created.", workspaceRoot: "/workspace/project", revision: "old-revision", rules: [], steps: []},
+  };
+  const staleHtml = renderTaskView(staleProposalTask);
+  assert.match(staleHtml, /Status:<\/strong> stale/);
+  assert.match(staleHtml, /Project rules changed after this proposal was created/);
+  assert.match(staleHtml, /No workflow steps are available for this proposal/);
+
+  const nullWorkflowHtml = renderTaskView({...snapshot.tasks[0]!, workflow: null});
+  const legacyHtml = renderTaskView(snapshot.tasks[0]!);
+  assert.match(nullWorkflowHtml, /No workflow proposal was recorded for this task\. Earlier objective-only records are not automatically reprocessed/);
+  assert.match(legacyHtml, /No workflow proposal was recorded for this task\. Earlier objective-only records are not automatically reprocessed/);
+});
+
+test("workflow proposal status and message remain visible across every contract state", () => {
+  for (const status of ["pending", "proposed", "unavailable", "stale", "invalid"] as const) {
+    const task: ProjectSupervisorInfo["tasks"][number] = {
+      ...snapshot.tasks[0]!,
+      workflow: {status, message: `Explanation for ${status}.`, workspaceRoot: null, revision: null, rules: [], steps: []},
+    };
+    const html = renderTaskView(task);
+    assert.match(html, new RegExp(`Status:<\\/strong> ${status}`));
+    assert.match(html, new RegExp(`Explanation for ${status}\\.`));
+  }
 });
 
 test("unavailable saved models remain visible and disabled while an available model can be selected", () => {

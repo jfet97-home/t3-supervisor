@@ -3,6 +3,7 @@ import type {
   ProjectSupervisorInfo,
   SupervisorModelInfo,
   SupervisorModelSelection,
+  WorkflowProposalInfo,
 } from "../../src/project-supervisor-contract.js";
 import { loadProjectSupervisor, ProjectSupervisorRequestError, retryProjectSupervisor, saveProjectSupervisor } from "./project-supervisor-api.js";
 
@@ -77,6 +78,50 @@ export const shouldOfferNativeRetry = (snapshot: ProjectSupervisorInfo) =>
   snapshot.binding?.state === "missing" ||
   snapshot.tasks.some(task => task.status === "uncertain") ||
   snapshot.settings.pending && snapshot.binding?.state === "ready";
+
+function WorkflowProposalView({workflow}: {workflow: WorkflowProposalInfo | null | undefined}) {
+  if (workflow == null) return <section className="stack" aria-labelledby="workflow-proposal-title">
+    <h4 id="workflow-proposal-title">Workflow proposal</h4>
+    <p className="muted">No workflow proposal was recorded for this task. Earlier objective-only records are not automatically reprocessed.</p>
+  </section>;
+
+  const orderedRules = [...workflow.rules].sort((left, right) => left.index - right.index);
+
+  return <section className="stack" aria-labelledby="workflow-proposal-title">
+    <h4 id="workflow-proposal-title">Workflow proposal</h4>
+    <p><strong>Status:</strong> {workflow.status}</p>
+    <p>{workflow.message}</p>
+    {workflow.status === "proposed" && <p className="muted">This is an advisory draft. It has not been accepted or executed.</p>}
+
+    <div className="stack">
+      <h5>Provenance</h5>
+      <p><strong>Workspace root:</strong> {workflow.workspaceRoot === null ? "Not recorded" : <code>{workflow.workspaceRoot}</code>}</p>
+      <p><strong>Rules revision:</strong> {workflow.revision === null ? "Not recorded" : <code>{workflow.revision}</code>}</p>
+    </div>
+
+    <div className="stack">
+      <h5>Rule applicability</h5>
+      {orderedRules.length > 0
+        ? <ol className="stack">{orderedRules.map(rule => <li key={`${rule.index}:${rule.name}`}>
+          <strong>{rule.name}</strong>
+          <p><strong>Decision:</strong> {rule.applies ? "Applies" : "Does not apply"}</p>
+          <p>{rule.reason}</p>
+        </li>)}</ol>
+        : <p className="muted">No rules were evaluated for this proposal.</p>}
+    </div>
+
+    <div className="stack">
+      <h5>Proposed steps</h5>
+      {workflow.steps.length > 0
+        ? <ol className="stack">{workflow.steps.map((step, index) => <li key={`${step.blockId}:${index}`}>
+          <strong>Step {index + 1}: {step.name}</strong>
+          <p><strong>Block ID:</strong> <code>{step.blockId}</code></p>
+          <p>{step.reason}</p>
+        </li>)}</ol>
+        : <p className="muted">{workflow.status === "proposed" ? "No workflow steps were proposed." : "No workflow steps are available for this proposal."}</p>}
+    </div>
+  </section>;
+}
 
 export function ProjectSupervisorView({
   snapshot,
@@ -191,6 +236,7 @@ export function ProjectSupervisorView({
       <p><strong>Status:</strong> {selectedTask.status}</p>
       {selectedTask.objective && <p><strong>Interpreted task:</strong> {selectedTask.objective}</p>}
       <p>{selectedTask.reason}</p>
+      <WorkflowProposalView workflow={selectedTask.workflow} />
     </section>}
   </div>;
 }
