@@ -241,7 +241,7 @@ export class GuidanceRuntime {
       sendingReason: this.sendingReason(),
       settings: this.store.settings(),
       threadPolicy: currentThreadPolicy(this.config),
-      threads: catalog.threads.filter(t => t.lineage?.relationshipToParent !== "subagent").map(t => ({ id: t.id, title: t.title, available: !t.deletedAt && !t.archivedAt && !t.settledAt })),
+      threads: catalog.threads.filter(t => t.lineage?.relationshipToParent !== "subagent").map(t => ({ id: t.id, title: t.title, projectId: t.projectId, available: !t.deletedAt && !t.archivedAt && !t.settledAt })),
       projects: catalog.projects.map(({ project, available }) => ({
         id: project.id,
         title: project.title,

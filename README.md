@@ -11,10 +11,10 @@ configuring guidance, and optionally handling Telegram notifications and input.
   exact guidance message to the relevant T3 conversation.
 - **Control dashboard:** manage rules, scopes, monitoring budget and delivery settings;
   inspect decisions, holds, uncertain deliveries and activity history.
-- **Project definitions read API:** load `.supervisor/rules.yaml` and Markdown
-  blocks through T3, validate required references and report permission or content
-  problems. See [project definitions](docs/project-definitions.md). Project browsing
-  and workflow negotiation are subsequent work.
+- **Project definitions:** inspect repository rules, reusable Markdown blocks and
+  validation problems in the read-only Projects section. Use a project root or a
+  conversation's working directory, and refresh after file changes. Definitions
+  are loaded through T3; see [project definitions](docs/project-definitions.md).
 - **Telegram completion notifications:** send concise recaps for substantial work.
   Routine exchanges stay silent. Telegram-originated work returns its full answer,
   and replies to recaps can be routed back to the original conversation.
@@ -27,7 +27,7 @@ configuring guidance, and optionally handling Telegram notifications and input.
 Open **[http://127.0.0.1:9008](http://127.0.0.1:9008)**. The dashboard opens directly,
 without a login code. Its Docker port is published only on the Mac's loopback address.
 
-The UI includes **Rules**, **Activity**, **Recaps and Telegram**, and **Settings**.
+The UI includes **Guidance rules**, **Projects**, **Activity**, **Recaps and Telegram**, and **Settings**.
 Start rules in **Observe** mode. Sending guidance requires its dedicated credential
 and the owner opt-in in Settings. Detection is advisory: a target finishing during
 message delivery can cause a follow-up turn. See [dashboard and guidance setup](docs/guidance.md).

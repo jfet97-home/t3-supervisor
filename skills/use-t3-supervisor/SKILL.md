@@ -1,6 +1,6 @@
 ---
 name: use-t3-supervisor
-description: Use an existing T3 Supervisor dashboard to configure guidance rules and scopes, preview conditions, inspect activity and notification history, or adjust monitoring settings. For product usage, not source development, deployment, credentials provisioning, or Lima VM setup.
+description: Use an existing T3 Supervisor dashboard to inspect project rules and reusable blocks, configure guidance and scopes, preview conditions, inspect activity and notification history, or adjust monitoring settings. For product usage, not source development, deployment, credentials provisioning, or Lima VM setup.
 ---
 
 # Use T3 Supervisor
@@ -20,6 +20,17 @@ network exposure, deployment or credentials as part of ordinary usage.
 Use the available browser interface and inspect current controls before acting.
 The local dashboard opens directly and handles write protection automatically.
 There is no supervisor MCP tool to invent or T3 orchestration command to substitute.
+
+## Inspect project definitions
+
+Open Projects and choose a registered project. Select Project root, or an available
+conversation to inspect its current working directory. Check the displayed source
+path and load time; use Refresh definitions after repository or workspace changes.
+Required-block buttons open reusable instructions and expected results. Validation
+problems and missing references remain visible; a valid individual block does not
+make an invalid collection complete. This view is read-only and does not negotiate
+or activate workflows. Edit definitions in the repository; a missing file-reading
+permission is a deployment issue, not authorization to provision credentials here.
 
 ## Configure guidance
 

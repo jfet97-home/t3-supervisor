@@ -102,7 +102,24 @@ block paths. T3 rejects reads resolving outside that workspace, but this is not
 a guarantee against symlinks targeting other files within the same workspace.
 These are working-tree reads, not immutable or authoritative policy attestations.
 
-This step supplies the loader and read API. It does not import these definitions
-into the existing condition/message reminder rules or interpret applicability.
-Project browsing in the dashboard, block creation/review and workflow negotiation
-are separate subsequent work.
+The dashboard's **Projects** section shows these definitions read-only. Select a
+project, then optionally a conversation to use its working directory. The
+conversation selector includes only available chats belonging to that project.
+Required-block buttons open the corresponding reusable block and focus its
+summary; missing or invalid references remain clearly marked. Instructions and
+expected results are displayed as text, never executed or interpreted as HTML.
+
+Definitions load on selection and **Refresh definitions**, not on the dashboard's
+ordinary background snapshot refresh. The load time and actual source directory
+are displayed. Refresh after editing files or changing a conversation's workspace.
+Switching selection or leaving the section cancels its request; stale responses
+cannot replace the new selection's contents.
+If a selected conversation becomes unavailable, its contents are hidden and a new
+working directory must be selected; the page does not silently fall back to the
+project root. Invalid collections never imply that unreadable rules or their
+block references are absent.
+
+These definitions are separate from **Guidance rules**, the existing
+condition/message reminders. Loading does not interpret rule applicability or
+activate a workflow. Block creation/review and workflow negotiation are subsequent
+work; make definition changes in the repository.

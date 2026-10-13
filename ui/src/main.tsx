@@ -28,6 +28,7 @@ import {
   snapshotAtom,
 } from "./api.js";
 import "./style.css";
+import { ProjectDefinitionsPanel } from "./project-definitions.js";
 
 const labels: Record<string, string> = {
   observe: "Observe only",
@@ -816,13 +817,13 @@ function Dashboard() {
         {data.rules.length} rules
       </div>
       <nav aria-label="Supervisor sections">
-        {["rules", "activity", "telegram", "settings"].map((name) => (
+        {["rules", "projects", "activity", "telegram", "settings"].map((name) => (
           <button
             key={name}
             aria-current={view === name ? "page" : undefined}
             onClick={() => navigate(name)}
           >
-            {name === "telegram"
+            {name === "rules" ? "Guidance rules" : name === "telegram"
               ? "Recaps & Telegram"
               : name[0]!.toUpperCase() + name.slice(1)}
           </button>
@@ -831,6 +832,7 @@ function Dashboard() {
       {view === "rules" && (
         <Rules data={data} scope={scope} setScope={setScope} />
       )}{" "}
+      {view === "projects" && <ProjectDefinitionsPanel data={data}/>}
       {view === "activity" && (
         <History items={data.activity} title="Guidance activity" />
       )}

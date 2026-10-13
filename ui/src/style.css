@@ -194,6 +194,22 @@ small,
   width: auto;
   max-width: 100%;
 }
+.definition-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: end;
+}
+.definition-controls label {display: grid; gap: 6px;}
+.definition-path, .definition-issues code {overflow-wrap: anywhere;}
+.definition-copy {white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 0;}
+.definition-block summary {cursor: pointer; min-height: 44px; font-weight: 650;}
+.definition-block[open] summary {margin-bottom: 16px;}
+.definition-block h4 {margin: 0;}
+.definition-issues {margin: 0; padding-left: 20px; display: grid; gap: 12px;}
+@media (max-width: 700px) {
+  .definition-controls {grid-template-columns: minmax(0, 1fr);}
+}
 .columns {
   display: grid;
   grid-template-columns: minmax(175px, 0.7fr) minmax(0, 1.6fr);
@@ -637,3 +653,19 @@ dialog pre {
 
 .chat-options { max-height: 24rem; overflow: auto; margin-block: 1rem; }
 .chat-options .toggle { min-height: 48px; }
+
+.definition-name,
+.definition-block summary,
+.definition-controls label,
+.definition-controls select,
+.definition-controls button,
+.definition-block,
+.definition-block button {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.project-definitions button {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}

@@ -74,7 +74,7 @@ export const Snapshot = Schema.Struct({
   sendingReason: Text,
   settings: Settings,
   threadPolicy: ThreadPolicy,
-  threads: Schema.Array(Schema.Struct({ id: Text, title: Text, available: Schema.Boolean })),
+  threads: Schema.Array(Schema.Struct({ id: Text, title: Text, projectId: NullableText, available: Schema.Boolean })),
   projects: Schema.Array(Project),
   rules: Schema.Array(Rule),
   mutes: Schema.Array(Schema.Struct({ ruleId: Text, scopeId: Text })),

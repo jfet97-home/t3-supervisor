@@ -1,11 +1,11 @@
 # Dashboard workflows
 
-The dashboard has Rules, Activity, Recaps and Telegram, and Settings views.
+The dashboard has Guidance rules, Projects, Activity, Recaps and Telegram, and Settings views.
 Use its current labels and saved state rather than assuming an older screenshot.
 
 ## Rules and scope
 
-In Rules, select Global rules, No-project chats, or a synchronized T3 project under
+In Guidance rules, select Global rules, No-project chats, or a synchronized T3 project under
 Show rules for. Use the actual selected project identity; similar titles do not
 establish that two projects are the same. Ambiguous projects can require explicit
 classification. Do not classify one as no-project simply to make a rule eligible.
