@@ -30,23 +30,32 @@ message delivery can cause a follow-up turn. See [dashboard and guidance setup](
 
 ## Local deployment
 
-The Mac installation uses `~/.config/mcpx/t3-supervisor.compose.yaml`.
+The Mac installation uses `~/.config/t3-supervisor/compose.yaml`.
 
 This is a private deployment-file convention shared with the Mac's MCP services;
 Supervisor remains its own Compose project and state volume. The source checkout's
 Compose files are portable templates. The Lima lab uses a separate Dokploy-managed
 Compose deployment, not this Mac configuration directory.
 
-`EXCLUDED_THREAD_IDS` is a comma-separated list of exact T3 chat IDs. It suppresses
-new completion notifications and guidance for those chats, plus native input-needed
-notices. `INPUT_INTERACTIVE_THREAD_ID` is an intentional input-only exception: that
-chat can still receive interactive Telegram questionnaires while remaining excluded
-from completion recaps and guidance. Existing forms for other newly excluded chats
-are retired; their native questions are not answered, and unresolved delivery evidence
-is reconciled under its original keys. Exclusion does not delete catalog or history.
+Manage **excluded chats** and the **interactive Telegram chat** in the dashboard's
+Settings page. Each instance saves them in `/data/thread-settings.sqlite3` inside its
+persistent Docker volume. Changes apply live and survive restarts. The Mac and VM
+have independent settings; new instances start with no exclusions or interactive chat.
+
+Exclusions suppress new completion notifications, guidance and native input-needed
+notices. The selected interactive chat is an input-only exception: it can answer
+Telegram questionnaires while remaining excluded from recaps and guidance. Existing
+forms for other newly excluded chats are retired without answering native questions.
+Catalog/history and uncertain delivery evidence remain intact. Legacy
+`EXCLUDED_THREAD_IDS` and `INPUT_INTERACTIVE_THREAD_ID` values are imported only when
+the settings database is first created; they never override saved UI choices.
+
+An obsolete questionnaire deletion with no confirmed receipt is retained as
+`expired` with reason `deletion_unconfirmed_expired` after its 24-hour cleanup TTL. This does not claim deletion or replay it. It no longer blocks readiness;
+uncertain sends and native submissions remain frozen and visible.
 
 ```sh
-docker --context desktop-linux compose -f ~/.config/mcpx/t3-supervisor.compose.yaml up -d
+docker --context desktop-linux compose -f ~/.config/t3-supervisor/compose.yaml up -d
 ```
 
 The repository's [Compose template](compose.yaml) is portable; configure private

@@ -65,3 +65,13 @@ Recaps and Telegram displays notification, questionnaire and reply-cleanup recor
 without performing recovery writes. Complete native questionnaires through their
 existing T3 interface or the configured Telegram questionnaire card. Ordinary chat
 messages and guidance are not substitutes for structured questionnaire answers.
+
+## Persisted chat policy
+
+Use Settings → Chat settings to choose excluded chats and the interactive Telegram
+chat. Changes apply without a restart and persist in `/data/thread-settings.sqlite3`
+in the instance state volume. Mac and Lima have independent policies. Legacy chat
+environment variables seed the database only once and are removed from active Compose.
+The interactive selection overrides exclusions for questionnaires only. Expired,
+unconfirmed questionnaire deletions remain explicit in Recaps and Telegram history
+without permanently degrading readiness; do not retry them or label them deleted.

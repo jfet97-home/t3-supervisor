@@ -41,7 +41,7 @@ blindly resent, and requires reconciliation or explicit acceptance of duplicate 
 
 Reading uses the existing read credential. Sending requires a **separate native T3
 session credential** with orchestration operation permission, mounted privately as
-`~/.config/mcpx/t3-supervisor-secrets/t3-guidance-token`. An MCP OAuth token cannot be
+`~/.config/t3-supervisor/secrets/t3-guidance-token`. An MCP OAuth token cannot be
 used on the native WebSocket surface. Do not reuse the questionnaire responder token.
 The local coordinator can provision this credential through the installed T3 CLI; the
 owner does not need to find or paste a token. Use `t3 auth session issue` with an explicit
@@ -73,3 +73,12 @@ connection and missing write capability are visible. Detailed evidence expires a
 configured 24-hour or seven-day period; ordinary metadata expires after thirty days.
 Uncertain notice bytes survive expiry for reconciliation. Databases remain in the existing
 private Docker volume. Preserve that volume and all existing Telegram ledgers on upgrade.
+
+## Chat settings
+
+Settings also selects excluded chats and the interactive Telegram chat by stable ID.
+The policy is saved in `/data/thread-settings.sqlite3`, separate from guidance settings
+in `/data/guidance.sqlite3` and delivery ledgers. Changes apply live and independently
+on each deployment. Excluded chats generate no new recaps, guidance or plain input
+notices; the selected interactive chat may still handle questionnaires. Saved IDs
+remain visible even when a chat is unavailable. Concurrent tab changes require reload.

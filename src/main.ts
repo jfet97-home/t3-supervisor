@@ -13,10 +13,16 @@ import { makeInputTelegramClient } from "./input-telegram.js";
 import { makeT3Client } from "./t3.js";
 import { telegramClientLayer } from "./telegram.js";
 
+import { ThreadPolicyStore } from "./thread-policy.js";
+
 const config = loadConfig();
 const status = createStatus(config);
 
 NodeRuntime.runMain(Effect.gen(function* () {
+  config.threadPolicy = yield* Effect.acquireRelease(
+    Effect.sync(() => new ThreadPolicyStore(config.dataDirectory, { excludedThreadIds: config.excludedThreadIds, interactiveThreadId: config.inputInteractiveThreadId ?? null })),
+    (store) => Effect.sync(() => store.close()),
+  );
   yield* initializeRuntimeAuth(config);
   const token = yield* Effect.tryPromise(() => readFile(config.t3TokenFile, "utf8"));
   if (config.telegramEnabled && config.inputEnabled) {
@@ -36,7 +42,7 @@ NodeRuntime.runMain(Effect.gen(function* () {
         store,
         replyCleanup,
         routerOnlyInput: true,
-        interactiveThreadId: config.inputInteractiveThreadId ?? "af0e5160-07d2-46c9-b60b-a329d6951d83",
+        readThreadPolicy: () => config.threadPolicy!.get(),
         excludedThreadIds: config.excludedThreadIds,
         native: makeNativeInputIntegration({ baseUrl: config.t3Url, readToken: token.trim(), responseToken: responseToken.trim() }),
         telegram: makeInputTelegramClient(config.mcpxUrl, {

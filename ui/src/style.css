@@ -634,3 +634,6 @@ dialog pre {
     margin: 16px auto;
   }
 }
+
+.chat-options { max-height: 24rem; overflow: auto; margin-block: 1rem; }
+.chat-options .toggle { min-height: 48px; }

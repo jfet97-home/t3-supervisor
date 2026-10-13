@@ -194,7 +194,7 @@ const withHarness = async <A>(
     status: () => ReturnType<ReturnType<typeof makeInputCoordinator>["status"]>;
     store: ReturnType<typeof makeInputStore>;
   }) => Promise<A>,
-  policy: { routerOnlyInput?: boolean; interactiveThreadId?: string; excludedThreadIds?: readonly string[] } = {},
+  policy: { routerOnlyInput?: boolean; interactiveThreadId?: string; excludedThreadIds?: readonly string[]; readThreadPolicy?: () => { excludedThreadIds: string[]; interactiveThreadId: string | null } } = {},
 ): Promise<A> => {
   const directory = await mkdtemp(join(tmpdir(), "t3-input-coordinator-"));
   const native = new FakeNative();
@@ -1398,5 +1398,45 @@ test("submit from a complete older draft is rejected after a later answer revisi
     await runOnce();
     assert.equal(native.responseCalls.length, 0);
     assert.equal(store.getRequest(oldSubmit.inputId, oldSubmit.requestRevision)?.submissionState, "none");
+  });
+});
+
+
+test("saved exclusion changes retire active input notices without restarting", async () => {
+  let policy = { excludedThreadIds: [] as string[], interactiveThreadId: null };
+  await withHarness(async ({ native, telegram, runOnce, store }) => {
+    native.threads[0] = { id: "router-thread", active: true, kind: "main" };
+    telegram.notificationRequest = { inputId: makeInputId("environment-1", "router-thread", "request-1"), requestRevision: "revision-1", draftRevision: 0 };
+    await runOnce();
+    const tracked = store.listRequests()[0]!;
+    assert.equal(telegram.sends.length, 1);
+    policy = { ...policy, excludedThreadIds: [tracked.threadId] };
+    await runOnce();
+    assert.notEqual(store.getRequest(tracked.inputId, tracked.requestRevision)?.lifecycle, "active");
+    assert.equal(telegram.sends.length, 1);
+  }, { routerOnlyInput: true, readThreadPolicy: () => policy });
+});
+
+test("unconfirmed obsolete deletion expires after 24 hours without replay", async () => {
+  await withHarness(async ({ telegram, now, advance, runOnce, store, status }) => {
+    await runOnce();
+    const tracked = store.listRequests()[0]!;
+    store.invalidateRequest(tracked.inputId, tracked.requestRevision, now());
+    telegram.deleteBehavior = () => ({ kind: "unknown", reason: "invalid_response" });
+    await runOnce();
+    const unknown = store.dueCleanupMessages(now()).find(m => m.cleanupState === "unknown")!;
+    assert.ok(unknown);
+    assert.equal(store.expireUnknownDeletion(unknown.deliveryKey, now()), false);
+    const count = telegram.deletes.length;
+    advance(23 * 60 * 60 * 1000);
+    await runOnce();
+    assert.equal(store.dueCleanupMessages(now()).some(m => m.deliveryKey === unknown.deliveryKey), true);
+    advance(60 * 60 * 1000 + 1);
+    await runOnce();
+    assert.equal(telegram.deletes.length, count);
+    const expired = store.messagesForRequest(unknown.inputId, unknown.requestRevision).find(m => m.deliveryKey === unknown.deliveryKey);
+    assert.equal(expired?.cleanupState, "expired");
+    assert.equal(expired?.cleanupError, "deletion_unconfirmed_expired");
+    assert.equal(status().uncertain, 0);
   });
 });

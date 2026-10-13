@@ -54,6 +54,7 @@ export interface InputCoordinatorDependencies {
   readonly routerOnlyInput?: boolean;
   readonly interactiveThreadId?: string;
   readonly excludedThreadIds?: readonly string[];
+  readonly readThreadPolicy?: () => { readonly excludedThreadIds: readonly string[]; readonly interactiveThreadId: string | null };
   readonly now?: () => number;
   readonly pollIntervalMs?: number;
   readonly refreshPresentationOnStart?: boolean;
@@ -125,10 +126,10 @@ export const makeInputCoordinator = (dependencies: InputCoordinatorDependencies)
   let cycleHadErrors = false;
   let lastDiscoveryAt: number | null = null;
   let routerThreadId: string | null = dependencies.interactiveThreadId ?? null;
-  const excludedThreadIds = new Set(dependencies.excludedThreadIds ?? []);
+  const excludedThreadIds = (): readonly string[] => dependencies.readThreadPolicy?.().excludedThreadIds ?? dependencies.excludedThreadIds ?? [];
   const isEligibleThread = (thread: InputThread): boolean =>
     isEligibleInputThread(thread) &&
-    (thread.id === routerThreadId || !excludedThreadIds.has(thread.id));
+    (thread.id === routerThreadId || !excludedThreadIds().includes(thread.id));
   let refreshPresentationOnStart = dependencies.refreshPresentationOnStart === true;
 
   const status = (): InputCoordinatorStatus => {
@@ -166,7 +167,7 @@ export const makeInputCoordinator = (dependencies: InputCoordinatorDependencies)
     const descriptor = await dependencies.native.descriptor();
     if (!isValidDescriptor(descriptor)) throw new InputDomainError("native descriptor is malformed");
     dependencies.store.bindEnvironment(descriptor.environmentId);
-    routerThreadId = dependencies.interactiveThreadId ?? descriptor.currentRouterThreadId ?? null;
+    routerThreadId = dependencies.readThreadPolicy ? dependencies.readThreadPolicy().interactiveThreadId : dependencies.interactiveThreadId ?? descriptor.currentRouterThreadId ?? null;
 
     phase = "native_threads";
     const listedThreads = await dependencies.native.listThreads();
@@ -358,7 +359,8 @@ export const makeInputCoordinator = (dependencies: InputCoordinatorDependencies)
         if (message.cleanupState === "unknown" && message.cleanupKey) {
           try {
             const status = await dependencies.telegram.getDeliveryStatus(message.cleanupKey);
-            if (status.state === "sent") dependencies.store.recordMessageDeleted(message.deliveryKey, now());
+            if (status.state === "sent" && status.mutationConfirmed === true) dependencies.store.recordMessageDeleted(message.deliveryKey, now());
+            else dependencies.store.expireUnknownDeletion(message.deliveryKey, now());
           } catch { reportError("telegram_input_reconcile"); }
         }
       }
@@ -614,7 +616,8 @@ export const makeInputCoordinator = (dependencies: InputCoordinatorDependencies)
         if (message.cleanupState === "unknown") {
           if (!message.cleanupKey) continue;
           const status = await dependencies.telegram.getDeliveryStatus(message.cleanupKey);
-          if (status.state === "sent") dependencies.store.recordMessageDeleted(message.deliveryKey, now());
+          if (status.state === "sent" && status.mutationConfirmed === true) dependencies.store.recordMessageDeleted(message.deliveryKey, now());
+          else dependencies.store.expireUnknownDeletion(message.deliveryKey, now());
           continue;
         }
         if (message.cleanupState !== "pending" || message.messageId === null || !message.cleanupKey) continue;
@@ -679,8 +682,16 @@ export const makeInputCoordinator = (dependencies: InputCoordinatorDependencies)
     }
   };
 
+  let lastPolicy: string | null = null;
   const cycle = async (forceDiscovery: boolean): Promise<void> => {
     cycleHadErrors = false;
+    if (dependencies.readThreadPolicy) {
+      const policy = dependencies.readThreadPolicy();
+      const signature = JSON.stringify(policy);
+      if (signature !== lastPolicy) forceDiscovery = true;
+      lastPolicy = signature;
+      routerThreadId = policy.interactiveThreadId;
+    }
     const processFirst = !forceDiscovery && lastDiscoveryAt !== null;
     if (processFirst) {
       await processInbox();

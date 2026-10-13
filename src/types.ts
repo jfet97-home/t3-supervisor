@@ -94,6 +94,7 @@ export interface SupervisorConfig {
   cxHome: string;
   cxSeedFile: string;
   excludedThreadIds: string[];
+  threadPolicy?: import("./thread-policy.js").ThreadPolicyStore;
   healthPort: number;
   modelTimeoutMs: number;
   telegramEnabled?: boolean;

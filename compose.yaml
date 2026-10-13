@@ -24,7 +24,6 @@ services:
       CX_COMMAND: /usr/local/bin/cx
       CX_HOME: /data/runtime-auth
       CX_SEED_FILE: /run/secrets/codex-auth.json
-      EXCLUDED_THREAD_IDS: "${EXCLUDED_THREAD_IDS:-}"
       HEALTH_PORT: "9007"
       MODEL_TIMEOUT_MS: "360000"
       UI_PORT: "9008"

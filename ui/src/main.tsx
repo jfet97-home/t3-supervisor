@@ -24,6 +24,7 @@ import {
   previewAtom,
   saveRuleAtom,
   settingsAtom,
+  threadPolicyAtom,
   snapshotAtom,
 } from "./api.js";
 import "./style.css";
@@ -519,6 +520,45 @@ function Rules({
     </section>
   );
 }
+function ChatSettings({ data }: { data: GuidanceSnapshot }) {
+  const [form, setForm] = useState(data.threadPolicy);
+  const [dirty, setDirty] = useState(false);
+  const [query, setQuery] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const save = useAtomSet(threadPolicyAtom, { mode: "promise" });
+  const refresh = useAtomRefresh(snapshotAtom);
+  useEffect(() => { if (!dirty) setForm(data.threadPolicy); }, [data.threadPolicy, dirty]);
+  const chats = [...data.threads, ...form.excludedThreadIds.filter(id => !data.threads.some(t => t.id === id)).map(id => ({ id, title: "Unavailable chat", available: false }))];
+  if (form.interactiveThreadId && !chats.some(t => t.id === form.interactiveThreadId)) chats.push({ id: form.interactiveThreadId, title: "Unavailable chat", available: false });
+  const change = (patch: Partial<typeof form>) => { setForm({ ...form, ...patch }); setDirty(true); setMessage(""); };
+  return <form className="panel stack" method="post" onSubmit={async event => {
+    event.preventDefault(); setSaving(true);
+    try { const result = await save({ payload: form }); setForm(result); setDirty(false); setMessage("Chat settings saved and applied."); refresh(); }
+    catch { setMessage("Chat settings invalid or changed in another tab. Reload first."); }
+    finally { setSaving(false); }
+  }}>
+    <h3>Chat settings</h3>
+    <p>Saved for this Supervisor instance. Changes apply without restarting.</p>
+    <div className="field"><label htmlFor="interactive-chat">Interactive Telegram chat</label>
+      <select id="interactive-chat" name="interactiveThreadId" value={form.interactiveThreadId ?? ""} onChange={e => change({ interactiveThreadId: e.target.value || null })}>
+        <option value="">None</option>
+        {chats.map(t => <option key={t.id} value={t.id} disabled={!t.available && t.id !== form.interactiveThreadId}>{t.title} — {t.id}</option>)}
+      </select>
+      <small>The selected chat can answer questionnaires through Telegram even when excluded below. Other eligible chats receive plain input-needed notices.</small>
+    </div>
+    <fieldset><legend>Excluded chats</legend>
+      <p>Suppress new completion recaps, forwarded answers, guidance and input-needed notices. Existing delivery records are preserved.</p>
+      <label htmlFor="chat-search">Find a chat</label><input id="chat-search" name="chatSearch" type="search" value={query} onChange={e => setQuery(e.target.value)} />
+      <div className="chat-options">{chats.filter(t => `${t.title} ${t.id}`.toLowerCase().includes(query.toLowerCase())).sort((a,b) => a.title.localeCompare(b.title)).map(t => <label className="toggle" key={t.id}>
+        <input type="checkbox" name="excludedThreadIds" value={t.id} checked={form.excludedThreadIds.includes(t.id)} onChange={e => change({ excludedThreadIds: e.target.checked ? [...form.excludedThreadIds, t.id] : form.excludedThreadIds.filter(id => id !== t.id) })} />
+        <span>{t.title}<small>{t.id}{!t.available ? " · unavailable" : ""}</small></span>
+      </label>)}</div>
+      <small>{form.excludedThreadIds.length} chats excluded.</small>
+    </fieldset>
+    <button className="primary" disabled={saving} type="submit">{saving ? "Saving…" : "Save chat settings"}</button><p role="status">{message}</p>
+  </form>;
+}
 function Settings({ data }: { data: GuidanceSnapshot }) {
   const [form, setForm] = useState<GuidanceSettings>(data.settings);
   const [dirty, setDirty] = useState(false);
@@ -550,6 +590,7 @@ function Settings({ data }: { data: GuidanceSnapshot }) {
   return (
     <section>
       <h2>One monitor, one place to manage it</h2>
+      <ChatSettings data={data} />
       <div className="detail-grid">
         <div className="panel stack">
           <h3>T3 connection</h3>

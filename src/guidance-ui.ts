@@ -62,6 +62,18 @@ export const startGuidanceUi = async (
                 "Settings invalid, T3 version changed or another tab saved first. Reload first.",
             }),
         }),
+      threadPolicy: ({ payload }) => Effect.tryPromise({
+        try: async () => {
+          const policy = runtime.config.threadPolicy;
+          if (!policy) throw new Error("Chat settings unavailable.");
+          if (payload.interactiveThreadId !== null && payload.interactiveThreadId !== policy.get().interactiveThreadId) {
+            const snapshot = await runtime.snapshot();
+            if (!snapshot.threads.some(t => t.id === payload.interactiveThreadId && t.available)) throw new Error("Choose an available ordinary chat.");
+          }
+          return policy.save(payload);
+        },
+        catch: (cause) => new UiError({ message: cause instanceof Error ? cause.message : "Chat settings invalid. Reload first." }),
+      }),
       mute: ({ payload }) =>
         Effect.try({
           try: () =>

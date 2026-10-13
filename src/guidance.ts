@@ -1,3 +1,4 @@
+import { currentThreadPolicy } from "./thread-policy.js";
 import { Effect, Schema } from "effect";
 import { existsSync, readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
@@ -239,6 +240,8 @@ export class GuidanceRuntime {
       sendingReady: this.sendingReady(),
       sendingReason: this.sendingReason(),
       settings: this.store.settings(),
+      threadPolicy: currentThreadPolicy(this.config),
+      threads: catalog.threads.filter(t => t.lineage?.relationshipToParent !== "subagent").map(t => ({ id: t.id, title: t.title, available: !t.deletedAt && !t.archivedAt && !t.settledAt })),
       projects: catalog.projects.map(({ project, available }) => ({
         id: project.id,
         title: project.title,
@@ -267,7 +270,7 @@ export class GuidanceRuntime {
       return db
         .prepare(
           `SELECT r.thread_id,r.native_request_id,r.submission_state,r.lifecycle,r.updated_at,
-        m.delivery_key,m.state,m.cleanup_state,m.message_id FROM input_requests r LEFT JOIN input_messages m
+        m.delivery_key,m.state,m.cleanup_state,m.cleanup_error,m.message_id FROM input_requests r LEFT JOIN input_messages m
         ON m.input_id=r.input_id AND m.request_revision=r.request_revision ORDER BY r.updated_at DESC LIMIT 100`,
         )
         .all()
@@ -280,13 +283,14 @@ export class GuidanceRuntime {
           state:
             row.cleanup_state === "unknown"
               ? "cleanup_uncertain"
-              : String(row.submission_state),
+              : row.cleanup_state === "expired" ? "cleanup_expired" : String(row.submission_state),
           reason: String(row.lifecycle),
           detail: JSON.stringify({
             requestId: row.native_request_id,
             submission: row.submission_state,
             cardDelivery: row.state,
             cleanup: row.cleanup_state,
+            cleanupError: row.cleanup_error,
             messageId: row.message_id,
           }),
           createdAt: Number(row.updated_at),
@@ -403,7 +407,7 @@ export class GuidanceRuntime {
     this.classifyCatalog(catalog.projects);
     const threads = catalog.threads.filter(
       (t) =>
-        !this.config.excludedThreadIds.includes(t.id) &&
+        !currentThreadPolicy(this.config).excludedThreadIds.includes(t.id) &&
         t.lineage.relationshipToParent !== "subagent" &&
         !t.archivedAt &&
         !t.deletedAt &&
@@ -626,7 +630,7 @@ export class GuidanceRuntime {
       projection.thread.deletedAt ||
       projection.thread.settledAt ||
       projection.thread.lineage.relationshipToParent === "subagent" ||
-      this.config.excludedThreadIds.includes(projection.thread.id)
+      currentThreadPolicy(this.config).excludedThreadIds.includes(projection.thread.id)
     )
       return "held_ineligible";
     this.classifyCatalog(

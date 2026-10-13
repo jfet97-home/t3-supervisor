@@ -33,6 +33,7 @@ const retryBaseMs = 5_000;
 const retryBackoffMaxMs = 60 * 60 * 1_000;
 const retryAfterMaxMs = 24 * 60 * 60 * 1_000;
 const maxInputButtonsJsonBytes = INPUT_MAX_REQUEST_JSON_BYTES + 32 * 1024;
+export const INPUT_CLEANUP_UNCERTAINTY_TTL_MS = 24 * 60 * 60 * 1_000;
 export const INPUT_DELETE_MAX_AGE_MS = 47 * 60 * 60 * 1_000;
 
 interface InputAnswerWithSource extends InputAnswerRecord {
@@ -118,6 +119,7 @@ export interface InputMessageRecord {
   readonly error: string | null;
   readonly cleanupState: InputCleanupState;
   readonly cleanupKey: string | null;
+  readonly cleanupError: string | null;
   readonly sendAttempts: number;
   readonly sendRetryAt: number;
   readonly deleteAttempts: number;
@@ -185,6 +187,7 @@ export interface InputStoreApi {
   dueCleanupMessages(now: number, limit?: number): InputMessageRecord[];
   beginMessageDeletion(deliveryKey: string, now: number): boolean;
   recordMessageDeleted(deliveryKey: string, now: number): boolean;
+  expireUnknownDeletion(deliveryKey: string, now: number): boolean;
   recordMessageDeleteUnknown(deliveryKey: string, error: string, now: number): boolean;
   recordMessageDeleteRejected(deliveryKey: string, error: string, now: number, retryAfterMs?: number): boolean;
   completeEvent(eventId: string): void;
@@ -1458,6 +1461,14 @@ export class InputStore implements InputStoreApi {
     return Number(result.changes) > 0;
   }));
 
+  expireUnknownDeletion = (deliveryKey: string, now: number): boolean => this.operation(() => {
+    this.validateNow(now);
+    const result = this.db.prepare(`UPDATE input_messages SET cleanup_state='expired',
+      cleanup_error='deletion_unconfirmed_expired' WHERE delivery_key=? AND cleanup_state='unknown'
+      AND COALESCE(NULLIF(delete_window_at,0),created_at)<=?`).run(deliveryKey, now - INPUT_CLEANUP_UNCERTAINTY_TTL_MS);
+    return Number(result.changes) > 0;
+  });
+
   recordMessageDeleteUnknown = (deliveryKey: string, error: string, now: number): boolean => this.operation(() => {
     this.validateNow(now);
     const result = this.db.prepare(`UPDATE input_messages SET cleanup_state='unknown', cleanup_error=?
@@ -1819,6 +1830,7 @@ export class InputStore implements InputStoreApi {
       error: readOptionalString(row, "error"),
       cleanupState: cleanupState as InputCleanupState,
       cleanupKey: readOptionalString(row, "cleanup_key"),
+      cleanupError: readOptionalString(row, "cleanup_error"),
       sendAttempts: readRowNumber(row, "send_attempts"),
       sendRetryAt: readRowNumber(row, "send_retry_at"),
       deleteAttempts: readRowNumber(row, "delete_attempts"),

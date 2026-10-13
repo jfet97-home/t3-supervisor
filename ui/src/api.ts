@@ -43,6 +43,7 @@ export class ApiClient extends AtomHttpApi.Service<ApiClient>()(
 ) {}
 export const snapshotAtom = ApiClient.query("guidance", "snapshot", {});
 export const saveRuleAtom = ApiClient.mutation("guidance", "saveRule");
+export const threadPolicyAtom = ApiClient.mutation("guidance", "threadPolicy");
 export const settingsAtom = ApiClient.mutation("guidance", "settings");
 export const muteAtom = ApiClient.mutation("guidance", "mute");
 export const classifyAtom = ApiClient.mutation("guidance", "classify");

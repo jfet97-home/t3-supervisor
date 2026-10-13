@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  EXCLUDED_THREAD_ID,
   buildContext,
   deliveryKey,
   eligibleRuns,
@@ -110,7 +109,7 @@ test("main-thread filtering excludes only the configured thread and subagent lin
   assert.equal(isMainThread(thread()), true);
   assert.equal(isMainThread(thread({ lineage: { parentThreadId: "parent", relationshipToParent: "fork" } })), true);
   assert.equal(isMainThread(thread({ lineage: { parentThreadId: "parent", relationshipToParent: "subagent" } })), false);
-  assert.equal(isMainThread(thread({ id: EXCLUDED_THREAD_ID })), false);
+  assert.equal(isMainThread(thread({ id: "instance-router" })), true);
   assert.equal(isMainThread(thread({ deletedAt: "2025-01-01T00:00:00.000Z" })), false);
 });
 

@@ -1,3 +1,4 @@
+import { currentThreadPolicy } from "./thread-policy.js";
 import { Cause, Effect, Option, Schedule } from "effect";
 import { createServer } from "node:http";
 import { buildContext, formatReplyParts, telegramRouteUpdateId, eligibleRuns, formatMessage, isMainThread, timestampMs } from "./domain.js";
@@ -163,7 +164,7 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
     const hints = yield* store.dueHints(Date.now(), 20);
     for (const hint of hints) {
       yield* Effect.gen(function* () {
-        if (!config.telegramEnabled || config.excludedThreadIds.includes(hint.threadId) || (hint.shell && !isMainThread(hint.shell))) {
+        if (!config.telegramEnabled || currentThreadPolicy(config).excludedThreadIds.includes(hint.threadId) || (hint.shell && !isMainThread(hint.shell))) {
           yield* store.doneHint(hint.threadId, hint.revision);
           return;
         }

@@ -7,7 +7,7 @@ import { GuidanceStore } from "../src/guidance-store.js";
 import { makeGuidanceModel } from "../src/guidance.js";
 
 const directory=await mkdtemp(join(tmpdir(),"guidance-model-probe-"));
-const config={...loadConfig(),cxCommand:"/opt/homebrew/bin/codex",cxHome:join(directory,"auth"),cxSeedFile:"/Users/andreasimonecosta/.config/mcpx/t3-supervisor-secrets/codex-auth.json"};
+const config={...loadConfig(),cxCommand:"/opt/homebrew/bin/codex",cxHome:join(directory,"auth"),cxSeedFile:"/Users/andreasimonecosta/.config/t3-supervisor/secrets/codex-auth.json"};
 const store=new GuidanceStore(directory);
 try {
   await Effect.runPromise(initializeRuntimeAuth(config));

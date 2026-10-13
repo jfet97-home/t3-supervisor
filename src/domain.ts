@@ -8,8 +8,6 @@ import type {
   ThreadInfo,
 } from "./types.js";
 
-export const EXCLUDED_THREAD_ID = "af0e5160-07d2-46c9-b60b-a329d6951d83";
-
 const activeRunStates = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 const activeTaskStates = new Set(["pending", "running", "waiting"]);
 const maxContextChars = 60_000;
@@ -211,7 +209,6 @@ const latestRootAnswer = (
 export const isMainThread = (thread: ThreadInfo): boolean =>
   typeof thread.id === "string" &&
   thread.id.length > 0 &&
-  thread.id !== EXCLUDED_THREAD_ID &&
   !thread.deletedAt &&
   thread.lineage?.relationshipToParent !== "subagent";
 

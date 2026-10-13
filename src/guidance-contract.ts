@@ -1,3 +1,4 @@
+import { ThreadPolicy } from "./thread-policy-contract.js";
 import { Schema } from "effect";
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/http-api";
 
@@ -71,6 +72,8 @@ export const Snapshot = Schema.Struct({
   sendingReady: Schema.Boolean,
   sendingReason: Text,
   settings: Settings,
+  threadPolicy: ThreadPolicy,
+  threads: Schema.Array(Schema.Struct({ id: Text, title: Text, available: Schema.Boolean })),
   projects: Schema.Array(Project),
   rules: Schema.Array(Rule),
   mutes: Schema.Array(Schema.Struct({ ruleId: Text, scopeId: Text })),
@@ -129,6 +132,7 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
         success: Settings,
         error: UiError,
       }),
+      HttpApiEndpoint.post("threadPolicy", "/thread-policy", { payload: ThreadPolicy, success: ThreadPolicy, error: UiError }),
       HttpApiEndpoint.post("mute", "/mute", {
         payload: MuteInput,
         success: Schema.Void,

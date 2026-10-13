@@ -11,7 +11,7 @@ import { GuidanceRuntime } from "../src/guidance.js";
 import { startGuidanceUi } from "../src/guidance-ui.js";
 
 const directory=await mkdtemp(join(tmpdir(),"guidance-ui-probe-"));
-const token=(await readFile('/Users/andreasimonecosta/.config/mcpx/t3-supervisor-secrets/t3-read-token',"utf8")).trim();
+const token=(await readFile('/Users/andreasimonecosta/.config/t3-supervisor/secrets/t3-read-token',"utf8")).trim();
 const config={...loadConfig(),dataDirectory:directory,t3Url:"http://127.0.0.1:3773",uiPort:19008,uiHost:"127.0.0.1",uiAssetsDirectory:join(process.cwd(),"ui-dist"),guidanceTokenFile:join(directory,"absent-guidance-token"),managedScratchRoot:"/Users/andreasimonecosta/.t3/scratch"};
 NodeRuntime.runMain(Effect.gen(function*(){
   const source=yield* Store;const t3=yield* T3Client;const descriptor=yield* t3.descriptor();yield* source.activate(descriptor.environmentId,Date.now());
