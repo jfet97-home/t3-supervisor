@@ -86,6 +86,7 @@ export interface SourceItem {
 }
 
 export interface SupervisorConfig {
+  supervisorOwnedThreadIds?: Set<string>;
   dataDirectory: string;
   t3Url: string;
   t3TokenFile: string;

@@ -10,6 +10,7 @@ import type { GuidanceRuntime } from "./guidance.js";
 import type { SupervisorConfig } from "./types.js";
 import type { ProjectDefinitionLoader } from "./project-definitions.js";
 import type { ProjectRuleEditor } from "./project-rule-editor.js";
+import type { ProjectSupervisor } from "./project-supervisor.js";
 
 const equal = (a: string, b: string) => {
   const x = Buffer.from(a);
@@ -34,12 +35,27 @@ export const startGuidanceUi = async (
   runtime: GuidanceRuntime,
   definitions?: ProjectDefinitionLoader,
   editor?: ProjectRuleEditor,
+  supervision?: ProjectSupervisor,
 ) => {
   const requireLegacy = () => {if (runtime.retired !== false) throw new Error("Legacy guidance rules are retired. Edit project rules in Projects.");};
   const legacyMessage = (fallback: string) => runtime.retired !== false ? "Legacy guidance rules are retired. Edit project rules in Projects." : fallback;
   const handlers = HttpApiBuilder.group(SupervisorApi, "guidance", (h) =>
     h.handleAll({
       snapshot: () => Effect.promise(() => runtime.snapshot()),
+      projectSupervisor: ({query}) => Effect.tryPromise({
+        try: signal => {
+          if (!supervision) throw new Error("supervision_unavailable");return supervision.snapshot(query.projectId, signal);
+        }, catch: () => new UiError({message: "Project supervision is unavailable. Check the T3 connection and registered project."}),
+      }),
+      saveProjectSupervisor: ({payload}) => Effect.tryPromise({
+        try: signal => {
+          if (!supervision) throw new Error("supervision_unavailable");return supervision.save(payload, signal);
+        }, catch: () => new UiError({message: "Supervisor settings could not be confirmed. Refresh and inspect the current selection before saving again."}),
+      }),
+      retryProjectSupervisor: ({payload}) => Effect.tryPromise({
+        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.retry(payload, signal);},
+        catch: () => new UiError({message: "Native access retry could not be confirmed. Refresh to inspect the retained state."}),
+      }),
       projectDefinitions: ({query}) => Effect.tryPromise({
         try: (signal) => {
           if (!definitions) throw new Error("Project definition access is not configured.");

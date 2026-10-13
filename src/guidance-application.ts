@@ -10,6 +10,9 @@ import { makeProjectFiles, makeProjectWriter } from "./project-files.js";
 import { ProjectDefinitionLoader } from "./project-definitions.js";
 import { ProjectRuleEditor } from "./project-rule-editor.js";
 import { existsSync } from "node:fs";
+import { ProjectSupervisorStore, loadSupervisorOwnership } from "./project-supervisor-store.js";
+import { ProjectSupervisor } from "./project-supervisor.js";
+import { makeSupervisorRpc, readSupervisorBaseline } from "./supervisor-native.js";
 
 export const runGuidanceApplication = (
   config: SupervisorConfig,
@@ -28,16 +31,28 @@ export const runGuidanceApplication = (
       t3,
       makeGuidanceModel(config, store),
     );
+    runtime.descriptor = yield* t3.descriptor();
+    store.bind(runtime.descriptor.environmentId);
     const readToken = yield* Effect.tryPromise(() => readFile(config.t3TokenFile, "utf8"));
     const definitions = new ProjectDefinitionLoader(source, t3, makeProjectFiles(config.t3Url, readToken.trim()));
     const writePath = config.projectWriteTokenFile;
     const writeToken = writePath && existsSync(writePath) ? yield* Effect.tryPromise(() => readFile(writePath, "utf8")) : "";
     const editor = writeToken.trim() ? new ProjectRuleEditor(definitions, makeProjectWriter(config.t3Url, writeToken.trim())) : undefined;
+    const owned = config.supervisorOwnedThreadIds ??= loadSupervisorOwnership(config.dataDirectory);
+    const supervisionStore = new ProjectSupervisorStore(store, owned);
+    const operateToken = config.guidanceTokenFile && existsSync(config.guidanceTokenFile) ? yield* Effect.tryPromise(() => readFile(config.guidanceTokenFile!, "utf8")) : "";
+    const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, makeSupervisorRpc(config.t3Url, readToken.trim()),
+      operateToken.trim() ? makeSupervisorRpc(config.t3Url, operateToken.trim()) : null, readSupervisorBaseline(config.t3Url, readToken.trim()));
     runtime.retired = true;
     yield* Effect.acquireRelease(
-      Effect.promise(() => startGuidanceUi(config, runtime, definitions, editor)),
+      Effect.promise(() => startGuidanceUi(config, runtime, definitions, editor, supervision)),
       (ui) => Effect.promise(() => ui.close()),
     );
+    const interpretation = Effect.tryPromise({try: signal => supervision.runOnce(AbortSignal.any([signal, AbortSignal.timeout(120_000)])), catch: () => new Error("task_interpretation_cycle_failed")}).pipe(
+      Effect.catch(() => Effect.sync(() => console.log(JSON.stringify({event: "task_interpretation_unavailable"})))),
+      Effect.andThen(Effect.sleep("5 seconds")), Effect.forever,
+    );
+    yield* Effect.forkScoped(interpretation);
     const cycle = Effect.tryPromise({
       try: async () => {
         runtime.descriptor = await Effect.runPromise(t3.descriptor());

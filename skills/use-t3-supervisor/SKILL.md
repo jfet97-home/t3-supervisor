@@ -1,6 +1,6 @@
 ---
 name: use-t3-supervisor
-description: Use an existing T3 Supervisor dashboard to inspect and edit repository project rules, inspect reusable workflow blocks and validation, view activity and notification history, or adjust chat settings. For product usage, not source development, deployment, credentials provisioning, or Lima VM setup.
+description: Use an existing T3 Supervisor dashboard to inspect and edit repository project rules, inspect reusable workflow blocks and validation, configure each project's Supervisor model and reasoning, view task interpretation and notification history, or adjust chat settings. For product usage, not source development, deployment, credentials provisioning, or Lima VM setup.
 ---
 
 # Use T3 Supervisor
@@ -8,6 +8,7 @@ description: Use an existing T3 Supervisor dashboard to inspect and edit reposit
 The dashboard uses one project rule model backed by `.supervisor/rules.yaml` and
 reusable Markdown blocks. Legacy condition/message reminders are retired. Workflow
 negotiation and semantic execution of the new rules are not connected yet.
+Task interpretation uses an automatically created T3 conversation per project.
 
 ## Connect
 
@@ -40,6 +41,21 @@ Missing/malformed files, invalid block files, symlinks or incomplete listings mu
 be repaired in the repository first. The editor only writes existing regular rule
 files. A missing write credential is a trusted deployment-setup task, not authority
 to provision or retrieve it through ordinary dashboard usage.
+
+## Configure the project Supervisor
+
+Under Projects, choose a model and reasoning from the connected T3 catalog, then
+Save Supervisor settings. This preference is project-wide, including its worktrees.
+The service creates and reuses a Supervisor conversation automatically for the first
+new task; no manual launch is needed. Saved and current selections differ while a
+change waits for the Supervisor to become idle. Unavailable models remain visible
+without a fallback. Refresh to verify the actual T3 selection after a change.
+
+Select an operational conversation to inspect its interpreted objective and status.
+An inferred objective is not an agreed workflow or proof that rules were followed.
+The first stage handles native web/mobile user tasks, not scheduled/imported/MCP
+requests. The bound Supervisor conversation can be opened in T3; it is excluded
+from ordinary monitoring and notifications.
 
 ## Interpret saves and history
 

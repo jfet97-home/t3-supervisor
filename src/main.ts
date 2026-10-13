@@ -14,8 +14,10 @@ import { makeT3Client } from "./t3.js";
 import { telegramClientLayer } from "./telegram.js";
 
 import { ThreadPolicyStore } from "./thread-policy.js";
+import { isSupervisorThread, loadSupervisorOwnership } from "./project-supervisor-store.js";
 
 const config = loadConfig();
+config.supervisorOwnedThreadIds = loadSupervisorOwnership(config.dataDirectory);
 const status = createStatus(config);
 
 NodeRuntime.runMain(Effect.gen(function* () {
@@ -44,7 +46,7 @@ NodeRuntime.runMain(Effect.gen(function* () {
         routerOnlyInput: true,
         readThreadPolicy: () => config.threadPolicy!.get(),
         excludedThreadIds: config.excludedThreadIds,
-        native: makeNativeInputIntegration({ baseUrl: config.t3Url, readToken: token.trim(), responseToken: responseToken.trim() }),
+        native: makeNativeInputIntegration({ baseUrl: config.t3Url, readToken: token.trim(), responseToken: responseToken.trim(), isSupervisorThread: thread => isSupervisorThread(config, thread) }),
         telegram: makeInputTelegramClient(config.mcpxUrl, {
           onReceiptFailure: (deliveryKey) => console.log(JSON.stringify({ event: "input_receipt_unconfirmed", deliveryKey })),
         }),

@@ -17,6 +17,7 @@ import type { StoreShape } from "./store.js";
 import type { T3ClientShape, T3EnvironmentDescriptor } from "./t3.js";
 import type { Projection, RunInfo, SupervisorConfig } from "./types.js";
 import { mainRunNodeReader, boundedText } from "./domain.js";
+import { isSupervisorThread } from "./project-supervisor-store.js";
 
 const decisionSchema = {
   type: "object",
@@ -243,7 +244,7 @@ export class GuidanceRuntime {
       sendingReason: this.sendingReason(),
       settings: this.store.settings(),
       threadPolicy: currentThreadPolicy(this.config),
-      threads: catalog.threads.filter(t => t.lineage?.relationshipToParent !== "subagent").map(t => ({ id: t.id, title: t.title, projectId: t.projectId, available: !t.deletedAt && !t.archivedAt && !t.settledAt })),
+      threads: catalog.threads.filter(t => t.lineage?.relationshipToParent !== "subagent" && !isSupervisorThread(this.config, t)).map(t => ({ id: t.id, title: t.title, projectId: t.projectId, available: !t.deletedAt && !t.archivedAt && !t.settledAt })),
       projects: catalog.projects.map(({ project, available }) => ({
         id: project.id,
         title: project.title,

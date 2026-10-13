@@ -38,7 +38,7 @@ export const normalizeNativeInput = (request: InputT3Request, title: string): Na
 });
 
 /** Adapts installed native T3 contracts without changing T3 itself. */
-export const makeNativeInputIntegration = (options: InputT3ClientOptions): InputNativeClient => {
+export const makeNativeInputIntegration = (options: InputT3ClientOptions & {isSupervisorThread?: (thread: InputT3Thread) => boolean}): InputNativeClient => {
   const client = makeInputT3Client(options);
   let environmentId: string | null = null;
   const threads = new Map<string, InputT3Thread>();
@@ -67,7 +67,7 @@ export const makeNativeInputIntegration = (options: InputT3ClientOptions): Input
       for (const id of cache.keys()) if (!threads.has(id)) cache.delete(id);
       return listed.map((thread): InputThread => ({
         id: thread.id,
-        active: true,
+        active: options.isSupervisorThread?.(thread) !== true,
         archived: thread.archived === true || thread.archivedAt != null,
         deleted: thread.deletedAt != null,
         delegated: thread.lineage.relationshipToParent === "subagent",
@@ -89,6 +89,8 @@ export const makeNativeInputIntegration = (options: InputT3ClientOptions): Input
       return request ? normalize(request) : null;
     },
     respond: async (threadId, requestId, answers) => {
+      const thread = threads.get(threadId);
+      if (thread && options.isSupervisorThread?.(thread)) throw new Error("Supervisor input is not forwarded or answered.");
       await descriptor();
       const result = await client.respond(threadId, requestId, { ...answers });
       return result.outcome === "accepted" ? { kind: "accepted" } : { kind: result.outcome, reason: result.reason };

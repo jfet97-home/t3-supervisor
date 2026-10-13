@@ -9,6 +9,7 @@ import { TelegramClient } from "./telegram.js";
 import type { SupervisorConfig } from "./types.js";
 import type { InputStoreCapacity } from "./input-store.js";
 import { runGuidanceApplication } from "./guidance-application.js";
+import { isSupervisorThread } from "./project-supervisor-store.js";
 
 export interface SupervisorStatus {
   startedAt: string;
@@ -164,12 +165,13 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
     const hints = yield* store.dueHints(Date.now(), 20);
     for (const hint of hints) {
       yield* Effect.gen(function* () {
-        if (!config.telegramEnabled || currentThreadPolicy(config).excludedThreadIds.includes(hint.threadId) || (hint.shell && !isMainThread(hint.shell))) {
+        if (!config.telegramEnabled || currentThreadPolicy(config).excludedThreadIds.includes(hint.threadId) || (hint.shell && (!isMainThread(hint.shell) || isSupervisorThread(config, hint.shell)))) {
           yield* store.doneHint(hint.threadId, hint.revision);
           return;
         }
         const snapshot = yield* t3.projection(hint.threadId);
         const projection = snapshot.projection;
+        if (isSupervisorThread(config, projection.thread)) {yield* store.doneHint(hint.threadId, hint.revision);return;}
         const project = yield* store.project(hint.threadId);
         for (const run of eligibleRuns(projection, notificationsAfter)) {
           if (yield* store.hasIdentity(descriptor.environmentId, hint.threadId, run.id)) continue;

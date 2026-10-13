@@ -11,6 +11,9 @@ repository-defined rules, and optionally handling Telegram notifications and inp
 - **Reusable blocks:** inspect Markdown instructions, expected results and rule
   references. Select a project root or a conversation's worktree and see validation
   problems and the actual source path. See [project definitions](docs/project-definitions.md).
+- **Project Supervisor:** choose a T3 model and reasoning per project. A reusable
+  conversation is created automatically for new task interpretation. See
+  [project supervision](docs/project-supervision.md).
 - **T3 observation and history:** project and chat inventories sync automatically;
   existing supervision and notification history remain inspectable.
 - **Telegram completion notifications:** optional concise recaps for substantial

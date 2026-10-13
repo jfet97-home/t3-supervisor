@@ -1,6 +1,7 @@
 import { ThreadPolicy } from "./thread-policy-contract.js";
 import { ProjectDefinitions, ProjectRuleSaveInput, ProjectRuleSaveResult } from "./project-definitions-contract.js";
 import { Schema } from "effect";
+import { ProjectSupervisorSnapshot, ProjectSupervisorSave, ProjectSupervisorRetry, ProjectSupervisorSaveResult } from "./project-supervisor-contract.js";
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/http-api";
 
 const Text = Schema.String;
@@ -123,6 +124,15 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
   HttpApiGroup.make("guidance")
     .add(
       HttpApiEndpoint.get("snapshot", "/snapshot", { success: Snapshot }),
+      HttpApiEndpoint.get("projectSupervisor", "/project-supervisor", {
+        query: {projectId: Text}, success: ProjectSupervisorSnapshot, error: UiError,
+      }),
+      HttpApiEndpoint.post("saveProjectSupervisor", "/project-supervisor", {
+        payload: ProjectSupervisorSave, success: ProjectSupervisorSaveResult, error: UiError,
+      }),
+      HttpApiEndpoint.post("retryProjectSupervisor", "/project-supervisor/retry", {
+        payload: ProjectSupervisorRetry, success: ProjectSupervisorSaveResult, error: UiError,
+      }),
       HttpApiEndpoint.get("projectDefinitions", "/project-definitions", {
         query: {projectId: Text, threadId: Schema.optional(Text)},
         success: ProjectDefinitions,
