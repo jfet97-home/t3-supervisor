@@ -188,6 +188,11 @@ saved rules, edited revision and save time. They can authorize only those rules,
 after the current review began and while blocks still match the approved snapshot.
 Independent block changes still require the Supervisor's user-message review.
 Every adopted revision requires a replacement workflow.
+The edited revision is retained as audit metadata; the editor checks it before
+writing, while adoption compares fresh content and the current review timestamp.
+Changes before first delivery use the same recovery flow. A restored or authorized
+collection refreshes an unsent draft without replacing or replaying a possibly
+accepted native introduction.
 
 For unrequested edits attributable to the operative agent, the Supervisor asks that
 agent to restore its own changes while preserving user edits. It does not perform a

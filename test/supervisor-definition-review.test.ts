@@ -60,10 +60,10 @@ const task = (overrides: Partial<TaskRecord> = {}): TaskRecord => {
   };
 };
 
-type UserFixture = {id: string; text: string; runStatus?: string; rootKind?: string; rootStatus?: string; nodeId?: string; streaming?: boolean;
+type UserFixture = {id: string; text: string; runStatus?: string; rootKind?: string; rootStatus?: string; nodeId?: string; historicalRoot?: boolean; streaming?: boolean;
   createdBy?: string; creationSource?: string; senderThreadId?: string | null; scheduledTaskId?: string | null; source?: string | null};
 
-const agentProjection = (users: UserFixture[] = [{id: "user-1", text: userText}], sourceRunStatus = "completed"): Projection => {
+const agentProjection = (users: UserFixture[] = [{id: "user-1", text: userText}], sourceRunStatus = "completed", sourceRestarted = false): Projection => {
   const messages = [{id: "source-0", runId: "operative-run-1", nodeId: "root-operative-run-1", role: "user", text: sourceText, streaming: false,
     createdAt: "2026-10-13T10:00:00.000Z", updatedAt: "2026-10-13T10:00:00.000Z", createdBy: "user", creationSource: "web", threadId: operativeThreadId},
   ...users.map((user, index) => ({id: user.id, runId: `operative-run-${index + 2}`, nodeId: user.nodeId ?? `root-operative-run-${index + 2}`, role: "user", text: user.text,
@@ -71,16 +71,24 @@ const agentProjection = (users: UserFixture[] = [{id: "user-1", text: userText}]
     createdBy: user.createdBy ?? "user", creationSource: user.creationSource ?? "web", senderThreadId: user.senderThreadId,
     scheduledTaskId: user.scheduledTaskId, source: user.source, threadId: operativeThreadId}))];
   const runs = [
-    {id: "operative-run-1", threadId: operativeThreadId, ordinal: 1, status: sourceRunStatus, requestedAt: "2026-10-13T10:00:00.000Z",
+    {id: "operative-run-1", threadId: operativeThreadId, ordinal: 1, status: sourceRunStatus, userMessageId: sourceRestarted ? "source-restart-message" : "source-0", requestedAt: "2026-10-13T10:00:00.000Z",
       startedAt: "2026-10-13T10:00:00.000Z", completedAt: sourceRunStatus === "completed" ? "2026-10-13T10:00:30.000Z" : null,
-      rootNodeId: "root-operative-run-1", providerThreadId: "provider"},
+      rootNodeId: sourceRestarted ? "restart-root-operative-run-1" : "root-operative-run-1", providerThreadId: "provider"},
     ...users.map((user, index) => ({id: `operative-run-${index + 2}`, threadId: operativeThreadId, ordinal: index + 2,
-      status: user.runStatus ?? "running", requestedAt: "2026-10-13T10:01:00.000Z", startedAt: "2026-10-13T10:01:00.000Z",
-      completedAt: null, rootNodeId: `root-operative-run-${index + 2}`, providerThreadId: "provider"})),
+      status: user.runStatus ?? "running", userMessageId: user.historicalRoot ? `${user.id}-restart` : user.id,
+      requestedAt: "2026-10-13T10:01:00.000Z", startedAt: "2026-10-13T10:01:00.000Z",
+      completedAt: null, rootNodeId: user.historicalRoot ? `restart-root-operative-run-${index + 2}` : `root-operative-run-${index + 2}`, providerThreadId: "provider"})),
   ];
   const nodes = runs.map((run, index) => ({id: run.rootNodeId!, kind: index === 0 ? "root_turn" : users[index - 1]!.rootKind ?? "root_turn",
     threadId: operativeThreadId, runId: run.id, rootNodeId: run.rootNodeId, providerThreadId: "provider",
-    status: index === 0 ? sourceRunStatus : users[index - 1]!.rootStatus ?? users[index - 1]!.runStatus ?? "running", parentNodeId: null}));
+    status: index === 0 ? sourceRunStatus : users[index - 1]!.runStatus ?? "running", parentNodeId: null}));
+  for (const [index, user] of users.entries()) {
+    if (user.historicalRoot) nodes.push({id: `root-operative-run-${index + 2}`, kind: "root_turn", threadId: operativeThreadId,
+      runId: `operative-run-${index + 2}`, rootNodeId: `root-operative-run-${index + 2}`, providerThreadId: "provider",
+      status: user.rootStatus ?? "interrupted", parentNodeId: null});
+  }
+  if (sourceRestarted) nodes.push({id: "root-operative-run-1", kind: "root_turn", threadId: operativeThreadId, runId: "operative-run-1",
+    rootNodeId: "root-operative-run-1", providerThreadId: "provider", status: "interrupted", parentNodeId: null});
   return {thread: {id: operativeThreadId, title: "Task", projectId, workspaceRoot: root,
     lineage: {parentThreadId: null, relationshipToParent: null}}, runs, messages, nodes};
 };
@@ -147,6 +155,33 @@ test("native primary user messages use the running root_turn node", () => {
   assert.equal(nativeUserMessageVisible(projection, sourceRun, source), true);
   assert.equal(nativeUserMessageVisible(projection, userRun, user), true);
   assert.equal(buildProjectDefinitionReviewRequest(task(), definitions(), definitions({revision: newRevision}), projection, "Running marker") !== null, true);
+});
+
+test("restart_active preserves source and citation messages on interrupted historical roots", () => {
+  const projection = agentProjection([{id: "user-1", text: userText, runStatus: "running", historicalRoot: true}], "running", true);
+  const source = projection.messages[0]!;
+  const sourceRun = projection.runs.find(run => run.id === source.runId)!;
+  const user = projection.messages[1]!;
+  const userRun = projection.runs.find(run => run.id === user.runId)!;
+  assert.notEqual(source.nodeId, sourceRun.rootNodeId);
+  assert.notEqual(user.nodeId, userRun.rootNodeId);
+  assert.equal(nativeUserMessageVisible(projection, sourceRun, source), true);
+  assert.equal(nativeUserMessageVisible(projection, userRun, user), true);
+
+  const current = task();
+  const observed = definitions({revision: newRevision});
+  const parsed = parseProjectDefinitionDecisionRecord(decisionRecord(), current, observed, projection);
+  assert.ok(parsed);
+  assert.deepEqual(parsed.decision.userMessageIds, ["user-1"]);
+  const request = buildProjectDefinitionReviewRequest(current, definitions(), observed, projection, "Restart marker");
+  assert.ok(request);
+  assert.deepEqual((parseEnvelope(request).userMessages as Array<Record<string, unknown>>).map(message => message.messageId), ["source-0", "user-1"]);
+
+  const rolledBack = agentProjection([{id: "user-1", text: userText, runStatus: "running", historicalRoot: true, rootStatus: "rolled_back"}], "running", true);
+  const rolledBackUser = rolledBack.messages[1]!;
+  const rolledBackRun = rolledBack.runs.find(run => run.id === rolledBackUser.runId)!;
+  assert.equal(nativeUserMessageVisible(rolledBack, rolledBackRun, rolledBackUser), false);
+  assert.equal(parseProjectDefinitionDecisionRecord(decisionRecord(), current, observed, rolledBack), null);
 });
 
 test("forwarded, scheduled, source-tagged, streaming, failed, and non-main user messages cannot authorize definitions", () => {

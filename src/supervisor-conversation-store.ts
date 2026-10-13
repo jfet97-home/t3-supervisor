@@ -93,6 +93,12 @@ export class SupervisorConversationStore {
     this.store.db.prepare("INSERT INTO supervisor_workflow_introductions VALUES(?,?,?) ON CONFLICT(task_id) DO UPDATE SET document=excluded.document")
       .run(introduction.taskId, introduction.projectId, JSON.stringify(introduction));
   }
+  removeUnsentIntroduction(taskId: string): void {
+    const introduction = this.introduction(taskId);
+    if (introduction && ["context", "ready", "blocked"].includes(introduction.state) && !introduction.dispatchMode &&
+      !introduction.acceptedAt && !introduction.rejectedAttempts?.length)
+      this.store.db.prepare("DELETE FROM supervisor_workflow_introductions WHERE task_id=?").run(taskId);
+  }
   agreementCandidates(taskId: string): WorkflowAgreementCandidate[] {
     return this.store.db.prepare("SELECT document FROM supervisor_workflow_agreement_candidates WHERE task_id=? ORDER BY created_at,rowid").all(taskId)
       .map(row => JSON.parse(String(row.document)) as WorkflowAgreementCandidate);

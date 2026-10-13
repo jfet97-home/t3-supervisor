@@ -80,7 +80,8 @@ export class SupervisorConversation {
     this.requests.prune(now);
     const tasks = this.store.bindings().flatMap(binding => this.store.tasks(binding.projectId))
       .filter(task => task.status === "inferred" && (task.workflow?.status === "proposed" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale") &&
-        task.supervisorThreadId === this.store.binding(task.projectId)?.threadId && this.requests.introduction(task.id)?.state === "sent");
+        task.supervisorThreadId === this.store.binding(task.projectId)?.threadId &&
+        (this.requests.introduction(task.id)?.state === "sent" || this.introductionUnsent(task.id)));
     const candidates = [...tasks.slice(this.offset), ...tasks.slice(0, this.offset)].slice(0, 20);
     this.offset = tasks.length ? (this.offset + 20) % tasks.length : 0;
     const supervisorProjections = new Map<string, Projection | null>();
@@ -90,14 +91,13 @@ export class SupervisorConversation {
       if (now - (this.observedAt.get(task.threadId) ?? 0) < 30_000) continue;
       this.observedAt.set(task.threadId, now);
       const introduction = this.requests.introduction(task.id);
-      if (!introduction || introduction.state !== "sent") continue;
       try {
         const agent = await this.projection(task.threadId, signal);
         if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== task.projectId) {
           this.markWorkflowStale(task, "The operative conversation is no longer eligible for this workflow agreement.", now);continue;
         }
         this.monitor.observe({projectId: task.projectId, threadId: task.threadId, sourceOrdinal: task.sourceOrdinal, projection: agent, now,
-          excludedIds: new Set([introduction.messageId])});
+          excludedIds: new Set(introduction ? [introduction.messageId] : [])});
         let supervisor = supervisorProjections.get(task.projectId);
         if (supervisor === undefined) {
           try {supervisor = await this.projection(task.supervisorThreadId, signal);}
@@ -111,12 +111,33 @@ export class SupervisorConversation {
           if (missingSupervisors.has(task.projectId)) this.markWorkflowStale(task, "The bound Supervisor conversation was deleted; this workflow agreement is stale.", now);
           continue;
         }
+        if (!introduction || introduction.state !== "sent") {
+          if (!this.sourceUnchanged(task, agent) || supervisor.thread.id !== task.supervisorThreadId || supervisor.thread.projectId !== task.projectId ||
+            supervisor.thread.archivedAt || supervisor.thread.deletedAt) continue;
+          const definitions = await this.definitions?.load(task.projectId, task.threadId, signal);
+          if (definitions && await this.reviewDefinitions(task, definitions, agent, supervisor, now, signal)) this.renewUnsentTask(task, now);
+          continue;
+        }
         await this.observeWorkflowAgreement(task, introduction, agent, supervisor, threads, now, signal);
       } catch (cause) {
         if (cause instanceof T3TransportError && cause.httpStatus === 404) this.markWorkflowStale(task, "A bound workflow conversation was deleted; this workflow agreement is stale.", now);
         // projection and definition read failures preserve the prior agreement for a later observation
       }
     }
+  }
+  private introductionUnsent(taskId: string): boolean {
+    const intro = this.requests.introduction(taskId);
+    return !intro || ["context", "ready", "blocked"].includes(intro.state) && !intro.dispatchMode && !intro.acceptedAt && !intro.rejectedAttempts?.length;
+  }
+  private renewUnsentTask(task: TaskRecord, now: number): void {
+    const current = this.store.task(task.threadId);
+    if (!current || current.id !== task.id || current.status !== "inferred" || !this.introductionUnsent(task.id) ||
+      current.definitionReview?.status !== "authorized" && current.definitionReview?.status !== "restored") return;
+    const renewed: TaskRecord = {...current, status: "queued", requestText: "", messageId: `supervisor-task-renewal:${randomUUID()}`,
+      workflowProposalId: `${task.id}:renew:${randomUUID()}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0,
+      reason: "Approved project definitions are ready; refresh the unsent proposal in the existing Supervisor conversation.", updatedAt: now};
+    delete renewed.definitionContext;delete renewed.definitionReadAttempts;delete renewed.revalidationAttempts;delete renewed.definitionNoticeKey;
+    this.store.store.transaction(() => {this.requests.removeUnsentIntroduction(task.id);this.store.saveTask(renewed);});
   }
   private async freshDefinitions(task: TaskRecord, signal: AbortSignal): Promise<ProjectDefinitionSnapshot | null> {
     const definitions = await this.definitions?.load(task.projectId, task.threadId, signal);
@@ -207,7 +228,8 @@ export class SupervisorConversation {
     const now = Date.now();
     if (now - (this.requests.lastNotice(binding.projectId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return false;
     for (const task of tasks.slice(0, 20)) {
-      if ((!task.definitionReview && task.agreement?.status !== "stale") || this.requests.introduction(task.id)?.state !== "sent") continue;
+      if ((!task.definitionReview && task.agreement?.status !== "stale") ||
+        this.requests.introduction(task.id)?.state !== "sent" && !this.introductionUnsent(task.id)) continue;
       const phase = task.definitionReview?.status === "revert_requested" ? "checking" : task.definitionReview?.status ?? `stale:${task.agreement?.proposalId}`;
       const key = fingerprint({expected: task.definitionReview?.expectedRevision ?? task.workflow?.revision,
         observed: task.definitionReview?.observedRevision ?? task.workflow?.revision, phase});
@@ -516,7 +538,17 @@ export class SupervisorConversation {
         this.requests.saveIntroduction({...introduction, state: "blocked", error: "The Supervisor's native modes cannot contact this operative chat. Adjust runtime/interaction modes in T3; existing conversations are never auto-upgraded."});continue;
       }
       const definitions = await this.freshDefinitions(task, signal);
-      if (!definitions) {this.requests.saveIntroduction({...introduction, state: "blocked", error: "Project definitions changed or are unavailable; the draft was not sent."});continue;}
+      if (!definitions) {
+        this.requests.saveIntroduction({...introduction, state: "blocked", error: "Project definitions changed or are unavailable; the draft was not sent."});
+        try {
+          const observed = await this.definitions?.load(task.projectId, task.threadId, signal);
+          if (observed) {
+            const ready = await this.reviewDefinitions(task, observed, agent, supervisor, Date.now(), signal);
+            if (ready) this.renewUnsentTask(task, Date.now());
+          }
+        } catch { /* a later observation preserves and rechecks the unsent proposal */ }
+        continue;
+      }
       const completionMarker = `Supervisor check-in context:${task.id} completed`;
       const safeDefinitions = {...definitions, rules: definitions.rules.map(rule => ({...rule, name: redact(rule.name), description: redact(rule.description)})),
         blocks: definitions.blocks.map(block => ({...block, name: redact(block.name), description: redact(block.description), instructions: redact(block.instructions), expected_result: redact(block.expected_result)}))};

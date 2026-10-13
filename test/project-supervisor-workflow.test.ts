@@ -81,7 +81,7 @@ const sourceProjection = (): Projection => {
     id: sourceMessageId,
     threadId: sourceThreadId,
     runId: run.id,
-    nodeId: "source-user-node",
+    nodeId: "source-root",
     role: "user",
     text: "Implement the export workflow",
     streaming: false,
@@ -96,7 +96,6 @@ const sourceProjection = (): Projection => {
     messages: [message],
     nodes: [
       { id: "source-root", threadId: sourceThreadId, runId: run.id, parentNodeId: null, rootNodeId: "source-root", kind: "root_turn", status: "completed", providerThreadId: "source-provider" },
-      { id: "source-user-node", threadId: sourceThreadId, runId: run.id, parentNodeId: "source-root", rootNodeId: "source-root", kind: "user_message", status: "completed", providerThreadId: "source-provider" },
     ],
   };
 };
@@ -119,7 +118,6 @@ const addSupervisorRequest = (projection: Projection, payload: Record<string, un
   const ordinal = projection.runs.length + 1;
   const runId = `supervisor-run-${ordinal}`;
   const rootId = `supervisor-root-${ordinal}`;
-  const nodeId = `supervisor-user-node-${ordinal}`;
   const messageId = String(payload.messageId);
   const now = new Date().toISOString();
   projection.runs.push({
@@ -138,7 +136,7 @@ const addSupervisorRequest = (projection: Projection, payload: Record<string, un
     id: messageId,
     threadId,
     runId,
-    nodeId,
+    nodeId: rootId,
     role: "user",
     text: String(payload.text),
     streaming: false,
@@ -150,7 +148,6 @@ const addSupervisorRequest = (projection: Projection, payload: Record<string, un
   const nodes = projection.nodes as Array<Record<string, unknown>>;
   nodes.push(
     { id: rootId, threadId, runId, parentNodeId: null, rootNodeId: rootId, kind: "root_turn", status: "running", providerThreadId: "supervisor-provider" },
-    { id: nodeId, threadId, runId, parentNodeId: rootId, rootNodeId: rootId, kind: "user_message", status: "completed", providerThreadId: "supervisor-provider" },
   );
 };
 
@@ -354,7 +351,7 @@ test("a correlated native result appears in the project DTO without repeating or
 
   await supervisor.runOnce();
   assert.equal(fixture.dispatches().length, 1);
-  assert.equal(fixture.definitionReads.length, 2, "only preparation and completed-result revalidation load definitions");
+  assert.equal(fixture.definitionReads.length, 3, "preparation, completed-result revalidation and one bounded unsent-definition observation load definitions");
   assert.equal(fixture.store.task(binding.threadId), null, "the owned Supervisor conversation is not a new source task");
 });
 
@@ -481,7 +478,7 @@ test("transient completion revalidation recovers and accepts the completed respo
   assert.equal(accepted?.revalidationAttempts, 1);
   assert.equal(accepted?.workflow?.status, "proposed");
   assert.equal(fixture.dispatches().length, 1, "revalidation retries inspect the original completed native run");
-  assert.equal(fixture.definitionReads.length, 3);
+  assert.equal(fixture.definitionReads.length, 4, "includes one bounded unsent-definition observation after acceptance");
 });
 
 test("three transient completion read failures stale only the proposal and preserve the objective", async (t) => {
@@ -519,7 +516,7 @@ test("three transient completion read failures stale only the proposal and prese
   assert.deepEqual(stale?.workflow?.steps, []);
   assert.match(stale?.workflow?.message ?? "", /could not be revalidated/u);
   assert.equal(fixture.dispatches().length, 1);
-  assert.equal(fixture.definitionReads.length, 4);
+  assert.equal(fixture.definitionReads.length, 5, "the separate unsent-definition observation does not change the three-attempt budget");
 });
 
 test("interrupted and definitively rejected requests clear pending workflow proposals", async (t) => {

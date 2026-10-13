@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Effect } from "effect";
 import { fingerprint } from "./guidance-store.js";
-import { mainRunNodeReader, timestampMs } from "./domain.js";
+import { mainRunNodeReader, nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { currentThreadPolicy } from "./thread-policy.js";
 import { ProjectSupervisorStore, isSupervisorThread, type BindingRecord, type TaskRecord, type SupervisorBaseline } from "./project-supervisor-store.js";
 import { modelSelection, sameModel, supervisorModels, validModelSelection, SupervisorRpcError, type SupervisorRpc } from "./supervisor-native.js";
@@ -24,7 +24,7 @@ export const taskSource = (projection: Projection, afterOrdinal: number): {run: 
     const message = projection.messages.find(m => m.id === run.userMessageId && m.threadId === projection.thread.id && m.runId === run.id &&
       m.role === "user" && m.createdBy === "user" && m.streaming === false && !m.id.startsWith("supervisor-notice:") && (m.creationSource === "web" || m.creationSource === "mobile") &&
       !m.senderThreadId && !m.scheduledTaskId && !m.source);
-    if (message && message.text.trim() && message.nodeId && mainRunNodeReader(projection, run)(message.nodeId)) return {run, message};
+    if (message && message.text.trim() && nativeUserMessageVisible(projection, run, message)) return {run, message};
   }
   return null;
 };
@@ -267,8 +267,8 @@ export class ProjectSupervisor {
           job = {...job, definitionReadAttempts: (job.definitionReadAttempts ?? 0) + 1};
           if (job.definitionReadAttempts! < 3) {this.store.saveTask({...job, reason: "Project definitions are temporarily unavailable; workflow preparation will retry with a bounded budget.", updatedAt: Date.now()});return;}
         }
-        const task = taskSource(source, job.sourceOrdinal - 1)!;
-        const prepared = prepareWorkflowRequest(job.threadId, job.sourceMessageId, task.message.text, definitions);
+        const message = source.messages.find(item => item.id === job!.sourceMessageId)!;
+        const prepared = prepareWorkflowRequest(job.threadId, job.sourceMessageId, message.text, definitions);
         job = {...job, requestText: prepared.requestText, definitionContext: prepared.context, workflow: prepared.workflow,
           definitionSnapshot: definitions.status === "ready" && prepared.context ? definitions : null};
       } catch {
@@ -295,11 +295,13 @@ export class ProjectSupervisor {
     }
   }
   private currentSource(job: TaskRecord, projection: Projection): boolean {
-    const current = taskSource(projection, job.sourceOrdinal - 1);
-    const message = current?.run.id === job.sourceRunId ? current.message : null;
+    const run = projection.runs.find(item => item.id === job.sourceRunId && item.ordinal === job.sourceOrdinal);
+    const message = projection.messages.find(item => item.id === job.sourceMessageId && item.runId === job.sourceRunId);
     return projection.thread.id === job.threadId && projection.thread.projectId === job.projectId && !unavailable(projection.thread) &&
       !isSupervisorThread(this.config, projection.thread) && !currentThreadPolicy(this.config).excludedThreadIds.includes(job.threadId) &&
-      Boolean(message && fingerprint(message.text) === job.sourceHash) && this.store.binding(job.projectId)?.threadId === job.supervisorThreadId;
+      Boolean(message && run && nativeUserMessageVisible(projection, run, message) && message.createdBy === "user" &&
+        (message.creationSource === "web" || message.creationSource === "mobile") && !message.senderThreadId && !message.scheduledTaskId && !message.source &&
+        fingerprint(message.text) === job.sourceHash) && this.store.binding(job.projectId)?.threadId === job.supervisorThreadId;
   }
   private complete(job: TaskRecord, status: TaskRecord["status"], objective: string | null, reason: string): void {
     const workflow = job.workflow?.status === "pending" ? {...job.workflow, status: "unavailable" as const, message: reason, rules: [], steps: []} : job.workflow;

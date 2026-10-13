@@ -62,7 +62,6 @@ const makeSourceProjection = (threadId: string, projectId: string, turns: Turn[]
   for (const [index, turn] of turns.entries()) {
     const runId = "run-" + turn.id;
     const rootId = "root-" + turn.id;
-    const nodeId = "user-node-" + turn.id;
     runs.push({
       id: runId,
       threadId,
@@ -79,7 +78,7 @@ const makeSourceProjection = (threadId: string, projectId: string, turns: Turn[]
       id: turn.id,
       threadId,
       runId,
-      nodeId,
+      nodeId: rootId,
       role: "user",
       text: turn.text,
       streaming: false,
@@ -90,7 +89,6 @@ const makeSourceProjection = (threadId: string, projectId: string, turns: Turn[]
     });
     nodes.push(
       { id: rootId, threadId, runId, parentNodeId: null, rootNodeId: rootId, kind: "root_turn", status: "completed", providerThreadId: "provider-" + threadId },
-      { id: nodeId, threadId, runId, parentNodeId: rootId, rootNodeId: rootId, kind: "user_message", status: "completed", providerThreadId: "provider-" + threadId },
     );
   }
   return { thread, runs, messages, nodes };
@@ -114,7 +112,6 @@ const addSupervisorRequest = (projection: Projection, payload: Record<string, un
   const ordinal = projection.runs.length + 1;
   const runId = "supervisor-run-" + ordinal;
   const rootId = "supervisor-root-" + ordinal;
-  const nodeId = "supervisor-user-node-" + ordinal;
   const messageId = String(payload.messageId);
   const now = new Date().toISOString();
   projection.runs.push({
@@ -133,7 +130,7 @@ const addSupervisorRequest = (projection: Projection, payload: Record<string, un
     id: messageId,
     threadId,
     runId,
-    nodeId,
+    nodeId: rootId,
     role: "user",
     text: String(payload.text),
     streaming: false,
@@ -145,7 +142,6 @@ const addSupervisorRequest = (projection: Projection, payload: Record<string, un
   projection.nodes = nodes;
   nodes.push(
     { id: rootId, threadId, runId, parentNodeId: null, rootNodeId: rootId, kind: "root_turn", status: "running", providerThreadId: "supervisor-provider" },
-    { id: nodeId, threadId, runId, parentNodeId: rootId, rootNodeId: rootId, kind: "user_message", status: "completed", providerThreadId: "supervisor-provider" },
   );
 };
 

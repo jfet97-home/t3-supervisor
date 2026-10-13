@@ -125,6 +125,49 @@ const appendRun = (input: {
   return run;
 };
 
+const restartRun = (projection: Projection, run: RunInfo, input: {messageId: string; text: string; now: number; oldRootStatus?: string}) => {
+  const oldRootId = run.rootNodeId;
+  assert.ok(oldRootId);
+  const oldRoot = nodesOf(projection).find(node => node.id === oldRootId);
+  assert.ok(oldRoot);
+  const oldMessages = projection.messages.filter(message => message.runId === run.id).map(message => [message.id, message.nodeId] as const);
+  oldRoot.status = input.oldRootStatus ?? "interrupted";
+  const rootNodeId = `${input.messageId}-root`;
+  const providerThreadId = String(run.providerThreadId);
+  nodesOf(projection).push({
+    id: rootNodeId,
+    threadId: projection.thread.id,
+    runId: run.id,
+    parentNodeId: null,
+    rootNodeId,
+    kind: "root_turn",
+    status: "running",
+    providerThreadId,
+  });
+  run.rootNodeId = rootNodeId;
+  run.userMessageId = input.messageId;
+  run.status = "running";
+  run.startedAt = iso(input.now);
+  run.completedAt = null;
+  const message: MessageInfo = {
+    id: input.messageId,
+    threadId: projection.thread.id,
+    runId: run.id,
+    nodeId: rootNodeId,
+    role: "user",
+    text: input.text,
+    streaming: false,
+    createdAt: iso(input.now),
+    updatedAt: iso(input.now),
+    createdBy: "user",
+    creationSource: "web",
+  };
+  projection.messages.push(message);
+  projection.thread.activeRunId = run.id;
+  for (const [messageId, nodeId] of oldMessages) assert.equal(projection.messages.find(item => item.id === messageId)?.nodeId, nodeId);
+  return {oldRootId, rootNodeId, message};
+};
+
 const appendMessageToRun = (
   projection: Projection,
   run: RunInfo,
@@ -1397,7 +1440,7 @@ test("legacy objective-only tasks without a proposed workflow do not create intr
   assert.equal(fixture.calls.length, 0);
 });
 
-test("three-cycle startup agrees during an active source run with native root-turn user messages", async t => {
+test("a restarted source run still gets context and its introduction in three startup cycles", async t => {
   const clock = {now: baseTime};
   t.mock.method(Date, "now", () => clock.now);
   const fixture = await makeFixture(clock, {operativeActive: false});
@@ -1408,12 +1451,14 @@ test("three-cycle startup agrees during an active source run with native root-tu
   assert.ok(sourceMessage);
   assert.equal(sourceMessage.nodeId, sourceRun.rootNodeId);
   assert.equal(nodesOf(fixture.operative).some(node => node.runId === sourceRun.id && node.kind === "user_message"), false);
-  sourceRun.status = "running";
-  sourceRun.completedAt = null;
-  const sourceRoot = nodesOf(fixture.operative).find(node => node.id === sourceRun.rootNodeId);
-  assert.ok(sourceRoot);
-  sourceRoot.status = "running";
-  fixture.operative.thread.activeRunId = sourceRun.id;
+  const originalRunId = sourceRun.id;
+  const originalOrdinal = sourceRun.ordinal;
+  const sourceRestart = restartRun(fixture.operative, sourceRun, {messageId: "operative-source-restart-input", text: "Continue the export workflow.", now: clock.now + 1});
+  assert.equal(sourceRun.id, originalRunId);
+  assert.equal(sourceRun.ordinal, originalOrdinal);
+  assert.equal(sourceMessage.nodeId, sourceRestart.oldRootId);
+  assert.equal(nodesOf(fixture.operative).find(node => node.id === sourceRestart.oldRootId)?.status, "interrupted");
+  assert.equal(sourceRestart.message.nodeId, sourceRestart.rootNodeId);
 
   await fixture.run();
   const contextRequest = fixture.conversation.requests.pending(projectId);
@@ -1466,6 +1511,91 @@ test("three-cycle startup agrees during an active source run with native root-tu
   }, fixture.conversation.definitions, thread => thread.id.startsWith("operative-") && thread.projectId === projectId);
   await restarted.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now + 60_000);
   assert.deepEqual(fixture.projectStore.task(fixture.task.threadId)?.agreement, beforeRestart);
+});
+
+test("a restarted operative run keeps its steered introduction historical for fresh agreement, while rollback invalidates old proof", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const introduction = appendNoticeToOperative(fixture);
+  const originalPlan = workflowRecord(fixture.task, fixture.task.id);
+  appendSupervisorProposal(fixture, fixture.task.id, originalPlan.workflow, clock.now);
+  const originalAcceptance = appendOperativeAcceptance(fixture, originalPlan, clock.now + 1);
+  clock.now += 30_000;
+  await observeAgreement(fixture, clock.now);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "agreed");
+
+  const operativeRun = fixture.operative.runs.find(run => run.id === introduction.targetRunId);
+  assert.ok(operativeRun);
+  const oldRootId = operativeRun.rootNodeId;
+  assert.ok(oldRootId);
+  const originalRunId = operativeRun.id;
+  const originalOrdinal = operativeRun.ordinal;
+  const originalMessages = fixture.operative.messages.filter(message => message.runId === operativeRun.id)
+    .map(message => ({id: message.id, nodeId: message.nodeId}));
+  const restarted = restartRun(fixture.operative, operativeRun, {
+    messageId: "operative-active-restart-input",
+    text: "Continue the implementation after restart.",
+    now: clock.now + 1,
+  });
+  assert.equal(operativeRun.id, originalRunId);
+  assert.equal(operativeRun.ordinal, originalOrdinal);
+  assert.equal(restarted.oldRootId, oldRootId);
+  assert.equal(fixture.operative.messages.find(message => message.id === introduction.messageId)?.nodeId, oldRootId);
+  assert.equal(fixture.operative.messages.find(message => message.id === originalAcceptance.id)?.nodeId, originalAcceptance.nodeId);
+  for (const message of originalMessages) assert.equal(fixture.operative.messages.find(item => item.id === message.id)?.nodeId, message.nodeId);
+
+  clock.now += 30_000;
+  await observeAgreement(fixture, clock.now);
+  let task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.agreement?.status, "stale", "the old acceptance is retained as historical evidence, not current-main proof");
+  assert.equal(fixture.conversation.requests.introduction(task.id)?.state, "sent");
+  assert.equal(fixture.operative.messages.find(message => message.id === introduction.messageId)?.nodeId, oldRootId,
+    "the steered introduction remains visible on the interrupted historical root");
+
+  const recoveryProposalId = "restart-recovery-proposal";
+  const recoveryPlan = workflowPlan(task);
+  appendSupervisorProposal(fixture, recoveryProposalId, recoveryPlan, clock.now + 1, task);
+  clock.now += 30_000;
+  await observeAgreement(fixture, clock.now);
+  task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.workflowProposalId, recoveryProposalId);
+  const recoveryAcceptance = appendOperativeAcceptance(fixture, workflowRecord(task, recoveryProposalId, workflowPlan(task)), clock.now + 1);
+  clock.now += 30_000;
+  await observeAgreement(fixture, clock.now);
+  task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.agreement?.status, "agreed");
+  assert.equal(task.agreement?.proposalId, recoveryProposalId);
+  assert.equal(task.agreement?.agentMessageId, recoveryAcceptance.id);
+  assert.equal(fixture.conversation.requests.introduction(task.id)?.state, "sent");
+  assert.equal(nodesOf(fixture.operative).find(node => node.id === recoveryAcceptance.nodeId)?.parentNodeId, operativeRun.rootNodeId,
+    "the new acceptance belongs to the restarted current root");
+
+  const rollbackClock = {now: clock.now + 1_000_000};
+  const rollbackFixture = await makeFixture(rollbackClock);
+  t.after(rollbackFixture.cleanup);
+  const rollbackIntroduction = appendNoticeToOperative(rollbackFixture);
+  const rollbackPlan = workflowRecord(rollbackFixture.task, rollbackFixture.task.id);
+  appendSupervisorProposal(rollbackFixture, rollbackFixture.task.id, rollbackPlan.workflow, rollbackClock.now);
+  appendOperativeAcceptance(rollbackFixture, rollbackPlan, rollbackClock.now + 1);
+  await observeAgreement(rollbackFixture, rollbackClock.now + 30_000);
+  assert.equal(rollbackFixture.projectStore.task(rollbackFixture.task.threadId)?.agreement?.status, "agreed");
+  const rollbackRun = rollbackFixture.operative.runs.find(run => run.id === rollbackIntroduction.targetRunId);
+  assert.ok(rollbackRun);
+  const rolledBackRootId = rollbackRun.rootNodeId;
+  const rollback = restartRun(rollbackFixture.operative, rollbackRun, {
+    messageId: "operative-rollback-restart-input",
+    text: "Resume after rollback.",
+    now: rollbackClock.now + 31_000,
+    oldRootStatus: "rolled_back",
+  });
+  assert.equal(rollback.oldRootId, rolledBackRootId);
+  await observeAgreement(rollbackFixture, rollbackClock.now + 60_000);
+  const rolledBackTask = rollbackFixture.projectStore.task(rollbackFixture.task.threadId)!;
+  assert.equal(rolledBackTask.agreement?.status, "stale", "proof attached to a rolled-back root cannot remain agreed");
+  assert.equal(rolledBackTask.workflow?.status, "stale");
+  assert.equal(rollbackFixture.operative.messages.find(message => message.id === rollbackIntroduction.messageId)?.nodeId, rolledBackRootId);
 });
 
 test("bare, self-reported, streaming and child records cannot create agreement", async t => {
@@ -1717,6 +1847,42 @@ test("a dashboard rule save never approves unrelated block edits or an older mat
   assert.deepEqual(fixture.projectStore.task(operativeThreadId)?.definitionSnapshot?.blocks, approved.blocks);
   assert.equal(fixture.projectStore.task(operativeThreadId)?.definitionSnapshot?.revision, rulesOnly.revision);
   assert.equal(fixture.projectStore.definitionUserSave(rulesOnly, rulesOnly, clock.now + 1), false);
+});
+
+test("definitions changed before the introduction get autonomous review and a restored unsent draft is renewed", async t => {
+  const clock = {now: baseTime};const fixture = await makeFixture(clock);t.after(fixture.cleanup);
+  t.mock.method(Date, "now", () => clock.now);
+  fixture.setDefinitions({...definitions(), revision: "changed-before-introduction"});
+  await observeAgreement(fixture, clock.now);
+  assert.equal(fixture.projectStore.task(operativeThreadId)?.definitionReview?.status, "checking");
+  await fixture.run();
+  const request = fixture.conversation.requests.pending(projectId)!;
+  assert.equal(request.kind, "review");
+  assert.match(request.text, /UNTRUSTED_PROJECT_DEFINITION_REVIEW_ENVELOPE/u);
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "blocked");
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
+
+  clock.now += 30_000;fixture.setDefinitions(definitions());
+  await observeAgreement(fixture, clock.now);
+  const renewed = fixture.projectStore.task(operativeThreadId)!;
+  assert.equal(renewed.status, "queued");
+  assert.equal(renewed.definitionReview?.status, "restored");
+  assert.equal(renewed.supervisorThreadId, fixture.binding.threadId);
+  assert.notEqual(renewed.workflowProposalId, fixture.task.id);
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id), null);
+  assert.equal(fixture.conversation.requests.pending(projectId)?.id, request.id);
+});
+
+test("renewal never removes a possibly accepted introduction reservation", async t => {
+  const clock = {now: baseTime};const fixture = await makeFixture(clock);t.after(fixture.cleanup);
+  const introduction = appendNoticeToOperative(fixture);
+  fixture.conversation.requests.saveIntroduction({...introduction, state: "blocked", acceptedAt: clock.now,
+    dispatchMode: {type: "steer_active", targetRunId: fixture.task.sourceRunId}});
+  fixture.conversation.requests.removeUnsentIntroduction(fixture.task.id);
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.acceptedAt, clock.now);
+  await observeAgreement(fixture, clock.now + 30_000);
+  assert.equal(fixture.projectStore.task(operativeThreadId)?.status, "inferred");
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "blocked");
 });
 
 test("assistant claims cannot stand in for user authorization and a deletion revert remains advisory", async t => {
