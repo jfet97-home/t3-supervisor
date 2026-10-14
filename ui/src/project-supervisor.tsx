@@ -10,9 +10,9 @@ import type {
 } from "../../src/project-supervisor-contract.js";
 import { defaultMonitoringSettings } from "../../src/project-supervisor-contract.js";
 import { loadProjectSupervisor, ProjectSupervisorRequestError, retryProjectSupervisor, saveProjectSupervisor } from "./project-supervisor-api.js";
+import { SupervisionControlPanel } from "./supervisor-control.js";
 
 type MonitoringDraft = {
-  enabled: boolean;
   intervalMinutes: string;
   activityThreshold: string;
 };
@@ -39,13 +39,12 @@ const copySelection = (selection: SupervisorModelSelection): SupervisorModelSele
 });
 const copyMonitoringDraft = (monitoring: MonitoringDraft): MonitoringDraft => ({...monitoring});
 const monitoringDraft = (monitoring: SupervisorMonitoringSettings): MonitoringDraft => ({
-  enabled: monitoring.enabled,
   intervalMinutes: String(monitoring.intervalMinutes),
   activityThreshold: String(monitoring.activityThreshold),
 });
 const copyMonitoringSettings = (monitoring: SupervisorMonitoringSettings): SupervisorMonitoringSettings => ({...monitoring});
 const sameMonitoring = (left: MonitoringDraft, right: MonitoringDraft) =>
-  left.enabled === right.enabled && left.intervalMinutes === right.intervalMinutes && left.activityThreshold === right.activityThreshold;
+  left.intervalMinutes === right.intervalMinutes && left.activityThreshold === right.activityThreshold;
 const readMonitoring = (snapshot: ProjectSupervisorInfo) => copyMonitoringSettings(snapshot.settings.monitoring ?? defaultMonitoringSettings);
 const readMonitoringDraft = (snapshot: ProjectSupervisorInfo) => monitoringDraft(readMonitoring(snapshot));
 const formatMonitoringTime = (value: number | null) => value === null ? "Not scheduled" : new Date(value).toLocaleString();
@@ -59,7 +58,7 @@ const monitoringError = (value: string, minimum: number, maximum: number, field:
 const parseMonitoringDraft = (value: MonitoringDraft): SupervisorMonitoringSettings | null => {
   if (monitoringError(value.intervalMinutes, 1, 60, "maximum pending activity age in minutes") ||
     monitoringError(value.activityThreshold, 3, 100, "finalized activity threshold")) return null;
-  return {enabled: value.enabled, intervalMinutes: Number(value.intervalMinutes), activityThreshold: Number(value.activityThreshold)};
+  return {intervalMinutes: Number(value.intervalMinutes), activityThreshold: Number(value.activityThreshold)};
 };
 const modelKey = (model: Pick<SupervisorModelInfo, "instanceId" | "model">) => JSON.stringify([model.instanceId, model.model]);
 const selectedModelKey = (selection: SupervisorModelSelection) => JSON.stringify([selection.instanceId, selection.model]);
@@ -373,12 +372,6 @@ export function ProjectSupervisorView({
           <p><strong>Last notice:</strong> {formatMonitoringTime(snapshot.monitoringStatus.lastNoticeAt)}</p>
           <p>{snapshot.monitoringStatus.message}</p>
         </section>}
-        <div className="stack">
-          <label htmlFor="supervisor-monitoring-enabled">Enable ongoing monitoring</label>
-          <input id="supervisor-monitoring-enabled" name="monitoringEnabled" type="checkbox" checked={monitoring.enabled}
-            aria-describedby="supervisor-monitoring-enabled-help" onChange={event => onMonitoringChange({...monitoring, enabled: event.target.checked})} />
-          <span id="supervisor-monitoring-enabled-help" className="small muted">Turn this off to pause monitoring sends for this project.</span>
-        </div>
         <div className="stack">
           <label htmlFor="supervisor-monitoring-interval">Maximum pending activity age (minutes)</label>
           <input id="supervisor-monitoring-interval" name="intervalMinutes" type="number" min={1} max={60} step={1} required
@@ -702,6 +695,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
 
   return <section className="stack project-supervisor" aria-labelledby="project-supervisor-title">
     <div><h2 id="project-supervisor-title">Project Supervisor settings</h2><p className="muted">Set defaults for new Supervisors and select a main conversation to inspect its own Supervisor.</p></div>
+    {projectId && <SupervisionControlPanel key={projectId} projectId={projectId} />}
     {!projectId && <p className="panel muted">Select a project to manage its Supervisor settings.</p>}
     {projectId && !connected && <p className="panel" role="status">T3 is disconnected. Any unsaved Supervisor settings draft is kept.</p>}
     {projectId && connected && !activeSnapshot && isLoading && <p className="panel" role="status">Loading Supervisor settings…</p>}

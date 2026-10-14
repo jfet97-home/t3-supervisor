@@ -3,6 +3,7 @@ import { ProjectDefinitions, ProjectRuleSaveInput, ProjectRuleSaveResult } from 
 import { Schema } from "effect";
 import { ProjectSupervisorSnapshot, ProjectSupervisorSave, ProjectSupervisorRetry, ProjectSupervisorSaveResult } from "./project-supervisor-contract.js";
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/http-api";
+import { SupervisionControl, SupervisionControlSave, SupervisionControlResult, SupervisionSetup, SupervisionSetupOptions, SupervisionSetupResult, GlobalDefinitionsControl, GlobalDefinitionsControlSave, GlobalDefinitionsControlResult } from "./supervisor-control-contract.js";
 
 const Text = Schema.String;
 const NullableText = Schema.NullOr(Text);
@@ -124,6 +125,24 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
   HttpApiGroup.make("guidance")
     .add(
       HttpApiEndpoint.get("snapshot", "/snapshot", { success: Snapshot }),
+      HttpApiEndpoint.get("supervisionControl", "/supervision-control", {
+        query: {projectId: Schema.optional(Schema.String)}, success: SupervisionControl, error: UiError,
+      }),
+      HttpApiEndpoint.post("saveSupervisionControl", "/supervision-control", {
+        payload: SupervisionControlSave, success: SupervisionControlResult, error: UiError,
+      }),
+      HttpApiEndpoint.get("supervisionSetupOptions", "/supervision-setup", {
+        query: {projectId: Schema.String}, success: SupervisionSetupOptions, error: UiError,
+      }),
+      HttpApiEndpoint.post("setupSupervision", "/supervision-setup", {
+        payload: SupervisionSetup, success: SupervisionSetupResult, error: UiError,
+      }),
+      HttpApiEndpoint.get("globalDefinitionsControl", "/global-definitions-control", {
+        success: GlobalDefinitionsControl, error: UiError,
+      }),
+      HttpApiEndpoint.post("saveGlobalDefinitionsControl", "/global-definitions-control", {
+        payload: GlobalDefinitionsControlSave, success: GlobalDefinitionsControlResult, error: UiError,
+      }),
       HttpApiEndpoint.get("projectSupervisor", "/project-supervisor", {
         query: {projectId: Text, mainThreadId: Schema.optional(Text)}, success: ProjectSupervisorSnapshot, error: UiError,
       }),

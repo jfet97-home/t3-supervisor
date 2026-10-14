@@ -143,7 +143,7 @@ test("authorized decisions require exact revisions and native main-root external
   assert.equal(parseProjectDefinitionDecisionRecord(decisionRecord({reason: "r".repeat(1001)}), current, definitions({revision: newRevision}), agent), null);
   assert.equal(parseProjectDefinitionDecisionRecord(decisionRecord({userMessageIds: []}), current, definitions({revision: newRevision}), agent), null);
   assert.equal(parseProjectDefinitionDecisionRecord(decisionRecord(), current, definitions({status: "invalid", revision: newRevision,
-    issues: [{path: ".supervisor/rules.yaml", code: "invalid_definition", message: "Incomplete rules."}]}), agent), null);
+    issues: [{path: ".t3-supervisor/rules.yaml", code: "invalid_definition", message: "Incomplete rules."}]}), agent), null);
 });
 
 test("native primary user messages use the running root_turn node", () => {
@@ -215,7 +215,7 @@ test("stopped, failed and cancelled runs retain their real user request and auth
 
 test("revert decisions may cite no users and retain a null observed revision for missing definitions", () => {
   const current = task();
-  const missing = definitions({status: "missing", revision: null, rules: [], blocks: [], issues: [{path: ".supervisor", code: "definitions_missing", message: "Missing."}]});
+  const missing = definitions({status: "missing", revision: null, rules: [], blocks: [], issues: [{path: ".t3-supervisor", code: "definitions_missing", message: "Missing."}]});
   const parsed = parseProjectDefinitionDecisionRecord(decisionRecord({observedRevision: null, decision: "revert_requested", userMessageIds: [],
     reason: "No real user message authorized these agent-authored file changes."}), current, missing, agentProjection([]));
   assert.ok(parsed);
@@ -255,7 +255,7 @@ test("decision reasons and review envelopes redact credentials and preserve comp
 test("review requests handle invalid snapshots and refresh proposals after restore or authorization", () => {
   const current = task();
   const invalid = definitions({status: "invalid", revision: null, rules: [], blocks: [],
-    issues: [{path: ".supervisor/rules.yaml", code: "invalid_definition", message: "The rules are incomplete."}]});
+    issues: [{path: ".t3-supervisor/rules.yaml", code: "invalid_definition", message: "The rules are incomplete."}]});
   const invalidRequest = buildProjectDefinitionReviewRequest(current, definitions(), invalid, agentProjection(), "Invalid marker");
   assert.ok(invalidRequest);
   const invalidEnvelope = parseEnvelope(invalidRequest);

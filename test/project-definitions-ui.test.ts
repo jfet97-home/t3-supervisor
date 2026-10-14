@@ -21,14 +21,14 @@ test("definition UI shows rules, block links, instructions and completion expect
 
 test("unreadable rules never imply that requirements or block references are absent", () => {
   const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions: {...definitions, status: "invalid", rules: [],
-    issues: [{path: ".supervisor/rules.yaml", code: "invalid_definition", message: "Invalid YAML."}]}}));
+    issues: [{path: ".t3-supervisor/rules.yaml", code: "invalid_definition", message: "Invalid YAML."}]}}));
   assert.match(html, /No readable rules are available/);assert.match(html, /Invalid YAML/);
   assert.doesNotMatch(html, /No requirements are declared|No declared rule references|Referenced by/);
 });
 
 test("invalid collections stay visibly invalid and missing references never become inspect buttons", () => {
   const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions: {...definitions, status: "invalid", blocks: [],
-    issues: [{path: ".supervisor/rules.yaml", code: "block_reference_missing", message: "Missing review block."}]}}));
+    issues: [{path: ".t3-supervisor/rules.yaml", code: "block_reference_missing", message: "Missing review block."}]}}));
   assert.match(html, /Definitions need attention/);assert.match(html, /Missing or invalid: review/);assert.match(html, /Missing review block/);
   assert.doesNotMatch(html, /<button/);
 });

@@ -15,14 +15,14 @@ const rule = "rules:\n  - name: Review\n    description: Behavior changes requir
 const block = "---\nname: Review\ndescription: Examine the implementation.\n---\n\n# Review\n\n## Instructions\nCheck errors and analogous code.\n\n## Expected result\nFindings and their resolutions.\n";
 function fixture(options: {root?: string; worktree?: unknown; projectId?: string} = {}) {
   const calls: Array<{root: string; path: string}> = [];
-  const content = new Map<string, string>([[".supervisor/rules.yaml", rule], [".supervisor/blocks/review.md", block]]);
+  const content = new Map<string, string>([[".t3-supervisor/rules.yaml", rule], [".t3-supervisor/blocks/review.md", block]]);
   const files: ProjectFiles = {
     directoryExists: async () => true,
     list: async (root, path) => {
       calls.push({root, path});
-      return {truncated: false, entries: path === ".supervisor" ? [
-        {path: ".supervisor/rules.yaml", kind: "file"}, {path: ".supervisor/blocks", kind: "directory"},
-      ] : [...content.keys()].filter(k => k.startsWith(".supervisor/blocks/")).map(path => ({path, kind: "file" as const}))};
+      return {truncated: false, entries: path === ".t3-supervisor" ? [
+        {path: ".t3-supervisor/rules.yaml", kind: "file"}, {path: ".t3-supervisor/blocks", kind: "directory"},
+      ] : [...content.keys()].filter(k => k.startsWith(".t3-supervisor/blocks/")).map(path => ({path, kind: "file" as const}))};
     },
     read: async (root, path) => {
       calls.push({root, path});
@@ -47,7 +47,7 @@ test("loads declarative rules and Markdown blocks without changing their instruc
   assert.deepEqual(result.rules[0]?.required_blocks, ["review"]);
   assert.equal(result.blocks[0]?.instructions, "Check errors and analogous code.");
   assert.equal(result.blocks[0]?.expected_result, "Findings and their resolutions.");
-  assert.ok(f.calls.every(c => c.path.startsWith(".supervisor")));
+  assert.ok(f.calls.every(c => c.path.startsWith(".t3-supervisor")));
 });
 
 test("uses the live conversation worktree and rejects cross-project or invalid bindings", async () => {
@@ -106,17 +106,17 @@ test("requires block metadata and both completion-related sections", () => {
 });
 
 test("flags missing or invalid block references and incomplete listings", async () => {
-  const f = fixture();f.content.set(".supervisor/blocks/review.md", "invalid");
+  const f = fixture();f.content.set(".t3-supervisor/blocks/review.md", "invalid");
   let s = await f.loader.load("project");assert.equal(s.status, "invalid");assert.ok(s.issues.some(i => i.code === "block_reference_missing"));
-  f.content.set(".supervisor/blocks/review.md", block);
+  f.content.set(".t3-supervisor/blocks/review.md", block);
   const list = f.files.list;f.files.list = async (...args) => ({...await list(...args), truncated: true});
   s = await f.loader.load("project");assert.equal(s.status, "invalid");assert.ok(s.issues.some(i => i.code === "listing_truncated"));
 });
 
 test("does not follow unexpected paths advertised in a block listing", async () => {
   const f = fixture();const list = f.files.list;
-  f.files.list = async (root, path, signal) => path === ".supervisor" ? list(root, path, signal) : {
-    truncated: false, entries: [{path: "/secrets/token.md", kind: "file"}, {path: ".supervisor/blocks/../token.md", kind: "file"}],
+  f.files.list = async (root, path, signal) => path === ".t3-supervisor" ? list(root, path, signal) : {
+    truncated: false, entries: [{path: "/secrets/token.md", kind: "file"}, {path: ".t3-supervisor/blocks/../token.md", kind: "file"}],
   };
   assert.equal((await f.loader.load("project")).status, "invalid");
   assert.ok(!f.calls.some(c => c.path.includes("token")));
@@ -126,8 +126,8 @@ test("rejects truncated reads and stops when the cumulative byte budget is exhau
   const f = fixture();const read = f.files.read;f.files.read = async (...args) => ({...await read(...args), truncated: true});
   assert.equal((await f.loader.load("project")).status, "invalid");
   f.files.read = read;let reads = 0;
-  f.files.list = async (_root, path) => ({truncated: false, entries: path === ".supervisor" ? [{path: ".supervisor/blocks", kind: "directory"}] :
-    Array.from({length: 20}, (_, i) => ({path: `.supervisor/blocks/block-${i}.md`, kind: "file"}))});
+  f.files.list = async (_root, path) => ({truncated: false, entries: path === ".t3-supervisor" ? [{path: ".t3-supervisor/blocks", kind: "directory"}] :
+    Array.from({length: 20}, (_, i) => ({path: `.t3-supervisor/blocks/block-${i}.md`, kind: "file"}))});
   f.files.read = async () => {reads++;const contents = "x".repeat(65 * 1024);return {contents, byteLength: contents.length, truncated: false};};
   const s = await f.loader.load("project");assert.equal(s.status, "invalid");assert.ok(reads < 20);assert.deepEqual(s.blocks, []);
 });
@@ -160,7 +160,7 @@ test("native transport recognizes serialized file failures whose OS code was rem
     for (const [input, code] of [[{failure: "binary_file"}, "invalid_file"], [{failure: "path_not_file"}, "invalid_file"],
       [{cause: {name: "Error", message: "ENOENT: no such file or directory"}}, "missing"],
       [{cause: {name: "Error", message: "EACCES: permission denied"}}, "invalid_file"]] as const) {
-      failure = input;await assert.rejects(files.read("/workspace", ".supervisor/rules.yaml", AbortSignal.timeout(5000)), (e: unknown) => e instanceof ProjectFileError && e.code === code);
+      failure = input;await assert.rejects(files.read("/workspace", ".t3-supervisor/rules.yaml", AbortSignal.timeout(5000)), (e: unknown) => e instanceof ProjectFileError && e.code === code);
     }
   } finally {await new Promise<void>(resolve => server.close(() => resolve()));}
 });
@@ -186,9 +186,9 @@ test("native file transport preserves RPC contracts, reports permission and reje
   }));
   try {
     const files = makeProjectFiles(`http://127.0.0.1:${address.port}`, "fixture-secret");
-    assert.equal((await files.read("/workspace", ".supervisor/rules.yaml", AbortSignal.timeout(5000))).contents, "hello");
-    await assert.rejects(files.list("/workspace", ".supervisor", AbortSignal.timeout(5000)), (e: unknown) => e instanceof ProjectFileError && e.code === "permission_required" && !e.message.includes("private"));
-    for (const path of ["/secret", ".supervisor/../secret", ".supervisor\\secret", ".supervisor//secret"])
+    assert.equal((await files.read("/workspace", ".t3-supervisor/rules.yaml", AbortSignal.timeout(5000))).contents, "hello");
+    await assert.rejects(files.list("/workspace", ".t3-supervisor", AbortSignal.timeout(5000)), (e: unknown) => e instanceof ProjectFileError && e.code === "permission_required" && !e.message.includes("private"));
+    for (const path of ["/secret", ".t3-supervisor/../secret", ".t3-supervisor\\secret", ".t3-supervisor//secret"])
       await assert.rejects(files.read("/workspace", path, AbortSignal.timeout(5000)));
     assert.equal(requests, 2);
   } finally {await new Promise<void>(resolve => server.close(() => resolve()));}
@@ -200,7 +200,7 @@ test("native transport releases connections when an unanswered request is aborte
   const address = server.address();assert.ok(address && typeof address !== "string");
   try {
     const files = makeProjectFiles(`http://127.0.0.1:${address.port}`, "fixture");
-    await assert.rejects(files.read("/workspace", ".supervisor/rules.yaml", AbortSignal.timeout(30)));
+    await assert.rejects(files.read("/workspace", ".t3-supervisor/rules.yaml", AbortSignal.timeout(30)));
   } finally {for (const client of server.clients) client.terminate();await new Promise<void>(resolve => server.close(() => resolve()));}
 });
 

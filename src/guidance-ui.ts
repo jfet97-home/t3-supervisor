@@ -42,6 +42,30 @@ export const startGuidanceUi = async (
   const handlers = HttpApiBuilder.group(SupervisorApi, "guidance", (h) =>
     h.handleAll({
       snapshot: () => Effect.promise(() => runtime.snapshot()),
+      supervisionControl: ({query}) => Effect.tryPromise({
+        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.control(query.projectId ?? null, signal);},
+        catch: () => new UiError({message: "Supervision control is unavailable."}),
+      }),
+      saveSupervisionControl: ({payload}) => Effect.tryPromise({
+        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.saveControl(payload, signal);},
+        catch: () => new UiError({message: "The enable/disable outcome could not be confirmed. Reload before trying again."}),
+      }),
+      supervisionSetupOptions: ({query}) => Effect.tryPromise({
+        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.setupOptions(query.projectId, signal);},
+        catch: () => new UiError({message: "Registered checkout options could not be loaded."}),
+      }),
+      setupSupervision: ({payload}) => Effect.tryPromise({
+        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.setup(payload, signal);},
+        catch: () => new UiError({message: "The setup outcome could not be confirmed. Inspect the selected checkout before retrying."}),
+      }),
+      globalDefinitionsControl: () => Effect.tryPromise({
+        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.globalDefinitionsControl(signal);},
+        catch: () => new UiError({message: "Global rules control is unavailable."}),
+      }),
+      saveGlobalDefinitionsControl: ({payload}) => Effect.tryPromise({
+        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.saveGlobalDefinitionsControl(payload, signal);},
+        catch: () => new UiError({message: "The global rules setup outcome could not be confirmed. Inspect ~/.t3-supervisor before retrying."}),
+      }),
       projectSupervisor: ({query}) => Effect.tryPromise({
         try: signal => {
           if (!supervision) throw new Error("supervision_unavailable");return supervision.snapshot(query.projectId, signal, query.mainThreadId ?? null);

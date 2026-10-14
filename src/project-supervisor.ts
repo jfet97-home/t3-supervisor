@@ -1,11 +1,12 @@
 import { SupervisorLifecycle } from "./supervisor-lifecycle.js";
 import { mainConversation, supervisorScopeKey } from "./supervisor-scope.js";
 import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 import { Effect } from "effect";
 import { fingerprint } from "./guidance-store.js";
 import { mainRunNodeReader, nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { currentThreadPolicy } from "./thread-policy.js";
-import { ProjectSupervisorStore, isSupervisorThread, type BindingRecord, type TaskRecord, type SupervisorBaseline } from "./project-supervisor-store.js";
+import { ProjectSupervisorStore, isSupervisorThread, type BindingRecord, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
 import { modelSelection, sameModel, supervisorModels, validModelSelection, SupervisorRpcError, type SupervisorRpc } from "./supervisor-native.js";
 import type { ProjectSupervisorInfo, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome, ProjectSupervisorRetryInput, SupervisorModelSelection, WorkflowProposalInfo } from "./project-supervisor-contract.js";
 import { interpretationPrompt, parseInterpretation, prepareWorkflowRequest, parseWorkflowInterpretation } from "./supervisor-workflow.js";
@@ -15,6 +16,21 @@ import type { StoreShape } from "./store.js";
 import { T3TransportError, type T3ClientShape } from "./t3.js";
 import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "./types.js";
 import { SupervisorConversation } from "./supervisor-conversation.js";
+import type { GlobalDefinitionsControlInput, SupervisionControlInput, SupervisionSetupInput } from "./supervisor-control-contract.js";
+
+type SetupCheckoutTarget = {origin: "project"; threadId: string | null; workspaceRoot: string; branch: string | null; isGitRepository: boolean};
+type SetupOutcome = {status: "created" | "committed" | "unchanged" | "stale" | "conflict" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string | null; branch: string | null; message: string};
+type GlobalSetupOutcome = {status: "created" | "unchanged" | "conflict" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string; branch: null; message: string};
+type ProjectSupervisorDefinitions = Pick<ProjectDefinitionLoader, "load"> & {
+  presence?: (projectId: string, signal: AbortSignal) => Promise<SupervisionFolderPresence>;
+  presenceGlobal?: (signal: AbortSignal) => Promise<SupervisionFolderPresence>;
+  globalDefinitionsPath?: () => string;
+  globalFingerprint?: (signal: AbortSignal) => Promise<string | null>;
+  initializeGlobal?: (signal: AbortSignal) => Promise<GlobalSetupOutcome>;
+  checkoutTargets?: (projectId: string, signal: AbortSignal) => Promise<SetupCheckoutTarget[]>;
+  presenceForCheckout?: (projectId: string, threadId: string | null, signal: AbortSignal) => Promise<SupervisionFolderPresence>;
+  initialize?: (projectId: string, threadId: string | null, input: {origin: "project"; action: "create" | "create_and_commit"; expectedWorkspaceRoot: string; expectedBranch: string | null}, signal: AbortSignal) => Promise<SetupOutcome>;
+};
 
 const active = (projection: Projection) => projection.runs.some(r => ["preparing","queued","starting","running","waiting"].includes(r.status));
 const unavailable = (thread: ThreadInfo) => Boolean(thread.archivedAt || thread.deletedAt);
@@ -35,6 +51,10 @@ export const taskSource = (projection: Projection, afterOrdinal: number): {run: 
 export class ProjectSupervisor {
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly examinedNonTasks = new Map<string, string>();
+  private readonly folderPresenceCheckedAt = new Map<string, number>();
+  private readonly folderPresenceInFlight = new Map<string, Promise<SupervisionFolderPresence>>();
+  private readonly scratchProjectIds = new Set<string>();
+  private activationBoundaryInFlight: Promise<SupervisorBaseline> | null = null;
   private offset = 0;
   private bindingOffset = 0;
   readonly conversation: SupervisorConversation;
@@ -42,9 +62,9 @@ export class ProjectSupervisor {
   constructor(readonly config: SupervisorConfig, readonly store: ProjectSupervisorStore, readonly source: Pick<StoreShape, "catalog">,
     readonly t3: Pick<T3ClientShape, "projection">, readonly readRpc: SupervisorRpc, readonly operateRpc: SupervisorRpc | null,
     readonly activationSnapshot: (signal: AbortSignal) => Promise<SupervisorBaseline>,
-    readonly definitions?: Pick<ProjectDefinitionLoader, "load">) {
+    readonly definitions?: ProjectSupervisorDefinitions, private readonly now: () => number = Date.now) {
       this.conversation = new SupervisorConversation(store, operateRpc, (threadId, signal) => this.projection(threadId, signal), definitions,
-        (thread, threads) => this.eligible(thread, threads));
+        (thread, threads) => this.eligible(thread, threads), projectId => this.projectEnabled(projectId));
       this.lifecycle = new SupervisorLifecycle(store, this.conversation, (id, signal) => this.projection(id, signal), operateRpc);
     }
   private async serial<A>(projectId: string, work: () => Promise<A>): Promise<A> {
@@ -54,11 +74,316 @@ export class ProjectSupervisor {
   }
   private async project(projectId: string) {
     const catalog = await Effect.runPromise(this.source.catalog());
+    this.rememberScratchProjects(catalog.projects.map(item => item.project));
     const project = catalog.projects.find(p => p.project.id === projectId && p.available)?.project;
     if (!project) throw new Error("project_unavailable");return {project, catalog};
   }
+  private rememberScratchProjects(projects: readonly {id: string; workspaceRoot: string}[]): void {
+    for (const project of projects) {
+      if (this.scratchProject(project.id, project.workspaceRoot)) this.scratchProjectIds.add(project.id);
+      else this.scratchProjectIds.delete(project.id);
+    }
+  }
+  private scratchProject(projectId: string, workspaceRoot: string): boolean {
+    const classification = this.store.store.classification(projectId);
+    if (classification !== "unclassified") return classification === "scratch";
+    return Boolean(this.config.managedScratchRoot && resolve(workspaceRoot) === resolve(this.config.managedScratchRoot));
+  }
+  private projectEnabled(projectId: string): boolean {
+    const classification = this.store.store.classification(projectId);
+    const scratch = classification === "scratch" || classification === "unclassified" && this.scratchProjectIds.has(projectId);
+    return this.store.enabled(projectId) && (!scratch || this.store.useGlobalDefinitions(projectId));
+  }
+  private effectiveControl(projectId: string): ReturnType<ProjectSupervisorStore["control"]> {
+    const control = this.store.control(projectId);
+    const effectiveEnabled = this.projectEnabled(projectId);
+    return control.effectiveEnabled === effectiveEnabled ? control : {...control, effectiveEnabled};
+  }
   private async projection(threadId: string, signal: AbortSignal): Promise<Projection> {return (await Effect.runPromise(this.t3.projection(threadId), {signal})).projection;}
   private async models(signal: AbortSignal) {return supervisorModels(await this.readRpc("server.getConfig", {}, signal));}
+  private async detectFolder(projectId: string, signal: AbortSignal): Promise<SupervisionFolderPresence> {
+    const existing = this.folderPresenceInFlight.get(projectId);
+    if (existing) return existing;
+    const current = (async (): Promise<SupervisionFolderPresence> => {
+      if (!this.definitions?.presence) return {status: "unavailable", message: "Project .t3-supervisor folder detection is not configured."};
+      const deadline = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
+      let presence: SupervisionFolderPresence;
+      try {
+        const result = await this.definitions.presence(projectId, deadline);
+        if (!result || !["present", "missing", "unavailable"].includes(result.status)) throw new Error("invalid_folder_presence");
+        presence = result;
+      } catch (cause) {
+        if (signal.aborted) throw cause;
+        presence = {status: "unavailable", message: "The project .t3-supervisor folder could not be checked."};
+      }
+      let baseline: SupervisorBaseline | undefined;
+      if (presence.status === "present" && !this.store.isManual(projectId) && !this.store.autoControlInitialized(projectId) &&
+        (this.store.folderPresenceNeedsBoundary(projectId) || !this.store.baseline() && !this.store.projectBoundary(projectId))) {
+        try {baseline = await this.activationBoundary(signal);}
+        catch (cause) {
+          if (signal.aborted) throw cause;
+          presence = {status: "unavailable", message: "The project folder is present, but a native enable boundary could not be captured. Retry the folder check before enabling supervision."};
+        }
+      }
+      this.store.recordFolderPresence(projectId, presence, baseline);
+      return presence;
+    })();
+    this.folderPresenceInFlight.set(projectId, current);
+    try {
+      const presence = await current;
+      this.folderPresenceCheckedAt.set(projectId, this.now());
+      return presence;
+    } finally {if (this.folderPresenceInFlight.get(projectId) === current) this.folderPresenceInFlight.delete(projectId);}
+  }
+  private async activationBoundary(signal: AbortSignal): Promise<SupervisorBaseline> {
+    const existing = this.activationBoundaryInFlight;
+    if (existing) return existing;
+    const current = this.activationSnapshot(AbortSignal.any([signal, AbortSignal.timeout(30_000)]));
+    this.activationBoundaryInFlight = current;
+    try {return await current;}
+    finally {if (this.activationBoundaryInFlight === current) this.activationBoundaryInFlight = null;}
+  }
+  private async resolveControl(projectId: string, signal: AbortSignal) {
+    if (this.store.isManual(projectId) || this.store.autoControlInitialized(projectId)) return this.store.control(projectId);
+    const checkedAt = this.folderPresenceCheckedAt.get(projectId) ?? 0;
+    const retryDelay = this.store.control(projectId).detectionStatus === "unavailable" ? 60_000 : 30_000;
+    if (this.now() - checkedAt < retryDelay) return this.store.control(projectId);
+    try {await this.detectFolder(projectId, signal);}
+    catch {if (!signal.aborted) this.store.setFolderPresence(projectId, {status: "unavailable", message: "The project .t3-supervisor folder could not be checked."});}
+    return this.store.control(projectId);
+  }
+  async control(projectId: string | null, signal: AbortSignal): Promise<ReturnType<ProjectSupervisorStore["control"]>> {
+    if (projectId === null) return this.store.control(null);
+    await this.project(projectId);
+    if (this.store.isManual(projectId) || this.store.autoControlInitialized(projectId)) return this.effectiveControl(projectId);
+    await this.resolveControl(projectId, signal);
+    return this.effectiveControl(projectId);
+  }
+  private globalDefinitionsPath(): string {return this.definitions?.globalDefinitionsPath?.() ?? "~/.t3-supervisor";}
+  async globalDefinitionsControl(signal: AbortSignal) {
+    let presence: SupervisionFolderPresence = {status: "unavailable", message: "Global rules folder detection is not configured."};
+    if (this.definitions?.presenceGlobal) {
+      const deadline = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
+      try {presence = await this.definitions.presenceGlobal(deadline);}
+      catch {if (signal.aborted) throw new Error("global_definitions_read_aborted");presence = {status: "unavailable", message: "The server-user .t3-supervisor folder could not be checked."};}
+    }
+    this.store.recordGlobalDefinitionsPresence(presence);
+    return this.store.globalDefinitionsControl(this.globalDefinitionsPath());
+  }
+  async saveGlobalDefinitionsControl(input: GlobalDefinitionsControlInput, signal: AbortSignal) {
+    const homePath = this.globalDefinitionsPath();
+    const current = await this.globalDefinitionsControl(signal);
+    if (!this.store.scopeCompatible) return {status: "unavailable" as const, message: "Supervisor state is unavailable; no global rules setting was changed.", control: current};
+    if (current.generation !== input.expectedGeneration) return {status: "conflict" as const, message: "Global rules changed in another window. Reload before saving.", control: current};
+    let outcome: GlobalSetupOutcome | null = null;
+    let globalFingerprint: string | null = null;
+    if (input.enabled) {
+      if (!this.definitions?.initializeGlobal) return {status: "unavailable" as const, message: "Global rules setup is not configured; no setting was changed.", control: current};
+      try {outcome = await this.definitions.initializeGlobal(AbortSignal.any([signal, AbortSignal.timeout(30_000)]));}
+      catch {return {status: "uncertain" as const, message: "Global rules setup could not be confirmed. Inspect ~/.t3-supervisor before retrying.", control: this.store.globalDefinitionsControl(homePath)};}
+      if (outcome.status !== "created" && outcome.status !== "unchanged") {
+        const status = outcome.status === "uncertain" ? "uncertain" as const : outcome.status === "conflict" ? "conflict" as const : "unavailable" as const;
+        return {status, message: outcome.message, control: this.store.globalDefinitionsControl(homePath)};
+      }
+      if (!this.definitions.globalFingerprint) return {status: "unavailable" as const, message: "Global rules input verification is unavailable; the setting was not changed.", control: this.store.globalDefinitionsControl(homePath)};
+      try {globalFingerprint = await this.definitions.globalFingerprint(AbortSignal.any([signal, AbortSignal.timeout(10_000)]));}
+      catch (cause) {if (signal.aborted) throw cause;globalFingerprint = null;}
+      if (!globalFingerprint) return {status: "unavailable" as const, message: "The global rules folder could not be verified; the setting was not changed.", control: this.store.globalDefinitionsControl(homePath)};
+    } else if (this.definitions?.globalFingerprint) {
+      try {globalFingerprint = await this.definitions.globalFingerprint(AbortSignal.any([signal, AbortSignal.timeout(10_000)]));}
+      catch (cause) {if (signal.aborted) throw cause;globalFingerprint = null;}
+    }
+    if (this.store.globalDefinitionsControl(homePath).generation !== input.expectedGeneration) {
+      const message = outcome ? "The global rules folder is ready, but the setting changed before it could be enabled. Refresh before continuing." : "Global rules changed in another window. Reload before saving.";
+      return {status: "conflict" as const, message, control: this.store.globalDefinitionsControl(homePath)};
+    }
+    if (this.definitions?.globalFingerprint && globalFingerprint) {
+      let verified: string | null = null;
+      try {verified = await this.definitions.globalFingerprint(AbortSignal.any([signal, AbortSignal.timeout(10_000)]));}
+      catch (cause) {if (signal.aborted) throw cause;verified = null;}
+      if (input.enabled && verified !== globalFingerprint) return {status: "conflict" as const, message: "The global rules files changed while the switch was being saved. Reload and review the current folder before enabling them.", control: this.store.globalDefinitionsControl(homePath)};
+      if (!input.enabled && verified !== globalFingerprint) globalFingerprint = null;
+    }
+    let scratchBoundaries: Array<{projectId: string; baseline: SupervisorBaseline}> = [];
+    if (input.enabled && !this.store.useGlobalDefinitions() && this.store.control(null).enabled) {
+      try {
+        const catalog = await Effect.runPromise(this.source.catalog(), {signal});
+        this.rememberScratchProjects(catalog.projects.map(item => item.project));
+        const activeScratch = catalog.projects.filter(item => item.available && this.scratchProject(item.project.id, item.project.workspaceRoot) &&
+          this.store.control(item.project.id).enabled).map(item => item.project.id);
+        if (activeScratch.length) {
+          const baseline = await this.activationSnapshot(signal);
+          scratchBoundaries = activeScratch.map(projectId => ({projectId, baseline}));
+        }
+      } catch {return {status: "unavailable" as const, message: "The enable boundary for global-only Scratch supervision could not be captured; the global rules setting was not changed.", control: this.store.globalDefinitionsControl(homePath)};}
+    }
+    if (this.store.globalDefinitionsControl(homePath).generation !== input.expectedGeneration) {
+      return {status: "conflict" as const, message: "Global rules changed before the setting could be enabled. Refresh before continuing.", control: this.store.globalDefinitionsControl(homePath)};
+    }
+    try {
+      const control = this.store.saveGlobalDefinitionsControl(input.expectedGeneration, input.enabled, homePath, globalFingerprint, scratchBoundaries);
+      return {status: "saved" as const, message: input.enabled ? "Global rules are now included in project Supervisor definitions. Existing folder contents were preserved." : "Global rules are no longer included. Project-local definitions remain available; existing plans are retained as stale history.", control};
+    } catch {return {status: "conflict" as const, message: "Global rules changed in another window. Reload before saving.", control: this.store.globalDefinitionsControl(homePath)};}
+  }
+  async setupOptions(projectId: string, signal: AbortSignal) {
+    const {project, catalog} = await this.project(projectId);
+    const control = await this.control(projectId, signal);
+    if (!this.definitions?.checkoutTargets || !this.definitions.presenceForCheckout) {
+      return {projectId, generation: control.generation, available: false, message: "Registered checkout setup is unavailable.", checkouts: []};
+    }
+    let targets: readonly SetupCheckoutTarget[];
+    try {targets = await this.definitions.checkoutTargets(projectId, signal);}
+    catch {return {projectId, generation: control.generation, available: false, message: "Registered checkout targets could not be read.", checkouts: []};}
+    const valid = targets.filter(target => {
+      const scratch = this.scratchProject(projectId, project.workspaceRoot);
+      if (scratch) return false;
+      if (target.threadId === null) return resolve(target.workspaceRoot) === resolve(project.workspaceRoot);
+      const thread = catalog.threads.find(item => item.id === target.threadId && item.projectId === projectId);
+      return Boolean(thread && this.eligible(thread, catalog.threads) && mainConversation(thread!, catalog.threads)?.id === thread!.id);
+    });
+    const checkouts = await Promise.all(valid.map(async target => {
+      try {
+        if (target.threadId !== null) {
+          const projection = await this.projection(target.threadId, signal);
+          const workspace = projection.thread.worktreePath;
+          if (!this.eligible(projection.thread, catalog.threads) || projection.thread.projectId !== projectId || typeof workspace !== "string" || resolve(workspace) !== resolve(target.workspaceRoot)) throw new Error("checkout_binding_changed");
+        }
+        const presence = await this.definitions!.presenceForCheckout!(projectId, target.threadId, signal);
+        return {...target, folderStatus: presence.status};
+      } catch {return {...target, folderStatus: "unavailable" as const};}
+    }));
+    return {projectId, generation: control.generation, available: checkouts.length > 0,
+      message: checkouts.length ? "Choose a registered checkout and confirm its current branch before creating .t3-supervisor files." : "No eligible registered checkout is available.", checkouts};
+  }
+  async setup(input: SupervisionSetupInput, signal: AbortSignal) {
+    const current = await this.control(input.projectId, signal);
+    if (!this.store.scopeCompatible) return {status: "unavailable" as const, message: "Supervisor state is unavailable; no setup was made.", control: current, workspaceRoot: null, branch: null};
+    if (current.generation !== input.expectedGeneration) return {status: "conflict" as const, message: "Supervision changed in another window. Reload checkout options before setup.", control: current, workspaceRoot: null, branch: null};
+    if (!this.definitions?.checkoutTargets || !this.definitions.presenceForCheckout || (input.action !== "enable_existing" && !this.definitions.initialize)) {
+      return {status: "unavailable" as const, message: "Registered checkout setup is unavailable; no files were changed.", control: current, workspaceRoot: null, branch: null};
+    }
+    const options = await this.setupOptions(input.projectId, signal);
+    const selected = options.checkouts.find(target => target.origin === input.origin && target.threadId === input.threadId && target.workspaceRoot === input.expectedWorkspaceRoot && target.branch === input.expectedBranch);
+    if (!options.available || !selected) return {status: "conflict" as const, message: "The selected checkout or branch changed. Reload the setup options before retrying.", control: this.store.control(input.projectId), workspaceRoot: null, branch: null};
+    if (input.action === "create_and_commit" && !selected.isGitRepository) return {status: "unavailable" as const, message: "This checkout is not a Git repository; choose Create without commit.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+    if (input.action === "enable_existing" && selected.folderStatus === "missing") return {status: "conflict" as const, message: "The selected checkout no longer has .t3-supervisor. Reload checkout options before enabling.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+    if (input.action !== "enable_existing" && selected.folderStatus === "present") return {status: "conflict" as const, message: "This checkout already has .t3-supervisor. Refresh its definitions before choosing another setup action.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+    if (selected.folderStatus === "unavailable") return {status: "unavailable" as const, message: "The selected checkout could not be checked; no files were changed.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+    if (this.store.control(input.projectId).generation !== input.expectedGeneration) return {status: "conflict" as const, message: "Supervision changed in another window. Reload checkout options before setup.", control: this.store.control(input.projectId), workspaceRoot: null, branch: null};
+    let baseline: SupervisorBaseline | undefined;
+    if (!current.enabled && current.globallyEnabled) {
+      try {baseline = await this.activationSnapshot(signal);}
+      catch {return {status: "unavailable" as const, message: "The enable boundary could not be captured; no files were changed.", control: this.store.control(input.projectId), workspaceRoot: null, branch: null};}
+    }
+    if (this.store.control(input.projectId).generation !== input.expectedGeneration) return {status: "conflict" as const, message: "Supervision changed before checkout setup. No files were changed.", control: this.store.control(input.projectId), workspaceRoot: null, branch: null};
+    const {catalog} = await this.project(input.projectId);
+    const project = catalog.projects.find(item => item.available && item.project.id === input.projectId)?.project;
+    if (!project) return {status: "unavailable" as const, message: "The registered project is no longer available; no files were changed.", control: this.store.control(input.projectId), workspaceRoot: null, branch: null};
+    if (this.scratchProject(input.projectId, project.workspaceRoot)) {
+      return {status: "conflict" as const, message: "Scratch definitions use the separate server-user .t3-supervisor control.", control: this.store.control(input.projectId), workspaceRoot: null, branch: null};
+    }
+    if (input.threadId !== null) {
+      const thread = catalog.threads.find(item => item.id === input.threadId && item.projectId === input.projectId);
+      if (!thread || !this.eligible(thread, catalog.threads) || mainConversation(thread, catalog.threads)?.id !== thread.id) return {status: "conflict" as const, message: "The selected operative checkout is no longer available; no files were changed.", control: this.store.control(input.projectId), workspaceRoot: null, branch: null};
+      const projection = await this.projection(input.threadId, signal);
+      if (projection.thread.id !== input.threadId || !this.eligible(projection.thread, catalog.threads) || projection.thread.projectId !== input.projectId || typeof projection.thread.worktreePath !== "string" || resolve(projection.thread.worktreePath) !== resolve(input.expectedWorkspaceRoot)) return {status: "conflict" as const, message: "The selected operative checkout changed; no files were changed.", control: this.store.control(input.projectId), workspaceRoot: null, branch: null};
+    }
+    if (this.store.control(input.projectId).generation !== input.expectedGeneration) return {status: "conflict" as const, message: "Supervision changed before checkout setup. No files were changed.", control: this.store.control(input.projectId), workspaceRoot: null, branch: null};
+    if (input.action === "enable_existing") {
+      let targets: SetupCheckoutTarget[];
+      try {targets = await this.definitions.checkoutTargets(input.projectId, signal);}
+      catch {return {status: "unavailable" as const, message: "The selected checkout could not be revalidated; no settings were changed.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};}
+      const stillSelected = targets.some(target => target.origin === input.origin && target.threadId === input.threadId &&
+        target.workspaceRoot === input.expectedWorkspaceRoot && target.branch === input.expectedBranch);
+      if (!stillSelected) return {status: "conflict" as const, message: "The selected checkout or branch changed. Reload checkout options before enabling.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+      let latestCatalog: Awaited<ReturnType<ProjectSupervisor["project"]>>["catalog"];
+      try {latestCatalog = (await this.project(input.projectId)).catalog;}
+      catch {return {status: "unavailable" as const, message: "The project changed while checkout enablement was being checked; no settings were changed.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};}
+      const latestProject = latestCatalog.projects.find(item => item.available && item.project.id === input.projectId)?.project;
+      if (!latestProject || (input.threadId === null && resolve(latestProject.workspaceRoot) !== resolve(input.expectedWorkspaceRoot))) {
+        return {status: "conflict" as const, message: "The selected project checkout changed. Reload checkout options before enabling.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+      }
+      if (input.threadId !== null) {
+        const latestMain = latestCatalog.threads.find(item => item.id === input.threadId && item.projectId === input.projectId);
+        if (!latestMain || !this.eligible(latestMain, latestCatalog.threads) || mainConversation(latestMain, latestCatalog.threads)?.id !== latestMain.id) {
+          return {status: "conflict" as const, message: "The selected checkout is no longer an eligible main conversation. Reload checkout options before enabling.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+        }
+        let projection: Projection;
+        try {projection = await this.projection(input.threadId, signal);}
+        catch {return {status: "unavailable" as const, message: "The selected checkout projection could not be revalidated; no settings were changed.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};}
+        if (projection.thread.id !== input.threadId || !this.eligible(projection.thread, latestCatalog.threads) || projection.thread.projectId !== input.projectId ||
+          typeof projection.thread.worktreePath !== "string" || resolve(projection.thread.worktreePath) !== resolve(input.expectedWorkspaceRoot)) {
+          return {status: "conflict" as const, message: "The selected operative checkout changed. Reload checkout options before enabling.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+        }
+      }
+      let presence: SupervisionFolderPresence;
+      try {presence = await this.definitions.presenceForCheckout(input.projectId, input.threadId, signal);}
+      catch {return {status: "unavailable" as const, message: "The selected checkout could not be checked; no settings were changed.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};}
+      if (presence.status === "missing") return {status: "conflict" as const, message: "The selected checkout no longer has .t3-supervisor. Reload checkout options before enabling.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+      if (presence.status === "unavailable") return {status: "unavailable" as const, message: presence.message ?? "The selected checkout could not be checked; no settings were changed.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+      if (this.store.control(input.projectId).generation !== input.expectedGeneration) return {status: "conflict" as const, message: "Supervision changed before checkout enablement. Reload before continuing.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+      try {
+        this.store.saveControl(input.projectId, input.expectedGeneration, true, baseline);
+        this.store.setFolderPresence(input.projectId, {status: "present"});
+        const control = this.store.control(input.projectId);
+        return {status: "saved" as const, message: "Existing .t3-supervisor definitions were adopted and project supervision is enabled. No files were written or committed.", control,
+          workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+      } catch {
+        return {status: "conflict" as const, message: "Supervision changed before enablement. Refresh controls before continuing.",
+          control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+      }
+    }
+    if (!this.definitions.initialize) return {status: "unavailable" as const, message: "Project checkout creation is unavailable; no files were changed.", control: this.store.control(input.projectId), workspaceRoot: selected.workspaceRoot, branch: selected.branch};
+    let outcome: SetupOutcome;
+    try {outcome = await this.definitions.initialize(input.projectId, input.threadId, {origin: "project", action: input.action,
+      expectedWorkspaceRoot: input.expectedWorkspaceRoot, expectedBranch: input.expectedBranch}, signal);}
+    catch {return {status: "uncertain" as const, message: "The setup outcome could not be confirmed. Inspect the selected checkout before retrying.", control: this.store.control(input.projectId), workspaceRoot: input.expectedWorkspaceRoot, branch: input.expectedBranch};}
+    const confirmed = input.action === "create" ? outcome.status === "created" : outcome.status === "committed";
+    if (!confirmed || outcome.workspaceRoot !== input.expectedWorkspaceRoot || outcome.branch !== input.expectedBranch) {
+      const status = outcome.status === "stale" || outcome.status === "conflict" || outcome.status === "unchanged" || confirmed ? "conflict" as const : outcome.status === "uncertain" ? "uncertain" as const : "unavailable" as const;
+      return {status, message: outcome.message || (status === "conflict" ? "The selected checkout changed; reload setup options." : status === "uncertain" ? "The setup result is uncertain. Inspect the checkout before retrying." : "The selected checkout could not be initialized."),
+        control: this.store.control(input.projectId), workspaceRoot: outcome.workspaceRoot, branch: outcome.branch};
+    }
+    try {
+      const control = this.store.saveControl(input.projectId, input.expectedGeneration, true, baseline);
+      this.store.setFolderPresence(input.projectId, {status: "present"});
+      return {status: "saved" as const, message: "The selected checkout was initialized and project supervision is enabled.", control,
+        workspaceRoot: outcome.workspaceRoot, branch: outcome.branch};
+    } catch {
+      return {status: "conflict" as const, message: "The checkout was initialized, but supervision changed before enablement. Refresh controls before continuing.",
+        control: this.store.control(input.projectId), workspaceRoot: outcome.workspaceRoot, branch: outcome.branch};
+    }
+  }
+  async saveControl(input: SupervisionControlInput, signal: AbortSignal) {
+    const registered = input.projectId !== null ? (await this.project(input.projectId)).project : null;
+    const current = input.projectId === null ? this.store.control(null) : await this.resolveControl(input.projectId, signal);
+    const visibleCurrent = input.projectId === null ? current : this.effectiveControl(input.projectId);
+    if (!this.store.scopeCompatible) return {status: "unavailable" as const, message: "Supervisor state is unavailable; no change was made.", control: visibleCurrent};
+    if (current.generation !== input.expectedGeneration) return {status: "conflict" as const, message: "Supervision changed in another window. Reload before saving.", control: visibleCurrent};
+    if (input.projectId !== null && input.enabled && registered && this.scratchProject(input.projectId, registered.workspaceRoot) && !this.store.useGlobalDefinitions(input.projectId)) {
+      return {status: "unavailable" as const, message: "Scratch uses the server-user global rules. Enable the separate global rules setting before enabling Scratch supervision.", control: visibleCurrent};
+    }
+    if (input.projectId !== null && input.enabled && !(current.manual && current.enabled)) {
+      const presence = await this.detectFolder(input.projectId, signal);
+      const detected = this.store.control(input.projectId);
+      const visibleDetected = this.effectiveControl(input.projectId);
+      if (detected.generation !== input.expectedGeneration) return {status: "conflict" as const, message: "Supervision changed in another window. Reload before saving.", control: visibleDetected};
+      if (presence.status === "missing") return {status: "setup_required" as const, message: "Choose a registered checkout and create its .t3-supervisor folder before enabling project supervision.", control: visibleDetected};
+      if (presence.status === "unavailable") return {status: "unavailable" as const, message: presence.message ?? "The project .t3-supervisor folder could not be checked; no change was made.", control: visibleDetected};
+    }
+    const latest = this.store.control(input.projectId);
+    const needsBoundary = input.enabled && !latest.enabled && (input.projectId === null || latest.globallyEnabled);
+    let baseline: SupervisorBaseline | undefined;
+    if (needsBoundary) {
+      try {baseline = await this.activationSnapshot(signal);}
+      catch {return {status: "unavailable" as const, message: "The enable boundary could not be captured; no change was made.", control: input.projectId === null ? this.store.control(null) : this.effectiveControl(input.projectId)};}
+    }
+    try {
+      this.store.saveControl(input.projectId, input.expectedGeneration, input.enabled, baseline);
+      const control = input.projectId === null ? this.store.control(null) : this.effectiveControl(input.projectId);
+      return {status: "saved" as const, message: input.enabled ? "Enabled. Existing scopes are retained; new task discovery starts from this enable boundary." : "Disabled. No new supervisory work will start; an already-running model turn may finish. Chats and history are retained.", control};
+    } catch {return {status: "conflict" as const, message: "Supervision changed in another window. Reload before saving.", control: input.projectId === null ? this.store.control(null) : this.effectiveControl(input.projectId)};}
+  }
   async snapshot(projectId: string, signal: AbortSignal, mainThreadId: string | null = null): Promise<ProjectSupervisorInfo> {
     const {catalog} = await this.project(projectId);
     if (mainThreadId !== null) {
@@ -98,6 +423,7 @@ export class ProjectSupervisor {
     if (!this.store.scopeCompatible) {available = false;message = "Supervisor state has an unsupported scope version. Supervision is disabled without resetting state; other service integrations remain available.";}
     if (binding?.state === "rejected" && binding.creationMessage) message = binding.creationMessage;
     if (!binding && models.length && !validModelSelection(current.modelSelection, models)) message = "Default Supervisor model unavailable. Choose an available T3 model; no fallback will run.";
+    if (!this.projectEnabled(projectId)) message = "Supervision is disabled globally or for this project. Existing chats and history are retained. " + message;
     return {projectId, mainThreadId, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring}, monitoringStatus: this.conversation.status(projectId, binding?.threadId ?? null), binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models, available, message,
       tasks: (binding ? this.store.tasksFor(binding) : []).slice(-200).reverse().map(({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview}) => ({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow: workflow ?? null,
         ...(workflowProposalId ? {workflowProposalId} : {}), agreement: agreement ?? null, ...(definitionReview ? {definitionReview} : {})}))};
@@ -115,19 +441,26 @@ export class ProjectSupervisor {
   }
   async retry(input: ProjectSupervisorRetryInput, signal: AbortSignal): Promise<ProjectSupervisorSaveOutcome> {
     if (!this.store.scopeCompatible) return {status: "unavailable", message: "Supervisor state version is unsupported; no changes were made.", snapshot: null};
+    const control = await this.control(input.projectId, signal);
+    if (!control.effectiveEnabled) return {status: "unavailable", message: "Enable global and project supervision before retrying native work.", snapshot: null};
     return this.serial(supervisorScopeKey(input.projectId, input.mainThreadId), async () => {
       const {project} = await this.project(input.projectId);
       const settings = this.store.settings(input.projectId);
+      if (!this.projectEnabled(input.projectId)) return {status: "unavailable", message: "Enable global and project supervision before retrying native work.", snapshot: null};
       if (settings.generation !== input.expectedGeneration) return {status: "conflict", message: "Settings changed. Refresh before retrying native access.", snapshot: null};
       let binding = this.store.binding(input.projectId, input.mainThreadId);
       if (!binding || !this.operateRpc) return {status: "unavailable", message: "No Supervisor conversation is available to reconcile.", snapshot: null};
       if (binding.threadId !== input.threadId || binding.generation !== input.bindingGeneration ||
         (input.action === "replace") !== (binding.state === "missing")) return {status: "conflict", message: "The conversation state changed. Refresh and choose the intended recovery action again.", snapshot: null};
+      const main = await this.lifecycle.readMain(binding, signal);
+      if (!this.projectEnabled(input.projectId)) return {status: "unavailable", message: "Supervision was disabled before the retry began; retained work was left unchanged.", snapshot: null};
+      if (!main || unavailable(main.thread)) return {status: "unavailable", message: "The main conversation is archived, deleted, or unavailable. Lifecycle handling will park its retained supervision state.", snapshot: null};
       if (binding.state !== "ready") {
         if (binding.state === "missing") {
           try {await this.projection(binding.threadId, signal);return {status: "unavailable", message: "The existing conversation is present; refresh before replacing it.", snapshot: null};}
           catch (cause) {if (!(cause instanceof T3TransportError) || cause.httpStatus !== 404) return {status: "unavailable", message: "T3 could not confirm that the conversation is missing.", snapshot: null};}
           if (!validModelSelection(settings.modelSelection, await this.models(signal))) return {status: "invalid", message: "Choose an available model before replacing a deleted conversation.", snapshot: null};
+          if (!this.projectEnabled(input.projectId)) return {status: "unavailable", message: "Supervision was disabled before replacement; retained work was left unchanged.", snapshot: null};
           const previousBinding = binding;
           binding = this.store.replaceMissingBinding(binding, settings.modelSelection);
           for (const job of this.store.tasksFor(previousBinding)) if (["queued", "dispatching", "waiting", "uncertain"].includes(job.status)) this.complete(job, "unavailable", null, "The bound Supervisor conversation was deleted; its request identity remains retained.");
@@ -138,12 +471,15 @@ export class ProjectSupervisor {
           } catch (cause) {
             if (!(cause instanceof T3TransportError) || cause.httpStatus !== 404) return {status: "unavailable", message: "T3 could not confirm the rejected creation's state.", snapshot: null};
             if (!validModelSelection(settings.modelSelection, await this.models(signal))) return {status: "invalid", message: "Choose an available model before retrying rejected creation.", snapshot: null};
+            if (!this.projectEnabled(input.projectId)) return {status: "unavailable", message: "Supervision was disabled before replacement; retained work was left unchanged.", snapshot: null};
             binding = {...binding, generation: binding.generation + 1, initialModel: settings.modelSelection, state: "creating"};
           }
         }
+        if (!this.projectEnabled(input.projectId)) return {status: "unavailable", message: "Supervision was disabled before native creation; retained work was left unchanged.", snapshot: null};
         this.store.setBinding({...binding, creationAttempts: 0});
         await this.ensureBinding(input.projectId, input.mainThreadId, project.title, signal).catch(() => undefined);
       } else {
+        if (!this.projectEnabled(input.projectId)) return {status: "unavailable", message: "Supervision was disabled before reconciliation; retained work was left unchanged.", snapshot: null};
         this.conversation.retry(input.projectId, binding.threadId);
         this.store.modelAttempt(binding, true);
         if (binding.settlement?.state === "uncertain") this.store.setBinding({...this.store.binding(binding.projectId, binding.mainThreadId)!, settlement: {...binding.settlement, state: "pending", attempts: 0}});
@@ -156,7 +492,11 @@ export class ProjectSupervisor {
     });
   }
   private async ensureBinding(projectId: string, mainThreadId: string, title: string, signal: AbortSignal): Promise<BindingRecord> {
+    if (!this.projectEnabled(projectId)) throw new Error("supervision_disabled");
     if (!this.operateRpc) throw new Error("supervisor_credential_missing");
+    const {catalog} = await this.project(projectId);
+    const main = await this.projection(mainThreadId, signal);
+    if (!this.projectEnabled(projectId) || main.thread.projectId !== projectId || !this.eligible(main.thread, catalog.threads)) throw new Error("main_conversation_unavailable");
     const settings = this.store.settings(projectId);
     let binding = this.store.binding(projectId, mainThreadId) ?? this.store.reserve(projectId, mainThreadId, title, settings.modelSelection, this.store.activation()!, Date.now());
     let existing: Projection | null;
@@ -167,11 +507,15 @@ export class ProjectSupervisor {
     }
     if (existing) {
       if (existing.thread.projectId !== projectId || supervisorUnavailable(existing.thread)) throw new Error("invalid_supervisor_binding");
+      const freshMain = await this.lifecycle.readMain(binding, signal);
+      if (!this.projectEnabled(projectId) || !freshMain || unavailable(freshMain.thread)) throw new Error("main_conversation_unavailable");
       const ready = {...binding, state: "ready" as const};this.store.setBinding(ready);return ready;
     } else {
       if (binding.state === "ready" || binding.state === "missing") {this.store.setBinding({...binding, state: "missing"});throw new Error("supervisor_missing");}
       // replay uses the exact durable reservation, never a new thread identity
       if (binding.state === "rejected" || (binding.creationAttempts ?? 0) >= 3) throw new Error("supervisor_creation_needs_retry");
+      const freshMain = await this.lifecycle.readMain(binding, signal);
+      if (!this.projectEnabled(projectId) || !freshMain || unavailable(freshMain.thread)) throw new Error("main_conversation_unavailable");
       binding = {...binding, creationAttempts: (binding.creationAttempts ?? 0) + 1};this.store.setBinding(binding);
       try {
         await this.operateRpc("orchestration.launchThread", {commandId: `supervisor-create:${binding.threadId}:${binding.generation}`, threadId: binding.threadId,
@@ -198,40 +542,49 @@ export class ProjectSupervisor {
   }
   async runOnce(signal: AbortSignal = AbortSignal.timeout(120_000)): Promise<void> {
     if (!this.operateRpc || !this.store.scopeCompatible) return;
-    if (this.store.baseline() === null) this.store.baseline(await this.activationSnapshot(signal));
-    this.conversation.requests.pruneAgreementCandidates(this.store.prune(Date.now()));
+    const masterEnabled = this.store.control(null).enabled;
+    if (masterEnabled && this.store.baseline() === null) this.store.baseline(await this.activationSnapshot(signal));
+    if (masterEnabled) this.conversation.requests.pruneAgreementCandidates(this.store.prune(Date.now()));
     const catalog = await Effect.runPromise(this.source.catalog());
+    this.rememberScratchProjects(catalog.projects.map(item => item.project));
     const threads = catalog.threads.filter(t => this.eligible(t, catalog.threads));
-    const candidates = [...threads.slice(this.offset), ...threads.slice(0,this.offset)].slice(0,20);this.offset = threads.length ? (this.offset + 20) % threads.length : 0;
-    for (const thread of candidates) {
-      if (signal.aborted) return;
-      const project = catalog.projects.find(p => p.available && p.project.id === thread.projectId)?.project;if (!project) continue;
-      const previous = this.store.task(thread.id);
-      if (previous && !["needs_context", "unavailable", "expired"].includes(previous.status)) continue;
-      if (typeof thread.latestRunId === "string" && (thread.latestRunId === previous?.sourceRunId ||
-        thread.latestRunId === this.store.baseline()?.threads.find(anchor => anchor.id === thread.id)?.latestRunId ||
-        thread.latestRunId === this.examinedNonTasks.get(thread.id))) continue;
-      try {
-        const projection = await this.projection(thread.id, signal);
-        if (!this.eligible(projection.thread, catalog.threads) || projection.thread.projectId !== project.id) continue;
-        const baseline = this.store.baselineOrdinal(thread.id, projection);if (baseline === null) continue;
-        const task = taskSource(projection, Math.max(baseline, previous?.sourceOrdinal ?? 0));
-        if (!task) {
-          if (!active(projection) && typeof thread.latestRunId === "string") {
-            if (this.examinedNonTasks.size >= 10_000) this.examinedNonTasks.clear();
-            this.examinedNonTasks.set(thread.id, thread.latestRunId);
+    if (masterEnabled) {
+      const candidates = [...threads.slice(this.offset), ...threads.slice(0,this.offset)].slice(0,20);this.offset = threads.length ? (this.offset + 20) % threads.length : 0;
+      const projectsToResolve = catalog.projects.filter(item => item.available && !this.store.isManual(item.project.id) && !this.store.autoControlInitialized(item.project.id));
+      await Promise.allSettled(projectsToResolve.map(item => this.resolveControl(item.project.id, signal)));
+      for (const thread of candidates) {
+        if (signal.aborted) return;
+        const project = catalog.projects.find(p => p.available && p.project.id === thread.projectId)?.project;if (!project || !this.projectEnabled(project.id)) continue;
+        const previous = this.store.task(thread.id);
+        if (previous && !["needs_context", "unavailable", "expired"].includes(previous.status)) continue;
+        if (typeof thread.latestRunId === "string" && (thread.latestRunId === previous?.sourceRunId ||
+          thread.latestRunId === this.store.baseline()?.threads.find(anchor => anchor.id === thread.id)?.latestRunId ||
+          thread.latestRunId === this.examinedNonTasks.get(thread.id))) continue;
+        try {
+          const projection = await this.projection(thread.id, signal);
+          if (!this.eligible(projection.thread, catalog.threads) || projection.thread.projectId !== project.id) continue;
+          const baseline = this.store.baselineOrdinal(thread.id, projection);if (baseline === null) continue;
+          const task = taskSource(projection, Math.max(baseline, previous?.sourceOrdinal ?? 0));
+          if (!task) {
+            if (!active(projection) && typeof thread.latestRunId === "string") {
+              if (this.examinedNonTasks.size >= 10_000) this.examinedNonTasks.clear();
+              this.examinedNonTasks.set(thread.id, thread.latestRunId);
+            }
+            continue;
           }
-          continue;
-        }
-        if (!validModelSelection(this.store.settings(project.id).modelSelection, await this.models(signal))) continue;
-        const binding = await this.serial(supervisorScopeKey(project.id, thread.id), () => this.ensureBinding(project.id, thread.id, thread.title, signal));
-        const id = randomUUID();const oversized = task.message.text.length > 24_000;
-        this.store.saveTask({id, threadId: thread.id, projectId: project.id, sourceRunId: task.run.id, sourceMessageId: task.message.id,
-          sourceOrdinal: task.run.ordinal, sourceHash: fingerprint(task.message.text), status: oversized ? "needs_context" : "queued", objective: null,
-          reason: oversized ? "The task message exceeds the interpretation limit; provide a shorter task." : "Waiting for the project Supervisor.",
-          updatedAt: Date.now(), requestText: oversized ? "" : interpretationPrompt(thread.id, task.message.id, task.message.text), supervisorThreadId: binding.threadId,
-          messageId: `supervisor-objective:${id}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0});
-      } catch { /* Discovery failures are retried without producing model work. */ }
+          if (!validModelSelection(this.store.settings(project.id).modelSelection, await this.models(signal)) || !this.projectEnabled(project.id)) continue;
+          const freshMain = await this.projection(thread.id, signal);
+          if (!this.projectEnabled(project.id) || freshMain.thread.projectId !== project.id || !this.eligible(freshMain.thread, catalog.threads)) continue;
+          const binding = await this.serial(supervisorScopeKey(project.id, thread.id), () => this.ensureBinding(project.id, thread.id, thread.title, signal));
+          if (!this.projectEnabled(project.id)) continue;
+          const id = randomUUID();const oversized = task.message.text.length > 24_000;
+          this.store.saveTask({id, threadId: thread.id, projectId: project.id, sourceRunId: task.run.id, sourceMessageId: task.message.id,
+            sourceOrdinal: task.run.ordinal, sourceHash: fingerprint(task.message.text), status: oversized ? "needs_context" : "queued", objective: null,
+            reason: oversized ? "The task message exceeds the interpretation limit; provide a shorter task." : "Waiting for the project Supervisor.",
+            updatedAt: Date.now(), requestText: oversized ? "" : interpretationPrompt(thread.id, task.message.id, task.message.text), supervisorThreadId: binding.threadId,
+            messageId: `supervisor-objective:${id}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0});
+        } catch { /* Discovery failures are retried without producing model work. */ }
+      }
     }
     const allBindings = this.store.bindings();
     const start = allBindings.length ? this.bindingOffset % allBindings.length : 0;
@@ -239,36 +592,55 @@ export class ProjectSupervisor {
     this.bindingOffset = allBindings.length ? (start + 4) % allBindings.length : 0;
     for (let index = 0; index < bindings.length; index += 4) {
       if (signal.aborted) return;
-      await Promise.allSettled(bindings.slice(index, index + 4).map(binding => {
+      const batch = bindings.slice(index, index + 4);
+      if (masterEnabled) await Promise.allSettled(batch.map(binding => this.resolveControl(binding.projectId, signal)));
+      await Promise.allSettled(batch.map(binding => {
         const deadline = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+        if (!masterEnabled || !this.projectEnabled(binding.projectId)) return this.checkClosedMainLifecycle(binding, catalog.threads, deadline);
         return this.serial(supervisorScopeKey(binding.projectId, binding.mainThreadId), async () => {
           try {await this.processProject(binding, deadline);}
-          finally {if (!deadline.aborted) await this.lifecycle.check(binding, catalog.threads, deadline);}
+          finally {if (!deadline.aborted && this.projectEnabled(binding.projectId)) await this.lifecycle.check(binding, catalog.threads, deadline);}
         });
       }));
     }
-    await this.conversation.observe(catalog.threads, signal);
+    if (masterEnabled) await this.conversation.observe(catalog.threads, signal);
+  }
+
+  private async checkClosedMainLifecycle(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
+    if (!this.operateRpc) return;
+    const current = this.store.binding(binding.projectId, binding.mainThreadId);
+    if (!current || current.threadId !== binding.threadId || current.state !== "ready") return;
+    let main: Projection | null;
+    try {main = await this.lifecycle.readMain(current, signal);}
+    catch {return;}
+    if (!main || unavailable(main.thread)) await this.lifecycle.check(current, threads, signal);
   }
 
   private async processProject(binding: BindingRecord, signal: AbortSignal): Promise<void> {
     const currentBinding = this.store.binding(binding.projectId, binding.mainThreadId);
     if (!currentBinding) return;
     binding = currentBinding;
+    if (!this.projectEnabled(binding.projectId)) return;
+    const main = await this.lifecycle.readMain(binding, signal);
+    if (!this.projectEnabled(binding.projectId) || !main || unavailable(main.thread)) return;
     await this.project(binding.projectId);
+    if (!this.projectEnabled(binding.projectId)) return;
     let projection: Projection;
     try {projection = await this.projection(binding.threadId, signal);}
     catch (cause) {if (cause instanceof T3TransportError && cause.httpStatus === 404 && binding.state === "ready") this.store.setBinding({...binding, state: "missing"});throw cause;}
     if (projection.thread.projectId !== binding.projectId || supervisorUnavailable(projection.thread)) return;
+    if (!this.projectEnabled(binding.projectId)) return;
     if (binding.state !== "ready") {binding = {...binding, state: "ready"};this.store.setBinding(binding);}
     this.observeModel(binding, projection);
     const jobs = this.store.tasksFor(binding);
     const inflight = jobs.find(t => ["dispatching","waiting","uncertain"].includes(t.status));
-    if (inflight) {await this.reconcile(inflight, projection, signal);return;}
-    if (this.conversation.hasInflight(binding.projectId, binding.threadId)) {await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
-    if (active(projection)) {await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
+    if (inflight) {if (this.projectEnabled(binding.projectId)) await this.reconcile(inflight, projection, signal);return;}
+    if (this.conversation.hasInflight(binding.projectId, binding.threadId)) {if (this.projectEnabled(binding.projectId)) await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
+    if (active(projection)) {if (this.projectEnabled(binding.projectId)) await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
     let job = jobs.find(t => t.status === "queued");
     if (!job) {await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
     const source = await this.projection(job.threadId, signal);
+    if (!this.projectEnabled(binding.projectId)) return;
     if (!this.currentSource(job, source)) {this.complete(job, "unavailable", null, "The task source changed or became unavailable.");return;}
     if (this.definitions && job.definitionContext === undefined) {
       try {
@@ -293,12 +665,18 @@ export class ProjectSupervisor {
       this.store.saveTask(job);
       if (!this.currentSource(job, await this.projection(job.threadId, signal))) {this.complete(job, "unavailable", null, "The task source changed while project definitions were being loaded.");return;}
     }
+    if (!this.projectEnabled(binding.projectId)) return;
     const current = modelSelection((await this.projection(binding.threadId, signal)).thread.modelSelection);
-    if (!current || !validModelSelection(current, await this.models(signal))) return;
+    if (!current || !validModelSelection(current, await this.models(signal)) || !this.projectEnabled(binding.projectId)) return;
     const sending: TaskRecord = {...job, status: "dispatching", dispatchedAt: Date.now(), updatedAt: Date.now()};this.store.saveTask(sending);
     await this.dispatch(sending, signal);
   }
   private async dispatch(job: TaskRecord, signal: AbortSignal): Promise<void> {
+    if (!this.projectEnabled(job.projectId)) {
+      if (job.status === "dispatching") this.store.saveTask({...job, status: "queued", dispatchedAt: null,
+        reason: "Supervision was disabled before dispatch; this task identity remains queued.", updatedAt: Date.now()});
+      return;
+    }
     try {
       await this.operateRpc!("orchestration.dispatchCommand", {type: "message.dispatch", createdBy: "system", creationSource: "server", commandId: `supervisor-objective:${job.id}`,
         threadId: job.supervisorThreadId, messageId: job.messageId, text: job.requestText, attachments: [], dispatchMode: {type: "queue_after_active"}}, signal);

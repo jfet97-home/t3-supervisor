@@ -15,11 +15,14 @@ export class ProjectRuleEditor {
       ({status, message, definitions: definitions ? {...definitions, editingAvailable: true} : null});
     let contents: string;
     try {
-      contents = stringify({rules: input.rules}, {lineWidth: 0});
+      if (input.rules.some(rule => rule.origin === "global")) throw new Error("global_rules_readonly");
+      const rules = input.rules.map(({name, description, required_blocks}) => ({name, description, required_blocks}));
+      contents = stringify({rules}, {lineWidth: 0});
       parseDefinitionRules(contents);
       if (Buffer.byteLength(contents) > 64 * 1024 || !/^[a-f0-9]{64}$/.test(input.expectedRevision)) throw new Error("invalid");
     } catch {return outcome("invalid", "Check rule names, descriptions, required blocks and the 64 KiB rules-file limit.");}
     const initial = await this.loader.load(input.projectId, input.threadId, signal);
+    if (initial.globalOnly) return outcome("unavailable", "Shared global definitions cannot be saved through the project rule editor.", initial);
     if (!initial.revision) return outcome(initial.status === "permission_required" ? "permission_required" : "unavailable", "Definitions cannot be edited until file access and validation problems are resolved.", initial);
     const root = initial.workspaceRoot;
     const previous = this.active.get(root) ?? Promise.resolve();
@@ -34,7 +37,8 @@ export class ProjectRuleEditor {
       const fresh = await this.loader.load(input.projectId, input.threadId, signal, source => {raw = source;});
       if (!fresh.revision || fresh.workspaceRoot !== root || fresh.revision !== input.expectedRevision)
         return outcome("conflict", "The working directory, rules or blocks changed. Your draft was kept; refresh before saving again.", fresh);
-      const ids = new Set(fresh.blocks.map(b => b.id));
+      if (fresh.globalOnly) return outcome("conflict", "The selected definition scope changed. Refresh before saving.", fresh);
+      const ids = new Set(fresh.blocks.filter(block => block.origin !== "global").map(b => b.id));
       if (input.rules.some(r => r.required_blocks.some(id => !ids.has(id))))
         return outcome("invalid", "Every required block must exist and be valid in this working directory.", fresh);
       const intended = parseDefinitionRules(contents);
@@ -59,7 +63,7 @@ export class ProjectRuleEditor {
         return outcome("invalid", "The edited YAML could not preserve the intended rules within the file limit.");
       try {
         if (!await this.writer.checkRulesFile(root, signal))
-          return outcome("unavailable", "Editing requires an existing regular rules.yaml and .supervisor directory. Symlinks and incomplete listings cannot be edited.");
+          return outcome("unavailable", "Editing requires an existing regular rules.yaml and .t3-supervisor directory. Symlinks and incomplete listings cannot be edited.");
       } catch (error) {return outcome(error instanceof ProjectFileError && error.code === "permission_required" ? "permission_required" : "unavailable", "Could not verify the rules-file write target. Check the write credential's filesystem:read scope.");}
       if (await this.loader.currentWorkspace(input.projectId, input.threadId, signal) !== root)
         return outcome("conflict", "The selected working directory changed before writing. Refresh before saving again.");
@@ -72,17 +76,18 @@ export class ProjectRuleEditor {
       }
       const verified = await this.loader.load(input.projectId, input.threadId, signal);
       try {
-        const bytes = await this.loader.files.read(root, ".supervisor/rules.yaml", signal);
+        const bytes = await this.loader.files.read(root, ".t3-supervisor/rules.yaml", signal);
         if (!await this.writer.checkRulesFile(root, signal) || bytes.truncated || bytes.contents !== contents || bytes.byteLength !== Buffer.byteLength(contents))
           return outcome("uncertain", "The file changed or could not be confirmed after writing. Refresh and inspect rules.yaml before retrying.", verified);
       } catch {return outcome("uncertain", "The write was accepted, but the file could not be confirmed. Refresh before retrying.", verified);}
-      if (verified.workspaceRoot !== root || !verified.revision || JSON.stringify(verified.rules) !== JSON.stringify(parseDefinitionRules(contents)))
+      const projectRules = verified.rules.filter(rule => rule.origin !== "global").map(({name, description, required_blocks}) => ({name, description, required_blocks}));
+      if (verified.workspaceRoot !== root || !verified.revision || JSON.stringify(projectRules) !== JSON.stringify(parseDefinitionRules(contents)))
         return outcome("uncertain", "T3 accepted the write, but readback could not confirm it. Refresh and inspect rules.yaml before retrying.", verified);
       if (verified.status === "ready") {
         try {this.onSaved?.(verified, input.expectedRevision);}
         catch {return outcome("uncertain", "The file was saved, but its user-authorization record could not be retained. Refresh before retrying.", verified);}
       }
-      return outcome("saved", "Saved .supervisor/rules.yaml. Rule changes are recorded as user input; independent block changes still require review.", verified);
+      return outcome("saved", "Saved .t3-supervisor/rules.yaml. Rule changes are recorded as user input; independent block changes still require review.", verified);
     } finally {
       release();
       if (this.active.get(root) === queued) this.active.delete(root);

@@ -213,6 +213,7 @@ const makeFixture = async (initialDefinitions: ProjectDefinitionSnapshot = defin
   const guidance = new GuidanceStore(directory);
   const ownedIds = new Set<string>();
   const store = new ProjectSupervisorStore(guidance, ownedIds);
+  guidance.db.prepare("INSERT INTO meta VALUES(?,?)").run(`supervisor_control:${JSON.stringify(source.thread.projectId)}`, JSON.stringify({generation: 1, enabled: true, manual: true}));
   const config: SupervisorConfig = {
     supervisorOwnedThreadIds: ownedIds,
     dataDirectory: directory,

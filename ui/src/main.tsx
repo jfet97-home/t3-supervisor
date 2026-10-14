@@ -18,6 +18,7 @@ import {
 } from "./api.js";
 import "./style.css";
 import { ProjectDefinitionsPanel } from "./project-definitions.js";
+import { SupervisionControlPanel, GlobalDefinitionsControlPanel } from "./supervisor-control.js";
 
 const labels: Record<string, string> = {
   observe: "Observe only",
@@ -162,10 +163,11 @@ function ChatSettings({ data }: { data: GuidanceSnapshot }) {
   </form>;
 }
 function Settings({data}: {data: GuidanceSnapshot}) {
-  return <section className="stack"><h2>Supervisor settings</h2><ChatSettings data={data}/>
+  const [controlRevision, setControlRevision] = useState(0);
+  return <section className="stack"><h2>Supervisor settings</h2><SupervisionControlPanel onChanged={() => setControlRevision(value => value + 1)} /><GlobalDefinitionsControlPanel refreshKey={controlRevision} /><ChatSettings data={data}/>
     <div className="panel stack"><h3>T3 connection</h3><p>{data.connected ? "Connected" : "Disconnected"} · Build: {data.serverVersion ?? "Unavailable"}</p><p>{data.coverage}</p>
-      <h3>Project file editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .supervisor/rules.yaml in the selected working directory.</p>
-      <p>Legacy reminders are retired. Their history is retained; uncertain deliveries are not retried or resolved automatically. Workflow drafts use project rules and existing blocks; agent dialogue and execution monitoring remain pending.</p>
+      <h3>Project file editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .t3-supervisor/rules.yaml in the selected working directory.</p>
+      <p>Legacy reminders are retired. Their history is retained; uncertain deliveries are not retried or resolved automatically. Workflow drafts use project rules and existing blocks. Native dialogue can save agreement; step execution tracking remains pending.</p>
     </div></section>;
 }
 function Dashboard() {

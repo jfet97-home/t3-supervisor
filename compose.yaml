@@ -30,6 +30,8 @@ services:
       UI_HOST: "0.0.0.0"
       T3_GUIDANCE_TOKEN_FILE: /run/secrets/t3-guidance-token
       T3_PROJECT_WRITE_TOKEN_FILE: /run/secrets/t3-project-write-token
+      T3_PROJECT_COMMIT_TOKEN_FILE: /run/secrets/t3-project-commit-token
+      T3_GIT_PROBE_TOKEN_FILE: /run/secrets/t3-git-probe-token
       T3_MANAGED_SCRATCH_ROOT: "${T3_MANAGED_SCRATCH_ROOT:-/tmp/t3-scratch}"
     volumes:
       - state:/data

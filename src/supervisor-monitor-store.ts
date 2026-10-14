@@ -473,7 +473,7 @@ export class ProjectSupervisorMonitorStore {
     optionsOrLimit: SupervisorMonitorSelectOptions | number = {},
     eligibleThreadIds?: ReadonlySet<string>,
   ): SupervisorMonitorBatch | null {
-    if (!settings.enabled || !Number.isFinite(now)) return null;
+    if (!Number.isFinite(now)) return null;
     const options =
       typeof optionsOrLimit === "number"
         ? { maxItems: optionsOrLimit, eligibleThreadIds }

@@ -4,6 +4,8 @@ export const DefinitionRule = Schema.Struct({
   name: Schema.String,
   description: Schema.String,
   required_blocks: Schema.Array(Schema.String),
+  origin: Schema.optional(Schema.Literals(["global", "project"])),
+  path: Schema.optional(Schema.String),
 });
 export const DefinitionBlock = Schema.Struct({
   id: Schema.String,
@@ -11,6 +13,9 @@ export const DefinitionBlock = Schema.Struct({
   description: Schema.String,
   instructions: Schema.String,
   expected_result: Schema.String,
+  origin: Schema.optional(Schema.Literals(["global", "project"])),
+  path: Schema.optional(Schema.String),
+  sourceId: Schema.optional(Schema.String),
 });
 export const DefinitionIssue = Schema.Struct({
   path: Schema.String,
@@ -21,6 +26,8 @@ export const ProjectDefinitions = Schema.Struct({
   projectId: Schema.String,
   threadId: Schema.NullOr(Schema.String),
   workspaceRoot: Schema.String,
+  globalOnly: Schema.optional(Schema.Boolean),
+  globalRevision: Schema.optional(Schema.NullOr(Schema.String)),
   revision: Schema.NullOr(Schema.String),
   editingAvailable: Schema.Boolean,
   status: Schema.Literals(["ready", "missing", "invalid", "permission_required", "unavailable"]),

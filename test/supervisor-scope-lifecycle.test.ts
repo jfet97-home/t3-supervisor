@@ -8,9 +8,10 @@ import { ProjectSupervisorStore, defaultSupervisorModel } from "../src/project-s
 import { SupervisorConversation } from "../src/supervisor-conversation.js";
 import { SupervisorLifecycle, SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
 import { mainConversation } from "../src/supervisor-scope.js";
+import { T3TransportError } from "../src/t3.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
 
-const thread = (id: string, parent: string | null = null, relationship: string | null = null): ThreadInfo => ({id, title: id, projectId: "p", lineage: {parentThreadId: parent, relationshipToParent: relationship, rootThreadId: "historical-root"}});
+const thread = (id: string, parent: string | null = null, relationship: string | null = null, rootThreadId = parent === "main" || id === "main" ? "main" : parent ?? id): ThreadInfo => ({id, title: id, projectId: "p", lineage: {parentThreadId: parent, relationshipToParent: relationship, rootThreadId}});
 
 test("subagent ancestry shares the main scope while forks and separate launches keep their own", () => {
   const main = thread("main");const child = thread("child", "main", "subagent");const nested = thread("nested", "child", "subagent");
@@ -31,15 +32,15 @@ const fixture = async () => {
   const main: Projection = {thread: thread("main"), runs: [{id: "run", ordinal: 1, status: "completed", requestedAt: "2026-10-14T10:00:00Z", startedAt: "2026-10-14T10:00:00Z", completedAt: "2026-10-14T10:01:00Z", rootNodeId: "root"}], messages: [], runtimeRequests: [], subagents: []};
   const supervisor: Projection = {thread: thread(binding.threadId), runs: [], messages: [], runtimeRequests: [], subagents: []};
   const projections = new Map([["main", main], [binding.threadId, supervisor]]);
-  const threads = [main.thread, supervisor.thread];const calls: Array<Record<string, unknown>> = [];
+  const threads = [main.thread, supervisor.thread];const calls: Array<Record<string, unknown>> = [];const failures = new Map<string, unknown>();
   let uncertain = false;
-  const project = async (id: string) => {const p = projections.get(id);if (!p) throw new Error("unreadable");return p;};
+  const project = async (id: string) => {const failure = failures.get(id);if (failure) throw failure;const p = projections.get(id);if (!p) throw new Error("unreadable");return p;};
   const rpc = async (_tag: string, payload: Record<string, unknown>) => {calls.push(payload);if (uncertain) throw new Error("lost receipt");supervisor.thread.settledAt = "2026-10-14T10:02:00Z";supervisor.thread.settledOverride = "settled";return {sequence: 11};};
   const conversation = new SupervisorConversation(store, rpc, project, undefined, () => true);
   store.saveTask({id: "task", projectId: "p", threadId: "main", sourceRunId: "run", sourceMessageId: "source", sourceHash: "hash", sourceOrdinal: 1, supervisorThreadId: binding.threadId,
     messageId: "interpretation", status: "inferred", objective: "Implement", reason: "Requested", updatedAt: 1, requestText: "", dispatchedAt: null, supervisorRunId: null, replayCount: 0});
   const lifecycle = new SupervisorLifecycle(store, conversation, project, rpc);
-  return {guidance, store, binding, conversation, lifecycle, main, supervisor, projections, threads, calls, setUncertain: () => {uncertain = true;},
+  return {guidance, store, binding, conversation, lifecycle, main, supervisor, projections, threads, calls, setUncertain: () => {uncertain = true;}, setFailure: (id: string, error: unknown | null) => {if (error) failures.set(id, error);else failures.delete(id);},
     check: (now: number) => lifecycle.check(store.binding("p", "main")!, threads, AbortSignal.timeout(1000), now),
     cleanup: async () => {guidance.close();await rm(directory, {recursive: true, force: true});}};
 };
@@ -73,6 +74,141 @@ test("completion parks an owned Supervisor after the quiet window and retains id
   f.main.runs[0]!.status = "running";
   await f.check(200_000);assert.equal(f.store.binding("p", "main")?.quietSince, null);
   assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId);
+});
+
+test("archived mains absent from the active catalog set aside the same Supervisor and retain unfinished semantic records", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  f.main.thread.archivedAt = "2026-10-14T10:02:00Z";f.main.thread.updatedAt = "2026-10-14T10:02:00Z";
+  f.threads.splice(f.threads.findIndex(item => item.id === "main"), 1);
+  f.store.saveTask({...f.store.task("main")!, status: "queued", objective: null, workflow: null, agreement: null});
+  const prepared = {id: "prepared-id", projectId: "p", supervisorThreadId: f.binding.threadId, kind: "review" as const, taskId: "task", text: "Prepared request", messageId: "prepared-message",
+    state: "prepared" as const, batch: null, createdAt: 1, sentAt: null, runId: null, error: null, completionMarker: "prepared done"};
+  const uncertain = {...prepared, id: "unknown-id", messageId: "unknown-message", state: "uncertain" as const, text: "Unknown request"};
+  f.conversation.requests.saveRequest(prepared);f.conversation.requests.saveRequest(uncertain);
+  f.conversation.requests.saveIntroduction({taskId: "task", projectId: "p", threadId: "main", supervisorThreadId: f.binding.threadId, state: "ready", text: "Unsent introduction", messageId: "intro", targetRunId: null, error: null});
+  await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(f.calls.length, 1);assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId);
+  assert.deepEqual(f.conversation.requests.requests("p", f.binding.threadId).map(request => [request.id, request.state]), [["prepared-id", "prepared"], ["unknown-id", "uncertain"]]);
+  assert.equal(f.conversation.requests.introduction("task")?.state, "ready");assert.equal(f.store.task("main")?.status, "queued");
+});
+
+test("a confirmed missing main closes a runless native child whose parent projection is gone", async t => {
+  const f = await fixture();t.after(f.cleanup);f.setFailure("main", new T3TransportError("deleted", 404));
+  const child = thread("child", "main", "subagent", "main");f.threads.push(child);
+  f.projections.set(child.id, {thread: child, runs: [], messages: [], subagents: []});
+  assert.equal(await f.lifecycle.readMain(f.binding, AbortSignal.timeout(1000)), null);
+  await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(f.calls.length, 1);assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId);
+});
+
+test("readMain rejects projections whose thread or project identity does not match the binding", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  f.main.thread.id = "other";await assert.rejects(f.lifecycle.readMain(f.binding, AbortSignal.timeout(1000)), /main_scope_mismatch/);
+  f.main.thread.id = "main";f.main.thread.projectId = "other-project";
+  await assert.rejects(f.lifecycle.readMain(f.binding, AbortSignal.timeout(1000)), /main_scope_mismatch/);
+});
+
+test("transient main reads clear the quiet epoch and fail closed", async t => {
+  const f = await fixture();t.after(f.cleanup);f.setFailure("main", new T3TransportError("unavailable", 503));
+  await assert.rejects(f.lifecycle.readMain(f.binding, AbortSignal.timeout(1000)), error => error instanceof T3TransportError && error.httpStatus === 503);
+  await f.check(10);assert.equal(f.calls.length, 0);assert.equal(f.store.binding("p", "main")?.quietSince, null);
+  f.setFailure("main", null);await f.check(100_000);assert.equal(f.calls.length, 0);
+  await f.check(100_000 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 1);
+});
+
+test("archived mains stay active while a cataloged direct or nested descendant is busy", async t => {
+  for (const kind of ["running", "background"] as const) {
+    const f = await fixture();t.after(f.cleanup);
+    f.main.thread.archivedAt = "2026-10-14T10:02:00Z";f.threads.splice(f.threads.findIndex(item => item.id === "main"), 1);
+    const child = thread(kind === "running" ? "child" : "nested", kind === "running" ? "main" : "parent", "subagent", "main");
+    f.threads.push(child);
+    if (kind === "background") {
+      const parent = thread("parent", "main", "subagent", "main");
+      f.threads.push(parent);f.projections.set(parent.id, {thread: parent, runs: [{...f.main.runs[0]!, id: "parent-run"}], messages: [], subagents: []});
+    }
+    const childProjection: Projection = {thread: child, runs: [{...f.main.runs[0]!, id: `${kind}-run`, status: kind === "running" ? "running" : "completed"}], messages: [], subagents: []};
+    if (kind === "background") childProjection.thread.pendingBackgroundTasks = [{kind: "task", id: "background"}];
+    f.projections.set(child.id, childProjection);
+    await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 0, kind);
+  }
+});
+
+test("nested descendants inherit historical roots but remain children of the bound main", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  f.main.thread.lineage.rootThreadId = "historical-root";f.main.thread.archivedAt = "2026-10-14T10:02:00Z";
+  f.threads.splice(f.threads.findIndex(item => item.id === "main"), 1);
+  const child = thread("child", "main", "subagent", "historical-root");
+  const grandchild = thread("grandchild", "child", "subagent", "historical-root");
+  f.threads.push(child, grandchild);
+  f.projections.set(child.id, {thread: child, runs: [{...f.main.runs[0]!, id: "child-run"}], messages: [], subagents: [{childThreadId: grandchild.id, status: "completed"}]});
+  f.projections.set(grandchild.id, {thread: grandchild, runs: [{...f.main.runs[0]!, id: "grandchild-run", status: "running"}], messages: [], subagents: []});
+  await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 0);
+});
+
+test("an active nested grandchild under an independent fork is outside the bound main scope", async t => {
+  const f = await fixture();t.after(f.cleanup);f.main.thread.lineage.rootThreadId = "historical-root";
+  const forkMain = thread("fork-main", "main", "fork", "historical-root");
+  const forkChild = thread("fork-child", "fork-main", "subagent", "historical-root");
+  const forkGrandchild = thread("fork-grandchild", "fork-child", "subagent", "historical-root");
+  f.threads.push(forkMain, forkChild, forkGrandchild);
+  f.projections.set(forkMain.id, {thread: forkMain, runs: [{...f.main.runs[0]!, id: "fork-main-run"}], messages: [], subagents: []});
+  f.projections.set(forkChild.id, {thread: forkChild, runs: [{...f.main.runs[0]!, id: "fork-child-run"}], messages: [], subagents: [{childThreadId: forkGrandchild.id, status: "running"}]});
+  f.projections.set(forkGrandchild.id, {thread: forkGrandchild, runs: [{...f.main.runs[0]!, id: "fork-grandchild-run", status: "running"}], messages: [], subagents: []});
+  assert.equal(mainConversation(forkGrandchild, f.threads)?.id, forkMain.id);
+  await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 1);
+});
+
+test("normal main settlement honors the active catalog shell's background work", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const sourceShell = {...f.main.thread, pendingBackgroundTasks: [{kind: "task", id: "background"}]};
+  f.threads.splice(f.threads.findIndex(item => item.id === "main"), 1, sourceShell);
+  await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 0);
+});
+
+test("T3 deletion closes a still-running child scope after the main returns confirmed 404", async t => {
+  const f = await fixture();t.after(f.cleanup);f.setFailure("main", new T3TransportError("deleted", 404));
+  const child = thread("child", "main", "subagent", "main");f.threads.push(child);
+  f.projections.set(child.id, {thread: child, runs: [{...f.main.runs[0]!, id: "child-run", status: "running"}], messages: [], subagents: []});
+  await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 1);
+});
+
+test("an archived but natively busy main cannot be set aside", async t => {
+  const f = await fixture();t.after(f.cleanup);f.main.thread.archivedAt = "2026-10-14T10:02:00Z";f.main.runs[0]!.status = "running";
+  await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 0);
+});
+
+test("unknown intermediate child ancestry blocks closed-main settlement", async t => {
+  const f = await fixture();t.after(f.cleanup);f.main.thread.archivedAt = "2026-10-14T10:02:00Z";
+  f.threads.splice(f.threads.findIndex(item => item.id === "main"), 1);
+  f.threads.push(thread("nested", "missing-parent", "subagent", "main"));
+  await f.check(10);assert.equal(f.calls.length, 0);assert.equal(f.store.binding("p", "main")?.quietSince, null);
+});
+
+test("a confirmed missing ancestor terminates an unrelated orphan subagent chain", async t => {
+  const f = await fixture();t.after(f.cleanup);f.setFailure("deleted-parent", new T3TransportError("deleted", 404));
+  f.threads.push(thread("orphan", "deleted-parent", "subagent", "historical-root"));
+  await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 1);
+});
+
+test("reopening the same main cancels its closed-source quiet epoch and retains binding identity", async t => {
+  const f = await fixture();t.after(f.cleanup);f.main.thread.archivedAt = "2026-10-14T10:02:00Z";f.threads.splice(f.threads.findIndex(item => item.id === "main"), 1);
+  await f.check(10);assert.equal(f.store.binding("p", "main")?.quietSince, 10);
+  delete f.main.thread.archivedAt;f.main.thread.updatedAt = "2026-10-14T10:03:00Z";f.threads.push(f.main.thread);
+  await f.check(20);assert.equal(f.calls.length, 0);assert.equal(f.store.binding("p", "main")?.quietSince, 20);
+  assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId);
+  await f.check(20 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 1);assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId);
+});
+
+test("a fresh main read that observes reopening cancels closed-source settlement", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const archived: Projection = {...f.main, thread: {...f.main.thread, archivedAt: "2026-10-14T10:02:00Z"}};
+  const reopened: Projection = {...f.main, thread: {...f.main.thread, archivedAt: null, updatedAt: "2026-10-14T10:03:00Z"}};
+  let mainReads = 0;
+  const projection = async (id: string) => id === "main" ? (++mainReads <= 2 ? archived : reopened) : f.projections.get(id)!;
+  const lifecycle = new SupervisorLifecycle(f.store, f.conversation, projection, async (_tag, payload) => {f.calls.push(payload);return {sequence: 20};});
+  await lifecycle.check(f.binding, f.threads, AbortSignal.timeout(1000), 10);
+  await lifecycle.check(f.binding, f.threads, AbortSignal.timeout(1000), 10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(mainReads, 3);assert.equal(f.calls.length, 0);assert.equal(f.store.binding("p", "main")?.quietSince, null);
 });
 
 for (const blocker of ["input", "main_running", "supervisor_queued", "child", "uncertain_request", "pin", "keep_active", "pending_review", "main_failed"] as const) {
@@ -150,7 +286,7 @@ test("an unknown scope version disables supervision without resetting the privat
 
 test("idle runless nested workers use their actual parent's native lifecycle records", async t => {
   const f = await fixture();t.after(f.cleanup);
-  const child = thread("z-child", "main", "subagent");const nested = thread("a-nested", "z-child", "subagent");
+  const child = thread("z-child", "main", "subagent");const nested = thread("a-nested", "z-child", "subagent", "main");
   f.threads.push(nested, child);
   f.main.subagents = [{childThreadId: child.id, status: "idle"}];
   f.projections.set(child.id, {thread: child, runs: [], messages: [], subagents: [{childThreadId: nested.id, status: "completed"}]});
@@ -159,10 +295,9 @@ test("idle runless nested workers use their actual parent's native lifecycle rec
 });
 
 
-test("paused monitoring permits parking only after all introductions and requests finish", async t => {
-  const f = await fixture();t.after(f.cleanup);f.store.saveSettings("p", 0, defaultSupervisorModel, {enabled: false, intervalMinutes: 5, activityThreshold: 10});
-  await f.check(1);await f.check(100_000);assert.equal(f.calls.length, 1);
-  delete f.supervisor.thread.settledAt;f.supervisor.thread.settledOverride = null;
+test("an unsent introduction blocks ordinary settlement while monitoring is idle", async t => {
+  const f = await fixture();t.after(f.cleanup);
   f.conversation.requests.saveIntroduction({taskId: "task", projectId: "p", threadId: "main", supervisorThreadId: f.binding.threadId, state: "ready", text: "Intro", messageId: "intro", targetRunId: null, error: null});
-  await f.check(200_000);await f.check(300_000);assert.equal(f.calls.length, 1, "paused does not discard an unsent introduction");
+  await f.check(1);await f.check(100_000);assert.equal(f.calls.length, 0, "the unsent introduction remains a blocker");
+  assert.equal(f.conversation.requests.introduction("task")?.state, "ready");
 });

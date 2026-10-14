@@ -6,7 +6,7 @@ repository-defined rules, and optionally handling Telegram notifications and inp
 ## Main features
 
 - **Project rules:** edit names, descriptions and required blocks in the selected
-  project's existing `.supervisor/rules.yaml`. The UI and repository use one rule
+  project's existing `.t3-supervisor/rules.yaml`. The UI and repository use one rule
   model; there is no separate reminder-rule editor.
 - **Reusable blocks:** inspect Markdown instructions, expected results and rule
   references. Select a project root or a conversation's worktree and see validation

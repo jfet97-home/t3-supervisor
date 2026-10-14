@@ -5,7 +5,7 @@ description: Use an existing T3 Supervisor dashboard to edit repository project 
 
 # Use T3 Supervisor
 
-The dashboard uses one project rule model backed by `.supervisor/rules.yaml` and
+The dashboard uses one project rule model backed by `.t3-supervisor/rules.yaml` and
 reusable Markdown blocks. Legacy condition/message reminders are retired. The Supervisor
 proposes draft workflows mixing ordinary task steps with project rules and blocks, introduces valid new drafts
 through active steering, and discusses them using native T3 messages. Ongoing
@@ -42,22 +42,43 @@ The UI edits the repository file, not a separate configuration database. It pres
 comments on retained YAML nodes where possible; formatting may change. Blocks
 remain repository-authored Markdown files in this step.
 
-Missing/malformed files, invalid block files, symlinks or incomplete listings must
-be repaired in the repository first. The editor only writes existing regular rule
+Missing setup can be created through the explicit checkout setup below. Malformed files, invalid blocks, symlinks and incomplete listings require repair in the repository. The editor only writes existing regular rule
 files. A missing write credential is a trusted deployment-setup task, not authority
 to provision or retrieve it through ordinary dashboard usage.
+
+## Enable supervision and set up definitions
+
+Settings → Global supervision is the master override, initially enabled.
+Projects → Project supervision has a persistent per-project switch. Initial defaults
+follow `.t3-supervisor` presence; unavailable reads never imply absence. Disabling
+retains chats/history and stops new service work; an active native model may finish.
+
+Settings → Use global rules and blocks is independent and initially off. First ON
+creates empty `~/.t3-supervisor` scaffolding if missing, preserves existing files and
+leaves them uncommitted. `~` is the T3 server user's home, not the container's.
+Enabled projects read shared definitions plus their operative checkout's definitions.
+Scratch requires this global input and has no local fallback.
+
+When a project's first enable needs setup, choose its exact checkout and inspect the
+shown folder/branch. **Create** leaves setup uncommitted; **Create + commit** submits
+the two new setup paths to native T3 and needs a Git-capable target plus trusted
+commit/probe grants. Repository hooks and signing apply; inspect staged files/history
+after an uncertain result. Enable existing definitions uses the selected checkout
+without writing or committing files.
+Neither switches branches. After an unknown outcome, reload and inspect; do not
+repeat creation or claim a commit without confirmed success.
 
 ## Configure the project Supervisor
 
 Under Projects, choose a model and reasoning from the connected T3 catalog, then
 Save Supervisor settings. This preference is project-wide, including its worktrees.
-The service creates one Supervisor for each main operational conversation's first
+When enabled, the service creates one Supervisor for each main operational conversation's first
 new task and reuses it on resume. Saved models/reasoning are defaults for new chats
 only; edit existing Supervisors using their native T3 controls. Select a main
 conversation to inspect its current model, task and scoped retry action. Project
 root shows defaults only. Unavailable models remain visible without a fallback.
 
-Configure ongoing monitoring in the same form: pause/resume, maximum pending age
+Configure ongoing monitoring in the same form: maximum pending age
 (default five minutes) and finalized activities per operative chat (default ten).
 Saving applies these limits on the next service check without losing pending
 changes or restarting the service. The fixed per-Supervisor cooldown is sixty seconds;

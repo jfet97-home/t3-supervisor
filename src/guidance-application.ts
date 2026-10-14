@@ -6,13 +6,15 @@ import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import type { SupervisorConfig } from "./types.js";
 import { readFile } from "node:fs/promises";
-import { makeProjectFiles, makeProjectWriter } from "./project-files.js";
+import { posix } from "node:path";
+import { makeProjectCommitter, makeProjectFiles, makeProjectWriter } from "./project-files.js";
 import { ProjectDefinitionLoader } from "./project-definitions.js";
 import { ProjectRuleEditor } from "./project-rule-editor.js";
 import { existsSync } from "node:fs";
 import { ProjectSupervisorStore, loadSupervisorOwnership } from "./project-supervisor-store.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
 import { makeSupervisorRpc, readSupervisorBaseline } from "./supervisor-native.js";
+import { makeGitProbe } from "./git-probe.js";
 
 export const runGuidanceApplication = (
   config: SupervisorConfig,
@@ -34,12 +36,39 @@ export const runGuidanceApplication = (
     runtime.descriptor = yield* t3.descriptor();
     store.bind(runtime.descriptor.environmentId);
     const readToken = yield* Effect.tryPromise(() => readFile(config.t3TokenFile, "utf8"));
-    const definitions = new ProjectDefinitionLoader(source, t3, makeProjectFiles(config.t3Url, readToken.trim()));
     const writePath = config.projectWriteTokenFile;
     const writeToken = writePath && existsSync(writePath) ? yield* Effect.tryPromise(() => readFile(writePath, "utf8")) : "";
+    const commitPath = config.projectCommitTokenFile;
+    const commitToken = commitPath && existsSync(commitPath) ? yield* Effect.tryPromise(() => readFile(commitPath, "utf8")) : "";
+    const probePath = config.gitProbeTokenFile;
+    const probeToken = probePath && existsSync(probePath) ? yield* Effect.tryPromise(() => readFile(probePath, "utf8")) : "";
+    const gitProbe = probeToken.trim() ? makeGitProbe(config.t3Url, probeToken.trim(), store) : undefined;
+    const cleanupGitProbe = gitProbe ? Effect.tryPromise(() => gitProbe.cleanup()).pipe(
+      Effect.catch(() => Effect.sync(() => console.log(JSON.stringify({event: "native_git_probe_cleanup_unavailable"})))),
+    ) : Effect.void;
+    yield* Effect.acquireRelease(Effect.succeed(gitProbe), () => cleanupGitProbe);
+    yield* cleanupGitProbe;
     const owned = config.supervisorOwnedThreadIds ??= loadSupervisorOwnership(config.dataDirectory);
     const supervisionStore = new ProjectSupervisorStore(store, owned);
-    const editor = writeToken.trim() ? new ProjectRuleEditor(definitions, makeProjectWriter(config.t3Url, writeToken.trim()), (snapshot, expectedRevision) => supervisionStore.recordDefinitionUserSave(snapshot, expectedRevision)) : undefined;
+    const projectWriter = writeToken.trim() ? makeProjectWriter(config.t3Url, writeToken.trim()) : undefined;
+    const commitWriter = commitToken.trim() ? makeProjectCommitter(config.t3Url, commitToken.trim()) : undefined;
+    const setupWriter = projectWriter?.writeFile ? {
+      writeFile: projectWriter.writeFile,
+      ...(commitWriter ? {commitFiles: commitWriter.commitFiles} : {}),
+    } : undefined;
+    const managedScratchRoot = config.managedScratchRoot && posix.isAbsolute(config.managedScratchRoot) ? posix.normalize(config.managedScratchRoot) : null;
+    const definitions = new ProjectDefinitionLoader(source, t3, makeProjectFiles(config.t3Url, readToken.trim()), {
+      globalRoot: "~",
+      useGlobalDefinitions: () => supervisionStore.useGlobalDefinitions(),
+      isScratchProject: (projectId, workspaceRoot) => {
+        const classification = store.classification(projectId);
+        if (classification !== "unclassified") return classification === "scratch";
+        return managedScratchRoot !== null && posix.normalize(workspaceRoot) === managedScratchRoot;
+      },
+      ...(setupWriter ? {setupWriter} : {}),
+      ...(gitProbe ? {gitProbe: gitProbe.probe} : {}),
+    });
+    const editor = projectWriter ? new ProjectRuleEditor(definitions, projectWriter, (snapshot, expectedRevision) => supervisionStore.recordDefinitionUserSave(snapshot, expectedRevision)) : undefined;
     const operateToken = config.guidanceTokenFile && existsSync(config.guidanceTokenFile) ? yield* Effect.tryPromise(() => readFile(config.guidanceTokenFile!, "utf8")) : "";
     const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, makeSupervisorRpc(config.t3Url, readToken.trim()),
       operateToken.trim() ? makeSupervisorRpc(config.t3Url, operateToken.trim()) : null, readSupervisorBaseline(config.t3Url, readToken.trim()), definitions);

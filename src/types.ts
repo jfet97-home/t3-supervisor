@@ -108,5 +108,7 @@ export interface SupervisorConfig {
   uiAssetsDirectory?: string;
   guidanceTokenFile?: string;
   projectWriteTokenFile?: string;
+  projectCommitTokenFile?: string;
+  gitProbeTokenFile?: string;
   managedScratchRoot?: string;
 }

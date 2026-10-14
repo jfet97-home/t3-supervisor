@@ -35,7 +35,7 @@ const snapshot: ProjectSupervisorInfo = {
 };
 
 const input: ProjectSupervisorSaveInput = {projectId: "project", mainThreadId: "task-thread", expectedGeneration: 7, modelSelection: selection};
-const monitoring = {enabled: true, intervalMinutes: "5", activityThreshold: "10"};
+const monitoring = {intervalMinutes: "5", activityThreshold: "10"};
 const workflow = (overrides: Partial<WorkflowProposalInfo> = {}): WorkflowProposalInfo => ({
   status: "proposed",
   message: "A workflow was drafted from the current project rules.",
@@ -97,9 +97,7 @@ test("Supervisor settings markup explains automatic conversation reuse and separ
   assert.match(html, /<label for="supervisor-model">Model/);
   assert.match(html, /<label for="supervisor-reasoning">Reasoning/);
   assert.doesNotMatch(html, /<label>Temperature/);
-  assert.match(html, /label for="supervisor-monitoring-enabled"/);
-  assert.match(html, /id="supervisor-monitoring-enabled"/);
-  assert.match(html, /name="monitoringEnabled"/);
+  assert.doesNotMatch(html, /supervisor-monitoring-enabled|monitoringEnabled|pause monitoring/i);
   assert.match(html, /id="supervisor-monitoring-interval" type="number" min="1" max="60" step="1" required=""/);
   assert.match(html, /name="intervalMinutes"/);
   assert.match(html, /id="supervisor-monitoring-threshold" type="number" min="3" max="100" step="1" required=""/);
@@ -117,7 +115,7 @@ test("Supervisor settings markup explains automatic conversation reuse and separ
 });
 
 test("monitoring settings default sensibly and remain optional for legacy snapshots and saves", () => {
-  assert.deepEqual(defaultMonitoringSettings, {enabled: true, intervalMinutes: 5, activityThreshold: 10});
+  assert.deepEqual(defaultMonitoringSettings, {intervalMinutes: 5, activityThreshold: 10});
   const decodedSnapshot = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(snapshot);
   const decodedInput = Schema.decodeUnknownSync(ProjectSupervisorSave)(input);
   assert.equal(decodedSnapshot.settings.monitoring, undefined);
@@ -127,7 +125,7 @@ test("monitoring settings default sensibly and remain optional for legacy snapsh
 
 test("invalid monitoring drafts expose associated accessible errors", () => {
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
-    snapshot, selection, monitoring: {enabled: true, intervalMinutes: "1.5", activityThreshold: "101"}, connected: true,
+    snapshot, selection, monitoring: {intervalMinutes: "1.5", activityThreshold: "101"}, connected: true,
     saving: false, fieldsBusy: false, blocked: false, dirty: true, canSave: false, shouldOfferRetry: false,
     retryButtonLabel: "Retry native access", canRetry: false, onSelectionChange: () => {}, onMonitoringChange: () => {},
     onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
@@ -520,7 +518,7 @@ test("Supervisor settings saves send live monitoring values with the model selec
   const original = globalThis.fetch;
   const monitoredInput: ProjectSupervisorSaveInput = {
     ...input,
-    monitoring: {enabled: false, intervalMinutes: 12, activityThreshold: 35},
+    monitoring: {intervalMinutes: 12, activityThreshold: 35},
   };
   try {
     globalThis.fetch = async (url, init) => {

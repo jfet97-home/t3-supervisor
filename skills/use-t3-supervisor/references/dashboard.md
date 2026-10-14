@@ -11,7 +11,7 @@ page loads on selection or Refresh definitions, not background snapshot polling.
 An unavailable selected conversation never silently switches to the project root.
 
 Inspect validation, rules, required-block links, instructions and expected results.
-Edit project rules modifies the same existing `.supervisor/rules.yaml` used by manual
+Edit project rules modifies the same existing `.t3-supervisor/rules.yaml` used by manual
 repository editing. Name, description and required_blocks are the sole rule fields.
 The description explains applicability; blocks describe work and its expected result.
 
@@ -33,7 +33,7 @@ inspection/reload, never an automatic retry or a success claim. A session-guard
 rejection is definitely not saved: the dashboard refreshes access, keeps the draft
 editable and asks for a new explicit Save. It never retries that write itself.
 
-Missing files are created manually in the repository in this step. Malformed files
+First-time setup offers checkout selection and Create or Create + commit; Create leaves changes uncommitted. An existing folder offers Enable existing definitions without a write or commit. Native commits honor hooks and signing; hooks can change committed contents and failure may leave setup files staged. Shared global setup uses the separate opt-in control in Settings. Malformed files
 and block errors must be repaired before editing. Native target checks reject
 symlinked paths and incomplete listings; external changes racing the actual native
 write remain outside the V1 contract.
@@ -69,3 +69,16 @@ steps identify existing project blocks; rule decisions explain their applicabili
 The workspace and definition revision identify the snapshot used. Unavailable,
 invalid or stale proposals do not become agreed workflows. Legacy objective-only
 records remain unchanged. The service introduces valid drafts and batches later check-ins.
+
+## Enable controls and settlement
+
+The master switch disables every semantic Supervisor. Project switches are independent
+and remember manual choices; initial folder presence supplies their defaults. Shared
+`~/.t3-supervisor` definitions have a separate opt-in switch and do not replace project
+controls. Project rules follow the operative checkout/worktree; global sources are
+marked separately and cannot be edited through the project editor.
+
+Completed idle scopes settle the same owned chat for later resume. Archived/deleted
+mains also park their companion once native work and children are quiet, retaining
+history and unknown request identities. A native 404 is distinct from a failed read.
+User pins and the retained keep-active choice can still hold settlement.

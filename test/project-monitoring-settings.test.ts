@@ -20,7 +20,7 @@ const setStoredSettings = (supervisor: ProjectSupervisorStore, value: Record<str
 
 test("new and legacy project settings receive the monitoring defaults", async () => {
   await withStore(supervisor => {
-    assert.deepEqual(supervisor.settings("new-project").monitoring, {enabled: true, intervalMinutes: 5, activityThreshold: 10});
+    assert.deepEqual(supervisor.settings("new-project").monitoring, {intervalMinutes: 5, activityThreshold: 10});
     assert.equal(supervisor.settings("new-project").modelMutationGeneration, 0);
     setStoredSettings(supervisor, {
       projectId: "legacy-project",
@@ -40,7 +40,7 @@ test("new and legacy project settings receive the monitoring defaults", async ()
 
 test("monitoring-only saves preserve model attempts and legacy saves keep current monitoring", async () => {
   await withStore(supervisor => {
-    const currentMonitoring: SupervisorMonitoringSettings = {enabled: true, intervalMinutes: 8, activityThreshold: 24};
+    const currentMonitoring: SupervisorMonitoringSettings = {intervalMinutes: 8, activityThreshold: 24};
     setStoredSettings(supervisor, {
       projectId: "project",
       generation: 4,
@@ -51,7 +51,7 @@ test("monitoring-only saves preserve model attempts and legacy saves keep curren
       applicationMessage: "The native model update is still being reconciled.",
     });
 
-    const changedMonitoring: SupervisorMonitoringSettings = {enabled: false, intervalMinutes: 12, activityThreshold: 35};
+    const changedMonitoring: SupervisorMonitoringSettings = {intervalMinutes: 12, activityThreshold: 35};
     const savedMonitoring = supervisor.saveSettings("project", 4, defaultSupervisorModel, changedMonitoring);
     assert.equal(savedMonitoring.generation, 5);
     assert.equal(savedMonitoring.modelMutationGeneration, 4);

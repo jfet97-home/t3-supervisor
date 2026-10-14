@@ -7,7 +7,6 @@ import { redact, validateWorkflowPlan, type ProposalContext } from "./supervisor
 import { extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, workflowAgreementPlanHash } from "./supervisor-workflow-agreement.js";
 import { extractApprovedProjectDefinitions, extractProjectDefinitionDecisionRecords, parseProjectDefinitionDecisionRecord, buildProjectDefinitionReviewRequest } from "./supervisor-definition-review.js";
 import type { BindingRecord, ProjectSupervisorStore, TaskRecord } from "./project-supervisor-store.js";
-import type { ProjectDefinitionLoader } from "./project-definitions.js";
 import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 import type { SupervisorMonitoringStatus, WorkflowAgreementInfo, WorkflowProposalInfo } from "./project-supervisor-contract.js";
 import { fingerprint } from "./guidance-store.js";
@@ -19,6 +18,8 @@ const busy = (projection: Projection) => projection.runs.some(run => ["preparing
 const failedRunStates = new Set(["failed", "interrupted", "cancelled", "rolled_back"]);
 const rank = (mode: unknown) => ["approval-required", "auto-accept-edits", "auto", "full-access"].indexOf(String(mode));
 const acceptedReceipt = (value: unknown): boolean => record(value) && Number.isSafeInteger(value.sequence) && Number(value.sequence) >= 0;
+type ConversationDefinitions = {load: (projectId: string, threadId: string, signal: AbortSignal) => Promise<ProjectDefinitionSnapshot>;
+  globalFingerprint?: (signal: AbortSignal) => Promise<string | null>};
 export const hasCompletionMarker = (text: string, marker: string): boolean => text.trim().replace(/[\s`*_.,!?:;'"()]+$/u, "").endsWith(marker);
 export const canSupervisorContact = (supervisor: ThreadInfo, agent: ThreadInfo): boolean =>
   rank(supervisor.runtimeMode) >= 0 && rank(agent.runtimeMode) >= 0 && rank(supervisor.runtimeMode) >= rank(agent.runtimeMode) &&
@@ -32,7 +33,19 @@ export const workflowIntroductionText = (task: TaskRecord): string => {
   const proposalId = task.workflowProposalId ?? task.id;
   const proposal = {taskId: task.id, proposalId, workspaceRoot: workflow.workspaceRoot, revision: workflow.revision,
     workflow: {rules: workflow.rules, steps: workflow.steps}};
-  return `Project Supervisor — proposal ${proposalId}\nA separate supervising T3 conversation helps organize this task and follows the project rules. This is semantic guidance, not a deterministic gate. You may already be working; adjust your plan and revise earlier work where appropriate.\nObjective: ${redact(task.objective ?? "")}\nDraft workflow:\n${workflow.steps.map((step, i) => `${i + 1}. ${redact(step.name)}${step.blockId === null ? "" : ` [${step.blockId}]`} — ${redact(step.reason)}`).join("\n") || "No blocks were selected."}\nApplicable rules: ${workflow.rules.filter(rule => rule.applies).map(rule => redact(rule.name)).join(", ") || "None assessed as applicable."}\nDefinitions are in ${workflow.workspaceRoot}/.supervisor/rules.yaml and ${workflow.workspaceRoot}/.supervisor/blocks/*.md (revision ${workflow.revision}). Consult them to understand the blocks and propose a different order, additional available blocks, or useful free named steps. Preserve every applicable rule and its required blocks.\nThe Supervisor has published this initial complete proposal record:\n\`\`\`workflow-proposal\n${JSON.stringify(proposal)}\n\`\`\`\nDiscuss it by sending a message to Supervisor thread ${task.supervisorThreadId} using T3's t3_thread_send (namespace prefixes may vary), mode queue. Include task ${task.id}, your operative thread ID ${task.threadId}, and proposal ${proposalId}. Do not start another conversation. If that tool is unavailable, reply in this chat; your completed reply can be read during the next check-in. If you agree with the record above, your own completed assistant reply in this operative chat must include a fenced workflow-acceptance JSON record echoing exactly its taskId, proposalId, workspaceRoot, revision, and full workflow {rules,steps}; a bare yes is not a confirmation. You may suggest changes in the ordinary dialogue before accepting. The supervising chat batches observations rather than interrupting you on every action.`;
+  const snapshot = task.definitionSnapshot;
+  const usesGlobal = Boolean(snapshot && (snapshot.globalRevision !== undefined && snapshot.globalRevision !== null ||
+    snapshot.rules.some(rule => rule.origin === "global") || snapshot.blocks.some(block => block.origin === "global")));
+  const sources = [
+    ...(usesGlobal ? ["shared rules at ~/.t3-supervisor/rules.yaml and blocks in ~/.t3-supervisor/blocks/*.md"] : []),
+    ...(!snapshot?.globalOnly ? [`project rules at ${workflow.workspaceRoot}/.t3-supervisor/rules.yaml and blocks in ${workflow.workspaceRoot}/.t3-supervisor/blocks/*.md`] : []),
+  ];
+  const definitions = sources.length
+    ? `Definitions are in ${sources.join(" and ")} (revision ${workflow.revision}). For global blocks, use each supplied sourceId and path to identify the original file; their workflow IDs are namespaced in the combined definitions. Consult the sources to understand blocks and propose a different order, additional available blocks, or useful free named steps. Preserve every applicable global and project rule and its required blocks.`
+    : snapshot?.globalOnly
+      ? "Scratch uses only shared rules; do not assume that a project-local .t3-supervisor folder exists."
+      : `Project definitions are unavailable at ${workflow.workspaceRoot}/.t3-supervisor (revision ${workflow.revision}).`;
+  return `Project Supervisor — proposal ${proposalId}\nA separate supervising T3 conversation helps organize this task and follows the applicable rules. This is semantic guidance, not a deterministic gate. You may already be working; adjust your plan and revise earlier work where appropriate.\nObjective: ${redact(task.objective ?? "")}\nDraft workflow:\n${workflow.steps.map((step, i) => `${i + 1}. ${redact(step.name)}${step.blockId === null ? "" : ` [${step.blockId}]`} — ${redact(step.reason)}`).join("\n") || "No blocks were selected."}\nApplicable rules: ${workflow.rules.filter(rule => rule.applies).map(rule => redact(rule.name)).join(", ") || "None assessed as applicable."}\n${definitions}\nThe Supervisor has published this initial complete proposal record:\n\`\`\`workflow-proposal\n${JSON.stringify(proposal)}\n\`\`\`\nDiscuss it by sending a message to Supervisor thread ${task.supervisorThreadId} using T3's t3_thread_send (namespace prefixes may vary), mode queue. Include task ${task.id}, your operative thread ID ${task.threadId}, and proposal ${proposalId}. Do not start another conversation. If that tool is unavailable, reply in this chat; your completed reply can be read during the next check-in. If you agree with the record above, your own completed assistant reply in this operative chat must include a fenced workflow-acceptance JSON record echoing exactly its taskId, proposalId, workspaceRoot, revision, and full workflow {rules,steps}; a bare yes is not a confirmation. You may suggest changes in the ordinary dialogue before accepting. The supervising chat batches observations rather than interrupting you on every action.`;
 };
 
 /** Uses existing T3 activity and ordinary conversations, with one durable service request per Supervisor. */
@@ -43,8 +56,9 @@ export class SupervisorConversation {
   private offset = 0;
   constructor(readonly store: ProjectSupervisorStore, readonly rpc: SupervisorRpc | null,
     readonly projection: (threadId: string, signal: AbortSignal) => Promise<Projection>,
-    readonly definitions: Pick<ProjectDefinitionLoader, "load"> | undefined,
-    readonly eligible: (thread: ThreadInfo, threads: readonly ThreadInfo[]) => boolean) {
+    readonly definitions: ConversationDefinitions | undefined,
+    readonly eligible: (thread: ThreadInfo, threads: readonly ThreadInfo[]) => boolean,
+    readonly enabled: (projectId: string) => boolean = () => true) {
     this.requests = new SupervisorConversationStore(store.store);
     this.monitor = new ProjectSupervisorMonitorStore(store.store);
   }
@@ -71,16 +85,16 @@ export class SupervisorConversation {
     const failed = this.requests.requests(projectId, supervisorThreadId).find(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged);
     const saturated = tasks.find(task => this.monitor.state(projectId, task.threadId)?.saturated);
     const misses = this.requests.reviewMisses(supervisorThreadId);
-    const state = !settings.enabled ? "paused" : request?.state === "uncertain" || blocked?.state === "uncertain" ? "uncertain" : blocked || failed || saturated ? "unavailable" : request || starting ? "busy" : "idle";
-    return {state, pendingItems, lastNoticeAt, nextReviewAt: settings.enabled ? nextReviewAt : null,
+    const state = request?.state === "uncertain" || blocked?.state === "uncertain" ? "uncertain" : blocked || failed || saturated ? "unavailable" : request || starting ? "busy" : "idle";
+    return {state, pendingItems, lastNoticeAt, nextReviewAt,
       retryable: Boolean(request?.state === "uncertain" || blocked || failed),
-      message: !settings.enabled ? "Monitoring sends are paused; pending activity is retained." : request?.error ?? blocked?.error ?? failed?.error ?? (saturated ? `Activity capacity reached in chat ${saturated.threadId}. Checkpointed items are retained, but overflow and later activity may remain untracked. Retry native access cannot repair this capacity limit.` : null) ??
+      message: request?.error ?? blocked?.error ?? failed?.error ?? (saturated ? `Activity capacity reached in chat ${saturated.threadId}. Checkpointed items are retained, but overflow and later activity may remain untracked. Retry native access cannot repair this capacity limit.` : null) ??
         (request ? "Waiting for this specific Supervisor request; changes are being collected." : starting ? "Preparing the proposal introduction and waiting for native visibility." : misses ? `The last check-in was not confirmed (${misses}/3); pending changes will be checked again after the cooldown.` : "Existing T3 activity is batched by age or count. No startup barrier or deterministic gate is applied.")};
   }
   async observe(threads: readonly ThreadInfo[], signal: AbortSignal, now = Date.now()): Promise<void> {
     this.requests.prune(now);
     const tasks = this.store.bindings().flatMap(binding => this.store.tasksFor(binding))
-      .filter(task => task.status === "inferred" && (task.workflow?.status === "proposed" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale") &&
+      .filter(task => this.enabled(task.projectId) && task.status === "inferred" && (task.workflow?.status === "proposed" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale") &&
         task.supervisorThreadId === this.store.bindingForSupervisor(task.supervisorThreadId)?.threadId &&
         (this.requests.introduction(task.id)?.state === "sent" || this.introductionUnsent(task.id)));
     const candidates = [...tasks.slice(this.offset), ...tasks.slice(0, this.offset)].slice(0, 20);
@@ -94,6 +108,7 @@ export class SupervisorConversation {
       const introduction = this.requests.introduction(task.id);
       try {
         const agent = await this.projection(task.threadId, signal);
+        if (!this.enabled(task.projectId)) continue;
         if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== task.projectId) {
           this.markWorkflowStale(task, "The operative conversation is no longer eligible for this workflow agreement.", now);continue;
         }
@@ -108,6 +123,7 @@ export class SupervisorConversation {
           }
           supervisorProjections.set(task.supervisorThreadId, supervisor);
         }
+        if (!this.enabled(task.projectId)) continue;
         if (!supervisor) {
           if (missingSupervisors.has(task.supervisorThreadId)) this.markWorkflowStale(task, "The bound Supervisor conversation was deleted; this workflow agreement is stale.", now);
           continue;
@@ -116,11 +132,14 @@ export class SupervisorConversation {
           if (!this.sourceUnchanged(task, agent) || supervisor.thread.id !== task.supervisorThreadId || supervisor.thread.projectId !== task.projectId ||
             supervisor.thread.archivedAt || supervisor.thread.deletedAt) continue;
           const definitions = await this.definitions?.load(task.projectId, task.threadId, signal);
+          if (!this.enabled(task.projectId)) continue;
           if (definitions && await this.reviewDefinitions(task, definitions, agent, supervisor, now, signal)) this.renewUnsentTask(task, now);
           continue;
         }
+        if (!this.enabled(task.projectId)) continue;
         await this.observeWorkflowAgreement(task, introduction, agent, supervisor, threads, now, signal);
       } catch (cause) {
+        if (!this.enabled(task.projectId)) continue;
         if (cause instanceof T3TransportError && cause.httpStatus === 404) this.markWorkflowStale(task, "A bound workflow conversation was deleted; this workflow agreement is stale.", now);
         // projection and definition read failures preserve the prior agreement for a later observation
       }
@@ -163,6 +182,7 @@ export class SupervisorConversation {
   }
   private async reviewDefinitions(task: TaskRecord, observed: ProjectDefinitionSnapshot, agent: Projection, supervisor: Projection,
     now: number, signal: AbortSignal): Promise<boolean> {
+    if (!this.enabled(task.projectId)) return false;
     if (observed.status === "unavailable" || observed.status === "permission_required") return false;
     const approved = extractApprovedProjectDefinitions(task);
     const matches = observed.status === "ready" && observed.workspaceRoot === task.workflow?.workspaceRoot && observed.revision === task.workflow?.revision;
@@ -178,18 +198,37 @@ export class SupervisorConversation {
     let current = this.store.task(task.threadId) ?? task;
     const prior = current.definitionReview;
     const explicitRuleSave = Boolean(approved && prior && this.store.definitionUserSave(observed, approved, prior.updatedAt));
+    let observedGlobalFingerprint: string | null = null;
+    if (approved && prior && this.store.hasGlobalDefinitionsEvent() && this.definitions?.globalFingerprint) {
+      try {observedGlobalFingerprint = await this.definitions.globalFingerprint(signal);} catch {return false;}
+      if (!this.enabled(task.projectId)) return false;
+    }
+    const explicitGlobalToggle = Boolean(approved && prior && this.store.definitionUserGlobalToggle(observed, approved, prior.updatedAt, observedGlobalFingerprint));
     if (!prior || prior.expectedRevision !== task.workflow.revision || prior.observedRevision !== observed.revision || prior.status === "authorized" || prior.status === "restored") {
-      current = {...current, definitionReview: {status: "checking", message: approved
+      current = {...current, definitionReview: {status: "checking", message: explicitGlobalToggle
+        ? "Global rules inclusion changed through the user setting; the old agreement remains stale while the selected definitions are refreshed."
+        : approved
         ? "Project definitions changed; the Supervisor will check actual user messages and request correction when needed."
         : "Project definitions changed, but a complete approved snapshot is unavailable. The previous workflow remains stale; do not adopt the changed files.",
         expectedRevision: task.workflow.revision, observedRevision: observed.revision, supervisorMessageId: null, userMessageIds: [],
-        updatedAt: explicitRuleSave ? prior!.updatedAt : now}, updatedAt: now};
+        updatedAt: explicitRuleSave || explicitGlobalToggle ? prior!.updatedAt : now}, updatedAt: now};
       this.store.saveTask(current);
     }
     if (!approved || observed.workspaceRoot !== approved.workspaceRoot || observed.projectId !== task.projectId || observed.threadId !== task.threadId) return false;
+    if (explicitGlobalToggle) {
+      let fresh: ProjectDefinitionSnapshot;let freshAgent: Projection;let freshGlobalFingerprint: string | null;
+      try {fresh = await this.definitions!.load(task.projectId, task.threadId, signal);freshAgent = await this.projection(task.threadId, signal);
+        freshGlobalFingerprint = await this.definitions!.globalFingerprint!(signal);} catch {return false;}
+      if (!this.enabled(task.projectId) || fresh.status !== "ready" || fresh.revision !== observed.revision || fresh.threadId !== task.threadId ||
+        freshGlobalFingerprint !== observedGlobalFingerprint || !this.sourceUnchanged(current, freshAgent) ||
+        !this.store.definitionUserGlobalToggle(fresh, approved, current.definitionReview!.updatedAt, freshGlobalFingerprint)) return false;
+      this.adoptDefinitions(current, fresh, now, null, [], "The user changed whether global rules are included; the current setting is adopted without asking the agent to reverse it.");
+      return true;
+    }
     if (explicitRuleSave) {
       let fresh: ProjectDefinitionSnapshot;let freshAgent: Projection;
       try {fresh = await this.definitions!.load(task.projectId, task.threadId, signal);freshAgent = await this.projection(task.threadId, signal);} catch {return false;}
+      if (!this.enabled(task.projectId)) return false;
       if (fresh.revision !== observed.revision || fresh.threadId !== task.threadId || !this.sourceUnchanged(current, freshAgent) ||
         !this.store.definitionUserSave(fresh, approved, current.definitionReview!.updatedAt)) return false;
       this.adoptDefinitions(current, fresh, now, null, [], "The rules were explicitly saved through the project rule editor; blocks still match the approved snapshot.");
@@ -206,6 +245,7 @@ export class SupervisorConversation {
           freshSupervisor = await this.projection(task.supervisorThreadId, signal);
           freshObserved = await this.definitions!.load(task.projectId, task.threadId, signal);
         } catch {return false;}
+        if (!this.enabled(task.projectId)) return false;
         const freshMessage = this.completedAssistantMessages(freshSupervisor, task.supervisorThreadId).find(item => item.messageId === message.messageId && item.runId === message.runId);
         if (!this.sourceUnchanged(current, freshAgent) || freshSupervisor.thread.projectId !== task.projectId || freshSupervisor.thread.deletedAt ||
           freshSupervisor.thread.archivedAt || !freshMessage || fingerprint(freshMessage.text) !== fingerprint(message.text) ||
@@ -229,6 +269,7 @@ export class SupervisorConversation {
     const now = Date.now();
     if (now - (this.requests.lastNotice(binding.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return false;
     for (const task of tasks.slice(0, 20)) {
+      if (!this.enabled(binding.projectId)) return false;
       if ((!task.definitionReview && task.agreement?.status !== "stale") ||
         this.requests.introduction(task.id)?.state !== "sent" && !this.introductionUnsent(task.id)) continue;
       const phase = task.definitionReview?.status === "revert_requested" ? "checking" : task.definitionReview?.status ?? `stale:${task.agreement?.proposalId}`;
@@ -239,6 +280,16 @@ export class SupervisorConversation {
       if (!approved) continue;
       let agent: Projection;let observed: ProjectDefinitionSnapshot;
       try {agent = await this.projection(task.threadId, signal);observed = await this.definitions!.load(task.projectId, task.threadId, signal);} catch {continue;}
+      if (!this.enabled(binding.projectId)) return false;
+      if (this.store.globalDefinitionsChangeAuthorized(task)) {
+        if (!this.store.useGlobalDefinitions(task.projectId)) continue;
+        if (this.definitions?.globalFingerprint) {
+          let globalFingerprint: string | null = null;
+          try {globalFingerprint = await this.definitions.globalFingerprint(signal);} catch {continue;}
+          if (!this.enabled(binding.projectId)) return false;
+          if (this.store.globalDefinitionsChangeAuthorized(task, globalFingerprint) && observed.status === "ready" && observed.revision === task.workflow?.revision) continue;
+        }
+      }
       if (!this.eligible(agent.thread, threads) || !this.sourceUnchanged(task, agent) || !canSupervisorContact(supervisor.thread, agent.thread) ||
         observed.status === "unavailable" || observed.status === "permission_required" || observed.projectId !== task.projectId || observed.threadId !== task.threadId ||
         observed.workspaceRoot !== approved.workspaceRoot) continue;
@@ -366,6 +417,7 @@ export class SupervisorConversation {
   }
   private async observeWorkflowAgreement(task: TaskRecord, introduction: WorkflowIntroduction, agent: Projection, supervisor: Projection,
     threads: readonly ThreadInfo[], now: number, signal: AbortSignal): Promise<void> {
+    if (!this.enabled(task.projectId)) return;
     const binding = this.store.bindingForSupervisor(task.supervisorThreadId);
     if (!binding || binding.threadId !== task.supervisorThreadId || binding.state === "missing" || binding.state === "rejected") {
       this.markWorkflowStale(task, "The bound Supervisor conversation is no longer valid; this workflow agreement is stale.", now);return;
@@ -384,8 +436,10 @@ export class SupervisorConversation {
     let definitions: ProjectDefinitionSnapshot | null;
     try {definitions = this.definitions ? await this.definitions.load(task.projectId, task.threadId, signal) : null;}
     catch {return;}
+    if (!this.enabled(task.projectId)) return;
     if (!definitions || definitions.status === "unavailable" || definitions.status === "permission_required") return;
     if (!(await this.reviewDefinitions(task, definitions, agent, supervisor, now, signal))) return;
+    if (!this.enabled(task.projectId)) return;
     task = this.store.task(task.threadId) ?? task;
     if (definitions.status !== "ready" || definitions.projectId !== task.projectId || definitions.threadId !== task.threadId ||
       !definitions.revision || definitions.workspaceRoot !== task.workflow?.workspaceRoot || definitions.revision !== task.workflow?.revision ||
@@ -457,18 +511,21 @@ export class SupervisorConversation {
   }
   private async recordWorkflowAgreement(task: TaskRecord, introduction: WorkflowIntroduction, candidate: WorkflowAgreementCandidate,
     agentMessageId: string, supervisor: Projection, threads: readonly ThreadInfo[], now: number, signal: AbortSignal): Promise<void> {
+    if (!this.enabled(task.projectId)) return;
     const binding = this.store.bindingForSupervisor(task.supervisorThreadId);
     if (!binding || binding.state !== "ready" || binding.threadId !== task.supervisorThreadId) return;
     const currentTask = this.store.task(task.threadId);
     if (!currentTask || currentTask.id !== task.id || currentTask.sourceHash !== task.sourceHash || currentTask.workflowProposalId !== candidate.proposalId) return;
     let agent: Projection;
     try {agent = await this.projection(task.threadId, signal);} catch {return;}
+    if (!this.enabled(task.projectId)) return;
     if (supervisor.thread.id !== binding.threadId || supervisor.thread.projectId !== task.projectId || supervisor.thread.deletedAt || supervisor.thread.archivedAt ||
       !this.eligible(agent.thread, threads) || agent.thread.projectId !== task.projectId || !this.sourceUnchanged(task, agent) ||
       !this.afterIntroduction(agent, introduction, agentMessageId)) return;
     let definitions: ProjectDefinitionSnapshot | null;
     try {definitions = this.definitions ? await this.definitions.load(task.projectId, task.threadId, signal) : null;}
     catch {return;}
+    if (!this.enabled(task.projectId)) return;
     if (!definitions || definitions.status !== "ready" || definitions.projectId !== task.projectId || definitions.threadId !== task.threadId ||
       definitions.workspaceRoot !== candidate.workflow.workspaceRoot || definitions.revision !== candidate.workflow.revision) {
       if (definitions && definitions.status !== "unavailable") this.markWorkflowStale(task, "Project definitions changed before workflow agreement could be recorded.", now);
@@ -476,6 +533,7 @@ export class SupervisorConversation {
     }
     const context = this.proposalContext(definitions);
     try {supervisor = await this.projection(task.supervisorThreadId, signal);} catch {return;}
+    if (!this.enabled(task.projectId)) return;
     if (supervisor.thread.id !== binding.threadId || supervisor.thread.projectId !== task.projectId || supervisor.thread.deletedAt || supervisor.thread.archivedAt) return;
     const supervisorMessages = this.completedAssistantMessages(supervisor, task.supervisorThreadId);
     if (!this.proposalEvidenceCurrent(currentTask, candidate, supervisorMessages, context)) return;
@@ -495,7 +553,7 @@ export class SupervisorConversation {
       const liveBinding = this.store.bindingForSupervisor(task.supervisorThreadId);
       const liveIntroduction = this.requests.introduction(task.id);
       const storedCandidate = this.requests.agreementCandidate(task.id, candidate.proposalId);
-      if (!current || current.id !== task.id || current.status !== "inferred" || current.sourceHash !== task.sourceHash ||
+      if (!this.enabled(task.projectId) || !current || current.id !== task.id || current.status !== "inferred" || current.sourceHash !== task.sourceHash ||
         current.workflowProposalId !== candidate.proposalId || current.supervisorThreadId !== task.supervisorThreadId ||
         liveBinding?.state !== "ready" || liveBinding.threadId !== task.supervisorThreadId || liveIntroduction?.state !== "sent" ||
         liveIntroduction.messageId !== introduction.messageId || storedCandidate?.planHash !== candidate.planHash ||
@@ -509,16 +567,16 @@ export class SupervisorConversation {
     });
   }
   async run(binding: BindingRecord, supervisor: Projection, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
+    if (!this.enabled(binding.projectId)) return;
     const inflight = this.requests.pending(binding.projectId, binding.threadId);
     if (inflight) {await this.reconcile(inflight, supervisor, threads, signal);return;}
     if (!this.rpc) return;
-    const enabled = this.store.settings(binding.projectId).monitoring.enabled;
     const tasks = this.store.tasks(binding.projectId).filter(task => task.status === "inferred" &&
       (task.workflow?.status === "proposed" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale") && task.supervisorThreadId === binding.threadId);
     for (const task of tasks) {
+      if (!this.enabled(binding.projectId)) return;
       const previous = this.requests.introduction(task.id);
       if (previous?.state === "ready" || previous?.state === "sending" || previous?.state === "accepted" || previous?.state === "uncertain") {
-        if (!enabled && previous.state === "ready") continue;
         try {await this.sendIntroduction(task, previous, threads, signal);}
         catch (cause) {
           this.requests.saveIntroduction({...previous, state: cause instanceof T3TransportError && cause.httpStatus === 404 ? "blocked" : previous.state,
@@ -527,9 +585,10 @@ export class SupervisorConversation {
         continue;
       }
       if (previous) continue;
-      if (!enabled || busy(supervisor)) continue;
+      if (busy(supervisor)) continue;
       let agent: Projection;
       try {agent = await this.projection(task.threadId, signal);} catch {continue;}
+      if (!this.enabled(binding.projectId)) return;
       if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== binding.projectId || !this.sourceUnchanged(task, agent)) continue;
       if (Date.now() - (this.requests.lastNotice(binding.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
       const text = workflowIntroductionText(task);
@@ -539,12 +598,15 @@ export class SupervisorConversation {
         this.requests.saveIntroduction({...introduction, state: "blocked", error: "The Supervisor's native modes cannot contact this operative chat. Adjust runtime/interaction modes in T3; existing conversations are never auto-upgraded."});continue;
       }
       const definitions = await this.freshDefinitions(task, signal);
+      if (!this.enabled(binding.projectId)) return;
       if (!definitions) {
         this.requests.saveIntroduction({...introduction, state: "blocked", error: "Project definitions changed or are unavailable; the draft was not sent."});
         try {
           const observed = await this.definitions?.load(task.projectId, task.threadId, signal);
+          if (!this.enabled(binding.projectId)) return;
           if (observed) {
             const ready = await this.reviewDefinitions(task, observed, agent, supervisor, Date.now(), signal);
+            if (!this.enabled(binding.projectId)) return;
             if (ready) this.renewUnsentTask(task, Date.now());
           }
         } catch { /* a later observation preserves and rechecks the unsent proposal */ }
@@ -559,13 +621,14 @@ export class SupervisorConversation {
         workflowProposalId: task.workflowProposalId ?? task.id, agreement: task.agreement ?? null,
         initialProposal, definitions: safeDefinitions, introduction: text})}\nEND_UNTRUSTED_CONTEXT_ENVELOPE`;
       if (prompt.length > 120_000 || text.length > 24_000) {this.requests.saveIntroduction({...introduction, state: "blocked", error: "Complete supervision context exceeds its limit; no rules or blocks were truncated."});continue;}
+      if (!this.enabled(binding.projectId)) return;
       this.store.store.transaction(() => {
         this.requests.saveIntroduction(introduction);
         this.requests.prepare({projectId: task.projectId, supervisorThreadId: binding.threadId, kind: "context", taskId: task.id, text: prompt, batch: null, completionMarker}, Date.now());
       });
       await this.dispatch(this.requests.pending(binding.projectId, binding.threadId)!, signal);return;
     }
-    if (!enabled || busy(supervisor)) return;
+    if (busy(supervisor)) return;
     const settings = this.store.settings(binding.projectId).monitoring;
     if (this.requests.requests(binding.projectId, binding.threadId).some(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged)) return;
     if (await this.runDefinitionRecovery(binding, supervisor, tasks, threads, signal)) return;
@@ -574,12 +637,15 @@ export class SupervisorConversation {
     if (!batch) return;
     const included: Array<SupervisorMonitorThreadBatch & {proposalId: string; workflowProposalId: string; objective: string; draft: WorkflowProposalInfo | null | undefined; agreement: WorkflowAgreementInfo | null | undefined; definitionReview: TaskRecord["definitionReview"]; staleRecovery: boolean}> = [];
     for (const chat of batch.threads) {
+      if (!this.enabled(binding.projectId)) return;
       const task = this.store.task(chat.threadId);
       if (!task || !tasks.some(candidate => candidate.id === task.id)) continue;
       let agent: Projection;
       try {agent = await this.projection(chat.threadId, signal);} catch {continue;}
+      if (!this.enabled(binding.projectId)) return;
       if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== binding.projectId || !canSupervisorContact(supervisor.thread, agent.thread)) continue;
       const staleRecovery = task.agreement?.status === "stale" && this.sourceUnchanged(task, agent) && Boolean(await this.freshDefinitions(task, signal));
+      if (!this.enabled(binding.projectId)) return;
       if (task.agreement?.status === "stale" && !staleRecovery && !task.definitionReview) continue;
       included.push({...chat, proposalId: task.id, workflowProposalId: task.workflowProposalId ?? task.id, objective: redact(task.objective ?? ""),
         draft: task.workflow, agreement: task.agreement, definitionReview: task.definitionReview, staleRecovery});
@@ -594,7 +660,7 @@ export class SupervisorConversation {
     await this.dispatch(request, signal);
   }
   private async dispatch(request: ConversationRequest, signal: AbortSignal): Promise<void> {
-    if (!this.rpc) return;
+    if (!this.rpc || !this.enabled(request.projectId)) return;
     const sending = {...request, state: "sending" as const, sentAt: Date.now()};
     this.store.store.transaction(() => {this.requests.saveRequest(sending);this.requests.noticeSent(request.supervisorThreadId, sending.sentAt);});
     try {
@@ -622,9 +688,11 @@ export class SupervisorConversation {
       supervisor.thread.id !== binding.threadId || supervisor.thread.projectId !== request.projectId) return null;
     let agent: Projection;
     try {agent = await this.projection(task.threadId, signal);} catch {return null;}
+    if (!this.enabled(task.projectId)) return null;
     if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== task.projectId || !this.sourceUnchanged(task, agent)) return null;
     let definitions: ProjectDefinitionSnapshot | null;
     try {definitions = await this.freshDefinitions(task, signal);} catch {return null;}
+    if (!this.enabled(task.projectId)) return null;
     if (!definitions) return null;
     const context = this.proposalContext(definitions);
     const requiredRules = this.applicableRules(task);
@@ -656,7 +724,7 @@ export class SupervisorConversation {
     const run = supervisor.runs.find(item => item.threadId === request.supervisorThreadId && (item.id === message?.runId || item.id === request.runId || item.userMessageId === request.messageId));
     if (!run) {
       if (request.state === "prepared") {
-        if (this.store.settings(request.projectId).monitoring.enabled) await this.dispatch(request, signal);
+        await this.dispatch(request, signal);
       } else if (request.state !== "uncertain") this.requests.saveRequest({...request, state: "uncertain", error: "The native request has no confirmed matching run yet. Its identity and pending activity are retained."});
       return;
     }
@@ -666,6 +734,7 @@ export class SupervisorConversation {
     const answers = this.completedAssistantMessages(supervisor, request.supervisorThreadId).filter(item => item.runId === run.id);
     const validCompletion = run.status === "completed" && message?.text === request.text && run.userMessageId === request.messageId && !contaminated && hasCompletionMarker(answers.at(-1)?.text ?? "", request.completionMarker);
     const initialCandidate = validCompletion && request.kind === "context" ? await this.initialWorkflowCandidate(request, run.id, supervisor, threads, signal, Date.now()) : null;
+    if (!this.enabled(request.projectId)) return;
     const confirmedCompletion = validCompletion && (request.kind !== "context" || initialCandidate !== null);
     this.store.store.transaction(() => {
       const misses = !confirmedCompletion && run.status === "completed" && request.kind === "review" ? this.requests.missedReview(request.supervisorThreadId) : 0;
@@ -685,7 +754,9 @@ export class SupervisorConversation {
     });
   }
   private async sendIntroduction(task: TaskRecord, introduction: WorkflowIntroduction, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
+    if (!this.enabled(task.projectId)) return;
     const agent = await this.projection(task.threadId, signal);
+    if (!this.enabled(task.projectId)) return;
     const visible = agent.messages.find(message => message.id === introduction.messageId && message.threadId === task.threadId && message.text === introduction.text);
     if (visible) {this.requests.saveIntroduction({...introduction, state: "sent", error: null});return;}
     if (introduction.state === "accepted") {
@@ -697,13 +768,18 @@ export class SupervisorConversation {
     if (introduction.state === "sending" || introduction.state === "uncertain") {
       this.requests.saveIntroduction({...introduction, state: "uncertain", error: "Proposal delivery is uncertain; its message identity is retained. Retry native access rather than sending another proposal."});return;
     }
-    if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== task.projectId || !this.sourceUnchanged(task, agent) || !(await this.freshDefinitions(task, signal))) {
+    if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== task.projectId || !this.sourceUnchanged(task, agent)) {
       this.blockIntroduction(task.id, "Task eligibility or project definitions changed; the draft was not sent.");return;
     }
+    const definitions = await this.freshDefinitions(task, signal);
+    if (!this.enabled(task.projectId)) return;
+    if (!definitions) {this.blockIntroduction(task.id, "Task eligibility or project definitions changed; the draft was not sent.");return;}
     const supervisor = await this.projection(task.supervisorThreadId, signal);
+    if (!this.enabled(task.projectId)) return;
     if (!canSupervisorContact(supervisor.thread, agent.thread)) {this.blockIntroduction(task.id, "The Supervisor's native modes cannot contact this operative chat. Adjust its T3 modes and Retry native access.");return;}
     const target = agent.runs.filter(run => run.status === "running").sort((a, b) => b.ordinal - a.ordinal)[0];
     const dispatchMode = introduction.dispatchMode ?? (target ? {type: "steer_active" as const, targetRunId: target.id} : {type: "queue_after_active" as const});
+    if (!this.enabled(task.projectId)) return;
     const sending = {...introduction, state: "sending" as const, dispatchMode, targetRunId: dispatchMode.type === "steer_active" ? dispatchMode.targetRunId : null};this.requests.saveIntroduction(sending);
     try {
       const receipt = await this.rpc!("orchestration.dispatchCommand", {type: "message.dispatch", commandId: introduction.commandId ?? `supervisor-workflow:${task.id}`, messageId: introduction.messageId,
@@ -723,6 +799,7 @@ export class SupervisorConversation {
     }
   }
   retry(projectId: string, supervisorThreadId: string): void {
+    if (!this.enabled(projectId)) return;
     this.requests.reviewMisses(supervisorThreadId, true);
     const request = this.requests.pending(projectId, supervisorThreadId);
     if (request?.state === "uncertain") this.requests.saveRequest({...request, state: "prepared", error: null});

@@ -7,12 +7,11 @@ export const ModelSelection = Schema.Struct({
 });
 export type SupervisorModelSelection = typeof ModelSelection.Type;
 export const MonitoringSettings = Schema.Struct({
-  enabled: Schema.Boolean,
   intervalMinutes: Schema.Number,
   activityThreshold: Schema.Number,
 });
 export type SupervisorMonitoringSettings = typeof MonitoringSettings.Type;
-export const defaultMonitoringSettings: SupervisorMonitoringSettings = {enabled: true, intervalMinutes: 5, activityThreshold: 10};
+export const defaultMonitoringSettings: SupervisorMonitoringSettings = {intervalMinutes: 5, activityThreshold: 10};
 export const SupervisorModel = Schema.Struct({
   instanceId: Schema.String,
   model: Schema.String,
@@ -68,7 +67,7 @@ export const DefinitionReview = Schema.Struct({
 });
 export type DefinitionReviewInfo = typeof DefinitionReview.Type;
 export const MonitoringStatus = Schema.Struct({
-  state: Schema.Literals(["idle", "busy", "paused", "unavailable", "uncertain"]),
+  state: Schema.Literals(["idle", "busy", "unavailable", "uncertain"]),
   message: Schema.String,
   pendingItems: Schema.Number,
   nextReviewAt: Schema.NullOr(Schema.Number),

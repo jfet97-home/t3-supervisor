@@ -31,8 +31,8 @@ const definitions = (): ProjectDefinitionSnapshot => ({
   revision,
   editingAvailable: true,
   status: "ready",
-  rules: [{ name: "Focused verification", description: "Test changed behavior.", required_blocks: ["test-plan"] }],
-  blocks: [{ id: "test-plan", name: "Test plan", description: "Verify the behavior.", instructions: "Add a focused test.", expected_result: "The test passes." }],
+  rules: [{ name: "Focused verification", description: "Test changed behavior.", required_blocks: ["test-plan"], origin: "project" }],
+  blocks: [{ id: "test-plan", name: "Test plan", description: "Verify the behavior.", instructions: "Add a focused test.", expected_result: "The test passes.", origin: "project" }],
   issues: [],
 });
 
@@ -261,7 +261,7 @@ interface FixtureOptions {
   supervisorInteractionMode?: string;
   workflow?: boolean;
   operativeActive?: boolean;
-  settings?: { enabled: boolean; intervalMinutes: number; activityThreshold: number };
+  settings?: { intervalMinutes: number; activityThreshold: number };
   queuePeerDuringNextSupervisorDispatch?: boolean;
 }
 
@@ -275,7 +275,6 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
   projectStore.setBinding({ ...binding, state: "ready" });
   const settings = projectStore.settings(projectId);
   projectStore.saveSettings(projectId, settings.generation, settings.modelSelection, options.settings ?? {
-    enabled: true,
     intervalMinutes: 5,
     activityThreshold: 3,
   });
@@ -865,7 +864,7 @@ test("an invalid native receipt makes introduction delivery uncertain without au
 test("a still-invisible accepted introduction does not starve another operative chat's review", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);
-  const fixture = await makeFixture(clock, { settings: { enabled: true, intervalMinutes: 5, activityThreshold: 3 } });
+  const fixture = await makeFixture(clock, { settings: { intervalMinutes: 5, activityThreshold: 3 } });
   t.after(fixture.cleanup);
   const second = fixture.addOperative("operative-b", "proposal-2");
   fixture.conversation.requests.saveIntroduction({
@@ -899,7 +898,7 @@ test("a still-invisible accepted introduction does not starve another operative 
 test("a deleted operative introduction is blocked while another operative chat still gets reviewed", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);
-  const fixture = await makeFixture(clock, { settings: { enabled: true, intervalMinutes: 5, activityThreshold: 3 } });
+  const fixture = await makeFixture(clock, { settings: { intervalMinutes: 5, activityThreshold: 3 } });
   t.after(fixture.cleanup);
   const second = fixture.addOperative("operative-b", "proposal-2");
   fixture.conversation.requests.saveIntroduction({
@@ -935,7 +934,7 @@ test("an unreadable introduced chat does not stop a healthy chat review or ackno
     { label: "deleted thread", error: new T3TransportError("deleted", 404) },
   ];
   for (const [index, failure] of projectionFailures.entries()) {
-    const fixture = await makeFixture(clock, { settings: { enabled: true, intervalMinutes: 5, activityThreshold: 3 } });
+    const fixture = await makeFixture(clock, { settings: { intervalMinutes: 5, activityThreshold: 3 } });
     t.after(fixture.cleanup);
     const healthy = fixture.addOperative("operative-b", `proposal-healthy-${index}`);
     appendNoticeToOperative(fixture);
@@ -1113,7 +1112,7 @@ test("a rejected queued fallback waits for explicit retry, then uses fresh queue
 test("one review stays in flight while activity changes and acknowledges only its frozen batch", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);
-  const fixture = await makeFixture(clock, { settings: { enabled: true, intervalMinutes: 5, activityThreshold: 3 } });
+  const fixture = await makeFixture(clock, { settings: { intervalMinutes: 5, activityThreshold: 3 } });
   t.after(fixture.cleanup);
   appendNoticeToOperative(fixture);
   for (let index = 1; index <= 3; index++) addCommandActivity(fixture.operative, `command-${index}`, `PRIVATE_COMMAND_BODY_${index}`, clock.now - index * 1_000);
@@ -1147,7 +1146,7 @@ test("one review stays in flight while activity changes and acknowledges only it
 test("primary replacement, missing markers and an untrusted interruption close reviews until the third miss requires retry", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);
-  const fixture = await makeFixture(clock, { settings: { enabled: true, intervalMinutes: 5, activityThreshold: 3 } });
+  const fixture = await makeFixture(clock, { settings: { intervalMinutes: 5, activityThreshold: 3 } });
   t.after(fixture.cleanup);
   appendNoticeToOperative(fixture);
   for (let index = 1; index <= 3; index++) addCommandActivity(fixture.operative, `contaminated-command-${index}`, `PRIVATE_COMMAND_BODY_${index}`, clock.now - index * 1_000);
@@ -1200,7 +1199,7 @@ test("primary replacement, missing markers and an untrusted interruption close r
 test("a direct peer reply with senderThreadId does not contaminate a valid review", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);
-  const fixture = await makeFixture(clock, { settings: { enabled: true, intervalMinutes: 5, activityThreshold: 3 } });
+  const fixture = await makeFixture(clock, { settings: { intervalMinutes: 5, activityThreshold: 3 } });
   t.after(fixture.cleanup);
   appendNoticeToOperative(fixture);
   for (let index = 1; index <= 3; index++) addCommandActivity(fixture.operative, `peer-safe-command-${index}`, `PRIVATE_PEER_SAFE_BODY_${index}`, clock.now - index * 1_000);
@@ -1232,7 +1231,7 @@ test("a direct peer reply with senderThreadId does not contaminate a valid revie
 test("a 100-item monitor burst freezes and acknowledges all activity while showing only 20 IDs in the prompt", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);
-  const fixture = await makeFixture(clock, { settings: { enabled: true, intervalMinutes: 5, activityThreshold: 3 } });
+  const fixture = await makeFixture(clock, { settings: { intervalMinutes: 5, activityThreshold: 3 } });
   t.after(fixture.cleanup);
   appendNoticeToOperative(fixture);
   for (let index = 0; index < 100; index++) addCommandActivity(fixture.operative, `burst-command-${index}`, `PRIVATE_BURST_BODY_${index}`, clock.now - (100 - index) * 1_000);
@@ -1317,7 +1316,7 @@ test("completed history is bounded to the latest 100 while ancient uncertain wor
   assert.equal(retained.some(request => request.id === next.id && request.state === "prepared"), true);
 });
 
-test("paused prepared requests retain their native identity until monitoring resumes", async t => {
+test("prepared requests retain their native identity when monitoring settings change", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);
   const fixture = await makeFixture(clock);
@@ -1327,27 +1326,16 @@ test("paused prepared requests retain their native identity until monitoring res
     supervisorThreadId: fixture.binding.threadId,
     kind: "review",
     taskId: null,
-    text: "Prepared before monitoring was paused.",
+    text: "Prepared before monitoring settings changed.",
     batch: null,
     completionMarker: "prepared request complete",
   }, clock.now);
-  let settings = fixture.projectStore.settings(projectId);
+  const settings = fixture.projectStore.settings(projectId);
   fixture.projectStore.saveSettings(projectId, settings.generation, settings.modelSelection, {
-    enabled: false,
     intervalMinutes: 5,
     activityThreshold: 3,
   });
 
-  await fixture.run();
-  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId)?.state, "prepared");
-  assert.equal(fixture.calls.length, 0);
-
-  settings = fixture.projectStore.settings(projectId);
-  fixture.projectStore.saveSettings(projectId, settings.generation, settings.modelSelection, {
-    enabled: true,
-    intervalMinutes: 5,
-    activityThreshold: 3,
-  });
   await fixture.run();
 
   const dispatched = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
@@ -1358,12 +1346,12 @@ test("paused prepared requests retain their native identity until monitoring res
   assert.equal(fixture.calls[0]?.payload.messageId, request.messageId);
 });
 
-test("monitoring-only API saves pause and resume the live threshold without losing pending activity", async t => {
+test("monitoring-only API saves update the live threshold without losing pending activity", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);
-  const fixture = await makeFixture(clock, { settings: { enabled: true, intervalMinutes: 5, activityThreshold: 3 } });
+  const fixture = await makeFixture(clock, { settings: { intervalMinutes: 5, activityThreshold: 3 } });
   t.after(fixture.cleanup);
-  const saveMonitoring = async (monitoring: { enabled: boolean; intervalMinutes: number; activityThreshold: number }) => {
+  const saveMonitoring = async (monitoring: { intervalMinutes: number; activityThreshold: number }) => {
     const settings = fixture.projectStore.settings(projectId);
     const outcome = await fixture.makeProjectSupervisor().save({
       projectId,
@@ -1395,7 +1383,6 @@ test("monitoring-only API saves pause and resume the live threshold without losi
   assert.equal(fixture.conversation.monitor.pending(projectId, operativeThreadId).length, 2);
 
   await saveMonitoring({
-    enabled: true,
     intervalMinutes: 5,
     activityThreshold: 4,
   });
@@ -1403,13 +1390,6 @@ test("monitoring-only API saves pause and resume the live threshold without losi
   assert.equal(fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId).length, 1);
   assert.equal(fixture.conversation.monitor.pending(projectId, operativeThreadId).length, 2);
 
-  await saveMonitoring({
-    enabled: false,
-    intervalMinutes: 5,
-    activityThreshold: 4,
-  });
-  await fixture.run();
-  assert.equal(fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId).length, 1);
   addCommandActivity(fixture.operative, "threshold-command-3", "PRIVATE_COMMAND_BODY_3", clock.now + 1_000);
   clock.now += 31_000;
   await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
@@ -1418,7 +1398,6 @@ test("monitoring-only API saves pause and resume the live threshold without losi
 
   clock.now += 31_000;
   await saveMonitoring({
-    enabled: true,
     intervalMinutes: 5,
     activityThreshold: 3,
   });
@@ -1782,7 +1761,7 @@ test("changed definitions stay unapproved, trigger one bounded recovery review, 
   const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.equal(request?.kind, "review");
   assert.equal(request?.taskId, fixture.task.id);
-  assert.match(request?.text ?? "", /Review the approved and observed \.supervisor snapshots/u);
+  assert.match(request?.text ?? "", /Review the approved and observed \.t3-supervisor snapshots/u);
   const recoveryCalls = fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId);
   assert.equal(recoveryCalls.length, 1, "the definition recovery review runs without new tool activity");
   const requestRun = fixture.supervisor.runs.find(run => run.userMessageId === request?.messageId);
@@ -1943,7 +1922,7 @@ test("assistant claims cannot stand in for user authorization and a deletion rev
   assert.ok(approvedSnapshot);
 
   const deletedBlockDefinitions = {...definitions(), revision: "rules-revision-8", status: "invalid" as const, blocks: [],
-    issues: [{path: ".supervisor/blocks/test-plan.md", code: "missing", message: "Required project block was deleted."}]};
+    issues: [{path: ".t3-supervisor/blocks/test-plan.md", code: "missing", message: "Required project block was deleted."}]};
   fixture.setDefinitions(deletedBlockDefinitions);
   await observeAgreement(fixture, clock.now + 60_000);
   let task = fixture.projectStore.task(fixture.task.threadId)!;

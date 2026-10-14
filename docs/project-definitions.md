@@ -8,7 +8,7 @@ project rule files through the same native API.
 ## Files
 
 ```text
-.supervisor/
+.t3-supervisor/
   rules.yaml
   blocks/
     adversarial-review.md
@@ -78,7 +78,7 @@ The result contains `projectId`, `threadId`, `workspaceRoot`, `revision`, `editi
 `issues`. Its status is one of:
 
 - `ready`: the definitions are valid and all required block references resolve.
-- `missing`: the `.supervisor` directory does not exist.
+- `missing`: the `.t3-supervisor` directory does not exist.
 - `invalid`: definition validation or completeness checks failed.
 - `permission_required`: provision `filesystem:read` on the read credential.
 - `unavailable`: the project, conversation, workspace or transport cannot be read.
@@ -98,7 +98,7 @@ read/operate credential. A missing filesystem scope is reported as a setup actio
 Supervisor does not issue or upgrade credentials.
 
 T3's filesystem scope is environment-wide. Supervisor only submits relative
-`.supervisor` requests against the selected workspace, and rejects unexpected
+`.t3-supervisor` requests against the selected workspace, and rejects unexpected
 block paths. T3 rejects reads resolving outside that workspace, but this is not
 a guarantee against symlinks targeting other files within the same workspace.
 These are working-tree reads, not immutable or authoritative policy attestations.
@@ -127,7 +127,7 @@ blocks from the valid Markdown blocks already in this working directory. Saving
 an empty collection explicitly writes `rules: []`. Block authoring remains a
 repository operation in this step.
 
-The UI writes the same `.supervisor/rules.yaml` that manual repository edits use;
+The UI writes the same `.t3-supervisor/rules.yaml` that manual repository edits use;
 there is no second database of active rules. YAML Document nodes preserve comments
 on retained rules/fields where possible; whitespace and YAML formatting may change.
 The output is reparsed to verify the intended normalized rules.
@@ -155,7 +155,7 @@ written text/bytes, regular-file listings and a fresh definition readback.
 
 T3's native writer is a non-atomic truncate/write without compare-and-swap and can
 follow symlinks. Consequently this editor only writes an **existing regular
-rules.yaml in an existing regular .supervisor directory**, checked through native
+rules.yaml in an existing regular .t3-supervisor directory**, checked through native
 listings immediately before and after writing. Missing, malformed or incompletely
 read files/blocks must be prepared or repaired in the repository first; the UI never
 creates missing paths. A complete collection with missing block references can be

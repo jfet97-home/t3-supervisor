@@ -9,6 +9,7 @@ import { parseInterpretation, ProjectSupervisor } from "../src/project-superviso
 import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../src/project-supervisor-contract.js";
 import { ProjectSupervisorSnapshot } from "../src/project-supervisor-contract.js";
+import { SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
@@ -190,6 +191,7 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
   const directory = await mkdtemp(join(tmpdir(), "project-supervisor-test-"));
   const projections = new Map<string, Projection>();
   const turnsByThread = new Map<string, Turn[]>();
+  let registeredProjects = [...projects];
   const operations: Array<{ tag: string; payload: Record<string, unknown> }> = [];
   const projectionReads: string[] = [];
   let unknownDispatches = 0;
@@ -212,6 +214,7 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
   let guidance = new GuidanceStore(directory);
   let ownedIds = new Set<string>();
   let supervisorStore = new ProjectSupervisorStore(guidance, ownedIds);
+  for (const project of projects) guidance.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(`supervisor_control:${JSON.stringify(project.id)}`, JSON.stringify({generation: 1, enabled: true, manual: true}));
   const config: SupervisorConfig = {
     supervisorOwnedThreadIds: ownedIds,
     dataDirectory: directory,
@@ -227,7 +230,7 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
   };
   const source = {
     catalog: () => Effect.succeed({
-      projects: projects.map((project) => ({ project, available: true })),
+      projects: registeredProjects.map((project) => ({ project, available: true })),
       threads: [...projections.values()].map((projection) => projection.thread),
     }),
   };
@@ -310,6 +313,12 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
       nextModelReadback = null;
       return { accepted: true };
     }
+    if (tag === "orchestration.dispatchCommand" && payload.type === "thread.settle") {
+      const projection = projections.get(String(payload.threadId));
+      assert.ok(projection);
+      projection.thread.settledAt = new Date().toISOString();
+      return {sequence: 20};
+    }
     throw new Error("unexpected fake operate RPC");
   };
   const activationSnapshot = async (_signal: AbortSignal): Promise<SupervisorBaseline> => {
@@ -328,7 +337,7 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
     turnsByThread.set(threadId, turns);
     projections.set(threadId, makeSourceProjection(threadId, projectId, turns));
   };
-  const makeSupervisor = () => new ProjectSupervisor(config, supervisorStore, source, t3, readRpc, operateRpc, activationSnapshot);
+  const makeSupervisor = (definitions?: ConstructorParameters<typeof ProjectSupervisor>[7]) => new ProjectSupervisor(config, supervisorStore, source, t3, readRpc, operateRpc, activationSnapshot, definitions);
   const restart = (): void => {
     guidance.close();
     guidance = new GuidanceStore(directory);
@@ -344,6 +353,7 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
     get supervisorStore() { return supervisorStore; },
     get baselineReads() { return baselineReads; },
     makeSupervisor,
+    addProject: (project: ProjectInfo) => {registeredProjects = [...registeredProjects, project];},
     restart,
     addTurn,
     setSnapshotSequence: (value: number) => { snapshotSequence = value; },
@@ -364,6 +374,16 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
     close: () => guidance.close(),
     cleanup: async () => { try { guidance.close(); } catch { /* already closed during a simulated restart */ } await rm(directory, { recursive: true, force: true }); },
   };
+};
+
+const reserveReadyBinding = (fixture: Awaited<ReturnType<typeof makeFixture>>, mainThreadId = "source-thread") => {
+  const main = fixture.projections.get(mainThreadId);
+  assert.ok(main);
+  const binding = fixture.supervisorStore.reserve("project-a", mainThreadId, main.thread.title, defaultSupervisorModel, activationSequence, Date.now());
+  const ready = {...binding, state: "ready" as const};
+  fixture.supervisorStore.setBinding(ready);
+  fixture.projections.set(ready.threadId, emptySupervisorProjection(ready.threadId, ready.projectId, defaultSupervisorModel));
+  return ready;
 };
 
 test("activation baseline excludes existing runs and gives independent mains separate Supervisors", async (t) => {
@@ -430,6 +450,87 @@ test("activation baseline excludes existing runs and gives independent mains sep
   assert.deepEqual(new Set(dispatches.map(call => call.payload.threadId)), new Set(fixture.supervisorStore.bindings().map(binding => binding.threadId)));
   assert.notEqual(dispatches[0]?.payload.messageId, dispatches[1]?.payload.messageId);
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 2);
+});
+
+test("a newly registered project reuses startup history bounds and auto-enables before its next prompt", async t => {
+  const fixture = await makeFixture([{threadId: "new-main", projectId: "project-new", turns: [
+    {id: "preexisting-history", sequence: 9, text: "A task that predates the service startup boundary"},
+  ]}]);
+  t.after(fixture.cleanup);
+  const definitions = {
+    load: async (projectId: string, threadId: string | null) => ({projectId, threadId, workspaceRoot: "/work/new", revision: null,
+      editingAvailable: false, status: "missing" as const, rules: [], blocks: [], issues: []}),
+    presence: async (projectId: string) => ({status: projectId === "project-new" ? "present" as const : "missing" as const}),
+  };
+  const supervisor = fixture.makeSupervisor(definitions);
+  await supervisor.runOnce();
+  fixture.addProject({id: "project-new", title: "New project", workspaceRoot: "/work/new"});
+  await supervisor.runOnce();
+  assert.equal(fixture.supervisorStore.autoControlInitialized("project-new"), true);
+  assert.equal(fixture.supervisorStore.control("project-new").enabled, true);
+  assert.equal(fixture.supervisorStore.task("new-main"), null, "startup history stays excluded even before the project appears in the catalog");
+  assert.equal(fixture.baselineReads, 1, "first known-present detection reuses the startup baseline");
+
+  fixture.addTurn("new-main", "project-new", {id: "first-task", sequence: 11, text: "Build the first project change"});
+  await supervisor.runOnce();
+  assert.equal(fixture.supervisorStore.task("new-main")?.sourceMessageId, "first-task");
+  assert.equal(fixture.supervisorStore.task("new-main")?.status, "waiting");
+  assert.equal(fixture.supervisorStore.bindings().some(binding => binding.projectId === "project-new" && binding.mainThreadId === "new-main"), true);
+  assert.equal(fixture.baselineReads, 1, "auto-detection does not move the boundary past the first subsequent task");
+});
+
+test("a project added with its first human task between polls supervises that task", async t => {
+  const fixture = await makeFixture([{threadId: "existing-thread", projectId: "project-a", turns: []}]);
+  t.after(fixture.cleanup);
+  const definitions = {
+    load: async (projectId: string, threadId: string | null) => ({projectId, threadId, workspaceRoot: "/work/new", revision: null,
+      editingAvailable: false, status: "missing" as const, rules: [], blocks: [], issues: []}),
+    presence: async (projectId: string) => ({status: projectId === "project-new" ? "present" as const : "missing" as const}),
+  };
+  const supervisor = fixture.makeSupervisor(definitions);
+  await supervisor.runOnce();
+  fixture.addProject({id: "project-new", title: "New project", workspaceRoot: "/work/new"});
+  fixture.addTurn("first-main", "project-new", {id: "first-task", sequence: 11, text: "Build the first project change"});
+
+  await supervisor.runOnce();
+
+  assert.equal(fixture.supervisorStore.autoControlInitialized("project-new"), true);
+  assert.equal(fixture.supervisorStore.control("project-new").effectiveEnabled, true);
+  assert.equal(fixture.supervisorStore.task("first-main")?.sourceMessageId, "first-task");
+  assert.equal(fixture.supervisorStore.task("first-main")?.status, "waiting");
+  assert.equal(fixture.baselineReads, 1, "the post-startup task is not absorbed by a late first-seen snapshot");
+});
+
+test("a project that was unreadable recaptures its boundary before resuming discovery", async t => {
+  const fixture = await makeFixture([{threadId: "existing-thread", projectId: "project-a", turns: []}]);
+  t.after(fixture.cleanup);
+  let folderStatus: "present" | "unavailable" = "unavailable";
+  const definitions = {
+    load: async (projectId: string, threadId: string | null) => ({projectId, threadId, workspaceRoot: "/work/new", revision: null,
+      editingAvailable: false, status: "missing" as const, rules: [], blocks: [], issues: []}),
+    presence: async (projectId: string) => ({status: projectId === "project-new" ? folderStatus : "missing" as const}),
+  };
+  const supervisor = fixture.makeSupervisor(definitions);
+  await supervisor.runOnce();
+  fixture.addProject({id: "project-new", title: "New project", workspaceRoot: "/work/new"});
+  await supervisor.runOnce();
+  assert.equal(fixture.supervisorStore.autoControlInitialized("project-new"), false);
+  assert.equal(fixture.supervisorStore.projectBoundary("project-new"), null);
+
+  fixture.restart();
+  const restartedSupervisor = fixture.makeSupervisor(definitions);
+  fixture.addTurn("new-main", "project-new", {id: "first-task", sequence: 11, text: "Work created during an unreadable interval"});
+  fixture.setSnapshotSequence(11);
+  folderStatus = "present";
+  await restartedSupervisor.runOnce();
+  assert.equal(fixture.supervisorStore.control("project-new").enabled, true);
+  assert.equal(fixture.supervisorStore.task("new-main"), null, "the unreadable interval is excluded from first-time discovery");
+  assert.equal(fixture.supervisorStore.bindings().some(binding => binding.projectId === "project-new"), false);
+
+  fixture.addTurn("new-main", "project-new", {id: "next-task", sequence: 12, text: "Work submitted after the folder became readable"});
+  await restartedSupervisor.runOnce();
+  assert.equal(fixture.supervisorStore.task("new-main")?.sourceMessageId, "next-task");
+  assert.equal(fixture.supervisorStore.task("new-main")?.status, "waiting");
 });
 
 test("a web-originated message with non-user authorship is not treated as a task", async (t) => {
@@ -765,6 +866,46 @@ test("an archived reserved binding is retained and never launched again", async 
   assert.equal(fixture.supervisorStore.ownedIds.size, 1);
   assert.equal(fixture.supervisorStore.task("source-thread"), null);
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 1);
+});
+
+test("global or project off still parks closed idle bindings without semantic work", async t => {
+  const clock = {now: Date.parse(baseTime)};
+  t.mock.method(Date, "now", () => clock.now);
+  for (const disabledScope of ["global", "project"] as const) {
+    const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
+    t.after(fixture.cleanup);
+    const binding = reserveReadyBinding(fixture);
+    fixture.projections.get("source-thread")!.thread.archivedAt = baseTime;
+    if (disabledScope === "global") fixture.supervisorStore.saveControl(null, 0, false);
+    else fixture.supervisorStore.saveControl("project-a", 1, false);
+
+    const supervisor = fixture.makeSupervisor();
+    await supervisor.runOnce();
+    assert.equal(fixture.supervisorStore.binding("project-a", "source-thread")?.settlement, undefined);
+    clock.now += SUPERVISOR_SETTLE_QUIET_MS + 1;
+    await supervisor.runOnce();
+    assert.equal(fixture.supervisorStore.binding("project-a", "source-thread")?.settlement?.state, "settled");
+    assert.equal(fixture.operations.filter(call => call.payload.type === "thread.settle").length, 1);
+    assert.equal(fixture.operations.some(call => call.payload.type === "message.dispatch" || call.tag === "orchestration.launchThread"), false);
+    assert.equal(fixture.supervisorStore.task("source-thread"), null);
+    assert.ok(fixture.projections.has(binding.threadId));
+  }
+});
+
+test("disabled supervision never settles a closed main with an active Supervisor run", async t => {
+  const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
+  t.after(fixture.cleanup);
+  const binding = reserveReadyBinding(fixture);
+  fixture.projections.get("source-thread")!.thread.archivedAt = baseTime;
+  const supervisorProjection = fixture.projections.get(binding.threadId)!;
+  supervisorProjection.runs.push({id: "active-supervisor-run", threadId: binding.threadId, ordinal: 1, status: "running", requestedAt: baseTime,
+    startedAt: baseTime, completedAt: null, rootNodeId: "active-supervisor-root"});
+  fixture.supervisorStore.saveControl(null, 0, false);
+
+  await fixture.makeSupervisor().runOnce();
+  assert.equal(fixture.operations.some(call => call.payload.type === "thread.settle"), false);
+  assert.equal(fixture.operations.some(call => call.payload.type === "message.dispatch" || call.tag === "orchestration.launchThread"), false);
+  assert.equal(fixture.supervisorStore.binding("project-a", "source-thread")?.settlement, undefined);
 });
 
 test("a stale retry intent cannot replace a missing binding; explicit replacement retains old ownership", async (t) => {

@@ -8,6 +8,8 @@ import { fingerprint } from "./guidance-store.js";
 import { defaultMonitoringSettings, type SupervisorBinding, type SupervisorModelSelection, type SupervisorMonitoringSettings, type TaskInterpretationInfo } from "./project-supervisor-contract.js";
 import type { Projection, SupervisorConfig } from "./types.js";
 import { sameModel } from "./supervisor-native.js";
+import type { SupervisionControlInfo } from "./supervisor-control-contract.js";
+import type { GlobalDefinitionsControlInfo } from "./supervisor-control-contract.js";
 import type { ProposalContext } from "./supervisor-workflow.js";
 import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 
@@ -15,6 +17,7 @@ export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "co
 export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; applyAttempts?: number; applicationMessage?: string | null};
 export type BindingRecord = SupervisorBinding & {mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string};
 export type SupervisorBaseline = {version?: 2; snapshotSequence: number; threads: Array<{id: string; latestRunId: string | null}>};
+export type SupervisionFolderPresence = {status: "present" | "missing" | "unavailable"; message?: string};
 export type TaskRecord = TaskInterpretationInfo & {id: string; sourceHash: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionSnapshot?: ProjectDefinitionSnapshot | null; definitionNoticeKey?: string; definitionReadAttempts?: number; revalidationAttempts?: number};
 
 /** Loads permanent ownership before any notification or input worker starts. */
@@ -36,6 +39,8 @@ export const isSupervisorThread = (config: SupervisorConfig, thread: {id: string
 /** Adds supervision metadata to the existing private database without touching delivery ledgers. */
 export class ProjectSupervisorStore {
   readonly scopeCompatible: boolean;
+  private readonly folderPresence = new Map<string, SupervisionFolderPresence>();
+  private globalFolderPresence: SupervisionFolderPresence | null = null;
   constructor(readonly store: GuidanceStore, readonly ownedIds: Set<string>) {
     store.db.exec(`CREATE TABLE IF NOT EXISTS supervisor_owned_threads(id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS supervisor_project_settings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL);
@@ -69,9 +74,176 @@ export class ProjectSupervisorStore {
   }
   baselineOrdinal(threadId: string, projection: Projection): number | null {
     const baseline = this.baseline();if (!baseline) return null;
-    const anchor = baseline.threads.find(thread => thread.id === threadId)?.latestRunId;
-    if (!anchor) return 0;
-    return projection.runs.find(run => run.id === anchor && run.threadId === threadId)?.ordinal ?? null;
+    const baselines = [baseline, this.controlRecord(null).baseline, this.controlRecord(projection.thread.projectId ?? "").baseline];
+    let floor = 0;
+    for (const value of baselines) {
+      const anchor = value?.threads.find(thread => thread.id === threadId)?.latestRunId;
+      if (!anchor) continue;
+      const ordinal = projection.runs.find(run => run.id === anchor && run.threadId === threadId)?.ordinal;
+      if (ordinal === undefined) return null;
+      floor = Math.max(floor, ordinal);
+    }
+    return floor;
+  }
+  private controlKey(projectId: string | null): string {return `supervisor_control:${JSON.stringify(projectId)}`;}
+  private presenceUnavailableKey(projectId: string): string {return `supervisor_control_presence_unavailable:${JSON.stringify(projectId)}`;}
+  private controlRecord(projectId: string | null): {generation: number; enabled: boolean; manual: boolean; baseline?: SupervisorBaseline} {
+    const row = this.store.db.prepare("SELECT value FROM meta WHERE key=?").get(this.controlKey(projectId));
+    if (!row) return projectId === null ? {generation: 0, enabled: true, manual: true} : {generation: 0, enabled: false, manual: false};
+    const value = JSON.parse(String(row.value)) as {generation?: number; enabled?: boolean; manual?: boolean; baseline?: SupervisorBaseline};
+    return {generation: Number.isSafeInteger(value.generation) && value.generation! >= 0 ? value.generation! : 0,
+      enabled: value.enabled === true, manual: projectId === null || value.manual !== false, ...(value.baseline ? {baseline: value.baseline} : {})};
+  }
+  projectBoundary(projectId: string): SupervisorBaseline | null {return this.controlRecord(projectId).baseline ?? null;}
+  folderPresenceNeedsBoundary(projectId: string): boolean {
+    return Boolean(this.store.db.prepare("SELECT 1 FROM meta WHERE key=?").get(this.presenceUnavailableKey(projectId)));
+  }
+  setFolderPresence(projectId: string, presence: SupervisionFolderPresence): void {this.folderPresence.set(projectId, presence);}
+  clearFolderPresence(projectId: string): void {this.folderPresence.delete(projectId);}
+  recordFolderPresence(projectId: string, presence: SupervisionFolderPresence, baseline?: SupervisorBaseline): void {
+    this.setFolderPresence(projectId, presence);
+    if (this.isManual(projectId) || this.autoControlInitialized(projectId)) return;
+    if (presence.status === "unavailable") {
+      if (!this.folderPresenceNeedsBoundary(projectId)) this.store.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .run(this.presenceUnavailableKey(projectId), JSON.stringify({checkedAt: Date.now()}));
+      return;
+    }
+    if (presence.status === "present" && (this.folderPresenceNeedsBoundary(projectId) && !baseline ||
+      !this.projectBoundary(projectId) && !baseline && !this.baseline())) return;
+    this.store.transaction(() => {
+      if (presence.status === "present" && baseline) {
+        if (this.baseline() === null) {
+          this.store.db.prepare("INSERT INTO meta VALUES('supervisor_activation_baseline',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+            .run(JSON.stringify({...baseline, version: 2}));
+          this.activation(baseline.snapshotSequence);
+        }
+        const control = this.controlRecord(projectId);
+        this.store.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+          .run(this.controlKey(projectId), JSON.stringify({...control, baseline}));
+      }
+      this.store.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .run(`supervisor_control_auto:${JSON.stringify(projectId)}`, JSON.stringify({status: presence.status, enabled: presence.status === "present", checkedAt: Date.now()}));
+      this.store.db.prepare("DELETE FROM meta WHERE key=?").run(this.presenceUnavailableKey(projectId));
+    });
+    this.clearFolderPresence(projectId);
+  }
+  autoControlInitialized(projectId: string): boolean {
+    const row = this.store.db.prepare("SELECT value FROM meta WHERE key=?").get(`supervisor_control_auto:${JSON.stringify(projectId)}`);
+    if (!row) return false;
+    const auto = JSON.parse(String(row.value)) as {status?: unknown; enabled?: unknown};
+    if (auto.status === "missing") return auto.enabled === false;
+    if (auto.status === "present" && auto.enabled === true) return Boolean(this.controlRecord(projectId).baseline || this.baseline()) && !this.folderPresenceNeedsBoundary(projectId);
+    return false;
+  }
+  isManual(projectId: string): boolean {return this.controlRecord(projectId).manual;}
+  control(projectId: string | null): SupervisionControlInfo {
+    const value = this.controlRecord(projectId);const global = this.controlRecord(null);const globallyEnabled = global.enabled;
+    if (projectId === null) return {projectId, generation: value.generation, enabled: value.enabled, manual: true, globallyEnabled,
+      effectiveEnabled: value.enabled, detectionStatus: "not_checked", detectionError: null};
+    const presence = this.folderPresence.get(projectId);
+    const autoRow = this.store.db.prepare("SELECT value FROM meta WHERE key=?").get(`supervisor_control_auto:${JSON.stringify(projectId)}`);
+    const auto = autoRow ? JSON.parse(String(autoRow.value)) as {status?: unknown; enabled?: unknown} : null;
+    const storedStatus = auto?.status === "present" || auto?.status === "missing" ? auto.status : null;
+    const boundaryMissing = !value.manual && auto?.status === "present" && auto.enabled === true && (!value.baseline && !this.baseline() || this.folderPresenceNeedsBoundary(projectId));
+    const detectionStatus = boundaryMissing ? "unavailable" as const : value.manual ? presence?.status ?? "not_checked" as const : storedStatus ?? presence?.status ?? "not_checked" as const;
+    const enabled = value.manual ? value.enabled : auto?.enabled === true && !boundaryMissing;
+    return {projectId, generation: value.generation, enabled, manual: value.manual, globallyEnabled,
+      effectiveEnabled: enabled && globallyEnabled, detectionStatus,
+      detectionError: boundaryMissing ? "The project folder is present, but a native enable boundary must be captured before auto-enabling supervision." :
+        detectionStatus === "unavailable" ? presence?.message ?? "The project .t3-supervisor folder could not be checked." : null};
+  }
+  private globalDefinitionsRecord(): {generation: number; enabled: boolean; manual: boolean} {
+    const row = this.store.db.prepare("SELECT value FROM meta WHERE key='supervisor_global_definitions_control'").get();
+    if (!row) return {generation: 0, enabled: false, manual: false};
+    const value = JSON.parse(String(row.value)) as {generation?: number; enabled?: boolean; manual?: boolean};
+    return {generation: Number.isSafeInteger(value.generation) && value.generation! >= 0 ? value.generation! : 0,
+      enabled: value.enabled === true, manual: value.manual === true};
+  }
+  setGlobalFolderPresence(presence: SupervisionFolderPresence): void {this.globalFolderPresence = presence;}
+  globalDefinitionsControl(homePath = "~/.t3-supervisor"): GlobalDefinitionsControlInfo {
+    const value = this.globalDefinitionsRecord();const presence = this.globalFolderPresence;
+    const detectionStatus = presence?.status ?? "not_checked" as const;
+    return {generation: value.generation, enabled: value.enabled, manual: value.manual, effectiveEnabled: value.enabled && this.control(null).enabled,
+      homePath, detectionStatus, detectionError: detectionStatus === "unavailable" ? presence?.message ?? "The server-user .t3-supervisor folder could not be checked." : null};
+  }
+  useGlobalDefinitions(_projectId?: string): boolean {return this.globalDefinitionsRecord().enabled;}
+  saveGlobalDefinitionsControl(expectedGeneration: number, enabled: boolean, homePath = "~/.t3-supervisor", globalFingerprint: string | null = null,
+    scratchBoundaries: ReadonlyArray<{projectId: string; baseline: SupervisorBaseline}> = []): GlobalDefinitionsControlInfo {
+    return this.store.transaction(() => {
+      const current = this.globalDefinitionsRecord();
+      if (current.generation !== expectedGeneration) throw new Error("global_definitions_control_conflict");
+      const generation = current.generation + 1;const changedAt = Date.now();
+      this.store.db.prepare("INSERT INTO meta VALUES('supervisor_global_definitions_control',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .run(JSON.stringify({generation, enabled, manual: true}));
+      if (current.enabled !== enabled) {
+        this.store.db.prepare("INSERT INTO meta VALUES('supervisor_global_definitions_event',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+          .run(JSON.stringify({generation, enabled, changedAt, globalFingerprint}));
+        for (const row of this.store.db.prepare("SELECT document FROM supervisor_task_interpretations").all()) {
+          const task = JSON.parse(String(row.document)) as TaskRecord;
+          if (task.status === "queued" && task.dispatchedAt === null && task.definitionContext !== undefined) {
+            const refresh: {-readonly [K in keyof TaskRecord]: TaskRecord[K]} = {...task, requestText: "", reason: "Global rules inclusion changed; definitions will be refreshed before dispatch.", updatedAt: changedAt,
+              workflow: {status: "pending", message: "Global rules inclusion changed; refresh the complete definitions before sending this task.", workspaceRoot: null, revision: null, rules: [], steps: []}};
+            delete refresh.definitionContext;delete refresh.definitionSnapshot;delete refresh.definitionReadAttempts;delete refresh.revalidationAttempts;
+            this.saveTask(refresh);continue;
+          }
+          if (task.status !== "inferred" || !task.workflow?.revision) continue;
+          const message = "The user changed whether global rules are included. The old plan and agreement are retained as stale history.";
+          this.saveTask({...task, workflow: {...task.workflow, status: "stale", message},
+            ...(task.agreement ? {agreement: {...task.agreement, status: "stale", message}} : {}),
+            definitionReview: {status: "checking", message, expectedRevision: task.workflow.revision, observedRevision: null,
+              supervisorMessageId: null, userMessageIds: [], updatedAt: changedAt}, updatedAt: changedAt});
+        }
+      }
+      for (const boundary of scratchBoundaries) {
+        const control = this.controlRecord(boundary.projectId);
+        const next = {...control, baseline: boundary.baseline};
+        this.store.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+          .run(this.controlKey(boundary.projectId), JSON.stringify(next));
+      }
+      return this.globalDefinitionsControl(homePath);
+    });
+  }
+  hasGlobalDefinitionsEvent(): boolean {return Boolean(this.store.db.prepare("SELECT 1 FROM meta WHERE key='supervisor_global_definitions_event'").get());}
+  globalDefinitionsChangeAuthorized(task: TaskRecord, globalFingerprint?: string | null): boolean {
+    const row = this.store.db.prepare("SELECT value FROM meta WHERE key='supervisor_global_definitions_event'").get();
+    if (!row || !task.definitionSnapshot || task.definitionReview?.status !== "authorized" || !task.workflow?.revision) return false;
+    const event = JSON.parse(String(row.value)) as {enabled?: boolean; changedAt?: number; globalFingerprint?: string | null};
+    return event.enabled === this.useGlobalDefinitions(task.projectId) && Number.isFinite(event.changedAt) &&
+      Boolean(event.globalFingerprint) && task.definitionReview.updatedAt >= event.changedAt! && task.workflow.revision === task.definitionSnapshot.revision &&
+      (!event.enabled || task.definitionSnapshot.globalRevision === event.globalFingerprint &&
+        (globalFingerprint === undefined || globalFingerprint === event.globalFingerprint));
+  }
+  definitionUserGlobalToggle(definitions: ProjectDefinitionSnapshot, approved: ProjectDefinitionSnapshot, after: number, globalFingerprint: string | null): boolean {
+    const row = this.store.db.prepare("SELECT value FROM meta WHERE key='supervisor_global_definitions_event'").get();
+    if (!row || definitions.status !== "ready" || approved.status !== "ready" || definitions.projectId !== approved.projectId ||
+      definitions.threadId !== approved.threadId || definitions.workspaceRoot !== approved.workspaceRoot) return false;
+    const event = JSON.parse(String(row.value)) as {generation?: number; enabled?: boolean; changedAt?: number; globalFingerprint?: string | null};
+    if (event.enabled !== this.useGlobalDefinitions(definitions.projectId) || !Number.isFinite(event.changedAt) || event.changedAt! < after ||
+      !event.globalFingerprint || event.globalFingerprint !== globalFingerprint) return false;
+    if (event.enabled && definitions.globalRevision !== event.globalFingerprint) return false;
+    if (!event.enabled && approved.globalRevision !== event.globalFingerprint) return false;
+    const hasOrigins = (values: ReadonlyArray<{origin?: string | undefined}>) => values.every(value => value.origin === "global" || value.origin === "project");
+    const local = <A extends {origin?: string | undefined}>(values: ReadonlyArray<A>) => values.filter(value => value.origin === "project");
+    return hasOrigins(definitions.rules) && hasOrigins(approved.rules) && hasOrigins(definitions.blocks) && hasOrigins(approved.blocks) &&
+      fingerprint(local(definitions.rules)) === fingerprint(local(approved.rules)) && fingerprint(local(definitions.blocks)) === fingerprint(local(approved.blocks));
+  }
+  enabled(projectId: string): boolean {return this.control(projectId).effectiveEnabled;}
+  saveControl(projectId: string | null, expectedGeneration: number, enabled: boolean, baseline?: SupervisorBaseline): SupervisionControlInfo {
+    return this.store.transaction(() => {
+      const current = this.controlRecord(projectId);
+      if (current.generation !== expectedGeneration) throw new Error("supervision_control_conflict");
+      if (enabled && !this.control(projectId).enabled && (projectId === null || this.controlRecord(null).enabled) && !baseline) throw new Error("supervision_control_baseline_required");
+      if (baseline && this.baseline() === null) {
+        this.store.db.prepare("INSERT INTO meta VALUES('supervisor_activation_baseline',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+          .run(JSON.stringify({...baseline, version: 2}));
+        this.activation(baseline.snapshotSequence);
+      }
+      const next = {...current, enabled, manual: true, generation: current.generation + 1,
+        ...(enabled && !current.enabled && baseline ? {baseline} : {})};
+      this.store.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(this.controlKey(projectId), JSON.stringify(next));
+      if (projectId !== null) this.store.db.prepare("DELETE FROM meta WHERE key=?").run(this.presenceUnavailableKey(projectId));
+      return this.control(projectId);
+    });
   }
   settings(projectId: string): ProjectModelSettings {
     const stored = this.read<Omit<ProjectModelSettings, "monitoring" | "modelMutationGeneration"> & {monitoring?: SupervisorMonitoringSettings; modelMutationGeneration?: number}>("supervisor_project_settings", "project_id", projectId);
@@ -180,10 +352,14 @@ export class ProjectSupervisorStore {
   definitionUserSave(definitions: ProjectDefinitionSnapshot, approved: ProjectDefinitionSnapshot, after: number): boolean {
     const row = this.store.db.prepare("SELECT signature,saved_at,expected_revision FROM supervisor_definition_user_saves WHERE project_id=? AND workspace_root=?")
       .get(definitions.projectId, definitions.workspaceRoot);
-    return definitions.status === "ready" && approved.status === "ready" && approved.projectId === definitions.projectId &&
+    const items: ReadonlyArray<{origin?: string | undefined}> = [...definitions.rules, ...definitions.blocks, ...approved.rules, ...approved.blocks];
+    const originsKnown = items.every(item => item.origin === "global" || item.origin === "project");
+    const globalRulesUnchanged = fingerprint(definitions.rules.filter(rule => rule.origin === "global")) === fingerprint(approved.rules.filter(rule => rule.origin === "global"));
+    return definitions.status === "ready" && approved.status === "ready" && originsKnown && globalRulesUnchanged && approved.projectId === definitions.projectId &&
       approved.workspaceRoot === definitions.workspaceRoot && fingerprint(definitions.blocks) === fingerprint(approved.blocks) &&
       Boolean(row?.expected_revision) && row?.signature === fingerprint(definitions.rules) && Number(row.saved_at) >= after;
   }
+  recordGlobalDefinitionsPresence(presence: SupervisionFolderPresence): void {this.setGlobalFolderPresence(presence);}
   prune(now: number): string[] {
     const expiredIds: string[] = [];
     for (const row of this.store.db.prepare("SELECT document FROM supervisor_task_interpretations WHERE updated_at<?").all(now - 30 * 86400_000)) {
@@ -203,9 +379,9 @@ export class ProjectSupervisorStore {
 }
 
 const normalizeMonitoringSettings = (value: SupervisorMonitoringSettings | undefined): SupervisorMonitoringSettings => value
-  ? {enabled: value.enabled, intervalMinutes: value.intervalMinutes, activityThreshold: value.activityThreshold}
+  ? {intervalMinutes: value.intervalMinutes, activityThreshold: value.activityThreshold}
   : {...defaultMonitoringSettings};
 
 const validMonitoringSettings = (value: SupervisorMonitoringSettings): boolean =>
-  typeof value.enabled === "boolean" && Number.isInteger(value.intervalMinutes) && value.intervalMinutes >= 1 && value.intervalMinutes <= 60 &&
+  Number.isInteger(value.intervalMinutes) && value.intervalMinutes >= 1 && value.intervalMinutes <= 60 &&
   Number.isInteger(value.activityThreshold) && value.activityThreshold >= 3 && value.activityThreshold <= 100;

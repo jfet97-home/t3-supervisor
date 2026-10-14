@@ -24,6 +24,82 @@ T3 can disable providers per project; rejections remain explicit with no fallbac
 Choose a main conversation to inspect its binding, task and recovery controls.
 Project-root selection shows shared defaults, without another chat's binding or retry.
 
+## Enable controls and definition locations
+
+Settings has a master **Global supervision** switch, initially on. It overrides
+all project supervision, without changing Telegram settings. Projects has a
+separate enable switch for each project. Its initial default is captured once:
+an existing `.t3-supervisor` folder enables it; no folder requires explicit opt-in.
+New and existing registered projects follow the same rule. Manual choices persist.
+An unreadable folder is reported as unavailable rather than inferred absent.
+
+The separate **Use global rules and blocks** switch is initially off, even if
+`~/.t3-supervisor` exists. Explicit enabling creates empty initial rules and a
+blocks directory if needed, leaves them uncommitted and preserves existing content.
+The home belongs to the T3 server user, including when the service runs in Docker.
+Turning global definitions off leaves enabled projects' local definitions available.
+Scratch has no local definition fallback and requires global definitions to be on.
+
+Every main's Supervisor reads local definitions from the operative conversation's
+actual checkout/worktree, not whichever branch the root checkout currently has.
+Enabled global definitions are additive. Namespaced global block IDs preserve
+source filenames and origins for inspection. Both input scopes and the global
+inclusion setting participate in the definition revision. Project editing writes
+only local rules; global rules remain read-only in that editor. Explicit global
+switch changes are recorded as user intent, without authorizing unrelated edits.
+
+Disabling stops new creation, interpretation, introductions, check-ins and recovery
+sends. Existing chats, identities, requests and agreements remain. An already-running
+native model turn may finish. Re-enabling captures a discovery boundary so prompts
+submitted while disabled do not create a burst of new Supervisor conversations;
+retained existing scopes can resume. Age/count monitoring remains configurable;
+there is no pause-monitoring feature.
+
+### First-time project setup
+
+A missing project folder offers checkout selection with exact path and branch.
+**Create** leaves `.t3-supervisor/rules.yaml` (`rules: []`) and
+`.t3-supervisor/blocks/.gitkeep` uncommitted. **Create + commit** submits those two
+new paths to native T3 Git only when the checkout starts clean, no merge, rebase,
+cherry-pick, revert, bisect, sequencer or lock state is present, and Git metadata can
+be inspected. T3's native commit path resets the real index before staging selected
+paths, so the clean-checkout requirement protects unrelated staged work and in-progress
+Git state. Before commit, the service confirms Git reports no changes outside the
+scaffold and native listings contain exactly the two setup files; any other change
+leaves them uncommitted. A fixed read-only probe runs Git in the selected checkout
+through T3's existing terminal API, including linked-worktree metadata. Cached VCS
+subscriptions cannot prove a clean index. The probe does not fetch or pull code;
+its temporary terminal and history are removed, with failed cleanup retained for
+recovery. Neither
+action switches branches, initializes Git or overwrites existing definitions.
+Checkout, branch, generation and contents are rechecked, with readback before success.
+If Git state cannot be verified, Create + commit is unavailable while Create remains
+available. Incomplete or uncertain results require inspection/reload and are never
+retried as a new write automatically. T3's native writer lacks atomic create-only writes;
+external writes can still race the preflight. The native Git action has no clean-index
+compare-and-swap, so an external Git operation can also race the final state check.
+These are V1 limitations. The native commit honors repository hooks and signing.
+Hooks can change the final staged/committed contents; the preflight does not prove
+that the resulting commit contains exactly two files. Rejection can leave setup
+files staged, and a signing prompt or timeout leaves an uncertain result. Inspect
+the index and commit history before retrying. T3's normal successful-commit refresh
+may fetch the upstream; the Git probe itself never fetches or pulls.
+Create + commit is unavailable for a project registered below the repository root;
+Create remains available there.
+
+If the selected eligible checkout already contains `.t3-supervisor`, **Enable
+existing definitions** activates project supervision without writing or committing
+files. It rechecks the checkout, branch, folder and settings generation. This also
+allows recovery when a commit attempt left a worktree scaffold in place.
+
+Reads need `filesystem:read`, creation needs a separate `filesystem:write` credential,
+and commit needs `source-control:write` at `T3_PROJECT_COMMIT_TOKEN_FILE`.
+Fresh commit preflight also needs `terminal:operate` at `T3_GIT_PROBE_TOKEN_FILE`
+and Python 3/Git on the T3 host. This native scope permits arbitrary terminal
+commands; the service restricts its use to the fixed Git probe, but T3 does not
+enforce a Git-only grant. Create without commit does not need this credential.
+Trusted deployment setup provisions these grants; the service never issues them.
+
 ## Task interpretation and draft workflows
 
 The current stage infers a concise objective from a new operational conversation's
@@ -32,7 +108,7 @@ not tool output, private reasoning or arbitrary excerpts selected by an agent.
 Only ordinary root user messages originating from T3 web/mobile are supported at
 this stage; scheduled, imported and MCP-originated requests are excluded.
 
-Before dispatch, the service loads `.supervisor/rules.yaml` and all valid Markdown
+Before dispatch, the service loads `.t3-supervisor/rules.yaml` and all valid Markdown
 blocks from the operational conversation's actual working directory through T3.
 A ready, complete collection is included with the bounded task in the project's
 Supervisor prompt. The model assesses each rule and proposes an ordered plan with
@@ -129,7 +205,7 @@ a compatible run is running. Starting and waiting runs use queue delivery. A
 definite steering rejection permits one queued attempt with new message/command
 identities, retaining the rejected attempt; an uncertain effect never triggers
 that fallback. The introduction explains the Supervisor's role, the proposed
-steps, the `.supervisor` paths and how to reply or suggest other available blocks.
+steps, the `.t3-supervisor` paths and how to reply or suggest other available blocks.
 With an idle target, native queue/start semantics can start a follow-up. A run
 that finishes during steering can also receive a follow-up under T3's own behavior.
 
@@ -248,7 +324,7 @@ receives a fair preview of up to 20 item references per chat and 100 per project
 with counts and instructions to read further where needed. A large burst is not
 split into repeated notices solely because its preview is smaller.
 
-Projects exposes a pause control, an interval of 1–60 minutes and an activity
+Projects exposes an interval of 1–60 minutes and an activity
 threshold of 3–100. Changes apply on the next service check without a restart or
 discarding the backlog. A lower limit can make one combined notice due after the
 cooldown; it does not generate a burst. Model changes still wait for an idle run.
@@ -304,8 +380,7 @@ User pins and disabled auto-settlement prevent parking while set. An observed
 keep-active override is retained conservatively in the binding, including when
 native dispatch clears it; no release control is added
 in this batch. T3 has no client pin CAS, so a last-moment pin can still race the
-read-then-settle request. Paused monitoring allows parking only when its backlog, requests and introductions
-are finished. Binding processing rotates each pass in groups of four, with a
+read-then-settle request. Binding processing rotates each pass in groups of four, with a
 thirty-second deadline per binding covering processing and lifecycle checks.
 Unknown settlement preserves its command identity and automatically retries it
 up to three times at one-minute intervals while the same scope remains quiet.
@@ -313,6 +388,15 @@ New activity supersedes the parking epoch; a successful receipt followed by
 reactivation is a superseded success, not uncertainty. Scoped retry renews an
 exhausted budget. No replacement or deletion occurs. Native background rosters,
 pending child completion delivery, active goals and PR watches prevent parking.
+
+### Archived or deleted main conversations
+
+A confirmed archived/deleted main suspends obsolete supervisory dispatch and parks
+its companion after the quiet period. Requests, agreements, binding and native
+history remain unchanged; parking does not attest their completion. Busy native
+main/Supervisor work, descendants and unknown child ancestry prevent settlement.
+Only native 404 means confirmed missing; transient errors or scope mismatches fail
+closed. Reopening cancels the parking epoch and resumes the same Supervisor.
 
 ## Disposable prototype state upgrade
 
@@ -330,9 +414,7 @@ agreements. Existing native test conversations are retained as excluded historic
 chats; this transition does not delete operational conversations. Back up the
 private state volume before rollout; never copy its contents into Git.
 
-Residual lifecycle limits: a paused monitoring backlog cannot be acknowledged
-until monitoring resumes, so pausing mid-task can keep the Supervisor active.
-Archiving/deleting a main does not automatically park its Supervisor. At high
+Residual lifecycle limits: at high
 retained-scope counts, bounded observation can notice final activity after parking
 and wake the same chat again; this does not discard the activity. The binding
 deadline includes time waiting for its lock, so concurrent recovery can postpone

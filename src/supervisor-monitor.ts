@@ -511,10 +511,10 @@ export const evaluateSupervisorMonitoring = (
       ? null
       : lastProjectNoticeAt + SUPERVISOR_MONITOR_COOLDOWN_MS;
   const inCooldown = cooldownUntil !== null && now < cooldownUntil;
-  const due = settings.enabled && trigger !== null && !inCooldown;
+  const due = trigger !== null && !inCooldown;
   return {
     due,
-    trigger: settings.enabled ? trigger : null,
+    trigger,
     finalizedActivityCount: finalized.length,
     pendingItemCount: reviewable.length,
     oldestAt,

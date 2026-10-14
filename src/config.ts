@@ -24,6 +24,8 @@ export const loadConfig = (): SupervisorConfig => ({
   uiAssetsDirectory: process.env.UI_ASSETS_DIRECTORY ?? "/app/ui-dist",
   guidanceTokenFile: process.env.T3_GUIDANCE_TOKEN_FILE ?? "/run/secrets/t3-guidance-token",
   projectWriteTokenFile: process.env.T3_PROJECT_WRITE_TOKEN_FILE ?? "/run/secrets/t3-project-write-token",
+  projectCommitTokenFile: process.env.T3_PROJECT_COMMIT_TOKEN_FILE ?? "/run/secrets/t3-project-commit-token",
+  gitProbeTokenFile: process.env.T3_GIT_PROBE_TOKEN_FILE ?? "/run/secrets/t3-git-probe-token",
   ...(process.env.T3_MANAGED_SCRATCH_ROOT ? { managedScratchRoot: process.env.T3_MANAGED_SCRATCH_ROOT } : {}),
 });
 

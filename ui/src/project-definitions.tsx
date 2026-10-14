@@ -29,8 +29,10 @@ export function DefinitionsContent({definitions}: {definitions: ProjectDefinitio
         <h3>{statusText[definitions.status]}</h3>
         <span className={`pill ${definitions.status === "ready" ? "green" : "amber"}`}>{definitions.status === "ready" ? "Valid" : "Check definitions"}</span>
       </div>
-      {definitions.workspaceRoot && <p className="muted definition-path">Read from <code>{definitions.workspaceRoot}/.supervisor</code></p>}
-      {definitions.status === "missing" && <p>Create <code>.supervisor/rules.yaml</code> and reusable Markdown blocks in this project's working directory.</p>}
+      {definitions.workspaceRoot && <p className="muted definition-path">Working checkout: <code>{definitions.workspaceRoot}</code></p>}
+      {definitions.workspaceRoot && !definitions.globalOnly && <p className="muted definition-path">Read from <code>{definitions.workspaceRoot}/.t3-supervisor</code></p>}
+      <p>Project definitions follow this checkout. Enabled global definitions come from the T3 server user's <code>~/.t3-supervisor</code>.</p>
+      {definitions.status === "missing" && <p>Create <code>.t3-supervisor/rules.yaml</code> and reusable Markdown blocks in this project's working directory.</p>}
       {definitions.status === "invalid" && <p>This collection is incomplete or invalid. Valid items below are available for inspection.</p>}
       {definitions.status === "permission_required" && <p>The deployment needs file-reading permission. No credential can be entered or changed from this page.</p>}
       {definitions.issues.length > 0 && <ul className="definition-issues">{definitions.issues.map((issue, i) => <li key={`${issue.path}:${issue.code}:${i}`}>
@@ -43,6 +45,7 @@ export function DefinitionsContent({definitions}: {definitions: ProjectDefinitio
         {definitions.rules.length === 0 && <p className="panel muted">{definitions.status === "ready" ? "No requirements are declared in this collection." : "No readable rules are available. See issues above."}</p>}
         {definitions.rules.map(rule => <article className="panel stack" key={rule.name}>
           <h4 className="definition-name">{rule.name}</h4><p className="definition-copy">{rule.description}</p>
+          {rule.origin && <p className="small muted">Source: {rule.origin}{rule.path && <> · <code>{rule.path}</code></>}</p>}
           <div><p className="small muted">Required blocks</p><div className="row">{rule.required_blocks.map(id => ids.has(id)
             ? <button key={id} type="button" onClick={() => inspect(id)}>{definitions.blocks.find(b => b.id === id)!.name} <span className="muted small">({id})</span></button>
             : <span key={id} className="pill amber">Missing or invalid: {id}</span>)}</div></div>
@@ -54,7 +57,8 @@ export function DefinitionsContent({definitions}: {definitions: ProjectDefinitio
         {definitions.blocks.map(block => {
           const rules = definitions.rules.filter(rule => rule.required_blocks.includes(block.id));
           return <details className="panel definition-block" key={block.id} id={`definition-block-${block.id}`}>
-            <summary>{block.name} <span className="muted small">{block.id}.md</span></summary>
+            <summary>{block.name} <span className="muted small">{block.sourceId ?? block.id}.md</span></summary>
+            {block.origin && <p className="small muted">Source: {block.origin}{block.path && <> · <code>{block.path}</code></>}</p>}
             <div className="stack"><p className="definition-copy">{block.description}</p>
               {(rules.length > 0 || definitions.status === "ready") && <p className="muted small">{rules.length ? `Referenced by loaded rules: ${rules.map(rule => rule.name).join(", ")}` : "No declared rule references this block."}</p>}
               <div><h4>Instructions</h4><pre className="definition-copy">{block.instructions}</pre></div>
@@ -129,7 +133,7 @@ export function ProjectDefinitionsPanel({data, csrfToken = "", onDirtyChange}: {
     {savedMessage && <p role="status">{savedMessage}</p>}
     {state.result && <div hidden={!canLoad || state.key !== key} inert={supervisorSaving}>
       <ProjectRulesEditor key={JSON.stringify([state.result.projectId, state.result.threadId, state.result.revision, revision])} definitions={state.result} csrfToken={csrfToken} onDirtyChange={reportDirty} onSavingChange={setRulesSaving}
-        onSaved={result => {setState({key, result, error: false, loadedAt: Date.now()});setSavedMessage("Saved project rules to .supervisor/rules.yaml.");}}/>
+        onSaved={result => {setState({key, result, error: false, loadedAt: Date.now()});setSavedMessage("Saved project rules to .t3-supervisor/rules.yaml.");}}/>
     </div>}
     {canLoad && current?.result && <>
       <p className="muted small" role="status">Loaded {new Date(current.loadedAt!).toLocaleTimeString()}. Refresh after repository changes.</p>
