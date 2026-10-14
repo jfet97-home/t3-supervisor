@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer, get } from "node:http";
+import { createServer, get, request } from "node:http";
 import { WebSocketServer } from "ws";
 import { Effect } from "effect";
 import { GuidanceStore } from "../src/guidance-store.js";
@@ -319,8 +319,17 @@ test("local UI opens without login while enforcing host, origin, CSRF and stale-
           orchestrationProtocolVersion: 2,
         };
         runtime.connected = true;
+        let workflowCalls = 0;
         const ui = yield* Effect.promise(() =>
-          startGuidanceUi(config(directory), runtime),
+          startGuidanceUi(config(directory), runtime, undefined, undefined, undefined, {
+            handle: async (request, response) => {
+              request.resume();
+              workflowCalls++;
+              response.writeHead(200, {"Content-Type": "application/json"});
+              response.end(JSON.stringify({fixture: "mcp"}));
+            },
+            close: async () => {},
+          }),
         );
         yield* Effect.promise(async () => {
           try {
@@ -355,6 +364,22 @@ test("local UI opens without login while enforcing host, origin, CSRF and stale-
             assert.equal(await browserStatus("/", { Host: "attacker.invalid" }), 403);
             assert.equal(await browserStatus("/api/guidance/snapshot", navigation), 403);
             assert.equal(await browserStatus("/api/csrf", navigation), 403);
+            for (const headers of [{Host: "attacker.invalid"}, {Origin: "http://attacker.invalid"}, {"Sec-Fetch-Site": "cross-site"}]) {
+              const status = await new Promise<number>((resolve, reject) => {
+                const call = request(origin + "/mcp/workflows", {method: "POST", headers}, response => {
+                  response.resume();
+                  resolve(response.statusCode ?? 0);
+                });
+                call.on("error", reject);
+                call.end("{}");
+              });
+              assert.equal(status, 403);
+            }
+            assert.equal(workflowCalls, 0, "the workflow route uses the shared loopback/browser guards");
+            const workflowResponse = await fetch(origin + "/mcp/workflows", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+            assert.equal(workflowResponse.status, 200, "MCP machine callers do not need the dashboard CSRF token");
+            assert.equal(workflowResponse.headers.get("cache-control"), "no-store");
+            assert.equal(workflowCalls, 1);
             assert.equal(
               (await fetch(origin + "/api/guidance/snapshot")).status,
               200,

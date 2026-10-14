@@ -1,7 +1,7 @@
 import { Effect, Layer } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
 import { HttpRouter, HttpServer } from "effect/http";
-import { createServer, type IncomingMessage } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { extname, join, resolve, sep } from "node:path";
@@ -11,6 +11,11 @@ import type { SupervisorConfig } from "./types.js";
 import type { ProjectDefinitionLoader } from "./project-definitions.js";
 import type { ProjectRuleEditor } from "./project-rule-editor.js";
 import type { ProjectSupervisor } from "./project-supervisor.js";
+
+export type WorkflowMcpEndpoint = {
+  handle: (request: IncomingMessage, response: ServerResponse) => Promise<void>;
+  close: () => Promise<void>;
+};
 
 const equal = (a: string, b: string) => {
   const x = Buffer.from(a);
@@ -36,6 +41,7 @@ export const startGuidanceUi = async (
   definitions?: ProjectDefinitionLoader,
   editor?: ProjectRuleEditor,
   supervision?: ProjectSupervisor,
+  workflows?: WorkflowMcpEndpoint,
 ) => {
   const requireLegacy = () => {if (runtime.retired !== false) throw new Error("Legacy guidance rules are retired. Edit project rules in Projects.");};
   const legacyMessage = (fallback: string) => runtime.retired !== false ? "Legacy guidance rules are retired. Edit project rules in Projects." : fallback;
@@ -273,6 +279,12 @@ export const startGuidanceUi = async (
         (request.headers["sec-fetch-site"] === "cross-site" && !navigation)
       )
         return reject(403, "Open the supervisor through its loopback address.");
+      if (url.pathname === "/mcp/workflows") {
+        if (!workflows) return reject(404, "Workflow MCP is unavailable.");
+        for (const [name, value] of Object.entries(headers)) response.setHeader(name, value);
+        await workflows.handle(request, response);
+        return;
+      }
       if (url.pathname.startsWith("/api/")) {
         if (
           request.method !== "GET" &&
@@ -372,6 +384,7 @@ export const startGuidanceUi = async (
     server,
     close: async () => {
       for(const controller of activeRequests)controller.abort();
+      await workflows?.close();
       await new Promise<void>((res) => {server.close(() => res());server.closeAllConnections();});
       await web.dispose();
     },

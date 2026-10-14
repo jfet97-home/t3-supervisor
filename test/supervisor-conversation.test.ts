@@ -14,6 +14,7 @@ import type { ConversationRequest, WorkflowIntroduction } from "../src/superviso
 import { SupervisorRpcError, type SupervisorRpc } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
 import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
+import { WorkflowStateStore } from "../src/workflow-state-store.js";
 
 const projectId = "project-a";
 const operativeThreadId = "operative-a";
@@ -433,6 +434,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     },
   };
   const threadList = [supervisor.thread, operative.thread];
+  const workflows = new WorkflowStateStore(projectStore, () => true);
   const conversation = new SupervisorConversation(
     projectStore,
     rpc,
@@ -445,6 +447,8 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     },
     definitionLoader,
     thread => thread.id.startsWith("operative-") && thread.projectId === projectId,
+    () => true,
+    workflows,
   );
   const apiConfig = {
     dataDirectory: directory,
@@ -537,6 +541,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     supervisor,
     task,
     threadList,
+    workflows,
   };
 };
 
@@ -659,6 +664,8 @@ test("context bootstrap is queued atomically, correlated to its own run, and onl
   assert.equal(request.messageId, contextCall.payload.messageId);
   assert.ok(request.completionMarker.length > 0);
   assert.ok(String(contextCall.payload.text).includes(request.completionMarker));
+  assert.ok(String(contextCall.payload.text).includes(`supervisorThreadId=${JSON.stringify(fixture.binding.threadId)}, bindingGeneration=${fixture.binding.generation}`));
+  assert.ok(String(contextCall.payload.text).includes("never equate steps with tasks"));
   const message = fixture.supervisor.messages.find(item => item.id === request.messageId && item.text === request.text);
   assert.ok(message);
   const run = fixture.supervisor.runs.find(item => item.userMessageId === request.messageId && item.id === message.runId);
@@ -1486,6 +1493,14 @@ test("a restarted source run still gets context and its introduction in three st
   assert.equal(agreed?.proposalId, fixture.task.id);
   assert.equal(agreed?.supervisorMessageId, fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id)?.supervisorMessageId);
   assert.ok(agreed?.agentMessageId);
+  const workflowState = fixture.workflows.get(projectId, operativeThreadId);
+  assert.ok(workflowState);
+  assert.equal(workflowState.revision, 1);
+  assert.equal(workflowState.status, "planned");
+  assert.equal(workflowState.currentAgreementKey, workflowState.acceptedAgreements[0]?.key);
+  assert.deepEqual(workflowState.acceptedAgreements[0]?.agreement, agreed);
+  assert.equal(workflowState.acceptedAgreements[0]?.sourceRunId, sourceRun.id);
+  assert.equal(workflowState.steps[0]?.status, "planned", "acceptance alone cannot mark execution complete");
   assert.equal(fixture.operative.runs.find(run => run.id === sourceRun.id)?.status, "running");
 
   const beforeRestart = structuredClone(agreed);

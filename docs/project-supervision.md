@@ -12,7 +12,9 @@ automatically when its first new task needs interpretation. It reuses that same
 Supervisor when the main resumes. Independent mains, including different worktrees
 in one project, have independent Supervisors. Subagent ancestry belongs to the main
 scope; forks and separately launched ordinary conversations are independent.
-Child-aware workflow monitoring and guidance remain a following batch.
+Connected workflow storage and MCP editing are described in
+[workflow MCP](workflow-mcp.md). Child-aware automatic monitoring and guidance
+remain a following batch.
 The initial default is `gpt-6-luna` with high reasoning on the `codex` provider;
 choose another available model if that selection is unavailable in the environment.
 

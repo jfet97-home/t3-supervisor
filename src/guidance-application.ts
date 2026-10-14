@@ -13,8 +13,10 @@ import { ProjectRuleEditor } from "./project-rule-editor.js";
 import { existsSync } from "node:fs";
 import { ProjectSupervisorStore, loadSupervisorOwnership } from "./project-supervisor-store.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
-import { makeSupervisorRpc, readSupervisorBaseline } from "./supervisor-native.js";
+import { makeSupervisorRpc, readSupervisorBaseline, readSupervisorThreads, record } from "./supervisor-native.js";
 import { makeGitProbe } from "./git-probe.js";
+import { WorkflowWriteController } from "./workflow-write-controller.js";
+import { createWorkflowMcpEndpoint } from "./workflow-mcp.js";
 
 export const runGuidanceApplication = (
   config: SupervisorConfig,
@@ -70,11 +72,26 @@ export const runGuidanceApplication = (
     });
     const editor = projectWriter ? new ProjectRuleEditor(definitions, projectWriter, (snapshot, expectedRevision) => supervisionStore.recordDefinitionUserSave(snapshot, expectedRevision)) : undefined;
     const operateToken = config.guidanceTokenFile && existsSync(config.guidanceTokenFile) ? yield* Effect.tryPromise(() => readFile(config.guidanceTokenFile!, "utf8")) : "";
-    const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, makeSupervisorRpc(config.t3Url, readToken.trim()),
+    const readRpc = makeSupervisorRpc(config.t3Url, readToken.trim());
+    const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, readRpc,
       operateToken.trim() ? makeSupervisorRpc(config.t3Url, operateToken.trim()) : null, readSupervisorBaseline(config.t3Url, readToken.trim()), definitions);
+    const workflows = createWorkflowMcpEndpoint(new WorkflowWriteController({
+      supervisors: supervisionStore,
+      workflows: supervision.workflowStates,
+      isEnabled: projectId => supervision.workflowEditingEnabled(projectId),
+      native: {
+        listThreads: readSupervisorThreads(config.t3Url, readToken.trim(), readRpc),
+        projection: async (threadId, signal) => (await Effect.runPromise(t3.projection(threadId), {signal})).projection,
+        getTurnItem: async (input, signal) => {
+          const result = await readRpc("orchestration.getTurnItem", input, signal);
+          if (!record(result) || !("item" in result)) throw new Error("workflow_native_item_unavailable");
+          return {item: result.item};
+        },
+      },
+    }));
     runtime.retired = true;
     yield* Effect.acquireRelease(
-      Effect.promise(() => startGuidanceUi(config, runtime, definitions, editor, supervision)),
+      Effect.promise(() => startGuidanceUi(config, runtime, definitions, editor, supervision, workflows)),
       (ui) => Effect.promise(() => ui.close()),
     );
     const interpretation = Effect.tryPromise({try: signal => supervision.runOnce(AbortSignal.any([signal, AbortSignal.timeout(120_000)])), catch: () => new Error("task_interpretation_cycle_failed")}).pipe(

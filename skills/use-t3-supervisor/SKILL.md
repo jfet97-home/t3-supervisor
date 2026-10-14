@@ -23,7 +23,11 @@ forwarder. Loopback refers to the client machine. Inspect current controls befor
 acting; the dashboard handles CSRF automatically and needs no login code.
 
 Usage does not authorize changing network exposure, T3, deployment or credentials.
-There is no Supervisor MCP endpoint to invent.
+Workflow MCP availability depends on the installed revision and explicit connection
+setup; do not infer availability from the source checkout. The dashboard does not
+provide a manual workflow-write control. Operational agents propose refinements
+through their owning Supervisor, which retains authority over the main and native
+descendants. See the product's `docs/workflow-mcp.md` for that separate interface.
 
 ## Inspect and edit project rules
 
@@ -89,8 +93,9 @@ delay an otherwise due check-in.
 Inspect monitoring status and pending counts before Retry native access. Existing
 Supervisor conversations keep their native modes; a mode mismatch requires an
 explicit change in T3's conversation controls, then retry. Newly created chats
-use full-access/default for native messaging parity. Their role instructions only
-permit T3 reading/messaging, but those instructions do not enforce a tool sandbox.
+use full-access/default for native messaging parity. Their role permits native
+reading/messaging and, where available, scoped workflow MCP edits. Role instructions
+do not enforce a tool sandbox; workflow writes require separate native evidence.
 
 Select an operational conversation to inspect its interpreted objective and status.
 Inspect the draft workflow, ordered block steps, rule applicability decisions and
@@ -141,5 +146,6 @@ After completed main work, a final confirmed check-in and a quiet minute, the
 controller can settle the owned Supervisor chat. Pending work/input, uncertainty,
 active children, pins or keep-active choices prevent parking. Resuming the main
 wakes the same Supervisor; settlement does not invalidate its agreement. Unknown
-settlement has a scoped Retry native access action. Child workflow tracking and
-direct child guidance remain planned work.
+settlement has a scoped Retry native access action. Automatic child check-ins and
+direct child guidance remain planned work. Connected child workflow storage and
+MCP editing have a separate source/installation boundary; consult current evidence.

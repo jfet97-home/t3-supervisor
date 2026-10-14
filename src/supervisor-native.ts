@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import type { SupervisorModelInfo, SupervisorModelSelection } from "./project-supervisor-contract.js";
+import type { ThreadInfo } from "./types.js";
 
 export class SupervisorRpcError extends Error {
   constructor(readonly outcome: "rejected" | "uncertain", readonly definiteRejection = false, readonly providerDisabled = false) {super("T3 Supervisor access is unavailable.");}
@@ -56,9 +57,9 @@ export const makeSupervisorRpc = (baseUrl: string, token: string) =>
   });
 export type SupervisorRpc = ReturnType<typeof makeSupervisorRpc>;
 
-/** Captures active and archived native run identities without relying on limited event replay. */
-const readShellBaseline = (baseUrl: string, token: string) =>
-  async (signal: AbortSignal): Promise<import("./project-supervisor-store.js").SupervisorBaseline> => {
+/** Reads the bounded active shell without relying on limited event replay. */
+const readShellSnapshot = (baseUrl: string, token: string) =>
+  async (signal: AbortSignal): Promise<{snapshotSequence: number; threads: Record<string, unknown>[]}> => {
     const response = await fetch(new URL("/api/orchestration/shell", baseUrl), {
       headers: {Authorization: `Bearer ${token}`, "x-t3-orchestration-protocol": "2"},
       signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
@@ -78,18 +79,18 @@ const readShellBaseline = (baseUrl: string, token: string) =>
     const threads = [...value.threads, ...value.archivedThreads];
     if (threads.length > 10_000 || !threads.every(thread => record(thread) && text(thread.id) && (thread.latestRunId === null || text(thread.latestRunId))) ||
       new Set(threads.map(thread => record(thread) ? thread.id : null)).size !== threads.length) throw new SupervisorRpcError("rejected");
-    return {snapshotSequence: Number(value.snapshotSequence), threads: value.threads.map(thread => ({id: String(thread.id), latestRunId: thread.latestRunId as string | null}))};
+    return {snapshotSequence: Number(value.snapshotSequence), threads: value.threads};
   };
 
 /** Combines native active/archive views only at the same global revision. */
 export const readSupervisorBaseline = (baseUrl: string, token: string, rpc: SupervisorRpc = makeSupervisorRpc(baseUrl, token)) =>
   async (signal: AbortSignal): Promise<import("./project-supervisor-store.js").SupervisorBaseline> => {
     capture: for (let attempt = 0; attempt < 3; attempt++) {
-      const [active, archived] = await Promise.all([readShellBaseline(baseUrl, token)(signal), rpc("orchestration.getArchivedShellSnapshot", {}, signal)]);
+      const [active, archived] = await Promise.all([readShellSnapshot(baseUrl, token)(signal), rpc("orchestration.getArchivedShellSnapshot", {}, signal)]);
       if (!record(archived) || archived.schemaVersion !== 2 || !Number.isSafeInteger(archived.snapshotSequence) || !Array.isArray(archived.threads) ||
         archived.threads.length > 10_000 || !archived.threads.every(thread => record(thread) && text(thread.id) && (thread.latestRunId === null || text(thread.latestRunId)))) throw new SupervisorRpcError("rejected");
       if (archived.snapshotSequence !== active.snapshotSequence) continue;
-      const threads = new Map(active.threads.map(thread => [thread.id, thread]));const seen = new Set<string>();
+      const threads = new Map(active.threads.map(thread => [String(thread.id), {id: String(thread.id), latestRunId: thread.latestRunId as string | null}]));const seen = new Set<string>();
       for (const thread of archived.threads) {
         const id = String(thread.id);if (seen.has(id)) throw new SupervisorRpcError("rejected");seen.add(id);
         const existing = threads.get(id);
@@ -98,6 +99,27 @@ export const readSupervisorBaseline = (baseUrl: string, token: string, rpc: Supe
       }
       if (threads.size > 10_000) throw new SupervisorRpcError("rejected");
       return {snapshotSequence: active.snapshotSequence, threads: [...threads.values()]};
+    }
+    throw new SupervisorRpcError("rejected");
+  };
+
+/** Reads fresh native lineage from coherent active/archive views for workflow scope checks. */
+export const readSupervisorThreads = (baseUrl: string, token: string, rpc: SupervisorRpc = makeSupervisorRpc(baseUrl, token)) =>
+  async (signal: AbortSignal): Promise<readonly ThreadInfo[]> => {
+    const validThread = (value: unknown): value is ThreadInfo => record(value) && text(value.id) && typeof value.title === "string" &&
+      (value.projectId === null || text(value.projectId)) && record(value.lineage) &&
+      (value.lineage.parentThreadId === null || text(value.lineage.parentThreadId)) &&
+      (value.lineage.relationshipToParent === null || value.lineage.relationshipToParent === "subagent" || value.lineage.relationshipToParent === "fork");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const [active, archived] = await Promise.all([readShellSnapshot(baseUrl, token)(signal), rpc("orchestration.getArchivedShellSnapshot", {}, signal)]);
+      if (!record(archived) || archived.schemaVersion !== 2 || !Number.isSafeInteger(archived.snapshotSequence) ||
+        !Array.isArray(archived.threads) || archived.threads.length > 10_000 || !archived.threads.every(validThread) || !active.threads.every(validThread))
+        throw new SupervisorRpcError("rejected");
+      if (archived.snapshotSequence !== active.snapshotSequence) continue;
+      const threads = [...active.threads, ...archived.threads];
+      if (threads.length > 10_000) throw new SupervisorRpcError("rejected");
+      if (new Set(threads.map(thread => thread.id)).size !== threads.length) continue;
+      return threads;
     }
     throw new SupervisorRpcError("rejected");
   };

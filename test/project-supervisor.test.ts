@@ -868,6 +868,31 @@ test("an archived reserved binding is retained and never launched again", async 
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 1);
 });
 
+test("workflow editing waits for classification and honors Scratch/global and project controls", async t => {
+  const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
+  t.after(fixture.cleanup);
+  reserveReadyBinding(fixture);
+  const supervisor = fixture.makeSupervisor();
+  assert.equal(supervisor.workflowEditingEnabled("project-a"), false, "startup cannot bypass unknown Scratch classification");
+  await supervisor.runOnce();
+  assert.equal(supervisor.workflowEditingEnabled("project-a"), true);
+  const guidance = fixture.supervisorStore.store;
+  guidance.classify("project-a", "scratch", guidance.settings().generation);
+  assert.equal(supervisor.workflowEditingEnabled("project-a"), false);
+  fixture.supervisorStore.saveGlobalDefinitionsControl(0, true);
+  assert.equal(supervisor.workflowEditingEnabled("project-a"), true);
+  fixture.supervisorStore.saveGlobalDefinitionsControl(1, false);
+  assert.equal(supervisor.workflowEditingEnabled("project-a"), false);
+  guidance.classify("project-a", "project", guidance.settings().generation);
+  assert.equal(supervisor.workflowEditingEnabled("project-a"), true);
+  fixture.supervisorStore.saveControl("project-a", 1, false);
+  assert.equal(supervisor.workflowEditingEnabled("project-a"), false);
+  fixture.supervisorStore.saveControl("project-a", 2, true, {snapshotSequence: activationSequence, threads: []});
+  assert.equal(supervisor.workflowEditingEnabled("project-a"), true);
+  fixture.supervisorStore.saveControl(null, 0, false);
+  assert.equal(supervisor.workflowEditingEnabled("project-a"), false);
+});
+
 test("global or project off still parks closed idle bindings without semantic work", async t => {
   const clock = {now: Date.parse(baseTime)};
   t.mock.method(Date, "now", () => clock.now);

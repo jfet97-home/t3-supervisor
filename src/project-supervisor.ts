@@ -17,6 +17,7 @@ import { T3TransportError, type T3ClientShape } from "./t3.js";
 import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "./types.js";
 import { SupervisorConversation } from "./supervisor-conversation.js";
 import type { GlobalDefinitionsControlInput, SupervisionControlInput, SupervisionSetupInput } from "./supervisor-control-contract.js";
+import { WorkflowStateStore } from "./workflow-state-store.js";
 
 type SetupCheckoutTarget = {origin: "project"; threadId: string | null; workspaceRoot: string; branch: string | null; isGitRepository: boolean};
 type SetupOutcome = {status: "created" | "committed" | "unchanged" | "stale" | "conflict" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string | null; branch: string | null; message: string};
@@ -54,17 +55,20 @@ export class ProjectSupervisor {
   private readonly folderPresenceCheckedAt = new Map<string, number>();
   private readonly folderPresenceInFlight = new Map<string, Promise<SupervisionFolderPresence>>();
   private readonly scratchProjectIds = new Set<string>();
+  private catalogClassificationsReady = false;
   private activationBoundaryInFlight: Promise<SupervisorBaseline> | null = null;
   private offset = 0;
   private bindingOffset = 0;
   readonly conversation: SupervisorConversation;
   readonly lifecycle: SupervisorLifecycle;
+  readonly workflowStates: WorkflowStateStore;
   constructor(readonly config: SupervisorConfig, readonly store: ProjectSupervisorStore, readonly source: Pick<StoreShape, "catalog">,
     readonly t3: Pick<T3ClientShape, "projection">, readonly readRpc: SupervisorRpc, readonly operateRpc: SupervisorRpc | null,
     readonly activationSnapshot: (signal: AbortSignal) => Promise<SupervisorBaseline>,
     readonly definitions?: ProjectSupervisorDefinitions, private readonly now: () => number = Date.now) {
+      this.workflowStates = new WorkflowStateStore(store, projectId => this.workflowEditingEnabled(projectId));
       this.conversation = new SupervisorConversation(store, operateRpc, (threadId, signal) => this.projection(threadId, signal), definitions,
-        (thread, threads) => this.eligible(thread, threads), projectId => this.projectEnabled(projectId));
+        (thread, threads) => this.eligible(thread, threads), projectId => this.projectEnabled(projectId), this.workflowStates);
       this.lifecycle = new SupervisorLifecycle(store, this.conversation, (id, signal) => this.projection(id, signal), operateRpc);
     }
   private async serial<A>(projectId: string, work: () => Promise<A>): Promise<A> {
@@ -83,6 +87,7 @@ export class ProjectSupervisor {
       if (this.scratchProject(project.id, project.workspaceRoot)) this.scratchProjectIds.add(project.id);
       else this.scratchProjectIds.delete(project.id);
     }
+    this.catalogClassificationsReady = true;
   }
   private scratchProject(projectId: string, workspaceRoot: string): boolean {
     const classification = this.store.store.classification(projectId);
@@ -94,6 +99,7 @@ export class ProjectSupervisor {
     const scratch = classification === "scratch" || classification === "unclassified" && this.scratchProjectIds.has(projectId);
     return this.store.enabled(projectId) && (!scratch || this.store.useGlobalDefinitions(projectId));
   }
+  workflowEditingEnabled(projectId: string): boolean {return this.catalogClassificationsReady && Boolean(this.operateRpc) && this.store.scopeCompatible && this.projectEnabled(projectId);}
   private effectiveControl(projectId: string): ReturnType<ProjectSupervisorStore["control"]> {
     const control = this.store.control(projectId);
     const effectiveEnabled = this.projectEnabled(projectId);
