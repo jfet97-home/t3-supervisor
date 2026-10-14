@@ -7,7 +7,7 @@ import { makeInputId, renderInputBatch } from "../src/input-domain.js";
 import type { InputEvent, InputThread, NativeInputRequest } from "../src/input-domain.js";
 import { makeInputCoordinator } from "../src/input-coordinator.js";
 import type { InputNativeClient, NativeResponseResult } from "../src/input-coordinator.js";
-import { makeInputStore } from "../src/input-store.js";
+import { INPUT_CLEANUP_UNCERTAINTY_TTL_MS, makeInputStore } from "../src/input-store.js";
 import { InputReplyCleanup } from "../src/input-reply-cleanup.js";
 import { initialInputPresentation, renderInputCard } from "../src/input-ui.js";
 import { makeInputTelegramClient } from "../src/input-telegram.js";
@@ -99,6 +99,7 @@ class FakeTelegram implements InputTelegramApi {
   readonly rejectedKeys = new Set<string>();
   readonly retired = new Set<string>();
   deferUnknownMessageRecovery = false;
+  forgetUnknownMessages = false;
   loseRetirementAcknowledgment = false;
   deleteBehavior: ((messageId: number, deliveryKey: string) => InputMutationResult) | null = null;
   inputRequestReads = 0;
@@ -157,10 +158,11 @@ class FakeTelegram implements InputTelegramApi {
     const matches = [...this.sends, ...this.edits].filter((message) => message.inputId === inputId && message.requestRevision === requestRevision);
     return {
       active: !this.retired.has(key),
-      messages: matches.filter((message) => message.result.kind === "sent" ||
-        message.result.kind === "unknown" && (!this.deferUnknownMessageRecovery || this.retired.has(key)))
+      messages: (this.forgetUnknownMessages ? [] : matches.filter((message) => message.result.kind === "sent" ||
+        message.result.kind === "unknown" && (!this.deferUnknownMessageRecovery || this.retired.has(key))))
         .map((message) => ({ messageId: message.messageId, deliveryKey: message.deliveryKey })),
-      pendingDeliveryKeys: matches.filter((message) => message.result.kind === "unknown").map((message) => message.deliveryKey),
+      pendingDeliveryKeys: this.forgetUnknownMessages ? [] : matches
+        .filter((message) => message.result.kind === "unknown").map((message) => message.deliveryKey),
     };
   };
   retireInputRequest = async (inputId: string, requestRevision: string, deliveryKey: string): Promise<InputMutationResult> => {
@@ -965,7 +967,7 @@ test("an accepted native response retires Telegram controls but remains pending 
 });
 
 test("a lost send acknowledgement is recovered after native termination and cleaned exactly once", async () => {
-  await withHarness(async ({ native, telegram, runOnce, store }) => {
+  await withHarness(async ({ native, telegram, runOnce, store, status }) => {
     let first = true;
     telegram.deferUnknownMessageRecovery = true;
     telegram.sendBehavior = (message) => {
@@ -974,6 +976,7 @@ test("a lost send acknowledgement is recovered after native termination and clea
     };
     await runOnce();
     assert.equal(store.stats().uncertain, 1);
+    assert.equal(status().uncertain, 1);
     native.requests.set("router-thread", [{ ...makeRequest(), terminal: true, terminalState: "cancelled" }]);
     await runOnce();
     assert.equal(telegram.retirements.length, 1);
@@ -982,6 +985,53 @@ test("a lost send acknowledgement is recovered after native termination and clea
     assert.equal(new Set(telegram.deletes.map((item) => item.messageId)).size, 1);
     assert.equal(store.stats().pendingCleanup, 0);
     assert.ok(telegram.inputRequestReads > 0);
+  });
+});
+
+test("aged retired unknown sends stay unconfirmed and stop blocking readiness without replay", async () => {
+  await withHarness(async ({ native, telegram, runOnce, advance, store, status }) => {
+    telegram.deferUnknownMessageRecovery = true;
+    telegram.sendBehavior = () => ({ kind: "unknown", reason: "invalid_response" });
+    await runOnce();
+    const tracked = store.listRequests()[0]!;
+    const original = store.messagesForRequest(tracked.inputId, tracked.requestRevision)
+      .find((message) => message.state === "unknown")!;
+    assert.equal(status().uncertain, 1);
+    assert.equal(original.messageId, null);
+
+    native.requests.set("router-thread", [{ ...makeRequest(), terminal: true, terminalState: "cancelled" }]);
+    telegram.forgetUnknownMessages = true;
+    telegram.statuses.set(original.deliveryKey, { state: "not_found" });
+    await runOnce();
+    assert.equal(store.getRequest(tracked.inputId, tracked.requestRevision)?.retirementState, "sent");
+    assert.equal(status().uncertain, 1);
+
+    advance(INPUT_CLEANUP_UNCERTAINTY_TTL_MS - 1);
+    await runOnce();
+    assert.equal(store.messagesForRequest(tracked.inputId, tracked.requestRevision)
+      .find((message) => message.deliveryKey === original.deliveryKey)?.cleanupState, "waiting");
+    assert.equal(status().uncertain, 1);
+
+    advance(2);
+    await runOnce();
+    const expired = store.messagesForRequest(tracked.inputId, tracked.requestRevision)
+      .find((message) => message.deliveryKey === original.deliveryKey)!;
+    assert.equal(expired.state, "unknown");
+    assert.equal(expired.error, "invalid_response");
+    assert.equal(expired.messageId, null);
+    assert.equal(expired.deliveryKey, original.deliveryKey);
+    assert.equal(expired.cleanupState, "expired");
+    assert.equal(expired.cleanupError, "send_unconfirmed_expired");
+    assert.equal(status().uncertain, 0);
+    assert.equal(telegram.sends.length, 1);
+    assert.equal(telegram.deletes.length, 0);
+
+    const requestReads = telegram.inputRequestReads;
+    const deliveryReads = telegram.deliveryStatusReads.length;
+    await runOnce();
+    assert.equal(telegram.inputRequestReads, requestReads);
+    assert.equal(telegram.deliveryStatusReads.length, deliveryReads);
+    assert.equal(telegram.sends.length, 1);
   });
 });
 

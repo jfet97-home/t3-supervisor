@@ -272,12 +272,26 @@ export class GuidanceRuntime {
     try {
       const archivedRows = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='input_cleanup_history'").get()
         ? db.prepare("SELECT * FROM input_cleanup_history ORDER BY recorded_at DESC LIMIT 100").all() : [];
-      const archived: GuidanceActivity[] = archivedRows.map(row => ({
-        id: `cleanup:${String(row.delivery_key)}`, kind: "native_question_cleanup", threadId: row.thread_id === null ? null : String(row.thread_id),
-        ruleId: null, runId: null, state: "cleanup_expired", reason: String(row.reason),
-        detail: JSON.stringify({ deliveryKey: row.delivery_key, cleanupKey: row.cleanup_key, messageId: row.message_id, messageCreatedAt: row.message_created_at, deletionConfirmed: false }),
-        createdAt: Number(row.recorded_at),
-      }));
+      const archived: GuidanceActivity[] = archivedRows.map(row => {
+        const sendUnconfirmed = row.reason === "send_unconfirmed_expired";
+        return {
+          id: `cleanup:${String(row.delivery_key)}`,
+          kind: sendUnconfirmed ? "native_question_send" : "native_question_cleanup",
+          threadId: row.thread_id === null ? null : String(row.thread_id),
+          ruleId: null,
+          runId: null,
+          state: sendUnconfirmed ? "delivery_uncertain_expired" : "cleanup_expired",
+          reason: String(row.reason),
+          detail: JSON.stringify({
+            deliveryKey: row.delivery_key,
+            cleanupKey: row.cleanup_key,
+            messageId: row.message_id,
+            messageCreatedAt: row.message_created_at,
+            ...(sendUnconfirmed ? { deliveryConfirmed: false } : { deletionConfirmed: false }),
+          }),
+          createdAt: Number(row.recorded_at),
+        };
+      });
       const current = db
         .prepare(
           `SELECT r.thread_id,r.native_request_id,r.submission_state,r.lifecycle,r.updated_at,

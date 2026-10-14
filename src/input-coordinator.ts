@@ -322,7 +322,8 @@ export const makeInputCoordinator = (dependencies: InputCoordinatorDependencies)
       const messages = dependencies.store.messagesForRequest(tracked.inputId, tracked.requestRevision);
       const interactive = !dependencies.routerOnlyInput || tracked.threadId === routerThreadId;
       const needsSnapshot = interactive && messages.some((message) =>
-        message.state === "unknown" || message.cleanupState === "waiting") ||
+        message.state === "unknown" && message.cleanupError !== "send_unconfirmed_expired" ||
+        message.cleanupState === "waiting") ||
         tracked.retirementState === "intent" || tracked.retirementState === "unknown";
       let snapshot = null;
       if (needsSnapshot) {
@@ -347,7 +348,8 @@ export const makeInputCoordinator = (dependencies: InputCoordinatorDependencies)
         }
       }
       for (const message of messages) {
-        if (message.state === "unknown" && (message.messageId === null || !interactive)) {
+        if (message.state === "unknown" && message.cleanupError !== "send_unconfirmed_expired" &&
+          (message.messageId === null || !interactive)) {
           try {
             const status = await dependencies.telegram.getDeliveryStatus(message.deliveryKey);
             if (status.state === "sent" && status.messageId !== null &&

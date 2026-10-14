@@ -15,7 +15,12 @@ import {
   renderInputBatch,
 } from "../src/input-domain.js";
 import type { InputEvent, NativeInputRequest } from "../src/input-domain.js";
-import { InputStore, INPUT_DELETE_MAX_AGE_MS, makeInputStore } from "../src/input-store.js";
+import {
+  InputStore,
+  INPUT_CLEANUP_UNCERTAINTY_TTL_MS,
+  INPUT_DELETE_MAX_AGE_MS,
+  makeInputStore,
+} from "../src/input-store.js";
 import { renderInputCard } from "../src/input-ui.js";
 
 const request: NativeInputRequest = {
@@ -1047,6 +1052,133 @@ test("unknown send becomes a cleanup obligation when its late Telegram id is rec
     assert.equal(recovered.cleanupState, "pending");
     assert.ok(recovered.cleanupKey);
   });
+});
+
+test("only old unknown sends with confirmed terminal retirement enter unconfirmed history", async () => {
+  await withStore((store, directory) => {
+    const base = 30_000;
+    const later = base + INPUT_CLEANUP_UNCERTAINTY_TTL_MS + 1;
+    const addUnknown = (requestId: string, createdAt: number) => {
+      const nativeRequest = { ...request, requestId };
+      const tracked = store.upsertRequest("env-1", nativeRequest, createdAt);
+      const messages = store.ensureGeneration(
+        tracked.inputId,
+        nativeRequest.revisionHash,
+        0,
+        renderInputBatch({ request: nativeRequest, answers: emptyInputAnswers() }),
+        createdAt + 1,
+      )!;
+      const message = messages[0]!;
+      store.beginMessageSend(message.deliveryKey, createdAt + 2);
+      store.recordMessageUnknown(message.deliveryKey, "invalid_response", createdAt + 3);
+      return { tracked, message };
+    };
+    const retire = (tracked: ReturnType<typeof store.upsertRequest>, state: "sent" | "unknown", at: number) => {
+      store.setRequestTerminal(tracked.inputId, tracked.requestRevision, at);
+      store.beginRetirement(tracked.inputId, tracked.requestRevision, `retire-${tracked.requestId}`, at + 1);
+      store.recordRetirement(tracked.inputId, tracked.requestRevision, state, at + 2);
+    };
+
+    const active = addUnknown("active", base);
+    const uncertainRetirement = addUnknown("uncertain-retirement", base);
+    retire(uncertainRetirement.tracked, "unknown", base + 4);
+    const youngCreatedAt = later - INPUT_CLEANUP_UNCERTAINTY_TTL_MS + 1;
+    const young = addUnknown("young", youngCreatedAt);
+    retire(young.tracked, "sent", youngCreatedAt + 4);
+    const expired = addUnknown("expired", base);
+    retire(expired.tracked, "sent", base + 4);
+
+    store.dueCleanupMessages(later);
+
+    const activeAfter = store.messagesForRequest(active.tracked.inputId, active.tracked.requestRevision)[0]!;
+    const uncertainRetirementAfter = store.messagesForRequest(
+      uncertainRetirement.tracked.inputId,
+      uncertainRetirement.tracked.requestRevision,
+    )[0]!;
+    const youngAfter = store.messagesForRequest(young.tracked.inputId, young.tracked.requestRevision)[0]!;
+    const expiredAfter = store.messagesForRequest(expired.tracked.inputId, expired.tracked.requestRevision)[0]!;
+    assert.equal(activeAfter.state, "unknown");
+    assert.equal(activeAfter.cleanupState, "none");
+    assert.equal(uncertainRetirementAfter.state, "unknown");
+    assert.equal(store.getRequest(
+      uncertainRetirement.tracked.inputId,
+      uncertainRetirement.tracked.requestRevision,
+    )?.retirementState, "unknown");
+    assert.equal(uncertainRetirementAfter.cleanupState, "waiting");
+    assert.equal(youngAfter.state, "unknown");
+    assert.equal(youngAfter.cleanupState, "waiting");
+    assert.equal(expiredAfter.state, "unknown");
+    assert.equal(expiredAfter.error, "invalid_response");
+    assert.equal(expiredAfter.messageId, null);
+    assert.equal(expiredAfter.deliveryKey, expired.message.deliveryKey);
+    assert.equal(expiredAfter.cleanupState, "expired");
+    assert.equal(expiredAfter.cleanupError, "send_unconfirmed_expired");
+    const stats = store.stats();
+    assert.equal(stats.requests, 4);
+    assert.equal(stats.pendingCleanup, 2);
+    assert.equal(stats.uncertain, 4);
+
+    const db = new DatabaseSync(join(directory, "telegram-input.sqlite3"), { readOnly: true });
+    try {
+      const history = db.prepare("SELECT * FROM input_cleanup_history WHERE delivery_key=?")
+        .get(expired.message.deliveryKey)!;
+      assert.equal(history.state, "expired");
+      assert.equal(history.reason, "send_unconfirmed_expired");
+      assert.equal(history.delivery_key, expired.message.deliveryKey);
+      assert.equal(history.cleanup_key, null);
+      assert.equal(history.message_id, null);
+    } finally { db.close(); }
+  });
+});
+
+test("unconfirmed send classification survives history pruning and store reopen", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "t3-input-expired-send-"));
+  let store = makeInputStore(directory);
+  try {
+    const createdAt = 50_000;
+    const tracked = store.upsertRequest("env-1", request, createdAt);
+    const messages = store.ensureGeneration(
+      tracked.inputId,
+      tracked.requestRevision,
+      0,
+      renderInputBatch({ request, answers: emptyInputAnswers() }),
+      createdAt + 1,
+    )!;
+    const original = messages[0]!;
+    store.beginMessageSend(original.deliveryKey, createdAt + 2);
+    store.recordMessageUnknown(original.deliveryKey, "invalid_response", createdAt + 3);
+    store.setRequestTerminal(tracked.inputId, tracked.requestRevision, createdAt + 4);
+    store.beginRetirement(tracked.inputId, tracked.requestRevision, "retire-expired-history", createdAt + 5);
+    store.recordRetirement(tracked.inputId, tracked.requestRevision, "sent", createdAt + 6);
+
+    const expiredAt = createdAt + INPUT_CLEANUP_UNCERTAINTY_TTL_MS + 1;
+    store.dueCleanupMessages(expiredAt);
+    assert.equal(store.stats().uncertain, 0);
+    assert.equal(store.stats().pendingCleanup, 0);
+
+    store.dueCleanupMessages(expiredAt + 31 * 24 * 60 * 60 * 1_000);
+    const db = new DatabaseSync(join(directory, "telegram-input.sqlite3"), { readOnly: true });
+    try {
+      assert.equal(db.prepare("SELECT 1 FROM input_cleanup_history WHERE delivery_key=?")
+        .get(original.deliveryKey), undefined);
+    } finally { db.close(); }
+
+    store.close();
+    store = makeInputStore(directory);
+    const reopened = store.messagesForRequest(tracked.inputId, tracked.requestRevision)
+      .find((message) => message.deliveryKey === original.deliveryKey)!;
+    assert.equal(reopened.state, "unknown");
+    assert.equal(reopened.error, "invalid_response");
+    assert.equal(reopened.deliveryKey, original.deliveryKey);
+    assert.equal(reopened.messageId, null);
+    assert.equal(reopened.cleanupState, "expired");
+    assert.equal(reopened.cleanupError, "send_unconfirmed_expired");
+    assert.equal(store.stats().uncertain, 0);
+    assert.equal(store.stats().pendingCleanup, 0);
+  } finally {
+    try { store.close(); } catch { /* store may already be closed */ }
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 

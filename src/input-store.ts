@@ -1429,6 +1429,21 @@ export class InputStore implements InputStoreApi {
     this.validateNow(now);
     const boundedLimit = this.readLimit(limit, 1_000);
     return this.transaction(() => {
+      const uncertaintyCutoff = now - INPUT_CLEANUP_UNCERTAINTY_TTL_MS;
+      this.db.prepare(`INSERT OR IGNORE INTO input_cleanup_history
+        SELECT m.delivery_key,m.cleanup_key,m.message_id,r.thread_id,'expired','send_unconfirmed_expired',m.created_at,?
+        FROM input_messages m JOIN input_requests r ON r.input_id=m.input_id AND r.request_revision=m.request_revision
+        WHERE m.state='unknown' AND m.message_id IS NULL AND m.cleanup_state='waiting'
+          AND r.native_terminal=1 AND r.lifecycle='retired' AND r.retirement_state='sent'
+          AND m.created_at<=?`).run(now, uncertaintyCutoff);
+      this.db.prepare(`UPDATE input_messages SET cleanup_state='expired',cleanup_error='send_unconfirmed_expired'
+        WHERE state='unknown' AND message_id IS NULL AND cleanup_state='waiting' AND created_at<=?
+          AND EXISTS (
+            SELECT 1 FROM input_requests r WHERE r.input_id=input_messages.input_id
+              AND r.request_revision=input_messages.request_revision AND r.native_terminal=1
+              AND r.lifecycle='retired' AND r.retirement_state='sent'
+          )`).run(uncertaintyCutoff);
+      this.db.prepare("DELETE FROM input_cleanup_history WHERE recorded_at<? OR delivery_key IN (SELECT delivery_key FROM input_cleanup_history ORDER BY recorded_at DESC,delivery_key LIMIT -1 OFFSET 1000)").run(now - 30 * 24 * 60 * 60 * 1000);
       this.db.prepare(`UPDATE input_messages SET cleanup_state='expired'
         WHERE cleanup_state IN ('pending','waiting') AND message_id IS NOT NULL
           AND COALESCE(NULLIF(delete_window_at,0),created_at)<=?`).run(now - INPUT_DELETE_MAX_AGE_MS);
@@ -1560,7 +1575,8 @@ export class InputStore implements InputStoreApi {
       requests: capacity.activeRequestPayloads + capacity.requestTombstones,
       messages: capacity.messages,
       pendingCleanup: this.count("SELECT COUNT(*) AS count FROM input_messages WHERE cleanup_state IN ('waiting','pending','deleting','unknown')"),
-      uncertain: this.count(`SELECT (SELECT COUNT(*) FROM input_messages WHERE state='unknown') +
+      uncertain: this.count(`SELECT (SELECT COUNT(*) FROM input_messages m WHERE m.state='unknown'
+          AND NOT (m.cleanup_state='expired' AND m.cleanup_error IS 'send_unconfirmed_expired')) +
         (SELECT COUNT(*) FROM input_messages WHERE cleanup_state='unknown') +
         (SELECT COUNT(*) FROM input_requests WHERE submission_state='unknown' OR retirement_state='unknown') AS count`),
       capacity,
