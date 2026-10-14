@@ -27,6 +27,8 @@ interface Behavior {
   readonly signal?: NodeJS.Signals | null;
   readonly stdout?: readonly string[];
   readonly stderr?: readonly string[];
+  readonly echoPromptToStderr?: boolean;
+  readonly earlyExitCode?: number;
   readonly hold?: boolean;
   readonly stdinError?: boolean;
 }
@@ -89,9 +91,21 @@ const createSpawner = (
   }) as FakeChild;
   children.push(child);
   let prompt = "";
+  let earlyExitStarted = false;
   child.stdin.setEncoding("utf8");
-  child.stdin.on("data", (part: string | Buffer) => { prompt += String(part); });
+  child.stdin.on("data", (part: string | Buffer) => {
+    const chunk = String(part);
+    prompt += chunk;
+    if (behavior.echoPromptToStderr) child.stderr.write(chunk);
+    if (behavior.earlyExitCode !== undefined && !earlyExitStarted) {
+      earlyExitStarted = true;
+      for (const errorChunk of behavior.stderr ?? []) child.stderr.write(errorChunk);
+      child.stdin.emit("error", Object.assign(new Error("EPIPE"), { code: "EPIPE" }));
+      child.emit("close", behavior.earlyExitCode, behavior.signal ?? null);
+    }
+  });
   child.stdin.on("finish", () => {
+    if (behavior.earlyExitCode !== undefined) return;
     void (async () => {
       const schema = await readFile(schemaPath, "utf8");
       invocations.push({
@@ -287,6 +301,35 @@ test("does not report failure signatures emitted by a successful CLI response", 
     }], invocations, children),
   }).recap(context));
   assert.equal(recap, "Completed the export fix; rollout remains pending.");
+});
+
+test("ignores echoed prompt signatures while preserving early-exit and EPIPE metadata", async () => {
+  const promptMarker = "refresh_token_reused";
+  const failureContext = { ...context, finalAnswer: `${promptMarker} ${"x".repeat(1_000_000)}` };
+  assert.ok(Buffer.byteLength(failureContext.finalAnswer, "utf8") > 64 * 1024);
+  for (const fixture of [
+    { stderr: [], expectedClass: "unclassified" },
+    { stderr: ["pthread_create failed"], expectedClass: "thread_creation_failed" },
+  ] as const) {
+    const invocations: Invocation[] = [];
+    const children: FakeChild[] = [];
+    await assert.rejects(Effect.runPromise(makeRecapper(config, {
+      spawnProcess: createSpawner([{
+        earlyExitCode: 101,
+        echoPromptToStderr: true,
+        stderr: fixture.stderr,
+      }], invocations, children),
+      killProcessGroup: () => undefined,
+    }).recap(failureContext)), (error: unknown) => {
+      assert.ok(error instanceof RecapError);
+      assert.equal(error.code, "model_failed");
+      assert.equal(error.failureClass, fixture.expectedClass);
+      assert.equal(error.exitCode, 101);
+      assert.equal(error.spawnErrno, "EPIPE");
+      assert.equal(error.message.includes(promptMarker), false);
+      return true;
+    });
+  }
 });
 
 test("kills the process group on timeout and reports only the failure code", async () => {

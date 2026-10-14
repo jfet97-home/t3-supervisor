@@ -127,14 +127,21 @@ const failurePriority: Readonly<Record<RecapFailureClass, number>> = {
 
 const maxFailureMarkerLength = Math.max(...failureSignatures.map(({ marker }) => marker.length));
 
-const failureClassifier = () => {
+const promptFailureMarkers = (prompt: string): ReadonlySet<string> => {
+  const normalized = prompt.toLowerCase();
+  return new Set(failureSignatures.filter(({ marker }) => normalized.includes(marker)).map(({ marker }) => marker));
+};
+
+const failureClassifier = (ignoredMarkers: ReadonlySet<string>) => {
   let tail = "";
   let classification: RecapFailureClass = "unclassified";
   return {
     observe(chunk: Buffer | string): void {
       const current = `${tail}${typeof chunk === "string" ? chunk : chunk.toString("utf8")}`.toLowerCase();
       for (const { marker, kind } of failureSignatures) {
-        if (current.includes(marker) && failurePriority[kind] > failurePriority[classification]) classification = kind;
+        if (!ignoredMarkers.has(marker) && current.includes(marker) && failurePriority[kind] > failurePriority[classification]) {
+          classification = kind;
+        }
       }
       tail = current.slice(-(maxFailureMarkerLength - 1));
     },
@@ -371,7 +378,8 @@ const invokeCodexUnlocked = async (
     let settled = false;
     let timedOut = false;
     let failure: RecapError | undefined;
-    const classifier = failureClassifier();
+    const classifier = failureClassifier(promptFailureMarkers(prompt));
+    let stdinEpipe = false;
     const timers: { timeout: NodeJS.Timeout | undefined; kill: NodeJS.Timeout | undefined } = {
       timeout: undefined,
       kill: undefined,
@@ -420,8 +428,9 @@ const invokeCodexUnlocked = async (
           failureClass: classifier.result(),
           ...(exitCode !== undefined ? { exitCode } : {}),
           ...(closeSignal ? { signal: closeSignal } : {}),
+          ...(stdinEpipe ? { spawnErrno: "EPIPE" } : {}),
         }));
-      }
+      } else if (stdinEpipe) reject(new RecapError("model_failed", { failureClass: "unclassified", spawnErrno: "EPIPE" }));
       else resolve();
     });
 
@@ -440,6 +449,10 @@ const invokeCodexUnlocked = async (
     }
     child.stdin.on("error", (cause: Error) => {
       const errno = safeSpawnErrno(cause);
+      if (errno === "EPIPE") {
+        stdinEpipe = true;
+        return;
+      }
       fail(new RecapError("model_failed", {
         failureClass: spawnFailureClass(errno),
         ...(errno ? { spawnErrno: errno } : {}),
