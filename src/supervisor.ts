@@ -2,7 +2,7 @@ import { currentThreadPolicy } from "./thread-policy.js";
 import { Cause, Effect, Option, Schedule } from "effect";
 import { createServer } from "node:http";
 import { buildContext, formatReplyParts, telegramRouteUpdateId, eligibleRuns, formatMessage, isMainThread, timestampMs } from "./domain.js";
-import { Recapper } from "./recap.js";
+import { RecapError, Recapper } from "./recap.js";
 import { Store, StoreError, type StoreShape, type StoreStats } from "./store.js";
 import { T3Client, T3TransportError } from "./t3.js";
 import { TelegramClient } from "./telegram.js";
@@ -57,6 +57,17 @@ export const createStatus = (config?: Pick<SupervisorConfig, "telegramEnabled">)
 
 const log = (event: string, fields: Record<string, string | number | boolean | null> = {}) =>
   Effect.sync(() => console.log(JSON.stringify({ time: new Date().toISOString(), event, ...fields })));
+
+const logRecapAttemptFailure = (jobId: string, cause: Cause.Cause<unknown>) => {
+  const error = Option.getOrNull(Cause.findErrorOption(cause));
+  if (!(error instanceof RecapError)) return Effect.void;
+  const fields: Record<string, string | number | boolean | null> = { jobId, code: error.code };
+  if (error.failureClass) fields.failureClass = error.failureClass;
+  if (error.exitCode !== undefined) fields.exitCode = error.exitCode;
+  if (error.signal) fields.signal = error.signal;
+  if (error.spawnErrno) fields.spawnErrno = error.spawnErrno;
+  return log("recap_attempt_failed", fields);
+};
 
 const guard = <A, E, R>(effect: Effect.Effect<A, E, R>, phase: string, status: SupervisorStatus) =>
   effect.pipe(Effect.catchCause((cause) => {
@@ -279,10 +290,10 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
         status.lastErrorPhase = "notification";
         if (job.state === "pending") status.modelState = "degraded";
         else { status.telegramState = "degraded"; status.deliveryState = "degraded"; }
-        return store.getJob(job.id).pipe(Effect.flatMap((current) => {
+        return logRecapAttemptFailure(job.id, cause).pipe(Effect.andThen(store.getJob(job.id).pipe(Effect.flatMap((current) => {
           if (current?.state === "unknown") return store.markUnknown(job.id, "notification_failed", Date.now());
           return store.retry(job.id, "notification_failed", Date.now(), 60_000);
-        }), Effect.andThen(log("notification_deferred", { jobId: job.id })));
+        }), Effect.andThen(log("notification_deferred", { jobId: job.id })))));
       }));
       yield* action;
       status.deliveryHeartbeat = Date.now();

@@ -24,6 +24,9 @@ interface Invocation {
 interface Behavior {
   readonly output?: unknown;
   readonly exitCode?: number;
+  readonly signal?: NodeJS.Signals | null;
+  readonly stdout?: readonly string[];
+  readonly stderr?: readonly string[];
   readonly hold?: boolean;
   readonly stdinError?: boolean;
 }
@@ -108,7 +111,9 @@ const createSpawner = (
       }
       if (behavior.hold) return;
       await writeFile(outputPath, JSON.stringify(behavior.output ?? { recap: "Completed the export fix; rollout remains pending." }));
-      child.emit("close", behavior.exitCode ?? 0, null);
+      for (const chunk of behavior.stdout ?? []) child.stdout.write(chunk);
+      for (const chunk of behavior.stderr ?? []) child.stderr.write(chunk);
+      child.emit("close", behavior.exitCode ?? 0, behavior.signal ?? null);
     })().catch((error: unknown) => child.emit("error", error instanceof Error ? error : new Error("fake process failed")));
   });
   return child as unknown as ChildProcessLike;
@@ -235,6 +240,53 @@ test("rejects malformed or oversized last-message output without printing it", a
   await assert.rejects(Effect.runPromise(recap), (error: unknown) =>
     error instanceof RecapError && error.code === "invalid_output");
   assert.equal(invocations.length, 1);
+});
+
+test("classifies only bounded CLI failure signatures and exposes no prompt or stream text", async () => {
+  const invocations: Invocation[] = [];
+  const children: FakeChild[] = [];
+  const secretMarker = "access_token=never-log-this";
+  const promptMarker = "PROMPT_SENTINEL_NEVER_LOG";
+  const failureContext = { ...context, finalAnswer: promptMarker };
+  await assert.rejects(Effect.runPromise(makeRecapper(config, {
+    spawnProcess: createSpawner([{
+      exitCode: 17,
+      stderr: [`failed: refresh_token_`, `reused ${secretMarker}; input was ${promptMarker}`],
+    }], invocations, children),
+  }).recap(failureContext)), (error: unknown) => {
+    assert.ok(error instanceof RecapError);
+    assert.equal(error.code, "model_failed");
+    assert.equal(error.failureClass, "refresh_token_reused");
+    assert.equal(error.exitCode, 17);
+    assert.equal(error.signal, undefined);
+    assert.equal(error.spawnErrno, undefined);
+    const safeDetails = JSON.stringify({
+      message: error.message,
+      code: error.code,
+      failureClass: error.failureClass,
+      exitCode: error.exitCode,
+      signal: error.signal,
+      spawnErrno: error.spawnErrno,
+    });
+    assert.equal(safeDetails.includes(secretMarker), false);
+    assert.equal(safeDetails.includes(promptMarker), false);
+    assert.equal(safeDetails.includes("failed: refresh_token_"), false);
+    return true;
+  });
+  assert.equal(invocations.length, 1);
+  assert.match(invocations[0]?.prompt ?? "", new RegExp(promptMarker, "u"));
+});
+
+test("does not report failure signatures emitted by a successful CLI response", async () => {
+  const invocations: Invocation[] = [];
+  const children: FakeChild[] = [];
+  const recap = await Effect.runPromise(makeRecapper(config, {
+    spawnProcess: createSpawner([{
+      output: { recap: "Completed the export fix; rollout remains pending." },
+      stderr: ["refresh_token_reused"],
+    }], invocations, children),
+  }).recap(context));
+  assert.equal(recap, "Completed the export fix; rollout remains pending.");
 });
 
 test("kills the process group on timeout and reports only the failure code", async () => {

@@ -26,14 +26,141 @@ const disabledFeatures = [
 
 export type RecapErrorCode = "invalid_context" | "context_too_large" | "model_timeout" | "model_failed" | "invalid_output";
 
+export type RecapFailureClass =
+  | "refresh_token_reused"
+  | "refresh_token_expired"
+  | "invalid_grant"
+  | "tls"
+  | "transport"
+  | "resource_eagain"
+  | "resource_enomem"
+  | "thread_creation_failed"
+  | "model_unsupported"
+  | "config_unsupported"
+  | "unclassified";
+
+export type RecapSpawnErrno =
+  | "EAGAIN"
+  | "ENOMEM"
+  | "EMFILE"
+  | "ENFILE"
+  | "ENOENT"
+  | "EACCES"
+  | "EPIPE"
+  | "ETIMEDOUT"
+  | "ECONNRESET"
+  | "ECONNREFUSED";
+
+export interface RecapFailureMetadata {
+  readonly failureClass?: RecapFailureClass;
+  readonly exitCode?: number;
+  readonly signal?: NodeJS.Signals;
+  readonly spawnErrno?: RecapSpawnErrno;
+}
+
 export class RecapError extends Error {
   readonly _tag = "RecapError";
+  readonly failureClass: RecapFailureClass | undefined;
+  readonly exitCode: number | undefined;
+  readonly signal: NodeJS.Signals | undefined;
+  readonly spawnErrno: RecapSpawnErrno | undefined;
 
-  constructor(readonly code: RecapErrorCode) {
+  constructor(readonly code: RecapErrorCode, metadata: RecapFailureMetadata = {}) {
     super("The context recap could not be generated.");
     this.name = "RecapError";
+    this.failureClass = metadata.failureClass;
+    this.exitCode = metadata.exitCode;
+    this.signal = metadata.signal;
+    this.spawnErrno = metadata.spawnErrno;
   }
 }
+
+const failureSignatures: readonly { readonly marker: string; readonly kind: RecapFailureClass }[] = [
+  { marker: "refresh_token_reused", kind: "refresh_token_reused" },
+  { marker: "refresh token has already been used", kind: "refresh_token_reused" },
+  { marker: "refresh_token_expired", kind: "refresh_token_expired" },
+  { marker: "refresh token expired", kind: "refresh_token_expired" },
+  { marker: "invalid_grant", kind: "invalid_grant" },
+  { marker: "pthread_create failed", kind: "thread_creation_failed" },
+  { marker: "failed to create thread", kind: "thread_creation_failed" },
+  { marker: "errno eagain", kind: "resource_eagain" },
+  { marker: "code eagain", kind: "resource_eagain" },
+  { marker: "resource temporarily unavailable", kind: "resource_eagain" },
+  { marker: "errno enomem", kind: "resource_enomem" },
+  { marker: "code enomem", kind: "resource_enomem" },
+  { marker: "cannot allocate memory", kind: "resource_enomem" },
+  { marker: "out of memory", kind: "resource_enomem" },
+  { marker: "tls handshake failed", kind: "tls" },
+  { marker: "tls handshake failure", kind: "tls" },
+  { marker: "certificate verify failed", kind: "tls" },
+  { marker: "self signed certificate", kind: "tls" },
+  { marker: "unable to verify the first certificate", kind: "tls" },
+  { marker: "connection reset by peer", kind: "transport" },
+  { marker: "econnreset", kind: "transport" },
+  { marker: "econnrefused", kind: "transport" },
+  { marker: "etimedout", kind: "transport" },
+  { marker: "socket hang up", kind: "transport" },
+  { marker: "network is unreachable", kind: "transport" },
+  { marker: "model_not_found", kind: "model_unsupported" },
+  { marker: "unsupported_model", kind: "model_unsupported" },
+  { marker: "model not found", kind: "model_unsupported" },
+  { marker: "unsupported model", kind: "model_unsupported" },
+  { marker: "unknown config key", kind: "config_unsupported" },
+  { marker: "unrecognized config key", kind: "config_unsupported" },
+  { marker: "unsupported config key", kind: "config_unsupported" },
+  { marker: "invalid config value", kind: "config_unsupported" },
+];
+
+const failurePriority: Readonly<Record<RecapFailureClass, number>> = {
+  refresh_token_reused: 10,
+  refresh_token_expired: 10,
+  invalid_grant: 10,
+  resource_eagain: 9,
+  resource_enomem: 9,
+  thread_creation_failed: 9,
+  tls: 8,
+  transport: 7,
+  model_unsupported: 6,
+  config_unsupported: 6,
+  unclassified: 0,
+};
+
+const maxFailureMarkerLength = Math.max(...failureSignatures.map(({ marker }) => marker.length));
+
+const failureClassifier = () => {
+  let tail = "";
+  let classification: RecapFailureClass = "unclassified";
+  return {
+    observe(chunk: Buffer | string): void {
+      const current = `${tail}${typeof chunk === "string" ? chunk : chunk.toString("utf8")}`.toLowerCase();
+      for (const { marker, kind } of failureSignatures) {
+        if (current.includes(marker) && failurePriority[kind] > failurePriority[classification]) classification = kind;
+      }
+      tail = current.slice(-(maxFailureMarkerLength - 1));
+    },
+    result(): RecapFailureClass {
+      return classification;
+    },
+  };
+};
+
+const spawnErrnos = new Set<RecapSpawnErrno>([
+  "EAGAIN", "ENOMEM", "EMFILE", "ENFILE", "ENOENT", "EACCES", "EPIPE", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED",
+]);
+
+const safeSpawnErrno = (error: Error): RecapSpawnErrno | undefined => {
+  const code = (error as NodeJS.ErrnoException).code;
+  return typeof code === "string" && spawnErrnos.has(code as RecapSpawnErrno) ? code as RecapSpawnErrno : undefined;
+};
+
+const spawnFailureClass = (errno: RecapSpawnErrno | undefined): RecapFailureClass => {
+  switch (errno) {
+    case "EAGAIN": return "resource_eagain";
+    case "ENOMEM": return "resource_enomem";
+    case "ETIMEDOUT": case "ECONNRESET": case "ECONNREFUSED": return "transport";
+    default: return "unclassified";
+  }
+};
 
 export interface RecapperApi {
   readonly recap: (context: RecapContext) => Effect.Effect<string | null, RecapError>;
@@ -235,14 +362,16 @@ const invokeCodexUnlocked = async (
     let child: ChildProcessLike;
     try {
       child = processSpawn(config.cxCommand, args, spawnOptions);
-    } catch {
-      reject(new RecapError("model_failed"));
+    } catch (cause) {
+      const errno = cause instanceof Error ? safeSpawnErrno(cause) : undefined;
+      reject(new RecapError("model_failed", { failureClass: spawnFailureClass(errno), ...(errno ? { spawnErrno: errno } : {}) }));
       return;
     }
 
     let settled = false;
     let timedOut = false;
     let failure: RecapError | undefined;
+    const classifier = failureClassifier();
     const timers: { timeout: NodeJS.Timeout | undefined; kill: NodeJS.Timeout | undefined } = {
       timeout: undefined,
       kill: undefined,
@@ -268,17 +397,31 @@ const invokeCodexUnlocked = async (
       terminate();
     };
 
-    child.stdout?.on("data", () => undefined);
-    child.stderr?.on("data", () => undefined);
-    child.once("error", () => fail(new RecapError("model_failed")));
-    child.once("close", (code) => {
+    child.stdout?.on("data", (chunk: Buffer | string) => classifier.observe(chunk));
+    child.stderr?.on("data", (chunk: Buffer | string) => classifier.observe(chunk));
+    child.once("error", (cause: Error) => {
+      const errno = safeSpawnErrno(cause);
+      fail(new RecapError("model_failed", {
+        failureClass: spawnFailureClass(errno),
+        ...(errno ? { spawnErrno: errno } : {}),
+      }));
+    });
+    child.once("close", (code, closeSignal) => {
       if (settled) return;
       settled = true;
       clearTimers();
       signal.removeEventListener("abort", onAbort);
       if (failure) reject(failure);
       else if (timedOut) reject(new RecapError("model_timeout"));
-      else if (signal.aborted || code !== 0) reject(new RecapError("model_failed"));
+      else if (signal.aborted) reject(new RecapError("model_failed"));
+      else if (code !== 0) {
+        const exitCode = typeof code === "number" && Number.isInteger(code) && code >= 0 && code <= 255 ? code : undefined;
+        reject(new RecapError("model_failed", {
+          failureClass: classifier.result(),
+          ...(exitCode !== undefined ? { exitCode } : {}),
+          ...(closeSignal ? { signal: closeSignal } : {}),
+        }));
+      }
       else resolve();
     });
 
@@ -291,11 +434,17 @@ const invokeCodexUnlocked = async (
     timers.timeout.unref();
 
     if (!child.stdin) {
-      fail(new RecapError("model_failed"));
+      fail(new RecapError("model_failed", { failureClass: "unclassified" }));
       killGroup(child.pid, "SIGTERM", dependencies);
       return;
     }
-    child.stdin.on("error", () => fail(new RecapError("model_failed")));
+    child.stdin.on("error", (cause: Error) => {
+      const errno = safeSpawnErrno(cause);
+      fail(new RecapError("model_failed", {
+        failureClass: spawnFailureClass(errno),
+        ...(errno ? { spawnErrno: errno } : {}),
+      }));
+    });
     child.stdin.end(prompt, "utf8");
   });
 };
