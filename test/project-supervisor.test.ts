@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Effect, Schema } from "effect";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { parseInterpretation, ProjectSupervisor } from "../src/project-supervisor.js";
-import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type SupervisorBaseline } from "../src/project-supervisor-store.js";
+import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../src/project-supervisor-contract.js";
 import { ProjectSupervisorSnapshot } from "../src/project-supervisor-contract.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
@@ -182,9 +182,9 @@ const completeSupervisorRequest = (projection: Projection, messageId: string, re
 const retryInput = (
   projectId: string,
   expectedGeneration: number,
-  binding: { threadId: string; generation: number },
+  binding: { threadId: string; generation: number; mainThreadId: string },
   action: "retry" | "replace",
-) => ({ projectId, expectedGeneration, threadId: binding.threadId, bindingGeneration: binding.generation, action });
+) => ({ projectId, mainThreadId: binding.mainThreadId, expectedGeneration, threadId: binding.threadId, bindingGeneration: binding.generation, action });
 
 const makeFixture = async (initial: Array<{ threadId: string; projectId: string; turns: Turn[] }>) => {
   const directory = await mkdtemp(join(tmpdir(), "project-supervisor-test-"));
@@ -366,7 +366,7 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
   };
 };
 
-test("activation baseline excludes existing runs, serializes new project work, and reuses one owned Supervisor", async (t) => {
+test("activation baseline excludes existing runs and gives independent mains separate Supervisors", async (t) => {
   const fixture = await makeFixture([
     { threadId: "old-thread", projectId: "project-a", turns: [{ id: "old-task", sequence: 9, text: "Old work" }] },
     { threadId: "current-thread", projectId: "project-a", turns: [
@@ -387,7 +387,7 @@ test("activation baseline excludes existing runs, serializes new project work, a
   assert.equal(baseline?.threads.find((thread) => thread.id === "archived-history")?.latestRunId, "run-archived-task");
   assert.equal(fixture.supervisorStore.task("old-thread"), null);
   assert.equal(fixture.supervisorStore.task("current-thread")?.status, "waiting");
-  const binding = fixture.supervisorStore.binding("project-a");
+  const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.ok(binding);
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 1);
   const initialLaunch = fixture.operations.find((call) => call.tag === "orchestration.launchThread");
@@ -401,8 +401,8 @@ test("activation baseline excludes existing runs, serializes new project work, a
   fixture.addTurn("second-thread", "project-a", { id: "second-task", sequence: 12, text: "Prepare a release note" });
 
   await supervisor.runOnce();
-  assert.equal(fixture.supervisorStore.task("second-thread")?.status, "queued");
-  assert.equal(fixture.operations.filter((call) => call.payload.type === "message.dispatch").length, 1, "a project has at most one in-flight interpretation");
+  assert.equal(fixture.supervisorStore.task("second-thread")?.status, "waiting");
+  assert.equal(fixture.operations.filter((call) => call.payload.type === "message.dispatch").length, 2, "each main can have its own in-flight interpretation");
   assert.equal(fixture.projectionReads.includes("owned-descendant"), false);
 
   const firstTask = fixture.supervisorStore.task("current-thread");
@@ -427,9 +427,9 @@ test("activation baseline excludes existing runs, serializes new project work, a
   await supervisor.runOnce();
   const dispatches = fixture.operations.filter((call) => call.payload.type === "message.dispatch");
   assert.equal(dispatches.length, 2);
-  assert.ok(dispatches.every((call) => call.payload.threadId === binding.threadId));
+  assert.deepEqual(new Set(dispatches.map(call => call.payload.threadId)), new Set(fixture.supervisorStore.bindings().map(binding => binding.threadId)));
   assert.notEqual(dispatches[0]?.payload.messageId, dispatches[1]?.payload.messageId);
-  assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 1);
+  assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 2);
 });
 
 test("a web-originated message with non-user authorship is not treated as a task", async (t) => {
@@ -446,7 +446,7 @@ test("a web-originated message with non-user authorship is not treated as a task
   await fixture.makeSupervisor().runOnce();
 
   assert.equal(fixture.supervisorStore.task("source-thread"), null);
-  assert.equal(fixture.supervisorStore.binding("project-a"), null);
+  assert.equal((fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null), null);
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 0);
 });
 
@@ -528,238 +528,28 @@ test("model choices are checked against T3 and saved per project with generation
   assert.equal(fixture.supervisorStore.settings("project-b").generation, 1);
 });
 
-test("model changes wait for an idle Supervisor and apply before its next task; settled ownership can wake", async (t) => {
-  const fixture = await makeFixture([
-    { threadId: "project-a-first", projectId: "project-a", turns: [{ id: "a-first-task", sequence: 11, text: "Review the first change" }] },
-    { threadId: "project-a-second", projectId: "project-a", turns: [{ id: "a-second-task", sequence: 12, text: "Review the second change" }] },
-    { threadId: "project-b-first", projectId: "project-b", turns: [{ id: "b-first-task", sequence: 13, text: "Review another project" }] },
-  ]);
+test("model defaults affect new Supervisors while independent T3 selections remain authoritative", async t => {
+  const fixture = await makeFixture([{threadId: "first", projectId: "project-a", turns: [{id: "first-task", sequence: 11, text: "Implement first"}]}]);
   t.after(fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
-  const bindingA = fixture.supervisorStore.binding("project-a");
-  const bindingB = fixture.supervisorStore.binding("project-b");
-  assert.ok(bindingA && bindingB);
-  const jobsA = fixture.supervisorStore.tasks("project-a");
-  const activeJob = jobsA.find((job) => job.status === "waiting");
-  const queuedJob = jobsA.find((job) => job.status === "queued");
-  assert.ok(activeJob && queuedJob);
-
-  const saved = await supervisor.save({
-    projectId: "project-a",
-    expectedGeneration: 0,
-    modelSelection: { instanceId: "codex", model: "gpt-6-luna", options: [{ id: "reasoningEffort", value: "low" }] },
-  }, AbortSignal.timeout(1000));
-  assert.equal(saved.status, "saved");
-  const projectionA = fixture.projections.get(bindingA.threadId);
-  const projectionB = fixture.projections.get(bindingB.threadId);
-  assert.ok(projectionA && projectionB);
-  projectionA.thread.settledAt = baseTime;
-
+  const first = fixture.supervisorStore.binding("project-a", "first")!;
+  const manual = {...defaultSupervisorModel, model: "gpt-6-astra", options: [{id: "reasoningEffort", value: "max"}]};
+  fixture.projections.get(first.threadId)!.thread.modelSelection = manual;
+  const defaults = {...defaultSupervisorModel, options: [{id: "reasoningEffort", value: "low"}]};
+  assert.equal((await supervisor.save({projectId: "project-a", expectedGeneration: 0, modelSelection: defaults}, AbortSignal.timeout(1000))).status, "saved");
+  fixture.addTurn("second", "project-a", {id: "second-task", sequence: 12, text: "Implement second"});
   await supervisor.runOnce();
-  assert.equal(fixture.operations.some((call) => call.payload.type === "thread.model-selection.set"), false, "an active interpretation keeps its model until it settles");
-  assert.equal(fixture.supervisorStore.settings("project-a").pending, true);
-
-  const task = fixture.supervisorStore.task(activeJob.threadId);
-  assert.ok(task);
-  completeSupervisorRequest(projectionA, task.messageId, JSON.stringify({
-    objective: "Review the first change",
-    reason: "The request asks for a review.",
-    sourceMessageIds: [task.sourceMessageId],
-  }));
-  await supervisor.runOnce();
-  assert.equal(fixture.supervisorStore.task(activeJob.threadId)?.status, "inferred");
-  assert.equal(fixture.supervisorStore.settings("project-a").pending, true, "model changes wait until the next scheduling pass");
-
-  await supervisor.runOnce();
-  const modelChanges = fixture.operations.filter((call) => call.payload.type === "thread.model-selection.set");
-  assert.equal(modelChanges.length, 1);
-  assert.equal(modelChanges[0]?.payload.threadId, bindingA.threadId);
-  assert.deepEqual(modelChanges[0]?.payload.modelSelection, { instanceId: "codex", model: "gpt-6-luna", options: [{ id: "reasoningEffort", value: "low" }] });
-  assert.equal(fixture.supervisorStore.settings("project-a").pending, false);
-  assert.equal(fixture.supervisorStore.settings("project-b").modelSelection.model, defaultSupervisorModel.model);
-  assert.equal(fixture.supervisorStore.task(queuedJob.threadId)?.status, "waiting");
-  assert.equal(projectionA.thread.settledAt, undefined, "an accepted native task dispatch wakes the owned settled conversation");
-
-  const modelIndex = fixture.operations.findIndex((call) => call.payload.type === "thread.model-selection.set");
-  const projectADispatchIndexes = fixture.operations.flatMap((call, index) => call.payload.type === "message.dispatch" && call.payload.threadId === bindingA.threadId ? [index] : []);
-  assert.equal(projectADispatchIndexes.length, 2);
-  assert.ok(modelIndex >= 0 && projectADispatchIndexes[1]! > modelIndex);
-  assert.deepEqual(projectionB.thread.modelSelection, defaultSupervisorModel);
-});
-
-test("a successful model command adopts the T3 readback when it differs from the saved selection", async (t) => {
-  const fixture = await makeFixture([
-    { threadId: "first-thread", projectId: "project-a", turns: [{ id: "first-task", sequence: 11, text: "Review the first item" }] },
-    { threadId: "second-thread", projectId: "project-a", turns: [{ id: "second-task", sequence: 12, text: "Review the next item" }] },
-  ]);
-  t.after(fixture.cleanup);
-  const supervisor = fixture.makeSupervisor();
-  await supervisor.runOnce();
-  const binding = fixture.supervisorStore.binding("project-a");
-  assert.ok(binding);
-  const activeJob = fixture.supervisorStore.tasks("project-a").find((job) => job.status === "waiting");
-  assert.ok(activeJob);
-  const saved = await supervisor.save({
-    projectId: "project-a",
-    expectedGeneration: 0,
-    modelSelection: { instanceId: "codex", model: "gpt-6-luna", options: [{ id: "reasoningEffort", value: "low" }] },
-  }, AbortSignal.timeout(1000));
-  assert.equal(saved.status, "saved");
-  const projection = fixture.projections.get(binding.threadId);
-  assert.ok(projection);
-  const task = fixture.supervisorStore.task(activeJob.threadId);
-  assert.ok(task);
-  completeSupervisorRequest(projection, task.messageId, JSON.stringify({
-    objective: "Review the first item",
-    reason: "The request is a review.",
-    sourceMessageIds: [task.sourceMessageId],
-  }));
-  await supervisor.runOnce();
-  fixture.setNextModelReadback(defaultSupervisorModel);
-  await supervisor.runOnce();
-
-  const settings = fixture.supervisorStore.settings("project-a");
-  assert.equal(settings.pending, false);
-  assert.deepEqual(settings.modelSelection, defaultSupervisorModel);
-  assert.match(settings.applicationMessage ?? "", /different model/u);
-  assert.equal(fixture.supervisorStore.tasks("project-a").some((job) => job.status === "queued"), false);
-  assert.equal(fixture.supervisorStore.tasks("project-a").filter((job) => job.status === "waiting").length, 1);
-});
-
-test("durable model rejection adopts current T3 selection and releases queued project work", async (t) => {
-  const fixture = await makeFixture([
-    { threadId: "first-thread", projectId: "project-a", turns: [{ id: "first-task", sequence: 11, text: "Review the first item" }] },
-    { threadId: "second-thread", projectId: "project-a", turns: [{ id: "second-task", sequence: 12, text: "Review the next item" }] },
-  ]);
-  t.after(fixture.cleanup);
-  const supervisor = fixture.makeSupervisor();
-  await supervisor.runOnce();
-  const binding = fixture.supervisorStore.binding("project-a");
-  const activeJob = fixture.supervisorStore.tasks("project-a").find((job) => job.status === "waiting");
-  assert.ok(binding && activeJob);
-  const saved = await supervisor.save({
-    projectId: "project-a",
-    expectedGeneration: 0,
-    modelSelection: { instanceId: "codex", model: "gpt-6-luna", options: [{ id: "reasoningEffort", value: "low" }] },
-  }, AbortSignal.timeout(1000));
-  assert.equal(saved.status, "saved");
-  const projection = fixture.projections.get(binding.threadId);
-  assert.ok(projection);
-  const task = fixture.supervisorStore.task(activeJob.threadId);
-  assert.ok(task);
-  completeSupervisorRequest(projection, task.messageId, JSON.stringify({
-    objective: "Review the first item",
-    reason: "The request is a review.",
-    sourceMessageIds: [task.sourceMessageId],
-  }));
-  await supervisor.runOnce();
-  fixture.setNextModelReadback({ instanceId: "codex", model: "gpt-6-astra", options: [{ id: "reasoningEffort", value: "high" }] });
-  fixture.setDurableModelRejections(1);
-  await supervisor.runOnce();
-
-  const settings = fixture.supervisorStore.settings("project-a");
-  assert.equal(settings.pending, false);
-  assert.equal(settings.modelSelection.model, "gpt-6-astra");
-  assert.match(settings.applicationMessage ?? "", /rejected the saved model update/u);
-  assert.equal(fixture.supervisorStore.tasks("project-a").some((job) => job.status === "queued"), false);
-  assert.equal(fixture.supervisorStore.tasks("project-a").filter((job) => job.status === "waiting").length, 1);
-});
-
-test("unknown model updates stop after three attempts until explicit retry reuses the same command", async (t) => {
-  const fixture = await makeFixture([
-    { threadId: "first-thread", projectId: "project-a", turns: [{ id: "first-task", sequence: 11, text: "Review the first item" }] },
-    { threadId: "second-thread", projectId: "project-a", turns: [{ id: "second-task", sequence: 12, text: "Review the next item" }] },
-  ]);
-  t.after(fixture.cleanup);
-  const supervisor = fixture.makeSupervisor();
-  await supervisor.runOnce();
-  const binding = fixture.supervisorStore.binding("project-a");
-  const activeJob = fixture.supervisorStore.tasks("project-a").find((job) => job.status === "waiting");
-  assert.ok(binding && activeJob);
-  const saved = await supervisor.save({
-    projectId: "project-a",
-    expectedGeneration: 0,
-    modelSelection: { instanceId: "codex", model: "gpt-6-luna", options: [{ id: "reasoningEffort", value: "low" }] },
-  }, AbortSignal.timeout(1000));
-  assert.equal(saved.status, "saved");
-  const projection = fixture.projections.get(binding.threadId);
-  assert.ok(projection);
-  const task = fixture.supervisorStore.task(activeJob.threadId);
-  assert.ok(task);
-  completeSupervisorRequest(projection, task.messageId, JSON.stringify({
-    objective: "Review the first item",
-    reason: "The request is a review.",
-    sourceMessageIds: [task.sourceMessageId],
-  }));
-  await supervisor.runOnce();
-
-  fixture.setUnknownModelUpdates(3);
-  for (let attempt = 0; attempt < 4; attempt += 1) await supervisor.runOnce();
-  const failedUpdates = fixture.operations.filter((call) => call.payload.type === "thread.model-selection.set");
-  assert.equal(failedUpdates.length, 3);
-  assert.ok(failedUpdates.every((call) => call.payload.commandId === failedUpdates[0]?.payload.commandId));
-  assert.equal(fixture.supervisorStore.settings("project-a").pending, true);
-  assert.equal(fixture.supervisorStore.settings("project-a").applyAttempts, 3);
-  assert.equal(fixture.supervisorStore.task("second-thread")?.status, "queued");
-
-  const retry = await supervisor.retry(retryInput("project-a", 1, binding, "retry"), AbortSignal.timeout(1000));
-  assert.equal(retry.status, "saved");
-  const updates = fixture.operations.filter((call) => call.payload.type === "thread.model-selection.set");
-  assert.equal(updates.length, 4);
-  assert.equal(updates[3]?.payload.commandId, updates[0]?.payload.commandId);
-  assert.equal(fixture.supervisorStore.settings("project-a").pending, false);
-  assert.equal(fixture.supervisorStore.task("second-thread")?.status, "waiting");
-});
-
-test("monitoring-only saves preserve unknown model command identity through explicit retry", async (t) => {
-  const fixture = await makeFixture([]);
-  t.after(fixture.cleanup);
-  const supervisor = fixture.makeSupervisor();
-  const binding = {...fixture.supervisorStore.reserve("project-a", "Project A", defaultSupervisorModel, activationSequence, Date.now()), state: "ready" as const};
-  fixture.supervisorStore.setBinding(binding);
-  const projection = emptySupervisorProjection(binding.threadId, "project-a", defaultSupervisorModel);
-  fixture.projections.set(binding.threadId, projection);
-  const selection = {...defaultSupervisorModel, options: [{id: "reasoningEffort", value: "low"}]};
-  const saved = await supervisor.save({projectId: "project-a", expectedGeneration: 0, modelSelection: selection}, AbortSignal.timeout(1000));
-  assert.equal(saved.status, "saved");
-  fixture.setUnknownModelUpdates(3);
-  const applyModel = (supervisor as unknown as {applyModel: (binding: BindingRecord, projection: Projection, signal: AbortSignal) => Promise<void>}).applyModel.bind(supervisor);
-
-  await assert.rejects(applyModel(binding, projection, AbortSignal.timeout(1000)), /simulated lost model update response/);
-  const firstSettings = fixture.supervisorStore.settings("project-a");
-  const firstCommandId = fixture.operations.find(call => call.payload.type === "thread.model-selection.set")?.payload.commandId;
-  assert.equal(firstSettings.generation, 1);
-  assert.equal(firstSettings.modelMutationGeneration, 1);
-  assert.equal(firstSettings.pending, true);
-  assert.equal(firstSettings.applyAttempts, 1);
-  assert.ok(firstCommandId);
-
-  const monitoringSaved = await supervisor.save({
-    projectId: "project-a",
-    expectedGeneration: firstSettings.generation,
-    modelSelection: firstSettings.modelSelection,
-    monitoring: {enabled: true, intervalMinutes: 6, activityThreshold: 10},
-  }, AbortSignal.timeout(1000));
-  assert.equal(monitoringSaved.status, "saved");
-  const afterMonitoring = fixture.supervisorStore.settings("project-a");
-  assert.equal(afterMonitoring.generation, 2, "the shared generation still protects settings CAS");
-  assert.equal(afterMonitoring.modelMutationGeneration, 1);
-  assert.equal(afterMonitoring.pending, true);
-  assert.equal(afterMonitoring.applyAttempts, 1, "monitoring saves do not reset the native attempt budget");
-  assert.equal(fixture.operations.filter(call => call.payload.type === "thread.model-selection.set").length, 1);
-
-  await assert.rejects(applyModel(binding, projection, AbortSignal.timeout(1000)), /simulated lost model update response/);
-  assert.equal(fixture.supervisorStore.settings("project-a").applyAttempts, 2);
-  const retry = await supervisor.retry(retryInput("project-a", afterMonitoring.generation, binding, "retry"), AbortSignal.timeout(1000));
-  assert.equal(retry.snapshot?.settings.generation, afterMonitoring.generation);
-  assert.equal(retry.snapshot?.settings.pending, true);
-  const updates = fixture.operations.filter(call => call.payload.type === "thread.model-selection.set");
-  assert.equal(updates.length, 3);
-  assert.ok(updates.every(call => call.payload.commandId === firstCommandId));
-  assert.equal(fixture.supervisorStore.settings("project-a").modelMutationGeneration, 1);
-  assert.equal(fixture.supervisorStore.settings("project-a").pending, true);
-  assert.equal(fixture.supervisorStore.settings("project-a").applyAttempts, 1, "explicit retry resets the budget before its new attempt");
+  const second = fixture.supervisorStore.binding("project-a", "second")!;
+  assert.notEqual(first.threadId, second.threadId);
+  assert.deepEqual(fixture.projections.get(first.threadId)!.thread.modelSelection, manual);
+  assert.deepEqual(fixture.projections.get(second.threadId)!.thread.modelSelection, defaults);
+  assert.deepEqual(fixture.supervisorStore.settings("project-a").modelSelection, defaults);
+  assert.equal(fixture.operations.some(call => call.payload.type === "thread.model-selection.set"), false);
+  const selected = await supervisor.snapshot("project-a", AbortSignal.timeout(1000), "first");
+  assert.deepEqual(selected.modelSelection, manual);
+  const noSelection = await supervisor.snapshot("project-a", AbortSignal.timeout(1000));
+  assert.equal(noSelection.binding, null);assert.equal(noSelection.modelSelection, null);assert.deepEqual(noSelection.tasks, []);
 });
 
 test("unknown dispatch survives restart and retention with the original native identities", async (t) => {
@@ -772,7 +562,7 @@ test("unknown dispatch survives restart and retention with the original native i
   const uncertain = fixture.supervisorStore.task("source-thread");
   assert.equal(uncertain?.status, "uncertain");
   assert.ok(uncertain);
-  const binding = fixture.supervisorStore.binding("project-a");
+  const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.ok(binding);
   fixture.supervisorStore.saveTask({ ...uncertain, updatedAt: Date.now() - 31 * day });
   const activationBaseline = fixture.supervisorStore.baseline();
@@ -807,7 +597,7 @@ test("accepted requests without native runs stop after two replays and remain av
   for (let attempt = 0; attempt < 3; attempt += 1) await supervisor.runOnce();
 
   const uncertain = fixture.supervisorStore.task("source-thread");
-  const binding = fixture.supervisorStore.binding("project-a");
+  const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.ok(uncertain && binding);
   assert.equal(uncertain.status, "uncertain");
   assert.equal(uncertain.replayCount, 2);
@@ -836,14 +626,14 @@ test("a transient Supervisor projection failure is not treated as proof the thre
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
 
-  const reserved = fixture.supervisorStore.binding("project-a");
+  const reserved = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.ok(reserved);
   assert.equal(reserved.state, "creating");
   assert.equal(fixture.supervisorStore.task("source-thread"), null);
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 0);
 
   await supervisor.runOnce();
-  assert.equal(fixture.supervisorStore.binding("project-a")?.state, "ready");
+  assert.equal((fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null)?.state, "ready");
   assert.equal(fixture.supervisorStore.task("source-thread")?.status, "waiting");
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 1);
 });
@@ -857,7 +647,7 @@ test("creation attempts stop after three failures until explicit retry reuses th
   const supervisor = fixture.makeSupervisor();
   for (let attempt = 0; attempt < 4; attempt += 1) await supervisor.runOnce();
 
-  const binding = fixture.supervisorStore.binding("project-a");
+  const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.ok(binding);
   assert.equal(binding.state, "uncertain");
   assert.equal(binding.creationAttempts, 3);
@@ -868,7 +658,7 @@ test("creation attempts stop after three failures until explicit retry reuses th
 
   const retry = await supervisor.retry(retryInput("project-a", 0, binding, "retry"), AbortSignal.timeout(1000));
   assert.equal(retry.status, "saved");
-  assert.equal(fixture.supervisorStore.binding("project-a")?.threadId, binding.threadId);
+  assert.equal((fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null)?.threadId, binding.threadId);
   const launches = fixture.operations.filter((call) => call.tag === "orchestration.launchThread");
   assert.equal(launches.length, 4);
   assert.equal(launches[3]?.payload.commandId, originalCommandId);
@@ -885,7 +675,7 @@ test("durable creation rejection requires explicit retry and advances only the n
   fixture.setDurableLaunchRejections(1);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
-  const rejected = fixture.supervisorStore.binding("project-a");
+  const rejected = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.ok(rejected);
   assert.equal(rejected.state, "rejected");
   assert.equal(fixture.supervisorStore.task("source-thread"), null);
@@ -894,7 +684,7 @@ test("durable creation rejection requires explicit retry and advances only the n
 
   const retry = await supervisor.retry(retryInput("project-a", 0, rejected, "retry"), AbortSignal.timeout(1000));
   assert.equal(retry.status, "saved");
-  const binding = fixture.supervisorStore.binding("project-a");
+  const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.equal(binding?.threadId, rejected.threadId);
   assert.equal(binding?.generation, rejected.generation + 1);
   const launches = fixture.operations.filter((call) => call.tag === "orchestration.launchThread");
@@ -915,48 +705,20 @@ test("a provider-disabled initial creation is durably rejected without automatic
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
 
-  assert.equal(fixture.supervisorStore.binding("project-a")?.state, "rejected");
+  assert.equal((fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null)?.state, "rejected");
   assert.equal(fixture.supervisorStore.task("source-thread"), null);
   await supervisor.runOnce();
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 1);
 });
 
-test("a provider-disabled objective releases queued work for a later model change", async (t) => {
-  const fixture = await makeFixture([
-    { threadId: "first-thread", projectId: "project-a", turns: [{ id: "first-task", sequence: 11, text: "Review the first change" }] },
-    { threadId: "second-thread", projectId: "project-a", turns: [{ id: "second-task", sequence: 12, text: "Review the next change" }] },
-  ]);
-  t.after(fixture.cleanup);
-  fixture.setProviderDisabledDispatches(1);
-  const supervisor = fixture.makeSupervisor();
-  await supervisor.runOnce();
+test("a provider-disabled objective does not block another main in the same project", async t => {
+  const fixture = await makeFixture([{threadId: "first-thread", projectId: "project-a", turns: [{id: "first-task", sequence: 11, text: "Implement first"}]},
+    {threadId: "second-thread", projectId: "project-a", turns: [{id: "second-task", sequence: 12, text: "Implement second"}]}]);
+  t.after(fixture.cleanup);fixture.setProviderDisabledDispatches(1);
+  await fixture.makeSupervisor().runOnce();
   assert.equal(fixture.supervisorStore.task("first-thread")?.status, "unavailable");
-  assert.equal(fixture.supervisorStore.task("second-thread")?.status, "queued");
-
-  const saved = await supervisor.save({
-    projectId: "project-a",
-    expectedGeneration: 0,
-    modelSelection: { instanceId: "codex", model: "gpt-6-astra", options: [{ id: "reasoningEffort", value: "max" }] },
-  }, AbortSignal.timeout(1000));
-  assert.equal(saved.status, "saved");
-  await supervisor.runOnce();
-
-  const binding = fixture.supervisorStore.binding("project-a");
-  assert.ok(binding);
-  const settings = fixture.supervisorStore.settings("project-a");
-  const projection = fixture.projections.get(binding.threadId);
-  assert.ok(projection);
-  assert.equal(settings.pending, false);
-  assert.equal(settings.modelSelection.model, "gpt-6-astra");
-  assert.deepEqual(projection.thread.modelSelection, settings.modelSelection);
   assert.equal(fixture.supervisorStore.task("second-thread")?.status, "waiting");
-
-  const modelIndex = fixture.operations.findIndex((call) => call.payload.type === "thread.model-selection.set");
-  const dispatchIndexes = fixture.operations.flatMap((call, index) => call.payload.type === "message.dispatch" ? [index] : []);
-  const nextDispatchIndex = dispatchIndexes[1];
-  assert.ok(nextDispatchIndex !== undefined);
-  assert.ok(modelIndex >= 0 && nextDispatchIndex > modelIndex);
-  assert.equal(fixture.operations.filter((call) => call.payload.type === "message.dispatch").length, 2);
+  assert.notEqual(fixture.supervisorStore.task("first-thread")?.supervisorThreadId, fixture.supervisorStore.task("second-thread")?.supervisorThreadId);
 });
 
 test("a lost launch response recovers the native-created Supervisor without duplicate launch or ownership", async (t) => {
@@ -967,7 +729,7 @@ test("a lost launch response recovers the native-created Supervisor without dupl
   fixture.setUnknownLaunchResponses(1);
   await fixture.makeSupervisor().runOnce();
 
-  const reserved = fixture.supervisorStore.binding("project-a");
+  const reserved = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.ok(reserved);
   assert.equal(reserved.state, "ready", "the native-created thread is reconciled from its visible projection");
   assert.equal(fixture.supervisorStore.task("source-thread"), null);
@@ -975,7 +737,7 @@ test("a lost launch response recovers the native-created Supervisor without dupl
   assert.ok(fixture.projections.has(reserved.threadId), "the fake native server created the thread before losing its reply");
 
   await fixture.makeSupervisor().runOnce();
-  const recovered = fixture.supervisorStore.binding("project-a");
+  const recovered = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.equal(recovered?.threadId, reserved.threadId);
   assert.equal(recovered?.state, "ready");
   assert.equal(fixture.supervisorStore.ownedIds.size, 1);
@@ -991,15 +753,15 @@ test("an archived reserved binding is retained and never launched again", async 
   t.after(fixture.cleanup);
   fixture.setUnknownLaunchResponses(1);
   await fixture.makeSupervisor().runOnce();
-  const binding = fixture.supervisorStore.binding("project-a");
+  const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.ok(binding);
   const projection = fixture.projections.get(binding.threadId);
   assert.ok(projection);
   projection.thread.archivedAt = baseTime;
 
   await fixture.makeSupervisor().runOnce();
-  assert.equal(fixture.supervisorStore.binding("project-a")?.threadId, binding.threadId);
-  assert.equal(fixture.supervisorStore.binding("project-a")?.state, "ready");
+  assert.equal((fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null)?.threadId, binding.threadId);
+  assert.equal((fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null)?.state, "ready");
   assert.equal(fixture.supervisorStore.ownedIds.size, 1);
   assert.equal(fixture.supervisorStore.task("source-thread"), null);
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 1);
@@ -1012,23 +774,23 @@ test("a stale retry intent cannot replace a missing binding; explicit replacemen
   t.after(fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
-  const original = fixture.supervisorStore.binding("project-a");
+  const original = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   const originalTask = fixture.supervisorStore.task("source-thread");
   assert.ok(original && originalTask);
   fixture.projections.delete(original.threadId);
   await supervisor.runOnce();
-  const missing = fixture.supervisorStore.binding("project-a");
+  const missing = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.equal(missing?.state, "missing");
 
   const staleRetry = await supervisor.retry(retryInput("project-a", 0, original, "retry"), AbortSignal.timeout(1000));
   assert.equal(staleRetry.status, "conflict");
-  assert.equal(fixture.supervisorStore.binding("project-a")?.threadId, original.threadId);
+  assert.equal((fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null)?.threadId, original.threadId);
   assert.equal(fixture.supervisorStore.ownedIds.size, 1);
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 1);
 
   const replacement = await supervisor.retry(retryInput("project-a", 0, missing!, "replace"), AbortSignal.timeout(1000));
   assert.equal(replacement.status, "saved");
-  const current = fixture.supervisorStore.binding("project-a");
+  const current = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.ok(current);
   assert.notEqual(current.threadId, original.threadId);
   assert.equal(fixture.supervisorStore.ownedIds.size, 2);
@@ -1049,7 +811,7 @@ test("a changed source invalidates a completed Supervisor result without an oper
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const task = fixture.supervisorStore.task("source-thread");
-  const binding = fixture.supervisorStore.binding("project-a");
+  const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.ok(task && binding);
   const supervisorProjection = fixture.projections.get(binding.threadId);
   assert.ok(supervisorProjection);
@@ -1078,7 +840,7 @@ test("a completed interpretation with unrelated source IDs is rejected", async (
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const task = fixture.supervisorStore.task("source-thread");
-  const binding = fixture.supervisorStore.binding("project-a");
+  const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   assert.ok(task && binding);
   const supervisorProjection = fixture.projections.get(binding.threadId);
   assert.ok(supervisorProjection);
@@ -1102,7 +864,7 @@ test("interrupted and stalled Supervisor runs become unavailable without answers
   t.after(fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
-  const binding = fixture.supervisorStore.binding("project-a");
+  const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   const first = fixture.supervisorStore.task("source-thread");
   assert.ok(binding && first);
   const supervisorProjection = fixture.projections.get(binding.threadId);
@@ -1139,7 +901,7 @@ test("queued and not-yet-started Supervisor runs do not time out from stale disp
   t.after(fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
-  const binding = fixture.supervisorStore.binding("project-a");
+  const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
   const task = fixture.supervisorStore.task("source-thread");
   assert.ok(binding && task);
   const supervisorProjection = fixture.projections.get(binding.threadId);
@@ -1175,11 +937,11 @@ test("agreement snapshots preserve mixed plans through restart and mark replaced
   fixture.supervisorStore.saveTask({...task, status: "inferred", objective: "Add CSV export", workflow, workflowProposalId: "csv-2", agreement});
   fixture.restart();
   const restored = fixture.makeSupervisor();
-  const snapshot = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(await restored.snapshot("project-a", new AbortController().signal));
+  const snapshot = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(await restored.snapshot("project-a", new AbortController().signal, "agreement-source"));
   assert.equal(snapshot.tasks[0]?.workflowProposalId, "csv-2");
   assert.deepEqual(snapshot.tasks[0]?.agreement, agreement);
   assert.equal(snapshot.tasks[0]?.workflow?.steps[0]?.blockId, null);
-  const binding = fixture.supervisorStore.binding("project-a")!;
+  const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null)!;
   fixture.supervisorStore.setBinding({...binding, state: "missing"});
   fixture.supervisorStore.replaceMissingBinding({...binding, state: "missing"}, defaultSupervisorModel);
   const stale = fixture.supervisorStore.task("agreement-source")?.agreement;
@@ -1196,6 +958,10 @@ test("task payload expiry clears retained agreement plans and current proposal i
   const workflow = {status: "proposed" as const, message: "Draft", workspaceRoot: "/work/a", revision: "definitions-1", rules: [], steps: []};
   fixture.supervisorStore.saveTask({...task, status: "inferred", workflow, workflowProposalId: "csv-1", updatedAt: 1,
     agreement: {status: "agreed", message: "Accepted", proposalId: "csv-1", agreedAt: 1, supervisorMessageId: "supervisor-proof", agentMessageId: "operative-proof", workflow}});
+  fixture.supervisorStore.prune(32 * day);
+  assert.equal(fixture.supervisorStore.task("expiry-source")?.agreement?.status, "agreed", "a retained ready scope survives long idle periods");
+  const binding = fixture.supervisorStore.binding("project-a", "expiry-source")!;
+  fixture.supervisorStore.setBinding({...binding, state: "missing"});
   fixture.supervisorStore.prune(32 * day);
   const expired = fixture.supervisorStore.task("expiry-source");
   assert.equal(expired?.status, "expired");
@@ -1220,4 +986,58 @@ test("explicit editor authorization binds exact complete definition contents and
   fixture.supervisorStore.recordDefinitionUserSave(definitions, "edited-revision");
   fixture.restart();
   assert.equal(fixture.supervisorStore.definitionUserSave(definitions, definitions, 0), true);
+});
+
+test("parallel main worktrees retain distinct ownership and scoped recovery through restart", async t => {
+  const fixture = await makeFixture([{threadId: "tree-a", projectId: "project-a", turns: [{id: "a-task", sequence: 11, text: "Implement in tree A"}]},
+    {threadId: "tree-b", projectId: "project-a", turns: [{id: "b-task", sequence: 12, text: "Implement in tree B"}]}]);
+  t.after(fixture.cleanup);
+  fixture.projections.get("tree-a")!.thread.worktreePath = "/work/a/tree-a";fixture.projections.get("tree-b")!.thread.worktreePath = "/work/a/tree-b";
+  fixture.setUnknownDispatches(1);await fixture.makeSupervisor().runOnce();
+  const a = fixture.supervisorStore.binding("project-a", "tree-a")!;const b = fixture.supervisorStore.binding("project-a", "tree-b")!;
+  assert.notEqual(a.threadId, b.threadId);assert.equal(fixture.supervisorStore.task("tree-a")?.status, "uncertain");assert.equal(fixture.supervisorStore.task("tree-b")?.status, "waiting");
+  const bTask = fixture.supervisorStore.task("tree-b")!;
+  fixture.restart();const restored = fixture.makeSupervisor();
+  const mismatch = await restored.retry({...retryInput("project-a", 0, a, "retry"), mainThreadId: "tree-b"}, AbortSignal.timeout(1000));
+  assert.equal(mismatch.status, "conflict");assert.deepEqual(fixture.supervisorStore.task("tree-b"), bTask);
+  assert.equal((await restored.snapshot("project-a", AbortSignal.timeout(1000), "tree-b")).binding?.threadId, b.threadId);
+  assert.equal((await restored.snapshot("project-a", AbortSignal.timeout(1000), "tree-a")).tasks[0]?.threadId, "tree-a");
+  assert.ok(fixture.operations.filter(call => call.tag === "orchestration.launchThread").every(call => (call.payload.workspaceStrategy as {type: string}).type === "root"));
+});
+
+test("a native keep-active choice does not restore stale binding creation state", async t => {
+  const fixture = await makeFixture([{threadId: "pinned-source", projectId: "project-a", turns: [{id: "pin-task", sequence: 11, text: "Implement a task"}]}]);
+  t.after(fixture.cleanup);const supervisor = fixture.makeSupervisor();await supervisor.runOnce();
+  const binding = fixture.supervisorStore.binding("project-a", "pinned-source")!;
+  fixture.supervisorStore.setBinding({...binding, state: "uncertain"});
+  fixture.projections.get(binding.threadId)!.thread.settledOverride = "active";
+  await supervisor.runOnce();
+  assert.equal(fixture.supervisorStore.binding("project-a", "pinned-source")?.state, "ready");
+  assert.equal(fixture.supervisorStore.binding("project-a", "pinned-source")?.manualKeepActive, true);
+});
+
+
+test("an independent fork remains eligible when its old parent is absent from the active catalog", async t => {
+  const fixture = await makeFixture([{threadId: "fork-main", projectId: "project-a", turns: [{id: "fork-task", sequence: 11, text: "Implement separately"}]}]);
+  t.after(fixture.cleanup);fixture.projections.get("fork-main")!.thread.lineage = {parentThreadId: "archived-parent", relationshipToParent: "fork", rootThreadId: "historical-root"};
+  await fixture.makeSupervisor().runOnce();assert.equal(fixture.supervisorStore.task("fork-main")?.status, "waiting");
+  assert.ok(fixture.supervisorStore.binding("project-a", "fork-main"));
+});
+
+test("repeated short passes rotate past a hung Supervisor and keep later mains progressing", async t => {
+  const initial = Array.from({length: 9}, (_, index) => ({threadId: `main-${index}`, projectId: "project-a", turns: [{id: `old-${index}`, sequence: 9, text: "Old task"}]}));
+  const fixture = await makeFixture(initial);t.after(fixture.cleanup);
+  const ids = new Map<string, string>();const touched = new Set<string>();
+  for (const item of initial) {
+    const binding = {...fixture.supervisorStore.reserve("project-a", item.threadId, item.threadId, defaultSupervisorModel, 10, Date.now()), state: "ready" as const};
+    fixture.supervisorStore.setBinding(binding);ids.set(binding.threadId, item.threadId);
+    fixture.projections.set(binding.threadId, emptySupervisorProjection(binding.threadId, "project-a", defaultSupervisorModel));
+  }
+  const supervisor = fixture.makeSupervisor();const original = supervisor.t3.projection;
+  t.mock.method(supervisor.t3, "projection", (id: string) => {
+    const main = ids.get(id);if (main) touched.add(main);
+    return main === "main-0" ? Effect.never : original(id);
+  });
+  for (let attempt = 0; attempt < 3; attempt++) await supervisor.runOnce(AbortSignal.timeout(25));
+  assert.equal(touched.size, 9, "the same slow first binding must not permanently hide tail mains");
 });

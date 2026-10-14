@@ -12,7 +12,8 @@ through active steering, and discusses them using native T3 messages. Ongoing
 check-ins use the existing T3 activity source. Matching structured confirmations
 from both chats produce a saved agreement; neither a draft nor an agreement proves
 that its steps were executed or that the code complies.
-Task interpretation uses an automatically created T3 conversation per project.
+Task interpretation uses an automatically created T3 conversation per main operational conversation. Independent mains in one
+project have separate Supervisors; descendants belong to their main scope.
 
 ## Connect
 
@@ -50,16 +51,18 @@ to provision or retrieve it through ordinary dashboard usage.
 
 Under Projects, choose a model and reasoning from the connected T3 catalog, then
 Save Supervisor settings. This preference is project-wide, including its worktrees.
-The service creates and reuses a Supervisor conversation automatically for the first
-new task; no manual launch is needed. Saved and current selections differ while a
-change waits for the Supervisor to become idle. Unavailable models remain visible
-without a fallback. Refresh to verify the actual T3 selection after a change.
+The service creates one Supervisor for each main operational conversation's first
+new task and reuses it on resume. Saved models/reasoning are defaults for new chats
+only; edit existing Supervisors using their native T3 controls. Select a main
+conversation to inspect its current model, task and scoped retry action. Project
+root shows defaults only. Unavailable models remain visible without a fallback.
 
 Configure ongoing monitoring in the same form: pause/resume, maximum pending age
 (default five minutes) and finalized activities per operative chat (default ten).
 Saving applies these limits on the next service check without losing pending
-changes or restarting the service. The fixed project cooldown is sixty seconds;
-only one service-originated check-in runs at a time. A busy supervising chat can
+changes or restarting the service. The fixed per-Supervisor cooldown is sixty seconds;
+each Supervisor has at most one service-originated check-in in flight. Other mains
+remain independently supervised. A busy supervising chat can
 delay an otherwise due check-in.
 
 Inspect monitoring status and pending counts before Retry native access. Existing
@@ -110,3 +113,12 @@ do not automatically replace the active task's saved definitions. Explicit rule
 editor saves are user input and still stale the old agreement. Inspect Checking,
 Revert requested, Authorized or Restored states and their evidence details. This
 does not prevent filesystem writes or provide GitHub comment escalation.
+
+## Idle lifecycle
+
+After completed main work, a final confirmed check-in and a quiet minute, the
+controller can settle the owned Supervisor chat. Pending work/input, uncertainty,
+active children, pins or keep-active choices prevent parking. Resuming the main
+wakes the same Supervisor; settlement does not invalidate its agreement. Unknown
+settlement has a scoped Retry native access action. Child workflow tracking and
+direct child guidance remain planned work.

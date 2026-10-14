@@ -7,19 +7,22 @@ remains visible; the service never silently substitutes another model.
 
 Save Supervisor settings stores the project's preference. It does not start an
 operational task or require a manual conversation-creation step. The service
-creates one ordinary T3 Supervisor conversation automatically when the first new
-task needs interpretation, then reuses it for later tasks in that project.
+creates one ordinary T3 Supervisor conversation for each main operational conversation
+automatically when its first new task needs interpretation. It reuses that same
+Supervisor when the main resumes. Independent mains, including different worktrees
+in one project, have independent Supervisors. Subagent ancestry belongs to the main
+scope; forks and separately launched ordinary conversations are independent.
+Child-aware workflow monitoring and guidance remain a following batch.
 The initial default is `gpt-6-luna` with high reasoning on the `codex` provider;
 choose another available model if that selection is unavailable in the environment.
 
-Saved and current model selections are displayed separately. The service applies
-changes through T3 between Supervisor runs and checks the observed selection.
-T3 can also disable providers per project; a native rejection is shown explicitly
-and releases the affected request rather than silently choosing another provider.
-Changes made directly in the T3 conversation are reflected when no dashboard
-change is pending. T3 does not offer an atomic model-setting compare-and-swap;
-a simultaneous edit from T3 and this dashboard can race. Refresh to inspect the
-actual selection rather than assuming a pending setting is already active.
+Saved project defaults and the selected Supervisor's current model are displayed
+separately. Dashboard model saves apply only to newly created Supervisors. Change
+an existing Supervisor's model and reasoning through that conversation's T3 controls;
+readback is isolated to its binding and never changes shared project defaults.
+T3 can disable providers per project; rejections remain explicit with no fallback.
+Choose a main conversation to inspect its binding, task and recovery controls.
+Project-root selection shows shared defaults, without another chat's binding or retry.
 
 ## Task interpretation and draft workflows
 
@@ -89,14 +92,13 @@ change the modes explicitly in that conversation's T3 controls and Retry native 
 A stale settings generation rejects a concurrent dashboard save. Drafts survive
 connection failures and stay available after conflicts. Unknown save outcomes
 require an explicit refresh; rejected session guards refresh access without
-repeating the write automatically. Model changes apply only when the Supervisor
-is idle, and existing requests retain their original identity through uncertainty.
-Monitoring-only saves advance the dashboard save generation but preserve the
-separate model-mutation generation, so an unresolved model update keeps its native
-command identity. Interpretation timeouts start at the native run's actual start;
+repeating the write automatically. Existing native requests retain their original
+identity through uncertainty. Monitoring saves apply shared thresholds on the next
+check, while request locks, cooldowns, failed-review budgets, caches and recovery
+are isolated per Supervisor. Interpretation timeouts start at the native run's actual start;
 time spent queued is not counted as model execution time.
 
-Retry native access reconciles an uncertain creation, model update or request
+Retry native access reconciles an uncertain creation, settlement or request
 with its original identity. Resolve dirty settings drafts first. A confirmed deleted
 conversation exposes a distinct Replace deleted Supervisor conversation action;
 the server checks the requested action and binding identity before replacement.
@@ -108,8 +110,8 @@ Task inputs are capped at 24,000 characters, complete workflow prompts at 120,00
 characters and structured workflow responses at 128,000 characters. Native
 frames/activation snapshots are capped at 8 MiB,
 and baseline threads at 10,000. There are at most 100 queued tasks per project,
-10,000 lifetime task records and 1,000 owned conversation IDs. Finished objective
-details expire after 30 days while deduplication metadata remains. These are
+10,000 lifetime task records and 1,000 owned conversation IDs. Ready scopes retain interpreted plans and agreements across long idle periods.
+Unbound/unavailable objective details expire after 30 days while identities remain. These are
 prototype limits; oversized or unavailable baseline reads keep discovery in its
 visible initializing state. Long Supervisor conversations use T3/provider context
 management rather than a separate compaction service.
@@ -173,7 +175,7 @@ Recovery uses the same Supervisor and operative conversations. A stale agreement
 is kept as history; a replacement needs a fresh proposal identity and a matching
 complete operative acceptance. A detected stale agreement or definition change
 can request one bounded recovery check-in without waiting for further tool activity.
-The existing project cooldown and single in-flight request still apply. An edited
+The per-Supervisor cooldown and single in-flight request still apply. An edited
 original user request can be reinterpreted when it remains a valid completed native
 user message; deleted or rolled-back source evidence cannot be treated as a new task.
 
@@ -228,7 +230,7 @@ do not trigger check-ins. Pending input and run finish/failure are priority chan
 
 For each operative chat, a check-in becomes due when its oldest unreviewed activity
 is five minutes old, ten activities have completed, or there is a priority event.
-There is a fixed 60-second gap between service notices to one project's supervising
+There is a fixed 60-second gap between service notices to one main conversation's supervising
 chat, and one service request in flight. Busy chats accumulate activity for later;
 five minutes is a scheduling threshold, not a guaranteed response deadline.
 Counts are per operative chat, with bounded fair selection across chats.
@@ -255,7 +257,7 @@ Capacity limits and unresolved deliveries are surfaced rather than silently
 discarding unreviewed activity. Completed check-ins with unconfirmed output retain
 their activity and retry after the cooldown, stopping after three consecutive
 misses. Other failed or uncertain effects need explicit native recovery.
-Completed request history retains the latest 100 entries per project for up to
+Completed request history retains the latest 100 entries per Supervisor for up to
 30 days; unfinished and unacknowledged failed reviews are preserved separately.
 Activity metadata is capped at 1,000 rows per chat. Fully acknowledged closed runs
 advance the source floor and release their reviewed metadata, so ordinary completed
@@ -285,3 +287,53 @@ with provider startup; `holdQueue` holds queued work rather than pausing the cur
 run for later resumption. Guaranteeing workflow negotiation before the first
 provider call requires control over T3's initial dispatch path. This stage keeps
 agent startup unchanged and does not implement a startup barrier.
+
+## Automatic settlement and resumed work
+
+The controller requests native `thread.settle` after a successful completed main
+turn, no pending monitoring/supervisory work and a quiet minute after the final
+confirmed check-in. Active or runless/unresolved children, native queued work, any
+pending runtime input, uncertainty, failed unacknowledged reviews and stale
+agreement recovery prevent parking. This is an idle lifecycle rule, not evidence
+that every workflow step passed. Shared-checkout Supervisor chats avoid operational
+worktree cleanup. Settled main chats remain eligible for observation; settlement
+alone neither creates a task nor invalidates its agreement. Ordinary dispatch
+reactivates the same owned Supervisor, preserving binding and native history.
+
+User pins and disabled auto-settlement prevent parking while set. An observed
+keep-active override is retained conservatively in the binding, including when
+native dispatch clears it; no release control is added
+in this batch. T3 has no client pin CAS, so a last-moment pin can still race the
+read-then-settle request. Paused monitoring allows parking only when its backlog, requests and introductions
+are finished. Binding processing rotates each pass in groups of four, with a
+thirty-second deadline per binding covering processing and lifecycle checks.
+Unknown settlement preserves its command identity and automatically retries it
+up to three times at one-minute intervals while the same scope remains quiet.
+New activity supersedes the parking epoch; a successful receipt followed by
+reactivation is a superseded success, not uncertainty. Scoped retry renews an
+exhausted budget. No replacement or deletion occurs. Native background rosters,
+pending child completion delivery, active goals and PR watches prevent parking.
+
+## Disposable prototype state upgrade
+
+The user authorized discarding existing Supervisor-only test state. The first
+startup with the per-main schema performs one transactional reset of old/new
+bindings, interpretations, introductions, candidates, requests and monitor clocks/
+items. It clears discovery baseline and sequence together so a fresh native
+active/archive baseline excludes historical messages. The `main-v1` marker prevents
+repeating this reset on ordinary restarts. Project defaults, permanent owned IDs,
+definition-save evidence, credentials and unrelated delivery/input state survive.
+An unsupported future scope version disables semantic supervision without resetting
+state or stopping unrelated service integrations. This is an approved prototype
+transition, not a general migration for production
+agreements. Existing native test conversations are retained as excluded historical
+chats; this transition does not delete operational conversations. Back up the
+private state volume before rollout; never copy its contents into Git.
+
+Residual lifecycle limits: a paused monitoring backlog cannot be acknowledged
+until monitoring resumes, so pausing mid-task can keep the Supervisor active.
+Archiving/deleting a main does not automatically park its Supervisor. At high
+retained-scope counts, bounded observation can notice final activity after parking
+and wake the same chat again; this does not discard the activity. The binding
+deadline includes time waiting for its lock, so concurrent recovery can postpone
+processing for one pass. These need live validation and later lifecycle UX work.

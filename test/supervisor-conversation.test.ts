@@ -271,7 +271,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-conversation-test-"));
   const guidance = new GuidanceStore(directory);
   const projectStore = new ProjectSupervisorStore(guidance, new Set());
-  const binding = projectStore.reserve(projectId, "Project A", defaultSupervisorModel, 10, clock.now);
+  const binding = projectStore.reserve(projectId, operativeThreadId, "Project A", defaultSupervisorModel, 10, clock.now);
   projectStore.setBinding({ ...binding, state: "ready" });
   const settings = projectStore.settings(projectId);
   projectStore.saveSettings(projectId, settings.generation, settings.modelSelection, options.settings ?? {
@@ -520,7 +520,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
   };
   const signal = AbortSignal.timeout(10_000);
   return {
-    binding: projectStore.binding(projectId) as BindingRecord,
+    binding: projectStore.binding(projectId, operativeThreadId) as BindingRecord,
     calls,
     cleanup: async () => { guidance.close(); await rm(directory, { recursive: true, force: true }); },
     conversation,
@@ -534,7 +534,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     projection: (threadId: string) => projections.get(threadId) ?? null,
     operative,
     projectStore,
-    run: () => conversation.run(projectStore.binding(projectId) as BindingRecord, supervisor, threadList, signal),
+    run: () => conversation.run(projectStore.binding(projectId, operativeThreadId) as BindingRecord, supervisor, threadList, signal),
     supervisor,
     task,
     threadList,
@@ -654,7 +654,7 @@ test("context bootstrap is queued atomically, correlated to its own run, and onl
   const contextCall = supervisorRequestCall(fixture, "context");
   assert.ok(contextCall);
   assert.deepEqual(contextCall.payload.dispatchMode, { type: "queue_after_active" });
-  const request = fixture.conversation.requests.pending(projectId);
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.ok(request);
   assert.equal(request.kind, "context");
   assert.equal(request.messageId, contextCall.payload.messageId);
@@ -668,7 +668,7 @@ test("context bootstrap is queued atomically, correlated to its own run, and onl
   assert.equal(fixture.calls.some(call => call.payload.threadId === operativeThreadId), false);
 
   await fixture.run();
-  assert.equal(fixture.conversation.requests.pending(projectId)?.runId, run.id);
+  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId)?.runId, run.id);
   assert.equal(fixture.calls.some(call => call.payload.threadId === operativeThreadId), false);
 
   const peerRun = fixture.supervisor.runs.find(item => item.id === "supervisor-peer-run");
@@ -700,7 +700,7 @@ test("a replaced context primary closes the request and blocks the proposal inst
   t.after(fixture.cleanup);
 
   await fixture.run();
-  const request = fixture.conversation.requests.pending(projectId);
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.ok(request?.kind === "context");
   const message = fixture.supervisor.messages.find(item => item.id === request.messageId);
   assert.ok(message);
@@ -713,7 +713,7 @@ test("a replaced context primary closes the request and blocks the proposal inst
   await fixture.run();
 
   assert.equal(fixture.conversation.requests.requests(projectId).find(item => item.id === request.id)?.state, "failed");
-  assert.equal(fixture.conversation.requests.pending(projectId), null);
+  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId), null);
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "blocked");
 });
 
@@ -764,7 +764,7 @@ test("uncertain operative introduction is not replayed automatically; explicit r
   assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 1);
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "uncertain");
 
-  fixture.conversation.retry(projectId);
+  fixture.conversation.retry(projectId, fixture.binding.threadId);
   await fixture.run();
   const retries = fixture.calls.filter(call => call.payload.threadId === operativeThreadId);
   assert.equal(retries.length, 2);
@@ -814,7 +814,7 @@ test("an uncertain idle introduction preserves its queued dispatch mode when an 
   assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 1);
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "uncertain");
 
-  fixture.conversation.retry(projectId);
+  fixture.conversation.retry(projectId, fixture.binding.threadId);
   await fixture.run();
   const calls = fixture.calls.filter(call => call.payload.threadId === operativeThreadId);
   assert.equal(calls.length, 2);
@@ -852,7 +852,7 @@ test("an invalid native receipt makes introduction delivery uncertain without au
   assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 1);
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "uncertain");
 
-  fixture.conversation.retry(projectId);
+  fixture.conversation.retry(projectId, fixture.binding.threadId);
   await fixture.run();
   const calls = fixture.calls.filter(call => call.payload.threadId === operativeThreadId);
   assert.equal(calls.length, 2);
@@ -890,7 +890,7 @@ test("a still-invisible accepted introduction does not starve another operative 
 
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "accepted");
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.visibilityMisses, 1);
-  const request = fixture.conversation.requests.pending(projectId);
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.equal(request?.kind, "review");
   assert.deepEqual(request?.batch?.threads.map(thread => thread.threadId), [second.task.threadId]);
   assert.ok(supervisorRequestCall(fixture, "review"));
@@ -921,7 +921,7 @@ test("a deleted operative introduction is blocked while another operative chat s
   await fixture.run();
 
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "blocked");
-  const request = fixture.conversation.requests.pending(projectId);
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.equal(request?.kind, "review");
   assert.deepEqual(request?.batch?.threads.map(thread => thread.threadId), [second.task.threadId]);
   assert.ok(supervisorRequestCall(fixture, "review"));
@@ -949,7 +949,7 @@ test("an unreadable introduced chat does not stop a healthy chat review or ackno
 
     await fixture.run();
 
-    const request = fixture.conversation.requests.pending(projectId);
+    const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
     assert.equal(request?.kind, "review", failure.label);
     assert.deepEqual(request?.batch?.threads.map(thread => thread.threadId), [healthy.task.threadId], failure.label);
     const reviewRun = fixture.supervisor.runs.find(run => run.userMessageId === request?.messageId);
@@ -1084,7 +1084,7 @@ test("a rejected queued fallback waits for explicit retry, then uses fresh queue
 
   await fixture.run();
   assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 2, "a definite queue rejection is never replayed automatically");
-  fixture.conversation.retry(projectId);
+  fixture.conversation.retry(projectId, fixture.binding.threadId);
   const retry = fixture.conversation.requests.introduction(fixture.task.id);
   assert.equal(retry?.state, "ready");
   assert.deepEqual(retry?.dispatchMode, { type: "queue_after_active" });
@@ -1121,7 +1121,7 @@ test("one review stays in flight while activity changes and acknowledges only it
 
   await fixture.run();
   const firstCall = supervisorRequestCall(fixture, "review");
-  const request = fixture.conversation.requests.pending(projectId);
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.ok(firstCall && request?.batch);
   assert.equal(request.kind, "review");
   assert.deepEqual(firstCall.payload.dispatchMode, { type: "queue_after_active" });
@@ -1155,7 +1155,7 @@ test("primary replacement, missing markers and an untrusted interruption close r
   const requests: ConversationRequest[] = [];
   for (let attempt = 1; attempt <= 3; attempt++) {
     await fixture.run();
-    const request = fixture.conversation.requests.pending(projectId);
+    const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
     assert.ok(request?.kind === "review" && request.batch);
     requests.push(request);
     const run = fixture.supervisor.runs.find(candidate => candidate.userMessageId === request.messageId);
@@ -1181,20 +1181,20 @@ test("primary replacement, missing markers and an untrusted interruption close r
     const closed = fixture.conversation.requests.requests(projectId).find(item => item.id === request.id);
     assert.equal(closed?.state, attempt < 3 ? "completed" : "failed");
     if (attempt === 1) assert.equal(closed?.runId, run.id, "the restarted run is terminally reconciled by its request message");
-    assert.equal(fixture.conversation.requests.pending(projectId), null, "a replaced run primary is terminal rather than an endless wait");
-    assert.equal(fixture.conversation.requests.reviewMisses(projectId), attempt);
+    assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId), null, "a replaced run primary is terminal rather than an endless wait");
+    assert.equal(fixture.conversation.requests.reviewMisses(fixture.binding.threadId), attempt);
     const pendingIds = new Set(fixture.conversation.monitor.pending(projectId, operativeThreadId).map(item => item.id));
     for (let index = 1; index <= 3; index++) assert.ok(pendingIds.has(`contaminated-command-${index}`));
-    if (attempt < 3) assert.equal(fixture.conversation.status(projectId).state, "idle");
+    if (attempt < 3) assert.equal(fixture.conversation.status(projectId, fixture.binding.threadId).state, "idle");
   }
 
-  assert.equal(fixture.conversation.status(projectId).state, "unavailable");
+  assert.equal(fixture.conversation.status(projectId, fixture.binding.threadId).state, "unavailable");
   assert.equal(requests[2]?.failureAcknowledged, undefined);
-  fixture.conversation.retry(projectId);
-  assert.equal(fixture.conversation.requests.reviewMisses(projectId), 0);
+  fixture.conversation.retry(projectId, fixture.binding.threadId);
+  assert.equal(fixture.conversation.requests.reviewMisses(fixture.binding.threadId), 0);
   assert.equal(fixture.conversation.requests.requests(projectId).find(item => item.id === requests[2]?.id)?.failureAcknowledged, true);
   await fixture.run();
-  assert.equal(fixture.conversation.requests.pending(projectId)?.kind, "review");
+  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId)?.kind, "review");
 });
 
 test("a direct peer reply with senderThreadId does not contaminate a valid review", async t => {
@@ -1207,7 +1207,7 @@ test("a direct peer reply with senderThreadId does not contaminate a valid revie
   await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
   await fixture.run();
 
-  const request = fixture.conversation.requests.pending(projectId);
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.ok(request?.kind === "review" && request.batch);
   const run = fixture.supervisor.runs.find(candidate => candidate.userMessageId === request.messageId);
   assert.ok(run);
@@ -1239,7 +1239,7 @@ test("a 100-item monitor burst freezes and acknowledges all activity while showi
   await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
   await fixture.run();
 
-  const request = fixture.conversation.requests.pending(projectId);
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.ok(request?.kind === "review" && request.batch);
   const frozenIds = new Set(request.batch.threads[0]?.items.map(item => item.id));
   assert.ok((frozenIds.size ?? 0) >= 100);
@@ -1339,7 +1339,7 @@ test("paused prepared requests retain their native identity until monitoring res
   });
 
   await fixture.run();
-  assert.equal(fixture.conversation.requests.pending(projectId)?.state, "prepared");
+  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId)?.state, "prepared");
   assert.equal(fixture.calls.length, 0);
 
   settings = fixture.projectStore.settings(projectId);
@@ -1350,7 +1350,7 @@ test("paused prepared requests retain their native identity until monitoring res
   });
   await fixture.run();
 
-  const dispatched = fixture.conversation.requests.pending(projectId);
+  const dispatched = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.equal(dispatched?.id, request.id);
   assert.equal(dispatched?.messageId, request.messageId);
   assert.equal(dispatched?.state, "waiting");
@@ -1379,7 +1379,7 @@ test("monitoring-only API saves pause and resume the live threshold without losi
   appendNoticeToOperative(fixture);
   await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
   await fixture.run();
-  const firstRequest = fixture.conversation.requests.pending(projectId);
+  const firstRequest = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.ok(firstRequest?.kind === "review");
   const firstRun = fixture.supervisor.runs.find(run => run.userMessageId === firstRequest.messageId);
   assert.ok(firstRun);
@@ -1426,7 +1426,7 @@ test("monitoring-only API saves pause and resume the live threshold without losi
   const reviewCalls = fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId && String(call.payload.text).includes("Review this factual change index."));
   assert.equal(reviewCalls.length, 2);
   const resumedPendingIds = new Set(fixture.conversation.monitor.pending(projectId, operativeThreadId).map(item => item.id));
-  const batchIds = new Set(fixture.conversation.requests.pending(projectId)?.batch?.threads[0]?.items.map(item => item.id));
+  const batchIds = new Set(fixture.conversation.requests.pending(projectId, fixture.binding.threadId)?.batch?.threads[0]?.items.map(item => item.id));
   for (let index = 1; index <= 3; index++) {
     assert.ok(resumedPendingIds.has(`threshold-command-${index}`));
     assert.ok(batchIds.has(`threshold-command-${index}`));
@@ -1442,7 +1442,7 @@ test("legacy objective-only tasks without a proposed workflow do not create intr
   await fixture.run();
 
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id), null);
-  assert.equal(fixture.conversation.requests.pending(projectId), null);
+  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId), null);
   assert.equal(fixture.calls.length, 0);
 });
 
@@ -1467,7 +1467,7 @@ test("a restarted source run still gets context and its introduction in three st
   assert.equal(sourceRestart.message.nodeId, sourceRestart.rootNodeId);
 
   await fixture.run();
-  const contextRequest = fixture.conversation.requests.pending(projectId);
+  const contextRequest = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.ok(contextRequest?.kind === "context");
   assert.equal(sourceRun.status, "running", "the source AppRun remains active through the initial context cycle");
   const contextRun = fixture.supervisor.runs.find(run => run.userMessageId === contextRequest.messageId);
@@ -1610,7 +1610,7 @@ test("a stopped source still receives supervision and a stopped introduction per
   sourceRun.status = "interrupted";fixture.operative.thread.activeRunId = null;
   nodesOf(fixture.operative).find(node => node.id === sourceRun.rootNodeId)!.status = "interrupted";
   await fixture.run();
-  const context = fixture.conversation.requests.pending(projectId)!;
+  const context = fixture.conversation.requests.pending(projectId, fixture.binding.threadId)!;
   assert.equal(context.kind, "context");
   const contextRun = fixture.supervisor.runs.find(run => run.userMessageId === context.messageId)!;
   completeRun(fixture.supervisor, contextRun, `Ready. ${context.completionMarker}`, clock.now + 1);
@@ -1779,7 +1779,7 @@ test("changed definitions stay unapproved, trigger one bounded recovery review, 
   assert.deepEqual(task.definitionSnapshot, originalDefinitions, "the saved approved baseline is retained while changed files are reviewed");
 
   await fixture.run();
-  const request = fixture.conversation.requests.pending(projectId);
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.equal(request?.kind, "review");
   assert.equal(request?.taskId, fixture.task.id);
   assert.match(request?.text ?? "", /Review the approved and observed \.supervisor snapshots/u);
@@ -1816,7 +1816,7 @@ test("changed definitions stay unapproved, trigger one bounded recovery review, 
   assert.equal(task.agreement?.status, "agreed");
   assert.equal(task.agreement?.proposalId, restoredProposalId);
   assert.equal(task.agreement?.agentMessageId, accepted.id);
-  assert.equal(fixture.projectStore.binding(projectId)?.threadId, fixture.binding.threadId);
+  assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)?.threadId, fixture.binding.threadId);
   assert.ok(fixture.calls.every(call => call.payload.threadId === fixture.binding.threadId || call.payload.threadId === operativeThreadId));
 });
 
@@ -1900,7 +1900,7 @@ test("definitions changed before the introduction get autonomous review and a re
   await observeAgreement(fixture, clock.now);
   assert.equal(fixture.projectStore.task(operativeThreadId)?.definitionReview?.status, "checking");
   await fixture.run();
-  const request = fixture.conversation.requests.pending(projectId)!;
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId)!;
   assert.equal(request.kind, "review");
   assert.match(request.text, /UNTRUSTED_PROJECT_DEFINITION_REVIEW_ENVELOPE/u);
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "blocked");
@@ -1914,7 +1914,7 @@ test("definitions changed before the introduction get autonomous review and a re
   assert.equal(renewed.supervisorThreadId, fixture.binding.threadId);
   assert.notEqual(renewed.workflowProposalId, fixture.task.id);
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id), null);
-  assert.equal(fixture.conversation.requests.pending(projectId)?.id, request.id);
+  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId)?.id, request.id);
 });
 
 test("renewal never removes a possibly accepted introduction reservation", async t => {
@@ -2017,7 +2017,7 @@ test("stale evidence can be renegotiated with a fresh ID in the same chats after
   clock.now += 60_000;
 
   await fixture.conversation.run(fixture.binding, fixture.supervisor, fixture.threadList, AbortSignal.timeout(5_000));
-  const request = fixture.conversation.requests.pending(projectId);
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.equal(request?.kind, "review");
   assert.equal(request?.taskId, fixture.task.id);
   assert.match(request?.text ?? "", /Reassess the real task/u);

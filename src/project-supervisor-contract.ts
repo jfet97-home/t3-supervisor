@@ -29,10 +29,13 @@ export const SupervisorModel = Schema.Struct({
 export type SupervisorModelInfo = typeof SupervisorModel.Type;
 export const ProjectSupervisorBinding = Schema.Struct({
   projectId: Schema.String,
+  mainThreadId: Schema.String,
   threadId: Schema.String,
   generation: Schema.Number,
   enabledAt: Schema.Number,
   state: Schema.Literals(["creating", "ready", "uncertain", "rejected", "missing"]),
+  settlementState: Schema.optionalKey(Schema.NullOr(Schema.Literals(["pending", "uncertain", "settled", "superseded"]))),
+  keptActive: Schema.optionalKey(Schema.Boolean),
 });
 export type SupervisorBinding = typeof ProjectSupervisorBinding.Type;
 export const WorkflowProposal = Schema.Struct({
@@ -90,6 +93,8 @@ export const TaskInterpretation = Schema.Struct({
 export type TaskInterpretationInfo = typeof TaskInterpretation.Type;
 export const ProjectSupervisorSnapshot = Schema.Struct({
   projectId: Schema.String,
+  mainThreadId: Schema.NullOr(Schema.String),
+  modelApplication: Schema.NullOr(Schema.Struct({pending: Schema.Boolean, attempts: Schema.Number, message: Schema.NullOr(Schema.String)})),
   settings: Schema.Struct({generation: Schema.Number, modelSelection: ModelSelection, pending: Schema.Boolean, monitoring: Schema.optionalKey(MonitoringSettings)}),
   binding: Schema.NullOr(ProjectSupervisorBinding),
   modelSelection: Schema.NullOr(ModelSelection),
@@ -102,6 +107,7 @@ export const ProjectSupervisorSnapshot = Schema.Struct({
 export type ProjectSupervisorInfo = typeof ProjectSupervisorSnapshot.Type;
 export const ProjectSupervisorSave = Schema.Struct({
   projectId: Schema.String,
+  mainThreadId: Schema.optionalKey(Schema.String),
   expectedGeneration: Schema.Number,
   modelSelection: ModelSelection,
   monitoring: Schema.optionalKey(MonitoringSettings),
@@ -109,6 +115,7 @@ export const ProjectSupervisorSave = Schema.Struct({
 export type ProjectSupervisorSaveInput = typeof ProjectSupervisorSave.Type;
 export const ProjectSupervisorRetry = Schema.Struct({
   projectId: Schema.String,
+  mainThreadId: Schema.String,
   expectedGeneration: Schema.Number,
   threadId: Schema.String,
   bindingGeneration: Schema.Number,

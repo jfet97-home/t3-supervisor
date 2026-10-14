@@ -112,12 +112,12 @@ const withReasoningValue = (selection: SupervisorModelSelection, model: Supervis
 export const shouldOfferNativeRetry = (snapshot: ProjectSupervisorInfo) => {
   const monitoringNeedsRetry = (snapshot.monitoringStatus?.state === "uncertain" || snapshot.monitoringStatus?.state === "unavailable") &&
     snapshot.monitoringStatus.retryable !== false;
-  return monitoringNeedsRetry ||
+  return monitoringNeedsRetry || snapshot.binding?.settlementState === "uncertain" ||
     snapshot.binding?.state === "uncertain" ||
     snapshot.binding?.state === "rejected" ||
     snapshot.binding?.state === "missing" ||
     snapshot.tasks.some(task => task.status === "uncertain") ||
-    snapshot.settings.pending && snapshot.binding?.state === "ready";
+    Boolean(snapshot.modelApplication?.pending) && snapshot.binding?.state === "ready";
 }
 
 const formatWorkflowAgreementTime = (timestamp: number) => {
@@ -321,21 +321,23 @@ export function ProjectSupervisorView({
       {snapshot.binding?.state === "missing"
         ? <p>Deleted Supervisor conversation: <code>{snapshot.binding.threadId}</code></p>
         : snapshot.binding
-          ? <p>Bound conversation: <a href={`t3-thread://v1/${encodeURIComponent(snapshot.binding.threadId)}`}>Open in T3</a> <code>{snapshot.binding.threadId}</code></p>
-        : <p>No Supervisor conversation is bound yet.</p>}
-      <p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses that conversation for later tasks.</p>
+          ? <p>Bound conversation: <a href={`t3-thread://v1/${snapshot.binding.threadId}`}>Open in T3</a> <code>{snapshot.binding.threadId}</code></p>
+        : <p>{snapshot.mainThreadId ? "No Supervisor is bound to this main conversation yet." : "Select a main conversation to inspect its Supervisor."}</p>}
+      <p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses it when that main conversation resumes. Independent main conversations have separate Supervisors.</p>
+      {snapshot.binding?.settlementState && <p>Automatic settlement: {snapshot.binding.settlementState}. Resumed work uses this same conversation.</p>}
+      {snapshot.binding?.keptActive && <p>Automatic settlement is held by a user keep-active choice.</p>}
       <p className="muted">Supervisor work runs in the project root. Role instructions limit it to reading and messaging through T3, but those instructions do not enforce tool restrictions.</p>
       <p>{snapshot.message}</p>
-      <p><strong>Saved Supervisor model:</strong> {formatModel(snapshot, snapshot.settings.modelSelection)}</p>
-      <p><strong>Current model observed in T3:</strong> {formatModel(snapshot, snapshot.modelSelection)}</p>
-      {snapshot.settings.pending && snapshot.binding?.state === "ready" && <p role="status">T3 is waiting to apply the saved model selection while the Supervisor is idle.</p>}
+      <p><strong>Project default for new Supervisors:</strong> {formatModel(snapshot, snapshot.settings.modelSelection)}</p>
+      {snapshot.mainThreadId && <p><strong>Selected Supervisor model in T3:</strong> {formatModel(snapshot, snapshot.modelSelection)}. Edit this conversation’s model using T3 controls.</p>}
+      {snapshot.modelApplication?.pending && snapshot.binding?.state === "ready" && <p role="status">T3 is waiting to apply the saved model selection while the Supervisor is idle.</p>}
       {snapshot.settings.pending && !snapshot.binding && <p role="status">The saved model selection will apply when T3 creates the Supervisor conversation for the first needed task.</p>}
       {!snapshot.available && <p role="status">Supervisor settings are currently unavailable.</p>}
     </div>
 
     <form className="panel stack" onSubmit={onSubmit} aria-label="Supervisor settings">
       <fieldset disabled={fieldsDisabled} className="stack">
-        <legend>Model selection</legend>
+        <legend>Project model defaults</legend>
         <label htmlFor="supervisor-model">Model</label>
         <select id="supervisor-model" name="model" value={selectedModelKey(selection)} disabled={!modelCanChange} onChange={event => {
             const next = parseModelKey(event.target.value);
@@ -362,7 +364,7 @@ export function ProjectSupervisorView({
       </fieldset>
       <fieldset disabled={fieldsDisabled} className="stack">
         <legend>Ongoing monitoring</legend>
-        <p className="muted">Monitoring wakes the project’s ordinary Supervisor chat when pending activity reaches its maximum age or the finalized activity threshold. Defaults apply to new task workflows; existing objective-only tasks are not reprocessed.</p>
+        <p className="muted">Monitoring wakes each main conversation’s own Supervisor chat when pending activity reaches its maximum age or the finalized activity threshold. Defaults apply to new task workflows; existing objective-only tasks are not reprocessed.</p>
         {snapshot.monitoringStatus && <section className="stack" aria-labelledby="supervisor-monitoring-status-title">
           <h4 id="supervisor-monitoring-status-title">Current monitoring status</h4>
           <p><strong>Status:</strong> {snapshot.monitoringStatus.state}</p>
@@ -395,8 +397,8 @@ export function ProjectSupervisorView({
           <span id="supervisor-monitoring-threshold-help" className="small muted">Enter a whole number from 3 to 100 finalized activities.</span>
           <span id="supervisor-monitoring-threshold-error" className="small" aria-live="polite">{thresholdError}</span>
         </div>
-        <p><strong>Project cooldown:</strong> 60 seconds between monitoring sends.</p>
-        <p><strong>Model review limit:</strong> one in-flight review per project.</p>
+        <p><strong>Supervisor cooldown:</strong> 60 seconds between monitoring sends.</p>
+        <p><strong>Model review limit:</strong> one in-flight review per Supervisor.</p>
       </fieldset>
       <button type="submit" disabled={!canSave || saving || blocked}>{saving ? "Saving…" : "Save Supervisor settings"}</button>
       {dirty && <button type="button" disabled={saving || blocked} onClick={onDiscard}>Discard draft</button>}
@@ -406,7 +408,7 @@ export function ProjectSupervisorView({
       <h3>{snapshot.binding?.state === "missing" ? "Deleted Supervisor conversation" : "Native Supervisor access"}</h3>
       <p className="muted">{snapshot.binding?.state === "missing"
         ? "T3 confirmed that the bound conversation was deleted. This explicit action replaces it with a new Supervisor conversation."
-        : "Use this explicit action to retry the project's pending or rejected native operation."}</p>
+        : "Use this explicit action to retry the selected conversation’s pending or rejected native operation."}</p>
       {!snapshot.binding && <p role="status">No bound Supervisor conversation is available to retry yet. Refresh after the service establishes one.</p>}
       {dirty && <p role="status">Save or discard your settings draft before retrying native access.</p>}
       <button type="button" disabled={!canRetry || saving || blocked} onClick={onRetry}>{retryButtonLabel}</button>
@@ -439,19 +441,21 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
   const [saving, setSaving] = useState(false);
   const [blocked, setBlocked] = useState(false);
   const activeProject = useRef(projectId);
+  const activeScope = useRef(JSON.stringify([projectId, threadId || null]));
   const draftRef = useRef(drafts);
   const savingRef = useRef(false);
   const activeLoadKey = useRef("");
   const completedLoadKey = useRef("");
   activeProject.current = projectId;
+  activeScope.current = JSON.stringify([projectId, threadId || null]);
   draftRef.current = drafts;
 
-  const activeSnapshot = snapshotState?.projectId === projectId ? snapshotState.snapshot : null;
+  const activeSnapshot = snapshotState?.projectId === projectId && snapshotState.snapshot.mainThreadId === (threadId || null) ? snapshotState.snapshot : null;
   const activeDraft = drafts[projectId] ?? null;
   const modelDirty = Boolean(activeDraft && selectionKey(activeDraft.modelValue) !== selectionKey(activeDraft.modelBaseline));
   const monitoringDirty = Boolean(activeDraft && !sameMonitoring(activeDraft.monitoringValue, activeDraft.monitoringBaseline));
   const dirty = modelDirty || monitoringDirty;
-  const requestKey = JSON.stringify([projectId, revision]);
+  const requestKey = JSON.stringify([projectId, threadId || null, revision]);
   const isLoading = connected && loadState.key === requestKey && loadState.status === "loading";
   const loadError = loadState.key === requestKey && loadState.status === "error";
   const fieldsBusy = saving || isLoading;
@@ -462,6 +466,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
   const retryButtonLabel = activeSnapshot?.binding?.state === "missing" ? "Replace deleted Supervisor conversation" : "Retry native access";
   const canRetry = Boolean(needsRetry && activeSnapshot?.available && activeSnapshot.binding && activeDraft && !dirty && connected && !fieldsBusy && !blocked);
 
+  useEffect(() => {setPanelMessage(null);}, [projectId, threadId]);
   useEffect(() => {onDirtyChange?.(dirty);}, [dirty, onDirtyChange]);
   useEffect(() => {onSavingChange?.(saving);}, [saving, onSavingChange]);
 
@@ -472,7 +477,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
     const controller = new AbortController();
     activeLoadKey.current = requestKey;
     setLoadState({key: requestKey, status: "loading"});
-    void loadProjectSupervisor(projectId, controller.signal).then(snapshot => {
+    void loadProjectSupervisor(projectId, controller.signal, threadId || null).then(snapshot => {
       if (controller.signal.aborted || activeLoadKey.current !== requestKey || activeProject.current !== projectId) return;
       const priorDraft = draftRef.current[projectId] ?? null;
       const priorModelWasDirty = Boolean(priorDraft && selectionKey(priorDraft.modelValue) !== selectionKey(priorDraft.modelBaseline));
@@ -546,8 +551,10 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
     event.preventDefault();
     if (savingRef.current || !canSave || !activeDraft || !activeSnapshot || !validMonitoring) return;
     const targetProject = projectId;
+    const targetScope = activeScope.current;
     const input = {
       projectId: targetProject,
+      ...(threadId ? {mainThreadId: threadId} : {}),
       expectedGeneration: activeDraft.expectedGeneration,
       modelSelection: copySelection(activeDraft.modelValue),
       monitoring: copyMonitoringSettings(validMonitoring),
@@ -557,7 +564,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
     setPanelMessage(null);
     try {
       const result = await saveProjectSupervisor(input, csrfToken);
-      if (activeProject.current !== targetProject) return;
+      if (activeProject.current !== targetProject || activeScope.current !== targetScope) return;
       if (result.status === "saved") {
         if (result.snapshot) {
           const canonical = copySelection(result.snapshot.settings.modelSelection);
@@ -611,7 +618,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
         setPanelMessage({projectId: targetProject, text: result.status === "conflict" ? `${result.message} Refresh Supervisor settings before trying again.` : result.message, alert: result.status === "invalid"});
       }
     } catch (error) {
-      if (activeProject.current !== targetProject) return;
+      if (activeProject.current !== targetProject || activeScope.current !== targetScope) return;
       const definitelyNotSaved = error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved;
       setBlocked(!definitelyNotSaved);
       setPanelMessage({
@@ -632,8 +639,10 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
     const binding = activeSnapshot?.binding;
     if (!binding) return;
     const targetProject = projectId;
+    const targetScope = activeScope.current;
     const input = {
       projectId: targetProject,
+      mainThreadId: binding.mainThreadId,
       expectedGeneration: activeDraft.expectedGeneration,
       threadId: binding.threadId,
       bindingGeneration: binding.generation,
@@ -644,7 +653,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
     setPanelMessage(null);
     try {
       const result = await retryProjectSupervisor(input, csrfToken);
-      if (activeProject.current !== targetProject) return;
+      if (activeProject.current !== targetProject || activeScope.current !== targetScope) return;
       if (result.status === "uncertain") {
         setBlocked(true);
         setPanelMessage({projectId: targetProject, text: result.message, alert: true});
@@ -672,7 +681,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
         });
       }
     } catch (error) {
-      if (activeProject.current !== targetProject) return;
+      if (activeProject.current !== targetProject || activeScope.current !== targetScope) return;
       const definitelyNotSaved = error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved;
       setBlocked(!definitelyNotSaved);
       setPanelMessage({
@@ -692,7 +701,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
   const loadKey = requestKey;
 
   return <section className="stack project-supervisor" aria-labelledby="project-supervisor-title">
-    <div><h2 id="project-supervisor-title">Project Supervisor settings</h2><p className="muted">Choose the model T3 should use for this project’s Supervisor tasks.</p></div>
+    <div><h2 id="project-supervisor-title">Project Supervisor settings</h2><p className="muted">Set defaults for new Supervisors and select a main conversation to inspect its own Supervisor.</p></div>
     {!projectId && <p className="panel muted">Select a project to manage its Supervisor settings.</p>}
     {projectId && !connected && <p className="panel" role="status">T3 is disconnected. Any unsaved Supervisor settings draft is kept.</p>}
     {projectId && connected && !activeSnapshot && isLoading && <p className="panel" role="status">Loading Supervisor settings…</p>}

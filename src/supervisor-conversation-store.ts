@@ -60,22 +60,22 @@ export class SupervisorConversationStore {
       CREATE TABLE IF NOT EXISTS supervisor_workflow_introductions(task_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS supervisor_workflow_agreement_candidates(task_id TEXT NOT NULL,proposal_id TEXT NOT NULL,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(task_id,proposal_id));
       CREATE INDEX IF NOT EXISTS supervisor_workflow_agreement_project ON supervisor_workflow_agreement_candidates(project_id);
-      CREATE TABLE IF NOT EXISTS supervisor_monitor_project_clock(project_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL,review_misses INTEGER NOT NULL DEFAULT 0);`);
-    if (!store.db.prepare("PRAGMA table_info(supervisor_monitor_project_clock)").all().some(row => row.name === "review_misses")) store.db.exec("ALTER TABLE supervisor_monitor_project_clock ADD COLUMN review_misses INTEGER NOT NULL DEFAULT 0");
+      CREATE TABLE IF NOT EXISTS supervisor_monitor_binding_clock(supervisor_thread_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL,review_misses INTEGER NOT NULL DEFAULT 0);`);
+    if (!store.db.prepare("PRAGMA table_info(supervisor_monitor_binding_clock)").all().some(row => row.name === "review_misses")) store.db.exec("ALTER TABLE supervisor_monitor_binding_clock ADD COLUMN review_misses INTEGER NOT NULL DEFAULT 0");
   }
-  requests(projectId: string): ConversationRequest[] {
+  requests(projectId: string, supervisorThreadId?: string): ConversationRequest[] {
     return this.store.db.prepare("SELECT document FROM supervisor_conversation_requests WHERE project_id=? ORDER BY created_at").all(projectId)
-      .map(row => JSON.parse(String(row.document)) as ConversationRequest);
+      .map(row => JSON.parse(String(row.document)) as ConversationRequest).filter(request => !supervisorThreadId || request.supervisorThreadId === supervisorThreadId);
   }
-  pending(projectId: string): ConversationRequest | null {
-    return this.requests(projectId).find(request => ["prepared", "sending", "waiting", "uncertain"].includes(request.state)) ?? null;
+  pending(projectId: string, supervisorThreadId: string): ConversationRequest | null {
+    return this.requests(projectId, supervisorThreadId).find(request => ["prepared", "sending", "waiting", "uncertain"].includes(request.state)) ?? null;
   }
   saveRequest(request: ConversationRequest): void {
     this.store.db.prepare("INSERT INTO supervisor_conversation_requests VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document")
       .run(request.id, request.projectId, JSON.stringify(request), request.createdAt);
   }
   prepare(input: Pick<ConversationRequest, "projectId" | "supervisorThreadId" | "kind" | "taskId" | "text" | "batch" | "completionMarker">, now: number): ConversationRequest {
-    if (this.pending(input.projectId)) throw new Error("supervisor_request_inflight");
+    if (this.pending(input.projectId, input.supervisorThreadId)) throw new Error("supervisor_request_inflight");
     this.prune(now);
     const id = randomUUID();
     const request: ConversationRequest = {...input, id, messageId: `supervisor-review:${id}`, state: "prepared", createdAt: now, sentAt: null, runId: null, error: null};
@@ -131,20 +131,20 @@ export class SupervisorConversationStore {
     const placeholders = taskIds.map(() => "?").join(",");
     this.store.db.prepare(`DELETE FROM supervisor_workflow_agreement_candidates WHERE task_id IN (${placeholders})`).run(...taskIds);
   }
-  lastNotice(projectId: string): number | null {
-    const row = this.store.db.prepare("SELECT last_notice_at FROM supervisor_monitor_project_clock WHERE project_id=?").get(projectId);
+  lastNotice(supervisorThreadId: string): number | null {
+    const row = this.store.db.prepare("SELECT last_notice_at FROM supervisor_monitor_binding_clock WHERE supervisor_thread_id=?").get(supervisorThreadId);
     return row ? Number(row.last_notice_at) : null;
   }
-  noticeSent(projectId: string, now: number): void {
-    this.store.db.prepare("INSERT INTO supervisor_monitor_project_clock(project_id,last_notice_at) VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET last_notice_at=excluded.last_notice_at").run(projectId, now);
+  noticeSent(supervisorThreadId: string, now: number): void {
+    this.store.db.prepare("INSERT INTO supervisor_monitor_binding_clock(supervisor_thread_id,last_notice_at) VALUES(?,?) ON CONFLICT(supervisor_thread_id) DO UPDATE SET last_notice_at=excluded.last_notice_at").run(supervisorThreadId, now);
   }
-  reviewMisses(projectId: string, reset = false): number {
-    if (reset) this.store.db.prepare("UPDATE supervisor_monitor_project_clock SET review_misses=0 WHERE project_id=?").run(projectId);
-    return Number(this.store.db.prepare("SELECT review_misses FROM supervisor_monitor_project_clock WHERE project_id=?").get(projectId)?.review_misses ?? 0);
+  reviewMisses(supervisorThreadId: string, reset = false): number {
+    if (reset) this.store.db.prepare("UPDATE supervisor_monitor_binding_clock SET review_misses=0 WHERE supervisor_thread_id=?").run(supervisorThreadId);
+    return Number(this.store.db.prepare("SELECT review_misses FROM supervisor_monitor_binding_clock WHERE supervisor_thread_id=?").get(supervisorThreadId)?.review_misses ?? 0);
   }
-  missedReview(projectId: string): number {
-    this.store.db.prepare("UPDATE supervisor_monitor_project_clock SET review_misses=review_misses+1 WHERE project_id=?").run(projectId);
-    return this.reviewMisses(projectId);
+  missedReview(supervisorThreadId: string): number {
+    this.store.db.prepare("UPDATE supervisor_monitor_binding_clock SET review_misses=review_misses+1 WHERE supervisor_thread_id=?").run(supervisorThreadId);
+    return this.reviewMisses(supervisorThreadId);
   }
   prune(now: number): void {
     for (const request of this.store.db.prepare("SELECT id,document FROM supervisor_conversation_requests WHERE created_at<?").all(now - 30 * 86400_000)) {
@@ -155,7 +155,7 @@ export class SupervisorConversationStore {
     for (const row of this.store.db.prepare("SELECT id,document FROM supervisor_conversation_requests ORDER BY created_at DESC,rowid DESC").all()) {
       const request = JSON.parse(String(row.document)) as ConversationRequest;
       if (request.state !== "completed" && !(request.state === "failed" && (request.kind !== "review" || request.failureAcknowledged))) continue;
-      const n = (terminalCount.get(request.projectId) ?? 0) + 1;terminalCount.set(request.projectId, n);
+      const n = (terminalCount.get(request.supervisorThreadId) ?? 0) + 1;terminalCount.set(request.supervisorThreadId, n);
       if (n > 100) this.store.db.prepare("DELETE FROM supervisor_conversation_requests WHERE id=?").run(String(row.id));
     }
   }

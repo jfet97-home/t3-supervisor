@@ -15,8 +15,10 @@ const selection: SupervisorModelSelection = {
 
 const snapshot: ProjectSupervisorInfo = {
   projectId: "project",
+  mainThreadId: "task-thread",
+  modelApplication: null,
   settings: {generation: 7, modelSelection: selection, pending: true},
-  binding: {projectId: "project", threadId: "exact-thread-123", generation: 7, enabledAt: 1, state: "ready"},
+  binding: {projectId: "project", mainThreadId: "task-thread", threadId: "exact-thread-123", generation: 7, enabledAt: 1, state: "ready"},
   modelSelection: {instanceId: "provider-two", model: "quick-model", options: [{id: "thinking", value: true}]},
   models: [
     {instanceId: "provider-one", model: "steady-model", name: "Steady", providerName: "Provider One", available: true, options: [
@@ -32,7 +34,7 @@ const snapshot: ProjectSupervisorInfo = {
   tasks: [{threadId: "task-thread", projectId: "project", sourceRunId: "run-1", sourceMessageId: "message-1", status: "inferred", objective: "<script>task</script>", reason: "The task text supports this interpretation.", updatedAt: 1}],
 };
 
-const input: ProjectSupervisorSaveInput = {projectId: "project", expectedGeneration: 7, modelSelection: selection};
+const input: ProjectSupervisorSaveInput = {projectId: "project", mainThreadId: "task-thread", expectedGeneration: 7, modelSelection: selection};
 const monitoring = {enabled: true, intervalMinutes: "5", activityThreshold: "10"};
 const workflow = (overrides: Partial<WorkflowProposalInfo> = {}): WorkflowProposalInfo => ({
   status: "proposed",
@@ -85,10 +87,10 @@ test("Supervisor settings markup explains automatic conversation reuse and separ
   assert.match(html, /Saving settings does not start a conversation/);
   assert.match(html, /Role instructions limit it to reading and messaging through T3, but those instructions do not enforce tool restrictions/);
   assert.match(html, /creates the Supervisor conversation for the first task that needs it/);
-  assert.match(html, /reuses that conversation for later tasks/);
-  assert.match(html, /Saved Supervisor model/);
-  assert.match(html, /Current model observed in T3/);
-  assert.match(html, /waiting to apply the saved model selection while the Supervisor is idle/);
+  assert.match(html, /reuses it when that main conversation resumes/);
+  assert.match(html, /Project default for new Supervisors/);
+  assert.match(html, /Selected Supervisor model in T3/);
+  assert.match(html, /Edit this conversation/);
   assert.match(html, /Task interpretation for the selected conversation/);
   assert.match(html, /&lt;script&gt;task&lt;\/script&gt;/);
   assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
@@ -103,7 +105,7 @@ test("Supervisor settings markup explains automatic conversation reuse and separ
   assert.match(html, /id="supervisor-monitoring-threshold" type="number" min="3" max="100" step="1" required=""/);
   assert.match(html, /name="activityThreshold"/);
   assert.match(html, /aria-describedby="supervisor-monitoring-interval-help supervisor-monitoring-interval-error"/);
-  assert.match(html, /Project cooldown:<\/strong> 60 seconds between monitoring sends/);
+  assert.match(html, /Supervisor cooldown:<\/strong> 60 seconds between monitoring sends/);
   assert.match(html, /Current monitoring status/);
   assert.match(html, /Status:<\/strong> busy/);
   assert.match(html, /Pending activities:<\/strong> 4/);
@@ -373,7 +375,7 @@ test("unavailable saved models remain visible and disabled while an available mo
     saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false, shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false,
     onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
   }));
-  assert.match(html, /Saved Supervisor model:<\/strong> Provider Two · Quick \(quick-model\) — unavailable/);
+  assert.match(html, /Project default for new Supervisors:<\/strong> Provider Two · Quick \(quick-model\) — unavailable/);
   assert.match(html, /Quick \(quick-model\) — unavailable/);
   assert.match(html, /disabled=""/);
 });
@@ -405,7 +407,7 @@ test("a deleted binding has a distinct explicit replacement action and no live l
 });
 
 test("native retries are explicit for pending ready bindings and uncertain project tasks, never for a pre-task pending default", () => {
-  assert.equal(shouldOfferNativeRetry(snapshot), true);
+  assert.equal(shouldOfferNativeRetry(snapshot), false);
   const beforeFirstTask = {...snapshot, binding: null, settings: {...snapshot.settings, pending: true}};
   assert.equal(shouldOfferNativeRetry(beforeFirstTask), false);
   const uncertainTask = {...snapshot.tasks[0]!, threadId: "other-thread", status: "uncertain" as const};
@@ -476,12 +478,12 @@ test("Supervisor client encodes project targets, checks response identity and pa
       assert.equal(init?.credentials, "same-origin");
       return new Response(JSON.stringify({...snapshot, projectId: "project & one"}), {status: 200});
     };
-    const loaded = await loadProjectSupervisor("project & one", controller.signal);
+    const loaded = await loadProjectSupervisor("project & one", controller.signal, "task-thread");
     assert.equal(loaded.projectId, "project & one");
     assert.equal(new URL(seen, "http://localhost").searchParams.get("projectId"), "project & one");
 
     globalThis.fetch = async () => new Response(JSON.stringify({...snapshot, projectId: "another-project"}), {status: 200});
-    await assert.rejects(loadProjectSupervisor("project", controller.signal), /another project/);
+    await assert.rejects(loadProjectSupervisor("project", controller.signal, "task-thread"), /another project/);
   } finally {globalThis.fetch = original;}
 });
 
@@ -494,7 +496,7 @@ test("a late GET cannot cross an aborted selection", async () => {
       assert.equal(init?.signal, controller.signal);
       return await new Promise<Response>(resolve => {resolveResponse = resolve;});
     };
-    const pending = loadProjectSupervisor("project", controller.signal);
+    const pending = loadProjectSupervisor("project", controller.signal, "task-thread");
     assert.ok(resolveResponse);
     controller.abort();
     resolveResponse!(new Response(JSON.stringify(snapshot), {status: 200}));
@@ -533,7 +535,7 @@ test("Supervisor settings saves send live monitoring values with the model selec
 
 test("native access retry uses its dedicated route and blocks a foreign-project response", async () => {
   const original = globalThis.fetch;
-  const retryInput: ProjectSupervisorRetryInput = {projectId: "project", expectedGeneration: 7, threadId: "bound-thread", bindingGeneration: 3, action: "retry"};
+  const retryInput: ProjectSupervisorRetryInput = {projectId: "project", mainThreadId: "task-thread", expectedGeneration: 7, threadId: "bound-thread", bindingGeneration: 3, action: "retry"};
   try {
     globalThis.fetch = async (url, init) => {
       assert.equal(String(url), "/api/guidance/project-supervisor/retry");
@@ -547,7 +549,7 @@ test("native access retry uses its dedicated route and blocks a foreign-project 
 
 test("deleted-conversation recovery sends an explicit replacement action and binding identity", async () => {
   const original = globalThis.fetch;
-  const replaceInput: ProjectSupervisorRetryInput = {projectId: "project", expectedGeneration: 7, threadId: "deleted-thread", bindingGeneration: 4, action: "replace"};
+  const replaceInput: ProjectSupervisorRetryInput = {projectId: "project", mainThreadId: "task-thread", expectedGeneration: 7, threadId: "deleted-thread", bindingGeneration: 4, action: "replace"};
   try {
     globalThis.fetch = async (url, init) => {
       assert.equal(String(url), "/api/guidance/project-supervisor/retry");
@@ -560,7 +562,7 @@ test("deleted-conversation recovery sends an explicit replacement action and bin
 
 test("a retry 403 refreshes the latest CSRF token without automatically repeating the native request", async () => {
   const original = globalThis.fetch;
-  const retryInput: ProjectSupervisorRetryInput = {projectId: "project", expectedGeneration: 7, threadId: "bound-thread", bindingGeneration: 3, action: "retry"};
+  const retryInput: ProjectSupervisorRetryInput = {projectId: "project", mainThreadId: "task-thread", expectedGeneration: 7, threadId: "bound-thread", bindingGeneration: 3, action: "retry"};
   let csrfReads = 0;
   let retryWrites = 0;
   try {
@@ -623,4 +625,25 @@ test("unconfirmed HTTP mutation outcomes are marked unsafe to retry without refr
     globalThis.fetch = async () => new Response("{}", {status: 500});
     await assert.rejects(saveProjectSupervisor(input, "token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
   } finally {globalThis.fetch = original;}
+});
+
+test("a response for another main in the same project is rejected by the client", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify(snapshot), {status: 200});
+    await assert.rejects(loadProjectSupervisor("project", AbortSignal.timeout(1000), "another-main"), /another project/);
+    globalThis.fetch = async () => new Response(JSON.stringify({status: "saved", message: "Read back", snapshot}), {status: 200});
+    const input: ProjectSupervisorRetryInput = {projectId: "project", mainThreadId: "another-main", expectedGeneration: 7, threadId: snapshot.binding!.threadId, bindingGeneration: 7, action: "retry"};
+    await assert.rejects(retryProjectSupervisor(input, "csrf"), /another project/);
+  } finally {globalThis.fetch = original;}
+});
+
+test("project defaults without a selection expose no conversation readback or retry", () => {
+  const defaults = {...snapshot, mainThreadId: null, binding: null, modelSelection: null, modelApplication: null, tasks: [], settings: {...snapshot.settings, pending: false}};
+  const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+    snapshot: defaults, selection, monitoring, connected: true, saving: false, fieldsBusy: false, blocked: false,
+    dirty: false, canSave: false, shouldOfferRetry: shouldOfferNativeRetry(defaults), retryButtonLabel: "Retry native access", canRetry: false,
+    onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+  }));
+  assert.match(html, /Project default for new Supervisors/);assert.doesNotMatch(html, /Selected Supervisor model in T3|Open in T3|Retry native access/);
 });

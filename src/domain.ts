@@ -193,6 +193,21 @@ const runIsBusy = (projection: Projection, run: RunInfo, shell?: Record<string, 
   return false;
 };
 
+/** Reuses completion's ongoing-work signals for an entire native conversation. */
+export const projectionHasOngoingWork = (projection: Projection, shell?: ThreadInfo): boolean => {
+  if (projection.runs.some(run => activeRunStates.has(run.status))) return true;
+  if (Array.isArray(projection.runtimeRequests) && projection.runtimeRequests.some(request => !isRecord(request) || request.status === "pending")) return true;
+  const latest = projection.runs.reduce<RunInfo | undefined>((old, run) => !old || run.ordinal > old.ordinal ? run : old, undefined);
+  if (latest && runIsBusy(projection, latest, shell)) return true;
+  if (hasPullRequestWatch(projection.thread) || hasBlockingBackgroundTask((shell ?? projection.thread).pendingBackgroundTasks)) return true;
+  if (Array.isArray(projection.providerThreads) && projection.providerThreads.some(provider => isRecord(provider) &&
+    (hasBlockingBackgroundTask(provider.pendingBackgroundTasks) || isRecord(provider.goal) && provider.goal.status === "active"))) return true;
+  return (projection.subagents ?? []).some(task => {
+    const delivery = isRecord(task.completionDelivery) ? task.completionDelivery : {};
+    return activeTaskStates.has(String(task.status)) || delivery.state === "pending" || delivery.state === "claimed";
+  });
+};
+
 const latestRootAnswer = (
   projection: Projection,
   run: RunInfo,

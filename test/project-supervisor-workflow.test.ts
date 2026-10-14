@@ -287,7 +287,7 @@ const makeFixture = async (initialDefinitions: ProjectDefinitionSnapshot = defin
     withDefinitions ? definitionLoader : undefined,
   );
   return {
-    binding: () => store.binding(projectId),
+    binding: () => store.binding(projectId, sourceThreadId),
     cleanup: async () => { guidance.close(); await rm(directory, { recursive: true, force: true }); },
     definitionReads,
     dispatches: () => operations.filter((call) => call.tag === "orchestration.dispatchCommand" && call.payload.type === "message.dispatch"),
@@ -342,7 +342,7 @@ test("a correlated native result appears in the project DTO without repeating or
   assert.equal(inferred?.workflow?.status, "proposed");
   assert.deepEqual(inferred?.workflow?.steps.map((step) => step.blockId), ["test-plan"]);
 
-  const snapshot = await supervisor.snapshot(projectId, AbortSignal.timeout(1000));
+  const snapshot = await supervisor.snapshot(projectId, AbortSignal.timeout(1000), sourceThreadId);
   const dto = snapshot.tasks.find((candidate) => candidate.threadId === sourceThreadId);
   assert.equal(dto?.workflow?.status, "proposed");
   assert.equal(dto?.workflow?.revision, "revision-1");
@@ -569,6 +569,7 @@ test("unknown dispatch retry reuses the persisted request and definition context
   fixture.setDefinitions(definitionSnapshot({ revision: "mutated-revision", workspaceRoot: "/work/project/worktrees/mutated" }));
   const retry = await supervisor.retry({
     projectId,
+    mainThreadId: binding.mainThreadId,
     expectedGeneration: 0,
     threadId: binding.threadId,
     bindingGeneration: binding.generation,

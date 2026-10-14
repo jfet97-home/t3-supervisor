@@ -44,7 +44,7 @@ export const startGuidanceUi = async (
       snapshot: () => Effect.promise(() => runtime.snapshot()),
       projectSupervisor: ({query}) => Effect.tryPromise({
         try: signal => {
-          if (!supervision) throw new Error("supervision_unavailable");return supervision.snapshot(query.projectId, signal);
+          if (!supervision) throw new Error("supervision_unavailable");return supervision.snapshot(query.projectId, signal, query.mainThreadId ?? null);
         }, catch: () => new UiError({message: "Project supervision is unavailable. Check the T3 connection and registered project."}),
       }),
       saveProjectSupervisor: ({payload}) => Effect.tryPromise({

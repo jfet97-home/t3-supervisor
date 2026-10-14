@@ -112,9 +112,9 @@ export function ProjectDefinitionsPanel({data, csrfToken = "", onDirtyChange}: {
       <label>Project<select value={projectId} disabled={saving} onChange={event => {if (discard(true)) setSelection({projectId: event.target.value, threadId: ""});}}>
         <option value="">Select a project</option>{projects.map(project => <option key={project.id} value={project.id}>{project.title}</option>)}
       </select></label>
-      <label>Working directory<select value={threadId} disabled={!projectId || saving} onChange={event => {if (discard()) setSelection(previous => ({...previous, threadId: event.target.value}));}}>
+      <label>Main conversation / working directory<select value={threadId} disabled={!projectId || saving} onChange={event => {if (discard()) setSelection(previous => ({...previous, threadId: event.target.value}));}}>
         {threadUnavailable && <option value={threadId} disabled>Conversation unavailable</option>}
-        <option value="">Project root</option>{threads.map(thread => <option key={thread.id} value={thread.id}>{thread.title}</option>)}
+        <option value="">Project root / defaults only</option>{threads.map(thread => <option key={thread.id} value={thread.id}>{thread.title}</option>)}
       </select></label>
       <button type="button" disabled={!canLoad || busy || saving} onClick={() => {if (discard()) setRevision(n => n + 1);}}>Refresh definitions</button>
     </div>

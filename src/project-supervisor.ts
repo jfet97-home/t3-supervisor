@@ -1,3 +1,5 @@
+import { SupervisorLifecycle } from "./supervisor-lifecycle.js";
+import { mainConversation, supervisorScopeKey } from "./supervisor-scope.js";
 import { randomUUID } from "node:crypto";
 import { Effect } from "effect";
 import { fingerprint } from "./guidance-store.js";
@@ -15,7 +17,7 @@ import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } f
 import { SupervisorConversation } from "./supervisor-conversation.js";
 
 const active = (projection: Projection) => projection.runs.some(r => ["preparing","queued","starting","running","waiting"].includes(r.status));
-const unavailable = (thread: ThreadInfo) => Boolean(thread.archivedAt || thread.deletedAt || thread.settledAt);
+const unavailable = (thread: ThreadInfo) => Boolean(thread.archivedAt || thread.deletedAt);
 const supervisorUnavailable = (thread: ThreadInfo) => Boolean(thread.archivedAt || thread.deletedAt);
 
 export const taskSource = (projection: Projection, afterOrdinal: number): {run: RunInfo; message: MessageInfo} | null => {
@@ -34,13 +36,16 @@ export class ProjectSupervisor {
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly examinedNonTasks = new Map<string, string>();
   private offset = 0;
+  private bindingOffset = 0;
   readonly conversation: SupervisorConversation;
+  readonly lifecycle: SupervisorLifecycle;
   constructor(readonly config: SupervisorConfig, readonly store: ProjectSupervisorStore, readonly source: Pick<StoreShape, "catalog">,
     readonly t3: Pick<T3ClientShape, "projection">, readonly readRpc: SupervisorRpc, readonly operateRpc: SupervisorRpc | null,
     readonly activationSnapshot: (signal: AbortSignal) => Promise<SupervisorBaseline>,
     readonly definitions?: Pick<ProjectDefinitionLoader, "load">) {
       this.conversation = new SupervisorConversation(store, operateRpc, (threadId, signal) => this.projection(threadId, signal), definitions,
         (thread, threads) => this.eligible(thread, threads));
+      this.lifecycle = new SupervisorLifecycle(store, this.conversation, (id, signal) => this.projection(id, signal), operateRpc);
     }
   private async serial<A>(projectId: string, work: () => Promise<A>): Promise<A> {
     const previous = this.queues.get(projectId) ?? Promise.resolve();
@@ -54,10 +59,14 @@ export class ProjectSupervisor {
   }
   private async projection(threadId: string, signal: AbortSignal): Promise<Projection> {return (await Effect.runPromise(this.t3.projection(threadId), {signal})).projection;}
   private async models(signal: AbortSignal) {return supervisorModels(await this.readRpc("server.getConfig", {}, signal));}
-  async snapshot(projectId: string, signal: AbortSignal): Promise<ProjectSupervisorInfo> {
-    await this.project(projectId);
-    const binding = this.store.binding(projectId);
-    let selection: SupervisorModelSelection | null = null;let available = Boolean(this.operateRpc);let message = binding ? "Supervisor conversation is being prepared." : "The Supervisor conversation will be created automatically for the first new task.";
+  async snapshot(projectId: string, signal: AbortSignal, mainThreadId: string | null = null): Promise<ProjectSupervisorInfo> {
+    const {catalog} = await this.project(projectId);
+    if (mainThreadId !== null) {
+      const selected = catalog.threads.find(thread => thread.id === mainThreadId && thread.projectId === projectId);
+      if (!selected || mainConversation(selected, catalog.threads)?.id !== mainThreadId || !this.eligible(selected, catalog.threads)) throw new Error("invalid_main_conversation");
+    }
+    const binding = this.store.scopeCompatible && mainThreadId ? this.store.binding(projectId, mainThreadId) : null;
+    let selection: SupervisorModelSelection | null = null;let available = Boolean(this.operateRpc && this.store.scopeCompatible);let message = binding ? "Supervisor conversation is being prepared." : "The Supervisor conversation will be created automatically for the first new task.";
     let models: ProjectSupervisorInfo["models"] = [];
     try {
       models = await this.models(signal);
@@ -72,7 +81,7 @@ export class ProjectSupervisor {
         else {
         selection = modelSelection(projection.thread.modelSelection);
         available = Boolean(available && selection);
-        message = available && selection && validModelSelection(selection, models) ? "T3 runs this project's Supervisor. Valid new workflow drafts can be introduced through active steering, with ongoing check-ins from existing T3 activity." : "The configured Supervisor model is unavailable in T3. Choose an available model; no fallback model will run.";
+        message = available && selection && validModelSelection(selection, models) ? "T3 runs the Supervisor for this main conversation. Valid new workflow drafts can be introduced through active steering, with ongoing check-ins from existing T3 activity." : "The configured Supervisor model is unavailable in T3. Choose an available model; no fallback model will run.";
         if (projection.thread.runtimeMode !== "full-access" || projection.thread.interactionMode !== "default") message += " This existing conversation retains its native modes; contact with a broader-mode operative chat needs an explicit mode change in T3.";
       }
       }
@@ -81,29 +90,36 @@ export class ProjectSupervisor {
     } catch {available = false;message = "T3 Supervisor access is unavailable. Existing settings and conversation identity are retained.";}
     const current = this.store.settings(projectId);
     if (this.store.baseline() === null) message = "Native task discovery is initializing; interpretation is not active yet. " + message;
-    if (current.applicationMessage) message = `${message} ${current.applicationMessage}`;
+    const application = binding ? this.store.modelState(binding) : null;
+    if (application?.applicationMessage) message = `${message} ${application.applicationMessage}`;
     if (current.pending && models.length && !validModelSelection(current.modelSelection, models)) message = "The saved Supervisor model is unavailable. Choose an available T3 model; no fallback will run.";
+    if (binding?.settlement?.state === "uncertain") message += " Automatic settlement could not be confirmed. Retry native access reconciles the retained settlement command; supervision can continue in the same chat.";
+    if (binding?.manualKeepActive) message += " Automatic settlement is held by an observed user keep-active choice.";
+    if (!this.store.scopeCompatible) {available = false;message = "Supervisor state has an unsupported scope version. Supervision is disabled without resetting state; other service integrations remain available.";}
     if (binding?.state === "rejected" && binding.creationMessage) message = binding.creationMessage;
     if (!binding && models.length && !validModelSelection(current.modelSelection, models)) message = "Default Supervisor model unavailable. Choose an available T3 model; no fallback will run.";
-    return {projectId, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: current.pending, monitoring: current.monitoring}, monitoringStatus: this.conversation.status(projectId), binding: this.store.binding(projectId), modelSelection: selection, models, available, message,
-      tasks: this.store.tasks(projectId).slice(-200).reverse().map(({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview}) => ({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow: workflow ?? null,
+    return {projectId, mainThreadId, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring}, monitoringStatus: this.conversation.status(projectId, binding?.threadId ?? null), binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models, available, message,
+      tasks: (binding ? this.store.tasksFor(binding) : []).slice(-200).reverse().map(({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview}) => ({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow: workflow ?? null,
         ...(workflowProposalId ? {workflowProposalId} : {}), agreement: agreement ?? null, ...(definitionReview ? {definitionReview} : {})}))};
   }
   async save(input: ProjectSupervisorSaveInput, signal: AbortSignal): Promise<ProjectSupervisorSaveOutcome> {
+    if (!this.store.scopeCompatible) return {status: "unavailable", message: "Supervisor state version is unsupported; no changes were made.", snapshot: null};
     return this.serial(input.projectId, async () => {
       await this.project(input.projectId);
+      if (input.mainThreadId) await this.snapshot(input.projectId, signal, input.mainThreadId);
       if (!sameModel(input.modelSelection, this.store.settings(input.projectId).modelSelection) && !validModelSelection(input.modelSelection, await this.models(signal))) return {status: "invalid", message: "Choose an available T3 model and its advertised reasoning options.", snapshot: null};
       try {this.store.saveSettings(input.projectId, input.expectedGeneration, input.modelSelection, input.monitoring);}
       catch (cause) {return cause instanceof Error && cause.message === "invalid_monitoring_settings" ? {status: "invalid", message: "Use an interval of 1–60 minutes and an activity threshold of 3–100, both whole numbers.", snapshot: null} : {status: "conflict", message: "Project Supervisor settings changed. Refresh before saving again.", snapshot: null};}
-      return {status: "saved", message: "Saved. Monitoring settings apply on the next service check without discarding pending activity; model changes apply between runs.", snapshot: await this.snapshot(input.projectId, signal)};
+      return {status: "saved", message: "Saved. Monitoring settings apply on the next service check without discarding pending activity; model defaults apply only to new Supervisor conversations. Edit existing models in T3.", snapshot: await this.snapshot(input.projectId, signal, input.mainThreadId ?? null)};
     });
   }
   async retry(input: ProjectSupervisorRetryInput, signal: AbortSignal): Promise<ProjectSupervisorSaveOutcome> {
-    return this.serial(input.projectId, async () => {
+    if (!this.store.scopeCompatible) return {status: "unavailable", message: "Supervisor state version is unsupported; no changes were made.", snapshot: null};
+    return this.serial(supervisorScopeKey(input.projectId, input.mainThreadId), async () => {
       const {project} = await this.project(input.projectId);
       const settings = this.store.settings(input.projectId);
       if (settings.generation !== input.expectedGeneration) return {status: "conflict", message: "Settings changed. Refresh before retrying native access.", snapshot: null};
-      let binding = this.store.binding(input.projectId);
+      let binding = this.store.binding(input.projectId, input.mainThreadId);
       if (!binding || !this.operateRpc) return {status: "unavailable", message: "No Supervisor conversation is available to reconcile.", snapshot: null};
       if (binding.threadId !== input.threadId || binding.generation !== input.bindingGeneration ||
         (input.action === "replace") !== (binding.state === "missing")) return {status: "conflict", message: "The conversation state changed. Refresh and choose the intended recovery action again.", snapshot: null};
@@ -112,8 +128,9 @@ export class ProjectSupervisor {
           try {await this.projection(binding.threadId, signal);return {status: "unavailable", message: "The existing conversation is present; refresh before replacing it.", snapshot: null};}
           catch (cause) {if (!(cause instanceof T3TransportError) || cause.httpStatus !== 404) return {status: "unavailable", message: "T3 could not confirm that the conversation is missing.", snapshot: null};}
           if (!validModelSelection(settings.modelSelection, await this.models(signal))) return {status: "invalid", message: "Choose an available model before replacing a deleted conversation.", snapshot: null};
+          const previousBinding = binding;
           binding = this.store.replaceMissingBinding(binding, settings.modelSelection);
-          for (const job of this.store.tasks(input.projectId)) if (["queued", "dispatching", "waiting", "uncertain"].includes(job.status)) this.complete(job, "unavailable", null, "The bound Supervisor conversation was deleted; its request identity remains retained.");
+          for (const job of this.store.tasksFor(previousBinding)) if (["queued", "dispatching", "waiting", "uncertain"].includes(job.status)) this.complete(job, "unavailable", null, "The bound Supervisor conversation was deleted; its request identity remains retained.");
         }
         if (binding.state === "rejected") {
           try {
@@ -125,22 +142,23 @@ export class ProjectSupervisor {
           }
         }
         this.store.setBinding({...binding, creationAttempts: 0});
-        await this.ensureBinding(input.projectId, project.title, signal).catch(() => undefined);
+        await this.ensureBinding(input.projectId, input.mainThreadId, project.title, signal).catch(() => undefined);
       } else {
-        this.conversation.retry(input.projectId);
-        this.store.modelAttempt(input.projectId, true);
-        const job = this.store.tasks(input.projectId).find(task => ["uncertain", "dispatching", "waiting"].includes(task.status));
+        this.conversation.retry(input.projectId, binding.threadId);
+        this.store.modelAttempt(binding, true);
+        if (binding.settlement?.state === "uncertain") this.store.setBinding({...this.store.binding(binding.projectId, binding.mainThreadId)!, settlement: {...binding.settlement, state: "pending", attempts: 0}});
+        const job = this.store.tasksFor(binding).find(task => ["uncertain", "dispatching", "waiting"].includes(task.status));
         if (job) this.store.saveTask({...job, replayCount: 0, updatedAt: Date.now()});
         await this.processProject(binding, signal).catch(() => undefined);
       }
-      const snapshot = await this.snapshot(input.projectId, signal);
+      const snapshot = await this.snapshot(input.projectId, signal, input.mainThreadId);
       return {status: snapshot.binding?.state === "ready" && !snapshot.tasks.some(task => task.status === "uncertain") && snapshot.monitoringStatus?.state !== "uncertain" ? "saved" : "uncertain", message: "Native access retried with the retained identity. Inspect the current conversation and task status.", snapshot};
     });
   }
-  private async ensureBinding(projectId: string, title: string, signal: AbortSignal): Promise<BindingRecord> {
+  private async ensureBinding(projectId: string, mainThreadId: string, title: string, signal: AbortSignal): Promise<BindingRecord> {
     if (!this.operateRpc) throw new Error("supervisor_credential_missing");
     const settings = this.store.settings(projectId);
-    let binding = this.store.binding(projectId) ?? this.store.reserve(projectId, title, settings.modelSelection, this.store.activation()!, Date.now());
+    let binding = this.store.binding(projectId, mainThreadId) ?? this.store.reserve(projectId, mainThreadId, title, settings.modelSelection, this.store.activation()!, Date.now());
     let existing: Projection | null;
     try {existing = await this.projection(binding.threadId, signal);}
     catch (cause) {
@@ -166,34 +184,20 @@ export class ProjectSupervisor {
         creationMessage: cause instanceof SupervisorRpcError && cause.providerDisabled ? "The Supervisor provider is disabled for this project in T3. Save another model or enable the provider, then retry native access." : "Conversation creation could not be confirmed. Retry native access to inspect its retained identity."});throw new Error("supervisor_creation_uncertain");}
     }
   }
-  private async applyModel(binding: BindingRecord, projection: Projection, signal: AbortSignal): Promise<void> {
-    const settings = this.store.settings(binding.projectId);const current = modelSelection(projection.thread.modelSelection);
+  private observeModel(binding: BindingRecord, projection: Projection): void {
+    const current = modelSelection(projection.thread.modelSelection);
     if (!current) throw new Error("supervisor_model_missing");
-    if (settings.pending && !active(projection)) {
-      if (!validModelSelection(settings.modelSelection, await this.models(signal))) throw new Error("supervisor_model_unavailable");
-      if ((settings.applyAttempts ?? 0) >= 3) return;
-      this.store.modelAttempt(binding.projectId);
-      try {
-        await this.operateRpc!("orchestration.dispatchCommand", {type: "thread.model-selection.set", commandId: `supervisor-model:${binding.threadId}:${settings.modelMutationGeneration}`, threadId: binding.threadId, modelSelection: settings.modelSelection}, signal);
-      } catch (cause) {
-        if (!(cause instanceof SupervisorRpcError) || !cause.definiteRejection) throw cause;
-        const result = modelSelection((await this.projection(binding.threadId, signal)).thread.modelSelection);
-        if (!result) throw new Error("model_change_uncertain");
-        this.store.observeModel(binding.projectId, result, settings.generation, "T3 rejected the saved model update. Its current model is authoritative; inspect it before another change.");return;
-      }
-      const result = modelSelection((await this.projection(binding.threadId, signal)).thread.modelSelection);
-      if (!result) throw new Error("model_change_uncertain");
-      this.store.observeModel(binding.projectId, result, settings.generation, sameModel(result, settings.modelSelection) ? null : "T3 reports a different model; the saved selection was not applied. Its observed selection is authoritative.");
-    } else if (!settings.pending) this.store.observeModel(binding.projectId, current);
+    const latest = this.store.binding(binding.projectId, binding.mainThreadId);
+    if (!latest || latest.threadId !== binding.threadId) return;
+    if (projection.thread.settledOverride === "active") this.store.setBinding({...latest, manualKeepActive: true});
+    this.store.observeModel(binding, current);
   }
   private eligible(thread: ThreadInfo, threads: readonly ThreadInfo[]): boolean {
     if (isSupervisorThread(this.config, thread) || unavailable(thread) || thread.lineage.relationshipToParent === "subagent" || currentThreadPolicy(this.config).excludedThreadIds.includes(thread.id)) return false;
-    let parent = thread.lineage.parentThreadId;let depth = 0;
-    while (parent) {const ancestor = threads.find(t => t.id === parent);if (!ancestor || ++depth > 64 || isSupervisorThread(this.config, ancestor)) return false;parent = ancestor.lineage.parentThreadId;}
-    return true;
+    return mainConversation(thread, threads)?.id === thread.id;
   }
   async runOnce(signal: AbortSignal = AbortSignal.timeout(120_000)): Promise<void> {
-    if (!this.operateRpc) return;
+    if (!this.operateRpc || !this.store.scopeCompatible) return;
     if (this.store.baseline() === null) this.store.baseline(await this.activationSnapshot(signal));
     this.conversation.requests.pruneAgreementCandidates(this.store.prune(Date.now()));
     const catalog = await Effect.runPromise(this.source.catalog());
@@ -203,7 +207,7 @@ export class ProjectSupervisor {
       if (signal.aborted) return;
       const project = catalog.projects.find(p => p.available && p.project.id === thread.projectId)?.project;if (!project) continue;
       const previous = this.store.task(thread.id);
-      if (previous && !["needs_context", "unavailable"].includes(previous.status)) continue;
+      if (previous && !["needs_context", "unavailable", "expired"].includes(previous.status)) continue;
       if (typeof thread.latestRunId === "string" && (thread.latestRunId === previous?.sourceRunId ||
         thread.latestRunId === this.store.baseline()?.threads.find(anchor => anchor.id === thread.id)?.latestRunId ||
         thread.latestRunId === this.examinedNonTasks.get(thread.id))) continue;
@@ -220,7 +224,7 @@ export class ProjectSupervisor {
           continue;
         }
         if (!validModelSelection(this.store.settings(project.id).modelSelection, await this.models(signal))) continue;
-        const binding = await this.serial(project.id, () => this.ensureBinding(project.id, project.title, signal));
+        const binding = await this.serial(supervisorScopeKey(project.id, thread.id), () => this.ensureBinding(project.id, thread.id, thread.title, signal));
         const id = randomUUID();const oversized = task.message.text.length > 24_000;
         this.store.saveTask({id, threadId: thread.id, projectId: project.id, sourceRunId: task.run.id, sourceMessageId: task.message.id,
           sourceOrdinal: task.run.ordinal, sourceHash: fingerprint(task.message.text), status: oversized ? "needs_context" : "queued", objective: null,
@@ -229,14 +233,25 @@ export class ProjectSupervisor {
           messageId: `supervisor-objective:${id}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0});
       } catch { /* Discovery failures are retried without producing model work. */ }
     }
-    for (const binding of this.store.bindings()) {
+    const allBindings = this.store.bindings();
+    const start = allBindings.length ? this.bindingOffset % allBindings.length : 0;
+    const bindings = [...allBindings.slice(start), ...allBindings.slice(0, start)];
+    this.bindingOffset = allBindings.length ? (start + 4) % allBindings.length : 0;
+    for (let index = 0; index < bindings.length; index += 4) {
       if (signal.aborted) return;
-      await this.serial(binding.projectId, () => this.processProject(binding, signal)).catch(() => undefined);
+      await Promise.allSettled(bindings.slice(index, index + 4).map(binding => {
+        const deadline = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+        return this.serial(supervisorScopeKey(binding.projectId, binding.mainThreadId), async () => {
+          try {await this.processProject(binding, deadline);}
+          finally {if (!deadline.aborted) await this.lifecycle.check(binding, catalog.threads, deadline);}
+        });
+      }));
     }
     await this.conversation.observe(catalog.threads, signal);
   }
+
   private async processProject(binding: BindingRecord, signal: AbortSignal): Promise<void> {
-    const currentBinding = this.store.binding(binding.projectId);
+    const currentBinding = this.store.binding(binding.projectId, binding.mainThreadId);
     if (!currentBinding) return;
     binding = currentBinding;
     await this.project(binding.projectId);
@@ -244,14 +259,13 @@ export class ProjectSupervisor {
     try {projection = await this.projection(binding.threadId, signal);}
     catch (cause) {if (cause instanceof T3TransportError && cause.httpStatus === 404 && binding.state === "ready") this.store.setBinding({...binding, state: "missing"});throw cause;}
     if (projection.thread.projectId !== binding.projectId || supervisorUnavailable(projection.thread)) return;
-    if (binding.state !== "ready") this.store.setBinding({...binding, state: "ready"});
-    const jobs = this.store.tasks(binding.projectId);
+    if (binding.state !== "ready") {binding = {...binding, state: "ready"};this.store.setBinding(binding);}
+    this.observeModel(binding, projection);
+    const jobs = this.store.tasksFor(binding);
     const inflight = jobs.find(t => ["dispatching","waiting","uncertain"].includes(t.status));
     if (inflight) {await this.reconcile(inflight, projection, signal);return;}
-    if (this.conversation.hasInflight(binding.projectId)) {await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
+    if (this.conversation.hasInflight(binding.projectId, binding.threadId)) {await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
     if (active(projection)) {await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
-    await this.applyModel(binding, projection, signal);
-    if (this.store.settings(binding.projectId).pending) return;
     let job = jobs.find(t => t.status === "queued");
     if (!job) {await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
     const source = await this.projection(job.threadId, signal);
@@ -301,7 +315,7 @@ export class ProjectSupervisor {
       !isSupervisorThread(this.config, projection.thread) && !currentThreadPolicy(this.config).excludedThreadIds.includes(job.threadId) &&
       Boolean(message && run && nativeUserMessageVisible(projection, run, message) && message.createdBy === "user" &&
         (message.creationSource === "web" || message.creationSource === "mobile") && !message.senderThreadId && !message.scheduledTaskId && !message.source &&
-        fingerprint(message.text) === job.sourceHash) && this.store.binding(job.projectId)?.threadId === job.supervisorThreadId;
+        fingerprint(message.text) === job.sourceHash) && this.store.binding(job.projectId, job.threadId)?.threadId === job.supervisorThreadId;
   }
   private complete(job: TaskRecord, status: TaskRecord["status"], objective: string | null, reason: string): void {
     const workflow = job.workflow?.status === "pending" ? {...job.workflow, status: "unavailable" as const, message: reason, rules: [], steps: []} : job.workflow;

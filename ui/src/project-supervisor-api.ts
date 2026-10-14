@@ -12,12 +12,13 @@ export class ProjectSupervisorRequestError extends Error {
   constructor(message: string, readonly definitelyNotSaved: boolean) {super(message);}
 }
 
-export const loadProjectSupervisor = async (projectId: string, signal: AbortSignal): Promise<ProjectSupervisorInfo> => {
+export const loadProjectSupervisor = async (projectId: string, signal: AbortSignal, mainThreadId: string | null = null): Promise<ProjectSupervisorInfo> => {
   const query = new URLSearchParams({projectId});
+  if (mainThreadId) query.set("mainThreadId", mainThreadId);
   const response = await fetch(`/api/guidance/project-supervisor?${query}`, {credentials: "same-origin", signal});
   if (!response.ok) throw new Error("Supervisor settings could not be loaded.");
   const value = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(await response.json());
-  if (signal.aborted || value.projectId !== projectId) throw new Error("The Supervisor response belongs to another project.");
+  if (signal.aborted || value.projectId !== projectId || value.mainThreadId !== mainThreadId) throw new Error("The Supervisor response belongs to another project.");
   return value;
 };
 
@@ -49,7 +50,7 @@ const postProjectSupervisor = async (path: string, input: ProjectSupervisorSaveI
   } catch {
     throw new ProjectSupervisorRequestError("The operation outcome could not be confirmed. Refresh Supervisor settings before trying again.", false);
   }
-  if (result.snapshot && result.snapshot.projectId !== input.projectId) {
+  if (result.snapshot && (result.snapshot.projectId !== input.projectId || result.snapshot.mainThreadId !== (input.mainThreadId ?? null))) {
     throw new ProjectSupervisorRequestError("The response belongs to another project. Refresh Supervisor settings before trying again.", false);
   }
   return result;

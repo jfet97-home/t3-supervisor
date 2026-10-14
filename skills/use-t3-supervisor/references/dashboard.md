@@ -42,15 +42,14 @@ write remain outside the V1 contract.
 
 Supervisor preferences belong to the project, independently of the rule editor's
 selected working directory. Model and reasoning choices come from native T3
-capabilities. Save stores the preference; the service applies it while idle and
-shows the separately observed current model. It automatically creates one bound
-conversation when a task first needs interpretation, then reuses it.
+capabilities. Save stores defaults for new Supervisors and shows the selected main conversation’s
+separately observed model. Each main gets its own bound Supervisor automatically.
+Edit existing models in T3. Independent requests and retries do not cross mains.
 
 Model drafts follow the same explicit refresh/conflict/session-guard rules. A
-request whose save outcome is unknown is never automatically repeated. Direct T3
-model edits can race with dashboard application; refresh to inspect the result.
+request whose save outcome is unknown is never automatically repeated. Refresh to inspect native model changes. Project root has no selected binding.
 Select a task conversation to see a source-linked objective or its unavailable/
-needs-context state. This stage does not propose or agree a workflow.
+needs-context state. Matching native proposal/acceptance records save a semantic agreement, not execution evidence.
 
 ## History and chat settings
 
@@ -69,4 +68,4 @@ Select an operational conversation to inspect its workflow proposal. The ordered
 steps identify existing project blocks; rule decisions explain their applicability.
 The workspace and definition revision identify the snapshot used. Unavailable,
 invalid or stale proposals do not become agreed workflows. Legacy objective-only
-records remain unchanged. This stage does not send the draft to the agent.
+records remain unchanged. The service introduces valid drafts and batches later check-ins.

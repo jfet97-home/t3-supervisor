@@ -241,7 +241,7 @@ function Dashboard() {
       )}
       {view === "settings" && <Settings data={data} />}
       <footer>
-        Project files define the rules and workflow blocks. Agent dialogue is not connected yet.
+        Project files define the rules and workflow blocks. Workflows are negotiated through native conversations; agreement does not prove execution.
         Projects and chats sync automatically.
       </footer>
     </main>

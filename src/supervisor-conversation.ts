@@ -35,7 +35,7 @@ export const workflowIntroductionText = (task: TaskRecord): string => {
   return `Project Supervisor — proposal ${proposalId}\nA separate supervising T3 conversation helps organize this task and follows the project rules. This is semantic guidance, not a deterministic gate. You may already be working; adjust your plan and revise earlier work where appropriate.\nObjective: ${redact(task.objective ?? "")}\nDraft workflow:\n${workflow.steps.map((step, i) => `${i + 1}. ${redact(step.name)}${step.blockId === null ? "" : ` [${step.blockId}]`} — ${redact(step.reason)}`).join("\n") || "No blocks were selected."}\nApplicable rules: ${workflow.rules.filter(rule => rule.applies).map(rule => redact(rule.name)).join(", ") || "None assessed as applicable."}\nDefinitions are in ${workflow.workspaceRoot}/.supervisor/rules.yaml and ${workflow.workspaceRoot}/.supervisor/blocks/*.md (revision ${workflow.revision}). Consult them to understand the blocks and propose a different order, additional available blocks, or useful free named steps. Preserve every applicable rule and its required blocks.\nThe Supervisor has published this initial complete proposal record:\n\`\`\`workflow-proposal\n${JSON.stringify(proposal)}\n\`\`\`\nDiscuss it by sending a message to Supervisor thread ${task.supervisorThreadId} using T3's t3_thread_send (namespace prefixes may vary), mode queue. Include task ${task.id}, your operative thread ID ${task.threadId}, and proposal ${proposalId}. Do not start another conversation. If that tool is unavailable, reply in this chat; your completed reply can be read during the next check-in. If you agree with the record above, your own completed assistant reply in this operative chat must include a fenced workflow-acceptance JSON record echoing exactly its taskId, proposalId, workspaceRoot, revision, and full workflow {rules,steps}; a bare yes is not a confirmation. You may suggest changes in the ordinary dialogue before accepting. The supervising chat batches observations rather than interrupting you on every action.`;
 };
 
-/** Uses existing T3 activity and ordinary conversations, with one durable service request per project. */
+/** Uses existing T3 activity and ordinary conversations, with one durable service request per Supervisor. */
 export class SupervisorConversation {
   readonly requests: SupervisorConversationStore;
   readonly monitor: ProjectSupervisorMonitorStore;
@@ -48,14 +48,15 @@ export class SupervisorConversation {
     this.requests = new SupervisorConversationStore(store.store);
     this.monitor = new ProjectSupervisorMonitorStore(store.store);
   }
-  hasInflight(projectId: string): boolean {return this.requests.pending(projectId) !== null;}
-  status(projectId: string): SupervisorMonitoringStatus {
+  hasInflight(projectId: string, supervisorThreadId: string): boolean {return this.requests.pending(projectId, supervisorThreadId) !== null;}
+  status(projectId: string, supervisorThreadId: string | null): SupervisorMonitoringStatus {
+    if (!supervisorThreadId) return {state: "idle", pendingItems: 0, nextReviewAt: null, lastNoticeAt: null, retryable: false, message: "Select a main conversation to inspect its supervision. Monitoring defaults are shared by the project."};
     const settings = this.store.settings(projectId).monitoring;
-    const lastNoticeAt = this.requests.lastNotice(projectId);
-    const request = this.requests.pending(projectId);
+    const lastNoticeAt = this.requests.lastNotice(supervisorThreadId);
+    const request = this.requests.pending(projectId, supervisorThreadId);
     const tasks = this.store.tasks(projectId).filter(task => task.status === "inferred" &&
       (task.workflow?.status === "proposed" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale") &&
-      task.supervisorThreadId === this.store.binding(projectId)?.threadId);
+      task.supervisorThreadId === supervisorThreadId);
     const pending = tasks.flatMap(task => this.monitor.pending(projectId, task.threadId));
     const pendingItems = pending.length;
     const oldestAt = pending.length ? Math.min(...pending.map(item => item.detectedAt)) : null;
@@ -67,9 +68,9 @@ export class SupervisorConversation {
     const introductions = this.requests.introductions(projectId).filter(intro => tasks.some(task => task.id === intro.taskId));
     const blocked = introductions.find(intro => ["blocked", "uncertain"].includes(intro.state));
     const starting = introductions.some(intro => ["context", "ready", "sending", "accepted"].includes(intro.state));
-    const failed = this.requests.requests(projectId).find(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged);
+    const failed = this.requests.requests(projectId, supervisorThreadId).find(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged);
     const saturated = tasks.find(task => this.monitor.state(projectId, task.threadId)?.saturated);
-    const misses = this.requests.reviewMisses(projectId);
+    const misses = this.requests.reviewMisses(supervisorThreadId);
     const state = !settings.enabled ? "paused" : request?.state === "uncertain" || blocked?.state === "uncertain" ? "uncertain" : blocked || failed || saturated ? "unavailable" : request || starting ? "busy" : "idle";
     return {state, pendingItems, lastNoticeAt, nextReviewAt: settings.enabled ? nextReviewAt : null,
       retryable: Boolean(request?.state === "uncertain" || blocked || failed),
@@ -78,9 +79,9 @@ export class SupervisorConversation {
   }
   async observe(threads: readonly ThreadInfo[], signal: AbortSignal, now = Date.now()): Promise<void> {
     this.requests.prune(now);
-    const tasks = this.store.bindings().flatMap(binding => this.store.tasks(binding.projectId))
+    const tasks = this.store.bindings().flatMap(binding => this.store.tasksFor(binding))
       .filter(task => task.status === "inferred" && (task.workflow?.status === "proposed" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale") &&
-        task.supervisorThreadId === this.store.binding(task.projectId)?.threadId &&
+        task.supervisorThreadId === this.store.bindingForSupervisor(task.supervisorThreadId)?.threadId &&
         (this.requests.introduction(task.id)?.state === "sent" || this.introductionUnsent(task.id)));
     const candidates = [...tasks.slice(this.offset), ...tasks.slice(0, this.offset)].slice(0, 20);
     this.offset = tasks.length ? (this.offset + 20) % tasks.length : 0;
@@ -98,17 +99,17 @@ export class SupervisorConversation {
         }
         if (introduction?.state === "sent") this.monitor.observe({projectId: task.projectId, threadId: task.threadId, sourceOrdinal: task.sourceOrdinal, projection: agent, now,
           excludedIds: new Set([introduction.messageId])});
-        let supervisor = supervisorProjections.get(task.projectId);
+        let supervisor = supervisorProjections.get(task.supervisorThreadId);
         if (supervisor === undefined) {
           try {supervisor = await this.projection(task.supervisorThreadId, signal);}
           catch (cause) {
-            if (cause instanceof T3TransportError && cause.httpStatus === 404) missingSupervisors.add(task.projectId);
+            if (cause instanceof T3TransportError && cause.httpStatus === 404) missingSupervisors.add(task.supervisorThreadId);
             supervisor = null;
           }
-          supervisorProjections.set(task.projectId, supervisor);
+          supervisorProjections.set(task.supervisorThreadId, supervisor);
         }
         if (!supervisor) {
-          if (missingSupervisors.has(task.projectId)) this.markWorkflowStale(task, "The bound Supervisor conversation was deleted; this workflow agreement is stale.", now);
+          if (missingSupervisors.has(task.supervisorThreadId)) this.markWorkflowStale(task, "The bound Supervisor conversation was deleted; this workflow agreement is stale.", now);
           continue;
         }
         if (!introduction || introduction.state !== "sent") {
@@ -150,7 +151,7 @@ export class SupervisorConversation {
     this.store.store.transaction(() => {
       const current = this.store.task(task.threadId);
       if (!current || current.id !== task.id || current.sourceHash !== task.sourceHash || current.workflow?.revision !== task.workflow?.revision ||
-        current.supervisorThreadId !== task.supervisorThreadId || this.store.binding(task.projectId)?.threadId !== task.supervisorThreadId) return;
+        current.supervisorThreadId !== task.supervisorThreadId || this.store.bindingForSupervisor(task.supervisorThreadId)?.threadId !== task.supervisorThreadId) return;
       const agreement = current.agreement ? {...current.agreement, status: "stale" as const,
         message: "Project definitions were updated with user authorization; the old agreement is retained as history."} : current.agreement;
       this.store.saveTask({...current, ...(agreement ? {agreement} : {}), definitionSnapshot: definitions, definitionContext: this.proposalContext(definitions),
@@ -226,7 +227,7 @@ export class SupervisorConversation {
   private async runDefinitionRecovery(binding: BindingRecord, supervisor: Projection, tasks: readonly TaskRecord[],
     threads: readonly ThreadInfo[], signal: AbortSignal): Promise<boolean> {
     const now = Date.now();
-    if (now - (this.requests.lastNotice(binding.projectId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return false;
+    if (now - (this.requests.lastNotice(binding.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return false;
     for (const task of tasks.slice(0, 20)) {
       if ((!task.definitionReview && task.agreement?.status !== "stale") ||
         this.requests.introduction(task.id)?.state !== "sent" && !this.introductionUnsent(task.id)) continue;
@@ -365,7 +366,7 @@ export class SupervisorConversation {
   }
   private async observeWorkflowAgreement(task: TaskRecord, introduction: WorkflowIntroduction, agent: Projection, supervisor: Projection,
     threads: readonly ThreadInfo[], now: number, signal: AbortSignal): Promise<void> {
-    const binding = this.store.binding(task.projectId);
+    const binding = this.store.bindingForSupervisor(task.supervisorThreadId);
     if (!binding || binding.threadId !== task.supervisorThreadId || binding.state === "missing" || binding.state === "rejected") {
       this.markWorkflowStale(task, "The bound Supervisor conversation is no longer valid; this workflow agreement is stale.", now);return;
     }
@@ -431,7 +432,7 @@ export class SupervisorConversation {
   private persistCandidate(task: TaskRecord, candidate: WorkflowAgreementCandidate, now: number): "saved" | "same" | "conflict" | "full" {
     return this.store.store.transaction(() => {
       const current = this.store.task(task.threadId);
-      const binding = this.store.binding(task.projectId);
+      const binding = this.store.bindingForSupervisor(task.supervisorThreadId);
       if (!current || current.id !== task.id || current.status !== "inferred" || !binding || binding.state !== "ready" ||
         binding.threadId !== task.supervisorThreadId || current.supervisorThreadId !== task.supervisorThreadId || current.sourceHash !== task.sourceHash) return "conflict";
       const result = this.requests.saveAgreementCandidate(candidate);
@@ -456,7 +457,7 @@ export class SupervisorConversation {
   }
   private async recordWorkflowAgreement(task: TaskRecord, introduction: WorkflowIntroduction, candidate: WorkflowAgreementCandidate,
     agentMessageId: string, supervisor: Projection, threads: readonly ThreadInfo[], now: number, signal: AbortSignal): Promise<void> {
-    const binding = this.store.binding(task.projectId);
+    const binding = this.store.bindingForSupervisor(task.supervisorThreadId);
     if (!binding || binding.state !== "ready" || binding.threadId !== task.supervisorThreadId) return;
     const currentTask = this.store.task(task.threadId);
     if (!currentTask || currentTask.id !== task.id || currentTask.sourceHash !== task.sourceHash || currentTask.workflowProposalId !== candidate.proposalId) return;
@@ -491,7 +492,7 @@ export class SupervisorConversation {
       supervisorMessageId: candidate.supervisorMessageId, agentMessageId, workflow: agreedWorkflow};
     this.store.store.transaction(() => {
       const current = this.store.task(task.threadId);
-      const liveBinding = this.store.binding(task.projectId);
+      const liveBinding = this.store.bindingForSupervisor(task.supervisorThreadId);
       const liveIntroduction = this.requests.introduction(task.id);
       const storedCandidate = this.requests.agreementCandidate(task.id, candidate.proposalId);
       if (!current || current.id !== task.id || current.status !== "inferred" || current.sourceHash !== task.sourceHash ||
@@ -508,7 +509,7 @@ export class SupervisorConversation {
     });
   }
   async run(binding: BindingRecord, supervisor: Projection, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
-    const inflight = this.requests.pending(binding.projectId);
+    const inflight = this.requests.pending(binding.projectId, binding.threadId);
     if (inflight) {await this.reconcile(inflight, supervisor, threads, signal);return;}
     if (!this.rpc) return;
     const enabled = this.store.settings(binding.projectId).monitoring.enabled;
@@ -530,7 +531,7 @@ export class SupervisorConversation {
       let agent: Projection;
       try {agent = await this.projection(task.threadId, signal);} catch {continue;}
       if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== binding.projectId || !this.sourceUnchanged(task, agent)) continue;
-      if (Date.now() - (this.requests.lastNotice(binding.projectId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
+      if (Date.now() - (this.requests.lastNotice(binding.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
       const text = workflowIntroductionText(task);
       const introduction: WorkflowIntroduction = {taskId: task.id, projectId: task.projectId, threadId: task.threadId, supervisorThreadId: binding.threadId,
         state: "context", text, messageId: `supervisor-notice:workflow:${task.id}`, targetRunId: null, error: null};
@@ -562,14 +563,14 @@ export class SupervisorConversation {
         this.requests.saveIntroduction(introduction);
         this.requests.prepare({projectId: task.projectId, supervisorThreadId: binding.threadId, kind: "context", taskId: task.id, text: prompt, batch: null, completionMarker}, Date.now());
       });
-      await this.dispatch(this.requests.pending(binding.projectId)!, signal);return;
+      await this.dispatch(this.requests.pending(binding.projectId, binding.threadId)!, signal);return;
     }
     if (!enabled || busy(supervisor)) return;
     const settings = this.store.settings(binding.projectId).monitoring;
-    if (this.requests.requests(binding.projectId).some(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged)) return;
+    if (this.requests.requests(binding.projectId, binding.threadId).some(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged)) return;
     if (await this.runDefinitionRecovery(binding, supervisor, tasks, threads, signal)) return;
     const eligibleThreadIds = new Set(tasks.filter(task => threads.some(thread => thread.id === task.threadId && this.eligible(thread, threads))).map(task => task.threadId));
-    const batch = this.monitor.select(binding.projectId, settings, Date.now(), this.requests.lastNotice(binding.projectId), {eligibleThreadIds});
+    const batch = this.monitor.select(binding.projectId, settings, Date.now(), this.requests.lastNotice(binding.threadId), {eligibleThreadIds});
     if (!batch) return;
     const included: Array<SupervisorMonitorThreadBatch & {proposalId: string; workflowProposalId: string; objective: string; draft: WorkflowProposalInfo | null | undefined; agreement: WorkflowAgreementInfo | null | undefined; definitionReview: TaskRecord["definitionReview"]; staleRecovery: boolean}> = [];
     for (const chat of batch.threads) {
@@ -595,7 +596,7 @@ export class SupervisorConversation {
   private async dispatch(request: ConversationRequest, signal: AbortSignal): Promise<void> {
     if (!this.rpc) return;
     const sending = {...request, state: "sending" as const, sentAt: Date.now()};
-    this.store.store.transaction(() => {this.requests.saveRequest(sending);this.requests.noticeSent(request.projectId, sending.sentAt);});
+    this.store.store.transaction(() => {this.requests.saveRequest(sending);this.requests.noticeSent(request.supervisorThreadId, sending.sentAt);});
     try {
       const receipt = await this.rpc("orchestration.dispatchCommand", {type: "message.dispatch", commandId: `supervisor-review:${request.id}`, messageId: request.messageId,
         threadId: request.supervisorThreadId, text: request.text, attachments: [], createdBy: "system", creationSource: "server", dispatchMode: {type: "queue_after_active"}}, signal);
@@ -615,7 +616,7 @@ export class SupervisorConversation {
     threads: readonly ThreadInfo[], signal: AbortSignal, now: number): Promise<WorkflowAgreementCandidate | null> {
     if (!request.taskId || request.kind !== "context") return null;
     const task = this.store.tasks(request.projectId).find(item => item.id === request.taskId);
-    const binding = this.store.binding(request.projectId);
+    const binding = this.store.bindingForSupervisor(request.supervisorThreadId);
     if (!task || task.status !== "inferred" || task.workflow?.status !== "proposed" || !binding || binding.state !== "ready" ||
       binding.threadId !== task.supervisorThreadId || task.supervisorThreadId !== request.supervisorThreadId ||
       supervisor.thread.id !== binding.threadId || supervisor.thread.projectId !== request.projectId) return null;
@@ -667,7 +668,7 @@ export class SupervisorConversation {
     const initialCandidate = validCompletion && request.kind === "context" ? await this.initialWorkflowCandidate(request, run.id, supervisor, threads, signal, Date.now()) : null;
     const confirmedCompletion = validCompletion && (request.kind !== "context" || initialCandidate !== null);
     this.store.store.transaction(() => {
-      const misses = !confirmedCompletion && run.status === "completed" && request.kind === "review" ? this.requests.missedReview(request.projectId) : 0;
+      const misses = !confirmedCompletion && run.status === "completed" && request.kind === "review" ? this.requests.missedReview(request.supervisorThreadId) : 0;
       const retryableMiss = request.kind === "review" && run.status === "completed" && misses < 3;
       const error = confirmedCompletion ? null : retryableMiss ? "The check-in output was not confirmed; pending activity will be checked again after the cooldown." : request.kind === "context" && validCompletion ? "The initial workflow-proposal record could not be confirmed; no operative proposal was sent." : "The check-in could not be confirmed. Pending activity is retained; Retry native access to recover.";
       this.requests.saveRequest({...request, state: confirmedCompletion || retryableMiss ? "completed" : "failed", error});
@@ -675,7 +676,7 @@ export class SupervisorConversation {
         const task = this.store.tasks(request.projectId).find(item => item.id === request.taskId);
         if (task) {const retry = {...task};delete retry.definitionNoticeKey;this.store.saveTask(retry);}
       }
-      if (confirmedCompletion && request.kind === "review") this.requests.reviewMisses(request.projectId, true);
+      if (confirmedCompletion && request.kind === "review") this.requests.reviewMisses(request.supervisorThreadId, true);
       if (confirmedCompletion && request.batch) this.monitor.acknowledgeInTransaction(request.batch);
     if (request.taskId && request.kind === "context") {
         const introduction = this.requests.introduction(request.taskId);
@@ -721,12 +722,12 @@ export class SupervisorConversation {
       this.requests.saveIntroduction({...sending, state: definite ? "blocked" : "uncertain", definiteRejection: definite, error: definite ? "T3 rejected the proposal. Retry native access after correcting the rejection." : "Proposal delivery is uncertain. Its exact message identity is retained."});
     }
   }
-  retry(projectId: string): void {
-    this.requests.reviewMisses(projectId, true);
-    const request = this.requests.pending(projectId);
+  retry(projectId: string, supervisorThreadId: string): void {
+    this.requests.reviewMisses(supervisorThreadId, true);
+    const request = this.requests.pending(projectId, supervisorThreadId);
     if (request?.state === "uncertain") this.requests.saveRequest({...request, state: "prepared", error: null});
-    for (const failed of this.requests.requests(projectId).filter(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged)) this.requests.saveRequest({...failed, failureAcknowledged: true});
-    for (const introduction of this.requests.introductions(projectId)) {
+    for (const failed of this.requests.requests(projectId, supervisorThreadId).filter(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged)) this.requests.saveRequest({...failed, failureAcknowledged: true});
+    for (const introduction of this.requests.introductions(projectId).filter(intro => intro.supervisorThreadId === supervisorThreadId)) {
       if (introduction.state === "uncertain") this.requests.saveIntroduction({...introduction, state: "ready", error: null});
       if (introduction.state === "blocked" && !introduction.dispatchMode) this.store.store.db.prepare("DELETE FROM supervisor_workflow_introductions WHERE task_id=?").run(introduction.taskId);
       if (introduction.state === "blocked" && introduction.definiteRejection) {

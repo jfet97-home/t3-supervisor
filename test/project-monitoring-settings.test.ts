@@ -56,14 +56,14 @@ test("monitoring-only saves preserve model attempts and legacy saves keep curren
     assert.equal(savedMonitoring.generation, 5);
     assert.equal(savedMonitoring.modelMutationGeneration, 4);
     assert.deepEqual(savedMonitoring.monitoring, changedMonitoring);
-    assert.equal(savedMonitoring.pending, true);
+    assert.equal(savedMonitoring.pending, false);
     assert.equal(savedMonitoring.applyAttempts, 2);
     assert.equal(savedMonitoring.applicationMessage, "The native model update is still being reconciled.");
 
     const legacySave = supervisor.saveSettings("project", 5, defaultSupervisorModel);
     assert.deepEqual(legacySave.monitoring, changedMonitoring);
     assert.equal(legacySave.modelMutationGeneration, 4);
-    assert.equal(legacySave.pending, true);
+    assert.equal(legacySave.pending, false);
     assert.equal(legacySave.applyAttempts, 2);
     assert.equal(legacySave.applicationMessage, "The native model update is still being reconciled.");
   });
@@ -84,7 +84,7 @@ test("only a changed model selection starts a new native model mutation", async 
       ...defaultSupervisorModel,
       options: [{id: "reasoningEffort", value: "low"}],
     });
-    assert.equal(changed.pending, true);
+    assert.equal(changed.pending, false);
     assert.equal(changed.modelMutationGeneration, 4, "a legacy generation 3 advances when the model target changes");
     assert.equal(changed.applyAttempts, 0);
     assert.equal(changed.applicationMessage, null);
@@ -92,30 +92,16 @@ test("only a changed model selection starts a new native model mutation", async 
   });
 });
 
-test("native model readback and the next target change advance model mutation identity without colliding", async () => {
+test("native model readback changes only its binding and preserves project defaults", async () => {
   await withStore(supervisor => {
     const requested = {...defaultSupervisorModel, options: [{id: "reasoningEffort", value: "low"}]};
-    setStoredSettings(supervisor, {
-      projectId: "project",
-      generation: 5,
-      modelSelection: requested,
-      pending: true,
-      monitoring: defaultMonitoringSettings,
-      modelMutationGeneration: 5,
-      applyAttempts: 1,
-    });
-
-    supervisor.observeModel("project", defaultSupervisorModel, 5, "T3 reports its current model.");
-    const readback = supervisor.settings("project");
-    assert.equal(readback.generation, 5, "an applied-generation readback keeps the shared CAS generation");
-    assert.equal(readback.modelMutationGeneration, 6);
-    assert.deepEqual(readback.modelSelection, defaultSupervisorModel);
-    assert.equal(readback.pending, false);
-
-    const nextTarget = supervisor.saveSettings("project", 5, requested);
-    assert.equal(nextTarget.generation, 6);
-    assert.equal(nextTarget.modelMutationGeneration, 7);
-    assert.notEqual(nextTarget.modelMutationGeneration, 5, "the previous native command identity remains retired");
+    supervisor.saveSettings("project", 0, requested);
+    const first = supervisor.reserve("project", "main-a", "First", requested, 10, Date.now());
+    const second = supervisor.reserve("project", "main-b", "Second", requested, 10, Date.now());
+    supervisor.observeModel(first, defaultSupervisorModel);
+    assert.deepEqual(supervisor.settings("project").modelSelection, requested);
+    assert.deepEqual(supervisor.modelState(supervisor.binding("project", "main-a")!).modelSelection, defaultSupervisorModel);
+    assert.deepEqual(supervisor.modelState(second).modelSelection, requested);
   });
 });
 

@@ -1,3 +1,4 @@
+import { initializeMainSupervisionState } from "./supervisor-state-reset.js";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -12,7 +13,7 @@ import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.j
 
 export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "codex", model: "gpt-6-luna", options: [{id: "reasoningEffort", value: "high"}]};
 export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; applyAttempts?: number; applicationMessage?: string | null};
-export type BindingRecord = SupervisorBinding & {enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string};
+export type BindingRecord = SupervisorBinding & {mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string};
 export type SupervisorBaseline = {version?: 2; snapshotSequence: number; threads: Array<{id: string; latestRunId: string | null}>};
 export type TaskRecord = TaskInterpretationInfo & {id: string; sourceHash: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionSnapshot?: ProjectDefinitionSnapshot | null; definitionNoticeKey?: string; definitionReadAttempts?: number; revalidationAttempts?: number};
 
@@ -34,15 +35,17 @@ export const isSupervisorThread = (config: SupervisorConfig, thread: {id: string
 
 /** Adds supervision metadata to the existing private database without touching delivery ledgers. */
 export class ProjectSupervisorStore {
+  readonly scopeCompatible: boolean;
   constructor(readonly store: GuidanceStore, readonly ownedIds: Set<string>) {
     store.db.exec(`CREATE TABLE IF NOT EXISTS supervisor_owned_threads(id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS supervisor_project_settings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS supervisor_main_bindings(project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,document TEXT NOT NULL,PRIMARY KEY(project_id,main_thread_id));
       CREATE TABLE IF NOT EXISTS supervisor_task_interpretations(thread_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS supervisor_definition_user_saves(project_id TEXT NOT NULL,workspace_root TEXT NOT NULL,signature TEXT NOT NULL,saved_at INTEGER NOT NULL,expected_revision TEXT NOT NULL,PRIMARY KEY(project_id,workspace_root));
       CREATE INDEX IF NOT EXISTS supervisor_tasks_project ON supervisor_task_interpretations(project_id);`);
     if (!store.db.prepare("PRAGMA table_info(supervisor_definition_user_saves)").all().some(row => row.name === "expected_revision"))
       store.db.exec("ALTER TABLE supervisor_definition_user_saves ADD COLUMN expected_revision TEXT NOT NULL DEFAULT ''");
+    this.scopeCompatible = store.transaction(() => initializeMainSupervisionState(store.db));
     for (const row of store.db.prepare("SELECT id FROM supervisor_owned_threads").all()) ownedIds.add(String(row.id));
   }
   private read<T>(table: string, key: string, id: string): T | null {
@@ -90,48 +93,59 @@ export class ProjectSupervisorStore {
         modelMutationGeneration: old.modelMutationGeneration + (modelChanged ? 1 : 0),
         modelSelection: selection,
         monitoring: nextMonitoring,
-        pending: modelChanged ? true : old.pending,
+        pending: false,
         ...(modelChanged ? {applyAttempts: 0, applicationMessage: null} : {}),
       };
       this.store.db.prepare("INSERT INTO supervisor_project_settings VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET document=excluded.document").run(projectId, JSON.stringify(next));
       return next;
     });
   }
-  observeModel(projectId: string, selection: SupervisorModelSelection, appliedGeneration?: number, message?: string | null): void {
-    const old = this.settings(projectId);
+  modelState(binding: BindingRecord): ProjectModelSettings {
+    return binding.modelState ?? {...this.settings(binding.projectId), modelSelection: binding.initialModel, pending: false, applyAttempts: 0, applicationMessage: null};
+  }
+  observeModel(binding: BindingRecord, selection: SupervisorModelSelection, appliedGeneration?: number, message?: string | null): void {
+    const latest = this.binding(binding.projectId, binding.mainThreadId);
+    if (!latest || latest.threadId !== binding.threadId) return;
+    const old = this.modelState(latest);
     if (old.pending && old.generation !== appliedGeneration) return;
-    const modelChanged = !sameModel(old.modelSelection, selection);
-    const next = {...old, modelSelection: selection, pending: false, applicationMessage: message === undefined ? old.applicationMessage ?? null : message,
-      modelMutationGeneration: old.modelMutationGeneration + (modelChanged ? 1 : 0),
-      generation: old.generation + (!old.pending && modelChanged ? 1 : 0)};
-    this.store.db.prepare("INSERT INTO supervisor_project_settings VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET document=excluded.document").run(projectId, JSON.stringify(next));
+    const changed = !sameModel(old.modelSelection, selection);
+    this.setBinding({...latest, modelState: {...old, modelSelection: selection, pending: false,
+      applicationMessage: message === undefined ? old.applicationMessage ?? null : message,
+      generation: old.generation + (!old.pending && changed ? 1 : 0)}});
   }
-  modelAttempt(projectId: string, reset = false): void {
-    const old = this.settings(projectId);
-    const next = {...old, applyAttempts: reset ? 0 : (old.applyAttempts ?? 0) + 1,
-      applicationMessage: reset ? null : "Native model application is unresolved. Retry native access after checking T3."};
-    this.store.db.prepare("UPDATE supervisor_project_settings SET document=? WHERE project_id=?").run(JSON.stringify(next), projectId);
+  modelAttempt(binding: BindingRecord, reset = false): void {
+    const latest = this.binding(binding.projectId, binding.mainThreadId);
+    if (!latest || latest.threadId !== binding.threadId) return;
+    const old = this.modelState(latest);
+    this.setBinding({...latest, modelState: {...old, applyAttempts: reset ? 0 : (old.applyAttempts ?? 0) + 1,
+      applicationMessage: reset ? null : "Native model application is unresolved. Retry native access after checking T3."}});
   }
-  binding(projectId: string): BindingRecord | null {return this.read("supervisor_project_bindings", "project_id", projectId);}
-  bindings(): BindingRecord[] {return this.store.db.prepare("SELECT document FROM supervisor_project_bindings").all().map(row => JSON.parse(String(row.document)) as BindingRecord);}
-  reserve(projectId: string, title: string, selection: SupervisorModelSelection, watermark: number, now: number): BindingRecord {
+  binding(projectId: string, mainThreadId: string): BindingRecord | null {
+    const row = this.store.db.prepare("SELECT document FROM supervisor_main_bindings WHERE project_id=? AND main_thread_id=?").get(projectId, mainThreadId);
+    return row ? JSON.parse(String(row.document)) as BindingRecord : null;
+  }
+  bindingForSupervisor(threadId: string): BindingRecord | null {return this.bindings().find(binding => binding.threadId === threadId) ?? null;}
+  tasksFor(binding: BindingRecord): TaskRecord[] {return this.tasks(binding.projectId).filter(task => task.supervisorThreadId === binding.threadId);}
+  bindings(): BindingRecord[] {return this.store.db.prepare("SELECT document FROM supervisor_main_bindings ORDER BY project_id,main_thread_id").all().map(row => JSON.parse(String(row.document)) as BindingRecord);}
+  reserve(projectId: string, mainThreadId: string, title: string, selection: SupervisorModelSelection, watermark: number, now: number): BindingRecord {
     const value = this.store.transaction(() => {
-      const old = this.binding(projectId);if (old) return old;
+      const old = this.binding(projectId, mainThreadId);if (old) return old;
       if (Number(this.store.db.prepare("SELECT count(*) AS n FROM supervisor_owned_threads").get()?.n) >= 1000) throw new Error("supervisor_capacity");
-      const binding: BindingRecord = {projectId, threadId: randomUUID(), title: `Supervisor · ${title.slice(0,160)}`, generation: 1, enabledAt: now,
+      const binding: BindingRecord = {projectId, mainThreadId, threadId: randomUUID(), modelState: {...this.settings(projectId), modelSelection: selection, pending: false}, title: `Supervisor · ${title.slice(0,160)}`, generation: 1, enabledAt: now,
         enableAfterSequence: watermark, initialModel: selection, creationAttempts: 0, state: "creating"};
       this.store.db.prepare("INSERT INTO supervisor_owned_threads VALUES(?)").run(binding.threadId);
-      this.store.db.prepare("INSERT INTO supervisor_project_bindings VALUES(?,?)").run(projectId, JSON.stringify(binding));
+      this.store.db.prepare("INSERT INTO supervisor_main_bindings VALUES(?,?,?)").run(projectId, mainThreadId, JSON.stringify(binding));
       return binding;
     });
     this.ownedIds.add(value.threadId);return value;
   }
-  setBinding(value: BindingRecord): void {this.store.db.prepare("UPDATE supervisor_project_bindings SET document=? WHERE project_id=?").run(JSON.stringify(value), value.projectId);}
+  setBinding(value: BindingRecord): void {this.store.db.prepare("UPDATE supervisor_main_bindings SET document=? WHERE project_id=? AND main_thread_id=?").run(JSON.stringify(value), value.projectId, value.mainThreadId);}
   replaceMissingBinding(binding: BindingRecord, selection: SupervisorModelSelection): BindingRecord {
     if (binding.state !== "missing") throw new Error("supervisor_not_missing");
     const value = this.store.transaction(() => {
       if (Number(this.store.db.prepare("SELECT count(*) AS n FROM supervisor_owned_threads").get()?.n) >= 1000) throw new Error("supervisor_capacity");
-      const next: BindingRecord = {...binding, threadId: randomUUID(), generation: 1, initialModel: selection, creationAttempts: 0, state: "creating"};
+      const next: BindingRecord = {...binding, threadId: randomUUID(), generation: 1, initialModel: selection, modelState: {...this.settings(binding.projectId), modelSelection: selection, pending: false}, quietSince: null,  creationAttempts: 0, state: "creating"};
+      delete next.settlement;
       this.store.db.prepare("INSERT INTO supervisor_owned_threads VALUES(?)").run(next.threadId);this.setBinding(next);
       for (const task of this.tasks(binding.projectId)) {
         if (task.supervisorThreadId !== binding.threadId || task.agreement?.status !== "agreed") continue;
@@ -175,6 +189,7 @@ export class ProjectSupervisorStore {
     for (const row of this.store.db.prepare("SELECT document FROM supervisor_task_interpretations WHERE updated_at<?").all(now - 30 * 86400_000)) {
       const task = JSON.parse(String(row.document)) as TaskRecord;
       if (!["inferred","needs_context","unavailable","expired"].includes(task.status)) continue;
+      if (task.status === "inferred" && this.bindingForSupervisor(task.supervisorThreadId)?.state === "ready") continue;
       const expired: {-readonly [K in keyof TaskRecord]: TaskRecord[K]} = {...task, status: "expired", objective: null, reason: "Interpretation evidence expired.", requestText: "", definitionContext: null, workflow: null, agreement: null, updatedAt: now};
       delete expired.workflowProposalId;
       delete expired.definitionSnapshot;

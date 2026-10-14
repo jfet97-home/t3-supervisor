@@ -125,7 +125,7 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
     .add(
       HttpApiEndpoint.get("snapshot", "/snapshot", { success: Snapshot }),
       HttpApiEndpoint.get("projectSupervisor", "/project-supervisor", {
-        query: {projectId: Text}, success: ProjectSupervisorSnapshot, error: UiError,
+        query: {projectId: Text, mainThreadId: Schema.optional(Text)}, success: ProjectSupervisorSnapshot, error: UiError,
       }),
       HttpApiEndpoint.post("saveProjectSupervisor", "/project-supervisor", {
         payload: ProjectSupervisorSave, success: ProjectSupervisorSaveResult, error: UiError,
