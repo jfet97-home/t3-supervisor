@@ -95,3 +95,11 @@ Completed idle scopes settle the same owned chat for later resume. Archived/dele
 mains also park their companion once native work and children are quiet, retaining
 history and unknown request identities. A native 404 is distinct from a failed read.
 User pins and the retained keep-active choice can still hold settlement.
+
+
+Grant and session hashes share one private access/login.sqlite3 database. The
+service and forge command use its current schema; old experimental schemas are
+not supported automatically. Login commits grant consumption and session creation
+together. Existing session expiry and durable sign-out are unchanged. Maintenance
+preserves real credentials and sessions without requiring product compatibility
+layers for obsolete prototypes.

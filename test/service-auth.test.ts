@@ -23,7 +23,6 @@ const withTemporaryDirectory = async <A>(run: (directory: string) => Promise<A>)
 const accessPath = (directory: string): string => join(directory, "access");
 const tokenPath = (directory: string): string => join(accessPath(directory), "workflow-mcp-token");
 const databasePath = (directory: string): string => join(accessPath(directory), "login.sqlite3");
-const sessionDatabasePath = (directory: string): string => join(accessPath(directory), "dashboard-sessions.sqlite3");
 const isToken = (value: string): boolean => /^[A-Za-z0-9_-]{43}$/u.test(value);
 
 const pendingGrants = (directory: string): Array<Record<string, unknown>> => {
@@ -36,9 +35,18 @@ const pendingGrants = (directory: string): Array<Record<string, unknown>> => {
 };
 
 const sessionRows = (directory: string): Array<Record<string, unknown>> => {
-  const database = new DatabaseSync(sessionDatabasePath(directory));
+  const database = new DatabaseSync(databasePath(directory));
   try {
     return database.prepare("SELECT rowid, token_hash, issued_at, expires_at FROM dashboard_login_sessions ORDER BY rowid").all();
+  } finally {
+    database.close();
+  }
+};
+
+const authDatabaseTables = (directory: string): Array<Record<string, unknown>> => {
+  const database = new DatabaseSync(databasePath(directory));
+  try {
+    return database.prepare("SELECT type, name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' ORDER BY type, name").all();
   } finally {
     database.close();
   }
@@ -154,7 +162,11 @@ test("service auth persists a private workflow token and stores only hashed one-
       assert.equal((await lstat(access)).mode & 0o777, 0o700);
       assert.equal((await lstat(tokenPath(directory))).mode & 0o777, 0o600);
       assert.equal((await lstat(databasePath(directory))).mode & 0o777, 0o600);
-      assert.equal((await lstat(sessionDatabasePath(directory))).mode & 0o777, 0o600);
+      assert.deepEqual((await readdir(access)).sort(), ["login.sqlite3", "workflow-mcp-token"]);
+      assert.deepEqual(authDatabaseTables(directory).map(object => [object.type, object.name]), [
+        ["table", "dashboard_login_grants"],
+        ["table", "dashboard_login_sessions"],
+      ]);
       await assert.rejects(lstat(join(access, "dashboard-token")), {code: "ENOENT"});
 
       const grant = await forgeDashboardToken(directory, {now: () => now});
@@ -264,7 +276,7 @@ test("SQLite recovers a hot session journal after SIGKILL without losing committ
     assert.ok(session);
     auth.close();
 
-    const databasePathForChild = sessionDatabasePath(directory);
+    const databasePathForChild = databasePath(directory);
     const uncommittedHash = createHash("sha256").update("crash-recovery-fixture").digest("hex");
     const source = `
       import { DatabaseSync } from "node:sqlite";
@@ -323,47 +335,108 @@ test("SQLite recovers a hot session journal after SIGKILL without losing committ
   });
 });
 
-test("dashboard grants keep their original schema and remain issuable while sessions are active", async () => {
+test("grant and session tables share one database", async () => {
   await withTemporaryDirectory(async (directory) => {
     const auth = await createServiceAuth(directory);
     try {
       const firstGrant = await forgeDashboardToken(directory);
       const firstSession = auth.login(firstGrant.token);
       assert.ok(firstSession);
-      const grantState = await readFile(databasePath(directory));
-      const schema = new DatabaseSync(databasePath(directory));
-      try {
-        const objects = schema.prepare("SELECT type, name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' ORDER BY type, name").all();
-        assert.deepEqual(objects.map(object => [object.type, object.name]), [["table", "dashboard_login_grants"]]);
-      } finally {
-        schema.close();
-      }
+      const firstRows = sessionRows(directory);
+      assert.deepEqual(authDatabaseTables(directory).map(object => [object.type, object.name]), [
+        ["table", "dashboard_login_grants"],
+        ["table", "dashboard_login_sessions"],
+      ]);
 
       const secondGrant = await forgeDashboardToken(directory);
+      assert.deepEqual(sessionRows(directory), firstRows, "grant forging leaves session deadlines unchanged");
       assert.equal(auth.authenticated(firstSession), true);
       const secondSession = auth.login(secondGrant.token);
       assert.ok(secondSession);
-      const afterLoginState = await readFile(databasePath(directory));
       assert.equal(auth.authenticated(firstSession), true);
       assert.equal(auth.authenticated(secondSession), true);
+      assert.equal(pendingGrants(directory).length, 0);
       auth.logout(firstSession);
       assert.equal(auth.authenticated(firstSession), false);
-      assert.ok((await readFile(databasePath(directory))).equals(afterLoginState));
-      assert.notDeepEqual(grantState, afterLoginState);
+      assert.equal(auth.authenticated(secondSession), true);
+      assert.deepEqual(sessionRows(directory).map(row => row.token_hash), [
+        createHash("sha256").update(secondSession).digest("hex"),
+      ]);
     } finally {
       auth.close();
     }
   });
 });
 
-test("dashboard grant forging never creates the separate session database", async () => {
+test("failed login rolls back grant consumption, expiry pruning and session eviction", async () => {
   await withTemporaryDirectory(async (directory) => {
-    const auth = await createServiceAuth(directory);
-    auth.close();
-    await rm(sessionDatabasePath(directory));
-    const grant = await forgeDashboardToken(directory);
-    assert.equal(isToken(grant.token), true);
-    await assert.rejects(lstat(sessionDatabasePath(directory)), {code: "ENOENT"});
+    const sessionTtl = 8 * 60 * 60 * 1_000;
+    const currentTime = 50_000_000;
+    const auth = await createServiceAuth(directory, {now: () => currentTime});
+    const expiredHash = createHash("sha256").update("expired-session-fixture").digest("hex");
+    const oldestLiveHash = createHash("sha256").update("live-session-0").digest("hex");
+    const database = new DatabaseSync(databasePath(directory));
+    try {
+      const insertSession = database.prepare(
+        "INSERT INTO dashboard_login_sessions(token_hash,issued_at,expires_at) VALUES(?,?,?)",
+      );
+      insertSession.run(expiredHash, currentTime - sessionTtl - 1_000, currentTime - 1_000);
+      for (let index = 0; index < 31; index += 1) {
+        const hash = createHash("sha256").update("live-session-" + index).digest("hex");
+        const issuedAt = currentTime - sessionTtl + 1_000 + index;
+        insertSession.run(hash, issuedAt, issuedAt + sessionTtl);
+      }
+    } finally {
+      database.close();
+    }
+
+    try {
+      const pruneGrant = await forgeDashboardToken(directory, {now: () => currentTime});
+      const beforePruneFailure = sessionRows(directory);
+      const insertFailure = new DatabaseSync(databasePath(directory));
+      insertFailure.exec(
+        "CREATE TRIGGER reject_session_insert BEFORE INSERT ON dashboard_login_sessions " +
+        "BEGIN SELECT RAISE(ABORT, 'fixture'); END",
+      );
+      insertFailure.close();
+      assert.equal(auth.login(pruneGrant.token), null);
+      assert.deepEqual(sessionRows(directory), beforePruneFailure);
+      assert.equal(pendingGrants(directory)[0]?.token_hash, createHash("sha256").update(pruneGrant.token).digest("hex"));
+
+      const allowPrune = new DatabaseSync(databasePath(directory));
+      allowPrune.exec("DROP TRIGGER reject_session_insert");
+      allowPrune.close();
+      const firstSession = auth.login(pruneGrant.token);
+      assert.ok(firstSession);
+      assert.equal(sessionRows(directory).length, 32);
+      assert.equal(sessionRows(directory).some(row => row.token_hash === expiredHash), false);
+
+      const evictionGrant = await forgeDashboardToken(directory, {now: () => currentTime});
+      const beforeEvictionFailure = sessionRows(directory);
+      const rejectEviction = new DatabaseSync(databasePath(directory));
+      rejectEviction.exec(
+        "CREATE TRIGGER reject_session_insert BEFORE INSERT ON dashboard_login_sessions " +
+        "BEGIN SELECT RAISE(ABORT, 'fixture'); END",
+      );
+      rejectEviction.close();
+      assert.equal(auth.login(evictionGrant.token), null);
+      assert.deepEqual(sessionRows(directory), beforeEvictionFailure);
+      assert.equal(pendingGrants(directory)[0]?.token_hash, createHash("sha256").update(evictionGrant.token).digest("hex"));
+
+      const allowEviction = new DatabaseSync(databasePath(directory));
+      allowEviction.exec("DROP TRIGGER reject_session_insert");
+      allowEviction.close();
+      const secondSession = auth.login(evictionGrant.token);
+      assert.ok(secondSession);
+      assert.equal(auth.authenticated(firstSession), true);
+      assert.equal(auth.authenticated(secondSession), true);
+      assert.equal(sessionRows(directory).length, 32);
+      assert.equal(sessionRows(directory).some(row => row.token_hash === expiredHash), false);
+      assert.equal(sessionRows(directory).some(row => row.token_hash === oldestLiveHash), false);
+      assert.equal(pendingGrants(directory).length, 0);
+    } finally {
+      auth.close();
+    }
   });
 });
 
@@ -469,22 +542,6 @@ test("pending dashboard grants are isolated between service state directories", 
   });
 });
 
-test("legacy static dashboard-token files are not accepted as login grants", async () => {
-  await withTemporaryDirectory(async (directory) => {
-    await mkdir(accessPath(directory), {mode: 0o700});
-    const legacyToken = "A".repeat(43);
-    await writeFile(join(accessPath(directory), "dashboard-token"), legacyToken, {mode: 0o600});
-    const auth = await createServiceAuth(directory);
-    try {
-      assert.equal(auth.login(legacyToken) === null, true);
-      const grant = await forgeDashboardToken(directory);
-      assert.equal(auth.login(grant.token) !== null, true);
-    } finally {
-      auth.close();
-    }
-  });
-});
-
 test("grant issuance prunes expired rows and fails closed at the pending-grant limit", async () => {
   await withTemporaryDirectory(async (directory) => {
     let currentTime = 10_000;
@@ -513,7 +570,7 @@ test("grant issuance prunes expired rows and fails closed at the pending-grant l
   });
 });
 
-test("concurrent service initialization preserves one workflow token and both initialized databases", async () => {
+test("concurrent service initialization preserves one workflow token and one two-table database", async () => {
   await withTemporaryDirectory(async (directory) => {
     const [first, second] = await Promise.all([
       createServiceAuth(directory),
@@ -525,7 +582,7 @@ test("concurrent service initialization preserves one workflow token and both in
       assert.equal(first.mcpAuthorized(`Bearer ${workflowToken}`), true);
       assert.equal(second.mcpAuthorized(`Bearer ${workflowToken}`), true);
       await assert.rejects(lstat(join(accessPath(directory), "dashboard-token")), {code: "ENOENT"});
-      assert.deepEqual((await readdir(accessPath(directory))).sort(), ["dashboard-sessions.sqlite3", "login.sqlite3", "workflow-mcp-token"]);
+      assert.deepEqual((await readdir(accessPath(directory))).sort(), ["login.sqlite3", "workflow-mcp-token"]);
     } finally {
       first.close();
       second.close();
@@ -549,13 +606,11 @@ test("valid existing auth files are tightened to private modes", async () => {
     const first = await createServiceAuth(directory);
     first.close();
     await chmod(databasePath(directory), 0o644);
-    await chmod(sessionDatabasePath(directory), 0o644);
     await chmod(tokenPath(directory), 0o644);
     const second = await createServiceAuth(directory);
     try {
       assert.equal((await lstat(accessPath(directory))).mode & 0o777, 0o700);
       assert.equal((await lstat(databasePath(directory))).mode & 0o777, 0o600);
-      assert.equal((await lstat(sessionDatabasePath(directory))).mode & 0o777, 0o600);
       assert.equal((await lstat(tokenPath(directory))).mode & 0o777, 0o600);
     } finally {
       second.close();
@@ -604,7 +659,7 @@ test("malformed, oversized, symlink and non-regular workflow token files fail cl
   });
 });
 
-test("malformed, oversized, symlink and non-regular login databases fail closed", async (t) => {
+test("malformed, oversized, symlink and non-regular auth databases fail closed", async (t) => {
   await t.test("corrupt database remains untouched", async () => {
     await withTemporaryDirectory(async (directory) => {
       await mkdir(accessPath(directory), {mode: 0o700});
@@ -648,15 +703,19 @@ test("malformed, oversized, symlink and non-regular login databases fail closed"
   });
 });
 
-test("malformed, oversized, symlink and unexpected session databases fail closed", async (t) => {
-  await t.test("corrupt session database remains untouched", async () => {
+test("unexpected session table schemas and row caps fail closed", async (t) => {
+  await t.test("missing current table is not added to an existing database", async () => {
     await withTemporaryDirectory(async (directory) => {
       const auth = await createServiceAuth(directory);
       auth.close();
-      const corrupt = Buffer.from("not a sqlite database");
-      await writeFile(sessionDatabasePath(directory), corrupt, {mode: 0o600});
+      const database = new DatabaseSync(databasePath(directory));
+      database.exec("DROP TABLE dashboard_login_sessions");
+      database.close();
+      const before = await readFile(databasePath(directory));
+      assert.deepEqual(authDatabaseTables(directory).map(object => object.name), ["dashboard_login_grants"]);
       await assert.rejects(createServiceAuth(directory));
-      assert.ok((await readFile(sessionDatabasePath(directory))).equals(corrupt));
+      await assert.rejects(forgeDashboardToken(directory));
+      assert.ok((await readFile(databasePath(directory))).equals(before));
     });
   });
 
@@ -664,12 +723,12 @@ test("malformed, oversized, symlink and unexpected session databases fail closed
     await withTemporaryDirectory(async (directory) => {
       const auth = await createServiceAuth(directory);
       auth.close();
-      const database = new DatabaseSync(sessionDatabasePath(directory));
+      const database = new DatabaseSync(databasePath(directory));
       database.exec("ALTER TABLE dashboard_login_sessions ADD COLUMN unexpected TEXT");
       database.close();
-      const before = await readFile(sessionDatabasePath(directory));
+      const before = await readFile(databasePath(directory));
       await assert.rejects(createServiceAuth(directory));
-      assert.ok((await readFile(sessionDatabasePath(directory))).equals(before));
+      assert.ok((await readFile(databasePath(directory))).equals(before));
     });
   });
 
@@ -677,7 +736,7 @@ test("malformed, oversized, symlink and unexpected session databases fail closed
     await withTemporaryDirectory(async (directory) => {
       const auth = await createServiceAuth(directory);
       auth.close();
-      const database = new DatabaseSync(sessionDatabasePath(directory));
+      const database = new DatabaseSync(databasePath(directory));
       const insert = database.prepare("INSERT INTO dashboard_login_sessions(token_hash,issued_at,expires_at) VALUES(?,?,?)");
       for (let index = 0; index < 33; index += 1) {
         const hash = createHash("sha256").update(`fixture-${index}`).digest("hex");
@@ -693,7 +752,7 @@ test("malformed, oversized, symlink and unexpected session databases fail closed
     await withTemporaryDirectory(async (directory) => {
       const auth = await createServiceAuth(directory);
       auth.close();
-      const database = new DatabaseSync(sessionDatabasePath(directory));
+      const database = new DatabaseSync(databasePath(directory));
       const hash = createHash("sha256").update("short-lived-session").digest("hex");
       assert.throws(() => database.prepare(
         "INSERT INTO dashboard_login_sessions(token_hash,issued_at,expires_at) VALUES(?,?,?)",
@@ -703,43 +762,6 @@ test("malformed, oversized, symlink and unexpected session databases fail closed
     });
   });
 
-  await t.test("oversized file is not replaced", async () => {
-    await withTemporaryDirectory(async (directory) => {
-      const auth = await createServiceAuth(directory);
-      auth.close();
-      await rm(sessionDatabasePath(directory));
-      const oversized = Buffer.alloc(1_048_577, 0x41);
-      await writeFile(sessionDatabasePath(directory), oversized, {mode: 0o600});
-      await assert.rejects(createServiceAuth(directory));
-      assert.equal((await lstat(sessionDatabasePath(directory))).size, oversized.length);
-    });
-  });
-
-  await t.test("symlink is not followed", async () => {
-    await withTemporaryDirectory(async (directory) => {
-      const targetDirectory = join(directory, "target");
-      const linkedDirectory = join(directory, "linked");
-      const target = await createServiceAuth(targetDirectory);
-      const linked = await createServiceAuth(linkedDirectory);
-      target.close();
-      linked.close();
-      await rm(sessionDatabasePath(linkedDirectory));
-      await symlink(sessionDatabasePath(targetDirectory), sessionDatabasePath(linkedDirectory));
-      await assert.rejects(createServiceAuth(linkedDirectory));
-      assert.equal((await lstat(sessionDatabasePath(linkedDirectory))).isSymbolicLink(), true);
-    });
-  });
-
-  await t.test("directory in place of database is not replaced", async () => {
-    await withTemporaryDirectory(async (directory) => {
-      const auth = await createServiceAuth(directory);
-      auth.close();
-      await rm(sessionDatabasePath(directory));
-      await mkdir(sessionDatabasePath(directory), {mode: 0o700});
-      await assert.rejects(createServiceAuth(directory));
-      assert.equal((await lstat(sessionDatabasePath(directory))).isDirectory(), true);
-    });
-  });
 });
 
 test("two concurrent service instances can consume one grant only once", async () => {

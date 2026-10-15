@@ -162,19 +162,23 @@ installation uses the same user state directory for service and CLI; Docker/VM
 users run it inside their deployment environment. Custom state paths use the same
 DATA_DIRECTORY or `--data-dir /absolute/path` for both commands. The CLI requires initialized
 private auth state. The login page shows this exact portable command. Private
-SQLite stores only pending token hashes, and consumption is atomic/durable, so a
-used token cannot replay after restart. Independent state directories reject one
+SQLite stores token hashes rather than raw codes. Consumption and session creation
+commit together, so a successfully used token cannot replay after restart. Independent state directories reject one
 another's tokens. The long-lived workflow MCP token remains a separate0600 file
 under0700 access, accepted only for MCP transport.
 
-Dashboard sessions retain their original eight-hour deadline across service
-restarts and deployments. Only session hashes and issue/expiry times are stored
-in the separate private access/dashboard-sessions.sqlite3 database; the browser
-keeps the raw session in origin-scoped sessionStorage. Sign out durably revokes
-the session across service instances and restarts. The grant database and existing
-forge command remain compatible; they do not create the session database.
-Only the service creates a missing session database. Existing malformed auth
-files fail closed and are never overwritten or recreated.
+Dashboard grants and sessions share one private access/login.sqlite3 database.
+The service and forge command require its current two-table schema. Login consumes
+the grant and saves the session in one transaction; a failed session write rolls
+back grant consumption too. A successful grant cannot be reused.
+
+Sessions retain their original eight-hour deadline across service restarts and
+deployments. Only hashes and issue/expiry times are stored; the browser keeps the
+raw session in origin-scoped sessionStorage. Sign out durably revokes the session
+across service instances and restarts. Only the service initializes a missing
+auth database, with both tables together. Existing malformed or obsolete schemas
+fail closed and are never overwritten, migrated or recreated automatically.
+Experimental formats may change without old-CLI or rollback compatibility.
 
 Do not use T3/provider credentials for these roles. To rotate the MCP bearer,
 replace only its file with a fresh canonical32-byte base64url token, restart

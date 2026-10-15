@@ -46,7 +46,9 @@ password or contact T3.
 
 The browser keeps only an eight-hour session in storage scoped to that exact
 address and port. Sessions survive Supervisor restarts and deployments until their
-original expiry; Sign out revokes the session durably. An expired session keeps
+original expiry; Sign out revokes the session durably. Grant hashes and session
+hashes/timestamps share one private login.sqlite3 database; grant consumption and
+session creation commit together. The service and CLI use the current schema. An expired session keeps
 an open draft in the tab and never automatically
 repeats a rejected write. The Docker dashboard port remains published only on
 the Mac's loopback address.

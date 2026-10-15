@@ -103,3 +103,11 @@ messages. Idle scopes may settle and later reuse the same Supervisor; deletion,
 archive, failed reads and settlement are distinct. Retry native access reconciles
 original identities, never resets state. Report actual saved/live evidence and any
 unverified limit; acceptance, plan status and execution remain separate facts.
+
+
+Grant and session hashes share one private access/login.sqlite3 database. The
+service and forge command use its current schema; old experimental schemas are
+not supported automatically. Login commits grant consumption and session creation
+together. Existing session expiry and durable sign-out are unchanged. Maintenance
+preserves real credentials and sessions without requiring product compatibility
+layers for obsolete prototypes.
