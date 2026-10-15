@@ -18,8 +18,8 @@ single-use token entered privately in the page. The page shows
 `t3-supervisor auth forge`; run it as the actual service account in its environment,
 with matching DATA_DIRECTORY or --data-dir if customized. Ordinary usage does not
 authorize extracting/provisioning tokens or changing network exposure/deployment.
-Sessions belong to the exact origin and expire after eight hours or service restart.
-Sign out revokes the session. Expired authentication keeps drafts; sign-in never
+Sessions belong to the exact origin and expire after eight hours. Supervisor
+restarts and deployments preserve valid sessions; Sign out revokes them durably. Expired authentication keeps drafts; sign-in never
 replays a rejected mutation automatically.
 
 ## Definitions and project configuration

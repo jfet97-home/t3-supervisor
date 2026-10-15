@@ -167,8 +167,17 @@ used token cannot replay after restart. Independent state directories reject one
 another's tokens. The long-lived workflow MCP token remains a separate0600 file
 under0700 access, accepted only for MCP transport.
 
+Dashboard sessions retain their original eight-hour deadline across service
+restarts and deployments. Only session hashes and issue/expiry times are stored
+in the separate private access/dashboard-sessions.sqlite3 database; the browser
+keeps the raw session in origin-scoped sessionStorage. Sign out durably revokes
+the session across service instances and restarts. The grant database and existing
+forge command remain compatible; they do not create the session database.
+Only the service creates a missing session database. Existing malformed auth
+files fail closed and are never overwritten or recreated.
+
 Do not use T3/provider credentials for these roles. To rotate the MCP bearer,
 replace only its file with a fresh canonical32-byte base64url token, restart
-Supervisor and update only the matching MCPX header. Existing dashboard sessions
-are invalid after restart. Preserve all other service state; a volume reset is
+Supervisor and update only the matching MCPX header. Dashboard sessions keep their
+original expiry across that restart. Preserve all other service state; a volume reset is
 never a login recovery method.

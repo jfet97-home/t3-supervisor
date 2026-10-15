@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { once } from "node:events";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { Worker } from "node:worker_threads";
@@ -20,6 +23,7 @@ const withTemporaryDirectory = async <A>(run: (directory: string) => Promise<A>)
 const accessPath = (directory: string): string => join(directory, "access");
 const tokenPath = (directory: string): string => join(accessPath(directory), "workflow-mcp-token");
 const databasePath = (directory: string): string => join(accessPath(directory), "login.sqlite3");
+const sessionDatabasePath = (directory: string): string => join(accessPath(directory), "dashboard-sessions.sqlite3");
 const isToken = (value: string): boolean => /^[A-Za-z0-9_-]{43}$/u.test(value);
 
 const pendingGrants = (directory: string): Array<Record<string, unknown>> => {
@@ -29,6 +33,49 @@ const pendingGrants = (directory: string): Array<Record<string, unknown>> => {
   } finally {
     database.close();
   }
+};
+
+const sessionRows = (directory: string): Array<Record<string, unknown>> => {
+  const database = new DatabaseSync(sessionDatabasePath(directory));
+  try {
+    return database.prepare("SELECT rowid, token_hash, issued_at, expires_at FROM dashboard_login_sessions ORDER BY rowid").all();
+  } finally {
+    database.close();
+  }
+};
+
+const runAuthChild = async (
+  directory: string,
+  action: "login" | "authenticated",
+  token: string,
+): Promise<string> => {
+  const moduleUrl = new URL("../src/service-auth.ts", import.meta.url).href;
+  const loader = fileURLToPath(new URL("../node_modules/tsx/dist/loader.mjs", import.meta.url));
+  const source = `
+    let input = "";
+    for await (const chunk of process.stdin) input += chunk;
+    const payload = JSON.parse(input);
+    const { createServiceAuth } = await import(${JSON.stringify(moduleUrl)});
+    const auth = await createServiceAuth(payload.directory);
+    const result = payload.action === "login" ? auth.login(payload.token) : auth.authenticated(payload.token);
+    process.stdout.write(result === null ? "rejected" : String(result), () => process.exit(0));
+  `;
+  const child = spawn(process.execPath, [
+    "--disable-warning=ExperimentalWarning",
+    "--import",
+    loader,
+    "--input-type=module",
+    "-e",
+    source,
+  ], {cwd: tmpdir(), stdio: ["pipe", "pipe", "pipe"]});
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+  child.stdin.end(JSON.stringify({directory, action, token}));
+  const [code] = await once(child, "close") as [number | null, NodeJS.Signals | null];
+  if (code !== 0) throw new Error(`service auth child failed: ${stderr}`);
+  return stdout;
 };
 
 const makeConsumerWorker = (directory: string, token: string, barrier: SharedArrayBuffer) => {
@@ -107,6 +154,7 @@ test("service auth persists a private workflow token and stores only hashed one-
       assert.equal((await lstat(access)).mode & 0o777, 0o700);
       assert.equal((await lstat(tokenPath(directory))).mode & 0o777, 0o600);
       assert.equal((await lstat(databasePath(directory))).mode & 0o777, 0o600);
+      assert.equal((await lstat(sessionDatabasePath(directory))).mode & 0o777, 0o600);
       await assert.rejects(lstat(join(access, "dashboard-token")), {code: "ENOENT"});
 
       const grant = await forgeDashboardToken(directory, {now: () => now});
@@ -137,6 +185,11 @@ test("service auth persists a private workflow token and stores only hashed one-
       assert.equal(auth.mcpAuthorized(`Bearer ${workflowToken} `), false);
       assert.equal(auth.mcpAuthorized("Bearer " + "x".repeat(100_000)), false);
       assert.equal(pendingGrants(directory).length, 0);
+      const storedSession = sessionRows(directory)[0];
+      assert.equal(storedSession?.token_hash === createHash("sha256").update(session).digest("hex"), true);
+      assert.equal(storedSession?.token_hash === session, false);
+      assert.equal(storedSession?.issued_at, now);
+      assert.equal(storedSession?.expires_at, now + 8 * 60 * 60 * 1_000);
       auth.close();
       assert.equal(auth.authenticated(session), false);
       assert.equal(auth.mcpAuthorized(`Bearer ${workflowToken}`), false);
@@ -147,11 +200,12 @@ test("service auth persists a private workflow token and stores only hashed one-
   });
 });
 
-test("unused grants survive restart, consumed grants and sessions do not, and expired grants are pruned", async () => {
+test("grants and sessions persist across reopen without renewing their original deadlines", async () => {
   await withTemporaryDirectory(async (directory) => {
     let currentTime = 1_000;
     let auth: ServiceAuth | undefined = await createServiceAuth(directory, {now: () => currentTime});
     try {
+      const workflowToken = await readFile(tokenPath(directory), "utf8");
       const retained = await forgeDashboardToken(directory, {now: () => currentTime});
       auth.close();
       auth = await createServiceAuth(directory, {now: () => currentTime});
@@ -162,7 +216,17 @@ test("unused grants survive restart, consumed grants and sessions do not, and ex
 
       auth.close();
       auth = await createServiceAuth(directory, {now: () => currentTime});
+      assert.equal(auth.mcpAuthorized(`Bearer ${workflowToken}`), true);
       assert.equal(auth.login(retained.token) === null, true);
+      assert.equal(auth.authenticated(session), true);
+
+      currentTime = 1_000 - 60_001;
+      assert.equal(auth.authenticated(session), false);
+      currentTime = 1_000 - 60_000;
+      assert.equal(auth.authenticated(session), true);
+      currentTime = 1_000 + 8 * 60 * 60 * 1_000 - 1;
+      assert.equal(auth.authenticated(session), true);
+      currentTime += 1;
       assert.equal(auth.authenticated(session), false);
 
       const expired = await forgeDashboardToken(directory, {now: () => currentTime});
@@ -178,10 +242,136 @@ test("unused grants survive restart, consumed grants and sessions do not, and ex
   });
 });
 
-test("dashboard sessions expire after eight hours, logout revokes, and oldest sessions are evicted", async () => {
+test("a committed session survives an abrupt child-process exit and a grant cannot replay", async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const auth = await createServiceAuth(directory);
+    const grant = await forgeDashboardToken(directory);
+    auth.close();
+
+    const session = await runAuthChild(directory, "login", grant.token);
+    assert.equal(isToken(session), true);
+    assert.equal(await runAuthChild(directory, "authenticated", session), "true");
+    assert.equal(await runAuthChild(directory, "login", grant.token), "rejected");
+  });
+});
+
+test("SQLite recovers a hot session journal after SIGKILL without losing committed sessions", async () => {
+  await withTemporaryDirectory(async (directory) => {
+    let currentTime = 3_000;
+    const auth = await createServiceAuth(directory, {now: () => currentTime});
+    const grant = await forgeDashboardToken(directory, {now: () => currentTime});
+    const session = auth.login(grant.token);
+    assert.ok(session);
+    auth.close();
+
+    const databasePathForChild = sessionDatabasePath(directory);
+    const uncommittedHash = createHash("sha256").update("crash-recovery-fixture").digest("hex");
+    const source = `
+      import { DatabaseSync } from "node:sqlite";
+      let input = "";
+      for await (const chunk of process.stdin) input += chunk;
+      const payload = JSON.parse(input);
+      const database = new DatabaseSync(payload.path);
+      database.exec("PRAGMA synchronous=FULL; BEGIN IMMEDIATE;");
+      database.prepare("INSERT INTO dashboard_login_sessions(token_hash,issued_at,expires_at) VALUES(?,?,?)").run(
+        payload.hash,
+        payload.issuedAt,
+        payload.issuedAt + 8 * 60 * 60 * 1_000,
+      );
+      process.stdout.write("ready\\n");
+      setInterval(() => {}, 1_000);
+    `;
+    const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "--input-type=module", "-e", source], {
+      cwd: tmpdir(),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let resolveReady!: () => void;
+    const ready = new Promise<void>(resolve => { resolveReady = resolve; });
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+      stdout += chunk;
+      if (stdout.includes("ready\n")) resolveReady();
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    child.stdin.end(JSON.stringify({path: databasePathForChild, hash: uncommittedHash, issuedAt: currentTime}));
+    const closed = once(child, "close");
+    try {
+      const started = await Promise.race([
+        ready.then(() => "ready"),
+        closed.then(() => "closed"),
+      ]);
+      assert.equal(started, "ready", `crash probe failed before writing: ${stderr}`);
+      assert.equal((await lstat(databasePathForChild + "-journal")).isFile(), true);
+      assert.equal(child.kill("SIGKILL"), true);
+      const [exitCode, signal] = await closed as [number | null, NodeJS.Signals | null];
+      assert.equal(exitCode, null);
+      assert.equal(signal, "SIGKILL");
+
+      currentTime += 1;
+      const reopened = await createServiceAuth(directory, {now: () => currentTime});
+      try {
+        assert.equal(reopened.authenticated(session), true);
+        assert.equal(sessionRows(directory).length, 1);
+        assert.equal(sessionRows(directory).some(row => row.token_hash === uncommittedHash), false);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
+  });
+});
+
+test("dashboard grants keep their original schema and remain issuable while sessions are active", async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const auth = await createServiceAuth(directory);
+    try {
+      const firstGrant = await forgeDashboardToken(directory);
+      const firstSession = auth.login(firstGrant.token);
+      assert.ok(firstSession);
+      const grantState = await readFile(databasePath(directory));
+      const schema = new DatabaseSync(databasePath(directory));
+      try {
+        const objects = schema.prepare("SELECT type, name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' ORDER BY type, name").all();
+        assert.deepEqual(objects.map(object => [object.type, object.name]), [["table", "dashboard_login_grants"]]);
+      } finally {
+        schema.close();
+      }
+
+      const secondGrant = await forgeDashboardToken(directory);
+      assert.equal(auth.authenticated(firstSession), true);
+      const secondSession = auth.login(secondGrant.token);
+      assert.ok(secondSession);
+      const afterLoginState = await readFile(databasePath(directory));
+      assert.equal(auth.authenticated(firstSession), true);
+      assert.equal(auth.authenticated(secondSession), true);
+      auth.logout(firstSession);
+      assert.equal(auth.authenticated(firstSession), false);
+      assert.ok((await readFile(databasePath(directory))).equals(afterLoginState));
+      assert.notDeepEqual(grantState, afterLoginState);
+    } finally {
+      auth.close();
+    }
+  });
+});
+
+test("dashboard grant forging never creates the separate session database", async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const auth = await createServiceAuth(directory);
+    auth.close();
+    await rm(sessionDatabasePath(directory));
+    const grant = await forgeDashboardToken(directory);
+    assert.equal(isToken(grant.token), true);
+    await assert.rejects(lstat(sessionDatabasePath(directory)), {code: "ENOENT"});
+  });
+});
+
+test("logout revokes across open instances and durable sessions keep a global stable cap", async () => {
   await withTemporaryDirectory(async (directory) => {
     let currentTime = 2_000;
     const auth = await createServiceAuth(directory, {now: () => currentTime});
+    const concurrent = await createServiceAuth(directory, {now: () => currentTime});
     try {
       const expiresGrant = await forgeDashboardToken(directory, {now: () => currentTime});
       const revokedGrant = await forgeDashboardToken(directory, {now: () => currentTime});
@@ -195,23 +385,62 @@ test("dashboard sessions expire after eight hours, logout revokes, and oldest se
       assert.equal(auth.authenticated(expires), true);
       currentTime += 1;
       assert.equal(auth.authenticated(expires), false);
-      auth.logout(revoked);
+      assert.equal(concurrent.authenticated(revoked), false);
+      concurrent.logout(revoked);
       assert.equal(auth.authenticated(revoked), false);
       auth.logout(undefined);
 
       currentTime += 1;
       const sessions: string[] = [];
-      for (let index = 0; index < 33; index += 1) {
+      for (let index = 0; index < 32; index += 1) {
         const grant = await forgeDashboardToken(directory, {now: () => currentTime});
-        const session = auth.login(grant.token);
+        const session = (index % 2 === 0 ? auth : concurrent).login(grant.token);
+        if (session === null) throw new Error("valid dashboard grant was rejected");
+        sessions.push(session);
+      }
+      concurrent.logout(sessions[16]);
+      concurrent.logout(sessions[31]);
+      for (let index = 0; index < 3; index += 1) {
+        const grant = await forgeDashboardToken(directory, {now: () => currentTime});
+        const session = (index % 2 === 0 ? concurrent : auth).login(grant.token);
         if (session === null) throw new Error("valid dashboard grant was rejected");
         sessions.push(session);
       }
       assert.equal(auth.authenticated(sessions[0]), false);
       assert.equal(auth.authenticated(sessions[1]), true);
+      assert.equal(auth.authenticated(sessions[16]), false);
+      assert.equal(auth.authenticated(sessions[31]), false);
       assert.equal(auth.authenticated(sessions[32]), true);
+      assert.equal(auth.authenticated(sessions[33]), true);
+      assert.equal(auth.authenticated(sessions[34]), true);
+      assert.equal(sessionRows(directory).length, 32);
     } finally {
       auth.close();
+      concurrent.close();
+    }
+  });
+});
+
+test("logout by another service instance remains revoked after reopen", async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const first = await createServiceAuth(directory);
+    const second = await createServiceAuth(directory);
+    const grant = await forgeDashboardToken(directory);
+    const session = first.login(grant.token);
+    assert.ok(session);
+    try {
+      assert.equal(second.authenticated(session), true);
+      second.logout(session);
+      assert.equal(first.authenticated(session), false);
+    } finally {
+      first.close();
+      second.close();
+    }
+    const reopened = await createServiceAuth(directory);
+    try {
+      assert.equal(reopened.authenticated(session), false);
+    } finally {
+      reopened.close();
     }
   });
 });
@@ -226,8 +455,12 @@ test("pending dashboard grants are isolated between service state directories", 
         const secondGrant = await forgeDashboardToken(secondDirectory);
         assert.equal(second.login(firstGrant.token) === null, true);
         assert.equal(first.login(secondGrant.token) === null, true);
-        assert.equal(first.login(firstGrant.token) !== null, true);
-        assert.equal(second.login(secondGrant.token) !== null, true);
+        const firstSession = first.login(firstGrant.token);
+        const secondSession = second.login(secondGrant.token);
+        assert.equal(firstSession !== null, true);
+        assert.equal(secondSession !== null, true);
+        assert.equal(first.authenticated(secondSession ?? undefined), false);
+        assert.equal(second.authenticated(firstSession ?? undefined), false);
       } finally {
         first.close();
         second.close();
@@ -280,7 +513,7 @@ test("grant issuance prunes expired rows and fails closed at the pending-grant l
   });
 });
 
-test("concurrent service initialization preserves one workflow token and one initialized grant database", async () => {
+test("concurrent service initialization preserves one workflow token and both initialized databases", async () => {
   await withTemporaryDirectory(async (directory) => {
     const [first, second] = await Promise.all([
       createServiceAuth(directory),
@@ -292,7 +525,7 @@ test("concurrent service initialization preserves one workflow token and one ini
       assert.equal(first.mcpAuthorized(`Bearer ${workflowToken}`), true);
       assert.equal(second.mcpAuthorized(`Bearer ${workflowToken}`), true);
       await assert.rejects(lstat(join(accessPath(directory), "dashboard-token")), {code: "ENOENT"});
-      assert.deepEqual((await readdir(accessPath(directory))).sort(), ["login.sqlite3", "workflow-mcp-token"]);
+      assert.deepEqual((await readdir(accessPath(directory))).sort(), ["dashboard-sessions.sqlite3", "login.sqlite3", "workflow-mcp-token"]);
     } finally {
       first.close();
       second.close();
@@ -316,11 +549,13 @@ test("valid existing auth files are tightened to private modes", async () => {
     const first = await createServiceAuth(directory);
     first.close();
     await chmod(databasePath(directory), 0o644);
+    await chmod(sessionDatabasePath(directory), 0o644);
     await chmod(tokenPath(directory), 0o644);
     const second = await createServiceAuth(directory);
     try {
       assert.equal((await lstat(accessPath(directory))).mode & 0o777, 0o700);
       assert.equal((await lstat(databasePath(directory))).mode & 0o777, 0o600);
+      assert.equal((await lstat(sessionDatabasePath(directory))).mode & 0o777, 0o600);
       assert.equal((await lstat(tokenPath(directory))).mode & 0o777, 0o600);
     } finally {
       second.close();
@@ -409,6 +644,100 @@ test("malformed, oversized, symlink and non-regular login databases fail closed"
       await mkdir(databasePath(directory), {recursive: true, mode: 0o700});
       await assert.rejects(createServiceAuth(directory));
       assert.equal((await lstat(databasePath(directory))).isDirectory(), true);
+    });
+  });
+});
+
+test("malformed, oversized, symlink and unexpected session databases fail closed", async (t) => {
+  await t.test("corrupt session database remains untouched", async () => {
+    await withTemporaryDirectory(async (directory) => {
+      const auth = await createServiceAuth(directory);
+      auth.close();
+      const corrupt = Buffer.from("not a sqlite database");
+      await writeFile(sessionDatabasePath(directory), corrupt, {mode: 0o600});
+      await assert.rejects(createServiceAuth(directory));
+      assert.ok((await readFile(sessionDatabasePath(directory))).equals(corrupt));
+    });
+  });
+
+  await t.test("unexpected schema remains untouched", async () => {
+    await withTemporaryDirectory(async (directory) => {
+      const auth = await createServiceAuth(directory);
+      auth.close();
+      const database = new DatabaseSync(sessionDatabasePath(directory));
+      database.exec("ALTER TABLE dashboard_login_sessions ADD COLUMN unexpected TEXT");
+      database.close();
+      const before = await readFile(sessionDatabasePath(directory));
+      await assert.rejects(createServiceAuth(directory));
+      assert.ok((await readFile(sessionDatabasePath(directory))).equals(before));
+    });
+  });
+
+  await t.test("more than 32 persisted sessions fail closed", async () => {
+    await withTemporaryDirectory(async (directory) => {
+      const auth = await createServiceAuth(directory);
+      auth.close();
+      const database = new DatabaseSync(sessionDatabasePath(directory));
+      const insert = database.prepare("INSERT INTO dashboard_login_sessions(token_hash,issued_at,expires_at) VALUES(?,?,?)");
+      for (let index = 0; index < 33; index += 1) {
+        const hash = createHash("sha256").update(`fixture-${index}`).digest("hex");
+        insert.run(hash, 1_000 + index, 1_000 + index + 8 * 60 * 60 * 1_000);
+      }
+      database.close();
+      await assert.rejects(createServiceAuth(directory));
+      assert.equal(sessionRows(directory).length, 33);
+    });
+  });
+
+  await t.test("SQLite rejects sessions without the exact eight-hour lifetime", async () => {
+    await withTemporaryDirectory(async (directory) => {
+      const auth = await createServiceAuth(directory);
+      auth.close();
+      const database = new DatabaseSync(sessionDatabasePath(directory));
+      const hash = createHash("sha256").update("short-lived-session").digest("hex");
+      assert.throws(() => database.prepare(
+        "INSERT INTO dashboard_login_sessions(token_hash,issued_at,expires_at) VALUES(?,?,?)",
+      ).run(hash, 1_000, 1_000 + 8 * 60 * 60 * 1_000 - 1));
+      database.close();
+      assert.equal(sessionRows(directory).length, 0);
+    });
+  });
+
+  await t.test("oversized file is not replaced", async () => {
+    await withTemporaryDirectory(async (directory) => {
+      const auth = await createServiceAuth(directory);
+      auth.close();
+      await rm(sessionDatabasePath(directory));
+      const oversized = Buffer.alloc(1_048_577, 0x41);
+      await writeFile(sessionDatabasePath(directory), oversized, {mode: 0o600});
+      await assert.rejects(createServiceAuth(directory));
+      assert.equal((await lstat(sessionDatabasePath(directory))).size, oversized.length);
+    });
+  });
+
+  await t.test("symlink is not followed", async () => {
+    await withTemporaryDirectory(async (directory) => {
+      const targetDirectory = join(directory, "target");
+      const linkedDirectory = join(directory, "linked");
+      const target = await createServiceAuth(targetDirectory);
+      const linked = await createServiceAuth(linkedDirectory);
+      target.close();
+      linked.close();
+      await rm(sessionDatabasePath(linkedDirectory));
+      await symlink(sessionDatabasePath(targetDirectory), sessionDatabasePath(linkedDirectory));
+      await assert.rejects(createServiceAuth(linkedDirectory));
+      assert.equal((await lstat(sessionDatabasePath(linkedDirectory))).isSymbolicLink(), true);
+    });
+  });
+
+  await t.test("directory in place of database is not replaced", async () => {
+    await withTemporaryDirectory(async (directory) => {
+      const auth = await createServiceAuth(directory);
+      auth.close();
+      await rm(sessionDatabasePath(directory));
+      await mkdir(sessionDatabasePath(directory), {mode: 0o700});
+      await assert.rejects(createServiceAuth(directory));
+      assert.equal((await lstat(sessionDatabasePath(directory))).isDirectory(), true);
     });
   });
 });

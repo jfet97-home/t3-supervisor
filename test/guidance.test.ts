@@ -659,6 +659,21 @@ test("local UI login scopes dashboard sessions and separates workflow MCP access
             assert.equal(canResetActivity(ownerAction),false);
             assert.equal(canResetActivity(fresh),true);
 
+            const sessionDatabase = new DatabaseSync(join(directory, "access", "dashboard-sessions.sqlite3"));
+            sessionDatabase.exec("CREATE TRIGGER reject_session_revocation BEFORE DELETE ON dashboard_login_sessions BEGIN SELECT RAISE(ABORT, 'fixture'); END");
+            sessionDatabase.close();
+            const rejectedLogout = await fetch(origin + "/auth/logout", {
+              method: "POST",
+              headers: {Origin: origin, "x-supervisor-session": dashboard.session, "Content-Type": "application/json"},
+              body: "{}",
+            });
+            assert.equal(rejectedLogout.status, 500);
+            assert.deepEqual(await rejectedLogout.json(), {message: "Supervisor operation unavailable."});
+            const retainedSession = new DatabaseSync(join(directory, "access", "dashboard-sessions.sqlite3"));
+            assert.equal(retainedSession.prepare("SELECT COUNT(*) AS count FROM dashboard_login_sessions").get()?.count, 1);
+            retainedSession.exec("DROP TRIGGER reject_session_revocation");
+            retainedSession.close();
+
             const logout = await fetch(origin + "/auth/logout", {
               method: "POST",
               headers: {Origin: origin, "x-supervisor-session": dashboard.session, "Content-Type": "application/json"},

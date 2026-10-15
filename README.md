@@ -45,8 +45,9 @@ state, following T3's pairing-token pattern; it does not read out a permanent
 password or contact T3.
 
 The browser keeps only an eight-hour session in storage scoped to that exact
-address and port. Sign out revokes the session; service restart requires sign-in
-again. An expired session keeps an open draft in the tab and never automatically
+address and port. Sessions survive Supervisor restarts and deployments until their
+original expiry; Sign out revokes the session durably. An expired session keeps
+an open draft in the tab and never automatically
 repeats a rejected write. The Docker dashboard port remains published only on
 the Mac's loopback address.
 

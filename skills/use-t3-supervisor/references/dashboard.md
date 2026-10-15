@@ -12,8 +12,9 @@ environment. A custom state directory must match the service's DATA_DIRECTORY or
 `--data-dir` option. This mints a fresh token valid for five minutes. Tokens come
 from private service state and must not be put in chat or a URL. Ordinary usage
 does not authorize retrieving or provisioning credentials. The browser stores only
-a short-lived session for that exact origin, with no auth cookie. A new tab, expired
-session or service restart can require sign-in again. Sign out revokes this session.
+an eight-hour session for that exact origin, with no auth cookie. Supervisor
+restarts preserve it until its original expiry. A new tab or expired session can
+require sign-in again. Sign out revokes this session durably.
 After reauthentication, review an unsaved draft and choose Save explicitly; the
 page never repeats a rejected mutation automatically.
 
