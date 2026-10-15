@@ -176,6 +176,7 @@ const whitelistThreadShell = (thread: ThreadInfo): ThreadInfo => {
       ...(typeof lineage.rootThreadId === "string" ? { rootThreadId: lineage.rootThreadId } : {}),
     },
   };
+  if (thread.creationSource === "provider" || thread.creationSource === "mcp") safe.creationSource = thread.creationSource;
   for (const field of ["activeRunId", "activityRunStatus", "activeProviderThreadId", "latestRunId", "status"]) {
     const value = thread[field];
     if (typeof value === "string" || value === null) safe[field] = value;

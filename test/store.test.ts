@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Effect } from "effect";
 import test from "node:test";
+import { childOrigin } from "../src/supervisor-observation.js";
+import { resolveSupervisorScope } from "../src/supervisor-scope.js";
 import { makeStore, Store, StoreError, type StoreShape } from "../src/store.js";
-import type { ProjectInfo, RecapContext, SourceItem, ThreadInfo } from "../src/types.js";
+import type { ProjectInfo, Projection, RecapContext, SourceItem, ThreadInfo } from "../src/types.js";
 
 const project = (id = "project-1", title = "Project one", workspaceRoot = "/work/project-one"): ProjectInfo => ({
   id,
@@ -379,6 +381,32 @@ test("stored thread shells drop conversation and goal text while retaining polic
       assert.ok(!onDisk.some((content) => content.includes(Buffer.from(privateValue))));
       assert.ok(!JSON.stringify(persisted).includes(privateValue));
     }
+  });
+});
+
+test("catalog persistence retains native child origin metadata for shared scope observation", async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const main = {...thread("main-thread"), lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: "main-thread"}};
+    const native = {...thread("native-child", null), creationSource: "provider",
+      lineage: {parentThreadId: main.id, relationshipToParent: "subagent", rootThreadId: main.id}};
+    const delegated = {...thread("delegated-child", "other-project"), creationSource: "mcp",
+      lineage: {parentThreadId: main.id, relationshipToParent: "subagent", rootThreadId: main.id}};
+    await withStore(directory, (store) => store.ingest(sourceItem("active", {kind: "snapshot", snapshot: {
+      schemaVersion: 2, snapshotSequence: 7, projects: [project()], threads: [main, native, delegated], archivedThreads: [],
+    }})));
+    const catalog = await withStore(directory, (store) => store.catalog());
+
+    const scope = resolveSupervisorScope(catalog.threads, "project-1", main.id);
+    assert.equal(scope.complete, true);
+    const persistedNative = scope.byId.get(native.id);
+    const persistedDelegated = scope.byId.get(delegated.id);
+    assert.equal(persistedNative?.creationSource, "provider");
+    assert.equal(persistedDelegated?.creationSource, "mcp");
+    const parentProjection: Projection = {thread: scope.main!, runs: [], messages: [],
+      subagents: [{childThreadId: native.id, status: "running"}, {childThreadId: delegated.id, status: "running"}]};
+    assert.equal(childOrigin(persistedNative!, parentProjection), "native_child");
+    assert.equal(childOrigin(persistedDelegated!, parentProjection), "delegated_child",
+      "an explicit mcp origin must win over the parent's generic child lifecycle record");
   });
 });
 
