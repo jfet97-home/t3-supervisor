@@ -28,3 +28,20 @@ Supervisor MCP endpoint. The existing MCPX gateway remains the client connection
 do not introduce another intermediary. The two legacy workflow HTTP proxy services were
 removed by the completed direct-authentication batch. Never modify
 T3 source or its installed app/server as a workaround.
+
+
+## Current phase: rapid development, no backward compatibility
+
+This is an experimental project being iterated quickly on the Mac and Lab VM.
+Backward compatibility with previous prototype versions, schemas, file formats,
+CLI behavior or configuration is not a requirement unless the user explicitly
+requests it for a particular change. Prefer the simplest current implementation.
+Do not add compatibility layers, legacy fallbacks, duplicate databases/stores or
+migration frameworks solely to keep obsolete experimental versions working.
+The former split grant/session databases are the concrete example to avoid.
+Obsolete prototype code and tests may be replaced rather than carried forward.
+
+Preserving current credentials, active sessions and non-disposable user data is
+operational care, not a reason to retain old product formats. When necessary,
+use a bounded one-off operational cut-over rather than permanent compatibility
+machinery. This policy does not authorize unrelated data resets.
