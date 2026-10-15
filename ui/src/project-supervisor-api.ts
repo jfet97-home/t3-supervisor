@@ -6,7 +6,7 @@ import {
   type ProjectSupervisorRetryInput,
   type ProjectSupervisorSaveInput,
 } from "../../src/project-supervisor-contract.js";
-import { getCsrfToken, loadAccess } from "./access.js";
+import { getCsrfToken, loadAccess, sessionHeaders } from "./access.js";
 
 export class ProjectSupervisorRequestError extends Error {
   constructor(message: string, readonly definitelyNotSaved: boolean) {super(message);}
@@ -15,7 +15,7 @@ export class ProjectSupervisorRequestError extends Error {
 export const loadProjectSupervisor = async (projectId: string, signal: AbortSignal, mainThreadId: string | null = null): Promise<ProjectSupervisorInfo> => {
   const query = new URLSearchParams({projectId});
   if (mainThreadId) query.set("mainThreadId", mainThreadId);
-  const response = await fetch(`/api/guidance/project-supervisor?${query}`, {credentials: "same-origin", signal});
+  const response = await fetch(`/api/guidance/project-supervisor?${query}`, {credentials: "omit", headers: sessionHeaders(), signal});
   if (!response.ok) throw new Error("Supervisor settings could not be loaded.");
   const value = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(await response.json());
   if (signal.aborted || value.projectId !== projectId || value.mainThreadId !== mainThreadId) throw new Error("The Supervisor response belongs to another project.");
@@ -25,11 +25,11 @@ export const loadProjectSupervisor = async (projectId: string, signal: AbortSign
 const postProjectSupervisor = async (path: string, input: ProjectSupervisorSaveInput | ProjectSupervisorRetryInput, csrfToken: string) => {
   const response = await fetch(path, {
     method: "POST",
-    credentials: "same-origin",
-    headers: {"Content-Type": "application/json", "x-csrf-token": getCsrfToken() || csrfToken},
+    credentials: "omit",
+    headers: {"Content-Type": "application/json", ...sessionHeaders(), "x-csrf-token": getCsrfToken() || csrfToken},
     body: JSON.stringify(input),
   });
-  if (response.status === 403) {
+  if (response.status === 401 || response.status === 403) {
     const refreshed = await loadAccess().catch(() => false);
     throw new ProjectSupervisorRequestError(
       refreshed ? "Session refreshed. Your Supervisor change was not performed; review the state and try again." : "Your Supervisor change was not performed. Session refresh failed; reconnect and try again.",

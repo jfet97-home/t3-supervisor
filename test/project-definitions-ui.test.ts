@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { DefinitionsContent } from "../ui/src/project-definitions.js";
 import { loadProjectDefinitions } from "../ui/src/project-definitions-api.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
+import { forgeDashboardToken } from "../src/service-auth.js";
 
 const definitions: ProjectDefinitionSnapshot = {
   projectId: "project", threadId: null, workspaceRoot: "/workspace", revision: "a".repeat(64), editingAvailable: true, status: "ready", issues: [],
@@ -43,7 +44,7 @@ test("definition client validates target identity and passes cancellation to sam
   const original = globalThis.fetch;const controller = new AbortController();
   try {
     let seen = "";globalThis.fetch = async (input, init) => {
-      seen = String(input);assert.equal(init?.signal, controller.signal);assert.equal(init?.credentials, "same-origin");
+      seen = String(input);assert.equal(init?.signal, controller.signal);assert.equal(init?.credentials, "omit");
       return new Response(JSON.stringify({...definitions, projectId: "project & other", threadId: "thread?#"}), {status: 200});
     };
     const result = await loadProjectDefinitions("project & other", "thread?#", controller.signal);
@@ -83,7 +84,7 @@ test("a restarted session refreshes CSRF without retrying the write or locking t
   } finally {globalThis.fetch = previous;}
 });
 
-test("real HTTP restart renews access and preserves an explicit second-save opportunity", async () => {
+test("real HTTP restart requires sign-in and preserves an explicit second-save opportunity", async () => {
   const {startGuidanceUi} = await import("../src/guidance-ui.js");
   const {mkdtemp, rm} = await import("node:fs/promises");const {join} = await import("node:path");const {tmpdir} = await import("node:os");
   const {loadAccess, getCsrfToken} = await import("../ui/src/access.js");
@@ -97,12 +98,22 @@ test("real HTTP restart renews access and preserves an explicit second-save oppo
   const address = ui.server.address();assert.ok(address && typeof address !== "string");const origin = `http://127.0.0.1:${address.port}`;
   const originalFetch = globalThis.fetch;
   try {
-    globalThis.fetch = (input, init) => originalFetch(new URL(String(input), origin), {...init, headers: {...init?.headers, ...(init?.method === "POST" ? {Origin: origin} : {})}});
+    let session = "";
+    const login = async () => {
+      const grant = await forgeDashboardToken(directory);
+      const response = await originalFetch(origin + "/auth/login", {method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify({token: grant.token})});
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("set-cookie"), null);
+      session = (await response.json()).session;
+    };
+    globalThis.fetch = (input, init) => originalFetch(new URL(String(input), origin), {...init, headers: {...init?.headers, "x-supervisor-session": session, ...(init?.method === "POST" ? {Origin: origin} : {})}});
+    await login();
     assert.equal(await loadAccess(), true);const stale = getCsrfToken();await ui.close();
     ui = await startGuidanceUi({...config, uiPort: address.port}, runtime, undefined, editor);
     const input = {projectId: "project", threadId: null, expectedRevision: "a".repeat(64), rules: definitions.rules};
     await assert.rejects(saveProjectRules(input, stale), (error: unknown) => error instanceof ProjectRuleRequestError && error.definitelyNotSaved);
-    assert.equal(saves, 0);assert.notEqual(getCsrfToken(), stale);
+    assert.equal(saves, 0);assert.equal(getCsrfToken(), "");
+    await login();assert.equal(await loadAccess(), true);assert.notEqual(getCsrfToken(), stale);
     assert.equal((await saveProjectRules(input, stale)).status, "saved");assert.equal(saves, 1);
   } finally {globalThis.fetch = originalFetch;await ui.close();await rm(directory, {recursive: true, force: true});}
 });

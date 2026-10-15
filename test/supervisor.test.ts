@@ -283,3 +283,33 @@ test("disabled Telegram keeps observation healthy without notification services 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+
+test("failed supervision startup degrades readiness while the coordinator stays alive", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "supervision-startup-failure-"));
+  const config: SupervisorConfig = {dataDirectory: directory, t3Url: "unused", t3TokenFile: join(directory, "missing-read-token"), mcpxUrl: "unused", cxCommand: "unused", cxHome: directory, cxSeedFile: "unused", excludedThreadIds: [], healthPort: 0, modelTimeoutMs: 100, telegramEnabled: false, uiPort: 0, uiHost: "127.0.0.1"};
+  const status = createStatus(config);
+  const source: T3ClientShape = {
+    descriptor: () => Effect.succeed({environmentId: "startup-test", orchestrationProtocolVersion: 2, serverVersion: "fixture"}),
+    projection: () => Effect.die("No completion read is expected"),
+    watch: (_cursor, onItem) => Effect.gen(function* () {
+      yield* onItem({stream: "active", item: {kind: "snapshot", snapshot: {schemaVersion: 2, snapshotSequence: 1, projects: [], threads: [], archivedThreads: []}}});
+      return yield* Effect.never;
+    }),
+  };
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      yield* Effect.forkScoped(runSupervisor(config, status));
+      yield* Effect.gen(function* () {
+        if (status.supervisionState !== "degraded" || !status.t3Connected) {yield* Effect.sleep("10 millis");return false;}
+        return true;
+      }).pipe(Effect.repeat({until: Boolean}), Effect.timeout("3 seconds"));
+      assert.equal(status.lastErrorPhase, "supervision");
+      assert.equal(readiness(status, config).alive, true);
+      assert.equal(readiness(status, config).ready, false);
+      assert.equal(readiness(status, config).supervisionProgress, false);
+      status.supervisionState = "ready";status.storeState = "ready";
+      assert.equal(readiness(status, config).ready, true);
+    }).pipe(Effect.provide(Layer.mergeAll(makeStore(directory), Layer.succeed(T3Client, source))), Effect.scoped));
+  } finally {await rm(directory, {recursive: true, force: true});}
+});

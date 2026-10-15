@@ -473,7 +473,7 @@ test("Supervisor client encodes project targets, checks response identity and pa
     globalThis.fetch = async (inputValue, init) => {
       seen = String(inputValue);
       assert.equal(init?.signal, controller.signal);
-      assert.equal(init?.credentials, "same-origin");
+      assert.equal(init?.credentials, "omit");
       return new Response(JSON.stringify({...snapshot, projectId: "project & one"}), {status: 200});
     };
     const loaded = await loadProjectSupervisor("project & one", controller.signal, "task-thread");
@@ -507,7 +507,7 @@ test("a save response for another project is treated as an unknown outcome", asy
   try {
     globalThis.fetch = async (_input, init) => {
       assert.equal(init?.method, "POST");
-      assert.equal(init?.credentials, "same-origin");
+      assert.equal(init?.credentials, "omit");
       return new Response(JSON.stringify({status: "saved", message: "Saved", snapshot: {...snapshot, projectId: "another-project"}}), {status: 200});
     };
     await assert.rejects(saveProjectSupervisor(input, "token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
@@ -644,4 +644,18 @@ test("project defaults without a selection expose no conversation readback or re
     onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
   }));
   assert.match(html, /Project default for new Supervisors/);assert.doesNotMatch(html, /Selected Supervisor model in T3|Open in T3|Retry native access/);
+});
+
+
+test("an expired dashboard session is a definite rejection and never repeats the mutation", async () => {
+  const original = globalThis.fetch;
+  let writes = 0;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      if (init?.method === "POST") writes++;
+      return new Response("{}", {status: 401});
+    };
+    await assert.rejects(saveProjectSupervisor(input, "token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved);
+    assert.equal(writes, 1);
+  } finally {globalThis.fetch = original;}
 });

@@ -11,6 +11,7 @@ import type { SupervisorConfig } from "./types.js";
 import type { ProjectDefinitionLoader } from "./project-definitions.js";
 import type { ProjectRuleEditor } from "./project-rule-editor.js";
 import type { ProjectSupervisor } from "./project-supervisor.js";
+import { createServiceAuth } from "./service-auth.js";
 
 export type WorkflowMcpEndpoint = {
   handle: (request: IncomingMessage, response: ServerResponse) => Promise<void>;
@@ -43,6 +44,10 @@ export const startGuidanceUi = async (
   supervision?: ProjectSupervisor,
   workflows?: WorkflowMcpEndpoint,
 ) => {
+  const mcpHosts = config.workflowMcpHosts ?? [];
+  if (mcpHosts.some(host => !/^(?:[a-z0-9.-]+|\[[a-f0-9:]+\]):[0-9]{1,5}$/u.test(host)))
+    throw new Error("Workflow MCP hosts must be exact host:port values.");
+  await rm(join(config.dataDirectory, "ui-login-code"), { force: true });
   const requireLegacy = () => {if (runtime.retired !== false) throw new Error("Legacy guidance rules are retired. Edit project rules in Projects.");};
   const legacyMessage = (fallback: string) => runtime.retired !== false ? "Legacy guidance rules are retired. Edit project rules in Projects." : fallback;
   const handlers = HttpApiBuilder.group(SupervisorApi, "guidance", (h) =>
@@ -240,12 +245,12 @@ export const startGuidanceUi = async (
     Layer.provide(handlers),
     Layer.provide(HttpServer.layerServices),
   );
+  const auth = await createServiceAuth(config.dataDirectory);
   const web = HttpRouter.toWebHandler(routes, { disableLogger: true });
   const csrf = randomBytes(32).toString("base64url");
   const activeRequests = new Set<AbortController>();
   const assets = resolve(config.uiAssetsDirectory ?? "ui-dist");
-  await rm(join(config.dataDirectory, "ui-login-code"), { force: true });
-  const server = createServer((request, response) => {
+  const handle = (request: IncomingMessage, response: ServerResponse, mcpOnly: boolean) => {
     void (async () => {
       const address = server.address();
       const port =
@@ -273,18 +278,55 @@ export const startGuidanceUi = async (
         });
         response.end(JSON.stringify({ message }));
       };
-      if (
-        request.headers.host !== `127.0.0.1:${port}` ||
-        (request.headers.origin && request.headers.origin !== origin) ||
-        (request.headers["sec-fetch-site"] === "cross-site" && !navigation)
-      )
-        return reject(403, "Open the supervisor through its loopback address.");
+      if (mcpOnly && url.pathname !== "/mcp/workflows")
+        return reject(404, "Not found.");
+      const sessionHeader = request.headers["x-supervisor-session"];
+      const session = typeof sessionHeader === "string" ? sessionHeader : undefined;
+      const browserRejected = (request.headers.origin && request.headers.origin !== origin) ||
+        (request.headers["sec-fetch-site"] === "cross-site" && !navigation);
       if (url.pathname === "/mcp/workflows") {
+        const allowedHosts = [`127.0.0.1:${request.socket.localPort ?? port}`, ...mcpHosts];
+        if (!allowedHosts.includes(request.headers.host?.toLowerCase() ?? "") || browserRejected)
+          return reject(403, "Workflow MCP request origin is not allowed.");
+        if (!auth.mcpAuthorized(request.headers.authorization)) {
+          return reject(401, "A workflow MCP token is required.");
+        }
         if (!workflows) return reject(404, "Workflow MCP is unavailable.");
         for (const [name, value] of Object.entries(headers)) response.setHeader(name, value);
         await workflows.handle(request, response);
         return;
       }
+      if (request.headers.host !== `127.0.0.1:${port}` || browserRejected)
+        return reject(403, "Open the supervisor through its loopback address.");
+      if (url.pathname.startsWith("/auth/")) {
+        if (url.pathname === "/auth/status" && request.method === "GET") {
+          response.writeHead(200, {...headers, "Content-Type": "application/json"});
+          response.end(JSON.stringify({authenticated: auth.authenticated(session)}));
+          return;
+        }
+        if (request.method !== "POST" || !["/auth/login", "/auth/logout"].includes(url.pathname))
+          return reject(404, "Not found.");
+        if (request.headers.origin !== origin || request.headers["content-type"]?.split(";", 1)[0]?.trim() !== "application/json")
+          return reject(403, "Use the Supervisor sign-in page.");
+        if (url.pathname === "/auth/login") {
+          let payload: unknown;
+          try { payload = JSON.parse(await body(request, 2048)); }
+          catch (error) { if (error instanceof BodyLimitError) throw error; return reject(400, "Invalid sign-in request."); }
+          const token = typeof payload === "object" && payload !== null && "token" in payload && typeof payload.token === "string" ? payload.token : "";
+          const authenticated = auth.login(token);
+          if (!authenticated) return reject(401, "The access token is invalid.");
+          auth.logout(session);
+          response.writeHead(200, {...headers, "Content-Type": "application/json"});
+          response.end(JSON.stringify({authenticated: true, session: authenticated}));
+          return;
+        }
+        auth.logout(session);
+        response.writeHead(200, {...headers, "Content-Type": "application/json"});
+        response.end(JSON.stringify({authenticated: false}));
+        return;
+      }
+      if (url.pathname.startsWith("/api/") && !auth.authenticated(session))
+        return reject(401, "Sign in to Supervisor.");
       if (url.pathname.startsWith("/api/")) {
         if (
           request.method !== "GET" &&
@@ -305,7 +347,6 @@ export const startGuidanceUi = async (
           response.writeHead(200, {
             ...headers,
             "Content-Type": "application/json",
-            "Set-Cookie": "supervisor_owner=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
           });
           response.end(JSON.stringify({ csrf }));
           return;
@@ -375,18 +416,40 @@ export const startGuidanceUi = async (
         JSON.stringify({ message: error instanceof BodyLimitError ? "The request payload is too large. Reduce its size before retrying." : "Supervisor operation unavailable." }),
       );
     });
+  };
+  const server = createServer((request, response) => handle(request, response, false));
+  const mcpServer = config.workflowMcpBindHost ? createServer((request, response) => handle(request, response, true)) : undefined;
+  const listen = (listener: typeof server, port: number, host: string) => new Promise<void>((resolve, reject) => {
+    listener.once("error", reject);
+    listener.listen(port, host, () => { listener.off("error", reject); resolve(); });
   });
-  await new Promise<void>((res, rej) => {
-    server.once("error", rej);
-    server.listen(config.uiPort ?? 9008, config.uiHost ?? "127.0.0.1", res);
-  });
+  const stop = (listener: typeof server) => new Promise<void>(resolve => { listener.close(() => resolve()); listener.closeAllConnections(); });
+  try {
+    await listen(server, config.uiPort ?? 9008, config.uiHost ?? "127.0.0.1");
+    const address = server.address();
+    if (mcpServer) await listen(mcpServer, config.workflowMcpPort ?? (typeof address === "object" && address ? address.port : config.uiPort ?? 9008), config.workflowMcpBindHost!);
+  } catch (error) {
+    try {
+      await stop(server);
+      if (mcpServer) await stop(mcpServer);
+      await web.dispose();
+    } finally { auth.close(); }
+    throw error;
+  }
   return {
     server,
+    mcpServer,
     close: async () => {
       for(const controller of activeRequests)controller.abort();
-      await workflows?.close();
-      await new Promise<void>((res) => {server.close(() => res());server.closeAllConnections();});
-      await web.dispose();
+      try {
+        await workflows?.close();
+      } finally {
+        try {
+          await stop(server);
+          if (mcpServer) await stop(mcpServer);
+          await web.dispose();
+        } finally { auth.close(); }
+      }
     },
   };
 };

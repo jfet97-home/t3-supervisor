@@ -20,7 +20,12 @@ project have separate Supervisors; descendants belong to their main scope.
 Use the environment's supplied dashboard URL. Mac default is
 http://127.0.0.1:9008; the Lima lab is http://127.0.0.1:19008 through its existing
 forwarder. Loopback refers to the client machine. Inspect current controls before
-acting; the dashboard handles CSRF automatically and needs no login code.
+acting. Sign in with the owner-generated single-use sign-in token; the dashboard handles
+its session and CSRF automatically. Ask the owner to enter it privately in the
+page; ordinary dashboard use does not authorize extracting the service's tokens.
+Sessions are scoped to the exact browser address/port and expire after eight hours
+or a service restart. Sign out revokes the current session. An expired session
+keeps the open draft, and rejected writes require another explicit Save after sign-in.
 
 Usage does not authorize changing network exposure, T3, deployment or credentials.
 Workflow MCP availability depends on the installed revision and explicit connection

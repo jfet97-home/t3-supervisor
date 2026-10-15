@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "t3-supervisor": "dist/cli.js"
+  },
   "scripts": {
     "autofix": "eslint src test ui/src vite.config.ts --fix",
     "lint": "eslint src test ui/src vite.config.ts",

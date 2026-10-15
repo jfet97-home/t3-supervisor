@@ -30,8 +30,26 @@ and uncertain outcomes remain available without automatic retries.
 
 ## Dashboard
 
-Open **[http://127.0.0.1:9008](http://127.0.0.1:9008)**. The dashboard opens directly,
-without a login code. Its Docker port is published only on the Mac's loopback address.
+Open **[http://127.0.0.1:9008](http://127.0.0.1:9008)**. The login page shows the
+same command for every deployment:
+
+```sh
+t3-supervisor auth forge
+```
+
+For a direct installation, run it in your terminal as the account running
+Supervisor, from any directory. For Docker or a VM, run it inside that environment.
+It creates a fresh
+sign-in token valid for five minutes and one use. Paste the result into the page;
+do not put it in chat or a URL. This issues a local grant against private service
+state, following T3's pairing-token pattern; it does not read out a permanent
+password or contact T3.
+
+The browser keeps only an eight-hour session in storage scoped to that exact
+address and port. Sign out revokes the session; service restart requires sign-in
+again. An expired session keeps an open draft in the tab and never automatically
+repeats a rejected write. The Docker dashboard port remains published only on
+the Mac's loopback address.
 
 The UI includes **Projects**, **Activity**, **Recaps and Telegram**, and **Settings**.
 Open Projects, select a workspace, then Edit project rules. Saving requires a
@@ -39,6 +57,29 @@ separate native T3 filesystem read/write credential supplied through trusted set
 No credential can be entered or upgraded through the dashboard.
 
 ## Local deployment
+
+### Direct installation
+
+Node.js 24 or newer is required. From a source checkout, install dependencies,
+build, and install the named command:
+
+```sh
+npm ci
+npm run build
+npm install --global --omit=dev .
+```
+
+Configure the service's T3 credential paths and other instance settings in its
+environment, then run `t3-supervisor start`. The dashboard and token command share
+the same state directory: `$XDG_STATE_HOME/t3-supervisor` when set, otherwise
+`~/.local/state/t3-supervisor`. Neither command depends on the current directory.
+For a custom state location, use the same `DATA_DIRECTORY` for both commands, or
+pass `--data-dir /absolute/path` to `start` and `auth forge`.
+The command only mints a token after that instance has initialized its auth state.
+The default T3 endpoint is `http://127.0.0.1:3773`; the built UI is located relative
+to the installed package. Docker explicitly sets its state directory to `/data`.
+
+### Existing Mac and Lab installations
 
 The Mac installation uses `~/.config/t3-supervisor/compose.yaml`.
 
@@ -98,8 +139,7 @@ With Telegram disabled, the service does not initialize the Telegram client, pol
 the bot, process deliveries, generate completion recaps or relay input. T3
 observation and the project dashboard remain available. Telegram credentials,
 its MCP connection and the input responder credential are unnecessary, and disabled
-Telegram workers do not affect readiness. Guidance model authentication remains
-independent of Telegram.
+Telegram workers do not affect readiness. Native workflow Supervisor conversations execute through T3; the optional recap CLI/auth cache is separate.
 
 Existing delivery records and uncertain outcomes are retained; disabling Telegram
 does not mark them sent or clear them. Re-enabling resumes existing queued work,

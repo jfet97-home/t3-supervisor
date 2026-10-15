@@ -22,6 +22,7 @@ export const runGuidanceApplication = (
   config: SupervisorConfig,
   source: StoreShape,
   t3: T3ClientShape,
+  onReady: () => void = () => {},
 ) =>
   Effect.gen(function* () {
     const store = yield* Effect.acquireRelease(
@@ -94,6 +95,7 @@ export const runGuidanceApplication = (
       Effect.promise(() => startGuidanceUi(config, runtime, definitions, editor, supervision, workflows)),
       (ui) => Effect.promise(() => ui.close()),
     );
+    yield* Effect.sync(onReady);
     const interpretation = Effect.tryPromise({try: signal => supervision.runOnce(AbortSignal.any([signal, AbortSignal.timeout(120_000)])), catch: () => new Error("task_interpretation_cycle_failed")}).pipe(
       Effect.catch(() => Effect.sync(() => console.log(JSON.stringify({event: "task_interpretation_unavailable"})))),
       Effect.andThen(Effect.sleep("5 seconds")), Effect.forever,

@@ -17,7 +17,7 @@ COPY --from=build /app/ui-dist ./ui-dist
 COPY --from=build /app/package.json ./package.json
 COPY vendor/ /opt/runtime/
 COPY scripts/cx /usr/local/bin/cx
-RUN chmod 755 /usr/local/bin/cx && mkdir /data && chown 501:20 /data
-ENV NODE_ENV=production PATH=/opt/runtime/aarch64-unknown-linux-musl/bin:${PATH}
+RUN chmod 755 /usr/local/bin/cx /app/dist/cli.js && ln -s /app/dist/cli.js /usr/local/bin/t3-supervisor && mkdir /data && chown 501:20 /data
+ENV NODE_ENV=production DATA_DIRECTORY=/data T3_URL=http://host.docker.internal:3773 PATH=/opt/runtime/aarch64-unknown-linux-musl/bin:${PATH}
 USER 501:20
 CMD ["node", "dist/main.js"]

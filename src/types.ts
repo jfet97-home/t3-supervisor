@@ -105,6 +105,9 @@ export interface SupervisorConfig {
   inputInteractiveThreadId?: string;
   uiPort?: number;
   uiHost?: string;
+  workflowMcpHosts?: ReadonlyArray<string>;
+  workflowMcpBindHost?: string;
+  workflowMcpPort?: number;
   uiAssetsDirectory?: string;
   guidanceTokenFile?: string;
   projectWriteTokenFile?: string;

@@ -28,6 +28,7 @@ services:
       MODEL_TIMEOUT_MS: "360000"
       UI_PORT: "9008"
       UI_HOST: "0.0.0.0"
+      WORKFLOW_MCP_HOSTS: "${WORKFLOW_MCP_HOSTS:-t3-supervisor:9008}"
       T3_GUIDANCE_TOKEN_FILE: /run/secrets/t3-guidance-token
       T3_PROJECT_WRITE_TOKEN_FILE: /run/secrets/t3-project-write-token
       T3_PROJECT_COMMIT_TOKEN_FILE: /run/secrets/t3-project-commit-token

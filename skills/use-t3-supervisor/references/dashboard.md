@@ -3,6 +3,20 @@
 The current views are Projects, Activity, Recaps and Telegram, and Settings.
 Projects is the default. Older Guidance rules screenshots describe retired UI.
 
+## Sign in
+
+Enter the owner-generated single-use sign-in token in the sign-in page. The login
+page shows `t3-supervisor auth forge`. For a direct installation, run it as the
+service account from any directory. For Docker or a VM, run it inside that
+environment. A custom state directory must match the service's DATA_DIRECTORY or
+`--data-dir` option. This mints a fresh token valid for five minutes. Tokens come
+from private service state and must not be put in chat or a URL. Ordinary usage
+does not authorize retrieving or provisioning credentials. The browser stores only
+a short-lived session for that exact origin, with no auth cookie. A new tab, expired
+session or service restart can require sign-in again. Sign out revokes this session.
+After reauthentication, review an unsaved draft and choose Save explicitly; the
+page never repeats a rejected mutation automatically.
+
 ## Project rules and blocks
 
 Select the actual registered project and optionally a conversation belonging to it.

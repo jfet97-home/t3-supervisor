@@ -18,3 +18,13 @@ state volumes, credentials, existing thread identities and instance settings.
 Update the Lab's current-state, next-steps and progress documents with the outcome.
 Choose checks proportionate to the change; do not replay the entire historical
 foundation test campaign. Never modify T3 source or its installed app/server.
+
+## Standing rule: no Supervisor proxy workarounds
+
+Do not add or retain extra HTTP proxies, reverse proxies or relay sidecars to make
+Supervisor integrations work. Fix endpoint exposure, authentication, accepted hosts
+and client configuration in Supervisor itself. MCPX must connect directly to the
+Supervisor MCP endpoint. The existing MCPX gateway remains the client connection;
+do not introduce another intermediary. The two workflow HTTP proxy services are
+being removed by the currently authorized direct-authentication batch. Never modify
+T3 source or its installed app/server as a workaround.

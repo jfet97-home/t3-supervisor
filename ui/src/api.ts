@@ -6,7 +6,7 @@ import {
   type GuidanceRuleInput,
 } from "../../src/guidance-contract.js";
 
-import { getCsrfToken } from "./access.js";
+import { getCsrfToken, getSessionToken } from "./access.js";
 export { getCsrfToken, loadAccess } from "./access.js";
 
 export class ApiClient extends AtomHttpApi.Service<ApiClient>()(
@@ -17,14 +17,14 @@ export class ApiClient extends AtomHttpApi.Service<ApiClient>()(
     httpClient: FetchHttpClient.layer.pipe(
       Layer.provide(
         Layer.succeed(FetchHttpClient.RequestInit, {
-          credentials: "same-origin",
+          credentials: "omit",
         }),
       ),
     ),
     transformClient: (client) =>
       client.pipe(
         HttpClient.mapRequest((request) =>
-          HttpClientRequest.setHeader(request, "x-csrf-token", getCsrfToken()),
+          HttpClientRequest.setHeaders(request, {"x-csrf-token": getCsrfToken(), "x-supervisor-session": getSessionToken()}),
         ),
       ),
   },

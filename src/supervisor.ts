@@ -17,6 +17,7 @@ export interface SupervisorStatus {
   environmentId: string | null;
   t3Connected: boolean;
   storeState: "starting" | "ready" | "degraded";
+  supervisionState: "disabled" | "starting" | "ready" | "degraded";
   modelState: "disabled" | "idle" | "ready" | "degraded";
   telegramState: "disabled" | "starting" | "ready" | "degraded";
   deliveryState: "disabled" | "idle" | "ready" | "degraded";
@@ -41,10 +42,11 @@ export interface SupervisorStatus {
   store: StoreStats | null;
 }
 
-export const createStatus = (config?: Pick<SupervisorConfig, "telegramEnabled">): SupervisorStatus => ({
+export const createStatus = (config?: Pick<SupervisorConfig, "telegramEnabled" | "uiPort">): SupervisorStatus => ({
   inputReplyCleanupExpired: 0,
   startedAt: new Date().toISOString(), activation: null, environmentId: null,
   t3Connected: false, storeState: "starting",
+  supervisionState: config?.uiPort === undefined ? "disabled" : "starting",
   modelState: config?.telegramEnabled ? "idle" : "disabled",
   telegramState: config?.telegramEnabled ? "starting" : "disabled",
   deliveryState: config?.telegramEnabled ? "idle" : "disabled",
@@ -90,9 +92,10 @@ export const readiness = (status: SupervisorStatus, config: SupervisorConfig, no
     status.deliveryState !== "degraded" && (status.store?.jobs.unknown ?? 0) === 0 &&
     (status.store?.deferredHints ?? 0) === 0
   );
-  const ready = alive && scanProgress && deliveryProgress && inputProgress && status.activation !== null &&
+  const supervisionProgress = config.uiPort === undefined || status.supervisionState === "ready";
+  const ready = supervisionProgress && alive && scanProgress && deliveryProgress && inputProgress && status.activation !== null &&
     status.t3Connected && status.storeState === "ready" && notificationsReady;
-  return { alive, ready, scanProgress, deliveryProgress, inputProgress };
+  return { alive, ready, scanProgress, deliveryProgress, inputProgress, supervisionProgress };
 };
 
 const healthServer = (config: SupervisorConfig, status: SupervisorStatus) => Effect.acquireRelease(
@@ -158,7 +161,23 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
   const notificationsAfter = yield* store.configureTelegram(descriptor.environmentId, config.telegramEnabled === true, Date.now());
   status.environmentId = descriptor.environmentId;
   status.activation = new Date(activatedAt).toISOString();
-  if (config.uiPort !== undefined) yield* Effect.forkScoped(runGuidanceApplication(config,store,t3));
+  if (config.uiPort !== undefined) {
+    status.supervisionState = "starting";
+    const supervision = Effect.suspend(() => runGuidanceApplication(config, store, t3, () => {
+      status.supervisionState = "ready";
+      if (status.lastErrorPhase === "supervision") status.lastErrorPhase = null;
+    })).pipe(
+      Effect.scoped,
+      Effect.catchCause(cause => {
+        if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
+        status.supervisionState = "degraded";
+        status.lastErrorPhase = "supervision";
+        return log("supervision_unavailable").pipe(Effect.andThen(Effect.sleep("10 seconds")));
+      }),
+      Effect.forever,
+    );
+    yield* Effect.forkScoped(supervision);
+  }
 
   const watch = Effect.gen(function* () {
     const cursor = yield* store.cursor("active");

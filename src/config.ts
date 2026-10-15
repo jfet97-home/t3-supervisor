@@ -1,15 +1,20 @@
 import { Effect } from "effect";
 import { chmod, copyFile, mkdir, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { SupervisorConfig } from "./types.js";
 
+export const loadDataDirectory = (): string => process.env.DATA_DIRECTORY ??
+  join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "t3-supervisor");
+
 export const loadConfig = (): SupervisorConfig => ({
-  dataDirectory: process.env.DATA_DIRECTORY ?? "/data",
-  t3Url: process.env.T3_URL ?? "http://host.docker.internal:3773",
+  dataDirectory: loadDataDirectory(),
+  t3Url: process.env.T3_URL ?? "http://127.0.0.1:3773",
   t3TokenFile: process.env.T3_TOKEN_FILE ?? "/run/secrets/t3-read-token",
   mcpxUrl: process.env.MCPX_URL ?? "http://mcpx:9000/mcp/lazy",
   cxCommand: process.env.CX_COMMAND ?? "cx",
-  cxHome: process.env.CX_HOME ?? "/data/runtime-auth",
+  cxHome: process.env.CX_HOME ?? join(loadDataDirectory(), "runtime-auth"),
   cxSeedFile: process.env.CX_SEED_FILE ?? "/run/secrets/codex-auth.json",
   excludedThreadIds: (process.env.EXCLUDED_THREAD_IDS ?? "").split(",").map((id) => id.trim()).filter(Boolean),
   ...(process.env.INPUT_INTERACTIVE_THREAD_ID ? { inputInteractiveThreadId: process.env.INPUT_INTERACTIVE_THREAD_ID } : {}),
@@ -21,7 +26,10 @@ export const loadConfig = (): SupervisorConfig => ({
   inputPollMs: Number(process.env.INPUT_POLL_MS ?? "1000"),
   uiPort: Number(process.env.UI_PORT ?? "9008"),
   uiHost: process.env.UI_HOST ?? "127.0.0.1",
-  uiAssetsDirectory: process.env.UI_ASSETS_DIRECTORY ?? "/app/ui-dist",
+  workflowMcpHosts: (process.env.WORKFLOW_MCP_HOSTS ?? "").split(",").map(host => host.trim().toLowerCase()).filter(Boolean),
+  ...(process.env.WORKFLOW_MCP_BIND_HOST ? { workflowMcpBindHost: process.env.WORKFLOW_MCP_BIND_HOST } : {}),
+  ...(process.env.WORKFLOW_MCP_PORT ? { workflowMcpPort: Number(process.env.WORKFLOW_MCP_PORT) } : {}),
+  uiAssetsDirectory: process.env.UI_ASSETS_DIRECTORY ?? fileURLToPath(new URL("../ui-dist", import.meta.url)),
   guidanceTokenFile: process.env.T3_GUIDANCE_TOKEN_FILE ?? "/run/secrets/t3-guidance-token",
   projectWriteTokenFile: process.env.T3_PROJECT_WRITE_TOKEN_FILE ?? "/run/secrets/t3-project-write-token",
   projectCommitTokenFile: process.env.T3_PROJECT_COMMIT_TOKEN_FILE ?? "/run/secrets/t3-project-commit-token",

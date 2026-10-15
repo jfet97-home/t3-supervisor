@@ -1,6 +1,6 @@
 import { Schema } from "effect";
 import { ProjectDefinitions, ProjectRuleSaveResult, type ProjectDefinitionSnapshot, type ProjectRuleSave } from "../../src/project-definitions-contract.js";
-import { getCsrfToken, loadAccess } from "./access.js";
+import { getCsrfToken, loadAccess, sessionHeaders } from "./access.js";
 
 export class ProjectRuleRequestError extends Error {
   constructor(message: string, readonly definitelyNotSaved: boolean) {super(message);}
@@ -9,7 +9,7 @@ export class ProjectRuleRequestError extends Error {
 export const loadProjectDefinitions = async (projectId: string, threadId: string | null, signal: AbortSignal): Promise<ProjectDefinitionSnapshot> => {
   const query = new URLSearchParams({projectId});
   if (threadId !== null) query.set("threadId", threadId);
-  const response = await fetch(`/api/guidance/project-definitions?${query}`, {credentials: "same-origin", signal});
+  const response = await fetch(`/api/guidance/project-definitions?${query}`, {credentials: "omit", headers: sessionHeaders(), signal});
   if (!response.ok) throw new Error("Project definitions could not be loaded.");
   const value = Schema.decodeUnknownSync(ProjectDefinitions)(await response.json());
   if (signal.aborted || value.projectId !== projectId || value.threadId !== threadId) throw new Error("The definition response belongs to another selection.");
@@ -17,8 +17,8 @@ export const loadProjectDefinitions = async (projectId: string, threadId: string
 };
 
 export const saveProjectRules = async (input: ProjectRuleSave, csrfToken: string) => {
-  const response = await fetch("/api/guidance/project-rules", {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json", "x-csrf-token": getCsrfToken() || csrfToken}, body: JSON.stringify(input)});
-  if (response.status === 403) {
+  const response = await fetch("/api/guidance/project-rules", {method: "POST", credentials: "omit", headers: {"Content-Type": "application/json", ...sessionHeaders(), "x-csrf-token": getCsrfToken() || csrfToken}, body: JSON.stringify(input)});
+  if (response.status === 401 || response.status === 403) {
     const refreshed = await loadAccess().catch(() => false);
     throw new ProjectRuleRequestError(refreshed ? "Session refreshed. Your draft was not saved; review it and save again." : "Your draft was not saved. Session refresh failed; reconnect and save again.", true);
   }

@@ -13,6 +13,7 @@ import { GuidanceRuntime as RetiredGuidanceRuntime, liveEvidence,makeGuidanceMod
 import { readStructuredModelOutput } from "../src/recap.js";
 import { dispatchGuidance } from "../src/guidance-native.js";
 import { startGuidanceUi } from "../src/guidance-ui.js";
+import { forgeDashboardToken } from "../src/service-auth.js";
 // legacy transport fixtures remain useful; production defaults to retired execution
 class GuidanceRuntime extends RetiredGuidanceRuntime {
   constructor(...args: ConstructorParameters<typeof RetiredGuidanceRuntime>) {super(...args);this.retired = false;}
@@ -83,6 +84,59 @@ const config = (directory: string): SupervisorConfig => ({
   uiHost: "127.0.0.1",
   uiAssetsDirectory: directory,
 });
+
+const readWorkflowToken = (directory: string) =>
+  readFile(join(directory, "access", "workflow-mcp-token"), "utf8");
+
+const signIn = async (origin: string, directory: string, token?: string) => {
+  const loginToken = token ?? (await forgeDashboardToken(directory)).token;
+  const response = await fetch(origin + "/auth/login", {
+    method: "POST",
+    headers: {Origin: origin, "Content-Type": "application/json"},
+    body: JSON.stringify({token: loginToken}),
+  });
+  if (response.status !== 200) throw new Error("Dashboard sign-in fixture failed.");
+  const payload: unknown = await response.json();
+  if (typeof payload !== "object" || payload === null || !("session" in payload) || typeof payload.session !== "string")
+    throw new Error("Dashboard sign-in response is invalid.");
+  return {
+    session: payload.session,
+    hasCookie: response.headers.get("set-cookie") !== null,
+  };
+};
+
+const sendHttp = (
+  url: string,
+  method: string,
+  headers: Record<string, string>,
+  body = "{}",
+): Promise<{status: number; headers: import("node:http").IncomingHttpHeaders; body: string}> =>
+  new Promise((resolve, reject) => {
+    const call = request(url, {method, headers}, response => {
+      const chunks: Buffer[] = [];
+      response.on("data", chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      response.on("end", () => resolve({
+        status: response.statusCode ?? 0,
+        headers: response.headers,
+        body: Buffer.concat(chunks).toString("utf8"),
+      }));
+    });
+    call.on("error", reject);
+    call.end(body);
+  });
+
+const reservePort = async (): Promise<number> => {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("Could not reserve a test port.");
+  await new Promise<void>(resolve => server.close(() => resolve()));
+  return address.port;
+};
+
 const projection: Projection = {
   thread: {
     id: "thread",
@@ -286,7 +340,7 @@ test("restart before dispatch marker is not uncertain and settings pause invalid
   }
 });
 
-test("local UI opens without login while enforcing host, origin, CSRF and stale-tab checks", async () => {
+test("local UI login scopes dashboard sessions and separates workflow MCP access", async () => {
   const directory = await mkdtemp(join(tmpdir(), "guidance-ui-test-"));
   const guidance = new GuidanceStore(directory);
   await writeFile(
@@ -320,8 +374,17 @@ test("local UI opens without login while enforcing host, origin, CSRF and stale-
         };
         runtime.connected = true;
         let workflowCalls = 0;
+        const workflowPort = yield* Effect.promise(reservePort);
+        const directHost = `supervisor.internal:${workflowPort}`;
+        const uiConfig = {
+          ...config(directory),
+          uiPort: workflowPort,
+          workflowMcpHosts: [directHost],
+          workflowMcpBindHost: "127.0.0.1",
+          workflowMcpPort: 0,
+        };
         const ui = yield* Effect.promise(() =>
-          startGuidanceUi(config(directory), runtime, undefined, undefined, undefined, {
+          startGuidanceUi(uiConfig, runtime, undefined, undefined, undefined, {
             handle: async (request, response) => {
               request.resume();
               workflowCalls++;
@@ -364,39 +427,144 @@ test("local UI opens without login while enforcing host, origin, CSRF and stale-
             assert.equal(await browserStatus("/", { Host: "attacker.invalid" }), 403);
             assert.equal(await browserStatus("/api/guidance/snapshot", navigation), 403);
             assert.equal(await browserStatus("/api/csrf", navigation), 403);
-            for (const headers of [{Host: "attacker.invalid"}, {Origin: "http://attacker.invalid"}, {"Sec-Fetch-Site": "cross-site"}]) {
-              const status = await new Promise<number>((resolve, reject) => {
-                const call = request(origin + "/mcp/workflows", {method: "POST", headers}, response => {
-                  response.resume();
-                  resolve(response.statusCode ?? 0);
-                });
-                call.on("error", reject);
-                call.end("{}");
+            assert.equal(address.port, workflowPort);
+            const workflowToken = await readWorkflowToken(directory);
+            const unsignedStatus = await fetch(origin + "/auth/status");
+            assert.deepEqual(await unsignedStatus.json(), {authenticated: false});
+            assert.equal((await fetch(origin + "/api/guidance/snapshot")).status, 401);
+            assert.equal((await fetch(origin + "/api/csrf")).status, 401);
+            assert.equal((await fetch(origin + "/api/guidance/rules", {
+              method: "POST",
+              headers: {Origin: origin, "Content-Type": "application/json"},
+              body: JSON.stringify(newRule),
+            })).status, 401);
+
+            const loginUrl = origin + "/auth/login";
+            const foreignGrant = await forgeDashboardToken(directory);
+            assert.equal((await fetch(loginUrl, {
+              method: "POST",
+              headers: {Origin: "http://attacker.invalid", "Content-Type": "application/json"},
+              body: JSON.stringify({token: foreignGrant.token}),
+            })).status, 403);
+            assert.equal((await fetch(loginUrl, {
+              method: "POST",
+              headers: {Origin: origin, "Content-Type": "application/json"},
+              body: JSON.stringify({token: "wrong-token"}),
+            })).status, 401);
+            assert.equal((await fetch(loginUrl, {
+              method: "POST",
+              headers: {Origin: origin, "Content-Type": "application/json"},
+              body: JSON.stringify({token: workflowToken}),
+            })).status, 401, "the workflow credential cannot sign in to the dashboard");
+            assert.equal((await fetch(loginUrl, {
+              method: "POST",
+              headers: {Origin: origin, "Content-Type": "application/json"},
+              body: "{",
+            })).status, 400);
+            assert.equal((await fetch(loginUrl, {
+              method: "POST",
+              headers: {Origin: origin, "Content-Type": "application/json"},
+              body: JSON.stringify({token: "x".repeat(3_000)}),
+            })).status, 413);
+
+            const dashboard = await signIn(origin, directory, foreignGrant.token);
+            assert.equal((await fetch(loginUrl, {
+              method: "POST",
+              headers: {Origin: origin, "Content-Type": "application/json"},
+              body: JSON.stringify({token: foreignGrant.token}),
+            })).status, 401, "a dashboard grant cannot be replayed after sign-in");
+            assert.equal(dashboard.session.length, 43);
+            assert.equal(/^[A-Za-z0-9_-]{43}$/u.test(dashboard.session), true);
+            assert.equal(dashboard.hasCookie, false, "dashboard sessions are returned without Set-Cookie");
+            const authenticatedStatus = await fetch(origin + "/auth/status", {
+              headers: {"x-supervisor-session": dashboard.session},
+            });
+            assert.deepEqual(await authenticatedStatus.json(), {authenticated: true});
+            assert.equal((await fetch(origin + "/api/guidance/snapshot", {
+              headers: {Cookie: `supervisor_session_${address.port}=${dashboard.session}`},
+            })).status, 401, "a cookie cannot authorize dashboard APIs");
+
+            const badWorkflowRequests = [
+              {Host: "attacker.invalid", Authorization: `Bearer ${workflowToken}`},
+              {Host: directHost, Origin: "http://attacker.invalid", Authorization: `Bearer ${workflowToken}`},
+              {Host: directHost, "Sec-Fetch-Site": "cross-site", Authorization: `Bearer ${workflowToken}`},
+            ];
+            for (const headers of badWorkflowRequests) {
+              const response = await sendHttp(origin + "/mcp/workflows", "POST", {
+                "Content-Type": "application/json",
+                ...headers,
               });
-              assert.equal(status, 403);
+              assert.equal(response.status, 403);
             }
-            assert.equal(workflowCalls, 0, "the workflow route uses the shared loopback/browser guards");
-            const workflowResponse = await fetch(origin + "/mcp/workflows", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
-            assert.equal(workflowResponse.status, 200, "MCP machine callers do not need the dashboard CSRF token");
-            assert.equal(workflowResponse.headers.get("cache-control"), "no-store");
-            assert.equal(workflowCalls, 1);
-            assert.equal(
-              (await fetch(origin + "/api/guidance/snapshot")).status,
-              200,
-            );
-            assert.equal(
-              (
-                await fetch(origin + "/api/csrf", {
-                  headers: {
-                    Origin: "http://attacker.invalid",
-                  },
-                })
-              ).status,
-              403,
-            );
-            const access = await fetch(origin + "/api/csrf");
+            assert.equal(workflowCalls, 0, "host and browser guards run before the MCP handler");
+            assert.equal((await sendHttp(origin + "/mcp/workflows", "POST", {
+              "Content-Type": "application/json",
+              Cookie: `supervisor_session_${address.port}=${dashboard.session}`,
+            })).status, 401, "a dashboard cookie cannot authorize the MCP route");
+            assert.equal((await sendHttp(origin + "/mcp/workflows", "POST", {
+              "Content-Type": "application/json",
+              "x-supervisor-session": dashboard.session,
+            })).status, 401, "a dashboard session header cannot authorize the MCP route");
+            assert.equal((await sendHttp(origin + "/mcp/workflows", "POST", {
+              "Content-Type": "application/json",
+              Cookie: `supervisor_session_${address.port}=${dashboard.session}`,
+              Authorization: `Bearer ${foreignGrant.token}`,
+            })).status, 401, "the dashboard token cannot authorize the MCP route");
+            assert.equal((await sendHttp(origin + "/mcp/workflows", "POST", {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${dashboard.session}`,
+            })).status, 401, "a dashboard session cannot authorize the MCP route");
+
+            const workflowResponse = await sendHttp(origin + "/mcp/workflows", "POST", {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${workflowToken}`,
+            });
+            assert.equal(workflowResponse.status, 200, "machine calls use their dedicated bearer without dashboard CSRF");
+            assert.equal(workflowResponse.headers["cache-control"], "no-store");
+            const directResponse = await sendHttp(origin + "/mcp/workflows", "POST", {
+              Host: directHost,
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${workflowToken}`,
+            });
+            assert.equal(directResponse.status, 200, "the configured direct MCP host accepts the workflow bearer");
+            assert.equal(workflowCalls, 2);
+            const mcpAddress = ui.mcpServer?.address();
+            assert.ok(mcpAddress && typeof mcpAddress === "object");
+            assert.notEqual(mcpAddress.port, address.port);
+            const mcpOrigin = `http://127.0.0.1:${mcpAddress.port}`;
+            for (const path of ["/", "/index.html", "/auth/status", "/api/guidance/snapshot"]) {
+              assert.equal((await fetch(mcpOrigin + path)).status, 404, `${path} is not served by the MCP-only listener`);
+            }
+            const isolatedMcp = await sendHttp(mcpOrigin + "/mcp/workflows", "POST", {
+              Host: `127.0.0.1:${mcpAddress.port}`,
+              Origin: origin,
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${workflowToken}`,
+            });
+            assert.equal(isolatedMcp.status, 200);
+            assert.equal(workflowCalls, 3);
+            for (const headers of [
+              {Host: `unknown.invalid:${mcpAddress.port}`, Origin: origin},
+              {Host: `127.0.0.1:${mcpAddress.port}`, Origin: "http://attacker.invalid"},
+              {Host: `127.0.0.1:${mcpAddress.port}`, Origin: origin, "Sec-Fetch-Site": "cross-site"},
+            ]) {
+              assert.equal((await sendHttp(mcpOrigin + "/mcp/workflows", "POST", {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${workflowToken}`,
+                ...headers,
+              })).status, 403);
+            }
+            assert.equal((await fetch(origin + "/api/guidance/snapshot", {
+              headers: {Authorization: `Bearer ${workflowToken}`},
+            })).status, 401, "the workflow bearer cannot read dashboard APIs");
+            assert.equal((await fetch(origin + "/api/csrf", {
+              headers: {Origin: "http://attacker.invalid", "x-supervisor-session": dashboard.session},
+            })).status, 403);
+
+            const access = await fetch(origin + "/api/csrf", {
+              headers: {"x-supervisor-session": dashboard.session},
+            });
             assert.equal(access.status, 200);
-            assert.match(access.headers.get("set-cookie")!, /Max-Age=0/);
             const session: unknown = await access.json();
             assert.ok(
               typeof session === "object" &&
@@ -406,11 +574,12 @@ test("local UI opens without login while enforcing host, origin, CSRF and stale-
             );
             const headers = {
               Origin: origin,
+              "x-supervisor-session": dashboard.session,
               "Content-Type": "application/json",
               "x-csrf-token": session.csrf,
             };
             assert.equal((await fetch(origin + "/api/login", { method: "POST", headers, body: "{}" })).status, 404);
-            assert.equal((await fetch(origin + "/api/guidance/rules", { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify(newRule) })).status, 403);
+            assert.equal((await fetch(origin + "/api/guidance/rules", { method: "POST", headers: { Origin: origin, "x-supervisor-session": dashboard.session, "Content-Type": "application/json" }, body: JSON.stringify(newRule) })).status, 403);
             assert.equal((await fetch(origin + "/api/guidance/rules", { method: "POST", headers: { ...headers, Origin: "http://attacker.invalid" }, body: JSON.stringify(newRule) })).status, 403);
             assert.equal(
               (
@@ -454,9 +623,7 @@ test("local UI opens without login while enforcing host, origin, CSRF and stale-
               ).status,
               400,
             );
-            const snapshotResponse = await fetch(
-              origin + "/api/guidance/snapshot",
-            );
+            const snapshotResponse = await fetch(origin + "/api/guidance/snapshot", {headers: {"x-supervisor-session": dashboard.session}});
             assert.equal(snapshotResponse.status, 200);
             const snapshot =
               (await snapshotResponse.json()) as GuidanceSnapshot;
@@ -491,6 +658,20 @@ test("local UI opens without login while enforcing host, origin, CSRF and stale-
             const ownerAction=guidance.activities().find(row=>row.kind==="owner_action")!;
             assert.equal(canResetActivity(ownerAction),false);
             assert.equal(canResetActivity(fresh),true);
+
+            const logout = await fetch(origin + "/auth/logout", {
+              method: "POST",
+              headers: {Origin: origin, "x-supervisor-session": dashboard.session, "Content-Type": "application/json"},
+              body: "{}",
+            });
+            assert.equal(logout.status, 200);
+            assert.equal(logout.headers.get("set-cookie") === null, true);
+            assert.deepEqual(await (await fetch(origin + "/auth/status", {
+              headers: {"x-supervisor-session": dashboard.session},
+            })).json(), {authenticated: false});
+            assert.equal((await fetch(origin + "/api/guidance/snapshot", {
+              headers: {"x-supervisor-session": dashboard.session},
+            })).status, 401);
           } finally {
             await ui.close();
           }
@@ -762,6 +943,23 @@ test("disabled native worker can display history from before the cleanup audit m
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test("a failed MCP bind releases the dashboard socket and permits a clean restart", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "guidance-bind-failure-"));
+  const store = new GuidanceStore(directory);
+  const port = await reservePort();
+  const uiConfig = {...config(directory), uiPort: port};
+  const runtime = new GuidanceRuntime(uiConfig, store, {} as never, t3, {decide: async () => {throw new Error("No evaluation requested");}});
+  try {
+    await assert.rejects(startGuidanceUi({...uiConfig, workflowMcpBindHost: "127.0.0.1", workflowMcpPort: port}, runtime),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === "EADDRINUSE");
+    const ui = await startGuidanceUi(uiConfig, runtime);
+    try {
+      const dashboard = await signIn(`http://127.0.0.1:${port}`, directory);
+      assert.equal(typeof dashboard.session, "string");
+    } finally {await ui.close();}
+  } finally {store.close();await rm(directory, {recursive: true, force: true});}
+});
+
 test("retired reminders cannot evaluate, send or claim sending readiness", async () => {
   const directory = await mkdtemp(join(tmpdir(), "retired-guidance-"));const store = new GuidanceStore(directory);
   try {
@@ -774,8 +972,9 @@ test("retired reminders cannot evaluate, send or claim sending readiness", async
     const ui = await startGuidanceUi(config(directory), runtime);
     try {
       const address = ui.server.address();assert.ok(address && typeof address !== "string");const origin = `http://127.0.0.1:${address.port}`;
-      const csrf = (await (await fetch(origin + "/api/csrf")).json()).csrf;
-      const headers = {Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf};
+      const dashboard = await signIn(origin, directory);
+      const csrf = (await (await fetch(origin + "/api/csrf", {headers: {"x-supervisor-session": dashboard.session}})).json()).csrf;
+      const headers = {Origin: origin, "x-supervisor-session": dashboard.session, "Content-Type": "application/json", "x-csrf-token": csrf};
       const rule = await fetch(origin + "/api/guidance/rules", {method: "POST", headers, body: JSON.stringify(newRule)});
       assert.equal(rule.status, 400);
       const preview = await fetch(origin + "/api/guidance/preview", {method: "POST", headers, body: JSON.stringify({condition: "Notice publication", message: "Review", evidence: "I will publish"})});

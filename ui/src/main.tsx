@@ -1,3 +1,4 @@
+import { clearAccess, setSessionToken, sessionHeaders } from "./access.js";
 import { useEffect, useState, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -170,7 +171,8 @@ function Settings({data}: {data: GuidanceSnapshot}) {
       <p>Legacy reminders are retired. Their history is retained; uncertain deliveries are not retried or resolved automatically. Workflow drafts use project rules and existing blocks. Native dialogue can save agreement; step execution tracking remains pending.</p>
     </div></section>;
 }
-function Dashboard() {
+function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
+  const [signOutError, setSignOutError] = useState("");
   const snapshot = useAtomValue(snapshotAtom);
   const refresh = useAtomRefresh(snapshotAtom);
   const [view, setView] = useState("projects");
@@ -179,6 +181,9 @@ function Dashboard() {
   const previousConnection = useRef<boolean | null>(null);
   if (snapshot._tag === "Success") lastData.current = snapshot.value;
   const connected = snapshot._tag === "Success" && snapshot.value.connected;
+  useEffect(() => {
+    if (snapshot._tag === "Failure") void loadAccess().catch(() => false);
+  }, [snapshot._tag]);
   useEffect(() => {
     if (previousConnection.current === false && connected) void loadAccess().catch(() => false);
     previousConnection.current = connected;
@@ -214,7 +219,9 @@ function Dashboard() {
     <main>
       <header className="head row between">
         <div className="row"><span className="brand">S</span><div><h1>Supervisor</h1><p className="muted">Project rules and reusable workflow blocks.</p></div></div>
+        <button disabled={projectDirty} title={projectDirty ? "Save or discard your draft before signing out." : undefined} onClick={() => { void onSignOut().catch(() => setSignOutError("Could not sign out. Try again.")); }}>Sign out</button>
       </header>
+      {signOutError && <p role="alert">{signOutError}</p>}
       {snapshot._tag === "Failure" && <p role="alert">Supervisor connection unavailable. Your project-rule draft is kept.</p>}
       <div className="connection">
         <span className={`dot ${data.connected ? "online" : ""}`} />
@@ -251,29 +258,59 @@ function Dashboard() {
 }
 function App() {
   const [ready, setReady] = useState<boolean | null>(null);
-  const connect = () => {
-    setReady(null);
-    void loadAccess()
-      .then(setReady)
-      .catch(() => setReady(false));
+  const [opened, setOpened] = useState(false);
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const connect = async () => {
+    const authenticated = await loadAccess();
+    setReady(authenticated);
+    if (authenticated) setOpened(true);
+    return authenticated;
   };
   useEffect(() => {
     let active = true;
     void loadAccess()
-      .then(value => { if (active) setReady(value); })
-      .catch(() => { if (active) setReady(false); });
-    return () => { active = false; };
+      .then(value => { if (active) { setReady(value); setOpened(value); } })
+      .catch(() => { if (active) { setReady(false); setError("Could not reach Supervisor. Try again."); } });
+    const expired = () => { setReady(false); };
+    window.addEventListener("supervisor-auth-required", expired);
+    return () => { active = false; window.removeEventListener("supervisor-auth-required", expired); };
   }, []);
-  if (ready) return <Dashboard />;
-  return (
-    <main className="connecting panel">
+  const signOut = async () => {
+    const response = await fetch("/auth/logout", {method: "POST", credentials: "omit", headers: {"Content-Type": "application/json", ...sessionHeaders()}, body: "{}"});
+    if (!response.ok) throw new Error("Sign out unavailable.");
+    clearAccess(); setOpened(false); setReady(false); setToken(""); setError("");
+  };
+  return <>
+    {opened && <div hidden={!ready}><Dashboard onSignOut={signOut} /></div>}
+    {!ready && <main className="connecting panel stack">
       <h1>Supervisor</h1>
-      <p role={ready === false ? "alert" : "status"}>
-        {ready === null ? "Opening supervisor…" : "Could not connect to the local supervisor."}
-      </p>
-      {ready === false && <button onClick={connect}>Retry</button>}
-    </main>
-  );
+      {ready === null ? <p role="status">Opening Supervisor…</p> : <form className="stack" onSubmit={async event => {
+        event.preventDefault(); setBusy(true); setError("");
+        try {
+          const response = await fetch("/auth/login", {method: "POST", credentials: "omit", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token})});
+          if (!response.ok) { setError(response.status === 401 ? "The sign-in token is invalid, expired or already used." : "Could not sign in. Try again."); return; }
+          const payload: unknown = await response.json();
+          if (typeof payload !== "object" || payload === null || !("session" in payload) || typeof payload.session !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(payload.session)) throw new Error("Invalid sign-in response.");
+          setSessionToken(payload.session);
+          setToken("");
+          if (!(await connect())) setError("Sign-in could not be confirmed. Try again.");
+        } catch { setError("Could not reach Supervisor. Try again."); }
+        finally { setBusy(false); }
+      }}>
+        <h2>{opened ? "Sign in again" : "Sign in"}</h2>
+        {opened && <p>Your open draft is kept in this tab.</p>}
+        <p>Generate a sign-in token on the machine running T3 Supervisor:</p>
+        <pre><code>t3-supervisor auth forge</code></pre>
+        <p className="muted">Run it in your terminal as the account running Supervisor. For Docker or a VM, run it inside that environment. Tokens expire after five minutes and can be used once.</p>
+        <label htmlFor="access-token">Sign-in token</label>
+        <input id="access-token" name="token" type="password" autoComplete="one-time-code" autoCapitalize="none" spellCheck={false} required maxLength={128} value={token} onChange={event => setToken(event.target.value)} />
+        <button className="primary" type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
+        {error && <p role="alert">{error}</p>}
+      </form>}
+    </main>}
+  </>;
 }
 const root = document.getElementById("root");
 if (!root) throw new Error("Supervisor root missing");

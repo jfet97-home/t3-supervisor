@@ -5,6 +5,7 @@ import { WebSocketServer } from "ws";
 import { ProjectDefinitionLoader, parseDefinitionBlock, parseDefinitionRules } from "../src/project-definitions.js";
 import { makeProjectFiles, ProjectFileError, type ProjectFiles } from "../src/project-files.js";
 import { startGuidanceUi } from "../src/guidance-ui.js";
+import { forgeDashboardToken } from "../src/service-auth.js";
 import type { GuidanceRuntime } from "../src/guidance.js";
 import type { SupervisorConfig } from "../src/types.js";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -214,12 +215,16 @@ test("definition endpoint decodes project/thread queries and preserves local API
   try {
     const address = ui.server.address();assert.ok(address && typeof address !== "string");
     const origin = `http://127.0.0.1:${address.port}`;
-    const response = await fetch(origin + "/api/guidance/project-definitions?projectId=project&threadId=thread");
+    const grant = await forgeDashboardToken(directory);
+    const login = await fetch(origin + "/auth/login", {method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify({token: grant.token})});
+    assert.equal(login.status, 200);
+    const headers = {"x-supervisor-session": (await login.json()).session as string};
+    const response = await fetch(origin + "/api/guidance/project-definitions?projectId=project&threadId=thread", {headers});
     assert.equal(response.status, 200);const value = await response.json();assert.equal(value.status, "ready");assert.equal(value.workspaceRoot, "/worktrees/feature");
-    assert.equal((await fetch(origin + "/api/guidance/project-definitions")).status, 400);
-    assert.equal((await fetch(origin + "/api/guidance/project-definitions?projectId=project", {headers: {Origin: "https://foreign.invalid"}})).status, 403);
+    assert.equal((await fetch(origin + "/api/guidance/project-definitions", {headers})).status, 400);
+    assert.equal((await fetch(origin + "/api/guidance/project-definitions?projectId=project", {headers: {...headers, Origin: "https://foreign.invalid"}})).status, 403);
     f.files.directoryExists = async () => {throw new ProjectFileError("permission_required");};
-    const denied = await fetch(origin + "/api/guidance/project-definitions?projectId=project");
+    const denied = await fetch(origin + "/api/guidance/project-definitions?projectId=project", {headers});
     assert.equal(denied.status, 200);assert.equal((await denied.json()).status, "permission_required");
     f.files.directoryExists = async () => true;
     let began!: () => void;let stopped!: () => void;
@@ -230,7 +235,7 @@ test("definition endpoint decodes project/thread queries and preserves local API
       began();
     });
     const controller = new AbortController();
-    const request = fetch(origin + "/api/guidance/project-definitions?projectId=project", {signal: controller.signal});
+    const request = fetch(origin + "/api/guidance/project-definitions?projectId=project", {headers, signal: controller.signal});
     await reading;controller.abort();await assert.rejects(request);
     await Promise.race([cancelled, new Promise((_, reject) => {const timer = setTimeout(() => reject(new Error("HTTP cancellation did not reach file read")), 1000);cancelled.then(() => clearTimeout(timer));})]);
   } finally {await ui.close();await rm(directory, {recursive: true, force: true});}

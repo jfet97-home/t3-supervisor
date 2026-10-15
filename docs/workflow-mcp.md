@@ -20,25 +20,40 @@ observation note proves execution.
 
 ## MCP interface
 
-The source provides a stateless Streamable HTTP MCP route at `/mcp/workflows` on
-the Supervisor's existing UI listener. Register it under the exact server alias
-`t3-supervisor-workflows` when authorized to configure a connection. Installation
-and connection setup are separate from source implementation; a source checkout
-does not establish that the running service exposes this route.
+The service provides a stateless Streamable HTTP MCP route at `/mcp/workflows`.
+Register it under the exact server alias `t3-supervisor-workflows` when authorized
+to configure a connection. MCPX connects directly to Supervisor; do not add HTTP
+proxies or relay sidecars to adapt the connection.
 
-The route retains the listener's exact loopback Host, Origin and cross-site browser
-guards. Machine clients do not use the dashboard's CSRF token. Dashboard mutation
-routes retain their CSRF checks. Do not relax those protections to connect a gateway;
-use the intended address/Host mapping. No HTTP identity header grants write access.
-Node fetch may ignore a configured Host override. The VM fixture used a temporary
-proxy inside the gateway's network namespace to forward from loopback with the
-required Host/Origin; it was removed after testing. Connection setup must verify
-the actual transport mapping rather than assume an override is effective.
+Every MCP request requires `Authorization: Bearer <workflow-token>`. The service
+creates the private token at `<DATA_DIRECTORY>/access/workflow-mcp-token` on first
+startup and preserves it across restarts. Configure this header privately in MCPX;
+never put its value in docs, conversation text or source control. The dashboard's
+login token and short-lived session cannot authenticate MCP, and the MCP bearer
+cannot authenticate dashboard APIs. Transport access grants no native write authority.
+
+`WORKFLOW_MCP_HOSTS` is a comma-separated list of exact accepted `host:port` values
+for this route, in addition to its actual loopback address. Foreign browser Origin,
+cross-site requests and browser preflight are rejected. Dashboard Host/Origin/CSRF
+checks remain independent, and every dashboard API also requires an authenticated
+session header. The dashboard uses origin-scoped browser storage and no auth cookies.
+
+On a host-network deployment, optional `WORKFLOW_MCP_BIND_HOST` starts another
+listening socket in the same Supervisor process, serving only `/mcp/workflows`.
+`WORKFLOW_MCP_PORT` defaults to the dashboard port. This lets the dashboard stay on
+loopback while the actual MCP endpoint binds directly to a private Docker bridge.
+Missing bind interfaces fail startup; no forwarding service or proxy is involved.
+For the Lima lab the MCP listener is `172.19.0.1:19008`, with dashboard loopback
+`127.0.0.1:19008`. Mac containers use their existing shared private network and
+direct `http://t3-supervisor:9008/mcp/workflows`.
+
+A successful read through the installed gateway establishes transport/permission
+behavior, not a positive workflow edit or complete configured-project dialogue.
 
 `workflow_read` takes the Supervisor thread ID and binding generation as lookup
 coordinates. It returns bounded workflow state and native main/descendant lineage,
-including child parent-step references and archive flags. Reads are not
-actor-authenticated under the same-user loopback scope and grant no edit authority.
+including child parent-step references and archive flags. Reads require the shared MCP transport token but are not
+actor-authenticated to a particular T3 conversation and grant no edit authority.
 `workflow_write` supports three actions:
 
 - `ensure_main` creates an unaccepted main draft.
@@ -118,3 +133,22 @@ The foundation does not add automatic child check-ins, per-step execution proofs
 progress UI, a task scheduler, or a pre-start negotiation barrier. Those remain
 separate roadmap work. Consult T3 Lab's three maintained tracking documents for
 source checks, remote review, staged VM evidence and the installed revision.
+
+## Local access and rotation
+
+Dashboard sign-in uses a freshly forged one-time token, valid for five minutes.
+Run `t3-supervisor auth forge` as the service account, from any directory. A direct
+installation uses the same user state directory for service and CLI; Docker/VM
+users run it inside their deployment environment. Custom state paths use the same
+DATA_DIRECTORY or `--data-dir /absolute/path` for both commands. The CLI requires initialized
+private auth state. The login page shows this exact portable command. Private
+SQLite stores only pending token hashes, and consumption is atomic/durable, so a
+used token cannot replay after restart. Independent state directories reject one
+another's tokens. The long-lived workflow MCP token remains a separate0600 file
+under0700 access, accepted only for MCP transport.
+
+Do not use T3/provider credentials for these roles. To rotate the MCP bearer,
+replace only its file with a fresh canonical32-byte base64url token, restart
+Supervisor and update only the matching MCPX header. Existing dashboard sessions
+are invalid after restart. Preserve all other service state; a volume reset is
+never a login recovery method.

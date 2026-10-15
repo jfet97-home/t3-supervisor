@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Schema } from "effect";
 import { SupervisionControl, SupervisionControlResult, SupervisionSetupOptions, SupervisionSetupResult, GlobalDefinitionsControl, GlobalDefinitionsControlResult,
   type SupervisionControlInfo, type GlobalDefinitionsControlInfo, type SupervisionSetupInput } from "../../src/supervisor-control-contract.js";
-import { getCsrfToken, loadAccess } from "./access.js";
+import { getCsrfToken, loadAccess, sessionHeaders } from "./access.js";
 
 export function SupervisionControlView({control, busy, blocked, message, onToggle, onReload}: {
   control: SupervisionControlInfo;
@@ -37,7 +37,7 @@ export function SupervisionControlPanel({projectId = null, onChanged}: {projectI
   useEffect(() => {
     const abort = new AbortController();setControl(null);
     const query = projectId === null ? "" : `?${new URLSearchParams({projectId})}`;
-    void fetch(`/api/guidance/supervision-control${query}`, {credentials: "same-origin", signal: abort.signal})
+    void fetch(`/api/guidance/supervision-control${query}`, {credentials: "omit", headers: sessionHeaders(), signal: abort.signal})
       .then(async response => {
         if (!response.ok) throw new Error("unavailable");
         const next = Schema.decodeUnknownSync(SupervisionControl)(await response.json());
@@ -51,11 +51,11 @@ export function SupervisionControlPanel({projectId = null, onChanged}: {projectI
     onReload={() => setRevision(value => value + 1)} onToggle={() => {
       if (busy || blocked) return;
       setBusy(true);setMessage("");
-      void fetch("/api/guidance/supervision-control", {method: "POST", credentials: "same-origin",
-        headers: {"Content-Type": "application/json", "x-csrf-token": getCsrfToken()},
+      void fetch("/api/guidance/supervision-control", {method: "POST", credentials: "omit",
+        headers: {"Content-Type": "application/json", ...sessionHeaders(), "x-csrf-token": getCsrfToken()},
         body: JSON.stringify({projectId, expectedGeneration: control.generation, enabled: !control.enabled})})
         .then(async response => {
-          if (response.status === 403) {await loadAccess().catch(() => false);throw new Error("session");}
+          if (response.status === 401 || response.status === 403) {await loadAccess().catch(() => false);throw new Error("session");}
           if (!response.ok) throw new Error("unknown");
           const result = Schema.decodeUnknownSync(SupervisionControlResult)(await response.json());
           if (result.control.projectId !== projectId) throw new Error("scope_mismatch");
@@ -116,7 +116,7 @@ function SupervisionSetupPanel({projectId, onComplete}: {projectId: string; onCo
   const [revision, setRevision] = useState(0);
   useEffect(() => {
     const abort = new AbortController();setOptions(null);
-    void fetch(`/api/guidance/supervision-setup?${new URLSearchParams({projectId})}`, {credentials: "same-origin", signal: abort.signal})
+    void fetch(`/api/guidance/supervision-setup?${new URLSearchParams({projectId})}`, {credentials: "omit", headers: sessionHeaders(), signal: abort.signal})
       .then(async response => {
         if (!response.ok) throw new Error("unavailable");
         const next = Schema.decodeUnknownSync(SupervisionSetupOptions)(await response.json());
@@ -131,11 +131,11 @@ function SupervisionSetupPanel({projectId, onComplete}: {projectId: string; onCo
     const expectedFolderStatus = action === "enable_existing" ? "present" : "missing";
     if (!checkout || busy || blocked || !options.available || checkout.folderStatus !== expectedFolderStatus) return;
     setBusy(true);setMessage("");
-    void fetch("/api/guidance/supervision-setup", {method: "POST", credentials: "same-origin",
-      headers: {"Content-Type": "application/json", "x-csrf-token": getCsrfToken()},
+    void fetch("/api/guidance/supervision-setup", {method: "POST", credentials: "omit",
+      headers: {"Content-Type": "application/json", ...sessionHeaders(), "x-csrf-token": getCsrfToken()},
       body: JSON.stringify(buildSupervisionSetupIntent(projectId, options.generation, checkout, action))})
       .then(async response => {
-        if (response.status === 403) {await loadAccess().catch(() => false);throw new Error("session");}
+        if (response.status === 401 || response.status === 403) {await loadAccess().catch(() => false);throw new Error("session");}
         if (!response.ok) throw new Error("unknown");
         const result = Schema.decodeUnknownSync(SupervisionSetupResult)(await response.json());
         if (result.control.projectId !== projectId || result.workspaceRoot !== checkout.workspaceRoot || result.branch !== checkout.branch) throw new Error("scope_mismatch");
@@ -173,7 +173,7 @@ export function GlobalDefinitionsControlPanel({refreshKey = 0}: {refreshKey?: nu
   const [revision, setRevision] = useState(0);
   useEffect(() => {
     const abort = new AbortController();setControl(null);
-    void fetch("/api/guidance/global-definitions-control", {credentials: "same-origin", signal: abort.signal})
+    void fetch("/api/guidance/global-definitions-control", {credentials: "omit", headers: sessionHeaders(), signal: abort.signal})
       .then(async response => {
         if (!response.ok) throw new Error("unavailable");
         const next = Schema.decodeUnknownSync(GlobalDefinitionsControl)(await response.json());
@@ -186,10 +186,10 @@ export function GlobalDefinitionsControlPanel({refreshKey = 0}: {refreshKey?: nu
     onToggle={() => {
       if (busy || blocked) return;
       setBusy(true);setMessage("");
-      void fetch("/api/guidance/global-definitions-control", {method: "POST", credentials: "same-origin",
-        headers: {"Content-Type": "application/json", "x-csrf-token": getCsrfToken()}, body: JSON.stringify({expectedGeneration: control.generation, enabled: !control.enabled})})
+      void fetch("/api/guidance/global-definitions-control", {method: "POST", credentials: "omit",
+        headers: {"Content-Type": "application/json", ...sessionHeaders(), "x-csrf-token": getCsrfToken()}, body: JSON.stringify({expectedGeneration: control.generation, enabled: !control.enabled})})
         .then(async response => {
-          if (response.status === 403) {await loadAccess().catch(() => false);throw new Error("session");}
+          if (response.status === 401 || response.status === 403) {await loadAccess().catch(() => false);throw new Error("session");}
           if (!response.ok) throw new Error("unknown");
           const result = Schema.decodeUnknownSync(GlobalDefinitionsControlResult)(await response.json());
           setControl(result.control);setMessage(result.message);setBlocked(result.status !== "saved");
