@@ -9,7 +9,7 @@ import type { Projection, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import type { WorkflowAgreementImport, WorkflowOwner } from "../src/workflow-state-contract.js";
 import { WorkflowWriteController, workflowReadToolDefinition, workflowWriteToolDefinition, type WorkflowApplyPatch, type WorkflowNativeAccess } from "../src/workflow-write-controller.js";
-import { workflowProviderDriverFromCatalog, workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, workflowTurnItemDetailMaxBytes, workflowWriteDriverSupport } from "../src/workflow-write-evidence.js";
+import { workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, workflowTurnItemDetailMaxBytes } from "../src/workflow-write-evidence.js";
 import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo } from "../src/project-supervisor-contract.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
@@ -495,131 +495,130 @@ test("rolled-back runs, roots, and tool nodes cannot authorize an old matching t
   }
 });
 
-test("unsupported native drivers return a structured proof gap and keep workflow writes closed", async () => {
-  for (const driver of ["claudeAgent", "future-provider"]) {
+test("Claude-shaped and future native tool records pass the shared exact proof", async () => {
+  for (const [driver, nodeKind] of [["claudeAgent", "tool_call"], ["future-provider", "tool_call"]] as const) {
     const fixture = await makeFixture();
     try {
-      const args = ensureArgs(fixture, `unsupported-driver-${driver}`, "Require a verified native source.");
-      installEvidence(fixture, args, {driver});
-      assert.deepEqual(await fixture.controller.write(args), {
-        status: "denied", operationId: args.operationId, reason: "provider_write_proof_unverified", providerDriver: driver,
+      const args = ensureArgs(fixture, `provider-neutral-${driver}`, "Require the exact native tool record.");
+      const itemId = installEvidence(fixture, args, {
+        driver,
+        nodeKind,
+        toolName: workflowToolNames.write.direct[1],
+        snapshotInput: args,
       });
-      assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
+      assert.equal((await fixture.controller.write(args)).status, "created", driver);
+      assert.deepEqual(fixture.detailCalls, [itemId]);
+      const proof = fixture.guidance.db.prepare(
+        "SELECT native_evidence FROM supervisor_workflow_write_evidence WHERE operation_id=?",
+      ).get(args.operationId) as {native_evidence: string} | undefined;
+      assert.equal(JSON.parse(proof!.native_evidence).nativeItemRef.driver, driver);
     } finally {await closeFixture(fixture);}
   }
   assert.match(workflowReadToolDefinition.description, /strong native item references/u);
   assert.match(workflowWriteToolDefinition.description, /sourceItemId/u);
-  assert.deepEqual(workflowWriteDriverSupport("codex"), {driverKind: "codex", status: "verified"});
-  assert.deepEqual(workflowWriteDriverSupport("claudeAgent"), {driverKind: "claudeAgent", status: "provider_write_proof_unverified"});
-  assert.deepEqual(workflowWriteDriverSupport("future-provider"), {driverKind: "future-provider", status: "provider_write_proof_unverified"});
-  assert.equal(workflowProviderDriverFromCatalog({providers: [{instanceId: "workspace-codex", driver: "codex"}]}, "workspace-codex"), "codex");
-  assert.equal(workflowProviderDriverFromCatalog({providers: [{instanceId: "workspace-codex", driverKind: "codex"}]}, "workspace-codex"), null);
-  assert.equal(workflowProviderDriverFromCatalog({providers: [
-    {instanceId: "workspace-codex", driver: "codex"}, {instanceId: "workspace-codex", driver: "claudeAgent"},
-  ]}, "workspace-codex"), null);
 });
 
-test("a live unsupported Supervisor driver reports the proof gap before any tool item is visible", async () => {
+test("provider-neutral records retain strong native identity and main-run quality gates", async () => {
+  for (const [label, mutate, expectedReason] of [
+    ["weak-ref", (detail: Record<string, unknown>) => {
+      (detail.nativeItemRef as Record<string, unknown>).strength = "weak";
+    }, "native_item_not_main_strong"],
+    ["parent-item", (detail: Record<string, unknown>) => {detail.parentItemId = "parent-item";}, "native_item_not_main_strong"],
+    ["non-execution", (detail: Record<string, unknown>) => {detail.toolNonExecutionKind = "preview";}, "native_item_not_executed"],
+    ["invalid-driver", (detail: Record<string, unknown>) => {
+      (detail.nativeItemRef as Record<string, unknown>).driver = " ";
+    }, "native_item_identity_incomplete"],
+  ] as const) {
+    const fixture = await makeFixture();
+    try {
+      const args = ensureArgs(fixture, `provider-quality-${label}`, "Reject incomplete native evidence.");
+      const itemId = installEvidence(fixture, args, {
+        driver: "claudeAgent",
+        nodeKind: "tool_call",
+        toolName: workflowToolNames.write.direct[1],
+        snapshotInput: args,
+      });
+      mutate(fixture.details.get(itemId) as Record<string, unknown>);
+      const result = await fixture.controller.write(args);
+      assert.equal(result.status, "denied", label);
+      assert.equal(result.status === "denied" ? result.reason : "", expectedReason, label);
+      assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
+      assert.equal(Number(fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_write_receipts").get()?.n), 0);
+    } finally {await closeFixture(fixture);}
+  }
+});
+
+test("an exact strong own-main record with an unrecognized tool name is explicitly denied", async () => {
   const fixture = await makeFixture();
   try {
-    const instanceId = "custom-claude-instance";
-    fixture.projection.thread.modelSelection = {instanceId, model: "claude-sonnet", options: []};
-    const resolved: string[] = [];
-    fixture.native.resolveProviderDriver = async value => {resolved.push(value);return "claudeAgent";};
-    fixture.projection.turnItems = [];
-    const args = ensureArgs(fixture, "unsupported-before-item", "Report the provider proof gap explicitly.");
-    assert.deepEqual(await fixture.controller.write(args), {
-      status: "denied", operationId: args.operationId, reason: "provider_write_proof_unverified", providerDriver: "claudeAgent",
+    const args = ensureArgs(fixture, "unknown-native-tool-name", "Do not infer authority from an unknown tool name.");
+    const observedToolName = "claudeAgent.dynamic_tool.workflow_write";
+    const itemId = installEvidence(fixture, args, {
+      driver: "claudeAgent",
+      nodeKind: "tool_call",
+      toolName: observedToolName,
+      snapshotInput: args,
     });
-    assert.deepEqual(resolved, [instanceId]);
-    assert.deepEqual(fixture.detailCalls, []);
-    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
-  } finally {await closeFixture(fixture);}
-});
-
-test("a sole own-main active AppRun identifies its provider before a tool item is visible", async () => {
-  const fixture = await makeFixture();
-  try {
-    const activeInstanceId = "active-claude-instance";
-    fixture.projection.thread.modelSelection = {instanceId: "next-codex-selection", model: "gpt-6-luna", options: []};
-    fixture.projection.runs = [{id: "active-claude-run", threadId: fixture.supervisorThreadId, providerThreadId: "active-provider-thread",
-      providerInstanceId: activeInstanceId, ordinal: 9, status: "running", requestedAt: "2026-10-15T00:00:00.000Z",
-      startedAt: "2026-10-15T00:00:01.000Z", completedAt: null, rootNodeId: "active-root"}];
-    fixture.projection.nodes = [{id: "active-root", threadId: fixture.supervisorThreadId, runId: "active-claude-run",
-      rootNodeId: "active-root", providerThreadId: "active-provider-thread", parentNodeId: null, kind: "root_turn", status: "running"}];
-    fixture.projection.turnItems = [];
-    const resolved: string[] = [];
-    fixture.native.resolveProviderDriver = async value => {resolved.push(value);return value === activeInstanceId ? "claudeAgent" : "codex";};
-    const args = ensureArgs(fixture, "unsupported-active-provider", "Report the active provider proof gap.");
-    assert.deepEqual(await fixture.controller.write(args), {
-      status: "denied", operationId: args.operationId, reason: "provider_write_proof_unverified", providerDriver: "claudeAgent",
+    const controller = new WorkflowWriteController({
+      supervisors: fixture.supervisors,
+      workflows: fixture.workflows,
+      native: fixture.native,
+      loadDefinitions: async () => fixture.definitionReader.current,
+      isEnabled: id => fixture.supervisors.enabled(id),
+      maxEvidenceWaitMs: 60,
     });
-    assert.deepEqual(resolved, [activeInstanceId]);
-    assert.deepEqual(fixture.detailCalls, []);
-  } finally {await closeFixture(fixture);}
-});
-
-test("ambiguous own-main active AppRuns do not use the next thread selection for provider feedback", async () => {
-  const fixture = await makeFixture();
-  try {
-    fixture.projection.thread.modelSelection = {instanceId: "next-claude-selection", model: "claude-sonnet", options: []};
-    fixture.projection.runs = ["provider-a", "provider-b"].map((providerThreadId, index) => ({
-      id: `active-run-${index}`, threadId: fixture.supervisorThreadId, providerThreadId, providerInstanceId: providerThreadId,
-      ordinal: index + 1, status: "running", requestedAt: "2026-10-15T00:00:00.000Z", startedAt: "2026-10-15T00:00:01.000Z",
-      completedAt: null, rootNodeId: `active-root-${index}`,
-    }));
-    fixture.projection.nodes = fixture.projection.runs.map(run => ({id: run.rootNodeId, threadId: fixture.supervisorThreadId,
-      runId: run.id, rootNodeId: run.rootNodeId, providerThreadId: run.providerThreadId, parentNodeId: null,
-      kind: "root_turn", status: "running"}));
-    fixture.projection.turnItems = [];
-    const resolved: string[] = [];
-    fixture.native.resolveProviderDriver = async value => {resolved.push(value);return "claudeAgent";};
-    const args = ensureArgs(fixture, "ambiguous-active-provider", "Wait for attributable native proof.");
-    assert.deepEqual(await fixture.controller.write(args), {
-      status: "pending", operationId: args.operationId, reason: "native_evidence_not_visible", retryable: true,
+    assert.deepEqual(await controller.write(args), {
+      status: "denied",
+      operationId: args.operationId,
+      reason: "native_tool_name_unrecognized",
+      observedToolName,
     });
-    assert.deepEqual(resolved, []);
-    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
-  } finally {await closeFixture(fixture);}
-});
-
-test("a custom provider instance mapped to Codex still needs exact native Codex evidence", async () => {
-  const fixture = await makeFixture();
-  try {
-    const instanceId = "codex-run-instance";
-    fixture.projection.thread.modelSelection = {instanceId: "claude-next-selection", model: "claude-sonnet", options: []};
-    const resolved: string[] = [];
-    fixture.native.resolveProviderDriver = async value => {resolved.push(value);return value === instanceId ? "codex" : "claudeAgent";};
-    const args = ensureArgs(fixture, "custom-instance-exact-proof", "Use the exact submitted native input.");
-    const itemId = installEvidence(fixture, args, {providerInstanceId: instanceId, runStatus: "running", status: "running"});
-    assert.equal((await fixture.controller.write(args)).status, "created");
-    assert.deepEqual(resolved, [instanceId]);
     assert.deepEqual(fixture.detailCalls, [itemId]);
+    assert.ok(fixture.projectionCalls.length > 1, "waits through the bounded evidence window before denying an unknown name");
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
+    assert.equal(Number(fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_write_receipts").get()?.n), 0);
   } finally {await closeFixture(fixture);}
 });
 
-test("an unknown live catalog grants nothing and leaves exact native proof as the only successful path", async () => {
-  const pendingFixture = await makeFixture();
-  try {
-    pendingFixture.projection.thread.modelSelection = {instanceId: "catalog-unavailable-instance", model: "unknown-model", options: []};
-    pendingFixture.native.resolveProviderDriver = async () => null;
-    pendingFixture.projection.turnItems = [];
-    const args = ensureArgs(pendingFixture, "unknown-catalog-empty", "Do not write without visible proof.");
-    assert.deepEqual(await pendingFixture.controller.write(args), {
-      status: "pending", operationId: args.operationId, reason: "native_evidence_not_visible", retryable: true,
-    });
-    assert.equal(pendingFixture.workflows.get(pendingFixture.projectId, pendingFixture.mainThreadId), null);
-  } finally {await closeFixture(pendingFixture);}
+test("an unrecognized name is reported only after all native ownership gates and stays bounded", async () => {
+  for (const [label, options] of [
+    ["weak", {refStrength: "weak"}],
+    ["nested", {parentItemId: "parent-item"}],
+  ] as const) {
+    const fixture = await makeFixture();
+    try {
+      const args = ensureArgs(fixture, `unknown-tool-quality-${label}`, "An unknown name cannot bypass evidence quality.");
+      const itemId = installEvidence(fixture, args, {
+        driver: "future-provider",
+        nodeKind: "tool_call",
+        toolName: `unrecognized-${label}`,
+        snapshotInput: args,
+        ...(options.parentItemId ? {parentItemId: options.parentItemId} : {}),
+      });
+      if (options.refStrength) (fixture.details.get(itemId) as {nativeItemRef: {strength: string}}).nativeItemRef.strength = options.refStrength;
+      const result = await fixture.controller.write(args);
+      assert.equal(result.status, "denied");
+      assert.equal(result.status === "denied" ? result.reason : "", "native_item_not_main_strong");
+      assert.equal(result.status === "denied" ? result.observedToolName : undefined, undefined);
+      assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
+    } finally {await closeFixture(fixture);}
+  }
 
-  const exactFixture = await makeFixture();
+  const fixture = await makeFixture();
   try {
-    exactFixture.projection.thread.modelSelection = {instanceId: "catalog-unavailable-instance", model: "unknown-model", options: []};
-    exactFixture.native.resolveProviderDriver = async () => null;
-    const args = ensureArgs(exactFixture, "unknown-catalog-exact-proof", "Require the exact Codex item record.");
-    const itemId = installEvidence(exactFixture, args, {driver: "codex", providerInstanceId: "catalog-unavailable-instance"});
-    assert.equal((await exactFixture.controller.write(args)).status, "created");
-    assert.deepEqual(exactFixture.detailCalls, [itemId]);
-  } finally {await closeFixture(exactFixture);}
+    const args = ensureArgs(fixture, "bounded-unknown-tool-name", "Bound names returned from native activity.");
+    const observedToolName = "x".repeat(300);
+    installEvidence(fixture, args, {
+      driver: "future-provider",
+      nodeKind: "tool_call",
+      toolName: observedToolName,
+      snapshotInput: args,
+    });
+    const result = await fixture.controller.write(args);
+    assert.equal(result.status, "denied");
+    assert.equal(result.status === "denied" ? result.reason : "", "native_tool_name_unrecognized");
+    assert.equal(result.status === "denied" ? result.observedToolName?.length : undefined, 128);
+  } finally {await closeFixture(fixture);}
 });
 
 test("a child-thread tool record cannot authorize a write for the bound Supervisor", async () => {

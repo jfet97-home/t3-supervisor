@@ -97,7 +97,6 @@ const progressSnapshot: WorkflowProgressSnapshot = {
     mainThreadId: "task-thread",
     supervisorThreadId: "supervisor-thread",
     bindingGeneration: 4,
-    workflowWriteSupport: {driverKind: "claudeAgent", status: "provider_write_proof_unverified"},
     observedAt: 1_800_000_000_090,
     complete: true,
     lineageTotal: 5,
@@ -717,7 +716,7 @@ test("live progress separates the current workflow from agreement history and pr
   assert.match(html, /Live workflow progress/);
   assert.match(html, /Current Supervisor workflow state, kept separate from proposals and saved agreements/);
   assert.match(html, />Underway<\/span>/);
-  assert.match(html, /Workflow updates through this native driver \(claudeAgent\) have not been verified/);
+  assert.doesNotMatch(html, /native driver.*verified|workflow updates.*verified/i);
   assert.match(html, /Native child/);
   assert.match(html, /<strong>Native child<\/strong><span class="pill amber">Failed<\/span>/);
   assert.match(html, /<strong>Delegated child<\/strong><span class="pill amber">Cancelled<\/span>/);

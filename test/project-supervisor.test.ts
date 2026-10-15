@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect, Schema } from "effect";
 import { GuidanceStore } from "../src/guidance-store.js";
-import { parseInterpretation, ProjectSupervisor, workflowWriteSupportForSelection } from "../src/project-supervisor.js";
+import { parseInterpretation, ProjectSupervisor } from "../src/project-supervisor.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../src/project-supervisor-contract.js";
 import { ProjectSupervisorSnapshot } from "../src/project-supervisor-contract.js";
@@ -667,16 +667,6 @@ test("an unversioned activation baseline is replaced by a conservative version 2
   assert.equal(fixture.baselineReads, 1);
   assert.equal(fixture.supervisorStore.task("source-thread")?.sourceMessageId, "post-activation-task");
   assert.equal(fixture.supervisorStore.task("source-thread")?.status, "waiting");
-});
-
-test("workflow-write support follows the live provider driver rather than its configured instance id", () => {
-  const selection = {...defaultSupervisorModel, instanceId: "local-codex-instance"};
-  const exactCatalog = {providers: [{instanceId: selection.instanceId, driver: "codex", models: [{slug: selection.model}]}]};
-  assert.deepEqual(workflowWriteSupportForSelection(exactCatalog, selection), {driverKind: "codex", status: "verified"});
-  assert.deepEqual(workflowWriteSupportForSelection({providers: [{instanceId: selection.instanceId, driverKind: "codex",
-    models: [{slug: selection.model}]}]}, selection), {driverKind: null, status: "unknown"});
-  assert.deepEqual(workflowWriteSupportForSelection({providers: [{instanceId: selection.instanceId, driver: "codex",
-    models: [{slug: "another-model"}]}]}, selection), {driverKind: null, status: "unknown"});
 });
 
 test("model choices are checked against T3 and saved per project with generation CAS", async (t) => {

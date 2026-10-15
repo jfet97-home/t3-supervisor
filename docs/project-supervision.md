@@ -142,14 +142,6 @@ are checked against fresh native scope and activity before storage; they explain
 the assessment without granting write authority. Historical agreement snapshots
 remain plans, not execution receipts.
 
-Native workflow-write proof is provider-specific. Codex has verified exact native
-recording support. Providers without established native proof remain selectable
-for Supervisor chats, but workflow updates report their unverified support rather
-than using a weaker authorization path. Observation and guidance remain available.
-Claude's complete native proof and a genuine configured Supervisor write still need
-live verification with an authenticated T3 provider; partial reviewer recordings
-are shape evidence only.
-
 Native creation/request identities and owned IDs are permanent recovery evidence.
 Retry native access reconciles the original uncertain action. A confirmed deleted
 Supervisor exposes a distinct replacement action; an archived one is restored in

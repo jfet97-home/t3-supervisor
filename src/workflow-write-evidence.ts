@@ -34,7 +34,7 @@ export type WorkflowEvidenceMatch = {
   providerThreadId: string;
   ordinal: number;
   status: "running" | "completed";
-  nativeItemRef: {driver: "codex"; nativeId: string; strength: "strong"};
+  nativeItemRef: {driver: string; nativeId: string; strength: "strong"};
 };
 
 export type WorkflowEvidenceCandidate = {
@@ -48,28 +48,10 @@ export type WorkflowEvidenceCandidate = {
 export type WorkflowEvidenceCheck =
   | {status: "verified"; evidence: WorkflowEvidenceMatch}
   | {status: "pending"; reason: string}
-  | {status: "denied"; reason: string; providerDriver?: string};
-
-export type WorkflowWriteDriverSupport = {
-  driverKind: string;
-  status: "verified" | "provider_write_proof_unverified";
-};
-
-export const workflowWriteDriverSupport = (driverKind: string): WorkflowWriteDriverSupport => ({
-  driverKind,
-  status: driverKind === "codex" ? "verified" : "provider_write_proof_unverified",
-});
+  | {status: "denied"; reason: string; observedToolName?: string};
 
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
-
-export const workflowProviderDriverFromCatalog = (catalog: unknown, instanceId: string): string | null => {
-  if (!instanceId || !isRecord(catalog) || !Array.isArray(catalog.providers) || catalog.providers.length > 200) return null;
-  const matches = catalog.providers.filter(provider => isRecord(provider) && provider.instanceId === instanceId);
-  if (matches.length !== 1) return null;
-  const driver = matches[0]!.driver;
-  return typeof driver === "string" && driver.length > 0 && driver.length <= 128 && driver.trim() === driver ? driver : null;
-};
 
 const exactKeys = (value: Record<string, unknown>, expected: readonly string[]): boolean => {
   const keys = Object.keys(value).sort();
@@ -101,6 +83,26 @@ export const workflowRequestHash = (value: unknown): string =>
 export const workflowToolInputSize = (value: unknown): number =>
   Buffer.byteLength(canonicalJson(value), "utf8");
 
+const knownDirectToolNames = new Set<string>([
+  ...workflowToolNames.read.direct,
+  ...workflowToolNames.write.direct,
+]);
+const knownMcpxTargets = new Set<string>([
+  workflowToolNames.read.mcpxTarget,
+  workflowToolNames.write.mcpxTarget,
+]);
+const isMcpxCall = (toolName: string): boolean => workflowToolNames.mcpxCall.includes(toolName as never);
+const maxObservedToolNameLength = 128;
+
+const boundedObservedToolName = (toolName: string): string =>
+  toolName.length <= maxObservedToolNameLength ? toolName : `${toolName.slice(0, maxObservedToolNameLength - 3)}...`;
+
+type RecordedArguments = {
+  arguments: Record<string, unknown>;
+  recognized: boolean;
+  observedToolName?: string;
+};
+
 const isTruncatedSnapshot = (item: Record<string, unknown>): boolean =>
   item.inputTruncated === true || item.truncated === true || isRecord(item.input) && item.input.truncated === true;
 
@@ -125,20 +127,33 @@ export const workflowEvidenceCandidates = (
   return (projection.turnItems ?? []).flatMap(item => {
     if (item.type !== "dynamic_tool" || item.threadId !== supervisorThreadId ||
       typeof item.runId !== "string" || typeof item.id !== "string" || typeof item.toolName !== "string") return [];
-    if (!names.includes(item.toolName as never) && !workflowToolNames.mcpxCall.includes(item.toolName as never)) return [];
+    if (!names.includes(item.toolName as never) && !isMcpxCall(item.toolName) && knownDirectToolNames.has(item.toolName)) return [];
     const run = runs.get(item.runId);
     if (!run || run.threadId !== supervisorThreadId) return [];
     const snapshotInput = item.input;
+    const unknownToolName = !names.includes(item.toolName as never) && !isMcpxCall(item.toolName) &&
+      !knownDirectToolNames.has(item.toolName);
     let plausible = false;
     if (isRecord(snapshotInput)) {
       const snapshotArguments = recordedArguments(item, tool);
       if (snapshotArguments) {
-        try {plausible = canonicalJson(snapshotArguments) === expectedCanonical;}
+        try {plausible = canonicalJson(snapshotArguments.arguments) === expectedCanonical;}
         catch {plausible = false;}
       }
       if (!plausible && isTruncatedSnapshot(item)) plausible = true;
     } else if (typeof snapshotInput === "string" && snapshotInput.trim().length > 0) {
-      plausible = true;
+      if (!unknownToolName) {
+        plausible = true;
+      } else {
+        try {
+          const parsed = JSON.parse(snapshotInput) as unknown;
+          if (isRecord(parsed)) {
+            const snapshotArguments = recordedArguments({...item, input: parsed}, tool);
+            plausible = snapshotArguments !== null && canonicalJson(snapshotArguments.arguments) === expectedCanonical;
+          }
+        } catch {plausible = false;}
+        if (!plausible && isTruncatedSnapshot(item)) plausible = true;
+      }
     }
     if (!plausible) return [];
     let snapshotSignature: string;
@@ -157,15 +172,24 @@ export const workflowEvidenceCandidates = (
 const recordedArguments = (
   item: Record<string, unknown>,
   tool: WorkflowEvidenceTool,
-): Record<string, unknown> | null => {
+): RecordedArguments | null => {
   if (!isRecord(item.input)) return null;
   const toolName = item.toolName;
   if (typeof toolName !== "string") return null;
-  if (workflowToolNames[tool].direct.includes(toolName as never)) return item.input;
-  if (!workflowToolNames.mcpxCall.includes(toolName as never)) return null;
-  if (!exactKeys(item.input, ["name", "arguments"]) || item.input.name !== workflowToolNames[tool].mcpxTarget ||
-    !isRecord(item.input.arguments)) return null;
-  return item.input.arguments;
+  if (workflowToolNames[tool].direct.includes(toolName as never)) return {arguments: item.input, recognized: true};
+  if (knownDirectToolNames.has(toolName)) return null;
+  if (isMcpxCall(toolName)) {
+    if (!exactKeys(item.input, ["name", "arguments"]) || typeof item.input.name !== "string" ||
+      !isRecord(item.input.arguments)) return null;
+    if (item.input.name === workflowToolNames[tool].mcpxTarget)
+      return {arguments: item.input.arguments, recognized: true};
+    if (knownMcpxTargets.has(item.input.name)) return null;
+    return {arguments: item.input.arguments, recognized: false, observedToolName: item.input.name};
+  }
+  if (exactKeys(item.input, ["name", "arguments"]) && item.input.name === workflowToolNames[tool].mcpxTarget &&
+    isRecord(item.input.arguments))
+    return {arguments: item.input.arguments, recognized: false, observedToolName: toolName};
+  return {arguments: item.input, recognized: false, observedToolName: toolName};
 };
 
 const getRun = (projection: Projection, runId: string): RunInfo | undefined =>
@@ -183,21 +207,21 @@ export const verifyWorkflowToolEvidence = (input: {
   const item = input.detail;
   if (typeof item.runId !== "string" || typeof item.toolName !== "string" || !isRecord(item.input))
     return {status: "pending", reason: "native_input_incomplete"};
-  const actualArguments = recordedArguments(item, input.tool);
-  if (!actualArguments) return {status: "pending", reason: "native_tool_name_or_wrapper_mismatch"};
+  const recorded = recordedArguments(item, input.tool);
+  if (!recorded) return {status: "pending", reason: "native_tool_name_or_wrapper_mismatch"};
   let expectedCanonical: string;
   let actualCanonical: string;
   let nativeInputCanonical: string;
   try {
     expectedCanonical = canonicalJson(input.arguments);
-    actualCanonical = canonicalJson(actualArguments);
+    actualCanonical = canonicalJson(recorded.arguments);
     nativeInputCanonical = canonicalJson(item.input);
   } catch {
     return {status: "pending", reason: "native_input_not_json"};
   }
   if (Buffer.byteLength(actualCanonical, "utf8") > workflowToolInputMaxBytes)
     return {status: "pending", reason: "native_input_too_large"};
-  if (Object.keys(actualArguments).length === 0) return {status: "pending", reason: "native_input_empty"};
+  if (Object.keys(recorded.arguments).length === 0) return {status: "pending", reason: "native_input_empty"};
   if (actualCanonical !== expectedCanonical) return {status: "pending", reason: "native_input_does_not_match_request"};
   if (item.id !== input.itemId || item.type !== "dynamic_tool" || item.threadId !== input.supervisorThreadId ||
     typeof item.nodeId !== "string") return {status: "denied", reason: "native_item_identity_mismatch"};
@@ -205,11 +229,9 @@ export const verifyWorkflowToolEvidence = (input: {
   if (item.parentItemId !== null) return {status: "denied", reason: "native_item_not_main_strong"};
   if (!isRecord(item.nativeItemRef) || item.nativeItemRef.strength !== "strong")
     return {status: "denied", reason: "native_item_not_main_strong"};
-  const providerDriver = typeof item.nativeItemRef.driver === "string" && item.nativeItemRef.driver.length > 0
-    ? item.nativeItemRef.driver : "unknown";
-  if (workflowWriteDriverSupport(providerDriver).status !== "verified")
-    return {status: "denied", reason: "provider_write_proof_unverified", providerDriver};
-  if (typeof item.nativeItemRef.nativeId !== "string" || !item.nativeItemRef.nativeId ||
+  const providerDriver = item.nativeItemRef.driver;
+  if (typeof providerDriver !== "string" || !providerDriver || providerDriver.length > 128 || providerDriver.trim() !== providerDriver ||
+    typeof item.nativeItemRef.nativeId !== "string" || !item.nativeItemRef.nativeId ||
     typeof item.ordinal !== "number" || !Number.isSafeInteger(item.ordinal) || item.ordinal < 0)
     return {status: "denied", reason: "native_item_identity_incomplete"};
   if (item.toolNonExecutionKind !== undefined && item.toolNonExecutionKind !== null)
@@ -229,6 +251,8 @@ export const verifyWorkflowToolEvidence = (input: {
   const node = mainRunNodeReader(input.projection, run)(item.nodeId);
   if (!node) return {status: "denied", reason: "native_item_outside_main_run"};
   if (node.status === "rolled_back") return {status: "denied", reason: "native_tool_node_rolled_back"};
+  if (!recorded.recognized) return {status: "denied", reason: "native_tool_name_unrecognized",
+    ...(recorded.observedToolName ? {observedToolName: boundedObservedToolName(recorded.observedToolName)} : {})};
   return {
     status: "verified",
     evidence: {
@@ -241,7 +265,7 @@ export const verifyWorkflowToolEvidence = (input: {
       ordinal: item.ordinal as number,
       status: item.status,
       nativeItemRef: {
-        driver: "codex",
+        driver: providerDriver,
         nativeId: item.nativeItemRef.nativeId as string,
         strength: "strong",
       },

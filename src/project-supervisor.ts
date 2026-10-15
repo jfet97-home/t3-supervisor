@@ -19,7 +19,6 @@ import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } f
 import { SupervisorConversation } from "./supervisor-conversation.js";
 import type { GlobalDefinitionsControlInput, SupervisionControlInput, SupervisionSetupInput } from "./supervisor-control-contract.js";
 import { WorkflowStateStore } from "./workflow-state-store.js";
-import { isRecord, workflowProviderDriverFromCatalog, workflowWriteDriverSupport } from "./workflow-write-evidence.js";
 import { monitorActivityReference, observeScopeThread, SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS, SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
 
 type SetupCheckoutTarget = {origin: "project"; threadId: string | null; workspaceRoot: string; branch: string | null; isGitRepository: boolean};
@@ -58,19 +57,6 @@ const sameDefinitionRead = (left: ProjectDefinitionSnapshot | null | undefined, 
     fingerprint({projectId: right.projectId, threadId: right.threadId, workspaceRoot: right.workspaceRoot, globalOnly: right.globalOnly ?? null,
       globalRevision: right.globalRevision ?? null, revision: right.revision, status: right.status, steps: right.steps, workflows: right.workflows,
       config: right.config, projectConfig: right.projectConfig, complete: right.complete, sources: right.sources, issues: right.issues}));
-
-export const workflowWriteSupportForSelection = (
-  catalog: unknown,
-  selection: SupervisorModelSelection | null,
-): ProjectSupervisorScopeSnapshot["workflowWriteSupport"] => {
-  if (!selection || !isRecord(catalog) || !Array.isArray(catalog.providers)) return {driverKind: null, status: "unknown"};
-  const providers = catalog.providers.filter((provider): provider is Record<string, unknown> => isRecord(provider) && provider.instanceId === selection.instanceId);
-  if (providers.length !== 1 || !Array.isArray(providers[0]!.models) ||
-    !providers[0]!.models.some(model => isRecord(model) && model.slug === selection.model)) return {driverKind: null, status: "unknown"};
-  const driverKind = workflowProviderDriverFromCatalog(catalog, selection.instanceId);
-  if (!driverKind) return {driverKind: null, status: "unknown"};
-  return workflowWriteDriverSupport(driverKind);
-};
 
 export const taskSource = (projection: Projection, afterOrdinal: number): {run: RunInfo; message: MessageInfo} | null => {
   for (const run of [...projection.runs].sort((a,b) => a.ordinal - b.ordinal)) {
@@ -146,12 +132,6 @@ export class ProjectSupervisor {
   }
   private async projection(threadId: string, signal: AbortSignal): Promise<Projection> {return (await Effect.runPromise(this.t3.projection(threadId), {signal})).projection;}
   private async models(signal: AbortSignal) {return supervisorModels(await this.readRpc("server.getConfig", {}, signal));}
-  private async workflowWriteSupport(selection: SupervisorModelSelection | null, signal: AbortSignal): Promise<ProjectSupervisorScopeSnapshot["workflowWriteSupport"]> {
-    try {
-      const catalog = await this.readRpc("server.getConfig", {}, signal);
-      return workflowWriteSupportForSelection(catalog, selection);
-    } catch {return {driverKind: null, status: "unknown"};}
-  }
   async scopeSnapshot(projectId: string, mainThreadId: string, signal: AbortSignal,
     options?: ProjectSupervisorScopeSnapshotOptions): Promise<ProjectSupervisorScopeSnapshot> {
     const observedAt = this.now();
@@ -171,19 +151,16 @@ export class ProjectSupervisor {
       issues.push(...scope.issues.slice(0, 20));
     }
     let supervisorProjection: Projection | null = null;
-    let selection: SupervisorModelSelection | null = binding?.initialModel ?? this.store.settings(projectId).modelSelection;
     if (binding) {
       try {
         supervisorProjection = await this.projection(binding.threadId, signal);
         if (supervisorProjection.thread.id !== binding.threadId || supervisorProjection.thread.projectId !== projectId) throw new Error("supervisor_scope_mismatch");
-        selection = modelSelection(supervisorProjection.thread.modelSelection) ?? selection;
       } catch {
         if (signal.aborted) throw new Error("scope_snapshot_aborted");
         complete = false;
         issues.push({code: "supervisor_unavailable", message: "The owning Supervisor conversation could not be observed."});
       }
     }
-    const workflowWriteSupport = await this.workflowWriteSupport(selection, signal);
     const allRows: ThreadInfo[] = scope?.main && scope.allowedIds.has(scope.main.id)
       ? [scope.main, ...scope.descendants.filter(thread => scope.allowedIds.has(thread.id))]
       : [];
@@ -298,7 +275,7 @@ export class ProjectSupervisor {
     if (issues.length > 100) issues.splice(100);
     if (!scope) complete = false;
     return {projectId, mainThreadId, supervisorThreadId: binding?.threadId ?? null, bindingGeneration: binding?.generation ?? null,
-      workflowWriteSupport, observedAt, lineageTotal, lineageOffset, lineageHasMore,
+      observedAt, lineageTotal, lineageOffset, lineageHasMore,
       complete: complete && Boolean(scope?.complete), issues, threads: observedRows};
   }
   private async detectFolder(projectId: string, signal: AbortSignal): Promise<SupervisionFolderPresence> {

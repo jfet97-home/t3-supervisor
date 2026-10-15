@@ -17,7 +17,6 @@ import { makeSupervisorRpc, readSupervisorBaseline, readSupervisorThreads, recor
 import { makeGitProbe } from "./git-probe.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
 import { createWorkflowMcpEndpoint } from "./workflow-mcp.js";
-import { workflowProviderDriverFromCatalog } from "./workflow-write-evidence.js";
 
 export const runGuidanceApplication = (
   config: SupervisorConfig,
@@ -85,12 +84,6 @@ export const runGuidanceApplication = (
       native: {
         listThreads: readSupervisorThreads(config.t3Url, readToken.trim(), readRpc),
         projection: async (threadId, signal) => (await Effect.runPromise(t3.projection(threadId), {signal})).projection,
-        resolveProviderDriver: async (instanceId, signal) => {
-          try {
-            const catalog = await readRpc("server.getConfig", {}, signal);
-            return workflowProviderDriverFromCatalog(catalog, instanceId);
-          } catch {return null;}
-        },
         getTurnItem: async (input, signal) => {
           const result = await readRpc("orchestration.getTurnItem", input, signal);
           if (!record(result) || !("item" in result)) throw new Error("workflow_native_item_unavailable");

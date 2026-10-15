@@ -989,7 +989,6 @@ test("workflow progress is a dashboard-session-authenticated read-only endpoint"
     mainThreadId: "main-thread",
     supervisorThreadId: "supervisor-thread",
     bindingGeneration: 2,
-    workflowWriteSupport: {driverKind: "codex", status: "verified"},
     observedAt: 100,
     lineageTotal: 1,
     lineageOffset: 0,

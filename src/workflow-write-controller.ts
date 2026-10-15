@@ -11,14 +11,12 @@ import {
   type WorkflowOwner,
   type WorkflowStateDocument,
 } from "./workflow-state-contract.js";
-import {mainRunNodeReader} from "./domain.js";
 import type { Projection, ThreadInfo } from "./types.js";
 import {resolveSupervisorScope, type SupervisorScopeResolution} from "./supervisor-scope.js";
 import {
   canonicalJson,
   isRecord,
   verifyWorkflowToolEvidence,
-  workflowWriteDriverSupport,
   workflowEvidenceCandidates,
   workflowRequestHash,
   workflowTurnItemDetailMaxBytes,
@@ -34,7 +32,6 @@ import type {WorkflowPlanGroupInfo, WorkflowPlanStepInfo, WorkflowPlanWorkflowIn
 export type WorkflowNativeAccess = {
   listThreads(signal: AbortSignal): Promise<readonly ThreadInfo[]>;
   projection(threadId: string, signal: AbortSignal): Promise<Projection>;
-  resolveProviderDriver?(instanceId: string, signal: AbortSignal): Promise<string | null>;
   getTurnItem(
     input: {threadId: string; itemId: string},
     signal: AbortSignal,
@@ -79,7 +76,7 @@ export type WorkflowWriteResult = WorkflowEnsureResult | WorkflowMutationResult 
   status: "pending" | "denied" | "invalid" | "unavailable" | "too_large";
   operationId?: string;
   reason: string;
-  providerDriver?: string;
+  observedToolName?: string;
   retryable?: boolean;
 };
 
@@ -132,38 +129,6 @@ type ApplyPinResult =
   | {status: "invalid" | "unavailable"; reason: string};
 
 type NativeScope = Omit<SupervisorScopeResolution, "main"> & {main: ThreadInfo};
-
-type ProviderInstanceAttribution = {status: "selected"; instanceId: string | null} | {status: "ambiguous"};
-
-const isOwnMainGraphRun = (projection: Projection, run: Projection["runs"][number]): boolean => {
-  if (run.threadId !== projection.thread.id || typeof run.rootNodeId !== "string" || run.status === "rolled_back") return false;
-  const root = mainRunNodeReader(projection, run)(run.rootNodeId);
-  return Boolean(root && root.kind === "root_turn" && root.status !== "rolled_back");
-};
-
-const explicitInstanceId = (value: unknown): string | null =>
-  typeof value === "string" && value.trim().length > 0 ? value : null;
-
-const providerInstanceAttribution = (
-  projection: Projection,
-  supervisorThreadId: string,
-  candidates: ReturnType<typeof workflowEvidenceCandidates>,
-): ProviderInstanceAttribution => {
-  const firstCandidate = candidates[0];
-  const candidateItem = firstCandidate && projection.turnItems?.find(item => item.id === firstCandidate.itemId && item.threadId === supervisorThreadId);
-  const candidateRun = candidateItem && typeof candidateItem.runId === "string"
-    ? projection.runs.find(run => run.id === candidateItem.runId && isOwnMainGraphRun(projection, run))
-    : undefined;
-  if (candidateRun) return {status: "selected", instanceId: explicitInstanceId(candidateRun.providerInstanceId)};
-
-  const activeRuns = projection.runs.filter(run => run.threadId === supervisorThreadId &&
-    (run.status === "running" || run.status === "waiting") && isOwnMainGraphRun(projection, run));
-  if (activeRuns.length > 1) return {status: "ambiguous"};
-  if (activeRuns.length === 1) return {status: "selected", instanceId: explicitInstanceId(activeRuns[0]!.providerInstanceId)};
-
-  const selection = isRecord(projection.thread.modelSelection) ? projection.thread.modelSelection : null;
-  return {status: "selected", instanceId: explicitInstanceId(selection?.instanceId)};
-};
 
 type ActivityReferenceResult =
   | {status: "ready"; evidence?: WorkflowStateEvidenceInput[]}
@@ -491,7 +456,7 @@ export const workflowReadToolDefinition = {
 
 export const workflowWriteToolDefinition = {
   name: "workflow_write",
-  description: "Create the main draft, link a verified live descendant, or update one semantic workflow with revision CAS. apply accepts a nested sequence/parallel plan and its unchanged source-bound requirements; omitted fields retain current values. Newly introduced nodes receive stable service IDs only after exact native submitted-argument verification. Keep operationId unique within this Supervisor binding and edit namespace. Status and notes are the Supervisor's assessment, not proof of execution. Optional sourceThreadId/sourceRunId/sourceMessageId/sourceItemId values link to existing in-scope T3 activity; when no sourceThreadId is supplied, the workflow target thread is used. A reference is for navigation and never proves success or grants authority. Unsupported native drivers return provider_write_proof_unverified with their driver identity.",
+  description: "Create the main draft, link a verified live descendant, or update one semantic workflow with revision CAS. apply accepts a nested sequence/parallel plan and its unchanged source-bound requirements; omitted fields retain current values. Newly introduced nodes receive stable service IDs only after exact native submitted-argument verification. Keep operationId unique within this Supervisor binding and edit namespace. Status and notes are the Supervisor's assessment, not proof of execution. Optional sourceThreadId/sourceRunId/sourceMessageId/sourceItemId values link to existing in-scope T3 activity; when no sourceThreadId is supplied, the workflow target thread is used. A reference is for navigation and never proves success or grants authority.",
   inputSchema: {
     $defs: workflowPlanDefinitions,
     type: "object",
@@ -658,7 +623,7 @@ export class WorkflowWriteController {
       return {status: "pending", operationId, reason: verified.reason, retryable: true};
     }
     if (verified.status === "denied") return {status: "denied", operationId, reason: verified.reason,
-      ...(verified.providerDriver ? {providerDriver: verified.providerDriver} : {})};
+      ...(verified.observedToolName ? {observedToolName: verified.observedToolName} : {})};
     if (signal.aborted) {
       this.rememberPendingCandidate(requestHash);
       return {status: "pending", operationId, reason: "native_evidence_wait_interrupted", retryable: true};
@@ -823,12 +788,12 @@ export class WorkflowWriteController {
   private async findEvidence(payload: WorkflowWritePayload, owner: WorkflowOwner, signal: AbortSignal): Promise<
     | {status: "verified"; evidence: WorkflowEvidenceMatch}
     | {status: "pending"; reason: string}
-    | {status: "denied"; reason: string; providerDriver?: string}
+    | {status: "denied"; reason: string; observedToolName?: string}
   > {
     const startedAt = performance.now();
     let lastReason = "native_evidence_not_visible";
+    let unrecognizedToolName: string | undefined;
     const inspected = new Map<string, {signature: string; check: WorkflowEvidenceCheck; retryAfter?: number; retryCount: number}>();
-    const providerDrivers = new Map<string, string | null>();
     let detailReads = 0;
     const maxDetailReads = 64;
     do {
@@ -845,21 +810,6 @@ export class WorkflowWriteController {
         projection.thread.archivedAt != null || projection.thread.deletedAt != null)
         return {status: "denied", reason: "supervisor_projection_not_current"};
       const candidates = workflowEvidenceCandidates(projection, payload.supervisorThreadId, "write", payload);
-      const attribution = providerInstanceAttribution(projection, payload.supervisorThreadId, candidates);
-      const instanceId = attribution.status === "selected" ? attribution.instanceId : null;
-      if (instanceId && this.options.native.resolveProviderDriver) {
-        let providerDriver = providerDrivers.get(instanceId);
-        if (!providerDrivers.has(instanceId)) {
-          try {
-            const resolved = await this.options.native.resolveProviderDriver(instanceId, signal);
-            providerDriver = typeof resolved === "string" && resolved.length > 0 && resolved.length <= 128 && resolved.trim() === resolved
-              ? resolved : null;
-          } catch {providerDriver = null;}
-          providerDrivers.set(instanceId, providerDriver);
-        }
-        if (providerDriver && workflowWriteDriverSupport(providerDriver).status !== "verified")
-          return {status: "denied", reason: "provider_write_proof_unverified", providerDriver};
-      }
       for (const candidate of candidates) {
         if (signal.aborted) return {status: "pending", reason: "native_evidence_wait_interrupted"};
         const cached = inspected.get(candidate.itemId);
@@ -904,13 +854,21 @@ export class WorkflowWriteController {
             ...(retryableUnavailable && retryCount < 1 ? {retryAfter: this.now() + 100} : {}), retryCount});
         }
         if (check.status === "verified") return {status: "verified", evidence: check.evidence};
-        if (check.status === "denied") return {status: "denied", reason: check.reason,
-          ...(check.providerDriver ? {providerDriver: check.providerDriver} : {})};
+        if (check.status === "denied") {
+          if (check.reason === "native_tool_name_unrecognized") {
+            unrecognizedToolName = check.observedToolName;
+            continue;
+          }
+          return {status: "denied", reason: check.reason,
+            ...(check.observedToolName ? {observedToolName: check.observedToolName} : {})};
+        }
         lastReason = check.reason;
       }
       if (performance.now() - startedAt >= this.maxEvidenceWaitMs) break;
       await this.pauseEvidencePoll(signal);
     } while (true);
+    if (lastReason === "native_evidence_not_visible" && unrecognizedToolName !== undefined)
+      return {status: "denied", reason: "native_tool_name_unrecognized", observedToolName: unrecognizedToolName};
     return {status: "pending", reason: lastReason};
   }
 

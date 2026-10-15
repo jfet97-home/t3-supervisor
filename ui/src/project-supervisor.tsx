@@ -468,11 +468,6 @@ export function WorkflowProgressPanel({mainThreadId, connected, progress, onRefr
         {!progress.error && apiFailure && <p role="alert">{progressStatusText[apiFailure.status]}. {apiFailure.message}</p>}
         {latest?.scope && <>
           <p className="small">Observed {formatProgressTime(latest.observedAt)} · Main <code>{mainThreadId}</code></p>
-          {latest.scope.supervisorThreadId && latest.scope.workflowWriteSupport.status !== "verified" && <p className="panel" role="status">
-            {latest.scope.workflowWriteSupport.status === "unknown"
-              ? "T3’s live catalog did not identify the Supervisor driver, so native workflow update support remains unverified."
-              : `Workflow updates through this native driver (${latest.scope.workflowWriteSupport.driverKind ?? "unknown"}) have not been verified. Observed progress and activity remain available.`}
-          </p>}
           {!latest.scope.complete && <div className="panel" role="status">
             <p>Connected child observation is incomplete. Some lifecycle or activity details may be missing.</p>
             {scopeIssues.length > 0 && <ul>{scopeIssues.map((issue, index) => <li key={`${issue.code}:${index}`}>{issue.message}</li>)}</ul>}

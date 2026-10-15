@@ -110,10 +110,6 @@ button. Only the current owning Supervisor's exact native tool evidence can
 authorize edits to its main/descendant scope; transport credentials alone cannot.
 Check actual installed availability, not source checkout features. Role instructions
 are not a sandbox. No proxies or T3 modifications are authorized by ordinary usage.
-Native write verification is provider-specific: currently proven Codex support
-does not establish Claude or other provider support. A selected unverified provider
-can still observe and guide; surface its workflow-write limitation explicitly and
-do not substitute transport credentials, roles or reviewer records as authority.
 
 Activity and Recaps and Telegram retain read-only history. Settings stores chat
 exclusions and optional interactive Telegram selection per instance. Preserve

@@ -12,7 +12,6 @@ const scopeSnapshot = (): ProjectSupervisorScopeSnapshot => ({
   mainThreadId: "main-thread",
   supervisorThreadId: "supervisor-thread",
   bindingGeneration: 7,
-  workflowWriteSupport: {driverKind: "codex", status: "verified"},
   observedAt: 100,
   complete: true,
   lineageTotal: 3,

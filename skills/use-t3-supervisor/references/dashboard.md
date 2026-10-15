@@ -81,8 +81,6 @@ they do not mean an empty or completed workflow.
 Native idle/no-AppRun mirrors are not child completion. The Supervisor observes
 normal actions/results and supplies the assessment without requiring constant agent
 reports. Its links explain the judgment, not independent proof of semantic success.
-A provider whose exact native workflow-write proof is still unverified can observe
-and guide, but the limitation on saving workflow changes must remain visible.
 
 ## History and chat settings
 

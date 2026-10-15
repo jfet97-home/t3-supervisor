@@ -43,10 +43,6 @@ export const ProjectSupervisorScopeSnapshotSchema = Schema.Struct({
   mainThreadId: Schema.String,
   supervisorThreadId: Schema.NullOr(Schema.String),
   bindingGeneration: Schema.NullOr(Schema.Number),
-  workflowWriteSupport: Schema.Struct({
-    driverKind: Schema.NullOr(Schema.String),
-    status: Schema.Literals(["verified", "provider_write_proof_unverified", "unknown"]),
-  }),
   observedAt: Schema.Number,
   lineageTotal: Schema.Number,
   lineageOffset: Schema.Number,

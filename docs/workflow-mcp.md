@@ -119,15 +119,16 @@ then reads complete input through T3's existing `orchestration.getTurnItem` API.
 The run, thread, provider thread, strong native reference and own main-node graph
 must match, with no parent item or non-execution marker. Only exact configured
 direct aliases or the exact MCPX call wrapper/inner tool name are accepted. The
-full structured object input must equal the complete submitted arguments.
-Writes currently accept only the verified `codex` native driver. Other drivers,
-including `claudeAgent`, return `provider_write_proof_unverified` with the native
-driver identity until provider-specific detail and a genuine configured Supervisor
-write are verified. An ordinary Claude tool summary without the strong native
-reference and main-run graph is insufficient. This remains a technical integration
-gap; model selection still comes from T3's live catalog, and no separate Supervisor
-model configuration is required. The ordinary agreement/dialogue path remains
-separate.
+full structured object input must equal the complete submitted arguments. The
+provider driver is retained as bounded audit metadata; it does not decide whether
+the record can prove the call. Any provider can pass the same gate when T3 exposes
+the exact strong native item and its owning main-run graph. An unrecognized native
+tool name is denied with a bounded observed name only after the item's complete
+ownership and execution checks pass; its arguments never grant authority by
+themselves. This nonretryable denial is returned after the bounded evidence wait.
+Model selection still comes from T3's live catalog, and no separate
+Supervisor model configuration is required. The ordinary agreement/dialogue path
+remains separate.
 
 Quoted JSON, ordinary messages, code-mode script text, empty placeholders,
 truncated strings and tool calls in another conversation or a native child cannot
@@ -164,9 +165,10 @@ fail explicitly instead of returning an empty page that cannot advance.
 
 This mechanism assumes the integrity of T3's provider-derived history under the
 existing non-hostile same-user scope. It is not an OS isolation boundary against
-an actor who can alter the local T3 database. Additional providers require verified
-native recording behavior before relying on their tool evidence. No T3 source,
-installed app/server, startup script or initial dispatch path is modified.
+an actor who can alter the local T3 database. Every write requires complete per-item
+evidence: missing or weak native references, incomplete/truncated inputs, or
+incomplete run graphs remain pending or denied regardless of provider identity.
+No T3 source, installed app/server, startup script or initial dispatch path is modified.
 
 The foundation does not add automatic child check-ins, per-step execution proofs,
 progress UI, a task scheduler, or a pre-start negotiation barrier. Those remain
