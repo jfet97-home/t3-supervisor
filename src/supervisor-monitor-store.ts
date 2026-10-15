@@ -73,6 +73,10 @@ export interface SupervisorMonitorSelectOptions {
   eligibleThreadIds?: ReadonlySet<string>;
 }
 
+export type SupervisorMonitorScopePendingScan =
+  | {status: "complete"; pending: boolean}
+  | {status: "incomplete"};
+
 const knownPriority = (value: unknown): SupervisorMonitorPriority | null =>
   value === "user_instruction" ||
   value === "run_finished" ||
@@ -221,6 +225,7 @@ export class ProjectSupervisorMonitorStore {
     projection: Projection;
     now?: number;
     excludedIds?: ReadonlySet<string>;
+    includeDetachedChildItems?: boolean;
   }): SupervisorMonitorObservation {
     if (
       !input.projectId.trim() ||
@@ -275,6 +280,7 @@ export class ProjectSupervisorMonitorStore {
         now,
         input.excludedIds,
         trackedIds,
+        input.includeDetachedChildItems === true,
       );
       this.store.db
         .prepare("UPDATE supervisor_monitor_items SET active=0 WHERE project_id=? AND thread_id=?")
@@ -291,6 +297,7 @@ export class ProjectSupervisorMonitorStore {
         collectionFloor,
         input.projection,
         activity,
+        input.includeDetachedChildItems === true,
       );
       if (sourceOrdinal !== collectionFloor)
         this.store.db
@@ -430,17 +437,53 @@ export class ProjectSupervisorMonitorStore {
     };
   }
 
+  hasState(projectId: string, threadId: string): boolean {
+    return this.threadRow(projectId, threadId) !== undefined;
+  }
+
+  hasPendingReviewableActivity(projectId: string, threadIds: readonly string[]): SupervisorMonitorScopePendingScan {
+    if (!projectId.trim() || !Array.isArray(threadIds) || threadIds.length < 1 || threadIds.length > 10_000 ||
+      threadIds.some(threadId => typeof threadId !== "string" || !threadId.trim()) || new Set(threadIds).size !== threadIds.length)
+      return {status: "incomplete"};
+    for (let start = 0; start < threadIds.length; start += 400) {
+      const ids = threadIds.slice(start, start + 400);
+      const placeholders = ids.map(() => "?").join(",");
+      try {
+        const match = this.store.db.prepare(`SELECT 1 AS pending FROM supervisor_monitor_items
+          WHERE project_id=? AND thread_id IN (${placeholders}) AND eligible=1 AND active=1
+          AND (reviewed_version IS NULL OR reviewed_version<>version)
+          AND (status IN ('completed','failed','cancelled','interrupted') OR priority='waiting_input') LIMIT 1`)
+          .get(projectId, ...ids);
+        if (match) return {status: "complete", pending: true};
+      } catch {return {status: "incomplete"};}
+    }
+    return {status: "complete", pending: false};
+  }
+
   private advanceSourceOrdinal(
     projectId: string,
     threadId: string,
     currentFloor: number,
     projection: Projection,
     activity: readonly SupervisorMonitorActivity[],
+    includeDetachedChildItems: boolean,
   ): number {
-    let floor = currentFloor;
     const runs = projection.runs
       .filter((run) => run.threadId === threadId && run.ordinal >= currentFloor)
       .sort((left, right) => left.ordinal - right.ordinal);
+    if (includeDetachedChildItems && projection.thread.lineage.relationshipToParent === "subagent" && runs.length === 0) {
+      const detached = activity.filter((item) => item.ordinal >= currentFloor);
+      if (!detached.length) return currentFloor;
+      const maxOrdinal = Math.max(...detached.map(item => item.ordinal));
+      for (const item of detached) {
+        if (!isReviewable(item)) continue;
+        const row = this.itemRow(projectId, threadId, item.id);
+        if (!row || Number(row.eligible) !== 1 || String(row.version) !== item.version || row.reviewed_version !== item.version)
+          return currentFloor;
+      }
+      return Math.max(currentFloor, maxOrdinal + 1);
+    }
+    let floor = currentFloor;
     for (const run of runs) {
       if (run.ordinal !== floor) break;
       if (liveRunStatuses.has(run.status) && isCurrentMainGraphRun(projection, run)) break;

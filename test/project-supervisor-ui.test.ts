@@ -4,8 +4,9 @@ import { Schema } from "effect";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultMonitoringSettings, ProjectSupervisorSave, ProjectSupervisorSnapshot, type DefinitionReviewInfo, type ProjectSupervisorInfo, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput, type SupervisorModelSelection, type WorkflowAgreementInfo, type WorkflowPlanGroupInfo, type WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
-import { ProjectSupervisorView, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
-import { loadProjectSupervisor, ProjectSupervisorRequestError, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
+import type { WorkflowProgressSnapshot } from "../src/workflow-progress.js";
+import { ProjectSupervisorView, WorkflowProgressPanel, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
+import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
 
 const selection: SupervisorModelSelection = {
   instanceId: "provider-one",
@@ -84,6 +85,57 @@ const definitionReview = (overrides: Partial<DefinitionReviewInfo> = {}): Defini
   updatedAt: 1_800_000_000_000,
   ...overrides,
 });
+
+const progressSnapshot: WorkflowProgressSnapshot = {
+  status: "ok",
+  message: null,
+  projectId: "project",
+  mainThreadId: "task-thread",
+  observedAt: 1_800_000_000_100,
+  scope: {
+    projectId: "project",
+    mainThreadId: "task-thread",
+    supervisorThreadId: "supervisor-thread",
+    bindingGeneration: 4,
+    workflowWriteSupport: {driverKind: "claudeAgent", status: "provider_write_proof_unverified"},
+    observedAt: 1_800_000_000_090,
+    complete: true,
+    lineageTotal: 5,
+    lineageOffset: 0,
+    lineageHasMore: false,
+    issues: [],
+    threads: [
+      {threadId: "task-thread", parentThreadId: null, depth: 0, origin: "main", lifecycle: "running", lifecycleDetail: "running", archivedAt: null, deletedAt: null, activityRefs: [], contactLimit: "Contact the main through its native T3 chat."},
+      {threadId: "child-one", parentThreadId: "task-thread", depth: 1, origin: "native_child", lifecycle: "unknown", lifecycleDetail: null, archivedAt: null, deletedAt: null,
+        activityRefs: [{sourceThreadId: "child-one", sourceRunId: "child-run", sourceMessageId: "child-message", sourceItemId: "child-item", kind: "command", observedAt: 1_800_000_000_050, label: "command · completed"}],
+        contactLimit: "Guide through the direct parent; keep native child contact mediated."},
+      {threadId: "child-two", parentThreadId: "task-thread", depth: 1, origin: "delegated_child", lifecycle: "completed", lifecycleDetail: "completed", archivedAt: null, deletedAt: null, activityRefs: [], contactLimit: "Terminal child; route follow-up through the parent."},
+      {threadId: "failed-native", parentThreadId: "task-thread", depth: 1, origin: "native_child", lifecycle: "interrupted", lifecycleDetail: "failed", archivedAt: null, deletedAt: null, activityRefs: [], contactLimit: "Terminal child; route follow-up through the parent."},
+      {threadId: "cancelled-delegated", parentThreadId: "task-thread", depth: 1, origin: "delegated_child", lifecycle: "interrupted", lifecycleDetail: "cancelled", archivedAt: null, deletedAt: null, activityRefs: [], contactLimit: "Terminal child; route follow-up through the parent."},
+    ],
+  },
+  incompatibleWorkflows: [],
+  workflows: [
+    {workflowId: "main-workflow", projectId: "project", mainThreadId: "task-thread", threadId: "task-thread", parentThreadId: null,
+      revision: 2, status: "underway", objective: "Review the source change", plan, updatedAt: 1_800_000_000_080,
+      parentNodeReferences: [], observations: []},
+    {workflowId: "child-workflow", projectId: "project", mainThreadId: "task-thread", threadId: "child-one", parentThreadId: "task-thread",
+      revision: 1, status: "needs_attention", objective: "Review the integration", plan: null, updatedAt: 1_800_000_000_070,
+      parentNodeReferences: [
+        {parentWorkflowId: "main-workflow", parentThreadId: "task-thread", nodeId: "step-inspect", nodeKind: "step", nodeName: "Inspect source"},
+        {parentWorkflowId: "main-workflow", parentThreadId: "task-thread", nodeId: "step-local", nodeKind: "step", nodeName: "Check migration notes"},
+      ],
+      observations: [{id: "observation-one", kind: "observation", recordedAt: 1_800_000_000_060,
+        targetNodeId: "step-inspect", targetNodeName: "Inspect source", statusFrom: null, statusTo: null,
+        sourceThreadId: "child-one", sourceRunId: "child-run", sourceMessageId: "child-message", sourceItemId: "child-item",
+        note: "The Supervisor observed the linked test output."}],
+    },
+  ],
+  workflowOffset: 0,
+  workflowHasMore: false,
+  lineageOffset: 0,
+  lineageHasMore: false,
+};
 
 const renderTaskView = (task: ProjectSupervisorInfo["tasks"][number]) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
   snapshot: {...snapshot, tasks: [task]}, selection, monitoring, threadId: task.threadId, connected: true,
@@ -651,5 +703,110 @@ test("an expired dashboard session is a definite rejection and never repeats the
     };
     await assert.rejects(saveProjectSupervisor(input, "token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved);
     assert.equal(writes, 1);
+  } finally {globalThis.fetch = original;}
+});
+
+test("live progress separates the current workflow from agreement history and preserves child uncertainty", () => {
+  const html = renderToStaticMarkup(createElement(WorkflowProgressPanel, {
+    mainThreadId: "task-thread",
+    connected: true,
+    progress: {key: "progress-key", pages: [progressSnapshot], loading: false, error: null},
+    onRefresh: () => {},
+    onLoadMore: () => {},
+  }));
+  assert.match(html, /Live workflow progress/);
+  assert.match(html, /Current Supervisor workflow state, kept separate from proposals and saved agreements/);
+  assert.match(html, />Underway<\/span>/);
+  assert.match(html, /Workflow updates through this native driver \(claudeAgent\) have not been verified/);
+  assert.match(html, /Native child/);
+  assert.match(html, /<strong>Native child<\/strong><span class="pill amber">Failed<\/span>/);
+  assert.match(html, /<strong>Delegated child<\/strong><span class="pill amber">Cancelled<\/span>/);
+  assert.match(html, /<h5>Main workflow<\/h5><span class="pill blue">Underway<\/span>/);
+  assert.match(html, /Lifecycle: Unknown/);
+  assert.match(html, /idle thread mirror alone does not establish that its work is finished/);
+  assert.match(html, /No workflow document is recorded for this conversation/);
+  assert.match(html, /Contributes to parent steps/);
+  assert.match(html, /Review the integration/);
+  assert.match(html, /The Supervisor observed the linked test output/);
+  assert.match(html, /t3-thread:\/\/v1\/child-one/);
+  assert.match(html, /child-item/);
+  assert.match(html, /Parent steps do not complete automatically when a child finishes/);
+  assert.doesNotMatch(html, /Agreement status|Agreement context|accepted-key/);
+  assert.doesNotMatch(html, /accept workflow|send workflow/i);
+});
+
+test("workflow progress API pages are scoped to the requested project, main, and independent offsets", async () => {
+  const original = globalThis.fetch;
+  const page = {...progressSnapshot, workflowOffset: 10, lineageOffset: 20};
+  let requested = "";
+  try {
+    globalThis.fetch = async (url, init) => {
+      requested = String(url);
+      assert.equal(init?.method, undefined);
+      assert.equal(init?.credentials, "omit");
+      assert.ok(init?.signal);
+      return new Response(JSON.stringify(page), {status: 200});
+    };
+    const loaded = await loadWorkflowProgress("project", "task-thread", AbortSignal.timeout(1000), {
+      workflowOffset: 10,
+      lineageOffset: 20,
+      limit: 50,
+      expectedBinding: {threadId: "supervisor-thread", generation: 4},
+    });
+    const url = new URL(requested, "http://localhost");
+    assert.equal(url.pathname, "/api/guidance/workflow-progress");
+    assert.equal(url.searchParams.get("projectId"), "project");
+    assert.equal(url.searchParams.get("mainThreadId"), "task-thread");
+    assert.equal(url.searchParams.get("workflowOffset"), "10");
+    assert.equal(url.searchParams.get("lineageOffset"), "20");
+    assert.equal(url.searchParams.get("limit"), "50");
+    assert.equal(url.searchParams.has("bindingGeneration"), false);
+    assert.equal(loaded.workflowOffset, 10);
+    assert.equal(loaded.lineageOffset, 20);
+
+    globalThis.fetch = async () => new Response(JSON.stringify({...page, mainThreadId: "another-main"}), {status: 200});
+    await assert.rejects(loadWorkflowProgress("project", "task-thread", AbortSignal.timeout(1000), {
+      workflowOffset: 10,
+      lineageOffset: 20,
+      limit: 50,
+      expectedBinding: {threadId: "supervisor-thread", generation: 4},
+    }), /another selection or page/);
+    globalThis.fetch = async () => new Response(JSON.stringify({...page, scope: {...page.scope!, bindingGeneration: 9}}), {status: 200});
+    await assert.rejects(loadWorkflowProgress("project", "task-thread", AbortSignal.timeout(1000), {
+      workflowOffset: 10,
+      lineageOffset: 20,
+      limit: 50,
+      expectedBinding: {threadId: "supervisor-thread", generation: 4},
+    }), /another Supervisor binding/);
+  } finally {globalThis.fetch = original;}
+});
+
+test("workflow progress refresh keeps every loaded page and fetches them sequentially", async () => {
+  const original = globalThis.fetch;
+  const requests = [
+    {workflowOffset: 0, lineageOffset: 0, limit: 20, expectedBinding: {threadId: "supervisor-thread", generation: 4}},
+    {workflowOffset: 20, lineageOffset: 20, limit: 20, expectedBinding: {threadId: "supervisor-thread", generation: 4}},
+    {workflowOffset: 40, lineageOffset: 40, limit: 20, expectedBinding: {threadId: "supervisor-thread", generation: 4}},
+  ];
+  const order: Array<[number, number]> = [];
+  let inFlight = 0;
+  let maximumInFlight = 0;
+  try {
+    globalThis.fetch = async url => {
+      const parsed = new URL(String(url), "http://localhost");
+      const workflowOffset = Number(parsed.searchParams.get("workflowOffset"));
+      const lineageOffset = Number(parsed.searchParams.get("lineageOffset"));
+      inFlight++;
+      maximumInFlight = Math.max(maximumInFlight, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 2));
+      order.push([workflowOffset, lineageOffset]);
+      inFlight--;
+      return new Response(JSON.stringify({...progressSnapshot, workflowOffset, lineageOffset}), {status: 200});
+    };
+    const pages = await refreshWorkflowProgressPages("project", "task-thread", AbortSignal.timeout(1000), requests);
+    assert.equal(pages.length, 3);
+    assert.deepEqual(order, [[0, 0], [20, 20], [40, 40]]);
+    assert.equal(maximumInFlight, 1);
+    assert.deepEqual(pages.map(page => [page.workflowOffset, page.lineageOffset]), [[0, 0], [20, 20], [40, 40]]);
   } finally {globalThis.fetch = original;}
 });

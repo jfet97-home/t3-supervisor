@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect, Schema } from "effect";
 import { GuidanceStore } from "../src/guidance-store.js";
-import { parseInterpretation, ProjectSupervisor } from "../src/project-supervisor.js";
+import { parseInterpretation, ProjectSupervisor, workflowWriteSupportForSelection } from "../src/project-supervisor.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../src/project-supervisor-contract.js";
 import { ProjectSupervisorSnapshot } from "../src/project-supervisor-contract.js";
@@ -415,6 +415,61 @@ const reserveReadyBinding = (fixture: Awaited<ReturnType<typeof makeFixture>>, m
   return ready;
 };
 
+test("scopeSnapshot returns current binding coordinates and verified descendant lineage across project mirrors", async t => {
+  const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
+  t.after(fixture.cleanup);
+  const binding = reserveReadyBinding(fixture);
+  const main = fixture.projections.get("source-thread");assert.ok(main);
+  const child = makeSourceProjection("native-child", "other-project", []);
+  child.thread.projectId = null;
+  child.thread.lineage = {parentThreadId: "source-thread", relationshipToParent: "subagent", rootThreadId: "source-thread"};
+  child.thread.creationSource = "provider";
+  child.thread.activeRunId = null;
+  const delegated = makeSourceProjection("delegated-child", "other-project", []);
+  delegated.thread.lineage = {parentThreadId: "source-thread", relationshipToParent: "subagent", rootThreadId: "source-thread"};
+  delegated.thread.creationSource = "mcp";
+  main.subagents = [{childThreadId: child.thread.id, status: "running"}, {childThreadId: delegated.thread.id, status: "completed"}];
+  fixture.projections.set(child.thread.id, child);
+  fixture.projections.set(delegated.thread.id, delegated);
+
+  const supervisor = fixture.makeSupervisor();
+  assert.deepEqual(supervisor.workflowLocator("project-a", "source-thread"), {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation});
+  const readsBefore = fixture.projectionReads.length;
+  const snapshot = await supervisor.scopeSnapshot("project-a", "source-thread", AbortSignal.timeout(5_000), {lineageOffset: 2, limit: 1});
+  assert.equal(snapshot.complete, true);
+  assert.equal(snapshot.supervisorThreadId, binding.threadId);
+  assert.equal(snapshot.bindingGeneration, binding.generation);
+  assert.equal(snapshot.lineageTotal, 3);
+  assert.equal(snapshot.lineageOffset, 2);
+  assert.equal(snapshot.lineageHasMore, false);
+  assert.deepEqual(snapshot.threads.map(row => row.threadId), ["native-child"]);
+  assert.equal(snapshot.threads[0]?.parentThreadId, "source-thread");
+  assert.equal(snapshot.threads[0]?.origin, "native_child");
+  assert.equal(snapshot.threads[0]?.lifecycle, "running");
+  assert.match(snapshot.threads[0]?.contactLimit ?? "", /direct parent/u);
+  assert.deepEqual(fixture.projectionReads.slice(readsBefore), [binding.threadId, "native-child", "source-thread"],
+    "the snapshot reads only the requested child and its parent, plus the owning Supervisor");
+});
+
+test("an unbound scopeSnapshot returns only the requested lineage page without Supervisor reads", async t => {
+  const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
+  t.after(fixture.cleanup);
+  for (const id of ["child-one", "child-two"]) {
+    const child = makeSourceProjection(id, "other-project", []);
+    child.thread.projectId = null;
+    child.thread.lineage = {parentThreadId: "source-thread", relationshipToParent: "subagent", rootThreadId: "source-thread"};
+    child.thread.creationSource = "provider";
+    fixture.projections.set(id, child);
+  }
+  const readsBefore = fixture.projectionReads.length;
+  const snapshot = await fixture.makeSupervisor().scopeSnapshot("project-a", "source-thread", AbortSignal.timeout(5_000), {lineageOffset: 1, limit: 1});
+  assert.equal(snapshot.supervisorThreadId, null);
+  assert.equal(snapshot.bindingGeneration, null);
+  assert.equal(snapshot.lineageTotal, 3);
+  assert.deepEqual(snapshot.threads.map(row => row.threadId), ["child-one"]);
+  assert.deepEqual(fixture.projectionReads.slice(readsBefore), ["child-one", "source-thread"]);
+});
+
 test("activation baseline excludes existing runs and gives independent mains separate Supervisors", async (t) => {
   const fixture = await makeFixture([
     { threadId: "old-thread", projectId: "project-a", turns: [{ id: "old-task", sequence: 9, text: "Old work" }] },
@@ -612,6 +667,16 @@ test("an unversioned activation baseline is replaced by a conservative version 2
   assert.equal(fixture.baselineReads, 1);
   assert.equal(fixture.supervisorStore.task("source-thread")?.sourceMessageId, "post-activation-task");
   assert.equal(fixture.supervisorStore.task("source-thread")?.status, "waiting");
+});
+
+test("workflow-write support follows the live provider driver rather than its configured instance id", () => {
+  const selection = {...defaultSupervisorModel, instanceId: "local-codex-instance"};
+  const exactCatalog = {providers: [{instanceId: selection.instanceId, driver: "codex", models: [{slug: selection.model}]}]};
+  assert.deepEqual(workflowWriteSupportForSelection(exactCatalog, selection), {driverKind: "codex", status: "verified"});
+  assert.deepEqual(workflowWriteSupportForSelection({providers: [{instanceId: selection.instanceId, driverKind: "codex",
+    models: [{slug: selection.model}]}]}, selection), {driverKind: null, status: "unknown"});
+  assert.deepEqual(workflowWriteSupportForSelection({providers: [{instanceId: selection.instanceId, driver: "codex",
+    models: [{slug: "another-model"}]}]}, selection), {driverKind: null, status: "unknown"});
 });
 
 test("model choices are checked against T3 and saved per project with generation CAS", async (t) => {

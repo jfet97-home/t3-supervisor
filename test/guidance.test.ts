@@ -14,6 +14,9 @@ import { readStructuredModelOutput } from "../src/recap.js";
 import { dispatchGuidance } from "../src/guidance-native.js";
 import { startGuidanceUi } from "../src/guidance-ui.js";
 import { forgeDashboardToken } from "../src/service-auth.js";
+import type { ProjectSupervisor } from "../src/project-supervisor.js";
+import type { ProjectSupervisorScopeSnapshot } from "../src/supervisor-observation.js";
+import type { WorkflowReadResult, WorkflowWriteController } from "../src/workflow-write-controller.js";
 // legacy transport fixtures remain useful; production defaults to retired execution
 class GuidanceRuntime extends RetiredGuidanceRuntime {
   constructor(...args: ConstructorParameters<typeof RetiredGuidanceRuntime>) {super(...args);this.retired = false;}
@@ -971,6 +974,76 @@ test("a failed MCP bind releases the dashboard socket and permits a clean restar
     try {
       const dashboard = await signIn(`http://127.0.0.1:${port}`, directory);
       assert.equal(typeof dashboard.session, "string");
+    } finally {await ui.close();}
+  } finally {store.close();await rm(directory, {recursive: true, force: true});}
+});
+
+test("workflow progress is a dashboard-session-authenticated read-only endpoint", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workflow-progress-api-"));
+  const store = new GuidanceStore(directory);
+  const port = await reservePort();
+  const uiConfig = {...config(directory), uiPort: port};
+  const runtime = new GuidanceRuntime(uiConfig, store, {} as never, t3, {decide: async () => {throw new Error("No evaluation requested");}});
+  const scope: ProjectSupervisorScopeSnapshot = {
+    projectId: "project",
+    mainThreadId: "main-thread",
+    supervisorThreadId: "supervisor-thread",
+    bindingGeneration: 2,
+    workflowWriteSupport: {driverKind: "codex", status: "verified"},
+    observedAt: 100,
+    lineageTotal: 1,
+    lineageOffset: 0,
+    lineageHasMore: false,
+    complete: true,
+    issues: [],
+    threads: [{threadId: "main-thread", parentThreadId: null, depth: 0, origin: "main", lifecycle: "running", lifecycleDetail: "running",
+      archivedAt: null, deletedAt: null, activityRefs: [], contactLimit: "main"}],
+  };
+  const readResult: Extract<WorkflowReadResult, {status: "ok"}> = {
+    status: "ok",
+    owner: {projectId: "project", mainThreadId: "main-thread", supervisorThreadId: "supervisor-thread", bindingGeneration: 2},
+    mainTaskAgreementStatus: null,
+    agreementValidityNote: "Not shown by the dashboard progress projection.",
+    incompatibleWorkflows: [],
+    workflows: [{document: {
+      formatVersion: 2, workflowId: "main-workflow", projectId: "project", mainThreadId: "main-thread", threadId: "main-thread",
+      parentWorkflowId: null, parentThreadId: null, revision: 1, status: "underway", objective: "Observe the project task",
+      sourceBinding: null, requirements: [], issues: [], plan: null, currentAgreementKey: "accepted-key", acceptedAgreements: [], evidence: [],
+      createdAt: 1, updatedAt: 2,
+    }, parentNodeReferences: []}],
+    workflowOffset: 0,
+    workflowHasMore: false,
+    lineage: [{threadId: "main-thread", parentThreadId: null, relationshipToParent: null, archivedAt: null}],
+    lineageOffset: 0,
+    lineageHasMore: false,
+  };
+  let readerCalls = 0;
+  let scopeOptions: unknown;
+  const supervision = {
+    workflowLocator: () => ({supervisorThreadId: "supervisor-thread", bindingGeneration: 2}),
+    scopeSnapshot: async (_projectId: string, _mainThreadId: string, _signal: AbortSignal, options?: unknown) => {
+      scopeOptions = options;
+      return scope;
+    },
+  } as unknown as ProjectSupervisor;
+  const workflowReader = {read: async () => {readerCalls++;return readResult;}} as unknown as WorkflowWriteController;
+  const url = `http://127.0.0.1:${port}/api/guidance/workflow-progress?projectId=project&mainThreadId=main-thread`;
+  try {
+    const ui = await startGuidanceUi(uiConfig, runtime, undefined, undefined, supervision, undefined, workflowReader);
+    try {
+      const anonymous = await fetch(url);
+      assert.equal(anonymous.status, 401);
+      assert.equal(readerCalls, 0);
+      const dashboard = await signIn(`http://127.0.0.1:${port}`, directory);
+      const response = await fetch(url, {headers: {"x-supervisor-session": dashboard.session}});
+      assert.equal(response.status, 200);
+      const result = await response.json() as {status: string; workflows: Array<Record<string, unknown>>; scope: ProjectSupervisorScopeSnapshot};
+      assert.equal(result.status, "ok");
+      assert.equal(result.scope.mainThreadId, "main-thread");
+      assert.equal(result.workflows[0]?.threadId, "main-thread");
+      assert.equal("acceptedAgreements" in (result.workflows[0] ?? {}), false);
+      assert.equal(readerCalls, 1);
+      assert.deepEqual(scopeOptions, {threadIds: ["main-thread"]});
     } finally {await ui.close();}
   } finally {store.close();await rm(directory, {recursive: true, force: true});}
 });

@@ -7,9 +7,11 @@ import { GuidanceStore } from "../src/guidance-store.js";
 import { ProjectSupervisorStore, defaultSupervisorModel } from "../src/project-supervisor-store.js";
 import { SupervisorConversation } from "../src/supervisor-conversation.js";
 import { SupervisorLifecycle, SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
-import { mainConversation } from "../src/supervisor-scope.js";
+import { mainConversation, resolveSupervisorScope } from "../src/supervisor-scope.js";
+import { childOrigin, delegatedLifecycle, directParentChildLifecycle, normalizeLifecycle, observeScopeThread } from "../src/supervisor-observation.js";
 import { T3TransportError } from "../src/t3.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
+import { WorkflowStateStore } from "../src/workflow-state-store.js";
 
 const thread = (id: string, parent: string | null = null, relationship: string | null = null, rootThreadId = parent === "main" || id === "main" ? "main" : parent ?? id): ThreadInfo => ({id, title: id, projectId: "p", lineage: {parentThreadId: parent, relationshipToParent: relationship, rootThreadId}});
 
@@ -24,6 +26,43 @@ test("subagent ancestry shares the main scope while forks and separate launches 
   assert.equal(mainConversation(thread("loop", "loop", "subagent"), [thread("loop", "loop", "subagent")]), null);
 });
 
+test("verified descendants with native published metadata attach across project mirrors and use their direct parent's lifecycle", () => {
+  const mainThread = thread("main");
+  const native = {...thread("native", "main", "subagent", "main"), projectId: null,
+    creationSource: "provider", forkedFrom: {type: "node", nodeId: "node:provider:codex:native-item"}, latestRunId: null, activeRunId: null};
+  const delegated = {...thread("delegated", "main", "subagent", "main"), projectId: "other-project",
+    creationSource: "mcp", forkedFrom: {type: "node", nodeId: "node:delegated-task:command%3Achild"}, latestRunId: "delegated-run"};
+  const scope = resolveSupervisorScope([mainThread, native, delegated], "p", "main");
+  const parentProjection: Projection = {thread: mainThread, runs: [], messages: [], subagents: [{childThreadId: native.id, status: "running"}],
+    turnItems: [{id: "native-item", type: "subagent", childThreadId: native.id, status: "running"}]};
+  const delegatedProjection: Projection = {thread: delegated, runs: [{id: "delegated-run", threadId: delegated.id, ordinal: 1,
+    status: "completed", requestedAt: "2026-10-14T10:00:00Z", startedAt: "2026-10-14T10:00:00Z", completedAt: "2026-10-14T10:01:00Z", rootNodeId: null}], messages: []};
+  assert.equal(scope.complete, true);
+  assert.deepEqual(scope.descendants.map(item => item.id), [delegated.id, native.id]);
+  assert.equal(scope.allowedIds.has(native.id), true);assert.equal(scope.allowedIds.has(delegated.id), true);
+  assert.equal(childOrigin(native, parentProjection), "native_child");
+  assert.equal(directParentChildLifecycle(parentProjection, native.id)?.status, "running");
+  assert.equal(childOrigin(delegated, parentProjection), "delegated_child");
+  assert.equal(delegatedLifecycle(delegated, delegatedProjection).lifecycle, "completed");
+  assert.equal(normalizeLifecycle("idle").lifecycle, "unknown");
+  assert.equal(normalizeLifecycle("failed").lifecycle, "interrupted");
+  const staleLineage = observeScopeThread({thread: native, mainThreadId: mainThread.id, depth: 1, projection: null,
+    parentProjection, lineageVerified: false, activityRefs: [{sourceThreadId: native.id, sourceRunId: null, sourceMessageId: null,
+      sourceItemId: "stale-item", kind: "command", observedAt: 1, label: "old activity"}]});
+  assert.equal(staleLineage.origin, "unknown_child");assert.equal(staleLineage.lifecycle, "unknown");assert.deepEqual(staleLineage.activityRefs, []);
+});
+
+test("an incomplete unrelated lineage retains verified sibling scope for read-only observation", () => {
+  const mainThread = thread("main");
+  const sibling = thread("sibling", "main", "subagent", "main");
+  const missingParent = thread("unknown-child", "missing-parent", "subagent", "main");
+  const scope = resolveSupervisorScope([mainThread, sibling, missingParent], "p", "main");
+  assert.equal(scope.complete, false);
+  assert.equal(scope.allowedIds.has("main"), true);
+  assert.equal(scope.allowedIds.has("sibling"), true);
+  assert.equal(scope.allowedIds.has("unknown-child"), false);
+});
+
 const fixture = async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-scopes-"));
   const guidance = new GuidanceStore(directory);const store = new ProjectSupervisorStore(guidance, new Set());
@@ -33,14 +72,17 @@ const fixture = async () => {
   const supervisor: Projection = {thread: thread(binding.threadId), runs: [], messages: [], runtimeRequests: [], subagents: []};
   const projections = new Map([["main", main], [binding.threadId, supervisor]]);
   const threads = [main.thread, supervisor.thread];const calls: Array<Record<string, unknown>> = [];const failures = new Map<string, unknown>();
+  let projectionReads = 0;
+  const workflows = new WorkflowStateStore(store, () => true);
   let uncertain = false;
-  const project = async (id: string) => {const failure = failures.get(id);if (failure) throw failure;const p = projections.get(id);if (!p) throw new Error("unreadable");return p;};
+  const project = async (id: string) => {projectionReads++;const failure = failures.get(id);if (failure) throw failure;const p = projections.get(id);if (!p) throw new Error("unreadable");return p;};
   const rpc = async (_tag: string, payload: Record<string, unknown>) => {calls.push(payload);if (uncertain) throw new Error("lost receipt");supervisor.thread.settledAt = "2026-10-14T10:02:00Z";supervisor.thread.settledOverride = "settled";return {sequence: 11};};
-  const conversation = new SupervisorConversation(store, rpc, project, undefined, () => true);
+  const conversation = new SupervisorConversation(store, rpc, project, undefined, () => true, () => true, workflows);
   store.saveTask({id: "task", projectId: "p", threadId: "main", sourceRunId: "run", sourceMessageId: "source", sourceHash: "hash", sourceOrdinal: 1, supervisorThreadId: binding.threadId,
     messageId: "interpretation", status: "inferred", objective: "Implement", reason: "Requested", updatedAt: 1, requestText: "", dispatchedAt: null, supervisorRunId: null, replayCount: 0});
-  const lifecycle = new SupervisorLifecycle(store, conversation, project, rpc);
-  return {guidance, store, binding, conversation, lifecycle, main, supervisor, projections, threads, calls, setUncertain: () => {uncertain = true;}, setFailure: (id: string, error: unknown | null) => {if (error) failures.set(id, error);else failures.delete(id);},
+  const lifecycle = new SupervisorLifecycle(store, conversation, project, rpc, workflows);
+  return {guidance, store, binding, conversation, lifecycle, workflows, main, supervisor, projections, threads, calls, projectionReads: () => projectionReads,
+    setUncertain: () => {uncertain = true;}, setFailure: (id: string, error: unknown | null) => {if (error) failures.set(id, error);else failures.delete(id);},
     check: (now: number) => lifecycle.check(store.binding("p", "main")!, threads, AbortSignal.timeout(1000), now),
     cleanup: async () => {guidance.close();await rm(directory, {recursive: true, force: true});}};
 };
@@ -74,6 +116,35 @@ test("completion parks an owned Supervisor after the quiet window and retains id
   f.main.runs[0]!.status = "running";
   await f.check(200_000);assert.equal(f.store.binding("p", "main")?.quietSince, null);
   assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId);
+});
+
+test("a busy main short-circuits child projection reads even with a large known descendant set", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  f.main.runs[0]!.status = "running";
+  for (let index = 0; index < 100; index++) {
+    const child = {...thread(`busy-child-${index}`, "main", "subagent", "main"), projectId: null, creationSource: "provider"};
+    f.threads.push(child);
+    f.projections.set(child.id, {thread: child, runs: [], messages: [], subagents: []});
+  }
+  const before = f.projectionReads();
+  await f.check(10);
+  assert.equal(f.projectionReads() - before, 2, "only the Supervisor and main projections are read before the main-busy blocker returns");
+  assert.equal(f.calls.length, 0);
+});
+
+test("pending child monitor activity blocks standby before any descendant projection reads", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const child = {...thread("pending-child", "main", "subagent", "main"), projectId: null, creationSource: "provider"};
+  f.threads.push(child);
+  const projection: Projection = {thread: child, runs: [], messages: [], subagents: [], turnItems: [{id: "pending-child-command", threadId: child.id,
+    runId: null, type: "command_execution", status: "completed", ordinal: 1, completedAt: "2026-10-14T10:02:00Z", updatedAt: "2026-10-14T10:02:00Z"}]};
+  f.projections.set(child.id, projection);
+  f.conversation.monitor.observe({projectId: "p", threadId: child.id, sourceOrdinal: 1, projection, includeDetachedChildItems: true, now: 1});
+  const before = f.projectionReads();
+  await f.check(10);
+  assert.equal(f.conversation.monitor.pending("p", child.id).length, 1);
+  assert.equal(f.projectionReads() - before, 2);
+  assert.equal(f.calls.length, 0);
 });
 
 test("archived mains absent from the active catalog set aside the same Supervisor and retain unfinished semantic records", async t => {
@@ -133,6 +204,42 @@ test("archived mains stay active while a cataloged direct or nested descendant i
   }
 });
 
+test("more than one hundred quiet descendants become cache-validated instead of permanently blocking parking", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  f.main.subagents = [];
+  for (let index = 0; index < 101; index++) {
+    const child = {...thread(`quiet-child-${String(index).padStart(3, "0")}`, "main", "subagent", "main"), projectId: null, creationSource: "provider"};
+    f.threads.push(child);
+    f.main.subagents.push({childThreadId: child.id, status: "completed"});
+    f.projections.set(child.id, {thread: child, runs: [], messages: [], subagents: []});
+  }
+  await f.check(10);assert.equal(f.calls.length, 0, "the first bounded pass leaves one child for the next rotation");
+  await f.check(20);assert.equal(f.calls.length, 0);
+  await f.check(20 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(f.calls.length, 1);
+});
+
+test("a live delegated child beyond the first lifecycle scan page still blocks parking when rotation reaches it", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  f.main.subagents = [];
+  for (let index = 0; index < 100; index++) {
+    const child = {...thread(`quiet-child-${String(index).padStart(3, "0")}`, "main", "subagent", "main"), projectId: null, creationSource: "provider"};
+    f.threads.push(child);
+    f.main.subagents.push({childThreadId: child.id, status: "completed"});
+    f.projections.set(child.id, {thread: child, runs: [], messages: [], subagents: []});
+  }
+  const activeChild = {...thread("z-delegated-active", "main", "subagent", "main"), projectId: "other-project", creationSource: "mcp",
+    activeRunId: "delegated-active-run"};
+  f.threads.push(activeChild);
+  f.main.subagents.push({childThreadId: activeChild.id, status: "completed"});
+  f.projections.set(activeChild.id, {thread: activeChild, runs: [{...f.main.runs[0]!, id: "delegated-active-run", threadId: activeChild.id, ordinal: 1, status: "running"}],
+    messages: [], subagents: []});
+
+  await f.check(10);assert.equal(f.calls.length, 0);
+  await f.check(20);assert.equal(f.calls.length, 0);
+  assert.equal(f.store.binding("p", "main")?.quietSince, null);
+});
+
 test("nested descendants inherit historical roots but remain children of the bound main", async t => {
   const f = await fixture();t.after(f.cleanup);
   f.main.thread.lineage.rootThreadId = "historical-root";f.main.thread.archivedAt = "2026-10-14T10:02:00Z";
@@ -175,6 +282,49 @@ test("T3 deletion closes a still-running child scope after the main returns conf
 test("an archived but natively busy main cannot be set aside", async t => {
   const f = await fixture();t.after(f.cleanup);f.main.thread.archivedAt = "2026-10-14T10:02:00Z";f.main.runs[0]!.status = "running";
   await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 0);
+});
+
+test("an active native child blocks settlement through its direct parent despite an idle child mirror", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const child = {...thread("native-child", "main", "subagent", "main"), projectId: null,
+    creationSource: "provider", latestRunId: null, activeRunId: null};
+  f.threads.push(child);
+  f.main.subagents = [{childThreadId: child.id, status: "running"}];
+  f.projections.set(child.id, {thread: child, runs: [], messages: [], subagents: []});
+  await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(f.calls.length, 0);
+  f.main.subagents[0]!.status = "completed";
+  await f.check(10 + 2 * SUPERVISOR_SETTLE_QUIET_MS);
+  await f.check(10 + 3 * SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(f.calls.length, 1);
+});
+
+test("quiet children with unknown lifecycle do not prevent standby while ongoing T3 effects still do", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const child = {...thread("old-child", "main", "subagent", "main"), projectId: null,
+    creationSource: "provider", latestRunId: null, activeRunId: null};
+  f.threads.push(child);
+  f.main.subagents = [{childThreadId: child.id, status: "unknown"}];
+  f.projections.set(child.id, {thread: child, runs: [], messages: [], subagents: []});
+  await f.check(1);await f.check(1 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(f.calls.length, 1);
+
+  const busyFixture = await fixture();t.after(busyFixture.cleanup);
+  busyFixture.main.subagents = [{childThreadId: "unresolved", status: "unknown", completionDelivery: {state: "pending"}}];
+  await busyFixture.check(1);await busyFixture.check(1 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(busyFixture.calls.length, 0);
+});
+
+test("known workflow needs-attention status blocks standby even when all T3 chats are quiet", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const owner = {projectId: "p", mainThreadId: "main", supervisorThreadId: f.binding.threadId, bindingGeneration: f.binding.generation};
+  const created = f.store.store.transaction(() => f.workflows.ensureMainInTransaction(owner, "workflow-attention-main", "Known issue", 1));
+  assert.equal(created.status, "created");
+  const document = f.workflows.get("p", "main");assert.ok(document);
+  f.guidance.db.prepare("UPDATE supervisor_workflow_state SET document=?,updated_at=? WHERE workflow_id=?")
+    .run(JSON.stringify({...document, status: "needs_attention"}), 2, document.workflowId);
+  await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(f.calls.length, 0);
 });
 
 test("unknown intermediate child ancestry blocks closed-main settlement", async t => {

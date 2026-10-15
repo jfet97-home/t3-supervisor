@@ -11,11 +11,14 @@ import {
   type WorkflowOwner,
   type WorkflowStateDocument,
 } from "./workflow-state-contract.js";
+import {mainRunNodeReader} from "./domain.js";
 import type { Projection, ThreadInfo } from "./types.js";
+import {resolveSupervisorScope, type SupervisorScopeResolution} from "./supervisor-scope.js";
 import {
   canonicalJson,
   isRecord,
   verifyWorkflowToolEvidence,
+  workflowWriteDriverSupport,
   workflowEvidenceCandidates,
   workflowRequestHash,
   workflowTurnItemDetailMaxBytes,
@@ -31,6 +34,7 @@ import type {WorkflowPlanGroupInfo, WorkflowPlanStepInfo, WorkflowPlanWorkflowIn
 export type WorkflowNativeAccess = {
   listThreads(signal: AbortSignal): Promise<readonly ThreadInfo[]>;
   projection(threadId: string, signal: AbortSignal): Promise<Projection>;
+  resolveProviderDriver?(instanceId: string, signal: AbortSignal): Promise<string | null>;
   getTurnItem(
     input: {threadId: string; itemId: string},
     signal: AbortSignal,
@@ -75,6 +79,7 @@ export type WorkflowWriteResult = WorkflowEnsureResult | WorkflowMutationResult 
   status: "pending" | "denied" | "invalid" | "unavailable" | "too_large";
   operationId?: string;
   reason: string;
+  providerDriver?: string;
   retryable?: boolean;
 };
 
@@ -126,14 +131,43 @@ type ApplyPinResult =
   | {status: "ready"; validation: WorkflowApplyValidationContext}
   | {status: "invalid" | "unavailable"; reason: string};
 
-type NativeScope = {
-  main: ThreadInfo;
-  byId: Map<string, ThreadInfo>;
-  descendants: ThreadInfo[];
-  allowedIds: Set<string>;
-  liveIds: Set<string>;
-  depthById: Map<string, number>;
+type NativeScope = Omit<SupervisorScopeResolution, "main"> & {main: ThreadInfo};
+
+type ProviderInstanceAttribution = {status: "selected"; instanceId: string | null} | {status: "ambiguous"};
+
+const isOwnMainGraphRun = (projection: Projection, run: Projection["runs"][number]): boolean => {
+  if (run.threadId !== projection.thread.id || typeof run.rootNodeId !== "string" || run.status === "rolled_back") return false;
+  const root = mainRunNodeReader(projection, run)(run.rootNodeId);
+  return Boolean(root && root.kind === "root_turn" && root.status !== "rolled_back");
 };
+
+const explicitInstanceId = (value: unknown): string | null =>
+  typeof value === "string" && value.trim().length > 0 ? value : null;
+
+const providerInstanceAttribution = (
+  projection: Projection,
+  supervisorThreadId: string,
+  candidates: ReturnType<typeof workflowEvidenceCandidates>,
+): ProviderInstanceAttribution => {
+  const firstCandidate = candidates[0];
+  const candidateItem = firstCandidate && projection.turnItems?.find(item => item.id === firstCandidate.itemId && item.threadId === supervisorThreadId);
+  const candidateRun = candidateItem && typeof candidateItem.runId === "string"
+    ? projection.runs.find(run => run.id === candidateItem.runId && isOwnMainGraphRun(projection, run))
+    : undefined;
+  if (candidateRun) return {status: "selected", instanceId: explicitInstanceId(candidateRun.providerInstanceId)};
+
+  const activeRuns = projection.runs.filter(run => run.threadId === supervisorThreadId &&
+    (run.status === "running" || run.status === "waiting") && isOwnMainGraphRun(projection, run));
+  if (activeRuns.length > 1) return {status: "ambiguous"};
+  if (activeRuns.length === 1) return {status: "selected", instanceId: explicitInstanceId(activeRuns[0]!.providerInstanceId)};
+
+  const selection = isRecord(projection.thread.modelSelection) ? projection.thread.modelSelection : null;
+  return {status: "selected", instanceId: explicitInstanceId(selection?.instanceId)};
+};
+
+type ActivityReferenceResult =
+  | {status: "ready"; evidence?: WorkflowStateEvidenceInput[]}
+  | {status: "invalid" | "denied" | "pending" | "unavailable"; reason: string};
 
 type ProofRow = {
   request_hash: string;
@@ -149,8 +183,8 @@ type ProofRow = {
 const maxBindingGeneration = 2_147_483_647;
 const maxWorkflowReadDocs = 50;
 const maxWorkflowReadBytes = 1024 * 1024;
-const maxScopeThreads = 10_000;
-const maxLineageDepth = 100;
+const maxActivityReferencesPerWrite = 16;
+const maxActivityReferenceThreadsPerWrite = 8;
 const writeOperationNamespace = "edit" as const;
 
 const isText = (value: unknown, max: number, allowEmpty = false): value is string =>
@@ -166,6 +200,7 @@ const hasExactKeys = (value: Record<string, unknown>, required: readonly string[
 
 const isStatus = (value: unknown): value is typeof workflowExecutionStatuses[number] =>
   typeof value === "string" && workflowExecutionStatuses.includes(value as typeof workflowExecutionStatuses[number]);
+const isNullableId = (value: unknown): boolean => value === undefined || value === null || isId(value);
 const planNodeIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const maxDefinitionTextLength = 8000;
 const maxPlanReasonLength = 1000;
@@ -260,10 +295,11 @@ const parseApplyInput = (value: unknown): WorkflowApplyPatch | null => {
   if (value.evidence !== undefined) {
     if (!Array.isArray(value.evidence) || value.evidence.length > workflowMutationLimits.maxEvidencePerApply) return null;
     for (const item of value.evidence) {
-      if (!isRecord(item) || !hasExactKeys(item, ["kind", "note"], ["targetNodeId"]) ||
+      if (!isRecord(item) || !hasExactKeys(item, ["kind", "note"], ["targetNodeId", "sourceThreadId", "sourceRunId", "sourceMessageId", "sourceItemId"]) ||
         !["status_changed", "note", "observation"].includes(String(item.kind)) ||
         !isText(item.note, workflowMutationLimits.maxTextLength) ||
-        !(item.targetNodeId === undefined || item.targetNodeId === null || isId(item.targetNodeId))) return null;
+        !isNullableId(item.targetNodeId) || !isNullableId(item.sourceThreadId) || !isNullableId(item.sourceRunId) ||
+        !isNullableId(item.sourceMessageId) || !isNullableId(item.sourceItemId)) return null;
     }
   }
   return value as WorkflowApplyPatch;
@@ -314,52 +350,10 @@ const parseReadPayload = (value: unknown): ParsedReadInput => {
   }};
 };
 
-const isOwnedThread = (thread: ThreadInfo): boolean =>
-  thread.deletedAt === null && (thread.archivedAt === null || typeof thread.archivedAt === "string");
-
-const isLiveThread = (thread: ThreadInfo): boolean => isOwnedThread(thread) && thread.archivedAt == null;
-
-const buildNativeScope = (threads: readonly ThreadInfo[], owner: WorkflowOwner): NativeScope | null => {
-  if (threads.length > maxScopeThreads) return null;
-  const byId = new Map<string, ThreadInfo>();
-  for (const thread of threads) {
-    if (typeof thread.id !== "string" || !thread.id) continue;
-    if (byId.has(thread.id)) return null;
-    byId.set(thread.id, thread);
-  }
-  const main = byId.get(owner.mainThreadId);
-  if (!main || main.projectId !== owner.projectId || !isLiveThread(main) || main.lineage.relationshipToParent === "subagent") return null;
-  const allowedIds = new Set<string>([owner.mainThreadId]);
-  const liveIds = new Set<string>([owner.mainThreadId]);
-  const depthById = new Map<string, number>([[owner.mainThreadId, 0]]);
-  const descendants: ThreadInfo[] = [];
-  const isDescendant = (threadId: string): number | null => {
-    let current = byId.get(threadId);
-    if (!current || current.id === owner.mainThreadId) return current ? 0 : null;
-    const visited = new Set<string>();
-    let depth = 0;
-    while (current.id !== owner.mainThreadId) {
-      if (visited.has(current.id) || visited.size >= maxLineageDepth || current.projectId !== owner.projectId ||
-        !isOwnedThread(current) || current.lineage.relationshipToParent !== "subagent" ||
-        typeof current.lineage.parentThreadId !== "string" || !current.lineage.parentThreadId) return null;
-      visited.add(current.id);
-      current = byId.get(current.lineage.parentThreadId)!;
-      if (!current) return null;
-      depth++;
-    }
-    return depth;
-  };
-  for (const thread of threads) {
-    if (thread.id === owner.mainThreadId) continue;
-    const depth = isDescendant(thread.id);
-    if (depth === null || depth === 0) continue;
-    allowedIds.add(thread.id);
-    if (isLiveThread(thread)) liveIds.add(thread.id);
-    depthById.set(thread.id, depth);
-    descendants.push(thread);
-  }
-  descendants.sort((left, right) => (depthById.get(left.id) ?? 0) - (depthById.get(right.id) ?? 0) || left.id.localeCompare(right.id));
-  return {main, byId, descendants, allowedIds, liveIds, depthById};
+const currentNativeScope = (threads: readonly ThreadInfo[], owner: WorkflowOwner, ownedThreadIds: ReadonlySet<string>): NativeScope | null => {
+  const resolution = resolveSupervisorScope(threads, owner.projectId, owner.mainThreadId, ownedThreadIds);
+  return resolution.complete && resolution.main && resolution.liveIds.has(owner.mainThreadId)
+    ? {...resolution, main: resolution.main} : null;
 };
 
 const ownerFor = (binding: BindingRecord): WorkflowOwner => ({
@@ -468,6 +462,10 @@ const applyInputSchema = {
         kind: {type: "string", enum: ["status_changed", "note", "observation"]},
         note: textSchema(workflowMutationLimits.maxTextLength),
         targetNodeId: {anyOf: [idSchema(), {type: "null"}]},
+        sourceThreadId: {anyOf: [idSchema(), {type: "null"}]},
+        sourceRunId: {anyOf: [idSchema(), {type: "null"}]},
+        sourceMessageId: {anyOf: [idSchema(), {type: "null"}]},
+        sourceItemId: {anyOf: [idSchema(), {type: "null"}]},
       },
     }},
   },
@@ -493,7 +491,7 @@ export const workflowReadToolDefinition = {
 
 export const workflowWriteToolDefinition = {
   name: "workflow_write",
-  description: "Create the main draft, link a verified live descendant, or update one semantic workflow with revision CAS. apply accepts a nested sequence/parallel plan and its unchanged source-bound requirements; omitted fields retain current values. Newly introduced nodes receive stable service IDs only after exact native submitted-argument verification. Keep operationId unique within this Supervisor binding and edit namespace. Status and notes are agent-reported and do not prove execution. Never include source run or message claims.",
+  description: "Create the main draft, link a verified live descendant, or update one semantic workflow with revision CAS. apply accepts a nested sequence/parallel plan and its unchanged source-bound requirements; omitted fields retain current values. Newly introduced nodes receive stable service IDs only after exact native submitted-argument verification. Keep operationId unique within this Supervisor binding and edit namespace. Status and notes are the Supervisor's assessment, not proof of execution. Optional sourceThreadId/sourceRunId/sourceMessageId/sourceItemId values link to existing in-scope T3 activity; when no sourceThreadId is supplied, the workflow target thread is used. A reference is for navigation and never proves success or grants authority. Unsupported native drivers return provider_write_proof_unverified with their driver identity.",
   inputSchema: {
     $defs: workflowPlanDefinitions,
     type: "object",
@@ -574,7 +572,7 @@ export class WorkflowWriteController {
     let threads: readonly ThreadInfo[];
     try {threads = await this.options.native.listThreads(signal);}
     catch {return {status: "unavailable", reason: "native_lineage_unavailable"};}
-    const scope = buildNativeScope(threads, owner);
+    const scope = currentNativeScope(threads, owner, this.options.supervisors.ownedIds);
     if (!scope) return {status: "unavailable", reason: "native_lineage_incomplete"};
     const limit = parsed.value.limit ?? 20;
     const workflowOffset = parsed.value.workflowOffset ?? 0;
@@ -659,7 +657,8 @@ export class WorkflowWriteController {
       this.rememberPendingCandidate(requestHash);
       return {status: "pending", operationId, reason: verified.reason, retryable: true};
     }
-    if (verified.status === "denied") return {status: "denied", operationId, reason: verified.reason};
+    if (verified.status === "denied") return {status: "denied", operationId, reason: verified.reason,
+      ...(verified.providerDriver ? {providerDriver: verified.providerDriver} : {})};
     if (signal.aborted) {
       this.rememberPendingCandidate(requestHash);
       return {status: "pending", operationId, reason: "native_evidence_wait_interrupted", retryable: true};
@@ -675,20 +674,107 @@ export class WorkflowWriteController {
       this.rememberPendingCandidate(requestHash);
       return {status: "pending", operationId, reason: "native_lineage_interrupted", retryable: true};
     }
-    const scope = buildNativeScope(threads, owner);
+    const scope = currentNativeScope(threads, owner, this.options.supervisors.ownedIds);
     if (!scope) return this.commitDenied(owner, payload, evidence, requestHash, "native_lineage_incomplete");
     if (payload.action === "link_child" && !scope.liveIds.has(payload.childThreadId))
       return this.commitDenied(owner, payload, evidence, requestHash, "child_not_current_native_descendant");
 
     let applyValidation: WorkflowApplyValidationContext | undefined;
+    let validatedEvidence: WorkflowStateEvidenceInput[] | undefined;
     if (payload.action === "apply") {
+      const references = await this.validateActivityReferences(payload, owner, scope, signal);
+      if (references.status !== "ready") return {status: references.status, operationId, reason: references.reason,
+        ...(references.status === "pending" ? {retryable: true} : {})};
+      validatedEvidence = references.evidence;
       const pinned = await this.resolveApplyValidation(owner, signal);
       if (pinned.status !== "ready") return {status: pinned.status, operationId, reason: pinned.reason};
       applyValidation = pinned.validation;
     }
-    const result = this.commitWrite(owner, payload, evidence, requestHash, scope, applyValidation);
+    const result = this.commitWrite(owner, payload, evidence, requestHash, scope, applyValidation, validatedEvidence);
     this.pendingCandidates.delete(requestHash);
     return result;
+  }
+
+  private async validateActivityReferences(
+    payload: Extract<WorkflowWritePayload, {action: "apply"}>,
+    owner: WorkflowOwner,
+    scope: NativeScope,
+    signal: AbortSignal,
+  ): Promise<ActivityReferenceResult> {
+    const evidence = payload.input.evidence;
+    if (!evidence) return {status: "ready"};
+    const references = evidence.filter(item => [item.sourceThreadId, item.sourceRunId, item.sourceMessageId, item.sourceItemId]
+      .some(value => typeof value === "string" && value.length > 0));
+    if (!references.length) return {status: "ready", evidence};
+    if (references.length > maxActivityReferencesPerWrite)
+      return {status: "invalid", reason: "activity_reference_limit"};
+    const target = this.options.workflows.getByIdForOwner(owner, payload.input.workflowId);
+    if (target.status === "not_found") return {status: "invalid", reason: "activity_reference_workflow_not_found"};
+    if (target.status === "owner_mismatch") return {status: "denied", reason: "activity_reference_owner_mismatch"};
+    if (target.status === "incompatible") return {status: "unavailable", reason: "activity_reference_workflow_incompatible"};
+
+    const resolved = [...evidence];
+    const sourceThreads = new Set<string>();
+    for (const item of references) {
+      const sourceThreadId = item.sourceThreadId ?? target.document.threadId;
+      if (!scope.allowedIds.has(sourceThreadId) || !scope.byId.has(sourceThreadId))
+        return {status: "denied", reason: "activity_reference_outside_current_scope"};
+      sourceThreads.add(sourceThreadId);
+      const index = evidence.indexOf(item);
+      resolved[index] = {...item, sourceThreadId};
+    }
+    if (sourceThreads.size > maxActivityReferenceThreadsPerWrite)
+      return {status: "invalid", reason: "activity_reference_thread_limit"};
+
+    const projections = new Map<string, Projection>();
+    const projectionFor = async (threadId: string): Promise<Projection | null> => {
+      const cached = projections.get(threadId);
+      if (cached) return cached;
+      try {
+        const projection = await this.options.native.projection(threadId, signal);
+        if (projection.thread.id !== threadId) return null;
+        projections.set(threadId, projection);
+        return projection;
+      } catch {return null;}
+    };
+
+    for (const item of references) {
+      if (signal.aborted) return {status: "pending", reason: "activity_reference_read_interrupted"};
+      const sourceThreadId = item.sourceThreadId ?? target.document.threadId;
+      const needsProjection = item.sourceRunId != null || item.sourceMessageId != null;
+      const projection = needsProjection ? await projectionFor(sourceThreadId) : null;
+      if (needsProjection && !projection) return {status: "pending", reason: "activity_reference_read_unavailable"};
+
+      const run = item.sourceRunId != null
+        ? projection?.runs.find(candidate => candidate.id === item.sourceRunId && candidate.threadId === sourceThreadId)
+        : undefined;
+      if (item.sourceRunId != null && !run)
+        return {status: "invalid", reason: "activity_reference_run_mismatch"};
+
+      const message = item.sourceMessageId != null
+        ? projection?.messages.find(candidate => candidate.id === item.sourceMessageId && candidate.threadId === sourceThreadId)
+        : undefined;
+      if (item.sourceMessageId != null && !message)
+        return {status: "invalid", reason: "activity_reference_message_not_found"};
+      if (message && item.sourceRunId != null && message.runId !== item.sourceRunId)
+        return {status: "invalid", reason: "activity_reference_message_run_mismatch"};
+
+      let activityItem: Record<string, unknown> | undefined;
+      if (item.sourceItemId != null) {
+        let response: {item: unknown | null};
+        try {response = await this.options.native.getTurnItem({threadId: sourceThreadId, itemId: item.sourceItemId}, signal);}
+        catch {return {status: "pending", reason: "activity_reference_read_unavailable"};}
+        if (!isRecord(response.item)) return {status: "invalid", reason: "activity_reference_item_not_found"};
+        activityItem = response.item;
+        if (activityItem.id !== item.sourceItemId || activityItem.threadId !== sourceThreadId)
+          return {status: "invalid", reason: "activity_reference_item_mismatch"};
+        if (item.sourceRunId != null && activityItem.runId !== item.sourceRunId)
+          return {status: "invalid", reason: "activity_reference_item_run_mismatch"};
+      }
+      if (message && activityItem && message.runId !== (typeof activityItem.runId === "string" ? activityItem.runId : null))
+        return {status: "invalid", reason: "activity_reference_context_mismatch"};
+    }
+    return {status: "ready", evidence: resolved};
   }
 
   private async resolveApplyValidation(owner: WorkflowOwner, signal: AbortSignal): Promise<ApplyPinResult> {
@@ -737,11 +823,12 @@ export class WorkflowWriteController {
   private async findEvidence(payload: WorkflowWritePayload, owner: WorkflowOwner, signal: AbortSignal): Promise<
     | {status: "verified"; evidence: WorkflowEvidenceMatch}
     | {status: "pending"; reason: string}
-    | {status: "denied"; reason: string}
+    | {status: "denied"; reason: string; providerDriver?: string}
   > {
     const startedAt = performance.now();
     let lastReason = "native_evidence_not_visible";
     const inspected = new Map<string, {signature: string; check: WorkflowEvidenceCheck; retryAfter?: number; retryCount: number}>();
+    const providerDrivers = new Map<string, string | null>();
     let detailReads = 0;
     const maxDetailReads = 64;
     do {
@@ -758,6 +845,21 @@ export class WorkflowWriteController {
         projection.thread.archivedAt != null || projection.thread.deletedAt != null)
         return {status: "denied", reason: "supervisor_projection_not_current"};
       const candidates = workflowEvidenceCandidates(projection, payload.supervisorThreadId, "write", payload);
+      const attribution = providerInstanceAttribution(projection, payload.supervisorThreadId, candidates);
+      const instanceId = attribution.status === "selected" ? attribution.instanceId : null;
+      if (instanceId && this.options.native.resolveProviderDriver) {
+        let providerDriver = providerDrivers.get(instanceId);
+        if (!providerDrivers.has(instanceId)) {
+          try {
+            const resolved = await this.options.native.resolveProviderDriver(instanceId, signal);
+            providerDriver = typeof resolved === "string" && resolved.length > 0 && resolved.length <= 128 && resolved.trim() === resolved
+              ? resolved : null;
+          } catch {providerDriver = null;}
+          providerDrivers.set(instanceId, providerDriver);
+        }
+        if (providerDriver && workflowWriteDriverSupport(providerDriver).status !== "verified")
+          return {status: "denied", reason: "provider_write_proof_unverified", providerDriver};
+      }
       for (const candidate of candidates) {
         if (signal.aborted) return {status: "pending", reason: "native_evidence_wait_interrupted"};
         const cached = inspected.get(candidate.itemId);
@@ -802,7 +904,8 @@ export class WorkflowWriteController {
             ...(retryableUnavailable && retryCount < 1 ? {retryAfter: this.now() + 100} : {}), retryCount});
         }
         if (check.status === "verified") return {status: "verified", evidence: check.evidence};
-        if (check.status === "denied") return {status: "denied", reason: check.reason};
+        if (check.status === "denied") return {status: "denied", reason: check.reason,
+          ...(check.providerDriver ? {providerDriver: check.providerDriver} : {})};
         lastReason = check.reason;
       }
       if (performance.now() - startedAt >= this.maxEvidenceWaitMs) break;
@@ -867,6 +970,7 @@ export class WorkflowWriteController {
     requestHash: string,
     scope: NativeScope,
     validation?: WorkflowApplyValidationContext,
+    validatedEvidence?: WorkflowStateEvidenceInput[],
   ): WorkflowWriteResult {
     return this.commit(owner, payload, evidence, requestHash, () => {
       if (payload.action === "ensure_main")
@@ -915,7 +1019,7 @@ export class WorkflowWriteController {
         issues: payload.input.issues ?? [...original.issues],
         plan: payload.input.plan === undefined ? current.plan : payload.input.plan,
         note: payload.input.note,
-        ...(payload.input.evidence !== undefined ? {evidence: payload.input.evidence} : {}),
+        ...(payload.input.evidence !== undefined ? {evidence: validatedEvidence ?? payload.input.evidence} : {}),
       };
       const candidate = {...applyInput, sourceBinding: effectiveSourceBinding};
       const target = {targetThreadId: current.threadId, mainThreadId: owner.mainThreadId};

@@ -9,8 +9,9 @@ import type {
   WorkflowPlanNodeInfo,
   WorkflowProposalInfo,
 } from "../../src/project-supervisor-contract.js";
+import type { WorkflowProgressSnapshot, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
 import { defaultMonitoringSettings } from "../../src/project-supervisor-contract.js";
-import { loadProjectSupervisor, ProjectSupervisorRequestError, retryProjectSupervisor, saveProjectSupervisor } from "./project-supervisor-api.js";
+import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "./project-supervisor-api.js";
 import { SupervisionControlPanel } from "./supervisor-control.js";
 
 type MonitoringDraft = {
@@ -31,6 +32,7 @@ type Drafts = Record<string, Draft>;
 type SnapshotState = {projectId: string; snapshot: ProjectSupervisorInfo};
 type LoadState = {key: string; status: "idle" | "loading" | "error"};
 type PanelMessage = {projectId: string; text: string; alert: boolean} | null;
+export type WorkflowProgressPanelState = {key: string; pages: WorkflowProgressSnapshot[]; loading: boolean; error: string | null};
 
 const selectionKey = (selection: SupervisorModelSelection) => JSON.stringify(selection);
 const copySelection = (selection: SupervisorModelSelection): SupervisorModelSelection => ({
@@ -170,13 +172,13 @@ function WorkflowSource({source, templatePath}: {source: WorkflowProposalInfo["r
   return <p className="small muted">Source: {source?.origin ?? "not recorded"}{source?.path && <> · <code>{source.path}</code></>}{templatePath && <> · template <code>{templatePath}</code></>}</p>;
 }
 
-function WorkflowPlanNode({node}: {node: WorkflowPlanNodeInfo}) {
+function WorkflowPlanNode({node, liveAssessment = false}: {node: WorkflowPlanNodeInfo; liveAssessment?: boolean}) {
   if ("nodes" in node) {
     const List = node.kind === "sequence" ? "ol" : "ul";
     return <div className="stack workflow-plan-group">
       <p><strong>{node.kind === "sequence" ? "Sequence" : "Parallel group"}</strong> <span className="muted">{node.kind === "sequence" ? "— intended semantic order" : "— members have no declared order"}</span></p>
       {node.templatePath && <p className="small muted">Template group: <code>{node.templatePath}</code></p>}
-      <List className="stack workflow-plan-nodes">{node.nodes.map((child, index) => <li key={"nodeId" in child ? child.nodeId : `group:${child.kind}:${index}`}><WorkflowPlanNode node={child}/></li>)}</List>
+      <List className="stack workflow-plan-nodes">{node.nodes.map((child, index) => <li key={"nodeId" in child ? child.nodeId : `group:${child.kind}:${index}`}><WorkflowPlanNode node={child} liveAssessment={liveAssessment}/></li>)}</List>
     </div>;
   }
   if (node.kind === "step") return <article className="stack workflow-plan-node">
@@ -185,7 +187,7 @@ function WorkflowPlanNode({node}: {node: WorkflowPlanNodeInfo}) {
     {node.localId && <p className="small">Task-local step ID: <code>{node.localId}</code></p>}
     <WorkflowSource source={node.source} templatePath={node.templatePath}/>
     <p>{node.description}</p>
-    <p><strong>Plan status:</strong> {planStatusText[node.status]} · <strong>Definition:</strong> {node.resolution === "resolved" ? "Resolved" : "Unresolved"}</p>
+    <p><strong>Plan status:</strong> {liveAssessment ? node.status === "underway" ? "Underway" : node.status === "completed" ? "Completed" : planStatusText[node.status] : planStatusText[node.status]} · <strong>Definition:</strong> {node.resolution === "resolved" ? "Resolved" : "Unresolved"}</p>
     <p>{node.reason}</p>
     {node.contributorThreadIds.length > 0 && <div><strong>Contributors</strong><ul>{node.contributorThreadIds.map(threadId => <li key={threadId}><a href={`t3-thread://v1/${threadId}`}>Child conversation <code>{threadId}</code></a></li>)}</ul></div>}
   </article>;
@@ -194,7 +196,7 @@ function WorkflowPlanNode({node}: {node: WorkflowPlanNodeInfo}) {
     <p><strong>Workflow: {node.name}</strong> <span className="muted">({node.definitionId})</span></p>
     <WorkflowSource source={node.source} templatePath={node.templatePath}/>
     <p>{node.description}</p>
-    <p><strong>Resolution:</strong> {node.resolution} · <strong>Plan status:</strong> {planStatusText[node.status]} · <strong>Fixed:</strong> {node.fixed === null ? "Unknown" : node.fixed ? "Yes" : "No"}</p>
+    <p><strong>Resolution:</strong> {node.resolution} · <strong>Plan status:</strong> {liveAssessment ? node.status === "underway" ? "Underway" : node.status === "completed" ? "Completed" : planStatusText[node.status] : planStatusText[node.status]} · <strong>Fixed:</strong> {node.fixed === null ? "Unknown" : node.fixed ? "Yes" : "No"}</p>
     <p>{node.reason}</p>
     {node.omissions.length > 0 && <div className="stack">
       <strong>Not-applicable original commitments</strong>
@@ -204,7 +206,7 @@ function WorkflowPlanNode({node}: {node: WorkflowPlanNodeInfo}) {
         <p>{omission.reason}</p>
       </li>)}</ul>
     </div>}
-    {node.plan && <WorkflowPlanNode node={node.plan}/>}
+    {node.plan && <WorkflowPlanNode node={node.plan} liveAssessment={liveAssessment}/>}
     {!node.plan && node.resolution !== "resolved" && <p className="muted">The referenced workflow could not be expanded completely.</p>}
     {node.contributorThreadIds.length > 0 && <div><strong>Contributors</strong><ul>{node.contributorThreadIds.map(threadId => <li key={threadId}><a href={`t3-thread://v1/${threadId}`}>Child conversation <code>{threadId}</code></a></li>)}</ul></div>}
   </article>;
@@ -332,6 +334,202 @@ function WorkflowProposalView({workflow, proposalId, agreement, definitionReview
   </section>;
 }
 
+const workflowExecutionStatusText = {
+  planned: "Planned",
+  underway: "Underway",
+  completed: "Completed",
+  needs_attention: "Needs attention",
+} as const;
+const childOriginText = {
+  main: "Main conversation",
+  native_child: "Native child",
+  delegated_child: "Delegated child",
+  unknown_child: "Child type unknown",
+} as const;
+const progressStatusText = {
+  ok: "Current workflow data",
+  unavailable: "Workflow data unavailable",
+  denied: "Workflow read is not available for this binding",
+  invalid: "Workflow data could not be read",
+  incompatible: "An incompatible workflow record was retained",
+  too_large: "Workflow data exceeds the read limit",
+} as const;
+
+const formatProgressTime = (value: number) => {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? "Unknown" : date.toLocaleString();
+};
+const threadHref = (threadId: string) => `t3-thread://v1/${encodeURIComponent(threadId)}`;
+
+type WorkflowProgressScopeThread = NonNullable<WorkflowProgressSnapshot["scope"]>["threads"][number];
+
+const lifecyclePresentation = (thread: WorkflowProgressScopeThread): {label: string; tone: "blue" | "green" | "amber"} => {
+  if (thread.deletedAt) return {label: "Deleted", tone: "amber"};
+  if (thread.archivedAt) return {label: "Archived", tone: "amber"};
+  const detail = thread.lifecycleDetail?.toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
+  if (detail === "failed") return {label: "Failed", tone: "amber"};
+  if (detail === "cancelled" || detail === "canceled") return {label: "Cancelled", tone: "amber"};
+  if (detail === "rolled_back") return {label: "Rolled back", tone: "amber"};
+  if (detail === "interrupted") return {label: "Interrupted", tone: "amber"};
+  if (detail === "expired") return {label: "Expired", tone: "amber"};
+  if (detail === "resolved") return {label: "Resolved", tone: "amber"};
+  if (detail === "idle") return {label: "Unknown", tone: "amber"};
+  if (detail === "completed") return {label: "Completed", tone: "green"};
+  if (thread.lifecycle === "completed") return {label: "Completed", tone: "green"};
+  if (thread.lifecycle === "running") return {label: "Running", tone: "blue"};
+  if (thread.lifecycle === "interrupted") return {label: "Interrupted", tone: "amber"};
+  return {label: "Unknown", tone: "amber"};
+};
+
+function WorkflowProgressDetails({workflow, scopeThread}: {workflow: WorkflowProgressWorkflow; scopeThread?: WorkflowProgressScopeThread}) {
+  const lifecycle = scopeThread ? lifecyclePresentation(scopeThread) : null;
+  return <article className="stack workflow-progress-document">
+    <div className="row between">
+      <h5>{workflow.parentThreadId ? "Child workflow" : "Main workflow"}</h5>
+      <span className={`pill ${workflow.status === "needs_attention" ? "amber" : workflow.status === "completed" ? "green" : "blue"}`}>
+        {workflowExecutionStatusText[workflow.status]}
+      </span>
+    </div>
+    <p>{workflow.objective ?? "No workflow objective was recorded."}</p>
+    <p className="small muted"><a href={threadHref(workflow.threadId)}>Open conversation {workflow.threadId}</a> · Revision {workflow.revision} · Updated {formatProgressTime(workflow.updatedAt)}</p>
+    {scopeThread && <div className="small muted">
+      <p><strong>Native lifecycle:</strong> {lifecycle!.label}</p>
+      {scopeThread.lifecycleDetail && <p>T3 lifecycle detail: {scopeThread.lifecycleDetail}</p>}
+      <p>{scopeThread.contactLimit}</p>
+    </div>}
+    {workflow.parentNodeReferences.length > 0 && <div className="stack">
+      <strong>Contributes to parent steps</strong>
+      <ul className="stack">{workflow.parentNodeReferences.map(reference => <li key={`${reference.parentWorkflowId}:${reference.nodeId}`}>
+        {reference.nodeKind}: {reference.nodeName} · <a href={threadHref(reference.parentThreadId)}>Open parent conversation {reference.parentThreadId}</a>
+      </li>)}</ul>
+    </div>}
+    {workflow.plan
+      ? <WorkflowPlanNode node={workflow.plan} liveAssessment/>
+      : <p className="muted">No current plan structure was recorded for this conversation.</p>}
+    <div className="stack">
+      <h6>Recent Supervisor observations</h6>
+      {workflow.observations.length === 0
+        ? <p className="muted">No status explanation or observation is recorded yet.</p>
+        : <ol className="stack">{workflow.observations.map(observation => <li key={observation.id} className="workflow-progress-observation">
+          <p>{observation.note}</p>
+          <p className="small muted">{observation.kind.replaceAll("_", " ")} · {formatProgressTime(observation.recordedAt)}
+            {observation.targetNodeName && <> · {observation.targetNodeName}</>}
+            {(observation.statusFrom || observation.statusTo) && <> · {observation.statusFrom ?? "new"} → {observation.statusTo ?? "removed"}</>}
+          </p>
+          {observation.sourceThreadId && <p className="small"><a href={threadHref(observation.sourceThreadId)}>Open supporting activity in conversation {observation.sourceThreadId}</a></p>}
+          {(observation.sourceRunId || observation.sourceMessageId || observation.sourceItemId) && <p className="small muted">
+            {observation.sourceRunId && <>Run <code>{observation.sourceRunId}</code> </>}
+            {observation.sourceMessageId && <>Message <code>{observation.sourceMessageId}</code> </>}
+            {observation.sourceItemId && <>Item <code>{observation.sourceItemId}</code></>}
+          </p>}
+        </li>)}</ol>}
+    </div>
+  </article>;
+}
+
+export function WorkflowProgressPanel({mainThreadId, connected, progress, onRefresh, onLoadMore}: {
+  mainThreadId: string | null;
+  connected: boolean;
+  progress: WorkflowProgressPanelState;
+  onRefresh: () => void;
+  onLoadMore: () => void;
+}) {
+  const pages = progress.pages;
+  const latest = pages.at(-1);
+  const threadById = new Map<string, NonNullable<WorkflowProgressSnapshot["scope"]>["threads"][number]>();
+  const workflowByThreadId = new Map<string, WorkflowProgressWorkflow>();
+  for (const page of pages) {
+    for (const thread of page.scope?.threads ?? []) threadById.set(thread.threadId, thread);
+    for (const workflow of page.workflows) {
+      const previous = workflowByThreadId.get(workflow.threadId);
+      if (!previous || workflow.updatedAt >= previous.updatedAt) workflowByThreadId.set(workflow.threadId, workflow);
+    }
+  }
+  const threads = [...threadById.values()];
+  const workflows = [...workflowByThreadId.values()];
+  const allWorkflowPagesLoaded = pages.length > 0 && pages.every(page => page.status === "ok") && !latest?.workflowHasMore;
+  const apiFailure = [...pages].reverse().find(page => page.status !== "ok");
+  const hasSuccessfulPage = pages.some(page => page.status === "ok");
+  const scopeIssues = latest?.scope?.issues ?? [];
+  const canLoadMore = Boolean(latest && (latest.workflowHasMore || latest.lineageHasMore));
+
+  return <section className="panel stack" aria-labelledby="workflow-progress-title">
+    <div className="row between">
+      <h3 id="workflow-progress-title">Live workflow progress</h3>
+      <button type="button" disabled={!connected || !mainThreadId || progress.loading} onClick={onRefresh}>Refresh live progress</button>
+    </div>
+    {!mainThreadId
+      ? <p className="muted">Select a main conversation to inspect its current workflow and connected children.</p>
+      : <>
+        <p className="muted">Current Supervisor workflow state, kept separate from proposals and saved agreements. Statuses and explanations are Supervisor assessments; they are not independent proof of execution. Parent steps do not complete automatically when a child finishes.</p>
+        {progress.loading && pages.length === 0 && <p role="status">Loading the selected main conversation’s live progress…</p>}
+        {progress.error && hasSuccessfulPage && <p role="status">Showing the last successful progress snapshot. {progress.error}</p>}
+        {progress.error && !hasSuccessfulPage && <p role="alert">{progress.error}</p>}
+        {!progress.error && apiFailure && <p role="alert">{progressStatusText[apiFailure.status]}. {apiFailure.message}</p>}
+        {latest?.scope && <>
+          <p className="small">Observed {formatProgressTime(latest.observedAt)} · Main <code>{mainThreadId}</code></p>
+          {latest.scope.supervisorThreadId && latest.scope.workflowWriteSupport.status !== "verified" && <p className="panel" role="status">
+            {latest.scope.workflowWriteSupport.status === "unknown"
+              ? "T3’s live catalog did not identify the Supervisor driver, so native workflow update support remains unverified."
+              : `Workflow updates through this native driver (${latest.scope.workflowWriteSupport.driverKind ?? "unknown"}) have not been verified. Observed progress and activity remain available.`}
+          </p>}
+          {!latest.scope.complete && <div className="panel" role="status">
+            <p>Connected child observation is incomplete. Some lifecycle or activity details may be missing.</p>
+            {scopeIssues.length > 0 && <ul>{scopeIssues.map((issue, index) => <li key={`${issue.code}:${index}`}>{issue.message}</li>)}</ul>}
+          </div>}
+          {threads.length > 0 && <div className="stack">
+            <h4>Connected conversations</h4>
+            <ul className="stack">{threads.map(thread => {
+              const lifecycle = lifecyclePresentation(thread);
+              return <li key={thread.threadId} className="workflow-progress-thread">
+              <div className="row between">
+                <strong>{childOriginText[thread.origin]}</strong>
+                <span className={`pill ${lifecycle.tone}`}>
+                  {lifecycle.label}
+                </span>
+              </div>
+              <p>Lifecycle: {lifecycle.label}</p>
+              {thread.lifecycleDetail && <p className="small muted">T3 lifecycle detail: {thread.lifecycleDetail}</p>}
+              {thread.parentThreadId && <p className="small">Parent: <a href={threadHref(thread.parentThreadId)}>Open conversation {thread.parentThreadId}</a></p>}
+              {!thread.deletedAt && <p className="small"><a href={threadHref(thread.threadId)}>Open conversation {thread.threadId}</a></p>}
+              {lifecycle.label === "Unknown" && <p className="small muted">T3 has not established this conversation’s current lifecycle. An idle thread mirror alone does not establish that its work is finished.</p>}
+              {thread.contactLimit && <p className="small muted">{thread.contactLimit}</p>}
+              {thread.activityRefs.length > 0 && <details>
+                <summary>Supporting activity ({thread.activityRefs.length})</summary>
+                <ul className="stack">{thread.activityRefs.map((activity, index) => <li key={`${activity.sourceThreadId}:${activity.sourceItemId ?? activity.sourceMessageId ?? index}`}>
+                  <p>{activity.label} · {formatProgressTime(activity.observedAt)}</p>
+                  <p className="small"><a href={threadHref(activity.sourceThreadId)}>Open supporting conversation {activity.sourceThreadId}</a></p>
+                  {(activity.sourceRunId || activity.sourceMessageId || activity.sourceItemId) && <p className="small muted">
+                    {activity.sourceRunId && <>Run <code>{activity.sourceRunId}</code> </>}
+                    {activity.sourceMessageId && <>Message <code>{activity.sourceMessageId}</code> </>}
+                    {activity.sourceItemId && <>Item <code>{activity.sourceItemId}</code></>}
+                  </p>}
+                </li>)}</ul>
+              </details>}
+              {!workflowByThreadId.has(thread.threadId) && <p className="small muted">
+                {allWorkflowPagesLoaded ? "No workflow document is recorded for this conversation." : "Workflow state for this conversation may be on a later page."}
+              </p>}
+            </li>;
+            })}</ul>
+          </div>}
+          {workflows.length > 0 && <div className="stack">
+            <h4>Current workflow records</h4>
+            {workflows.map(workflow => {
+              const scopeThread = threadById.get(workflow.threadId);
+              return <WorkflowProgressDetails key={workflow.workflowId} workflow={workflow} {...(scopeThread ? {scopeThread} : {})}/>;
+            })}
+          </div>}
+          {workflows.length === 0 && allWorkflowPagesLoaded && <p className="muted">No current workflow document has been recorded for this main or its connected children.</p>}
+          {latest.incompatibleWorkflows.length > 0 && <div className="panel" role="status">
+            <p>Some retained workflow records use an incompatible format and remain read-only.</p>
+            <ul>{latest.incompatibleWorkflows.map(item => <li key={item.workflowId}><code>{item.workflowId}</code> · format {item.formatVersion ?? "unknown"}</li>)}</ul>
+          </div>}
+          {canLoadMore && <button type="button" disabled={!connected || progress.loading} onClick={onLoadMore}>Load more connected workflows and activity</button>}
+        </>}
+      </>}
+  </section>;
+}
+
 export function ProjectSupervisorView({
   snapshot,
   selection,
@@ -346,6 +544,9 @@ export function ProjectSupervisorView({
   shouldOfferRetry,
   retryButtonLabel,
   canRetry,
+  workflowProgress,
+  onWorkflowProgressRefresh,
+  onWorkflowProgressLoadMore,
   onSelectionChange,
   onMonitoringChange,
   onDiscard,
@@ -365,6 +566,9 @@ export function ProjectSupervisorView({
   shouldOfferRetry: boolean;
   retryButtonLabel: string;
   canRetry: boolean;
+  workflowProgress?: WorkflowProgressPanelState;
+  onWorkflowProgressRefresh?: () => void;
+  onWorkflowProgressLoadMore?: () => void;
   onSelectionChange: (selection: SupervisorModelSelection) => void;
   onMonitoringChange: (monitoring: MonitoringDraft) => void;
   onDiscard: () => void;
@@ -488,6 +692,8 @@ export function ProjectSupervisorView({
       <p>{selectedTask.reason}</p>
       <WorkflowProposalView workflow={selectedTask.workflow} proposalId={selectedTask.workflowProposalId} agreement={selectedTask.agreement} definitionReview={selectedTask.definitionReview} />
     </section>}
+    {workflowProgress && <WorkflowProgressPanel mainThreadId={snapshot.mainThreadId} connected={connected} progress={workflowProgress}
+      onRefresh={onWorkflowProgressRefresh ?? (() => {})} onLoadMore={onWorkflowProgressLoadMore ?? (() => {})}/>}
   </div>;
 }
 
@@ -507,17 +713,27 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
   const [forceRefresh, setForceRefresh] = useState(false);
   const [saving, setSaving] = useState(false);
   const [blocked, setBlocked] = useState(false);
+  const [workflowProgressState, setWorkflowProgressState] = useState<WorkflowProgressPanelState>({key: "", pages: [], loading: false, error: null});
+  const [workflowProgressRevision, setWorkflowProgressRevision] = useState(0);
   const activeProject = useRef(projectId);
   const activeScope = useRef(JSON.stringify([projectId, threadId || null]));
   const draftRef = useRef(drafts);
   const savingRef = useRef(false);
   const activeLoadKey = useRef("");
   const completedLoadKey = useRef("");
+  const workflowProgressStateRef = useRef(workflowProgressState);
+  const workflowProgressRequestRef = useRef<AbortController | null>(null);
+  const workflowProgressRequestIdRef = useRef(0);
+  const activeWorkflowProgressKey = useRef("");
   activeProject.current = projectId;
   activeScope.current = JSON.stringify([projectId, threadId || null]);
   draftRef.current = drafts;
+  workflowProgressStateRef.current = workflowProgressState;
 
   const activeSnapshot = snapshotState?.projectId === projectId && snapshotState.snapshot.mainThreadId === (threadId || null) ? snapshotState.snapshot : null;
+  const workflowProgressKey = JSON.stringify([projectId, activeSnapshot?.mainThreadId ?? (threadId || null),
+    activeSnapshot?.binding?.threadId ?? null, activeSnapshot?.binding?.generation ?? null]);
+  activeWorkflowProgressKey.current = workflowProgressKey;
   const activeDraft = drafts[projectId] ?? null;
   const modelDirty = Boolean(activeDraft && selectionKey(activeDraft.modelValue) !== selectionKey(activeDraft.modelBaseline));
   const monitoringDirty = Boolean(activeDraft && !sameMonitoring(activeDraft.monitoringValue, activeDraft.monitoringBaseline));
@@ -536,6 +752,64 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
   useEffect(() => {setPanelMessage(null);}, [projectId, threadId]);
   useEffect(() => {onDirtyChange?.(dirty);}, [dirty, onDirtyChange]);
   useEffect(() => {onSavingChange?.(saving);}, [saving, onSavingChange]);
+
+  useEffect(() => {
+    const mainThreadId = activeSnapshot?.mainThreadId ?? null;
+    if (!projectId || !connected || !mainThreadId) {
+      workflowProgressRequestRef.current?.abort();
+      setWorkflowProgressState({key: workflowProgressKey, pages: [], loading: false, error: null});
+      return;
+    }
+    const previous = workflowProgressStateRef.current;
+    const expectedBinding = activeSnapshot?.binding
+      ? {threadId: activeSnapshot.binding.threadId, generation: activeSnapshot.binding.generation}
+      : undefined;
+    const pageRequests = previous.key === workflowProgressKey && previous.pages.length > 0
+      ? previous.pages.map(page => ({
+        workflowOffset: page.workflowOffset,
+        lineageOffset: page.lineageOffset,
+        ...(expectedBinding ? {expectedBinding} : {}),
+      }))
+      : [{workflowOffset: 0, lineageOffset: 0, ...(expectedBinding ? {expectedBinding} : {})}];
+    const requestId = ++workflowProgressRequestIdRef.current;
+    workflowProgressRequestRef.current?.abort();
+    const controller = new AbortController();
+    workflowProgressRequestRef.current = controller;
+    setWorkflowProgressState(current => current.key === workflowProgressKey
+      ? {...current, loading: true, error: null}
+      : {key: workflowProgressKey, pages: [], loading: true, error: null});
+    void refreshWorkflowProgressPages(projectId, mainThreadId, controller.signal, pageRequests).then(pages => {
+      if (controller.signal.aborted || requestId !== workflowProgressRequestIdRef.current || activeProject.current !== projectId ||
+        activeWorkflowProgressKey.current !== workflowProgressKey) return;
+      const failed = pages.find(page => page.status !== "ok");
+      setWorkflowProgressState(current => {
+        if (current.key === workflowProgressKey && current.pages.length > 0 && failed) return {
+          ...current, loading: false, error: failed.message ?? "Progress could not be refreshed.",
+        };
+        return {key: workflowProgressKey, pages, loading: false, error: failed?.message ?? null};
+      });
+    }, () => {
+      if (controller.signal.aborted || requestId !== workflowProgressRequestIdRef.current || activeProject.current !== projectId ||
+        activeWorkflowProgressKey.current !== workflowProgressKey) return;
+      setWorkflowProgressState(current => current.key === workflowProgressKey
+        ? {...current, loading: false, error: "Progress could not be refreshed. The last successful snapshot is retained."}
+        : {key: workflowProgressKey, pages: [], loading: false, error: "Progress could not be loaded for this main conversation."});
+    });
+    return () => {
+      controller.abort();
+      if (workflowProgressRequestRef.current === controller) workflowProgressRequestRef.current = null;
+    };
+  }, [projectId, connected, workflowProgressKey, workflowProgressRevision]);
+
+  useEffect(() => {
+    if (!connected || !activeSnapshot?.mainThreadId) return;
+    const timer = setInterval(() => {
+      const current = workflowProgressStateRef.current;
+      if (document.visibilityState === "visible" && current.key === workflowProgressKey && !current.loading)
+        setWorkflowProgressRevision(value => value + 1);
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [connected, workflowProgressKey]);
 
   useEffect(() => {
     if (!projectId || !connected || saving) return;
@@ -583,6 +857,42 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
     if (!projectId || !connected || saving || isLoading) return;
     setForceRefresh(true);
     setRevision(value => value + 1);
+  };
+
+  const refreshWorkflowProgress = () => {
+    if (!connected || !activeSnapshot?.mainThreadId || workflowProgressState.loading) return;
+    setWorkflowProgressRevision(value => value + 1);
+  };
+
+  const loadMoreWorkflowProgress = () => {
+    const current = workflowProgressStateRef.current;
+    const latest = current.key === workflowProgressKey ? current.pages.at(-1) : undefined;
+    if (!connected || !activeSnapshot?.mainThreadId || !latest || current.loading ||
+      (!latest.workflowHasMore && !latest.lineageHasMore)) return;
+    const page = {
+      workflowOffset: latest.workflowHasMore ? latest.workflowOffset + latest.workflows.length : latest.workflowOffset,
+      lineageOffset: latest.lineageHasMore ? latest.lineageOffset + (latest.scope?.threads.length ?? 0) : latest.lineageOffset,
+    };
+    if (page.workflowOffset === latest.workflowOffset && page.lineageOffset === latest.lineageOffset) return;
+    workflowProgressRequestRef.current?.abort();
+    const controller = new AbortController();
+    workflowProgressRequestRef.current = controller;
+    const requestId = ++workflowProgressRequestIdRef.current;
+    setWorkflowProgressState(state => state.key === workflowProgressKey ? {...state, loading: true, error: null} : state);
+    void loadWorkflowProgress(projectId, activeSnapshot.mainThreadId, controller.signal, {...page,
+      ...(activeSnapshot.binding ? {expectedBinding: {threadId: activeSnapshot.binding.threadId, generation: activeSnapshot.binding.generation}} : {})}).then(result => {
+      if (controller.signal.aborted || requestId !== workflowProgressRequestIdRef.current || activeProject.current !== projectId ||
+        activeWorkflowProgressKey.current !== workflowProgressKey) return;
+      setWorkflowProgressState(state => state.key === workflowProgressKey
+        ? {...state, pages: [...state.pages, result], loading: false, error: result.status === "ok" ? null : result.message}
+        : state);
+    }, () => {
+      if (controller.signal.aborted || requestId !== workflowProgressRequestIdRef.current || activeProject.current !== projectId ||
+        activeWorkflowProgressKey.current !== workflowProgressKey) return;
+      setWorkflowProgressState(state => state.key === workflowProgressKey
+        ? {...state, loading: false, error: "The next progress page could not be loaded. The last successful snapshot is retained."}
+        : state);
+    });
   };
 
   const updateSelection = (selection: SupervisorModelSelection) => {
@@ -788,6 +1098,11 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
       shouldOfferRetry={needsRetry}
       retryButtonLabel={retryButtonLabel}
       canRetry={canRetry}
+      workflowProgress={workflowProgressState.key === workflowProgressKey
+        ? workflowProgressState
+        : {key: workflowProgressKey, pages: [], loading: connected, error: null}}
+      onWorkflowProgressRefresh={refreshWorkflowProgress}
+      onWorkflowProgressLoadMore={loadMoreWorkflowProgress}
       onSelectionChange={updateSelection}
       onMonitoringChange={updateMonitoring}
       onDiscard={discardDraft}

@@ -1,5 +1,5 @@
 import { SupervisorLifecycle } from "./supervisor-lifecycle.js";
-import { mainConversation, supervisorScopeKey } from "./supervisor-scope.js";
+import { mainConversation, resolveSupervisorScope, supervisorScopeKey } from "./supervisor-scope.js";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { Effect } from "effect";
@@ -19,6 +19,8 @@ import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } f
 import { SupervisorConversation } from "./supervisor-conversation.js";
 import type { GlobalDefinitionsControlInput, SupervisionControlInput, SupervisionSetupInput } from "./supervisor-control-contract.js";
 import { WorkflowStateStore } from "./workflow-state-store.js";
+import { isRecord, workflowProviderDriverFromCatalog, workflowWriteDriverSupport } from "./workflow-write-evidence.js";
+import { monitorActivityReference, observeScopeThread, SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS, SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
 
 type SetupCheckoutTarget = {origin: "project"; threadId: string | null; workspaceRoot: string; branch: string | null; isGitRepository: boolean};
 type SetupOutcome = {status: "created" | "committed" | "unchanged" | "stale" | "conflict" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string | null; branch: string | null; message: string};
@@ -32,6 +34,12 @@ type ProjectSupervisorDefinitions = Pick<ProjectDefinitionLoader, "load"> & {
   checkoutTargets?: (projectId: string, signal: AbortSignal) => Promise<SetupCheckoutTarget[]>;
   presenceForCheckout?: (projectId: string, threadId: string | null, signal: AbortSignal) => Promise<SupervisionFolderPresence>;
   initialize?: (projectId: string, threadId: string | null, input: {origin: "project"; action: "create" | "create_and_commit"; expectedWorkspaceRoot: string; expectedBranch: string | null}, signal: AbortSignal) => Promise<SetupOutcome>;
+};
+export type ProjectSupervisorWorkflowLocator = {supervisorThreadId: string; bindingGeneration: number};
+export type ProjectSupervisorScopeSnapshotOptions = {
+  threadIds?: readonly string[];
+  lineageOffset?: number;
+  limit?: number;
 };
 
 const active = (projection: Projection) => projection.runs.some(r => ["preparing","queued","starting","running","waiting"].includes(r.status));
@@ -50,6 +58,19 @@ const sameDefinitionRead = (left: ProjectDefinitionSnapshot | null | undefined, 
     fingerprint({projectId: right.projectId, threadId: right.threadId, workspaceRoot: right.workspaceRoot, globalOnly: right.globalOnly ?? null,
       globalRevision: right.globalRevision ?? null, revision: right.revision, status: right.status, steps: right.steps, workflows: right.workflows,
       config: right.config, projectConfig: right.projectConfig, complete: right.complete, sources: right.sources, issues: right.issues}));
+
+export const workflowWriteSupportForSelection = (
+  catalog: unknown,
+  selection: SupervisorModelSelection | null,
+): ProjectSupervisorScopeSnapshot["workflowWriteSupport"] => {
+  if (!selection || !isRecord(catalog) || !Array.isArray(catalog.providers)) return {driverKind: null, status: "unknown"};
+  const providers = catalog.providers.filter((provider): provider is Record<string, unknown> => isRecord(provider) && provider.instanceId === selection.instanceId);
+  if (providers.length !== 1 || !Array.isArray(providers[0]!.models) ||
+    !providers[0]!.models.some(model => isRecord(model) && model.slug === selection.model)) return {driverKind: null, status: "unknown"};
+  const driverKind = workflowProviderDriverFromCatalog(catalog, selection.instanceId);
+  if (!driverKind) return {driverKind: null, status: "unknown"};
+  return workflowWriteDriverSupport(driverKind);
+};
 
 export const taskSource = (projection: Projection, afterOrdinal: number): {run: RunInfo; message: MessageInfo} | null => {
   for (const run of [...projection.runs].sort((a,b) => a.ordinal - b.ordinal)) {
@@ -83,7 +104,7 @@ export class ProjectSupervisor {
       this.workflowStates = new WorkflowStateStore(store, projectId => this.workflowEditingEnabled(projectId));
       this.conversation = new SupervisorConversation(store, operateRpc, (threadId, signal) => this.projection(threadId, signal), definitions,
         (thread, threads) => this.eligible(thread, threads), projectId => this.projectEnabled(projectId), this.workflowStates);
-      this.lifecycle = new SupervisorLifecycle(store, this.conversation, (id, signal) => this.projection(id, signal), operateRpc);
+      this.lifecycle = new SupervisorLifecycle(store, this.conversation, (id, signal) => this.projection(id, signal), operateRpc, this.workflowStates);
     }
   private async serial<A>(projectId: string, work: () => Promise<A>): Promise<A> {
     const previous = this.queues.get(projectId) ?? Promise.resolve();
@@ -114,6 +135,10 @@ export class ProjectSupervisor {
     return this.store.enabled(projectId) && (!scratch || this.store.useGlobalDefinitions(projectId));
   }
   workflowEditingEnabled(projectId: string): boolean {return this.catalogClassificationsReady && Boolean(this.operateRpc) && this.store.scopeCompatible && this.projectEnabled(projectId);}
+  workflowLocator(projectId: string, mainThreadId: string): ProjectSupervisorWorkflowLocator | null {
+    const binding = this.store.binding(projectId, mainThreadId);
+    return binding?.state === "ready" ? {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation} : null;
+  }
   private effectiveControl(projectId: string): ReturnType<ProjectSupervisorStore["control"]> {
     const control = this.store.control(projectId);
     const effectiveEnabled = this.projectEnabled(projectId);
@@ -121,6 +146,161 @@ export class ProjectSupervisor {
   }
   private async projection(threadId: string, signal: AbortSignal): Promise<Projection> {return (await Effect.runPromise(this.t3.projection(threadId), {signal})).projection;}
   private async models(signal: AbortSignal) {return supervisorModels(await this.readRpc("server.getConfig", {}, signal));}
+  private async workflowWriteSupport(selection: SupervisorModelSelection | null, signal: AbortSignal): Promise<ProjectSupervisorScopeSnapshot["workflowWriteSupport"]> {
+    try {
+      const catalog = await this.readRpc("server.getConfig", {}, signal);
+      return workflowWriteSupportForSelection(catalog, selection);
+    } catch {return {driverKind: null, status: "unknown"};}
+  }
+  async scopeSnapshot(projectId: string, mainThreadId: string, signal: AbortSignal,
+    options?: ProjectSupervisorScopeSnapshotOptions): Promise<ProjectSupervisorScopeSnapshot> {
+    const observedAt = this.now();
+    const binding = this.store.binding(projectId, mainThreadId);
+    const issues: Array<ProjectSupervisorScopeSnapshot["issues"][number]> = [];
+    let complete = true;
+    let catalog: {threads: ThreadInfo[]} | null = null;
+    try {catalog = await Effect.runPromise(this.source.catalog(), {signal});}
+    catch {
+      if (signal.aborted) throw new Error("scope_snapshot_aborted");
+      complete = false;
+      issues.push({code: "catalog_unavailable", message: "The current T3 thread catalog could not be read."});
+    }
+    const scope = catalog ? resolveSupervisorScope(catalog.threads, projectId, mainThreadId, this.store.ownedIds) : null;
+    if (scope) {
+      complete = complete && scope.complete;
+      issues.push(...scope.issues.slice(0, 20));
+    }
+    let supervisorProjection: Projection | null = null;
+    let selection: SupervisorModelSelection | null = binding?.initialModel ?? this.store.settings(projectId).modelSelection;
+    if (binding) {
+      try {
+        supervisorProjection = await this.projection(binding.threadId, signal);
+        if (supervisorProjection.thread.id !== binding.threadId || supervisorProjection.thread.projectId !== projectId) throw new Error("supervisor_scope_mismatch");
+        selection = modelSelection(supervisorProjection.thread.modelSelection) ?? selection;
+      } catch {
+        if (signal.aborted) throw new Error("scope_snapshot_aborted");
+        complete = false;
+        issues.push({code: "supervisor_unavailable", message: "The owning Supervisor conversation could not be observed."});
+      }
+    }
+    const workflowWriteSupport = await this.workflowWriteSupport(selection, signal);
+    const allRows: ThreadInfo[] = scope?.main && scope.allowedIds.has(scope.main.id)
+      ? [scope.main, ...scope.descendants.filter(thread => scope.allowedIds.has(thread.id))]
+      : [];
+    let rows: ThreadInfo[];
+    let lineageOffset = 0;
+    let lineageHasMore = false;
+    const lineageTotal = allRows.length;
+    const hasThreadSelection = options?.threadIds !== undefined;
+    const hasPageSelection = options?.lineageOffset !== undefined || options?.limit !== undefined;
+    if (hasThreadSelection && hasPageSelection) {
+      complete = false;
+      issues.push({code: "scope_snapshot_options_invalid", message: "Choose explicit thread IDs or a lineage page, not both."});
+      rows = [];
+    } else if (hasThreadSelection) {
+      const selected = options!.threadIds!;
+      if (selected.length > SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS || selected.some(id => !id.trim()) || new Set(selected).size !== selected.length) {
+        complete = false;
+        issues.push({code: "scope_snapshot_options_invalid", message: "The requested thread page is invalid or exceeds the observation limit."});
+        rows = [];
+      } else {
+        rows = [];
+        for (const id of selected) {
+          const thread = scope?.byId.get(id);
+          if (!thread || !scope?.allowedIds.has(id)) {
+            complete = false;
+            issues.push({code: "scope_thread_unverified", message: "A requested thread is outside the verified main scope."});
+          } else rows.push(thread);
+        }
+      }
+    } else if (hasPageSelection) {
+      const offset = options?.lineageOffset ?? 0;
+      const limit = options?.limit ?? 20;
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > 10_000 || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
+        complete = false;
+        issues.push({code: "scope_snapshot_options_invalid", message: "The requested lineage offset or page size is invalid."});
+        rows = [];
+      } else {
+        lineageOffset = offset;
+        rows = allRows.slice(offset, offset + limit);
+        lineageHasMore = offset + rows.length < lineageTotal;
+      }
+    } else {
+      rows = allRows.slice(0, SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS);
+      lineageHasMore = rows.length < lineageTotal;
+      if (lineageHasMore) {
+        complete = false;
+        issues.push({code: "scope_observation_limit", message: `Only the first ${SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS} threads are included in this bounded snapshot.`});
+      }
+    }
+    const observedRows: Array<ProjectSupervisorScopeSnapshot["threads"][number]> = [];
+    const projections = new Map<string, Projection>();
+    let projectionReads = 0;
+    const readProjection = async (threadId: string): Promise<Projection | null> => {
+      const existing = projections.get(threadId);
+      if (existing) return existing;
+      if (!scope || projectionReads >= SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS) return null;
+      projectionReads++;
+      try {
+        const projection = await this.projection(threadId, signal);
+        if (projection.thread.id !== threadId) throw new Error("projection_scope_mismatch");
+        projections.set(threadId, projection);
+        return projection;
+      } catch {
+        if (signal.aborted) throw new Error("scope_snapshot_aborted");
+        return null;
+      }
+    };
+    for (const thread of rows.slice(0, SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS)) {
+      if (signal.aborted) throw new Error("scope_snapshot_aborted");
+      const depth = scope?.depthById.get(thread.id) ?? 0;
+      const isMain = thread.id === mainThreadId;
+      let projection = isMain || !thread.archivedAt && !thread.deletedAt ? await readProjection(thread.id) : null;
+      let lineageVerified = true;
+      if (isMain && projection && projection.thread.projectId !== projectId) {
+        complete = false;
+        issues.push({code: "main_projection_mismatch", message: "The main projection no longer matches the requested project."});
+        projection = null;
+      }
+      if (!isMain && projection && (projection.thread.lineage.relationshipToParent !== "subagent" ||
+        projection.thread.lineage.parentThreadId !== thread.lineage.parentThreadId)) {
+        complete = false;
+        issues.push({code: "projection_lineage_changed", message: "A descendant projection no longer matches its verified catalog lineage."});
+        lineageVerified = false;
+        projection = null;
+      } else if (!isMain && !projection && !thread.archivedAt && !thread.deletedAt) {
+        complete = false;
+        issues.push({code: "descendant_projection_unavailable", message: "A live descendant projection could not be read."});
+      }
+      const parentId = typeof thread.lineage.parentThreadId === "string" ? thread.lineage.parentThreadId : null;
+      let parentProjection = parentId ? await readProjection(parentId) : null;
+      if (!isMain && parentId && !parentProjection) {
+        complete = false;
+        lineageVerified = false;
+        issues.push({code: "parent_projection_unavailable", message: "A descendant's direct parent projection could not be read."});
+      }
+      const parentInfo = parentId ? scope?.byId.get(parentId) : null;
+      const parentMismatch = !isMain && parentProjection && parentId !== mainThreadId && (!parentInfo ||
+        parentProjection.thread.lineage.relationshipToParent !== "subagent" ||
+        parentProjection.thread.lineage.parentThreadId !== parentInfo.lineage.parentThreadId);
+      const mainParentMismatch = !isMain && parentId === mainThreadId && parentProjection?.thread.projectId !== projectId;
+      if (parentMismatch || mainParentMismatch) {
+        complete = false;
+        lineageVerified = false;
+        issues.push({code: "parent_projection_lineage_changed", message: "A descendant's direct parent projection no longer matches the verified lineage."});
+        parentProjection = null;
+      }
+      const activityRefs = lineageVerified ? this.conversation.monitor.state(projectId, thread.id).activities
+        .slice(-SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS)
+        .map(item => monitorActivityReference(thread.id, projection, item)) : [];
+      observedRows.push(observeScopeThread({thread, mainThreadId, depth, projection, parentProjection, lineageVerified, activityRefs}));
+    }
+    if (issues.length > 100) issues.splice(100);
+    if (!scope) complete = false;
+    return {projectId, mainThreadId, supervisorThreadId: binding?.threadId ?? null, bindingGeneration: binding?.generation ?? null,
+      workflowWriteSupport, observedAt, lineageTotal, lineageOffset, lineageHasMore,
+      complete: complete && Boolean(scope?.complete), issues, threads: observedRows};
+  }
   private async detectFolder(projectId: string, signal: AbortSignal): Promise<SupervisionFolderPresence> {
     const existing = this.folderPresenceInFlight.get(projectId);
     if (existing) return existing;

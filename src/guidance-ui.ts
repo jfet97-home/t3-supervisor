@@ -11,6 +11,8 @@ import type { SupervisorConfig } from "./types.js";
 import type { ProjectDefinitionLoader } from "./project-definitions.js";
 import type { ProjectConfigEditor } from "./project-config-editor.js";
 import type { ProjectSupervisor } from "./project-supervisor.js";
+import type { WorkflowWriteController } from "./workflow-write-controller.js";
+import { parseWorkflowProgressPageQuery, readWorkflowProgressPage } from "./workflow-progress.js";
 import { createServiceAuth } from "./service-auth.js";
 
 export type WorkflowMcpEndpoint = {
@@ -43,6 +45,7 @@ export const startGuidanceUi = async (
   editor?: ProjectConfigEditor,
   supervision?: ProjectSupervisor,
   workflows?: WorkflowMcpEndpoint,
+  workflowReader?: WorkflowWriteController,
 ) => {
   const mcpHosts = config.workflowMcpHosts ?? [];
   if (mcpHosts.some(host => !/^(?:[a-z0-9.-]+|\[[a-f0-9:]+\]):[0-9]{1,5}$/u.test(host)))
@@ -81,6 +84,15 @@ export const startGuidanceUi = async (
         try: signal => {
           if (!supervision) throw new Error("supervision_unavailable");return supervision.snapshot(query.projectId, signal, query.mainThreadId ?? null);
         }, catch: () => new UiError({message: "Project supervision is unavailable. Check the T3 connection and registered project."}),
+      }),
+      workflowProgress: ({query}) => Effect.tryPromise({
+        try: signal => {
+          if (!supervision || !workflowReader) throw new Error("workflow_progress_unavailable");
+          const parsed = parseWorkflowProgressPageQuery(query);
+          if (!parsed) throw new Error("workflow_progress_invalid_query");
+          return readWorkflowProgressPage(supervision, workflowReader, parsed, signal);
+        },
+        catch: () => new UiError({message: "Live workflow progress is unavailable. Refresh and check the T3 connection."}),
       }),
       saveProjectSupervisor: ({payload}) => Effect.tryPromise({
         try: signal => {

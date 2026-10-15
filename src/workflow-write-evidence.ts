@@ -48,10 +48,28 @@ export type WorkflowEvidenceCandidate = {
 export type WorkflowEvidenceCheck =
   | {status: "verified"; evidence: WorkflowEvidenceMatch}
   | {status: "pending"; reason: string}
-  | {status: "denied"; reason: string};
+  | {status: "denied"; reason: string; providerDriver?: string};
+
+export type WorkflowWriteDriverSupport = {
+  driverKind: string;
+  status: "verified" | "provider_write_proof_unverified";
+};
+
+export const workflowWriteDriverSupport = (driverKind: string): WorkflowWriteDriverSupport => ({
+  driverKind,
+  status: driverKind === "codex" ? "verified" : "provider_write_proof_unverified",
+});
 
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+export const workflowProviderDriverFromCatalog = (catalog: unknown, instanceId: string): string | null => {
+  if (!instanceId || !isRecord(catalog) || !Array.isArray(catalog.providers) || catalog.providers.length > 200) return null;
+  const matches = catalog.providers.filter(provider => isRecord(provider) && provider.instanceId === instanceId);
+  if (matches.length !== 1) return null;
+  const driver = matches[0]!.driver;
+  return typeof driver === "string" && driver.length > 0 && driver.length <= 128 && driver.trim() === driver ? driver : null;
+};
 
 const exactKeys = (value: Record<string, unknown>, expected: readonly string[]): boolean => {
   const keys = Object.keys(value).sort();
@@ -187,7 +205,10 @@ export const verifyWorkflowToolEvidence = (input: {
   if (item.parentItemId !== null) return {status: "denied", reason: "native_item_not_main_strong"};
   if (!isRecord(item.nativeItemRef) || item.nativeItemRef.strength !== "strong")
     return {status: "denied", reason: "native_item_not_main_strong"};
-  if (item.nativeItemRef.driver !== "codex") return {status: "denied", reason: "native_driver_unverified"};
+  const providerDriver = typeof item.nativeItemRef.driver === "string" && item.nativeItemRef.driver.length > 0
+    ? item.nativeItemRef.driver : "unknown";
+  if (workflowWriteDriverSupport(providerDriver).status !== "verified")
+    return {status: "denied", reason: "provider_write_proof_unverified", providerDriver};
   if (typeof item.nativeItemRef.nativeId !== "string" || !item.nativeItemRef.nativeId ||
     typeof item.ordinal !== "number" || !Number.isSafeInteger(item.ordinal) || item.ordinal < 0)
     return {status: "denied", reason: "native_item_identity_incomplete"};

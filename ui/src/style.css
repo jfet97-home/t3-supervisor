@@ -214,6 +214,9 @@ small,
 .workflow-plan-group {padding: 4px 0 4px 12px; border-left: 2px solid var(--line);}
 .workflow-plan-nodes {padding-left: 24px; margin: 4px 0 0;}
 .workflow-plan-node {padding: 12px; border: 1px solid var(--line); border-radius: 10px;}
+.workflow-progress-document, .workflow-progress-thread {padding: 14px; border: 1px solid var(--line); border-radius: 10px; overflow-wrap: anywhere;}
+.workflow-progress-observation {padding: 10px 0 10px 12px; border-left: 2px solid var(--line);}
+.workflow-progress-thread summary {cursor: pointer; min-height: 44px; display: flex; align-items: center;}
 .steps-guide {margin-top: 8px;}
 .guide-topic {padding-top: 4px;}
 .guide-example {margin: 0; display: grid; gap: 8px;}

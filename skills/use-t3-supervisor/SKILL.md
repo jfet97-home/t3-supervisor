@@ -74,10 +74,25 @@ Select a main to inspect actual binding/model, objective, proposal, agreement an
 recovery. Native mode mismatches need an explicit T3 change before scoped retry.
 Project-root view shows shared defaults only.
 
-Monitoring uses native activity and project age/count thresholds, independent
-per-main cooldowns/requests. Saved changes apply on the next check. There is no
+Monitoring observes the main and its native/delegated descendants under one shared
+per-main cooldown/request budget and the project's age/count thresholds. Forks are
+independent. Native child lifecycle comes from its direct parent; idle/no-AppRun
+mirrors do not prove completion. Saved changes apply on the next check. There is no
 pause-monitoring mode. Supervisors run through T3; optional Telegram recaps use a
 separate worker/authentication scope.
+
+The live progress section shows current main/child workflows separately from
+proposals and accepted plans. Read the Supervisor's short assessment and supporting
+activity links; missing workflow, unknown lifecycle and incomplete/unavailable reads
+remain explicit. Viewing progress does not wake chats or write state. Agents have
+no continual reporting obligation. A linked result alone does not prove a step's
+description has been satisfied.
+
+Guidance to native children goes through their parent. Direct delegated guidance
+requires fresh active scope and contact checks and active-only steer delivery;
+never retry a rejected steer using a mode that wakes a finished child. A quiet
+unknown child may permit guarded standby while its work remains unresolved and
+background monitoring continues. New relevant activity reuses the same Supervisor.
 
 Inspect nested plans, requirement accounting, source revision and diagnostics
 separately from native acceptance evidence and actual execution. Required inclusion
@@ -95,6 +110,10 @@ button. Only the current owning Supervisor's exact native tool evidence can
 authorize edits to its main/descendant scope; transport credentials alone cannot.
 Check actual installed availability, not source checkout features. Role instructions
 are not a sandbox. No proxies or T3 modifications are authorized by ordinary usage.
+Native write verification is provider-specific: currently proven Codex support
+does not establish Claude or other provider support. A selected unverified provider
+can still observe and guide; surface its workflow-write limitation explicitly and
+do not substitute transport credentials, roles or reviewer records as authority.
 
 Activity and Recaps and Telegram retain read-only history. Settings stores chat
 exclusions and optional interactive Telegram selection per instance. Preserve

@@ -76,7 +76,13 @@ type PlanEntity = Exclude<WorkflowPlanNodeInfo, WorkflowPlanGroupInfo>;
 type WorkflowStateDecode = {status: "found"; document: WorkflowStateDocument} | WorkflowStateLookupResult & {status: "incompatible"};
 type PlanBudget = {nodes: number; nodeIds: Set<string>};
 
+export type WorkflowNeedsAttentionScan =
+  | {status: "complete"; needsAttention: boolean; inspected: number}
+  | {status: "incomplete"; needsAttention: boolean; inspected: number; reason: "invalid_scope" | "limit_exceeded" | "unreadable_workflow"};
+
 const statuses = new Set<string>(workflowExecutionStatuses);
+const maxNeedsAttentionScan = 512;
+const needsAttentionThreadChunkSize = 400;
 const definitionStatuses = new Set(["ready", "missing", "invalid", "permission_required", "unavailable"]);
 const requirementStates = new Set(["included", "not_applicable", "unresolved", "unknown"]);
 const opaqueId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -250,7 +256,8 @@ const validEvidenceInput = (evidence: unknown): evidence is readonly WorkflowSta
     ((item as Record<string, unknown>).targetNodeId === undefined || (item as Record<string, unknown>).targetNodeId === null || validNodeId((item as Record<string, unknown>).targetNodeId)) &&
     ((item as Record<string, unknown>).sourceThreadId === undefined || (item as Record<string, unknown>).sourceThreadId === null || validId((item as Record<string, unknown>).sourceThreadId)) &&
     ((item as Record<string, unknown>).sourceRunId === undefined || (item as Record<string, unknown>).sourceRunId === null || validId((item as Record<string, unknown>).sourceRunId)) &&
-    ((item as Record<string, unknown>).sourceMessageId === undefined || (item as Record<string, unknown>).sourceMessageId === null || validId((item as Record<string, unknown>).sourceMessageId)));
+    ((item as Record<string, unknown>).sourceMessageId === undefined || (item as Record<string, unknown>).sourceMessageId === null || validId((item as Record<string, unknown>).sourceMessageId)) &&
+    ((item as Record<string, unknown>).sourceItemId === undefined || (item as Record<string, unknown>).sourceItemId === null || validId((item as Record<string, unknown>).sourceItemId)));
 
 const copyPlanNode = (node: WorkflowPlanNodeInfo): WorkflowPlanNodeInfo => {
   if (isPlanGroup(node)) return {...node, nodes: node.nodes.map(copyPlanNode)};
@@ -334,6 +341,13 @@ export class WorkflowStateStore {
     return row ? this.decodeRow(row) : {status: "not_found"};
   }
 
+  getByIdForOwner(owner: WorkflowOwner, workflowId: string): WorkflowStateLookupResult {
+    if (!this.currentOwner(owner)) return {status: "owner_mismatch"};
+    if (!validId(workflowId)) return {status: "not_found"};
+    const row = this.workflowById(owner, workflowId);
+    return row ? this.decodeRow(row) : {status: "not_found"};
+  }
+
   listResult(projectId: string, mainThreadId: string): {documents: WorkflowStateDocument[]; incompatible: Array<{workflowId: string; formatVersion: number | null}>} {
     const rows = this.supervisors.store.db.prepare("SELECT workflow_id,project_id,main_thread_id,thread_id,parent_workflow_id,parent_thread_id,revision,document FROM supervisor_workflow_state WHERE project_id=? AND main_thread_id=? ORDER BY created_at,thread_id")
       .all(projectId, mainThreadId) as WorkflowRow[];
@@ -349,6 +363,43 @@ export class WorkflowStateStore {
 
   list(projectId: string, mainThreadId: string): WorkflowStateDocument[] {
     return this.listResult(projectId, mainThreadId).documents;
+  }
+
+  hasNeedsAttention(projectId: string, mainThreadId: string, threadIds: readonly string[], limit = maxNeedsAttentionScan): WorkflowNeedsAttentionScan {
+    if (!validId(projectId) || !validId(mainThreadId) || !Array.isArray(threadIds) || threadIds.length < 1 || threadIds.length > 10_000 ||
+      !threadIds.every(id => validId(id)) || new Set(threadIds).size !== threadIds.length || !threadIds.includes(mainThreadId))
+      return {status: "incomplete", needsAttention: false, inspected: 0, reason: "invalid_scope"};
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > maxNeedsAttentionScan)
+      return {status: "incomplete", needsAttention: false, inspected: 0, reason: "limit_exceeded"};
+
+    let inspected = 0;
+    for (let start = 0; start < threadIds.length; start += needsAttentionThreadChunkSize) {
+      const ids = threadIds.slice(start, start + needsAttentionThreadChunkSize);
+      const remaining = limit - inspected;
+      const queryLimit = remaining + 1;
+      const placeholders = ids.map(() => "?").join(",");
+      let rows: WorkflowRow[];
+      try {
+        rows = this.supervisors.store.db.prepare(
+          `SELECT workflow_id,project_id,main_thread_id,thread_id,parent_workflow_id,parent_thread_id,revision,document FROM supervisor_workflow_state WHERE project_id=? AND main_thread_id=? AND thread_id IN (${placeholders}) ORDER BY thread_id LIMIT ${queryLimit}`,
+        ).all(projectId, mainThreadId, ...ids) as WorkflowRow[];
+      } catch {
+        return {status: "incomplete", needsAttention: false, inspected, reason: "unreadable_workflow"};
+      }
+
+      for (const row of rows.slice(0, remaining)) {
+        inspected++;
+        const decoded = this.decodeRow(row);
+        if (decoded.status !== "found")
+          return {status: "incomplete", needsAttention: false, inspected, reason: "unreadable_workflow"};
+        if (decoded.document.status === "needs_attention" ||
+          collectPlanEntities(decoded.document.plan).some(node => node.status === "needs_attention"))
+          return {status: "complete", needsAttention: true, inspected};
+      }
+      if (rows.length > remaining)
+        return {status: "incomplete", needsAttention: false, inspected, reason: "limit_exceeded"};
+    }
+    return {status: "complete", needsAttention: false, inspected};
   }
 
   apply(owner: WorkflowOwner, input: WorkflowApplyInput, validation: WorkflowApplyValidationContext | undefined, now = Date.now()): WorkflowMutationResult {
@@ -413,20 +464,21 @@ export class WorkflowStateStore {
         targetNodeId: nodeId, targetNodeName: next?.name ?? previous?.name ?? null,
         statusFrom: previous?.status ?? (nodeId === null ? current.status : null),
         statusTo: next?.status ?? (nodeId === null ? validatedInput.status : null),
-        sourceThreadId: item.sourceThreadId ?? null, sourceRunId: item.sourceRunId ?? null,
-        sourceMessageId: item.sourceMessageId ?? null, agreementKey: null, note: item.note}));
+        sourceThreadId: item.sourceThreadId ?? ((item.sourceRunId ?? item.sourceMessageId ?? item.sourceItemId) ? current.threadId : null),
+        sourceRunId: item.sourceRunId ?? null,
+        sourceMessageId: item.sourceMessageId ?? null, sourceItemId: item.sourceItemId ?? null, agreementKey: null, note: item.note}));
     }
     for (const node of previousNodes.values()) {
       if (!nextNodes.has(node.nodeId)) evidence.push(this.makeEvidence({operationId: input.operationId, owner, kind: "node_removed", now,
         targetNodeId: node.nodeId, targetNodeName: node.name, statusFrom: node.status, statusTo: null,
-        sourceThreadId: null, sourceRunId: null, sourceMessageId: null, agreementKey: null, note: input.note}));
+        sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null, agreementKey: null, note: input.note}));
     }
 
     const oldPlanHash = workflowPlanSignature(current.objective, current.sourceBinding, current.requirements, current.issues, current.plan);
     const newPlanHash = workflowPlanSignature(validatedInput.objective, validatedInput.sourceBinding, validatedInput.requirements, validatedInput.issues, nextPlan);
     evidence.push(this.makeEvidence({operationId: input.operationId, owner, kind: "plan_updated", now,
       targetNodeId: null, targetNodeName: null, statusFrom: current.status, statusTo: validatedInput.status,
-      sourceThreadId: null, sourceRunId: null, sourceMessageId: null, agreementKey: null, note: input.note}));
+      sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null, agreementKey: null, note: input.note}));
     if (evidence.length > workflowMutationLimits.maxEvidence) return {status: "invalid", operationId: input.operationId, reason: "evidence_capacity"};
 
     const next: WorkflowStateDocument = {...current, revision: current.revision + 1, status: validatedInput.status, objective: validatedInput.objective,
@@ -612,7 +664,7 @@ export class WorkflowStateStore {
 
   private makeEvidence(input: Omit<WorkflowStateEvidence, "id" | "recordedAt" | "actorSupervisorThreadId"> & {owner: WorkflowOwner; now: number}): WorkflowStateEvidence {
     const {owner, now, ...rest} = input;
-    return {...rest, id: randomUUID(), recordedAt: now, actorSupervisorThreadId: owner.supervisorThreadId};
+    return {...rest, sourceItemId: rest.sourceItemId ?? null, id: randomUUID(), recordedAt: now, actorSupervisorThreadId: owner.supervisorThreadId};
   }
 
   private insertWorkflow(document: WorkflowStateDocument, serialized: string): void {
@@ -740,5 +792,6 @@ const validDocument = (value: Record<string, unknown>): boolean => value.formatV
     (item.targetNodeName === null || validPlanText(item.targetNodeName)) && (item.statusFrom === null || isStatus(item.statusFrom)) &&
     (item.statusTo === null || isStatus(item.statusTo)) && (item.sourceThreadId === null || validId(item.sourceThreadId)) &&
     (item.sourceRunId === null || validId(item.sourceRunId)) && (item.sourceMessageId === null || validId(item.sourceMessageId)) &&
+    (item.sourceItemId === undefined || item.sourceItemId === null || validId(item.sourceItemId)) &&
     (item.agreementKey === null || validText(item.agreementKey)) && validText(item.note)) &&
   Number.isFinite(value.createdAt) && Number.isFinite(value.updatedAt);

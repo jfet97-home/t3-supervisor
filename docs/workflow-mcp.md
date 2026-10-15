@@ -88,6 +88,20 @@ status or objective change without resending an entire plan. A supplied plan rep
 A supplied requirement list replaces its accounting; reusable provenance, fixed
 commitments and current-task policy are revalidated. Status changes still require explicit status-change evidence.
 
+An evidence entry may include optional `sourceThreadId`, `sourceRunId`,
+`sourceMessageId` and `sourceItemId` references. If a reference is supplied without
+`sourceThreadId`, the controller uses the target workflow's thread. That thread must
+be the owner's main or a verified native descendant in the fresh scope. Run and
+message references must carry that exact thread identity in its current projection;
+item references are checked through `orchestration.getTurnItem`. Supplied run IDs
+must agree with any supplied message or item. A message and item may be combined
+only when their run identities agree. A native child command can have no run ID, so omit
+`sourceRunId` when the referenced item has `runId: null`. A write may include at most
+16 activity references across at most 8 source threads. Reference reads that are
+temporarily unavailable leave the write pending; malformed or out-of-scope
+references are rejected. These references help the user navigate to observed
+activity; they are optional and do not prove that a status is semantically complete.
+
 Each write includes `supervisorThreadId`, `bindingGeneration`, a stable unique
 `operationId`, and the complete action arguments. The first two fields locate the
 binding to verify; they are untrusted claims. Expected revisions prevent parallel
@@ -106,14 +120,19 @@ The run, thread, provider thread, strong native reference and own main-node grap
 must match, with no parent item or non-execution marker. Only exact configured
 direct aliases or the exact MCPX call wrapper/inner tool name are accepted. The
 full structured object input must equal the complete submitted arguments.
-Writes currently accept only the verified `codex` native driver. `claudeAgent` and
-other drivers return `native_driver_unverified` until their coverage is authorized
-and verified. The ordinary agreement/dialogue path remains separate.
+Writes currently accept only the verified `codex` native driver. Other drivers,
+including `claudeAgent`, return `provider_write_proof_unverified` with the native
+driver identity until provider-specific detail and a genuine configured Supervisor
+write are verified. An ordinary Claude tool summary without the strong native
+reference and main-run graph is insufficient. This remains a technical integration
+gap; model selection still comes from T3's live catalog, and no separate Supervisor
+model configuration is required. The ordinary agreement/dialogue path remains
+separate.
 
 Quoted JSON, ordinary messages, code-mode script text, empty placeholders,
 truncated strings and tool calls in another conversation or a native child cannot
-authorize an edit. Static provider credentials and gateway tags do not identify a
-thread. The service snapshots verified evidence and the operation outcome
+authorize an edit. Optional activity references do not change this authority gate.
+Static provider credentials and gateway tags do not identify a thread. The service snapshots verified evidence and the operation outcome
 atomically, with a final owner/generation/effective-enable check. Exact authorized
 replays retain their original result; conflicting operation/evidence reuse fails.
 

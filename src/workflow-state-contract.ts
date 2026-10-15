@@ -30,6 +30,7 @@ export type WorkflowStateEvidence = {
   sourceThreadId: string | null;
   sourceRunId: string | null;
   sourceMessageId: string | null;
+  sourceItemId?: string | null;
   agreementKey: string | null;
   note: string;
 };
@@ -41,6 +42,7 @@ export type WorkflowStateEvidenceInput = {
   sourceThreadId?: string | null;
   sourceRunId?: string | null;
   sourceMessageId?: string | null;
+  sourceItemId?: string | null;
 };
 
 export type AcceptedWorkflowAgreementRecord = {

@@ -10,7 +10,7 @@ import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { ProjectSupervisorStore, defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { ProjectSupervisor } from "../src/project-supervisor.js";
-import { SupervisorConversation, workflowIntroductionText } from "../src/supervisor-conversation.js";
+import { SupervisorConversation, firstObservedOrdinal, workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
 import { prepareWorkflowRequest, validateWorkflowPlan, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import type { ConversationRequest, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
@@ -582,11 +582,19 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     failNextIntroduction: () => { failNextIntroduction = true; },
     rejectNextIntroduction: (count = 1) => { introductionsToReject += count; },
     makeProjectSupervisor: () => projectSupervisor,
+    makeRestartedConversation: () => new SupervisorConversation(projectStore, null, async threadId => {
+      const failure = projectionFailures.get(threadId);
+      if (failure) throw failure;
+      const projection = projections.get(threadId);
+      if (!projection) throw new Error(`missing restarted test projection ${threadId}`);
+      return projection;
+    }, definitionLoader, thread => thread.id.startsWith("operative-") && thread.projectId === projectId, () => true, workflows),
     returnInvalidNextIntroductionReceipt: () => { returnInvalidNextIntroductionReceipt = true; },
     setDefinitions: (snapshot: ProjectDefinitionSnapshot) => { definitionSnapshot = snapshot; },
     setDefinitionReadFailure: (failure: Error | null) => { definitionReadFailure = failure; },
     setProjectionFailure: (threadId: string, failure: Error | null) => { if (failure) projectionFailures.set(threadId, failure); else projectionFailures.delete(threadId); },
     projection: (threadId: string) => projections.get(threadId) ?? null,
+    addChildProjection: (projection: Projection) => {projections.set(projection.thread.id, projection);threadList.push(projection.thread);},
     operative,
     projectStore,
     run: () => conversation.run(projectStore.binding(projectId, operativeThreadId) as BindingRecord, supervisor, threadList, signal),
@@ -734,6 +742,101 @@ const appendOperativeAcceptance = (fixture: Awaited<ReturnType<typeof makeFixtur
 
 const observeAgreement = (fixture: Awaited<ReturnType<typeof makeFixture>>, now: number) =>
   fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), now);
+
+test("first descendant observation seeds past quiet history but includes active native or delegated work", () => {
+  const projection = makeProjection(makeThread({id: "child", title: "Child"}));
+  projection.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  const taskStartedAt = baseTime - 120_000;
+  projection.turnItems = [1, 2, 3].map(ordinal => ({id: `old-${ordinal}`, threadId: projection.thread.id, runId: null,
+    type: "command_execution", status: "completed", ordinal, completedAt: iso(baseTime - 300_000), updatedAt: iso(baseTime - 300_000)}));
+  assert.equal(firstObservedOrdinal(projection), 4);
+  assert.equal(firstObservedOrdinal(projection, taskStartedAt), 4, "pre-task child history is not replayed when the child is first seen");
+  for (const item of projection.turnItems) {
+    item.completedAt = iso(baseTime - 30_000);
+    item.updatedAt = iso(baseTime - 30_000);
+  }
+  assert.equal(firstObservedOrdinal(projection, taskStartedAt), 1, "completed runless activity after the main task source is retained on first sight");
+  projection.turnItems.push({id: "active-input", threadId: projection.thread.id, runId: null, type: "user_input_request", status: "waiting", ordinal: 4});
+  assert.equal(firstObservedOrdinal(projection), 4);
+  projection.runs = [
+    {id: "old-run", threadId: projection.thread.id, ordinal: 1, status: "completed", requestedAt: iso(baseTime - 300_000),
+      startedAt: iso(baseTime - 300_000), completedAt: iso(baseTime - 240_000), rootNodeId: null},
+    {id: "active-run", threadId: projection.thread.id, ordinal: 6, status: "running", requestedAt: iso(baseTime - 30_000),
+      startedAt: iso(baseTime - 30_000), completedAt: null, rootNodeId: null},
+  ];
+  assert.equal(firstObservedOrdinal(projection), 6);
+  assert.equal(firstObservedOrdinal(projection, taskStartedAt), 1, "current-task completed child activity is retained even when a later run is active");
+  projection.runs[1]!.status = "completed";
+  assert.equal(firstObservedOrdinal(projection), 7);
+});
+
+test("first child checkpoint includes relevant completed work before a later active run and all work on a new child", () => {
+  const taskStartedAt = baseTime - 120_000;
+  const projection = makeProjection(makeThread({id: "reused-running-child", title: "Reused running child"}));
+  projection.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  projection.runs = [
+    {id: "pre-task-run", threadId: projection.thread.id, ordinal: 1, status: "completed", requestedAt: iso(taskStartedAt - 60_000),
+      startedAt: iso(taskStartedAt - 59_000), completedAt: iso(taskStartedAt - 30_000), rootNodeId: null},
+    {id: "current-completed-run", threadId: projection.thread.id, ordinal: 2, status: "completed", requestedAt: iso(taskStartedAt + 10_000),
+      startedAt: iso(taskStartedAt + 11_000), completedAt: iso(taskStartedAt + 20_000), rootNodeId: null},
+    {id: "current-active-run", threadId: projection.thread.id, ordinal: 6, status: "running", requestedAt: iso(taskStartedAt + 30_000),
+      startedAt: iso(taskStartedAt + 31_000), completedAt: null, rootNodeId: null},
+  ];
+  projection.turnItems = [
+    {id: "pre-task-command", threadId: projection.thread.id, runId: "pre-task-run", ordinal: 1, type: "command_execution", status: "completed",
+      completedAt: iso(taskStartedAt - 40_000)},
+    {id: "current-completed-command", threadId: projection.thread.id, runId: "current-completed-run", ordinal: 2, type: "command_execution", status: "completed"},
+    {id: "current-active-command", threadId: projection.thread.id, runId: "current-active-run", ordinal: 6, type: "command_execution", status: "running"},
+  ];
+  assert.equal(firstObservedOrdinal(projection, taskStartedAt), 2,
+    "a relevant completed AppRun remains in scope even when the child already has a later active run");
+
+  const newChild = makeProjection(makeThread({id: "new-child-with-sparse-activity", title: "New child"}));
+  newChild.thread.createdAt = iso(taskStartedAt + 1);
+  newChild.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  newChild.runs = [{id: "new-child-run", threadId: newChild.thread.id, ordinal: 1, status: "completed", requestedAt: iso(taskStartedAt + 2),
+    startedAt: iso(taskStartedAt + 3), completedAt: iso(taskStartedAt + 4), rootNodeId: null}];
+  newChild.turnItems = [{id: "new-child-command", threadId: newChild.thread.id, runId: "new-child-run", ordinal: 1,
+    type: "command_execution", status: "completed"}];
+  assert.equal(firstObservedOrdinal(newChild, taskStartedAt), 1,
+    "newly created descendants include their own activity when item timestamps are absent");
+});
+
+test("a child first discovered after restart retains a current failed AppRun but skips earlier completed history", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock, {operativeActive: false, settings: {intervalMinutes: 5, activityThreshold: 3}});
+  t.after(fixture.cleanup);
+  fixture.projectStore.saveTask({...fixture.task, sourceOrdinal: 2});
+  fixture.conversation.requests.saveIntroduction({taskId: fixture.task.id, projectId, threadId: operativeThreadId,
+    supervisorThreadId: fixture.binding.threadId, state: "sent", text: "Existing workflow context.", messageId: "workflow-context",
+    targetRunId: null, error: null});
+  await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
+
+  const child = makeProjection(makeThread({id: "operative-restarted-child", title: "Reused delegated child"}));
+  child.thread.projectId = "other-project";
+  child.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  child.thread.creationSource = "mcp";
+  const oldRun = appendRun({projection: child, id: "pre-task-child-run", ordinal: 1, status: "completed",
+    messageId: "pre-task-child-input", text: "Earlier work", now: clock.now - 300_000});
+  child.thread.activeRunId = oldRun.id;
+  addCommandActivity(child, "pre-task-child-command", "PRIVATE_PRE_TASK_CHILD_BODY", clock.now - 240_000);
+  const failedRun = appendRun({projection: child, id: "current-failed-child-run", ordinal: 2, status: "failed",
+    messageId: "current-failed-child-input", text: "Current child work failed", now: clock.now - 20_000});
+  failedRun.completedAt = iso(clock.now - 10_000);
+  nodesOf(child).find(node => node.id === failedRun.rootNodeId)!.status = "failed";
+  child.thread.activeRunId = failedRun.id;
+  addCommandActivity(child, "current-failed-child-command", "PRIVATE_CURRENT_FAILED_CHILD_BODY", clock.now - 15_000);
+  child.thread.activeRunId = null;
+  fixture.addChildProjection(child);
+
+  const restarted = fixture.makeRestartedConversation();
+  await restarted.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now + 5_001);
+  const pending = restarted.monitor.pending(projectId, child.thread.id);
+  assert.ok(pending.some(item => item.id === "run:current-failed-child-run" && item.priority === "run_failed"));
+  assert.ok(pending.some(item => item.id === "current-failed-child-command"));
+  assert.equal(pending.some(item => item.id === "pre-task-child-command"), false);
+  assert.equal(restarted.monitor.hasState(projectId, child.thread.id), true);
+});
 
 test("context bootstrap is queued atomically, correlated to its own run, and only then steers the operative run", async t => {
   const clock = { now: baseTime };
@@ -1357,6 +1460,86 @@ test("a 100-item monitor burst freezes and acknowledges all activity while showi
 
   assert.equal(fixture.conversation.requests.requests(projectId).find(item => item.id === request.id)?.state, "completed");
   assert.equal(fixture.conversation.monitor.pending(projectId, operativeThreadId).length, 0, "all 100 frozen metadata items are acknowledged together");
+});
+
+test("completed activity first observed on new and reused children is batched by the owning Supervisor", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock, {operativeActive: false, settings: {intervalMinutes: 5, activityThreshold: 3}});
+  t.after(fixture.cleanup);
+  fixture.projectStore.saveTask({...fixture.task, sourceOrdinal: 2});
+  fixture.conversation.requests.saveIntroduction({taskId: fixture.task.id, projectId, threadId: operativeThreadId,
+    supervisorThreadId: fixture.binding.threadId, state: "sent", text: "Existing workflow context.", messageId: "workflow-context",
+    targetRunId: null, error: null});
+  const child = makeProjection(makeThread({id: "operative-native-child", title: "Native child"}));
+  child.thread.projectId = null;
+  child.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  child.thread.creationSource = "provider";
+  for (let index = 1; index <= 3; index++) turnItemsOf(child).push({id: `child-command-${index}`, threadId: child.thread.id,
+    runId: null, type: "command_execution", status: "completed", ordinal: index, completedAt: iso(clock.now - 30_000 + index),
+    updatedAt: iso(clock.now - 30_000 + index), input: `PRIVATE_CHILD_BODY_${index}`, output: "ok"});
+  fixture.addChildProjection(child);
+
+  const delegated = makeProjection(makeThread({id: "operative-new-delegated-child", title: "New delegated child"}));
+  delegated.thread.projectId = "other-project";
+  delegated.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  delegated.thread.creationSource = "mcp";
+  const delegatedRun = appendRun({projection: delegated, id: "delegated-current-run", ordinal: 1, status: "completed",
+    messageId: "delegated-current-input", text: "Current delegated child work", now: clock.now - 25_000});
+  delegated.thread.activeRunId = delegatedRun.id;
+  addCommandActivity(delegated, "delegated-current-command", "PRIVATE_DELEGATED_BODY", clock.now - 20_000);
+  delegated.thread.activeRunId = null;
+  fixture.addChildProjection(delegated);
+
+  const reused = makeProjection(makeThread({id: "operative-reused-child", title: "Reused delegated child"}));
+  reused.thread.projectId = "other-project";
+  reused.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  reused.thread.creationSource = "mcp";
+  const oldRun = appendRun({projection: reused, id: "reused-old-run", ordinal: 1, status: "completed",
+    messageId: "reused-old-input", text: "Old child work", now: clock.now - 300_000});
+  reused.thread.activeRunId = oldRun.id;
+  addCommandActivity(reused, "reused-old-command", "PRIVATE_OLD_CHILD_BODY", clock.now - 240_000);
+  const currentRun = appendRun({projection: reused, id: "reused-current-run", ordinal: 2, status: "completed",
+    messageId: "reused-current-input", text: "Current child work", now: clock.now - 30_000});
+  reused.thread.activeRunId = currentRun.id;
+  addCommandActivity(reused, "reused-current-command", "PRIVATE_CURRENT_CHILD_BODY", clock.now - 20_000);
+  reused.thread.activeRunId = null;
+  fixture.addChildProjection(reused);
+
+  await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
+  assert.equal(fixture.conversation.monitor.hasState(projectId, child.thread.id), true);
+  assert.equal(fixture.conversation.monitor.pending(projectId, operativeThreadId).length, 0);
+  assert.equal(fixture.conversation.monitor.pending(projectId, child.thread.id).length, 3);
+  assert.equal(fixture.conversation.monitor.pending(projectId, delegated.thread.id).some(item => item.id === "delegated-current-command"), true);
+  assert.equal(fixture.conversation.monitor.pending(projectId, reused.thread.id).some(item => item.id === "reused-current-command"), true);
+  assert.equal(fixture.conversation.monitor.pending(projectId, reused.thread.id).some(item => item.id === "reused-old-command"), false);
+  await fixture.run();
+
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.ok(request?.kind === "review" && request.batch);
+  assert.deepEqual(request.batch.threads.map(item => item.threadId).sort(), [child.thread.id, delegated.thread.id, reused.thread.id].sort());
+  assert.equal(request.batch.threads.find(item => item.threadId === child.thread.id)?.items.length, 3);
+  assert.equal(request.batch.threads.find(item => item.threadId === reused.thread.id)?.items.some(item => item.id === "reused-current-command"), true);
+  assert.equal(request.batch.threads.find(item => item.threadId === reused.thread.id)?.items.some(item => item.id === "reused-old-command"), false);
+  assert.equal(request.batch.threads.find(item => item.threadId === delegated.thread.id)?.items.some(item => item.id === "delegated-current-command"), true);
+  const envelopeStart = request.text.indexOf("UNTRUSTED_MONITOR_ENVELOPE\n") + "UNTRUSTED_MONITOR_ENVELOPE\n".length;
+  const envelopeEnd = request.text.indexOf("\nEND_UNTRUSTED_MONITOR_ENVELOPE", envelopeStart);
+  const envelope = JSON.parse(request.text.slice(envelopeStart, envelopeEnd)) as {threads: Array<{threadId: string; origin: string; parentThreadId: string | null; activityRefs: Array<{sourceThreadId: string; sourceItemId: string | null}>}>};
+  const nativeEnvelope = envelope.threads.find(item => item.threadId === child.thread.id);
+  assert.equal(nativeEnvelope?.origin, "native_child");
+  assert.equal(nativeEnvelope?.parentThreadId, operativeThreadId);
+  assert.equal(nativeEnvelope?.activityRefs[0]?.sourceThreadId, child.thread.id);
+  assert.ok(nativeEnvelope?.activityRefs[0]?.sourceItemId);
+  assert.equal(envelope.threads.find(item => item.threadId === delegated.thread.id)?.origin, "delegated_child");
+  assert.equal(envelope.threads.find(item => item.threadId === reused.thread.id)?.origin, "delegated_child");
+  assert.equal(request.text.includes("PRIVATE_CHILD_BODY"), false);
+  assert.equal(request.text.includes("PRIVATE_DELEGATED_BODY"), false);
+  assert.equal(request.text.includes("PRIVATE_OLD_CHILD_BODY"), false);
+  assert.equal(request.text.includes("PRIVATE_CURRENT_CHILD_BODY"), false);
+  assert.ok(request.text.includes("Contact the operative main for necessary guidance or workflow negotiation using mode steer when its turn is active and mode auto when it is idle."));
+  assert.ok(request.text.includes("Guide native children through their direct parent."));
+  assert.ok(request.text.includes("use mode steer only for a verified active delegated child"));
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId && call.payload.type === "message.dispatch").length, 1);
 });
 
 test("completed history is bounded to the latest 100 while ancient uncertain work remains durable and does not consume capacity", async t => {

@@ -63,6 +63,27 @@ request whose save outcome is unknown is never automatically repeated. Refresh t
 Select a task conversation to see a source-linked objective or its unavailable/
 needs-context state. Matching native proposal/acceptance records save a semantic agreement, not execution evidence.
 
+## Current workflow progress
+
+Select a main conversation to inspect current main and child workflow state in the
+live progress section. This is separate from task proposals and historical accepted
+plans. The view includes native/delegated lineage and lifecycle, current semantic
+steps, overlapping parent contributions, recent Supervisor assessment notes and
+supporting activity links. Missing child workflows and unknown lifecycle remain
+visible without synthesizing successful execution. Load further pages when offered.
+
+Refresh reads state only: it does not wake a chat, save a workflow or accept a plan.
+A refresh failure retains the last successful data with an explicit stale warning.
+After switching main/project, never interpret the old main's data as the new scope.
+Incomplete native scope, incompatible state and unavailable reads require attention;
+they do not mean an empty or completed workflow.
+
+Native idle/no-AppRun mirrors are not child completion. The Supervisor observes
+normal actions/results and supplies the assessment without requiring constant agent
+reports. Its links explain the judgment, not independent proof of semantic success.
+A provider whose exact native workflow-write proof is still unverified can observe
+and guide, but the limitation on saving workflow changes must remain visible.
+
 ## History and chat settings
 
 Activity displays retained earlier supervision records; Recaps and Telegram shows
@@ -94,7 +115,10 @@ marked separately and cannot be edited through the project editor.
 Completed idle scopes settle the same owned chat for later resume. Archived/deleted
 mains also park their companion once native work and children are quiet, retaining
 history and unknown request identities. A native 404 is distinct from a failed read.
-User pins and the retained keep-active choice can still hold settlement.
+User pins and the retained keep-active choice can still hold settlement. An idle
+main's old quiet lifecycle-unknown child can permit guarded standby when no known
+activity/attention/input remains; unknown work stays unresolved. Monitoring continues
+and relevant activity reuses the same companion identity and binding.
 
 
 Grant and session hashes share one private access/login.sqlite3 database. The

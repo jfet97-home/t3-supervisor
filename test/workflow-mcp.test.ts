@@ -10,6 +10,7 @@ type WorkflowJsonSchema = {
   anyOf?: WorkflowJsonSchema[];
   required?: string[];
   properties?: Record<string, WorkflowJsonSchema>;
+  items?: WorkflowJsonSchema;
 };
 
 const postJson = async (url: string, body: unknown): Promise<Response> => fetch(url, {
@@ -55,6 +56,11 @@ test("workflow MCP exposes only read/write tools and serves stateless JSON calls
     const sourceBindingSchema = writeSchema?.properties?.input?.properties?.sourceBinding;
     assert.ok(sourceBindingSchema?.required?.includes("sourceHash"));
     assert.equal(sourceBindingSchema?.properties?.sourceHash?.type, "string");
+    const activityEvidenceSchema = writeSchema?.properties?.input?.properties?.evidence?.items?.properties;
+    for (const key of ["sourceThreadId", "sourceRunId", "sourceMessageId", "sourceItemId"]) {
+      assert.ok(activityEvidenceSchema?.[key]?.anyOf?.some(item => item.type === "string"));
+      assert.ok(activityEvidenceSchema?.[key]?.anyOf?.some(item => item.type === "null"));
+    }
 
     const args = {supervisorThreadId: "sx-current", bindingGeneration: 7};
     const called = await postJson(url, {

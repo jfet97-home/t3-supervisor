@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { WorkflowProgressSnapshotSchema, type WorkflowProgressSnapshot } from "../../src/workflow-progress.js";
 import {
   ProjectSupervisorSnapshot,
   ProjectSupervisorSaveResult,
@@ -20,6 +21,55 @@ export const loadProjectSupervisor = async (projectId: string, signal: AbortSign
   const value = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(await response.json());
   if (signal.aborted || value.projectId !== projectId || value.mainThreadId !== mainThreadId) throw new Error("The Supervisor response belongs to another project.");
   return value;
+};
+
+export type WorkflowProgressPageRequest = {
+  workflowOffset?: number;
+  lineageOffset?: number;
+  limit?: number;
+  expectedBinding?: {threadId: string; generation: number};
+};
+
+export const loadWorkflowProgress = async (
+  projectId: string,
+  mainThreadId: string,
+  signal: AbortSignal,
+  page: WorkflowProgressPageRequest = {},
+): Promise<WorkflowProgressSnapshot> => {
+  const query = new URLSearchParams({projectId, mainThreadId});
+  if (page.workflowOffset !== undefined) query.set("workflowOffset", String(page.workflowOffset));
+  if (page.lineageOffset !== undefined) query.set("lineageOffset", String(page.lineageOffset));
+  if (page.limit !== undefined) query.set("limit", String(page.limit));
+  const response = await fetch(`/api/guidance/workflow-progress?${query}`, {
+    credentials: "omit",
+    headers: sessionHeaders(),
+    signal,
+  });
+  if (!response.ok) throw new Error("Live workflow progress could not be loaded.");
+  const value = Schema.decodeUnknownSync(WorkflowProgressSnapshotSchema)(await response.json());
+  if (signal.aborted || value.projectId !== projectId || value.mainThreadId !== mainThreadId ||
+    value.workflowOffset !== (page.workflowOffset ?? 0) || value.lineageOffset !== (page.lineageOffset ?? 0))
+    throw new Error("The live workflow progress response belongs to another selection or page.");
+  if (page.expectedBinding && value.scope && (value.scope.supervisorThreadId !== page.expectedBinding.threadId ||
+    value.scope.bindingGeneration !== page.expectedBinding.generation))
+    throw new Error("The live workflow progress response belongs to another Supervisor binding.");
+  return value;
+};
+
+export const refreshWorkflowProgressPages = async (
+  projectId: string,
+  mainThreadId: string,
+  signal: AbortSignal,
+  pages: readonly WorkflowProgressPageRequest[],
+): Promise<WorkflowProgressSnapshot[]> => {
+  const requests = pages.length > 0 ? pages : [{workflowOffset: 0, lineageOffset: 0}];
+  const refreshed: WorkflowProgressSnapshot[] = [];
+  for (const page of requests) {
+    const result = await loadWorkflowProgress(projectId, mainThreadId, signal, page);
+    refreshed.push(result);
+    if (result.status !== "ok") break;
+  }
+  return refreshed;
 };
 
 const postProjectSupervisor = async (path: string, input: ProjectSupervisorSaveInput | ProjectSupervisorRetryInput, csrfToken: string) => {

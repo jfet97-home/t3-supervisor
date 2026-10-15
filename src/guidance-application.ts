@@ -17,6 +17,7 @@ import { makeSupervisorRpc, readSupervisorBaseline, readSupervisorThreads, recor
 import { makeGitProbe } from "./git-probe.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
 import { createWorkflowMcpEndpoint } from "./workflow-mcp.js";
+import { workflowProviderDriverFromCatalog } from "./workflow-write-evidence.js";
 
 export const runGuidanceApplication = (
   config: SupervisorConfig,
@@ -76,7 +77,7 @@ export const runGuidanceApplication = (
     const readRpc = makeSupervisorRpc(config.t3Url, readToken.trim());
     const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, readRpc,
       operateToken.trim() ? makeSupervisorRpc(config.t3Url, operateToken.trim()) : null, readSupervisorBaseline(config.t3Url, readToken.trim()), definitions);
-    const workflows = createWorkflowMcpEndpoint(new WorkflowWriteController({
+    const workflowReader = new WorkflowWriteController({
       supervisors: supervisionStore,
       workflows: supervision.workflowStates,
       isEnabled: projectId => supervision.workflowEditingEnabled(projectId),
@@ -84,16 +85,23 @@ export const runGuidanceApplication = (
       native: {
         listThreads: readSupervisorThreads(config.t3Url, readToken.trim(), readRpc),
         projection: async (threadId, signal) => (await Effect.runPromise(t3.projection(threadId), {signal})).projection,
+        resolveProviderDriver: async (instanceId, signal) => {
+          try {
+            const catalog = await readRpc("server.getConfig", {}, signal);
+            return workflowProviderDriverFromCatalog(catalog, instanceId);
+          } catch {return null;}
+        },
         getTurnItem: async (input, signal) => {
           const result = await readRpc("orchestration.getTurnItem", input, signal);
           if (!record(result) || !("item" in result)) throw new Error("workflow_native_item_unavailable");
           return {item: result.item};
         },
       },
-    }));
+    });
+    const workflows = createWorkflowMcpEndpoint(workflowReader);
     runtime.retired = true;
     yield* Effect.acquireRelease(
-      Effect.promise(() => startGuidanceUi(config, runtime, definitions, editor, supervision, workflows)),
+      Effect.promise(() => startGuidanceUi(config, runtime, definitions, editor, supervision, workflows, workflowReader)),
       (ui) => Effect.promise(() => ui.close()),
     );
     yield* Effect.sync(onReady);

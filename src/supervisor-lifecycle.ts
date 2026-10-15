@@ -6,26 +6,56 @@ import type { BindingRecord, ProjectSupervisorStore } from "./project-supervisor
 import type { SupervisorConversation } from "./supervisor-conversation.js";
 import { T3TransportError } from "./t3.js";
 import type { Projection, ThreadInfo } from "./types.js";
+import { resolveSupervisorScope, type SupervisorScopeResolution } from "./supervisor-scope.js";
+import { childOrigin, delegatedLifecycle, directParentChildLifecycle, normalizeLifecycle } from "./supervisor-observation.js";
+import type { WorkflowStateStore } from "./workflow-state-store.js";
 
 export const SUPERVISOR_SETTLE_QUIET_MS = 60_000;
-const terminal = new Set(["completed", "failed", "interrupted", "cancelled", "rolled_back", "idle"]);
+const SUPERVISOR_LIFECYCLE_MAX_PROJECTION_READS = 100;
+const SUPERVISOR_LIFECYCLE_MAX_CACHE_REFRESHES = 20;
+const SUPERVISOR_LIFECYCLE_MAX_CACHE_ENTRIES = 10_000;
+const SUPERVISOR_LIFECYCLE_MAX_SCAN_OFFSETS = 256;
 export const userKeepsSupervisorActive = (thread: ThreadInfo): boolean => Boolean(thread.pinnedAt || thread.autoSettleDisabledAt || thread.settledOverride === "active");
 export const projectionNeedsAttention = (projection: Projection, shell?: ThreadInfo): boolean =>
-  projectionHasOngoingWork(projection, shell) || Boolean(projection.thread.activeRunId || projection.thread.pendingRuntimeRequest) ||
-  (projection.subagents ?? []).some(child => !terminal.has(String(child.status)));
+  projectionHasOngoingWork(projection, shell) || Boolean(projection.thread.activeRunId || projection.thread.pendingRuntimeRequest);
 const activityVersion = (projection: Projection) => fingerprint({
   archivedAt: projection.thread.archivedAt ?? null,
   deletedAt: projection.thread.deletedAt ?? null,
   updatedAt: projection.thread.updatedAt,
   runs: projection.runs.map(run => [run.id, run.status, run.completedAt]),
   messages: projection.messages.map(message => [message.id, message.updatedAt, message.streaming]),
-  items: projection.turnItems?.map(item => [item.id, item.status, item.updatedAt]),
+  items: projection.turnItems?.map(item => [item.id, item.type, item.status, item.updatedAt, item.childThreadId, item.providerThreadId]),
+  subagents: projection.subagents?.map(item => [item.childThreadId, item.providerThreadId, item.status, item.completedAt]),
 });
+const lifecycleShellVersion = (thread: ThreadInfo): string => fingerprint({
+  id: thread.id,
+  parentThreadId: thread.lineage.parentThreadId,
+  relationshipToParent: thread.lineage.relationshipToParent,
+  creationSource: thread.creationSource ?? null,
+  updatedAt: thread.updatedAt ?? null,
+  archivedAt: thread.archivedAt ?? null,
+  deletedAt: thread.deletedAt ?? null,
+  latestRunId: thread.latestRunId ?? null,
+  activeRunId: thread.activeRunId ?? null,
+  activityRunStatus: thread.activityRunStatus ?? null,
+  latestRunCompletedAt: thread.latestRunCompletedAt ?? null,
+  pendingRuntimeRequest: thread.pendingRuntimeRequest ?? null,
+  pendingBackgroundTasks: thread.pendingBackgroundTasks ?? null,
+  pullRequests: thread.pullRequests ?? null,
+});
+type QuietChildObservation = {childShellVersion: string; parentShellVersion: string; parentProjectionVersion: string; resultVersion: string};
+
+const activeDetachedChildWork = (projection: Projection): boolean => (projection.turnItems ?? []).some(item =>
+  item.threadId === projection.thread.id && item.runId === null && (item.streaming === true ||
+  ["preparing", "queued", "starting", "running", "waiting"].includes(String(item.status))));
 
 /** Parks only owned idle conversations, retaining their identity for normal native dispatch. */
 export class SupervisorLifecycle {
+  private readonly childObservations = new Map<string, QuietChildObservation>();
+  private readonly childScanOffsets = new Map<string, number>();
   constructor(readonly store: ProjectSupervisorStore, readonly conversation: SupervisorConversation,
-    readonly projection: (threadId: string, signal: AbortSignal) => Promise<Projection>, readonly rpc: SupervisorRpc | null) {}
+    readonly projection: (threadId: string, signal: AbortSignal) => Promise<Projection>, readonly rpc: SupervisorRpc | null,
+    readonly workflows?: WorkflowStateStore) {}
 
   /** Returns a confirmed missing main as null; every other unreadable or mismatched scope fails closed. */
   async readMain(binding: BindingRecord, signal: AbortSignal): Promise<Projection | null> {
@@ -39,87 +69,152 @@ export class SupervisorLifecycle {
     return projection;
   }
 
-  private async relatedChildren(binding: BindingRecord, main: Projection | null, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<{blocked: boolean; version: string}> {
-    if (!main || main.thread.deletedAt) return {blocked: false, version: fingerprint("deleted-main")};
-    const shells = new Map(threads.map(thread => [thread.id, thread]));
-    const projections = new Map<string, Projection>();
-    if (main) {shells.set(main.thread.id, main.thread);projections.set(main.thread.id, main);}
-    const candidates = threads.filter(thread => thread.id !== binding.mainThreadId && thread.projectId === binding.projectId &&
-      !thread.deletedAt && thread.lineage.relationshipToParent === "subagent");
-    const relatedIds = new Set<string>();
-    const missingAncestor = Symbol("missing-ancestor");
-    const readShell = async (threadId: string): Promise<ThreadInfo | typeof missingAncestor | null> => {
-      const known = shells.get(threadId);
-      if (known) return known.deletedAt ? missingAncestor : known;
+  private workflowAttention(binding: BindingRecord, threadIds: readonly string[]): {blocked: boolean; version: string} {
+    if (!this.workflows) return {blocked: false, version: "workflow-store-unavailable-in-test"};
+    const result = this.workflows.hasNeedsAttention(binding.projectId, binding.mainThreadId, threadIds);
+    return {blocked: result.status !== "complete" || result.needsAttention, version: fingerprint(result)};
+  }
+
+  private mainNeedsAttention(binding: BindingRecord, supervisor: Projection, main: Projection | null, closedMain: boolean, source?: ThreadInfo): boolean {
+    if (binding.manualKeepActive || userKeepsSupervisorActive(supervisor.thread) || this.store.modelState(binding).pending || projectionNeedsAttention(supervisor)) return true;
+    if (closedMain) return Boolean(main && projectionNeedsAttention(main, source ?? main.thread));
+    const tasks = this.store.tasksFor(binding);
+    const requests = this.conversation.requests.requests(binding.projectId, binding.threadId);
+    const status = this.conversation.status(binding.projectId, binding.threadId);
+    const blocked = !source || status.state !== "idle" || status.pendingItems > 0 || this.conversation.requests.reviewMisses(binding.threadId) > 0 ||
+      tasks.length === 0 || tasks.some(task => task.status !== "inferred" || task.definitionReview?.status === "checking" ||
+        task.definitionReview?.status === "revert_requested" || task.agreement?.status === "stale") ||
+      this.conversation.requests.introductions(binding.projectId).some(intro => intro.supervisorThreadId === binding.threadId && intro.state !== "sent") ||
+      requests.some(request => ["prepared", "sending", "waiting", "uncertain"].includes(request.state) ||
+        request.state === "failed" && request.kind === "review" && !request.failureAcknowledged);
+    const latest = main ? [...main.runs].sort((left, right) => right.ordinal - left.ordinal)[0] : undefined;
+    return blocked || !latest || latest.status !== "completed" || !main || projectionNeedsAttention(main, source ?? main.thread);
+  }
+
+  private scopeFor(binding: BindingRecord, main: Projection | null, threads: readonly ThreadInfo[]): SupervisorScopeResolution | null {
+    if (!main || main.thread.deletedAt) return null;
+    const nativeThreads = threads.some(thread => thread.id === main.thread.id) ? threads : [...threads, main.thread];
+    return resolveSupervisorScope(nativeThreads, binding.projectId, binding.mainThreadId, this.store.ownedIds);
+  }
+
+  private childObservationKey(binding: BindingRecord, childThreadId: string): string {
+    return JSON.stringify([binding.projectId, binding.mainThreadId, childThreadId]);
+  }
+
+  private rememberChildObservation(key: string, value: QuietChildObservation): void {
+    this.childObservations.delete(key);
+    this.childObservations.set(key, value);
+    while (this.childObservations.size > SUPERVISOR_LIFECYCLE_MAX_CACHE_ENTRIES)
+      this.childObservations.delete(this.childObservations.keys().next().value!);
+  }
+
+  private rememberScanOffset(scopeKey: string, offset: number): void {
+    this.childScanOffsets.delete(scopeKey);
+    this.childScanOffsets.set(scopeKey, offset);
+    while (this.childScanOffsets.size > SUPERVISOR_LIFECYCLE_MAX_SCAN_OFFSETS)
+      this.childScanOffsets.delete(this.childScanOffsets.keys().next().value!);
+  }
+
+  private async relatedChildren(binding: BindingRecord, main: Projection | null, threads: readonly ThreadInfo[], scope: SupervisorScopeResolution | null,
+    signal: AbortSignal): Promise<{blocked: boolean; version: string; threadIds: string[]}> {
+    if (!main || main.thread.deletedAt) return {blocked: false, version: fingerprint("deleted-main"), threadIds: [binding.mainThreadId]};
+    if (!scope || !scope.complete || !scope.main || !scope.allowedIds.has(scope.main.id))
+      return {blocked: true, version: fingerprint(["incomplete-child-scope", scope?.issues ?? []]), threadIds: scope ? [...scope.allowedIds] : [binding.mainThreadId]};
+    const projections = new Map<string, Projection>([[main.thread.id, main]]);
+    const children = scope.descendants.filter(child => scope.allowedIds.has(child.id) && child.lineage.relationshipToParent !== "fork");
+    const scopeKey = JSON.stringify([binding.projectId, binding.mainThreadId]);
+    const start = children.length ? (this.childScanOffsets.get(scopeKey) ?? 0) % children.length : 0;
+    const ordered = [...children.slice(start), ...children.slice(0, start)];
+    const observed = new Map<string, readonly unknown[]>();
+    const stale: ThreadInfo[] = [];
+    for (const child of ordered) {
+      const parentId = child.lineage.parentThreadId;
+      const parentInfo = parentId ? scope.byId.get(parentId) : null;
+      if (!parentId || !scope.allowedIds.has(parentId) || !parentInfo)
+        return {blocked: true, version: fingerprint(["child_parent_outside_scope", child.id]), threadIds: [...scope.allowedIds]};
+      const cacheKey = this.childObservationKey(binding, child.id);
+      const cached = this.childObservations.get(cacheKey);
+      const parentProjection = projections.get(parentId);
+      const parentProjectionVersion = parentProjection ? activityVersion(parentProjection) : null;
+      const current = cached && cached.childShellVersion === lifecycleShellVersion(child) &&
+        cached.parentShellVersion === lifecycleShellVersion(parentInfo) &&
+        (parentProjectionVersion === null || cached.parentProjectionVersion === parentProjectionVersion) ? cached : null;
+      if (current && !stale.includes(child)) {
+        this.childObservations.delete(cacheKey);
+        this.childObservations.set(cacheKey, current);
+        observed.set(child.id, [child.id, current.resultVersion]);
+      } else stale.push(child);
+    }
+    const refreshCandidates = [...stale, ...ordered.filter(child => observed.has(child.id)).slice(0, SUPERVISOR_LIFECYCLE_MAX_CACHE_REFRESHES)];
+    let projectionReads = 0;
+    let scanned = 0;
+    const readProjection = async (threadId: string): Promise<Projection | null | "budget"> => {
       const existing = projections.get(threadId);
-      if (existing) return existing.thread.deletedAt ? missingAncestor : existing.thread;
-      let projection: Projection;
-      try {projection = await this.projection(threadId, signal);}
-      catch (cause) {
-        if (cause instanceof T3TransportError && cause.httpStatus === 404) return missingAncestor;
+      if (existing) return existing;
+      if (projectionReads >= SUPERVISOR_LIFECYCLE_MAX_PROJECTION_READS) return "budget";
+      projectionReads++;
+      try {
+        const value = await this.projection(threadId, signal);
+        if (value.thread.id !== threadId) return null;
+        projections.set(threadId, value);
+        return value;
+      } catch (cause) {
+        if (cause instanceof T3TransportError && cause.httpStatus === 404) return null;
         throw cause;
       }
-      if (projection.thread.id !== threadId || projection.thread.projectId !== binding.projectId) return null;
-      shells.set(threadId, projection.thread);projections.set(threadId, projection);
-      return projection.thread.deletedAt ? missingAncestor : projection.thread;
     };
-    const family = async (candidate: ThreadInfo): Promise<"child" | "other" | "unknown"> => {
-      let current = candidate;
-      const seen = new Set<string>();
-      const path: string[] = [];
-      for (let depth = 0; depth < 64; depth++) {
-        if (current.projectId !== binding.projectId) return "unknown";
-        if (current.lineage.relationshipToParent !== "subagent") return "other";
-        const parentId = current.lineage.parentThreadId;
-        if (!parentId || seen.has(current.id)) return "unknown";
-        path.push(current.id);
-        if (parentId === binding.mainThreadId) {for (const id of path) relatedIds.add(id);return "child";}
-        seen.add(current.id);
-        const parent = await readShell(parentId);
-        if (parent === missingAncestor) return "other";
-        if (!parent) return "unknown";
-        current = parent;
+    let incomplete = false;
+    for (const child of refreshCandidates) {
+      if (signal.aborted) throw new Error("child_lifecycle_observation_aborted");
+      const parentId = child.lineage.parentThreadId;
+      if (!parentId) return {blocked: true, version: fingerprint(["child_parent_missing", child.id]), threadIds: [...scope.allowedIds]};
+      let parentProjection = projections.get(parentId) ?? null;
+      if (!parentProjection) {
+        const read = await readProjection(parentId);
+        if (read === "budget") {incomplete = true;break;}
+        parentProjection = read;
       }
-      return "unknown";
-    };
-    for (const candidate of candidates) {
-      const membership = await family(candidate);
-      if (membership === "unknown") return {blocked: true, version: fingerprint(["unknown-child-ancestry", candidate.id])};
-      if (membership === "child") relatedIds.add(candidate.id);
+      if (!parentProjection) return {blocked: true, version: fingerprint(["parent_projection_unavailable", child.id]), threadIds: [...scope.allowedIds]};
+      const parentInfo = scope.byId.get(parentId);
+      if (parentProjection.thread.id !== parentId || !parentInfo || parentId !== binding.mainThreadId && (parentProjection.thread.lineage.relationshipToParent !== "subagent" ||
+        parentProjection.thread.lineage.parentThreadId !== parentInfo.lineage.parentThreadId))
+        return {blocked: true, version: fingerprint(["parent_lineage_mismatch", child.id]), threadIds: [...scope.allowedIds]};
+      const parentRecord = directParentChildLifecycle(parentProjection, child.id);
+      let childProjection: Projection | null = null;
+      if (!child.deletedAt) {
+        const read = await readProjection(child.id);
+        if (read === "budget") {incomplete = true;break;}
+        childProjection = read;
+      }
+      if (!childProjection && !child.deletedAt && !child.archivedAt)
+        return {blocked: true, version: fingerprint(["child_projection_unavailable", child.id]), threadIds: [...scope.allowedIds]};
+      if (childProjection && (childProjection.thread.id !== child.id || childProjection.thread.lineage.relationshipToParent !== "subagent" ||
+        childProjection.thread.lineage.parentThreadId !== parentId))
+        return {blocked: true, version: fingerprint(["child_scope_mismatch", child.id]), threadIds: [...scope.allowedIds]};
+      if (childProjection) projections.set(child.id, childProjection);
+      if (childProjection && (projectionNeedsAttention(childProjection, childProjection.thread) || activeDetachedChildWork(childProjection)))
+        return {blocked: true, version: fingerprint([child.id, activityVersion(childProjection), parentRecord?.status ?? null]), threadIds: [...scope.allowedIds]};
+
+      const origin = childOrigin(child, parentProjection ?? undefined);
+      const lifecycle = origin === "native_child"
+        ? parentRecord ? normalizeLifecycle(parentRecord.status) : {lifecycle: "unknown" as const, detail: null}
+        : origin === "delegated_child" && childProjection
+          ? delegatedLifecycle(childProjection.thread, childProjection)
+          : {lifecycle: "unknown" as const, detail: null};
+      if (lifecycle.lifecycle === "running" || parentRecord && normalizeLifecycle(parentRecord.status).lifecycle === "running")
+        return {blocked: true, version: fingerprint([child.id, activityVersion(childProjection ?? {thread: child, runs: [], messages: []}), parentRecord?.status ?? null]), threadIds: [...scope.allowedIds]};
+      const parentVersion = activityVersion(parentProjection);
+      const childVersion = activityVersion(childProjection ?? {thread: child, runs: [], messages: []});
+      const resultVersion = fingerprint([child.id, childVersion, parentRecord?.status ?? null, parentVersion]);
+      this.rememberChildObservation(this.childObservationKey(binding, child.id), {childShellVersion: lifecycleShellVersion(child),
+        parentShellVersion: lifecycleShellVersion(parentInfo), parentProjectionVersion: parentVersion, resultVersion});
+      observed.set(child.id, [child.id, resultVersion]);
+      scanned++;
     }
-    const relatedProjections: Projection[] = [];
-    for (const childId of [...relatedIds].sort()) {
-      let projection = projections.get(childId);
-      if (!projection) {
-        try {projection = await this.projection(childId, signal);}
-        catch (cause) {
-          if (cause instanceof T3TransportError && cause.httpStatus === 404) continue;
-          throw cause;
-        }
-        if (projection.thread.id !== childId || projection.thread.projectId !== binding.projectId) return {blocked: true, version: fingerprint(["child-scope-mismatch", childId])};
-        projections.set(childId, projection);shells.set(childId, projection.thread);
-      }
-      const child = projection.thread;
-      relatedProjections.push(projection);
-      if (projectionNeedsAttention(projection, projection.thread)) return {blocked: true, version: fingerprint([child.id, activityVersion(projection)])};
-      if (projection.runs.length === 0) {
-        const parentId = child.lineage.parentThreadId;
-        let parent = parentId ? projections.get(parentId) : null;
-        if (parentId && !parent) {
-          try {parent = await this.projection(parentId, signal);}
-          catch (cause) {
-            if (!(cause instanceof T3TransportError && cause.httpStatus === 404)) throw cause;
-          }
-          if (parent && (parent.thread.id !== parentId || parent.thread.projectId !== binding.projectId)) return {blocked: true, version: fingerprint(["parent-scope-mismatch", parentId])};
-          if (parent) projections.set(parentId, parent);
-        }
-        if (!(parent?.subagents ?? []).some(task => task.childThreadId === child.id && terminal.has(String(task.status)))) {
-          return {blocked: true, version: fingerprint(["unconfirmed-runless-child", child.id])};
-        }
-      }
-    }
-    const version = fingerprint(relatedProjections.map(projection => [projection.thread.id, activityVersion(projection)] as const).sort(([a], [b]) => a.localeCompare(b)));
-    return {blocked: false, version};
+    if (children.length) this.rememberScanOffset(scopeKey, (start + Math.max(1, scanned)) % children.length);
+    const allObserved = children.every(child => observed.has(child.id));
+    const orderedVersion = children.map(child => observed.get(child.id) ?? [child.id, "not-yet-observed"]);
+    return {blocked: incomplete || !allObserved, version: fingerprint(orderedVersion), threadIds: [...scope.allowedIds]};
   }
 
   async check(input: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal, now = Date.now()): Promise<void> {
@@ -136,36 +231,31 @@ export class SupervisorLifecycle {
       if (binding.settlement && binding.settlement.state !== "settled") this.store.setBinding({...binding, settlement: {...binding.settlement, state: "settled"}});
       return;
     }
+    if (this.mainNeedsAttention(binding, supervisor, null, true)) {this.clearQuiet(binding);return;}
     let main: Projection | null;
     try {main = await this.readMain(binding, signal);}
     catch {this.clearQuiet(binding);return;}
     const closedMain = !main || Boolean(main.thread.archivedAt || main.thread.deletedAt);
     const source = threads.find(thread => thread.id === input.mainThreadId && thread.projectId === input.projectId);
-    let childScopes: {blocked: boolean; version: string};
-    try {childScopes = await this.relatedChildren(binding, main, threads, signal);}
+    if (this.mainNeedsAttention(binding, supervisor, main, closedMain, source)) {this.clearQuiet(binding);return;}
+    const scope = this.scopeFor(binding, main, threads);
+    if (main && !main.thread.deletedAt && (!scope || !scope.complete || !scope.main || !scope.allowedIds.has(scope.main.id))) {
+      this.clearQuiet(binding);return;
+    }
+    const threadIds = scope ? [...scope.allowedIds] : [binding.mainThreadId];
+    const monitorPending = this.conversation.monitor.hasPendingReviewableActivity(binding.projectId, threadIds);
+    const workflowAttention = this.workflowAttention(binding, threadIds);
+    if (monitorPending.status !== "complete" || monitorPending.pending || workflowAttention.blocked) {this.clearQuiet(binding);return;}
+    let childScopes: {blocked: boolean; version: string; threadIds: string[]};
+    try {childScopes = await this.relatedChildren(binding, main, threads, scope, signal);}
     catch {this.clearQuiet(binding);return;}
     if (childScopes.blocked) {this.clearQuiet(binding);return;}
-    const version = fingerprint({main: main ? activityVersion(main) : "missing", supervisor: activityVersion(supervisor), children: childScopes.version});
+    const version = fingerprint({main: main ? activityVersion(main) : "missing", supervisor: activityVersion(supervisor), children: childScopes.version,
+      workflows: workflowAttention.version});
     if (binding.settlement && ["pending", "uncertain"].includes(binding.settlement.state) && binding.settlement.activityVersion !== version) {
       this.store.setBinding({...binding, quietSince: null, settlement: {...binding.settlement, state: "superseded"}});return;
     }
     if (binding.settlement?.state === "uncertain" && ((binding.settlement.attempts ?? 0) >= 3 || now - binding.settlement.observedAt < SUPERVISOR_SETTLE_QUIET_MS)) return;
-    if (binding.manualKeepActive || userKeepsSupervisorActive(supervisor.thread) || this.store.modelState(binding).pending || projectionNeedsAttention(supervisor)) {
-      this.clearQuiet(binding);return;
-    }
-    if (!closedMain) {
-      const tasks = this.store.tasksFor(binding);
-      const requests = this.conversation.requests.requests(binding.projectId, binding.threadId);
-      const status = this.conversation.status(binding.projectId, binding.threadId);
-      const blocked = !source || !["idle"].includes(status.state) || status.pendingItems > 0 || this.conversation.requests.reviewMisses(binding.threadId) > 0 ||
-        tasks.length === 0 || tasks.some(task => task.status !== "inferred" || task.definitionReview?.status === "checking" || task.definitionReview?.status === "revert_requested" || task.agreement?.status === "stale") ||
-        this.conversation.requests.introductions(binding.projectId).some(intro => intro.supervisorThreadId === binding!.threadId && intro.state !== "sent") ||
-        requests.some(request => ["prepared", "sending", "waiting", "uncertain"].includes(request.state) || request.state === "failed" && request.kind === "review" && !request.failureAcknowledged);
-      const latest = [...main!.runs].sort((a, b) => b.ordinal - a.ordinal)[0];
-      if (blocked || !latest || latest.status !== "completed" || projectionNeedsAttention(main!, source ?? main!.thread)) {this.clearQuiet(binding);return;}
-    } else if (main && projectionNeedsAttention(main, source ?? main.thread)) {
-      this.clearQuiet(binding);return;
-    }
     if (binding.quietFingerprint !== version || binding.quietSince == null) {
       this.store.setBinding({...binding, quietFingerprint: version, quietSince: now});return;
     }
@@ -178,11 +268,22 @@ export class SupervisorLifecycle {
     catch {this.clearQuiet(binding);return;}
     if (supervisor.thread.id !== binding.threadId || supervisor.thread.projectId !== binding.projectId || supervisor.thread.archivedAt || supervisor.thread.deletedAt) {this.clearQuiet(binding);return;}
     const freshClosedMain = !freshMain || Boolean(freshMain.thread.archivedAt || freshMain.thread.deletedAt);
-    let freshChildren: {blocked: boolean; version: string};
-    try {freshChildren = await this.relatedChildren(binding, freshMain, threads, signal);}
+    if (this.mainNeedsAttention(binding, supervisor, freshMain, freshClosedMain, source)) {this.clearQuiet(binding);return;}
+    const freshScope = this.scopeFor(binding, freshMain, threads);
+    if (freshMain && !freshMain.thread.deletedAt && (!freshScope || !freshScope.complete || !freshScope.main || !freshScope.allowedIds.has(freshScope.main.id))) {
+      this.clearQuiet(binding);return;
+    }
+    const freshThreadIds = freshScope ? [...freshScope.allowedIds] : [binding.mainThreadId];
+    const freshMonitorPending = this.conversation.monitor.hasPendingReviewableActivity(binding.projectId, freshThreadIds);
+    const freshWorkflowAttention = this.workflowAttention(binding, freshThreadIds);
+    if (freshMonitorPending.status !== "complete" || freshMonitorPending.pending || freshWorkflowAttention.blocked) {this.clearQuiet(binding);return;}
+    let freshChildren: {blocked: boolean; version: string; threadIds: string[]};
+    try {freshChildren = await this.relatedChildren(binding, freshMain, threads, freshScope, signal);}
     catch {this.clearQuiet(binding);return;}
-    if (freshClosedMain !== closedMain || freshChildren.blocked || fingerprint({main: freshMain ? activityVersion(freshMain) : "missing", supervisor: activityVersion(supervisor), children: freshChildren.version}) !== version ||
-      freshMain && projectionNeedsAttention(freshMain, source ?? freshMain.thread) || projectionNeedsAttention(supervisor) || userKeepsSupervisorActive(supervisor.thread)) {
+    if (freshClosedMain !== closedMain || freshChildren.blocked ||
+      fingerprint({main: freshMain ? activityVersion(freshMain) : "missing", supervisor: activityVersion(supervisor), children: freshChildren.version,
+        workflows: freshWorkflowAttention.version}) !== version ||
+      freshMain && projectionNeedsAttention(freshMain, source ?? freshMain.thread)) {
       this.clearQuiet(binding);return;
     }
     binding = this.store.binding(binding.projectId, binding.mainThreadId)!;

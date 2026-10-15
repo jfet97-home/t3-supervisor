@@ -9,7 +9,7 @@ import type { Projection, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import type { WorkflowAgreementImport, WorkflowOwner } from "../src/workflow-state-contract.js";
 import { WorkflowWriteController, workflowReadToolDefinition, workflowWriteToolDefinition, type WorkflowApplyPatch, type WorkflowNativeAccess } from "../src/workflow-write-controller.js";
-import { workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, workflowTurnItemDetailMaxBytes } from "../src/workflow-write-evidence.js";
+import { workflowProviderDriverFromCatalog, workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, workflowTurnItemDetailMaxBytes, workflowWriteDriverSupport } from "../src/workflow-write-evidence.js";
 import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo } from "../src/project-supervisor-contract.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
@@ -224,6 +224,7 @@ const installEvidence = (fixture: Fixture, args: Record<string, unknown>, option
   parentItemId?: string | null;
   runId?: string;
   providerThreadId?: string;
+  providerInstanceId?: string;
   appRunOrdinal?: number;
   snapshotInput?: unknown;
   driver?: string;
@@ -254,7 +255,7 @@ const installEvidence = (fixture: Fixture, args: Record<string, unknown>, option
   fixture.details.set(itemId, detail);
   fixture.projection.runs = [{id: runId, ordinal: options.appRunOrdinal ?? 1, status: options.runStatus ?? "completed", requestedAt: "2026-10-14T00:00:00.000Z",
     startedAt: "2026-10-14T00:00:00.000Z", completedAt: "2026-10-14T00:00:01.000Z", rootNodeId,
-    threadId: fixture.supervisorThreadId, providerThreadId}];
+    threadId: fixture.supervisorThreadId, providerThreadId, ...(options.providerInstanceId ? {providerInstanceId: options.providerInstanceId} : {})}];
   fixture.projection.nodes = [
     {id: rootNodeId, kind: "root_turn", threadId: fixture.supervisorThreadId, runId, rootNodeId,
       providerThreadId, parentNodeId: null, status: options.rootNodeStatus ?? "completed"},
@@ -494,20 +495,131 @@ test("rolled-back runs, roots, and tool nodes cannot authorize an old matching t
   }
 });
 
-test("only verified Codex native item references authorize workflow writes", async () => {
+test("unsupported native drivers return a structured proof gap and keep workflow writes closed", async () => {
   for (const driver of ["claudeAgent", "future-provider"]) {
     const fixture = await makeFixture();
     try {
       const args = ensureArgs(fixture, `unsupported-driver-${driver}`, "Require a verified native source.");
       installEvidence(fixture, args, {driver});
       assert.deepEqual(await fixture.controller.write(args), {
-        status: "denied", operationId: args.operationId, reason: "native_driver_unverified",
+        status: "denied", operationId: args.operationId, reason: "provider_write_proof_unverified", providerDriver: driver,
       });
       assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
     } finally {await closeFixture(fixture);}
   }
   assert.match(workflowReadToolDefinition.description, /strong native item references/u);
-  assert.match(workflowWriteToolDefinition.description, /Never include source run or message claims/u);
+  assert.match(workflowWriteToolDefinition.description, /sourceItemId/u);
+  assert.deepEqual(workflowWriteDriverSupport("codex"), {driverKind: "codex", status: "verified"});
+  assert.deepEqual(workflowWriteDriverSupport("claudeAgent"), {driverKind: "claudeAgent", status: "provider_write_proof_unverified"});
+  assert.deepEqual(workflowWriteDriverSupport("future-provider"), {driverKind: "future-provider", status: "provider_write_proof_unverified"});
+  assert.equal(workflowProviderDriverFromCatalog({providers: [{instanceId: "workspace-codex", driver: "codex"}]}, "workspace-codex"), "codex");
+  assert.equal(workflowProviderDriverFromCatalog({providers: [{instanceId: "workspace-codex", driverKind: "codex"}]}, "workspace-codex"), null);
+  assert.equal(workflowProviderDriverFromCatalog({providers: [
+    {instanceId: "workspace-codex", driver: "codex"}, {instanceId: "workspace-codex", driver: "claudeAgent"},
+  ]}, "workspace-codex"), null);
+});
+
+test("a live unsupported Supervisor driver reports the proof gap before any tool item is visible", async () => {
+  const fixture = await makeFixture();
+  try {
+    const instanceId = "custom-claude-instance";
+    fixture.projection.thread.modelSelection = {instanceId, model: "claude-sonnet", options: []};
+    const resolved: string[] = [];
+    fixture.native.resolveProviderDriver = async value => {resolved.push(value);return "claudeAgent";};
+    fixture.projection.turnItems = [];
+    const args = ensureArgs(fixture, "unsupported-before-item", "Report the provider proof gap explicitly.");
+    assert.deepEqual(await fixture.controller.write(args), {
+      status: "denied", operationId: args.operationId, reason: "provider_write_proof_unverified", providerDriver: "claudeAgent",
+    });
+    assert.deepEqual(resolved, [instanceId]);
+    assert.deepEqual(fixture.detailCalls, []);
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
+  } finally {await closeFixture(fixture);}
+});
+
+test("a sole own-main active AppRun identifies its provider before a tool item is visible", async () => {
+  const fixture = await makeFixture();
+  try {
+    const activeInstanceId = "active-claude-instance";
+    fixture.projection.thread.modelSelection = {instanceId: "next-codex-selection", model: "gpt-6-luna", options: []};
+    fixture.projection.runs = [{id: "active-claude-run", threadId: fixture.supervisorThreadId, providerThreadId: "active-provider-thread",
+      providerInstanceId: activeInstanceId, ordinal: 9, status: "running", requestedAt: "2026-10-15T00:00:00.000Z",
+      startedAt: "2026-10-15T00:00:01.000Z", completedAt: null, rootNodeId: "active-root"}];
+    fixture.projection.nodes = [{id: "active-root", threadId: fixture.supervisorThreadId, runId: "active-claude-run",
+      rootNodeId: "active-root", providerThreadId: "active-provider-thread", parentNodeId: null, kind: "root_turn", status: "running"}];
+    fixture.projection.turnItems = [];
+    const resolved: string[] = [];
+    fixture.native.resolveProviderDriver = async value => {resolved.push(value);return value === activeInstanceId ? "claudeAgent" : "codex";};
+    const args = ensureArgs(fixture, "unsupported-active-provider", "Report the active provider proof gap.");
+    assert.deepEqual(await fixture.controller.write(args), {
+      status: "denied", operationId: args.operationId, reason: "provider_write_proof_unverified", providerDriver: "claudeAgent",
+    });
+    assert.deepEqual(resolved, [activeInstanceId]);
+    assert.deepEqual(fixture.detailCalls, []);
+  } finally {await closeFixture(fixture);}
+});
+
+test("ambiguous own-main active AppRuns do not use the next thread selection for provider feedback", async () => {
+  const fixture = await makeFixture();
+  try {
+    fixture.projection.thread.modelSelection = {instanceId: "next-claude-selection", model: "claude-sonnet", options: []};
+    fixture.projection.runs = ["provider-a", "provider-b"].map((providerThreadId, index) => ({
+      id: `active-run-${index}`, threadId: fixture.supervisorThreadId, providerThreadId, providerInstanceId: providerThreadId,
+      ordinal: index + 1, status: "running", requestedAt: "2026-10-15T00:00:00.000Z", startedAt: "2026-10-15T00:00:01.000Z",
+      completedAt: null, rootNodeId: `active-root-${index}`,
+    }));
+    fixture.projection.nodes = fixture.projection.runs.map(run => ({id: run.rootNodeId, threadId: fixture.supervisorThreadId,
+      runId: run.id, rootNodeId: run.rootNodeId, providerThreadId: run.providerThreadId, parentNodeId: null,
+      kind: "root_turn", status: "running"}));
+    fixture.projection.turnItems = [];
+    const resolved: string[] = [];
+    fixture.native.resolveProviderDriver = async value => {resolved.push(value);return "claudeAgent";};
+    const args = ensureArgs(fixture, "ambiguous-active-provider", "Wait for attributable native proof.");
+    assert.deepEqual(await fixture.controller.write(args), {
+      status: "pending", operationId: args.operationId, reason: "native_evidence_not_visible", retryable: true,
+    });
+    assert.deepEqual(resolved, []);
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
+  } finally {await closeFixture(fixture);}
+});
+
+test("a custom provider instance mapped to Codex still needs exact native Codex evidence", async () => {
+  const fixture = await makeFixture();
+  try {
+    const instanceId = "codex-run-instance";
+    fixture.projection.thread.modelSelection = {instanceId: "claude-next-selection", model: "claude-sonnet", options: []};
+    const resolved: string[] = [];
+    fixture.native.resolveProviderDriver = async value => {resolved.push(value);return value === instanceId ? "codex" : "claudeAgent";};
+    const args = ensureArgs(fixture, "custom-instance-exact-proof", "Use the exact submitted native input.");
+    const itemId = installEvidence(fixture, args, {providerInstanceId: instanceId, runStatus: "running", status: "running"});
+    assert.equal((await fixture.controller.write(args)).status, "created");
+    assert.deepEqual(resolved, [instanceId]);
+    assert.deepEqual(fixture.detailCalls, [itemId]);
+  } finally {await closeFixture(fixture);}
+});
+
+test("an unknown live catalog grants nothing and leaves exact native proof as the only successful path", async () => {
+  const pendingFixture = await makeFixture();
+  try {
+    pendingFixture.projection.thread.modelSelection = {instanceId: "catalog-unavailable-instance", model: "unknown-model", options: []};
+    pendingFixture.native.resolveProviderDriver = async () => null;
+    pendingFixture.projection.turnItems = [];
+    const args = ensureArgs(pendingFixture, "unknown-catalog-empty", "Do not write without visible proof.");
+    assert.deepEqual(await pendingFixture.controller.write(args), {
+      status: "pending", operationId: args.operationId, reason: "native_evidence_not_visible", retryable: true,
+    });
+    assert.equal(pendingFixture.workflows.get(pendingFixture.projectId, pendingFixture.mainThreadId), null);
+  } finally {await closeFixture(pendingFixture);}
+
+  const exactFixture = await makeFixture();
+  try {
+    exactFixture.projection.thread.modelSelection = {instanceId: "catalog-unavailable-instance", model: "unknown-model", options: []};
+    exactFixture.native.resolveProviderDriver = async () => null;
+    const args = ensureArgs(exactFixture, "unknown-catalog-exact-proof", "Require the exact Codex item record.");
+    const itemId = installEvidence(exactFixture, args, {driver: "codex", providerInstanceId: "catalog-unavailable-instance"});
+    assert.equal((await exactFixture.controller.write(args)).status, "created");
+    assert.deepEqual(exactFixture.detailCalls, [itemId]);
+  } finally {await closeFixture(exactFixture);}
 });
 
 test("a child-thread tool record cannot authorize a write for the bound Supervisor", async () => {
@@ -599,23 +711,36 @@ test("an incompatible main-scope version disables the default controller without
   } finally {await closeFixture(fixture);}
 });
 
-test("independent and foreign children cannot be linked", async () => {
-  for (const child of [
-    thread("independent-child", "project-workflows", "independent-root", "subagent", "independent-root"),
-    thread("foreign-child", "project-foreign", "main-workflows", "subagent", "main-workflows"),
-  ]) {
-    const fixture = await makeFixture();
-    try {
-      fixture.threads.push(child);
-      const args = {action: "link_child", ...locator(fixture), operationId: `link-${child.id}`, childThreadId: child.id,
-        note: "Try linking this thread."};
-      installEvidence(fixture, args);
-      const result = await fixture.controller.write(args);
-      assert.equal(result.status, "denied");
-      assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
-      assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId, child.id), null);
-    } finally {await closeFixture(fixture);}
-  }
+test("an independent child with no verified path to the main cannot be linked", async () => {
+  const fixture = await makeFixture();
+  try {
+    const child = thread("independent-child", "project-workflows", "independent-root", "subagent", "independent-root");
+    fixture.threads.push(child);
+    const args = {action: "link_child", ...locator(fixture), operationId: `link-${child.id}`, childThreadId: child.id,
+      note: "Try linking this independent thread."};
+    installEvidence(fixture, args);
+    const result = await fixture.controller.write(args);
+    assert.equal(result.status, "denied");
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId, child.id), null);
+  } finally {await closeFixture(fixture);}
+});
+
+test("a verified descendant stays in scope when its native project ID differs", async () => {
+  const fixture = await makeFixture();
+  try {
+    const child = thread("foreign-project-child", "project-foreign", fixture.mainThreadId, "subagent", fixture.mainThreadId);
+    fixture.threads.push(child);
+    const ensure = ensureArgs(fixture, "foreign-project-main", "Create the owning main workflow.");
+    installEvidence(fixture, ensure);
+    assert.equal((await fixture.controller.write(ensure)).status, "created");
+
+    const link = {action: "link_child", ...locator(fixture), operationId: "foreign-project-child-link",
+      childThreadId: child.id, note: "Link the child through its exact parent lineage."};
+    installEvidence(fixture, link);
+    assert.equal((await fixture.controller.write(link)).status, "created");
+    assert.ok(fixture.workflows.get(fixture.projectId, fixture.mainThreadId, child.id));
+  } finally {await closeFixture(fixture);}
 });
 
 test("a fork can own a workflow and subagent descendants in its own logical scope", async () => {
@@ -1159,7 +1284,7 @@ test("exact apply receipt replay survives a later definition revision change", a
     });
     installEvidence(fixture, args);
     const applied = await fixture.controller.write(args);
-    assert.equal(applied.status, "applied");
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
     const definitionReads = fixture.definitionReader.calls;
     fixture.definitionReader.current = {...fixture.definitionReader.current, revision: "definition-revision-2"};
     const currentTask = fixture.supervisors.task(fixture.mainThreadId)!;
@@ -1496,26 +1621,164 @@ test("partial status edits retain contributors whose child is no longer in the c
   } finally {await closeFixture(fixture);}
 });
 
-test("source IDs are not accepted as agent-authored progress evidence", async () => {
+test("activity references are scoped and stored as navigation evidence without proving success", async () => {
   const fixture = await makeFixture();
   try {
-    const args = ensureArgs(fixture, "source-evidence-create", "Create a workflow.");
-    installEvidence(fixture, args);
-    const created = await fixture.controller.write(args);
+    const create = ensureArgs(fixture, "source-evidence-create", "Create a workflow.");
+    installEvidence(fixture, create);
+    const created = await fixture.controller.write(create);
     assert.equal(created.status, "created");
     if (created.status !== "created") return;
-    const input = {
-      operationId: "source-evidence-apply",
-      workflowId: created.workflowId,
-      expectedRevision: created.revision,
-      status: "planned",
-      objective: "Keep the evidence source native.",
-      plan: sequencePlan([localStep("Check evidence", "Avoid fabricated pointers.", [fixture.mainThreadId])]),
-      note: "Try to attribute an arbitrary source.",
-      evidence: [{kind: "observation", note: "Unverified source.", sourceThreadId: "foreign", sourceRunId: "run-x"}],
-    };
-    const argsWithClaim = {action: "apply", ...locator(fixture), input};
-    assert.equal((await fixture.controller.write(argsWithClaim)).status, "invalid");
-    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.revision, 1);
+
+    fixture.details.set("source-command", {id: "source-command", type: "command_execution", threadId: fixture.mainThreadId,
+      runId: null, status: "interrupted"});
+    const current = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    const apply = applyArgs(fixture, {operationId: "source-evidence-apply", workflowId: created.workflowId,
+      expectedRevision: current.revision, status: "planned", objective: "Keep the evidence source native.",
+      plan: sequencePlan([localStep("Check evidence", "Assess the command output semantically.", [fixture.mainThreadId])]),
+      note: "The Supervisor assessed the observed command.", evidence: [{kind: "observation", note: "The command result was inspected.",
+        sourceItemId: "source-command"}]});
+    installEvidence(fixture, apply);
+    const result = await fixture.controller.write(apply);
+    assert.equal(result.status, "applied");
+    if (result.status !== "applied") return;
+    assert.equal(result.revision, 2);
+    const updated = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    const observation = updated.evidence.find(item => item.kind === "observation");
+    assert.equal(observation?.sourceThreadId, fixture.mainThreadId, "an omitted thread defaults to the workflow target");
+    assert.equal(observation?.sourceRunId, null, "native child/tool activity may not have a run ID");
+    assert.equal(observation?.sourceItemId, "source-command");
+
+    const invalidScope = applyArgs(fixture, {operationId: "source-evidence-outside-scope", workflowId: created.workflowId,
+      expectedRevision: updated.revision, status: "planned", objective: updated.objective, plan: updated.plan,
+      note: "Reject a link to a foreign thread.", evidence: [{kind: "observation", note: "This source is outside the owner scope.",
+        sourceThreadId: "foreign-thread", sourceMessageId: "foreign-message"}]});
+    installEvidence(fixture, invalidScope);
+    assert.deepEqual(await fixture.controller.write(invalidScope), {
+      status: "denied", operationId: "source-evidence-outside-scope", reason: "activity_reference_outside_current_scope",
+    });
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.revision, 2);
+  } finally {await closeFixture(fixture);}
+});
+
+test("activity references fail closed when their workflow target is absent", async () => {
+  const fixture = await makeFixture();
+  try {
+    const apply = applyArgs(fixture, {operationId: "reference-target-missing", workflowId: "missing-workflow",
+      expectedRevision: 1, note: "Reject an unresolvable workflow target.",
+      evidence: [{kind: "observation", note: "Link this to a workflow that does not exist.", sourceItemId: "source-command"}]});
+    installEvidence(fixture, apply);
+    assert.deepEqual(await fixture.controller.write(apply), {
+      status: "invalid", operationId: "reference-target-missing", reason: "activity_reference_workflow_not_found",
+    });
+    assert.equal(Number(fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_write_receipts WHERE operation_id=?")
+      .get("reference-target-missing")?.n), 0);
+  } finally {await closeFixture(fixture);}
+});
+
+test("an exact successful apply replay precedes new activity-reference target validation", async () => {
+  const fixture = await makeFixture();
+  try {
+    const create = ensureArgs(fixture, "reference-replay-create", "Create the workflow target.");
+    installEvidence(fixture, create);
+    const created = await fixture.controller.write(create);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+
+    const apply = applyArgs(fixture, {operationId: "reference-replay-apply", workflowId: created.workflowId,
+      expectedRevision: created.revision, status: "underway", objective: "Track the current task.",
+      plan: sequencePlan([localStep("Inspect the result", "Review the task output before completion.")]),
+      note: "Apply a traceable status change.",
+      evidence: [{kind: "status_changed", note: "The Supervisor assessed the current activity.", sourceThreadId: fixture.mainThreadId}]});
+    installEvidence(fixture, apply);
+    const applied = await fixture.controller.write(apply);
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
+    const detailReadCount = fixture.detailCalls.length;
+    fixture.guidance.db.prepare("DELETE FROM supervisor_workflow_state WHERE workflow_id=?").run(created.workflowId);
+
+    assert.deepEqual(await fixture.controller.write(apply), applied);
+    assert.equal(fixture.detailCalls.length, detailReadCount, "receipt replay does not repeat native proof or reference validation");
+  } finally {await closeFixture(fixture);}
+});
+
+test("activity references must resolve exactly and agree on their native run", async () => {
+  const fixture = await makeFixture();
+  try {
+    const create = ensureArgs(fixture, "source-run-create", "Create a workflow.");
+    installEvidence(fixture, create);
+    const created = await fixture.controller.write(create);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+
+    const sourceProjection = makeProjection(fixture.mainThreadId, fixture.projectId);
+    sourceProjection.runs = [{id: "source-run", ordinal: 3, status: "completed", requestedAt: "2026-10-15T00:00:00.000Z",
+      startedAt: "2026-10-15T00:00:00.000Z", completedAt: "2026-10-15T00:00:01.000Z", rootNodeId: null, threadId: fixture.mainThreadId}];
+    sourceProjection.messages = [{id: "source-message", runId: "source-run", nodeId: null, role: "assistant",
+      text: "The test result was inspected.", streaming: false, createdAt: "2026-10-15T00:00:00.000Z", updatedAt: "2026-10-15T00:00:00.000Z",
+      threadId: fixture.mainThreadId}];
+    fixture.projections.set(fixture.mainThreadId, sourceProjection);
+    const current = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    const matching = applyArgs(fixture, {operationId: "source-run-match", workflowId: created.workflowId,
+      expectedRevision: current.revision, status: "planned", objective: "Keep references attributable.",
+      plan: sequencePlan([localStep("Review result", "Assess the activity semantically.", [fixture.mainThreadId])]),
+      note: "The Supervisor inspected the message.", evidence: [{kind: "observation", note: "The observed result is linked.",
+        sourceRunId: "source-run", sourceMessageId: "source-message"}]});
+    installEvidence(fixture, matching);
+    const matched = await fixture.controller.write(matching);
+    assert.equal(matched.status, "applied", JSON.stringify(matched));
+    if (matched.status !== "applied") return;
+    const observation = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.evidence.find(item => item.kind === "observation");
+    assert.equal(observation?.sourceThreadId, fixture.mainThreadId);
+    assert.equal(observation?.sourceRunId, "source-run");
+    assert.equal(observation?.sourceMessageId, "source-message");
+
+    fixture.details.set("source-item-other-run", {id: "source-item-other-run", type: "command_execution", threadId: fixture.mainThreadId,
+      runId: "different-run", status: "completed"});
+    const latest = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    const mismatched = applyArgs(fixture, {operationId: "source-run-mismatch", workflowId: created.workflowId,
+      expectedRevision: latest.revision, status: "planned", objective: latest.objective, plan: latest.plan,
+      note: "Reject a run that disagrees with the item.", evidence: [{kind: "observation", note: "This reference is inconsistent.",
+        sourceRunId: "source-run", sourceItemId: "source-item-other-run"}]});
+    installEvidence(fixture, mismatched);
+    assert.deepEqual(await fixture.controller.write(mismatched), {
+      status: "invalid", operationId: "source-run-mismatch", reason: "activity_reference_item_run_mismatch",
+    });
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.revision, latest.revision);
+  } finally {await closeFixture(fixture);}
+});
+
+test("activity references cannot relabel inherited projection records as local activity", async () => {
+  const fixture = await makeFixture();
+  try {
+    const create = ensureArgs(fixture, "inherited-activity-create", "Create a workflow.");
+    installEvidence(fixture, create);
+    const created = await fixture.controller.write(create);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+
+    const sourceProjection = makeProjection(fixture.mainThreadId, fixture.projectId);
+    sourceProjection.runs = [{id: "inherited-run", ordinal: 3, status: "completed", requestedAt: "2026-10-15T00:00:00.000Z",
+      startedAt: "2026-10-15T00:00:00.000Z", completedAt: "2026-10-15T00:00:01.000Z", rootNodeId: null, threadId: "foreign-thread"}];
+    sourceProjection.messages = [{id: "inherited-message", runId: "inherited-run", nodeId: null, role: "assistant",
+      text: "This message belongs to another thread.", streaming: false, createdAt: "2026-10-15T00:00:00.000Z",
+      updatedAt: "2026-10-15T00:00:00.000Z", threadId: "foreign-thread"}];
+    fixture.projections.set(fixture.mainThreadId, sourceProjection);
+    const current = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    const common = {workflowId: created.workflowId, expectedRevision: current.revision, status: "planned" as const,
+      objective: current.objective, plan: current.plan};
+    const wrongRun = applyArgs(fixture, {...common, operationId: "inherited-run-reference", note: "Reject an inherited run.",
+      evidence: [{kind: "observation", note: "This run belongs elsewhere.", sourceRunId: "inherited-run"}]});
+    installEvidence(fixture, wrongRun);
+    assert.deepEqual(await fixture.controller.write(wrongRun), {
+      status: "invalid", operationId: "inherited-run-reference", reason: "activity_reference_run_mismatch",
+    });
+
+    const wrongMessage = applyArgs(fixture, {...common, operationId: "inherited-message-reference", note: "Reject an inherited message.",
+      evidence: [{kind: "observation", note: "This message belongs elsewhere.", sourceMessageId: "inherited-message"}]});
+    installEvidence(fixture, wrongMessage);
+    assert.deepEqual(await fixture.controller.write(wrongMessage), {
+      status: "invalid", operationId: "inherited-message-reference", reason: "activity_reference_message_not_found",
+    });
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.revision, current.revision);
   } finally {await closeFixture(fixture);}
 });

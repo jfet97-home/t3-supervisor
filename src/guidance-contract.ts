@@ -2,6 +2,7 @@ import { ThreadPolicy } from "./thread-policy-contract.js";
 import { ProjectDefinitions, ProjectConfigSaveInput, ProjectConfigSaveResult } from "./project-definitions-contract.js";
 import { Schema } from "effect";
 import { ProjectSupervisorSnapshot, ProjectSupervisorSave, ProjectSupervisorRetry, ProjectSupervisorSaveResult } from "./project-supervisor-contract.js";
+import { WorkflowProgressSnapshotSchema } from "./workflow-progress.js";
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/http-api";
 import { SupervisionControl, SupervisionControlSave, SupervisionControlResult, SupervisionSetup, SupervisionSetupOptions, SupervisionSetupResult, GlobalDefinitionsControl, GlobalDefinitionsControlSave, GlobalDefinitionsControlResult } from "./supervisor-control-contract.js";
 
@@ -145,6 +146,17 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
       }),
       HttpApiEndpoint.get("projectSupervisor", "/project-supervisor", {
         query: {projectId: Text, mainThreadId: Schema.optional(Text)}, success: ProjectSupervisorSnapshot, error: UiError,
+      }),
+      HttpApiEndpoint.get("workflowProgress", "/workflow-progress", {
+        query: {
+          projectId: Text,
+          mainThreadId: Text,
+          workflowOffset: Schema.optional(Text),
+          lineageOffset: Schema.optional(Text),
+          limit: Schema.optional(Text),
+        },
+        success: WorkflowProgressSnapshotSchema,
+        error: UiError,
       }),
       HttpApiEndpoint.post("saveProjectSupervisor", "/project-supervisor", {
         payload: ProjectSupervisorSave, success: ProjectSupervisorSaveResult, error: UiError,

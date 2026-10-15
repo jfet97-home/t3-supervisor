@@ -333,6 +333,7 @@ export const collectSupervisorActivity = (
   now = Date.now(),
   excludedIds: ReadonlySet<string> = new Set(),
   trackedIds: ReadonlySet<string> = new Set(),
+  includeDetachedChildItems = false,
 ): SupervisorMonitorActivity[] => {
   const ordinal = Number.isSafeInteger(sourceOrdinal) && sourceOrdinal >= 0 ? sourceOrdinal : 0;
   const runs = new Map<string, { run: RunInfo; nodeFor: (nodeId: string) => RecordLike | undefined; root: RecordLike }>();
@@ -398,6 +399,43 @@ export const collectSupervisorActivity = (
     if (records.has(canonicalId) || (context.run.ordinal < ordinal && !trackedIds.has(canonicalId))) continue;
     const record = messageActivity(projection.thread.id, context.run, context.nodeFor, value, ordinal, now);
     if (record && !isExcluded(record.id, id, excludedIds)) records.set(record.id, record);
+  }
+
+  // native child mirrors may expose activity with runId:null and no AppRun.
+  // accept it only for a verified child observation, never as main-run proof.
+  if (includeDetachedChildItems && projection.thread.lineage.relationshipToParent === "subagent") {
+    for (const [index, value] of (projection.turnItems ?? []).entries()) {
+      if (!isRecord(value) || value.threadId !== projection.thread.id || value.runId !== null) continue;
+      const type = stringValue(value.type);
+      const nativeId = stringValue(value.id);
+      if (!type || !nativeId || excludedTypes.has(type) || !countableTypes.has(type)) continue;
+      const messageId = stringValue(value.messageId);
+      const id = messageId ? `message:${messageId}` : nativeId;
+      if (isExcluded(id, messageId ?? nativeId, excludedIds)) continue;
+      if ((type === "assistant_message" || type === "user_message") &&
+        (typeof value.text !== "string" || value.streaming !== true && value.text.trim() === "")) continue;
+      if (type === "proposed_plan" &&
+        (typeof value.markdown !== "string" || value.streaming !== true && value.markdown.trim() === "")) continue;
+      const status = value.streaming === true ? "streaming" : stringValue(value.status) ?? "unknown";
+      const itemOrdinal = Number.isSafeInteger(value.ordinal) && Number(value.ordinal) >= 0 ? Number(value.ordinal) : index + 1;
+      if (itemOrdinal < ordinal && !trackedIds.has(id) && !trackedIds.has(nativeId)) continue;
+      const pairedMessage = messageId ? messagesById.get(messageId) : undefined;
+      const updatedAt = pairedMessage ? stringValue(pairedMessage.updatedAt) : stringValue(value.updatedAt);
+      const priority = ["user_input_request", "approval_request", "secret_request"].includes(type) &&
+        (status === "waiting" || status === "pending") ? "waiting_input" : null;
+      records.set(id, activity({
+        id,
+        readItemId: nativeId,
+        type,
+        status,
+        ordinal: itemOrdinal,
+        detectedAt: timestampMs(updatedAt) ?? timestampMs(value.completedAt) ?? timestampMs(value.startedAt) ?? now,
+        updatedAt,
+        priority,
+        nodeId: stringValue(value.nodeId),
+        rootNodeId: null,
+      }));
+    }
   }
 
   const approvalRequestKinds = new Set([

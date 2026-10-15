@@ -239,7 +239,7 @@ test("nested moves and insertions preserve occurrence status and contributor ide
       {...firstStep, status: "underway" as const, contributorThreadIds: [contributorThreadId]},
     ]};
     const statusEvidence = [{kind: "status_changed" as const, targetNodeId: firstStep.nodeId,
-      note: "The first occurrence started after its inputs were ready.", sourceThreadId: "child-a"}];
+      note: "The first occurrence started after its inputs were ready.", sourceThreadId: "child-a", sourceItemId: "turn-item-child-command"}];
     const input = applyInput(fixture, initial, moved, "move-and-start", {requirements: [], issues: [], evidence: statusEvidence});
     const applied = fixture.workflows.apply(fixture.owner, input, validationFor(fixture), 200);
     assert.equal(applied.status, "applied", JSON.stringify(applied));
@@ -252,7 +252,8 @@ test("nested moves and insertions preserve occurrence status and contributor ide
     assert.equal(retainedFirst.status, "underway");
     assert.deepEqual(retainedFirst.contributorThreadIds, [contributorThreadId]);
     assert.ok(updated.evidence.some(item => item.kind === "status_changed" && item.targetNodeId === firstStep.nodeId &&
-      item.statusFrom === "planned" && item.statusTo === "underway" && item.sourceThreadId === "child-a"));
+      item.statusFrom === "planned" && item.statusTo === "underway" && item.sourceThreadId === "child-a" &&
+      item.sourceItemId === "turn-item-child-command"));
     assert.deepEqual(fixture.workflows.apply(reverseObjectKeys(fixture.owner) as WorkflowOwner,
       reverseObjectKeys(input) as WorkflowApplyInput, validationFor(fixture), 900), applied,
     "object-key order does not change operation replay");
@@ -334,6 +335,49 @@ test("a fixed workflow added after the original proposal remains pinned in main 
     const rejected = fixture.workflows.apply(fixture.owner, remove, validationFor(fixture), 300);
     assert.equal(rejected.status, "invalid", "mutable current state is canonicalized against pinned definitions before preserving fixed nodes");
     assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, pinned.revision);
+  } finally {await closeFixture(fixture);}
+});
+
+test("workflow needs-attention lookup is scoped, bounded, and reports incomplete scans", async () => {
+  const fixture = await makeFixture();
+  try {
+    const main = fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(
+      fixture.owner, "attention-scan-main", "Create the main workflow.", 100));
+    assert.equal(main.status, "created");
+    const child = fixture.supervisors.store.transaction(() => fixture.workflows.linkChildInTransaction(fixture.owner, {
+      operationId: "attention-scan-child",
+      lineage: {threadId: "child-a", parentThreadId: fixture.owner.mainThreadId, relationshipToParent: "subagent"},
+      note: "Create a child workflow.",
+    }, 101));
+    assert.equal(child.status, "created");
+    assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId, "child-a")?.status, "planned");
+
+    const mainDocument = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const rootStep = localPlanInput(["main-step"]).nodes[0];
+    const attentionCandidate = localPlanInput(["attention-step"]).nodes[0];
+    if (rootStep?.kind !== "step" || attentionCandidate?.kind !== "step") throw new Error("expected_local_step");
+    const attentionStep = {...attentionCandidate, status: "needs_attention" as const};
+    const nestedPlan: WorkflowPlanGroupInfo = {kind: "sequence", templatePath: null, nodes: [{kind: "parallel", templatePath: null,
+      nodes: [rootStep, attentionStep]}]};
+    const rootStatusEvidence = {
+      id: randomUUID(), operationId: "attention-scan-status", kind: "status_changed" as const, recordedAt: 102,
+      actorSupervisorThreadId: fixture.owner.supervisorThreadId, targetNodeId: null, targetNodeName: null,
+      statusFrom: "planned" as const, statusTo: "underway" as const, sourceThreadId: null,
+      sourceRunId: null, sourceMessageId: null, agreementKey: null, note: "A current issue needs attention.",
+    };
+    const nodeStatusEvidence = {...rootStatusEvidence, id: randomUUID(), targetNodeId: attentionStep.nodeId,
+      targetNodeName: attentionStep.name, statusFrom: "planned" as const, statusTo: "needs_attention" as const};
+    const needsAttentionDocument = {...mainDocument, status: "underway" as const, plan: nestedPlan,
+      evidence: [...mainDocument.evidence, rootStatusEvidence, nodeStatusEvidence], updatedAt: 102};
+    fixture.guidance.db.prepare("UPDATE supervisor_workflow_state SET document=?,updated_at=? WHERE workflow_id=?")
+      .run(JSON.stringify(needsAttentionDocument), 102, mainDocument.workflowId);
+
+    assert.deepEqual(fixture.workflows.hasNeedsAttention(fixture.owner.projectId, fixture.owner.mainThreadId,
+      [fixture.owner.mainThreadId, "child-a"], 2), {status: "complete", needsAttention: true, inspected: 2});
+    assert.deepEqual(fixture.workflows.hasNeedsAttention(fixture.owner.projectId, fixture.owner.mainThreadId,
+      [fixture.owner.mainThreadId, "child-a"], 1), {status: "incomplete", needsAttention: false, inspected: 1, reason: "limit_exceeded"});
+    assert.equal(fixture.workflows.hasNeedsAttention(fixture.owner.projectId, fixture.owner.mainThreadId,
+      [fixture.owner.mainThreadId, fixture.owner.mainThreadId], 2).status, "incomplete");
   } finally {await closeFixture(fixture);}
 });
 

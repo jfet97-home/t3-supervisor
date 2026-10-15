@@ -107,12 +107,48 @@ advisory conversation, not filesystem prevention or a dashboard approval gate.
 
 ## Monitoring, recovery and lifecycle
 
-Ongoing checks reuse T3 activity with project age/count thresholds (initially five
-minutes or ten finalized activities), independent per-main cooldowns and one
-service check-in in flight per Supervisor. Quiet completion/archive/deletion can
-settle the owned chat once children and pending work are quiet; resume reuses its
-identity. Settlement is not deletion or agreement invalidation. Automatic detailed
-child monitoring and execution proofs remain separate work.
+Ongoing checks observe the main and its verified native and delegated descendants,
+using the project age/count thresholds (initially five minutes or ten finalized
+activities), one shared per-main cooldown and one service check-in in flight per
+Supervisor. Forks remain separate scopes. Native child lifecycle comes from its
+direct parent's child record; an idle child mirror with no AppRun is not completion.
+Bounded activity batches identify their source and show incomplete reads explicitly.
+
+The Supervisor assesses adherence and progress from T3 actions, results and visible
+context. Agents work normally without continual status reports. The Supervisor can
+inspect a specific result to resolve uncertainty, write a short status explanation
+and link supporting activity. A tool result or linked item alone does not establish
+semantic completion, and child completion never completes a parent step by itself.
+Clarification or changed plans are discussed and reflected in the live workflow.
+
+Direct guidance to a delegated child uses active-only steering after fresh scope,
+lifecycle and contact checks. If the child has finished or the send is rejected,
+guidance goes through its parent without retrying a mode that would start another
+run. Native read-only children receive guidance through their parent. These routing
+instructions are not a sandbox around the model's other native tools.
+
+Quiet completion/archive/deletion can settle the owned chat once children and
+pending work are quiet. An idle main's old lifecycle-unknown child can also permit
+standby after the quiet period when no known activity, attention issue or pending
+input requires action. Unknown work stays unresolved. Background monitoring
+continues and relevant activity reuses the same Supervisor identity and binding;
+settlement is not deletion or agreement invalidation.
+
+The progress view is separate from definition authoring, proposals and saved
+agreements. It reads current main/child workflows, lifecycle and recent Supervisor
+observations without waking chats or changing plans. Missing child workflows,
+unavailable reads and incomplete scope are shown explicitly. Supporting references
+are checked against fresh native scope and activity before storage; they explain
+the assessment without granting write authority. Historical agreement snapshots
+remain plans, not execution receipts.
+
+Native workflow-write proof is provider-specific. Codex has verified exact native
+recording support. Providers without established native proof remain selectable
+for Supervisor chats, but workflow updates report their unverified support rather
+than using a weaker authorization path. Observation and guidance remain available.
+Claude's complete native proof and a genuine configured Supervisor write still need
+live verification with an authenticated T3 provider; partial reviewer recordings
+are shape evidence only.
 
 Native creation/request identities and owned IDs are permanent recovery evidence.
 Retry native access reconciles the original uncertain action. A confirmed deleted
