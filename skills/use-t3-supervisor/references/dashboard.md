@@ -1,6 +1,6 @@
 # Dashboard workflows
 
-The current views are Projects, Activity, Recaps and Telegram, and Settings.
+The current views are Projects, Guide, Activity, Recaps and Telegram, and Settings.
 Projects is the default. Older Guidance rules screenshots describe retired UI.
 
 ## Sign in
@@ -17,21 +17,19 @@ session or service restart can require sign-in again. Sign out revokes this sess
 After reauthentication, review an unsaved draft and choose Save explicitly; the
 page never repeats a rejected mutation automatically.
 
-## Project rules and blocks
+## Steps, workflows and project configuration
 
-Select the actual registered project and optionally a conversation belonging to it.
-Confirm the displayed working directory; a conversation can use a worktree. The
-page loads on selection or Refresh definitions, not background snapshot polling.
-An unavailable selected conversation never silently switches to the project root.
+Select the actual project and optionally a matching conversation. Confirm its
+working directory; definition reads follow the operative checkout, not a root
+fallback. Refresh explicitly after repository edits. Inspect source paths,
+reusable steps, nested workflows, requirements, completeness and diagnostics.
+The Guide contains complete syntax examples and FAQ independently of this selection.
 
-Inspect validation, rules, required-block links, instructions and expected results.
-Edit project rules modifies the same existing `.t3-supervisor/rules.yaml` used by manual
-repository editing. Name, description and required_blocks are the sole rule fields.
-The description explains applicability; blocks describe work and its expected result.
-
-Before saving, confirm the exact target, particularly an active conversation's
-working tree. Changes remain uncommitted in the project; saving does not commit,
-push, execute blocks or activate a negotiated workflow.
+The project configuration editor saves the existing local project.yaml, with
+required step/workflow references and optional default_workflow. Effective global
+requirements remain separate and read-only. Step/workflow catalog definitions
+are authored in the repository. Confirm the target before Save. This leaves files
+uncommitted and does not execute or accept a workflow.
 
 ## Drafts and conflicts
 
@@ -40,21 +38,20 @@ Switching project/workspace, refreshing or cancelling asks before discarding an
 unsaved draft. Browser navigation also warns about unsaved or in-flight changes.
 During a save the editor and selection controls are disabled.
 
-A changed workspace, raw rules or block definitions rejects a stale save. The draft
+A changed workspace, configuration or step/workflow definitions rejects a stale save. The draft
 is kept. Copy or reconcile the intended changes before Refresh definitions and
 explicitly confirm discarding the old draft. An uncertain result likewise requires
 inspection/reload, never an automatic retry or a success claim. A session-guard
 rejection is definitely not saved: the dashboard refreshes access, keeps the draft
 editable and asks for a new explicit Save. It never retries that write itself.
 
-First-time setup offers checkout selection and Create or Create + commit; Create leaves changes uncommitted. An existing folder offers Enable existing definitions without a write or commit. Native commits honor hooks and signing; hooks can change committed contents and failure may leave setup files staged. Shared global setup uses the separate opt-in control in Settings. Malformed files
-and block errors must be repaired before editing. Native target checks reject
+First-time setup offers checkout selection and Create or Create + commit; Create leaves changes uncommitted. An existing folder offers Enable existing definitions without a write or commit. Native commits honor hooks and signing; hooks can change committed contents and failure may leave setup files staged. Shared global setup uses the separate opt-in control in Settings. Incomplete reads and unsupported source errors require repository repair. Native target checks reject
 symlinked paths and incomplete listings; external changes racing the actual native
 write remain outside the V1 contract.
 
 ## Supervisor model, task interpretation and workflow drafts
 
-Supervisor preferences belong to the project, independently of the rule editor's
+Supervisor preferences belong to the project, independently of the configuration editor's
 selected working directory. Model and reasoning choices come from native T3
 capabilities. Save stores defaults for new Supervisors and shows the selected main conversation’s
 separately observed model. Each main gets its own bound Supervisor automatically.
@@ -78,8 +75,9 @@ Changes apply live and persist in the instance state volume. Mac and Lima polici
 are independent. The interactive chat can answer questionnaires even when excluded
 from other notifications. The Telegram integration is completely optional.
 
-Select an operational conversation to inspect its workflow proposal. The ordered
-steps identify existing project blocks; rule decisions explain their applicability.
+Select an operational conversation to inspect its workflow proposal. The nested
+plan preserves sequence/parallel structure, occurrence identity and provenance;
+requirement decisions explain inclusion, non-applicability and unresolved policy.
 The workspace and definition revision identify the snapshot used. Unavailable,
 invalid or stale proposals do not become agreed workflows. Legacy objective-only
 records remain unchanged. The service introduces valid drafts and batches later check-ins.
@@ -89,7 +87,7 @@ records remain unchanged. The service introduces valid drafts and batches later 
 The master switch disables every semantic Supervisor. Project switches are independent
 and remember manual choices; initial folder presence supplies their defaults. Shared
 `~/.t3-supervisor` definitions have a separate opt-in switch and do not replace project
-controls. Project rules follow the operative checkout/worktree; global sources are
+controls. Project definitions follow the operative checkout/worktree; global sources are
 marked separately and cannot be edited through the project editor.
 
 Completed idle scopes settle the same owned chat for later resume. Archived/deleted

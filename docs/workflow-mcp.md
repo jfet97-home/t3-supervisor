@@ -4,7 +4,7 @@ The Supervisor maintains a broad editable plan for an ordinary main conversation
 and a lightweight connected workflow for each native descendant. Steps can run in
 parallel, overlap between children, and change as understanding improves. One
 child can contribute to several parent steps and expand those into its own subflow.
-The parent step's contributor thread IDs are the association source; child read
+Each parent occurrence's contributor thread IDs are the association source; child read
 results derive their parent-step references from it. These are participation links,
 not exclusive assignments or task dependencies. Child completion does not complete
 parent steps automatically.
@@ -59,14 +59,34 @@ actor-authenticated to a particular T3 conversation and grant no edit authority.
 - `ensure_main` creates an unaccepted main draft.
 - `link_child` creates a live child's workflow under its verified native parent.
 - `apply` revises the editable plan with an expected revision and retains
-  explicit notes for status changes and removed steps. Existing step IDs are stable;
-  new steps begin planned. Read the current document before refining it.
+  explicit notes for status changes and removed steps. Existing occurrence IDs are stable and separate from definition IDs;
+  repeated reusable references remain distinct, and new nodes begin planned. Read the current document before refining it.
+
+A valid unaccepted draft can be edited: formal agreement is not a write gate.
+The controller supplies the current task's trusted canonical proposal and a fresh
+matching valid definition snapshot; live edits cannot self-authorize their source
+binding or weaken fixed/required commitments. Invalid/incomplete source material
+supports provisional dialogue, while source-bound writes wait for a valid pin.
+
+Stored workflow documents and immutable receipts use `formatVersion: 2`. Plans
+retain nested groups and per-occurrence `nodeId` values separately from reusable
+`definitionId` or task-local `localId` values. The service derives the task ID,
+task source hash and definition source binding from its current trusted proposal
+and fresh definitions; public arguments cannot supply a weaker policy. Fixed commitments already accepted or
+present in the live plan survive a changed proposal ID for the same task source
+hash and definition pin. Editing the operative task message creates a new task
+source for negotiation, even when its stored task ID is retained. A merely
+unaccepted draft candidate is still negotiable. An explicitly reviewed, adopted
+new source revision may replace the previous commitments.
+Old prototype documents remain explicitly incompatible and are not migrated or
+silently reinterpreted; their historical rows and unrelated service state remain.
 
 Apply requires `operationId`, `workflowId`, `expectedRevision` and `note`. Status,
-objective, rules, steps and evidence are optional; omitted plan fields are preserved
+objective, requirements, plan and evidence are optional; omitted plan fields are preserved
 from the current document inside the revision-checked transaction. This permits a
-status or objective change without resending an entire plan. Supplied rules/steps
-replace those arrays. Status changes still require explicit status-change evidence.
+status or objective change without resending an entire plan. A supplied plan replaces the nested plan, retaining stable occurrence identities.
+A supplied requirement list replaces its accounting; reusable provenance, fixed
+commitments and current-task policy are revalidated. Status changes still require explicit status-change evidence.
 
 Each write includes `supervisorThreadId`, `bindingGeneration`, a stable unique
 `operationId`, and the complete action arguments. The first two fields locate the

@@ -1,5 +1,5 @@
 import type { ProjectSupervisorStore, BindingRecord } from "./project-supervisor-store.js";
-import type { WorkflowStateStore } from "./workflow-state-store.js";
+import {acceptedTaskPlanForBinding, acceptedWorkflowPlansForBinding, type WorkflowApplyValidationContext, type WorkflowStateStore} from "./workflow-state-store.js";
 import {
   workflowExecutionStatuses,
   workflowMutationLimits,
@@ -24,6 +24,9 @@ import {
   type WorkflowEvidenceMatch,
   type WorkflowEvidenceCheck,
 } from "./workflow-write-evidence.js";
+import {proposalContextFromDefinitions, proposalContextMatches, validateWorkflowApplyAgainstPinnedContext} from "./supervisor-workflow.js";
+import type {ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
+import type {WorkflowPlanGroupInfo, WorkflowPlanStepInfo, WorkflowPlanWorkflowInfo, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
 
 export type WorkflowNativeAccess = {
   listThreads(signal: AbortSignal): Promise<readonly ThreadInfo[]>;
@@ -38,6 +41,7 @@ export type WorkflowWriteControllerOptions = {
   supervisors: ProjectSupervisorStore;
   workflows: WorkflowStateStore;
   native: WorkflowNativeAccess;
+  loadDefinitions?: (projectId: string, threadId: string, signal: AbortSignal) => Promise<ProjectDefinitionSnapshot>;
   isEnabled?: (projectId: string) => boolean;
   now?: () => number;
   maxEvidenceWaitMs?: number;
@@ -51,7 +55,7 @@ export type WorkflowLocator = {
 };
 
 export type WorkflowApplyPatch = Pick<WorkflowApplyInput, "operationId" | "workflowId" | "expectedRevision" | "note"> &
-  Partial<Pick<WorkflowApplyInput, "status" | "objective" | "rules" | "steps">> &
+  Partial<Pick<WorkflowApplyInput, "status" | "objective" | "sourceBinding" | "requirements" | "issues" | "plan">> &
   {evidence?: WorkflowStateEvidenceInput[]};
 
 export type WorkflowWritePayload = WorkflowLocator & (
@@ -79,13 +83,15 @@ export type WorkflowReadResult = {
   owner: WorkflowOwner;
   mainTaskAgreementStatus: "agreed" | "stale" | null;
   agreementValidityNote: string;
+  incompatibleWorkflows: Array<{workflowId: string; formatVersion: number | null}>;
   workflows: Array<{
     document: WorkflowStateDocument;
-    parentStepReferences: Array<{
+    parentNodeReferences: Array<{
       parentWorkflowId: string;
       parentThreadId: string;
-      stepId: string;
-      stepName: string;
+      nodeId: string;
+      nodeKind: "step" | "workflow";
+      nodeName: string;
     }>;
   }>;
   workflowOffset: number;
@@ -101,6 +107,11 @@ export type WorkflowReadResult = {
 } | {
   status: "denied" | "invalid" | "unavailable" | "too_large";
   reason: string;
+} | {
+  status: "incompatible";
+  workflowId: string;
+  formatVersion: number | null;
+  reason: string;
 };
 
 type ParsedInput =
@@ -110,6 +121,10 @@ type ParsedInput =
 type ParsedReadInput =
   | {ok: true; value: WorkflowReadPayload}
   | {ok: false; reason: string};
+
+type ApplyPinResult =
+  | {status: "ready"; validation: WorkflowApplyValidationContext}
+  | {status: "invalid" | "unavailable"; reason: string};
 
 type NativeScope = {
   main: ThreadInfo;
@@ -151,6 +166,79 @@ const hasExactKeys = (value: Record<string, unknown>, required: readonly string[
 
 const isStatus = (value: unknown): value is typeof workflowExecutionStatuses[number] =>
   typeof value === "string" && workflowExecutionStatuses.includes(value as typeof workflowExecutionStatuses[number]);
+const planNodeIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const maxDefinitionTextLength = 8000;
+const maxPlanReasonLength = 1000;
+
+const validWorkflowSource = (value: unknown): boolean => value === null || isRecord(value) &&
+  hasExactKeys(value, ["origin", "path", "sourceId"]) &&
+  (value.origin === null || value.origin === "global" || value.origin === "project") &&
+  (value.path === null || isText(value.path, 4096)) && (value.sourceId === null || isText(value.sourceId, 64));
+
+const validPlanRequest = (value: unknown): boolean => {
+  let count = 0;
+  const visitGroup = (group: unknown, depth: number): boolean => {
+    if (depth > workflowMutationLimits.maxPlanDepth || ++count > workflowMutationLimits.maxPlanNodes || !isRecord(group) ||
+      (group.kind !== "sequence" && group.kind !== "parallel") || !hasExactKeys(group, ["kind", "nodes"], ["templatePath"]) ||
+      !(group.templatePath === undefined || group.templatePath === null || isText(group.templatePath, 2000)) ||
+      !Array.isArray(group.nodes) || group.nodes.length === 0 || group.nodes.length > workflowMutationLimits.maxPlanNodes) return false;
+    return group.nodes.every(node => {
+      if (!isRecord(node) || typeof node.kind !== "string") return false;
+      if (node.kind === "sequence" || node.kind === "parallel") return visitGroup(node, depth + 1);
+      if (++count > workflowMutationLimits.maxPlanNodes || !(node.nodeId === undefined || typeof node.nodeId === "string" && planNodeIdPattern.test(node.nodeId)) ||
+        !(node.templatePath === undefined || node.templatePath === null || isText(node.templatePath, 2000)) ||
+        !isText(node.reason, maxPlanReasonLength)) return false;
+      if (node.kind === "step") {
+        if (!hasExactKeys(node, ["kind", "reason"], ["nodeId", "definitionId", "localId", "templatePath", "name", "description", "source", "resolution", "status", "contributorThreadIds"])) return false;
+        return (node.definitionId === undefined || node.definitionId === null || isText(node.definitionId, 200)) &&
+          (node.localId === undefined || node.localId === null || isText(node.localId, 200)) &&
+          (node.name === undefined || isText(node.name, 160)) &&
+          (node.description === undefined || isText(node.description, maxDefinitionTextLength, true)) &&
+          (node.source === undefined || validWorkflowSource(node.source)) &&
+          (node.resolution === undefined || node.resolution === "resolved" || node.resolution === "unresolved") &&
+          (node.status === undefined || isStatus(node.status)) &&
+          (node.contributorThreadIds === undefined || Array.isArray(node.contributorThreadIds) &&
+            node.contributorThreadIds.length <= workflowMutationLimits.maxContributorsPerNode && node.contributorThreadIds.every(id => isId(id)) &&
+            new Set(node.contributorThreadIds).size === node.contributorThreadIds.length);
+      }
+      if (node.kind !== "workflow" || !hasExactKeys(node, ["kind", "definitionId", "reason"],
+        ["nodeId", "templatePath", "name", "description", "fixed", "source", "resolution", "status", "contributorThreadIds", "omissions", "plan"]) ||
+        !isText(node.definitionId, 200) || !(node.name === undefined || isText(node.name, 160)) ||
+        !(node.description === undefined || isText(node.description, maxDefinitionTextLength, true)) ||
+        !(node.fixed === undefined || node.fixed === null || typeof node.fixed === "boolean") ||
+        !(node.source === undefined || validWorkflowSource(node.source)) ||
+        !(node.resolution === undefined || ["resolved", "partial", "unresolved"].includes(String(node.resolution))) ||
+        !(node.status === undefined || isStatus(node.status)) ||
+        !(node.contributorThreadIds === undefined || Array.isArray(node.contributorThreadIds) &&
+          node.contributorThreadIds.length <= workflowMutationLimits.maxContributorsPerNode && node.contributorThreadIds.every(id => isId(id)) &&
+          new Set(node.contributorThreadIds).size === node.contributorThreadIds.length)) return false;
+      if (node.omissions !== undefined && (!Array.isArray(node.omissions) || node.omissions.length > workflowMutationLimits.maxPlanNodes ||
+        !node.omissions.every(item => isRecord(item) && hasExactKeys(item, ["templatePath", "kind", "id", "name", "source", "reason"]) &&
+          isText(item.templatePath, 2000) && (item.kind === "step" || item.kind === "workflow") && isText(item.id, 200) &&
+          isText(item.name, 160) && validWorkflowSource(item.source) && isText(item.reason, maxPlanReasonLength)))) return false;
+      return node.plan === undefined || node.plan === null || visitGroup(node.plan, depth + 1);
+    });
+  };
+  return isRecord(value) && visitGroup(value, 0);
+};
+
+const validSourceBindingInput = (value: unknown): value is WorkflowSourceBindingInfo => isRecord(value) &&
+  hasExactKeys(value, ["workspaceRoot", "revision", "globalRevision", "definitionsStatus", "definitionsComplete", "requirementsKnown", "taskId", "proposalId", "sourceHash"]) &&
+  isText(value.workspaceRoot, 4096) && (value.revision === null || isText(value.revision, 256)) &&
+  (value.globalRevision === null || isText(value.globalRevision, 256)) &&
+  ["ready", "missing", "invalid", "permission_required", "unavailable"].includes(String(value.definitionsStatus)) &&
+  typeof value.definitionsComplete === "boolean" && typeof value.requirementsKnown === "boolean" &&
+  isText(value.taskId, workflowMutationLimits.maxOperationIdLength) && isText(value.proposalId, workflowMutationLimits.maxOperationIdLength) &&
+  isText(value.sourceHash, 256);
+
+const validRequirementInput = (value: unknown): boolean => Array.isArray(value) && value.length <= workflowMutationLimits.maxPlanNodes &&
+  value.every(item => isRecord(item) && hasExactKeys(item, ["kind", "id", "name", "source", "state", "reason"]) &&
+    (item.kind === "step" || item.kind === "workflow") && isText(item.id, 200) && isText(item.name, 160) && validWorkflowSource(item.source) &&
+    ["included", "not_applicable", "unresolved", "unknown"].includes(String(item.state)) && isText(item.reason, maxPlanReasonLength, true));
+
+const validIssueInput = (value: unknown): boolean => Array.isArray(value) && value.length <= workflowMutationLimits.maxPlanNodes &&
+  value.every(item => isRecord(item) && hasExactKeys(item, ["path", "code", "message"]) && isText(item.path, 4096, true) &&
+    isText(item.code, 160) && isText(item.message, maxDefinitionTextLength, true));
 
 const parseLocator = (value: Record<string, unknown>): WorkflowLocator | null => {
   if (!isId(value.supervisorThreadId) || !Number.isSafeInteger(value.bindingGeneration) ||
@@ -160,38 +248,22 @@ const parseLocator = (value: Record<string, unknown>): WorkflowLocator | null =>
 
 const parseApplyInput = (value: unknown): WorkflowApplyPatch | null => {
   if (!isRecord(value) || !hasExactKeys(value,
-    ["operationId", "workflowId", "expectedRevision", "note"], ["status", "objective", "rules", "steps", "evidence"])) return null;
+    ["operationId", "workflowId", "expectedRevision", "note"], ["status", "objective", "sourceBinding", "requirements", "issues", "plan", "evidence"])) return null;
   if (!isId(value.operationId) || !isId(value.workflowId) || !Number.isSafeInteger(value.expectedRevision) ||
     (value.expectedRevision as number) < 1 || value.status !== undefined && !isStatus(value.status) ||
     value.objective !== undefined && !(value.objective === null || isText(value.objective, workflowMutationLimits.maxTextLength)) ||
     !isText(value.note, workflowMutationLimits.maxTextLength) ||
-    value.rules !== undefined && (!Array.isArray(value.rules) || value.rules.length > workflowMutationLimits.maxRules) ||
-    value.steps !== undefined && (!Array.isArray(value.steps) || value.steps.length > workflowMutationLimits.maxSteps)) return null;
-  const rules = value.rules ?? [];
-  if (!Array.isArray(rules)) return null;
-  for (const rule of rules) {
-    if (!isRecord(rule) || !hasExactKeys(rule, ["index", "name", "applies", "reason"]) ||
-      !Number.isSafeInteger(rule.index) || (rule.index as number) < 0 || !isText(rule.name, workflowMutationLimits.maxTextLength) ||
-      typeof rule.applies !== "boolean" || !isText(rule.reason, workflowMutationLimits.maxTextLength)) return null;
-  }
-  const steps = value.steps ?? [];
-  if (!Array.isArray(steps)) return null;
-  for (const step of steps) {
-    if (!isRecord(step) || !hasExactKeys(step, ["blockId", "name", "reason", "status", "contributorThreadIds"], ["id"]) ||
-      !(step.id === undefined || isId(step.id)) || !(step.blockId === null || isId(step.blockId)) ||
-      !isText(step.name, workflowMutationLimits.maxTextLength) || !isText(step.reason, workflowMutationLimits.maxTextLength) ||
-      !isStatus(step.status) || !Array.isArray(step.contributorThreadIds) ||
-      step.contributorThreadIds.length > workflowMutationLimits.maxContributorsPerStep ||
-      !step.contributorThreadIds.every(id => isId(id)) ||
-      new Set(step.contributorThreadIds).size !== step.contributorThreadIds.length) return null;
-  }
+    value.sourceBinding !== undefined && !validSourceBindingInput(value.sourceBinding) ||
+    value.requirements !== undefined && !validRequirementInput(value.requirements) ||
+    value.issues !== undefined && !validIssueInput(value.issues) ||
+    value.plan !== undefined && value.plan !== null && !validPlanRequest(value.plan)) return null;
   if (value.evidence !== undefined) {
     if (!Array.isArray(value.evidence) || value.evidence.length > workflowMutationLimits.maxEvidencePerApply) return null;
     for (const item of value.evidence) {
-      if (!isRecord(item) || !hasExactKeys(item, ["kind", "note"], ["targetStepId"]) ||
+      if (!isRecord(item) || !hasExactKeys(item, ["kind", "note"], ["targetNodeId"]) ||
         !["status_changed", "note", "observation"].includes(String(item.kind)) ||
         !isText(item.note, workflowMutationLimits.maxTextLength) ||
-        !(item.targetStepId === undefined || item.targetStepId === null || isId(item.targetStepId))) return null;
+        !(item.targetNodeId === undefined || item.targetNodeId === null || isId(item.targetNodeId))) return null;
     }
   }
   return value as WorkflowApplyPatch;
@@ -318,6 +390,49 @@ const locatorProperties = {
   supervisorThreadId: idSchema(),
   bindingGeneration: {type: "integer", minimum: 1, maximum: maxBindingGeneration},
 };
+const nullableTextSchema = (maxLength: number): Record<string, unknown> => ({anyOf: [{type: "string", maxLength}, {type: "null"}]});
+const workflowPlanDefinitions = {
+  group: {
+    type: "object", additionalProperties: false, required: ["kind", "nodes"], properties: {
+      kind: {type: "string", enum: ["sequence", "parallel"]},
+      templatePath: nullableTextSchema(2000),
+      nodes: {type: "array", minItems: 1, maxItems: workflowMutationLimits.maxPlanNodes, items: {$ref: "#/$defs/node"}},
+    },
+  },
+  node: {oneOf: [{$ref: "#/$defs/group"}, {$ref: "#/$defs/step"}, {$ref: "#/$defs/workflow"}]},
+  source: {
+    type: "object", additionalProperties: false, required: ["origin", "path", "sourceId"], properties: {
+      origin: {anyOf: [{type: "string", enum: ["global", "project"]}, {type: "null"}]},
+      path: nullableTextSchema(4096), sourceId: nullableTextSchema(64),
+    },
+  },
+  step: {
+    type: "object", additionalProperties: false, required: ["kind", "reason"], properties: {
+      kind: {const: "step"}, nodeId: idSchema(64), definitionId: nullableTextSchema(200), localId: nullableTextSchema(200),
+      templatePath: nullableTextSchema(2000), name: textSchema(160), description: {type: "string", maxLength: maxDefinitionTextLength},
+      source: {anyOf: [{$ref: "#/$defs/source"}, {type: "null"}]}, resolution: {type: "string", enum: ["resolved", "unresolved"]},
+      reason: textSchema(maxPlanReasonLength), status: {type: "string", enum: workflowExecutionStatuses},
+      contributorThreadIds: {type: "array", maxItems: workflowMutationLimits.maxContributorsPerNode, uniqueItems: true, items: idSchema()},
+    },
+  },
+  workflow: {
+    type: "object", additionalProperties: false, required: ["kind", "definitionId", "reason"], properties: {
+      kind: {const: "workflow"}, nodeId: idSchema(64), definitionId: idSchema(200), templatePath: nullableTextSchema(2000),
+      name: textSchema(160), description: {type: "string", maxLength: maxDefinitionTextLength}, fixed: {anyOf: [{type: "boolean"}, {type: "null"}]},
+      source: {anyOf: [{$ref: "#/$defs/source"}, {type: "null"}]}, resolution: {type: "string", enum: ["resolved", "partial", "unresolved"]},
+      reason: textSchema(maxPlanReasonLength), status: {type: "string", enum: workflowExecutionStatuses},
+      contributorThreadIds: {type: "array", maxItems: workflowMutationLimits.maxContributorsPerNode, uniqueItems: true, items: idSchema()},
+      omissions: {type: "array", maxItems: workflowMutationLimits.maxPlanNodes, items: {
+        type: "object", additionalProperties: false, required: ["templatePath", "kind", "id", "name", "source", "reason"], properties: {
+          templatePath: textSchema(2000), kind: {type: "string", enum: ["step", "workflow"]}, id: idSchema(200), name: textSchema(160),
+          source: {anyOf: [{$ref: "#/$defs/source"}, {type: "null"}]}, reason: textSchema(maxPlanReasonLength),
+        },
+      }},
+      plan: {anyOf: [{$ref: "#/$defs/group"}, {type: "null"}]},
+    },
+  },
+};
+const workflowPlanSchema = {anyOf: [{$ref: "#/$defs/group"}, {type: "null"}]};
 const applyInputSchema = {
   type: "object",
   additionalProperties: false,
@@ -328,25 +443,31 @@ const applyInputSchema = {
     expectedRevision: {type: "integer", minimum: 1},
     status: {type: "string", enum: workflowExecutionStatuses},
     objective: {type: ["string", "null"], maxLength: workflowMutationLimits.maxTextLength},
-    rules: {type: "array", maxItems: workflowMutationLimits.maxRules, items: {
-      type: "object", additionalProperties: false, required: ["index", "name", "applies", "reason"], properties: {
-        index: {type: "integer", minimum: 0}, name: textSchema(workflowMutationLimits.maxTextLength),
-        applies: {type: "boolean"}, reason: textSchema(workflowMutationLimits.maxTextLength),
+    sourceBinding: {
+      type: "object", additionalProperties: false, required: ["workspaceRoot", "revision", "globalRevision", "definitionsStatus", "definitionsComplete", "requirementsKnown", "taskId", "proposalId", "sourceHash"],
+      properties: {workspaceRoot: textSchema(4096), revision: nullableTextSchema(256), globalRevision: nullableTextSchema(256),
+        definitionsStatus: {type: "string", enum: ["ready", "missing", "invalid", "permission_required", "unavailable"]},
+        definitionsComplete: {type: "boolean"}, requirementsKnown: {type: "boolean"}, taskId: idSchema(), proposalId: idSchema(), sourceHash: textSchema(256)},
+    },
+    requirements: {type: "array", maxItems: workflowMutationLimits.maxPlanNodes, items: {
+      type: "object", additionalProperties: false, required: ["kind", "id", "name", "source", "state", "reason"], properties: {
+        kind: {type: "string", enum: ["step", "workflow"]}, id: idSchema(200), name: textSchema(160),
+        source: {anyOf: [{$ref: "#/$defs/source"}, {type: "null"}]},
+        state: {type: "string", enum: ["included", "not_applicable", "unresolved", "unknown"]}, reason: {type: "string", maxLength: maxPlanReasonLength},
       },
     }},
-    steps: {type: "array", maxItems: workflowMutationLimits.maxSteps, items: {
-      type: "object", additionalProperties: false, required: ["blockId", "name", "reason", "status", "contributorThreadIds"], properties: {
-        id: idSchema(), blockId: {anyOf: [idSchema(), {type: "null"}]}, name: textSchema(workflowMutationLimits.maxTextLength),
-        reason: textSchema(workflowMutationLimits.maxTextLength), status: {type: "string", enum: workflowExecutionStatuses},
-        contributorThreadIds: {type: "array", maxItems: workflowMutationLimits.maxContributorsPerStep, uniqueItems: true, items: idSchema()},
+    issues: {type: "array", maxItems: workflowMutationLimits.maxPlanNodes, items: {
+      type: "object", additionalProperties: false, required: ["path", "code", "message"], properties: {
+        path: {type: "string", maxLength: 4096}, code: textSchema(160), message: {type: "string", maxLength: maxDefinitionTextLength},
       },
     }},
+    plan: workflowPlanSchema,
     note: textSchema(workflowMutationLimits.maxTextLength),
     evidence: {type: "array", maxItems: workflowMutationLimits.maxEvidencePerApply, items: {
       type: "object", additionalProperties: false, required: ["kind", "note"], properties: {
         kind: {type: "string", enum: ["status_changed", "note", "observation"]},
         note: textSchema(workflowMutationLimits.maxTextLength),
-        targetStepId: {anyOf: [idSchema(), {type: "null"}]},
+        targetNodeId: {anyOf: [idSchema(), {type: "null"}]},
       },
     }},
   },
@@ -354,8 +475,9 @@ const applyInputSchema = {
 
 export const workflowReadToolDefinition = {
   name: "workflow_read",
-  description: "Read bounded workflow records for this current Supervisor binding and a fresh main-thread descendant summary, including retained archived descendants and their archivedAt flags. Writes currently accept only strong Codex native item references; Claude Agent and unknown source labels are not authorized. currentAgreementKey only marks content matching a retained snapshot; it does not prove current acceptance, execution, or definition validity.",
+  description: "Read bounded semantic workflow records for this current Supervisor binding and a fresh main-thread descendant summary, including retained archived descendants and incompatible older records. Writes accept only strong native item references authorized by the existing evidence verifier. currentAgreementKey only marks content matching a retained snapshot; it does not prove current acceptance, execution, or definition validity.",
   inputSchema: {
+    $defs: workflowPlanDefinitions,
     type: "object",
     additionalProperties: false,
     required: ["supervisorThreadId", "bindingGeneration"],
@@ -371,8 +493,9 @@ export const workflowReadToolDefinition = {
 
 export const workflowWriteToolDefinition = {
   name: "workflow_write",
-  description: "Create the main draft, link a verified live descendant, or update one current workflow with revision CAS. apply accepts only changed plan fields; omitted status, objective, rules, and steps remain unchanged. Write evidence is limited to a strong Codex native item reference; Claude Agent and unknown source labels are not authorized. Keep operationId unique within this Supervisor binding and edit namespace. Status and notes are agent-reported and do not prove execution. Never include source run or message claims.",
+  description: "Create the main draft, link a verified live descendant, or update one semantic workflow with revision CAS. apply accepts a nested sequence/parallel plan and its unchanged source-bound requirements; omitted fields retain current values. Newly introduced nodes receive stable service IDs only after exact native submitted-argument verification. Keep operationId unique within this Supervisor binding and edit namespace. Status and notes are agent-reported and do not prove execution. Never include source run or message claims.",
   inputSchema: {
+    $defs: workflowPlanDefinitions,
     type: "object",
     additionalProperties: false,
     required: ["action", "supervisorThreadId", "bindingGeneration"],
@@ -469,22 +592,27 @@ export class WorkflowWriteController {
         const result = this.options.workflows.getByIdForOwnerInTransaction(owner, parsed.value.workflowId);
         if (result.status === "owner_mismatch") return {status: "owner_mismatch" as const};
         if (result.status === "not_found") return {status: "not_found" as const};
+        if (result.status === "incompatible") return {status: "incompatible" as const, workflowId: result.workflowId, formatVersion: result.formatVersion};
         const document = result.document;
         if (!scope.allowedIds.has(document.threadId) || document.projectId !== owner.projectId || document.mainThreadId !== owner.mainThreadId)
           return {status: "not_found" as const};
-        return {status: "ok" as const, documents: [document]};
+        return {status: "ok" as const, documents: [document], incompatible: [] as Array<{workflowId: string; formatVersion: number | null}>};
       }
-      return {status: "ok" as const, documents: this.options.workflows.list(owner.projectId, owner.mainThreadId)
+      const listed = this.options.workflows.listResult(owner.projectId, owner.mainThreadId);
+      return {status: "ok" as const, documents: listed.documents
         .filter(document => scope.allowedIds.has(document.threadId) && document.projectId === owner.projectId && document.mainThreadId === owner.mainThreadId)
-        .sort((left, right) => scope.depthById.get(left.threadId)! - scope.depthById.get(right.threadId)! || left.threadId.localeCompare(right.threadId))};
+        .sort((left, right) => scope.depthById.get(left.threadId)! - scope.depthById.get(right.threadId)! || left.threadId.localeCompare(right.threadId)),
+      incompatible: listed.incompatible};
     });
     if (rows.status === "owner_mismatch") return {status: "denied", reason: "owner_changed"};
     if (rows.status === "not_found") return {status: "unavailable", reason: "workflow_not_found_in_current_scope"};
+    if (rows.status === "incompatible") return {status: "incompatible", workflowId: rows.workflowId, formatVersion: rows.formatVersion,
+      reason: "This workflow uses an older or unknown storage format and is retained read-only."};
     const all = rows.documents;
     const page = all.slice(workflowOffset, workflowOffset + limit);
     const withReferences = page.map(document => ({
       document,
-      parentStepReferences: this.parentStepReferences(owner, scope, document),
+      parentNodeReferences: this.parentNodeReferences(owner, scope, document),
     }));
     const task = this.options.supervisors.task(owner.mainThreadId);
     const result: WorkflowReadResult = {
@@ -492,6 +620,7 @@ export class WorkflowWriteController {
       owner,
       mainTaskAgreementStatus: task?.agreement?.status ?? null,
       agreementValidityNote: "Agreement status is current task metadata. currentAgreementKey only marks content matching a retained accepted snapshot; neither field proves execution or current definition validity.",
+      incompatibleWorkflows: rows.incompatible,
       workflows: withReferences,
       workflowOffset,
       workflowHasMore: workflowOffset + page.length < all.length,
@@ -551,9 +680,41 @@ export class WorkflowWriteController {
     if (payload.action === "link_child" && !scope.liveIds.has(payload.childThreadId))
       return this.commitDenied(owner, payload, evidence, requestHash, "child_not_current_native_descendant");
 
-    const result = this.commitWrite(owner, payload, evidence, requestHash, scope);
+    let applyValidation: WorkflowApplyValidationContext | undefined;
+    if (payload.action === "apply") {
+      const pinned = await this.resolveApplyValidation(owner, signal);
+      if (pinned.status !== "ready") return {status: pinned.status, operationId, reason: pinned.reason};
+      applyValidation = pinned.validation;
+    }
+    const result = this.commitWrite(owner, payload, evidence, requestHash, scope, applyValidation);
     this.pendingCandidates.delete(requestHash);
     return result;
+  }
+
+  private async resolveApplyValidation(owner: WorkflowOwner, signal: AbortSignal): Promise<ApplyPinResult> {
+    const task = this.options.supervisors.task(owner.mainThreadId);
+    if (!task || task.threadId !== owner.mainThreadId || task.projectId !== owner.projectId || task.supervisorThreadId !== owner.supervisorThreadId ||
+      task.status !== "inferred" || !task.workflowProposalId && !isId(task.id) || !task.definitionSnapshot || !task.definitionContext || !task.workflow ||
+      task.workflow.status !== "proposed" || task.workflow.definitionsStatus !== "ready" || !task.workflow.definitionsComplete ||
+      !task.workflow.requirementsKnown || !task.workflow.plan || !task.workflow.workspaceRoot || !task.workflow.revision || !isText(task.sourceHash, 256) ||
+      task.definitionSnapshot.status !== "ready" || !task.definitionSnapshot.complete || !task.definitionSnapshot.revision ||
+      task.definitionSnapshot.workspaceRoot !== task.workflow.workspaceRoot || task.definitionSnapshot.revision !== task.workflow.revision ||
+      (task.definitionSnapshot.globalRevision ?? null) !== task.workflow.globalRevision) return {status: "invalid", reason: "current_task_has_no_valid_source_bound_plan"};
+    if (!this.options.loadDefinitions) return {status: "unavailable", reason: "definition_source_reader_unavailable"};
+    let fresh: ProjectDefinitionSnapshot;
+    try {fresh = await this.options.loadDefinitions(owner.projectId, owner.mainThreadId, signal);}
+    catch {return {status: "unavailable", reason: signal.aborted ? "definition_source_read_interrupted" : "definition_source_read_unavailable"};}
+    if (signal.aborted) return {status: "unavailable", reason: "definition_source_read_interrupted"};
+    if (fresh.projectId !== owner.projectId || fresh.threadId !== owner.mainThreadId || fresh.status !== "ready" || !fresh.complete || !fresh.revision ||
+      fresh.workspaceRoot !== task.workflow.workspaceRoot || fresh.revision !== task.workflow.revision ||
+      (fresh.globalRevision ?? null) !== task.workflow.globalRevision || !proposalContextMatches(task.definitionContext, fresh) ||
+      !proposalContextMatches(proposalContextFromDefinitions(task.definitionSnapshot), fresh))
+      return {status: "invalid", reason: "definition_source_changed_or_is_not_current"};
+    const expectedProposalId = task.workflowProposalId ?? task.id;
+    if (!isId(task.id) || !isId(expectedProposalId)) return {status: "invalid", reason: "current_task_identity_invalid"};
+    return {status: "ready", validation: {pinnedContext: proposalContextFromDefinitions(fresh), originalProposal: task.workflow,
+      expectedTaskId: task.id, expectedProposalId, expectedSourceHash: task.sourceHash,
+      acceptedTaskAgreement: task.agreement ?? null, acceptedTaskAgreementSourceHash: task.agreementSourceHash ?? null}};
   }
 
   private resolveBinding(locator: WorkflowLocator): BindingRecord | null {
@@ -705,6 +866,7 @@ export class WorkflowWriteController {
     evidence: WorkflowEvidenceMatch,
     requestHash: string,
     scope: NativeScope,
+    validation?: WorkflowApplyValidationContext,
   ): WorkflowWriteResult {
     return this.commit(owner, payload, evidence, requestHash, () => {
       if (payload.action === "ensure_main")
@@ -720,33 +882,93 @@ export class WorkflowWriteController {
       const found = this.options.workflows.getByIdForOwnerInTransaction(owner, payload.input.workflowId);
       if (found.status === "owner_mismatch") return {status: "owner_mismatch", operationId: payload.input.operationId};
       if (found.status === "not_found") return {status: "not_found", operationId: payload.input.operationId};
+      if (found.status === "incompatible") return {...found, operationId: payload.input.operationId};
       if (!scope.allowedIds.has(found.document.threadId) ||
         found.document.projectId !== owner.projectId || found.document.mainThreadId !== owner.mainThreadId)
         return {status: "denied", operationId: payload.input.operationId, reason: "workflow_outside_current_scope"};
+      if (!validation) return {status: "invalid", operationId: payload.input.operationId, reason: "pinned_definition_context_required"};
       const current = found.document;
+      const activeTask = this.options.supervisors.task(owner.mainThreadId);
+      const activeProposalId = activeTask?.workflowProposalId ?? activeTask?.id;
+      if (!activeTask || !activeTask.workflow || activeTask.id !== validation.expectedTaskId || activeProposalId !== validation.expectedProposalId ||
+        activeTask.sourceHash !== validation.expectedSourceHash || canonicalJson(activeTask.workflow) !== canonicalJson(validation.originalProposal) ||
+        canonicalJson(activeTask.agreement ?? null) !== canonicalJson(validation.acceptedTaskAgreement) ||
+        (activeTask.agreementSourceHash ?? null) !== validation.acceptedTaskAgreementSourceHash || activeTask.status !== "inferred")
+        return {status: "invalid", operationId: payload.input.operationId, reason: "current_task_proposal_changed"};
+      const original = validation.originalProposal;
+      const sourceBinding: WorkflowSourceBindingInfo = {
+        workspaceRoot: original.workspaceRoot!, revision: original.revision!, globalRevision: original.globalRevision ?? null,
+        definitionsStatus: original.definitionsStatus, definitionsComplete: original.definitionsComplete,
+        requirementsKnown: original.requirementsKnown, taskId: validation.expectedTaskId, proposalId: validation.expectedProposalId,
+        sourceHash: validation.expectedSourceHash,
+      };
+      const effectiveSourceBinding = payload.input.sourceBinding ?? sourceBinding;
       const applyInput: WorkflowApplyInput = {
         operationId: payload.input.operationId,
         workflowId: payload.input.workflowId,
         expectedRevision: payload.input.expectedRevision,
         status: payload.input.status ?? current.status,
-        objective: payload.input.objective === undefined ? current.objective : payload.input.objective,
-        rules: payload.input.rules ?? current.rules,
-        steps: payload.input.steps ?? current.steps,
+        objective: payload.input.objective === undefined ?
+          current.objective ?? (current.threadId === owner.mainThreadId ? activeTask.objective : null) : payload.input.objective,
+        sourceBinding: effectiveSourceBinding,
+        requirements: payload.input.requirements ?? (current.threadId === owner.mainThreadId ? [...original.requirements] : []),
+        issues: payload.input.issues ?? [...original.issues],
+        plan: payload.input.plan === undefined ? current.plan : payload.input.plan,
         note: payload.input.note,
         ...(payload.input.evidence !== undefined ? {evidence: payload.input.evidence} : {}),
       };
-      const contributorsByStep = new Map(current.steps.map(step => [step.id, new Set(step.contributorThreadIds)]));
-      for (const step of applyInput.steps) {
-        const existingOnStep = typeof step.id === "string" ? contributorsByStep.get(step.id) : undefined;
-        for (const contributorThreadId of step.contributorThreadIds) {
-          if (existingOnStep?.has(contributorThreadId)) continue;
+      const candidate = {...applyInput, sourceBinding: effectiveSourceBinding};
+      const target = {targetThreadId: current.threadId, mainThreadId: owner.mainThreadId};
+      const currentBinding = current.sourceBinding;
+      const currentPlan = currentBinding?.taskId === validation.expectedTaskId &&
+        currentBinding.sourceHash === validation.expectedSourceHash &&
+        currentBinding.workspaceRoot === validation.pinnedContext.workspaceRoot &&
+        currentBinding.revision === validation.pinnedContext.revision &&
+        currentBinding.globalRevision === (validation.pinnedContext.globalRevision ?? null) &&
+        currentBinding.definitionsStatus === "ready" && currentBinding.definitionsComplete && currentBinding.requirementsKnown
+        ? current.plan : null;
+      const acceptedTaskPlan = current.threadId === owner.mainThreadId ? acceptedTaskPlanForBinding(validation.acceptedTaskAgreement,
+        validation.acceptedTaskAgreementSourceHash, validation.expectedSourceHash, sourceBinding) : null;
+      const acceptedPlans = [...acceptedWorkflowPlansForBinding(current, sourceBinding), ...(acceptedTaskPlan ? [acceptedTaskPlan] : [])];
+      const canonical = validateWorkflowApplyAgainstPinnedContext(candidate, validation.pinnedContext, validation.originalProposal,
+        validation.expectedTaskId, validation.expectedProposalId, validation.expectedSourceHash, target, acceptedPlans, currentPlan);
+      if (!canonical) return {status: "invalid", operationId: applyInput.operationId, reason: "pinned_definition_context_mismatch"};
+      const normalizedInput: WorkflowApplyInput = {...applyInput, plan: canonical.plan, requirements: [...canonical.requirements], issues: [...canonical.issues]};
+      const previousNodes = new Map<string, Set<string>>();
+      const indexPrevious = (group: WorkflowPlanGroupInfo | null): void => {
+        if (!group) return;
+        for (const node of group.nodes) {
+          if ("nodes" in node) indexPrevious(node);
+          else {
+            previousNodes.set(node.nodeId, new Set(node.contributorThreadIds));
+            if ("plan" in node) indexPrevious(node.plan);
+          }
+        }
+      };
+      indexPrevious(current.plan);
+      const nextNodes: Array<WorkflowPlanStepInfo | WorkflowPlanWorkflowInfo> = [];
+      const indexNext = (group: WorkflowPlanGroupInfo | null): void => {
+        if (!group) return;
+        for (const node of group.nodes) {
+          if ("nodes" in node) indexNext(node);
+          else {
+            nextNodes.push(node);
+            if ("plan" in node) indexNext(node.plan);
+          }
+        }
+      };
+      indexNext(normalizedInput.plan);
+      for (const node of nextNodes) {
+        const existingOnNode = previousNodes.get(node.nodeId);
+        for (const contributorThreadId of node.contributorThreadIds) {
+          if (existingOnNode?.has(contributorThreadId)) continue;
           if (!scope.allowedIds.has(contributorThreadId))
             return {status: "denied", operationId: applyInput.operationId, reason: "contributor_outside_current_scope"};
           if (!scope.liveIds.has(contributorThreadId))
             return {status: "denied", operationId: applyInput.operationId, reason: "new_contributor_not_live"};
         }
       }
-      return this.options.workflows.applyInTransaction(owner, applyInput, this.now());
+      return this.options.workflows.applyInTransaction(owner, normalizedInput, this.now(), validation);
     });
   }
 
@@ -821,20 +1043,29 @@ export class WorkflowWriteController {
       owner.bindingGeneration, nativeEvidence, JSON.stringify(result), successful ? 1 : 0, this.now());
   }
 
-  private parentStepReferences(owner: WorkflowOwner, scope: NativeScope, document: WorkflowStateDocument): Array<{
+  private parentNodeReferences(owner: WorkflowOwner, scope: NativeScope, document: WorkflowStateDocument): Array<{
     parentWorkflowId: string;
     parentThreadId: string;
-    stepId: string;
-    stepName: string;
+    nodeId: string;
+    nodeKind: "step" | "workflow";
+    nodeName: string;
   }> {
     if (!document.parentWorkflowId || !document.parentThreadId || !scope.allowedIds.has(document.parentThreadId)) return [];
     const parent = this.options.workflows.get(owner.projectId, owner.mainThreadId, document.parentThreadId);
     if (!parent || parent.workflowId !== document.parentWorkflowId) return [];
-    return parent.steps.filter(step => step.contributorThreadIds.includes(document.threadId)).map(step => ({
-      parentWorkflowId: parent.workflowId,
-      parentThreadId: parent.threadId,
-      stepId: step.id,
-      stepName: step.name,
-    }));
+    const references: Array<{parentWorkflowId: string; parentThreadId: string; nodeId: string; nodeKind: "step" | "workflow"; nodeName: string}> = [];
+    const walk = (group: WorkflowPlanGroupInfo | null): void => {
+      if (!group) return;
+      for (const node of group.nodes) {
+        if ("nodes" in node) walk(node);
+        else {
+          if (node.contributorThreadIds.includes(document.threadId)) references.push({parentWorkflowId: parent.workflowId,
+            parentThreadId: parent.threadId, nodeId: node.nodeId, nodeKind: node.kind, nodeName: node.name});
+          if ("plan" in node) walk(node.plan);
+        }
+      }
+    };
+    walk(parent.plan);
+    return references;
   }
 }

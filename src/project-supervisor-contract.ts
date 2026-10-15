@@ -37,13 +37,161 @@ export const ProjectSupervisorBinding = Schema.Struct({
   keptActive: Schema.optionalKey(Schema.Boolean),
 });
 export type SupervisorBinding = typeof ProjectSupervisorBinding.Type;
+export const WorkflowExecutionStatus = Schema.Literals(["planned", "underway", "completed", "needs_attention"]);
+export type WorkflowExecutionStatusInfo = typeof WorkflowExecutionStatus.Type;
+export type WorkflowSourceInfo = {
+  origin: "global" | "project" | null;
+  path: string | null;
+  sourceId: string | null;
+};
+const WorkflowSource = Schema.Struct({
+  origin: Schema.NullOr(Schema.Literals(["global", "project"])),
+  path: Schema.NullOr(Schema.String),
+  sourceId: Schema.NullOr(Schema.String),
+});
+export type WorkflowRequirementInfo = {
+  kind: "step" | "workflow";
+  id: string;
+  name: string;
+  source: WorkflowSourceInfo | null;
+  state: "included" | "not_applicable" | "unresolved" | "unknown";
+  reason: string;
+};
+export const WorkflowRequirement = Schema.Struct({
+  kind: Schema.Literals(["step", "workflow"]),
+  id: Schema.String,
+  name: Schema.String,
+  source: Schema.NullOr(WorkflowSource),
+  state: Schema.Literals(["included", "not_applicable", "unresolved", "unknown"]),
+  reason: Schema.String,
+});
+export type WorkflowIssueInfo = {path: string; code: string; message: string};
+export const WorkflowIssue = Schema.Struct({path: Schema.String, code: Schema.String, message: Schema.String});
+export type WorkflowSourceBindingInfo = {
+  workspaceRoot: string;
+  revision: string | null;
+  globalRevision: string | null;
+  definitionsStatus: "ready" | "missing" | "invalid" | "permission_required" | "unavailable";
+  definitionsComplete: boolean;
+  requirementsKnown: boolean;
+  taskId: string;
+  proposalId: string;
+  sourceHash: string;
+};
+export const WorkflowSourceBinding = Schema.Struct({
+  workspaceRoot: Schema.String,
+  revision: Schema.NullOr(Schema.String),
+  globalRevision: Schema.NullOr(Schema.String),
+  definitionsStatus: Schema.Literals(["ready", "missing", "invalid", "permission_required", "unavailable"]),
+  definitionsComplete: Schema.Boolean,
+  requirementsKnown: Schema.Boolean,
+  taskId: Schema.String,
+  proposalId: Schema.String,
+  sourceHash: Schema.String,
+});
+export type WorkflowPlanStepInfo = {
+  kind: "step";
+  nodeId: string;
+  definitionId: string | null;
+  localId: string | null;
+  templatePath: string | null;
+  name: string;
+  description: string;
+  source: WorkflowSourceInfo | null;
+  resolution: "resolved" | "unresolved";
+  reason: string;
+  status: WorkflowExecutionStatusInfo;
+  contributorThreadIds: readonly string[];
+};
+export type WorkflowOmissionInfo = {
+  templatePath: string;
+  kind: "step" | "workflow";
+  id: string;
+  name: string;
+  source: WorkflowSourceInfo | null;
+  reason: string;
+};
+export type WorkflowPlanWorkflowInfo = {
+  kind: "workflow";
+  nodeId: string;
+  definitionId: string;
+  templatePath: string | null;
+  name: string;
+  description: string;
+  fixed: boolean | null;
+  source: WorkflowSourceInfo | null;
+  resolution: "resolved" | "partial" | "unresolved";
+  reason: string;
+  status: WorkflowExecutionStatusInfo;
+  contributorThreadIds: readonly string[];
+  omissions: readonly WorkflowOmissionInfo[];
+  plan: WorkflowPlanGroupInfo | null;
+};
+export type WorkflowPlanGroupInfo = {kind: "sequence" | "parallel"; templatePath: string | null; nodes: readonly WorkflowPlanNodeInfo[]};
+export type WorkflowPlanNodeInfo = WorkflowPlanStepInfo | WorkflowPlanWorkflowInfo | WorkflowPlanGroupInfo;
+const WorkflowPlanStep = Schema.Struct({
+  kind: Schema.Literal("step"),
+  nodeId: Schema.String,
+  definitionId: Schema.NullOr(Schema.String),
+  localId: Schema.NullOr(Schema.String),
+  templatePath: Schema.NullOr(Schema.String),
+  name: Schema.String,
+  description: Schema.String,
+  source: Schema.NullOr(WorkflowSource),
+  resolution: Schema.Literals(["resolved", "unresolved"]),
+  reason: Schema.String,
+  status: WorkflowExecutionStatus,
+  contributorThreadIds: Schema.Array(Schema.String),
+});
+const workflowPlanNodeSchema = (): Schema.Codec<WorkflowPlanNodeInfo, WorkflowPlanNodeInfo, never, never> => Schema.suspend((): Schema.Codec<WorkflowPlanNodeInfo, WorkflowPlanNodeInfo, never, never> => Schema.Union([
+  WorkflowPlanStep,
+  WorkflowPlanWorkflow,
+  WorkflowPlanGroup,
+]));
+const WorkflowPlanGroup: Schema.Codec<WorkflowPlanGroupInfo, WorkflowPlanGroupInfo, never, never> = Schema.suspend((): Schema.Codec<WorkflowPlanGroupInfo, WorkflowPlanGroupInfo, never, never> => Schema.Struct({
+  kind: Schema.Literals(["sequence", "parallel"]),
+  templatePath: Schema.NullOr(Schema.String),
+  nodes: Schema.Array(workflowPlanNodeSchema()),
+}));
+const WorkflowOmission = Schema.Struct({
+  templatePath: Schema.String,
+  kind: Schema.Literals(["step", "workflow"]),
+  id: Schema.String,
+  name: Schema.String,
+  source: Schema.NullOr(WorkflowSource),
+  reason: Schema.String,
+});
+const WorkflowPlanWorkflow = Schema.Struct({
+  kind: Schema.Literal("workflow"),
+  nodeId: Schema.String,
+  definitionId: Schema.String,
+  templatePath: Schema.NullOr(Schema.String),
+  name: Schema.String,
+  description: Schema.String,
+  fixed: Schema.NullOr(Schema.Boolean),
+  source: Schema.NullOr(WorkflowSource),
+  resolution: Schema.Literals(["resolved", "partial", "unresolved"]),
+  reason: Schema.String,
+  status: WorkflowExecutionStatus,
+  contributorThreadIds: Schema.Array(Schema.String),
+  omissions: Schema.Array(WorkflowOmission),
+  plan: Schema.NullOr(WorkflowPlanGroup),
+});
+const WorkflowPlanNodeSchemaInternal = workflowPlanNodeSchema();
+export const WorkflowPlanGroupSchema = WorkflowPlanGroup;
+export const WorkflowPlanNodeSchema = WorkflowPlanNodeSchemaInternal;
 export const WorkflowProposal = Schema.Struct({
-  status: Schema.Literals(["pending", "proposed", "unavailable", "stale", "invalid"]),
+  status: Schema.Literals(["pending", "proposed", "provisional", "unavailable", "stale", "invalid"]),
   message: Schema.String,
   workspaceRoot: Schema.NullOr(Schema.String),
   revision: Schema.NullOr(Schema.String),
-  rules: Schema.Array(Schema.Struct({index: Schema.Number, name: Schema.String, applies: Schema.Boolean, reason: Schema.String})),
-  steps: Schema.Array(Schema.Struct({blockId: Schema.NullOr(Schema.String), name: Schema.String, reason: Schema.String})),
+  globalRevision: Schema.NullOr(Schema.String),
+  definitionsStatus: Schema.Literals(["ready", "missing", "invalid", "permission_required", "unavailable"]),
+  definitionsComplete: Schema.Boolean,
+  requirementsKnown: Schema.Boolean,
+  requirements: Schema.Array(WorkflowRequirement),
+  issues: Schema.Array(WorkflowIssue),
+  plan: Schema.NullOr(WorkflowPlanGroup),
 });
 export type WorkflowProposalInfo = typeof WorkflowProposal.Type;
 export const WorkflowAgreement = Schema.Struct({

@@ -1,62 +1,74 @@
 import { fingerprint } from "./guidance-store.js";
-import { record } from "./supervisor-native.js";
-import { validateWorkflowPlan, type ProposalContext } from "./supervisor-workflow.js";
-import type { WorkflowProposalInfo } from "./project-supervisor-contract.js";
+import { validateWorkflowRecord, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
+import type { WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
 
 export type WorkflowAgreementRecordKind = "workflow-proposal" | "workflow-acceptance";
-export type NormalizedWorkflowPlan = Pick<WorkflowProposalInfo, "rules" | "steps">;
-export type ParsedWorkflowAgreementRecord = {
+export type ParsedWorkflowProposalRecord = {
   taskId: string;
   proposalId: string;
   workspaceRoot: string;
-  revision: string;
-  workflow: NormalizedWorkflowPlan;
+  revision: string | null;
+  workflow: WorkflowPlanValue;
 };
+export type ParsedWorkflowAgreementRecord = ParsedWorkflowProposalRecord & {revision: string};
 
-const proposalIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-const recordFields = ["taskId", "proposalId", "workspaceRoot", "revision", "workflow"];
+const maxRecordLength = 128_000;
+const maxRecords = 20;
+const idText = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(value);
+const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const exactFields = (value: Record<string, unknown>, fields: readonly string[]): boolean =>
+  Object.keys(value).length === fields.length && fields.every(field => Object.hasOwn(value, field));
 
-/** Extracts bounded named fences without accepting prose or a bare confirmation. */
+/** Reads only exact named proposal or acceptance fences from completed message text. */
 export const extractWorkflowAgreementRecords = (text: string, kind: WorkflowAgreementRecordKind): unknown[] => {
-  if (text.length > 128_000) return [];
-  const lines = text.split(/\r?\n/u);
-  const records: unknown[] = [];
-  for (let index = 0; index < lines.length && records.length < 20; index++) {
-    if (!/^ {0,3}```workflow-(?:proposal|acceptance)[ \t]*$/u.test(lines[index]!)) continue;
-    if (lines[index]!.trim() !== "```" + kind) continue;
-    const body: string[] = [];
-    let bodyLength = 0;
-    let closed = false;
-    for (index++; index < lines.length; index++) {
-      if (/^ {0,3}```[ \t]*$/u.test(lines[index]!)) {closed = true; break;}
-      body.push(lines[index]!);
-      bodyLength += lines[index]!.length + 1;
-      if (bodyLength > 128_000) break;
-    }
-    if (!closed) continue;
-    try {records.push(JSON.parse(body.join("\n")) as unknown);} catch { /* malformed records are ignored */ }
+  if (text.length > maxRecordLength) return [];
+  const values: unknown[] = [];
+  const pattern = /```(workflow-proposal|workflow-acceptance)\r?\n([\s\S]*?)\r?\n```/gu;
+  for (const match of text.matchAll(pattern)) {
+    if (match[1] !== kind || values.length >= maxRecords || match[2]!.length > maxRecordLength) continue;
+    try {values.push(JSON.parse(match[2]!));} catch { /* malformed fenced records are ignored */ }
   }
-  return records;
+  return values;
 };
 
-/** Validates the complete task identity and definition-backed plan in one record. */
-export const parseWorkflowAgreementRecord = (
-  value: unknown,
-  taskId: string,
-  workspaceRoot: string,
-  revision: string,
-  context: ProposalContext,
-  requiredRuleIndexes: ReadonlySet<number>,
-): ParsedWorkflowAgreementRecord | null => {
-  if (!record(value) || Object.keys(value).length !== recordFields.length || recordFields.some(field => !Object.hasOwn(value, field)) ||
-    value.taskId !== taskId || typeof value.proposalId !== "string" || !proposalIdPattern.test(value.proposalId) ||
-    value.workspaceRoot !== workspaceRoot || value.workspaceRoot !== context.workspaceRoot ||
-    value.revision !== revision || value.revision !== context.revision) return null;
-  const workflow = validateWorkflowPlan(value.workflow, context, requiredRuleIndexes);
-  return workflow ? {taskId, proposalId: value.proposalId, workspaceRoot, revision, workflow} : null;
+const parseProposal = (value: unknown, taskId: string, context: ProposalContext): ParsedWorkflowProposalRecord | null => {
+  if (!record(value) || !exactFields(value, ["taskId", "proposalId", "workspaceRoot", "revision", "workflow"]) ||
+    value.taskId !== taskId || !idText(value.proposalId) || value.workspaceRoot !== context.workspaceRoot ||
+    !(value.revision === null || typeof value.revision === "string") || value.revision !== context.revision ||
+    typeof value.workspaceRoot !== "string" || value.workspaceRoot.length > 4096) return null;
+  const workflow = validateWorkflowRecord(value.workflow, context);
+  if (!workflow) return null;
+  return {taskId, proposalId: value.proposalId, workspaceRoot: value.workspaceRoot, revision: value.revision, workflow};
 };
 
-export const workflowAgreementPlanHash = (recordValue: Pick<ParsedWorkflowAgreementRecord, "workspaceRoot" | "revision" | "workflow">): string =>
-  fingerprint({workspaceRoot: recordValue.workspaceRoot, revision: recordValue.revision, workflow: recordValue.workflow});
+/** Validates a canonical proposal for presentation, including provisional source states. */
+export const parseWorkflowProposalRecord = (value: unknown, taskId: string, context: ProposalContext): ParsedWorkflowProposalRecord | null =>
+  parseProposal(value, taskId, context);
 
-export const workflowPlanValue = (workflow: NormalizedWorkflowPlan): NormalizedWorkflowPlan => ({rules: workflow.rules, steps: workflow.steps});
+const fullyResolvedPlan = (workflow: WorkflowPlanValue): boolean => {
+  if (!workflow.plan || !workflow.requirementsKnown || workflow.requirements.some(item => item.state === "unknown" || item.state === "unresolved")) return false;
+  if (workflow.issues.some(item => ["definition_context_incomplete", "supervisor_context_limit", "workflow_cycle_in_plan",
+    "workflow_cycle_in_definition", "fixed_workflow_changed", "workflow_member_unresolved", "unresolved_project_requirement",
+    "unresolved_step_reference", "unresolved_workflow_reference"].includes(item.code))) return false;
+  const walk = (group: WorkflowPlanGroupInfo): boolean => group.nodes.every(node => {
+    switch (node.kind) {
+      case "sequence":
+      case "parallel": return walk(node);
+      case "step": return node.resolution === "resolved";
+      case "workflow": return node.resolution === "resolved" && node.fixed !== null && node.plan !== null && walk(node.plan);
+    }
+  });
+  return walk(workflow.plan);
+};
+
+/** Parses only current complete valid agreements; invalid or incomplete definitions stay provisional. */
+export const parseWorkflowAgreementRecord = (value: unknown, taskId: string, context: ProposalContext): ParsedWorkflowAgreementRecord | null => {
+  const proposal = parseProposal(value, taskId, context);
+  if (!proposal || context.status !== "ready" || !context.complete || !context.revision ||
+    proposal.workflow.definitionsStatus !== "ready" || !proposal.workflow.definitionsComplete || !fullyResolvedPlan(proposal.workflow)) return null;
+  return {...proposal, revision: context.revision};
+};
+
+/** Hashes the exact source-bound canonical record, retaining node identity and group order. */
+export const workflowAgreementPlanHash = (value: Pick<ParsedWorkflowProposalRecord, "workspaceRoot" | "revision" | "workflow">): string =>
+  fingerprint({workspaceRoot: value.workspaceRoot, revision: value.revision, workflow: value.workflow});

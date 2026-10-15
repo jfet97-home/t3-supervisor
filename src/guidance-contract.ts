@@ -1,5 +1,5 @@
 import { ThreadPolicy } from "./thread-policy-contract.js";
-import { ProjectDefinitions, ProjectRuleSaveInput, ProjectRuleSaveResult } from "./project-definitions-contract.js";
+import { ProjectDefinitions, ProjectConfigSaveInput, ProjectConfigSaveResult } from "./project-definitions-contract.js";
 import { Schema } from "effect";
 import { ProjectSupervisorSnapshot, ProjectSupervisorSave, ProjectSupervisorRetry, ProjectSupervisorSaveResult } from "./project-supervisor-contract.js";
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/http-api";
@@ -152,14 +152,14 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
       HttpApiEndpoint.post("retryProjectSupervisor", "/project-supervisor/retry", {
         payload: ProjectSupervisorRetry, success: ProjectSupervisorSaveResult, error: UiError,
       }),
-      HttpApiEndpoint.get("projectDefinitions", "/project-definitions", {
+      HttpApiEndpoint.get("projectConfiguration", "/project-configuration", {
         query: {projectId: Text, threadId: Schema.optional(Text)},
         success: ProjectDefinitions,
         error: UiError,
       }),
-      HttpApiEndpoint.post("saveProjectRules", "/project-rules", {
-        payload: ProjectRuleSaveInput,
-        success: ProjectRuleSaveResult,
+      HttpApiEndpoint.post("saveProjectConfiguration", "/project-configuration", {
+        payload: ProjectConfigSaveInput,
+        success: ProjectConfigSaveResult,
         error: UiError,
       }),
       HttpApiEndpoint.post("saveRule", "/rules", {

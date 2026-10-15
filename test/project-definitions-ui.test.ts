@@ -3,117 +3,192 @@ import { test } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DefinitionsContent } from "../ui/src/project-definitions.js";
+import { ProjectConfigurationEditor } from "../ui/src/project-configuration-editor.js";
 import { loadProjectDefinitions } from "../ui/src/project-definitions-api.js";
-import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { forgeDashboardToken } from "../src/service-auth.js";
+import { ProjectConfigRequestError, saveProjectConfiguration } from "../ui/src/project-definitions-api.js";
+import type { ProjectConfigSave, ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
+import { clearAccess, loadAccess } from "../ui/src/access.js";
 
 const definitions: ProjectDefinitionSnapshot = {
-  projectId: "project", threadId: null, workspaceRoot: "/workspace", revision: "a".repeat(64), editingAvailable: true, status: "ready", issues: [],
-  rules: [{name: "Review changes", description: "Changes require independent review.", required_blocks: ["review"]}],
-  blocks: [{id: "review", name: "Review", description: "Inspect changes", instructions: "Check errors and existing patterns.", expected_result: "Findings and resolutions."}],
+  projectId: "project",
+  threadId: null,
+  workspaceRoot: "/workspace",
+  globalOnly: false,
+  globalRevision: null,
+  revision: "a".repeat(64),
+  editingAvailable: true,
+  status: "ready",
+  steps: [
+    {id: "e2e-testing", name: "End-to-end testing", description: "Test the changed behavior.", origin: "project", path: ".t3-supervisor/steps/e2e-testing.md", sourceId: "e2e-testing"},
+    {id: "security-review", name: "Security review", description: "Check the relevant trust boundaries.", origin: "global", path: "~/.t3-supervisor/steps/security-review.md", sourceId: "security-review"},
+  ],
+  workflows: [{
+    id: "reviewer", name: "Reviewer", description: "Review the change and verify affected behavior.", fixed: true,
+    sequence: [
+      {step: "e2e-testing"},
+      {parallel: [{step: "security-review"}, {step: {id: "inspect-notes", name: "Inspect notes", description: "Check the task-specific notes."}}]},
+      {workflow: "missing-review"},
+    ],
+    origin: "project", path: ".t3-supervisor/workflows/reviewer.yaml", sourceId: "reviewer",
+  }],
+  config: {required: [{step: "e2e-testing"}, {step: "security-review"}, {workflow: "reviewer"}], default_workflow: "reviewer"},
+  projectConfig: {required: [{step: "e2e-testing"}], default_workflow: "reviewer"},
+  complete: true,
+  sources: [{path: ".t3-supervisor/project.yaml", origin: "project", content: "required:\n  - step: e2e-testing\n"}],
+  issues: [],
 };
 
-test("definition UI shows rules, block links, instructions and completion expectations", () => {
+test("definitions UI shows effective global and project requirements plus nested workflow structure", () => {
   const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions}));
-  assert.match(html, /Review changes/);assert.match(html, /Required blocks/);assert.match(html, /definition-block-review/);
-  assert.match(html, /Check errors and existing patterns/);assert.match(html, /Findings and resolutions/);
-  assert.match(html, /Referenced by loaded rules: Review changes/);assert.match(html, /<details/);assert.match(html, /<summary/);
+  assert.match(html, /Effective requirements/);
+  assert.match(html, /End-to-end testing/);
+  assert.match(html, /Security review/);
+  assert.match(html, /Workflow reference cycle|Missing or invalid workflow: missing-review/);
+  assert.match(html, /Fixed fragment/);
+  assert.match(html, /Parallel group/);
+  assert.match(html, /Local step:<\/strong> Inspect notes/);
+  assert.match(html, /intended semantic order/);
+  assert.match(html, /project\.yaml/);
+  assert.match(html, /<details/);
+  assert.match(html, /<summary/);
+  assert.doesNotMatch(html, /Project rules|Reusable blocks|instructions|expected result/i);
 });
 
-test("unreadable rules never imply that requirements or block references are absent", () => {
-  const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions: {...definitions, status: "invalid", rules: [],
-    issues: [{path: ".t3-supervisor/rules.yaml", code: "invalid_definition", message: "Invalid YAML."}]}}));
-  assert.match(html, /No readable rules are available/);assert.match(html, /Invalid YAML/);
-  assert.doesNotMatch(html, /No requirements are declared|No declared rule references|Referenced by/);
+test("invalid and incomplete collections never imply that unreadable requirements are absent", () => {
+  const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions: {...definitions, status: "invalid", complete: false, config: {required: []}, steps: [],
+    issues: [{path: ".t3-supervisor/workflows/reviewer.yaml", code: "workflow_cycle", message: "Workflow reference cycle: reviewer -> nested -> reviewer."}]}}));
+  assert.match(html, /Definitions need attention/);
+  assert.match(html, /Read incomplete/);
+  assert.match(html, /may be only part of the requirements/);
+  assert.match(html, /Workflow reference cycle: reviewer -&gt; nested -&gt; reviewer/);
+  assert.match(html, /No readable required references are available/);
+  assert.doesNotMatch(html, /No effective required references are configured/);
 });
 
-test("invalid collections stay visibly invalid and missing references never become inspect buttons", () => {
-  const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions: {...definitions, status: "invalid", blocks: [],
-    issues: [{path: ".t3-supervisor/rules.yaml", code: "block_reference_missing", message: "Missing review block."}]}}));
-  assert.match(html, /Definitions need attention/);assert.match(html, /Missing or invalid: review/);assert.match(html, /Missing review block/);
-  assert.doesNotMatch(html, /<button/);
-});
-
-test("repository markup stays escaped text rather than executable or interactive HTML", () => {
+test("raw repository source is escaped plain text and missing references stay diagnostic text", () => {
   const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions: {...definitions,
-    blocks: [{...definitions.blocks[0]!, instructions: '<script>window.injected=true</script><img src=x onerror="alert(1)">'}]}}));
-  assert.doesNotMatch(html, /<script>|<img/);assert.match(html, /&lt;script&gt;/);
+    workflows: [{...definitions.workflows[0]!, sequence: [{step: "missing-step"}]}],
+    sources: [{path: ".t3-supervisor/steps/bad.md", origin: "project", content: '<script>window.injected=true</script><img src=x onerror="alert(1)">'}],
+  }}));
+  assert.doesNotMatch(html, /<script>|<img/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
+  assert.match(html, /Missing or invalid step: missing-step/);
 });
 
-test("definition client validates target identity and passes cancellation to same-origin GET", async () => {
-  const original = globalThis.fetch;const controller = new AbortController();
+test("configuration editor saves checkout-local defaults and remains available to repair a fully read invalid collection", () => {
+  const invalid = {...definitions, status: "invalid" as const, issues: [{path: ".t3-supervisor/workflows/reviewer.yaml", code: "workflow_cycle", message: "Workflow reference cycle."}]};
+  const html = renderToStaticMarkup(createElement(ProjectConfigurationEditor, {
+    definitions: invalid,
+    csrfToken: "csrf",
+    onSaved: () => {},
+    onDirtyChange: () => {},
+    onSavingChange: () => {},
+  }));
+  assert.match(html, /Edit project configuration/);
+  assert.match(html, /Required in this checkout:<\/strong> step:e2e-testing/);
+  assert.doesNotMatch(html, /Required in this checkout:[\s\S]*security-review/);
+  assert.match(html, /selected checkout&#x27;s <code>\.t3-supervisor\/project\.yaml<\/code>/);
+});
+
+test("a complete readable but invalid project.yaml can be replaced without claiming its requirements were empty", () => {
+  const invalid = {...definitions, status: "invalid" as const, projectConfig: null, complete: true, revision: "b".repeat(64),
+    sources: [{path: ".t3-supervisor/project.yaml", origin: "project" as const, content: "required: [broken"}],
+    issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "Invalid YAML."}]};
+  const html = renderToStaticMarkup(createElement(ProjectConfigurationEditor, {
+    definitions: invalid,
+    csrfToken: "csrf",
+    onSaved: () => {},
+    onDirtyChange: () => {},
+    onSavingChange: () => {},
+  }));
+  assert.match(html, /Project configuration needs repair/);
+  assert.match(html, /Repair project configuration/);
+  assert.match(html, /requirements are unknown/);
+  assert.match(html, /empty replacement draft/);
+  assert.match(html, /required: \[broken/);
+  assert.doesNotMatch(html, /Required in this checkout:<\/strong> None/);
+});
+
+test("global-only and incomplete snapshots never expose project configuration editing", () => {
+  const props = {csrfToken: "csrf", onSaved: () => {}, onDirtyChange: () => {}, onSavingChange: () => {}};
+  const globalHtml = renderToStaticMarkup(createElement(ProjectConfigurationEditor, {definitions: {...definitions, globalOnly: true}, ...props}));
+  assert.match(globalHtml, /global-only/);
+  assert.doesNotMatch(globalHtml, /Edit project configuration/);
+  const incompleteHtml = renderToStaticMarkup(createElement(ProjectConfigurationEditor, {definitions: {...definitions, complete: false}, ...props}));
+  assert.match(incompleteHtml, /complete read and a current revision/);
+  assert.doesNotMatch(incompleteHtml, /Edit project configuration/);
+});
+
+test("definition client reads the selected configuration scope and rejects mismatched snapshots", async () => {
+  const previous = globalThis.fetch;
+  const controller = new AbortController();
   try {
-    let seen = "";globalThis.fetch = async (input, init) => {
-      seen = String(input);assert.equal(init?.signal, controller.signal);assert.equal(init?.credentials, "omit");
+    let seen = "";
+    globalThis.fetch = async (input, init) => {
+      seen = String(input);
+      assert.equal(init?.signal, controller.signal);
+      assert.equal(init?.credentials, "omit");
       return new Response(JSON.stringify({...definitions, projectId: "project & other", threadId: "thread?#"}), {status: 200});
     };
     const result = await loadProjectDefinitions("project & other", "thread?#", controller.signal);
-    assert.equal(result.threadId, "thread?#");const query = new URL(seen, "http://localhost").searchParams;
-    assert.equal(query.get("projectId"), "project & other");assert.equal(query.get("threadId"), "thread?#");
+    assert.equal(result.threadId, "thread?#");
+    const query = new URL(seen, "http://localhost").searchParams;
+    assert.equal(new URL(seen, "http://localhost").pathname, "/api/guidance/project-configuration");
+    assert.equal(query.get("projectId"), "project & other");
+    assert.equal(query.get("threadId"), "thread?#");
     globalThis.fetch = async () => new Response(JSON.stringify({...definitions, projectId: "wrong"}));
     await assert.rejects(loadProjectDefinitions("project", null, controller.signal));
     globalThis.fetch = async () => new Response(JSON.stringify({status: "ready"}));
     await assert.rejects(loadProjectDefinitions("project", null, controller.signal));
-    globalThis.fetch = async () => new Response(JSON.stringify(definitions));controller.abort();
+    globalThis.fetch = async () => new Response(JSON.stringify(definitions));
+    controller.abort();
     await assert.rejects(loadProjectDefinitions("project", null, controller.signal));
-  } finally {globalThis.fetch = original;}
+  } finally {globalThis.fetch = previous;}
 });
 
-test("a restarted session refreshes CSRF without retrying the write or locking the draft", async () => {
-  const {saveProjectRules, ProjectRuleRequestError} = await import("../ui/src/project-definitions-api.js");
-  const {loadAccess} = await import("../ui/src/access.js");
-  const previous = globalThis.fetch;let currentToken = "first-session";let writes = 0;
-  const input = {projectId: "project", threadId: null, expectedRevision: "a".repeat(64), rules: definitions.rules};
+test("configuration client posts local project.yaml config and preserves the origin session header", async () => {
+  const previous = globalThis.fetch;
+  const input: ProjectConfigSave = {projectId: "project", threadId: null, expectedRevision: definitions.revision!, config: definitions.projectConfig!};
+  try {
+    globalThis.fetch = async (url, init) => {
+      assert.equal(String(url), "/api/guidance/project-configuration");
+      assert.equal(init?.method, "POST");
+      assert.equal(init?.credentials, "omit");
+      assert.equal((init?.headers as Record<string, string>)["Content-Type"], "application/json");
+      assert.deepEqual(JSON.parse(String(init?.body)), input);
+      return new Response(JSON.stringify({status: "saved", message: "Saved project.yaml.", definitions}), {status: 200});
+    };
+    const result = await saveProjectConfiguration(input, "csrf-token");
+    assert.equal(result.status, "saved");
+    assert.equal(result.definitions?.projectId, "project");
+  } finally {globalThis.fetch = previous;}
+});
+
+test("expired CSRF refresh keeps a definite no-save draft opportunity and never replays the POST", async () => {
+  const previous = globalThis.fetch;
+  const input: ProjectConfigSave = {projectId: "project", threadId: null, expectedRevision: definitions.revision!, config: definitions.projectConfig!};
+  clearAccess();
+  let currentToken = "first-session";
+  let writes = 0;
   try {
     globalThis.fetch = async (url, init) => {
       if (String(url) === "/api/csrf") return new Response(JSON.stringify({csrf: currentToken}));
       writes++;
       if ((init?.headers as Record<string, string>)["x-csrf-token"] !== currentToken) return new Response("{}", {status: 403});
-      return new Response(JSON.stringify({status: "saved", message: "Saved", definitions}));
+      return new Response(JSON.stringify({status: "saved", message: "Saved", definitions}), {status: 200});
     };
-    assert.equal(await loadAccess(), true);currentToken = "after-restart";
-    await assert.rejects(saveProjectRules(input, "first-session"), (error: unknown) => error instanceof ProjectRuleRequestError && error.definitelyNotSaved && /Session refreshed/.test(error.message));
+    assert.equal(await loadAccess(), true);
+    currentToken = "after-restart";
+    await assert.rejects(saveProjectConfiguration(input, "first-session"), (error: unknown) => error instanceof ProjectConfigRequestError && error.definitelyNotSaved && /Session refreshed/.test(error.message));
     assert.equal(writes, 1);
-    assert.equal((await saveProjectRules(input, "first-session")).status, "saved");assert.equal(writes, 2);
+    assert.equal((await saveProjectConfiguration(input, "first-session")).status, "saved");
+    assert.equal(writes, 2);
     for (const status of [413, 415]) {
       globalThis.fetch = async () => new Response("{}", {status});
-      await assert.rejects(saveProjectRules(input, "old"), (error: unknown) => error instanceof ProjectRuleRequestError && error.definitelyNotSaved);
+      await assert.rejects(saveProjectConfiguration(input, "old"), (error: unknown) => error instanceof ProjectConfigRequestError && error.definitelyNotSaved);
     }
     globalThis.fetch = async () => new Response("{}", {status: 500});
-    await assert.rejects(saveProjectRules(input, "old"), (error: unknown) => error instanceof ProjectRuleRequestError && !error.definitelyNotSaved);
-  } finally {globalThis.fetch = previous;}
-});
-
-test("real HTTP restart requires sign-in and preserves an explicit second-save opportunity", async () => {
-  const {startGuidanceUi} = await import("../src/guidance-ui.js");
-  const {mkdtemp, rm} = await import("node:fs/promises");const {join} = await import("node:path");const {tmpdir} = await import("node:os");
-  const {loadAccess, getCsrfToken} = await import("../ui/src/access.js");
-  const {saveProjectRules, ProjectRuleRequestError} = await import("../ui/src/project-definitions-api.js");
-  const directory = await mkdtemp(join(tmpdir(), "rule-session-restart-"));
-  const config = {dataDirectory: directory, t3Url: "unused", t3TokenFile: "unused", mcpxUrl: "unused", cxCommand: "unused", cxHome: directory, cxSeedFile: "unused", excludedThreadIds: [], healthPort: 0, modelTimeoutMs: 1000, uiPort: 0, uiHost: "127.0.0.1", uiAssetsDirectory: directory};
-  let saves = 0;
-  const editor = {save: async () => {saves++;return {status: "saved" as const, message: "Saved", definitions};}} as unknown as import("../src/project-rule-editor.js").ProjectRuleEditor;
-  const runtime = {retired: true} as import("../src/guidance.js").GuidanceRuntime;
-  let ui = await startGuidanceUi(config, runtime, undefined, editor);
-  const address = ui.server.address();assert.ok(address && typeof address !== "string");const origin = `http://127.0.0.1:${address.port}`;
-  const originalFetch = globalThis.fetch;
-  try {
-    let session = "";
-    const login = async () => {
-      const grant = await forgeDashboardToken(directory);
-      const response = await originalFetch(origin + "/auth/login", {method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify({token: grant.token})});
-      assert.equal(response.status, 200);
-      assert.equal(response.headers.get("set-cookie"), null);
-      session = (await response.json()).session;
-    };
-    globalThis.fetch = (input, init) => originalFetch(new URL(String(input), origin), {...init, headers: {...init?.headers, "x-supervisor-session": session, ...(init?.method === "POST" ? {Origin: origin} : {})}});
-    await login();
-    assert.equal(await loadAccess(), true);const stale = getCsrfToken();await ui.close();
-    ui = await startGuidanceUi({...config, uiPort: address.port}, runtime, undefined, editor);
-    const input = {projectId: "project", threadId: null, expectedRevision: "a".repeat(64), rules: definitions.rules};
-    await assert.rejects(saveProjectRules(input, stale), (error: unknown) => error instanceof ProjectRuleRequestError && error.definitelyNotSaved);
-    assert.equal(saves, 0);assert.equal(getCsrfToken(), "");
-    await login();assert.equal(await loadAccess(), true);assert.notEqual(getCsrfToken(), stale);
-    assert.equal((await saveProjectRules(input, stale)).status, "saved");assert.equal(saves, 1);
-  } finally {globalThis.fetch = originalFetch;await ui.close();await rm(directory, {recursive: true, force: true});}
+    await assert.rejects(saveProjectConfiguration(input, "old"), (error: unknown) => error instanceof ProjectConfigRequestError && !error.definitelyNotSaved);
+  } finally {globalThis.fetch = previous;clearAccess();}
 });

@@ -979,9 +979,10 @@ test("retired reminders cannot evaluate, send or claim sending readiness", async
       assert.equal(rule.status, 400);
       const preview = await fetch(origin + "/api/guidance/preview", {method: "POST", headers, body: JSON.stringify({condition: "Notice publication", message: "Review", evidence: "I will publish"})});
       assert.equal(preview.status, 400);assert.equal(store.rules().length, 1);
-      const missingWrite = await fetch(origin + "/api/guidance/project-rules", {method: "POST", headers, body: JSON.stringify({projectId: "project", threadId: null, expectedRevision: "a".repeat(64), rules: []})});
+      const missingWrite = await fetch(origin + "/api/guidance/project-configuration", {method: "POST", headers, body: JSON.stringify({projectId: "project", threadId: null, expectedRevision: "a".repeat(64), config: {required: []}})});
       assert.equal((await missingWrite.json()).status, "permission_required");
-      const large = await fetch(origin + "/api/guidance/project-rules", {method: "POST", headers, body: JSON.stringify({padding: "x".repeat(256 * 1024)})});
+      const large = await fetch(origin + "/api/guidance/project-configuration", {method: "POST", headers, body: JSON.stringify({projectId: "project", threadId: null,
+        expectedRevision: "a".repeat(64), config: {required: []}, padding: "x".repeat(256 * 1024)})});
       assert.equal(large.status, 413);
     } finally {await ui.close();}
   } finally {store.close();await rm(directory, {recursive: true, force: true});}

@@ -1,339 +1,612 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { interpretationPrompt, parseWorkflowInterpretation, prepareWorkflowRequest, validateWorkflowPlan, redact } from "../src/supervisor-workflow.js";
+import type { WorkflowPlanNodeInfo, WorkflowPlanStepInfo, WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
+import {
+  parseWorkflowInterpretation,
+  prepareWorkflowRequest,
+  proposalContextMatches,
+  redact,
+  validateWorkflowApplyAgainstPinnedContext,
+  validateWorkflowPlan,
+  validateWorkflowRecord,
+} from "../src/supervisor-workflow.js";
+import { makeDefinitionFixture, stepSource, workflowSource } from "./project-definitions-fixture.js";
 
-const threadId = "operational-thread";
-const sourceId = "source-message";
+const threadId = "thread";
+const sourceMessageId = "m1";
+type Files = Record<string, string>;
 
-test("credential redaction stays stable when complete plans are echoed and revalidated", () => {
+const load = async (files: Files, options: {globalEnabled?: boolean; globalFiles?: Files} = {}) => {
+  const fixture = makeDefinitionFixture({globalEnabled: options.globalEnabled ?? false});
+  for (const [path, contents] of Object.entries(files)) fixture.addFile(fixture.threadRoot!, `.t3-supervisor/${path}`, contents);
+  for (const [path, contents] of Object.entries(options.globalFiles ?? {})) fixture.addFile(fixture.globalRoot, `.t3-supervisor/${path}`, contents);
+  return {fixture, snapshot: await fixture.loader.load("project", threadId)};
+};
+
+const reply = (workflow: unknown, objective = "Ship export support") => JSON.stringify({
+  objective,
+  reason: "The latest message describes a concrete task.",
+  sourceMessageIds: objective ? [sourceMessageId] : [],
+  workflow: objective ? workflow : null,
+});
+
+const interpret = (snapshot: ProjectDefinitionSnapshot, workflow: unknown, task = "Ship export support") => {
+  const prepared = prepareWorkflowRequest(threadId, sourceMessageId, task, snapshot);
+  assert.ok(prepared.context, "the task retains a provisional workflow context");
+  const result = parseWorkflowInterpretation(reply(workflow), sourceMessageId, prepared.context);
+  return {prepared, result};
+};
+
+const proposalRecord = (workflow: WorkflowProposalInfo) => ({
+  definitionsStatus: workflow.definitionsStatus,
+  definitionsComplete: workflow.definitionsComplete,
+  requirementsKnown: workflow.requirementsKnown,
+  requirements: workflow.requirements,
+  issues: workflow.issues,
+  plan: workflow.plan,
+});
+
+const emptyConfig = {"project.yaml": "required: []\n", "workflows/.gitkeep": ""};
+const commonSteps = {
+  "steps/inspect.md": stepSource("inspect", "Inspect the current behavior."),
+  "steps/e2e.md": stepSource("e2e", "Verify the user flow."),
+  "steps/report.md": stepSource("report", "Report findings and remaining risks."),
+  "steps/deliver.md": stepSource("deliver", "Prepare the reviewed change for delivery."),
+};
+const reviewer = (fixed = false) => workflowSource("Reviewer", "  - step: inspect\n  - step: e2e\n  - step: report\n", {fixed});
+const delivery = (fixed = false) => workflowSource("Delivery", "  - workflow: reviewer\n  - step: deliver\n", {fixed});
+
+test("redaction is stable while source identities and paths remain exact", () => {
   const once = redact("secret=github_pat_12345678901234567890 token=[redacted credential] password=hidden Bearer sample-credential");
   assert.equal(redact(once), once);
-  assert.equal(once.includes("credential] credential]"), false);
   assert.equal(once.includes("hidden"), false);
+  assert.equal(once.includes("12345678901234567890"), false);
 });
 
-const definitions = (overrides: Partial<ProjectDefinitionSnapshot> = {}): ProjectDefinitionSnapshot => ({
-  projectId: "project-a",
-  threadId,
-  workspaceRoot: "/workspace/feature-branch",
-  revision: "revision-1",
-  editingAvailable: true,
-  status: "ready",
-  rules: [
-    { name: "Tests first", description: "Run focused tests before changes are merged.", required_blocks: ["test-plan"] },
-    { name: "API compatibility", description: "Preserve the existing public contract.", required_blocks: ["api-check"] },
-  ],
-  blocks: [
-    { id: "test-plan", name: "Test plan", description: "Check focused behavior.", instructions: "Add a focused test for the behavior.", expected_result: "The test passes." },
-    { id: "api-check", name: "API review", description: "Check exported shapes.", instructions: "Review changed public names.", expected_result: "Existing consumers still compile." },
-    { id: "optional-docs", name: "Documentation", description: "Document user-facing behavior.", instructions: "Update the usage note.", expected_result: "The behavior is clear." },
-  ],
-  issues: [],
-  ...overrides,
-});
+test("the bounded request includes exact nested template paths for fixed-workflow insertions", async () => {
+  const {snapshot} = await load({
+    ...commonSteps,
+    "project.yaml": "required:\n  - workflow: delivery\n",
+    "workflows/reviewer.yaml": reviewer(true),
+    "workflows/delivery.yaml": delivery(true),
+  });
+  const prepared = prepareWorkflowRequest(threadId, sourceMessageId, "Ship export support", snapshot);
 
-const validInterpretation = () => ({
-  objective: "Add a project-specific workflow proposal",
-  reason: "The request asks for a bounded feature change.",
-  sourceMessageIds: [sourceId],
-  workflow: {
-    rules: [
-      { index: 1, applies: false, reason: "No public contract is being changed." },
-      { index: 0, applies: true, reason: "The requested feature needs behavior checks." },
-    ],
-    steps: [
-      { blockId: "test-plan", reason: "The applicable rule requires a focused test." },
-      { blockId: "optional-docs", reason: "A usage note will clarify the feature." },
-    ],
-  },
-});
-
-test("ready definitions enter the prompt with the exact worktree, revision, rules, and complete block contents", () => {
-  const snapshot = definitions();
-  const prepared = prepareWorkflowRequest(threadId, sourceId, "Add export support", snapshot);
-
-  assert.equal(prepared.workflow.status, "pending");
-  assert.equal(prepared.context?.workspaceRoot, snapshot.workspaceRoot);
-  assert.equal(prepared.context?.revision, snapshot.revision);
-  assert.deepEqual(prepared.context?.rules.map((rule) => rule.required_blocks), [["test-plan"], ["api-check"]]);
-  assert.match(prepared.requestText, /UNTRUSTED_WORKFLOW_ENVELOPE/u);
-  assert.match(prepared.requestText, /"workspaceRoot":"\/workspace\/feature-branch"/u);
-  assert.match(prepared.requestText, /"revision":"revision-1"/u);
-  assert.match(prepared.requestText, /Run focused tests before changes are merged\./u);
-  assert.match(prepared.requestText, /Preserve the existing public contract\./u);
-  assert.match(prepared.requestText, /Review changed public names\./u);
-  assert.match(prepared.requestText, /Existing consumers still compile\./u);
-  assert.match(prepared.requestText, /"required_blocks":\["test-plan"\]/u);
-  assert.match(prepared.requestText, /Add export support/u);
-  assert.match(prepared.requestText, /Ordinary task-specific plan steps may be free-text/u);
-  assert.match(prepared.requestText, /Project blocks are optional references/u);
-});
-
-test("non-ready, incomplete, or worktree-mismatched definitions never become an empty rule set", () => {
-  for (const status of ["missing", "invalid", "permission_required", "unavailable"] as const) {
-    const prepared = prepareWorkflowRequest(threadId, sourceId, "Add export support", definitions({ status }));
-    assert.equal(prepared.context, null, `${status} definitions must not be proposed as empty rules`);
-    assert.equal(prepared.workflow.status, "unavailable");
-    assert.equal(prepared.requestText, interpretationPrompt(threadId, sourceId, "Add export support"));
-    assert.doesNotMatch(prepared.requestText, /UNTRUSTED_WORKFLOW_ENVELOPE/u);
-  }
-
-  const incomplete = prepareWorkflowRequest(threadId, sourceId, "Add export support", definitions({
-    status: "invalid",
-    rules: [{ name: "Missing mandatory block", description: "This rule is incomplete.", required_blocks: ["not-loaded"] }],
-  }));
-  assert.equal(incomplete.context, null);
-  assert.equal(incomplete.workflow.status, "unavailable");
-
-  const wrongWorktree = prepareWorkflowRequest(threadId, sourceId, "Add export support", definitions({ threadId: "another-thread" }));
-  assert.equal(wrongWorktree.context, null);
-  assert.equal(wrongWorktree.workflow.status, "unavailable");
-  assert.equal(wrongWorktree.requestText, interpretationPrompt(threadId, sourceId, "Add export support"));
-});
-
-test("oversized complete definitions fall back without truncating the rule or block context", () => {
-  const oversized = "complete-instruction-".repeat(6_000);
-  const prepared = prepareWorkflowRequest(threadId, sourceId, "Add export support", definitions({
-    blocks: [{ id: "test-plan", name: "Test plan", description: "Long block", instructions: oversized, expected_result: "Complete." }],
-  }));
-
-  assert.equal(prepared.context, null);
-  assert.equal(prepared.workflow.status, "unavailable");
-  assert.match(prepared.workflow.message, /exceed the prompt limit/u);
-  assert.equal(prepared.requestText, interpretationPrompt(threadId, sourceId, "Add export support"));
-  assert.ok(prepared.requestText.length < 120_000);
-  assert.doesNotMatch(prepared.requestText, /complete-instruction-/u);
-});
-
-test("task and definition credentials are redacted before entering the workflow envelope", () => {
-  const prepared = prepareWorkflowRequest(threadId, sourceId, "Ship this with Bearer abcdefghijklmnopqrstuvwxyz123456", definitions({
-    rules: [{ name: "secret=project-rule-token", description: "Use token=super-secret-rule-value", required_blocks: ["test-plan"] }],
-    blocks: [{ id: "test-plan", name: "secret=block-name-token", description: "Credential ghp_abcdefghijklmnopqrstuvwxyz1234", instructions: "Use api_key=do-not-send-this", expected_result: "password:still-secret" }],
-  }));
-
-  assert.match(prepared.requestText, /\[redacted credential\]/u);
-  assert.match(prepared.requestText, /token=\[redacted\]/u);
-  assert.match(prepared.requestText, /api_key=\[redacted\]/u);
-  assert.match(prepared.requestText, /password:\[redacted\]/u);
-  for (const secret of ["abcdefghijklmnopqrstuvwxyz123456", "super-secret-rule-value", "ghp_abcdefghijklmnopqrstuvwxyz1234", "do-not-send-this", "still-secret"]) {
-    assert.equal(prepared.requestText.includes(secret), false);
-  }
-});
-
-test("workflow interpretation checks every rule, block membership, duplicates, and mandatory applicable blocks", () => {
-  const prepared = prepareWorkflowRequest(threadId, sourceId, "Add export support", definitions());
   assert.ok(prepared.context);
-  const parsed = parseWorkflowInterpretation(JSON.stringify(validInterpretation()), sourceId, prepared.context);
-  assert.equal(parsed.objective, "Add a project-specific workflow proposal");
-  assert.equal(parsed.workflow.status, "proposed");
-  assert.deepEqual(parsed.workflow.rules.map((rule) => [rule.index, rule.applies]), [[0, true], [1, false]]);
-  assert.deepEqual(parsed.workflow.steps.map((step) => step.blockId), ["test-plan", "optional-docs"]);
-
-  const invalidProposals = [
-    { ...validInterpretation(), workflow: { ...validInterpretation().workflow, rules: [{ index: 0, applies: true, reason: "Only one decision." }] } },
-    { ...validInterpretation(), workflow: { ...validInterpretation().workflow, rules: [
-      { index: 0, applies: true, reason: "First decision." }, { index: 0, applies: false, reason: "Duplicate decision." },
-    ] } },
-    { ...validInterpretation(), workflow: { ...validInterpretation().workflow, steps: [{ blockId: "missing-block", reason: "Not supplied." }] } },
-    { ...validInterpretation(), workflow: { ...validInterpretation().workflow, steps: [
-      { blockId: "test-plan", reason: "First use." }, { blockId: "test-plan", reason: "Duplicate use." },
-    ] } },
-    { ...validInterpretation(), workflow: { ...validInterpretation().workflow, steps: [{ blockId: "optional-docs", reason: "Mandatory block omitted." }] } },
-    { ...validInterpretation(), workflow: { ...validInterpretation().workflow, rules: [
-      { index: 0, applies: true, reason: "Missing second rule decision." }, { index: 1, applies: true, reason: "This rule requires a block." },
-    ] } },
-  ];
-  for (const invalid of invalidProposals) {
-    const result = parseWorkflowInterpretation(JSON.stringify(invalid), sourceId, prepared.context);
-    assert.equal(result.objective, "Add a project-specific workflow proposal");
-    assert.equal(result.workflow.status, "invalid");
-    assert.deepEqual(result.workflow.steps, []);
-  }
+  assert.equal(prepared.context.promptComplete, true);
+  assert.match(prepared.requestText, /"workflowTemplates"/u);
+  assert.match(prepared.requestText, /workflow:delivery\/root\/0\/workflow:reviewer\/root\/1/u);
+  assert.match(prepared.requestText, /"fixed":true/u);
+  assert.ok(prepared.requestText.length <= 120_000);
+  assert.equal(prepared.workflow.requirements[0]?.id, snapshot.config.required[0] && "workflow" in snapshot.config.required[0]
+    ? snapshot.config.required[0].workflow : "");
 });
 
-test("malformed workflow proposals retain a valid objective while source identity and response caps remain strict", () => {
-  const prepared = prepareWorkflowRequest(threadId, sourceId, "Add export support", definitions());
-  const context = prepared.context;
-  assert.ok(context);
-  const malformed = parseWorkflowInterpretation(JSON.stringify({
-    objective: "Add a project-specific workflow proposal",
-    reason: "The objective is valid despite the malformed workflow.",
-    sourceMessageIds: [sourceId],
-    workflow: { rules: "not an array", steps: [] },
-  }), sourceId, context);
-  assert.equal(malformed.objective, "Add a project-specific workflow proposal");
-  assert.equal(malformed.workflow.status, "invalid");
-  assert.deepEqual(malformed.workflow.rules, []);
+test("nested reusable paths stay stable across normalization and strict record validation preserves occurrence IDs", async () => {
+  const {snapshot} = await load({
+    ...commonSteps,
+    ...emptyConfig,
+    "workflows/reviewer.yaml": reviewer(),
+    "workflows/delivery.yaml": delivery(),
+  });
+  const {prepared, result} = interpret(snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "workflow", definitionId: "delivery", reason: "Include delivery."},
+  ]}});
+  const plan = result.workflow.plan;
+  assert.ok(plan);
+  assert.equal(result.workflow.status, "proposed");
+  const deliveryNode = plan.nodes[0];
+  assert.ok(deliveryNode && deliveryNode.kind === "workflow");
+  const reviewerNode = deliveryNode.plan?.nodes[0];
+  assert.ok(reviewerNode && reviewerNode.kind === "workflow");
+  const nestedStep = reviewerNode.plan?.nodes[1];
+  assert.ok(nestedStep && nestedStep.kind === "step");
+  assert.match(nestedStep.templatePath ?? "", /workflow:delivery\/root\/0\/workflow:reviewer\/root\/1/u);
 
-  assert.throws(() => parseWorkflowInterpretation(JSON.stringify({
-    objective: "Add a project-specific workflow proposal",
-    reason: "Wrong source.",
-    sourceMessageIds: ["another-source"],
-    workflow: { rules: [], steps: [] },
-  }), sourceId, context));
-  assert.throws(() => parseWorkflowInterpretation("x".repeat(128_001), sourceId, context));
+  const firstIds: string[] = [];
+  const collectIds = (nodes: readonly WorkflowPlanNodeInfo[]) => {
+    for (const node of nodes) {
+      if (node.kind === "step" || node.kind === "workflow") firstIds.push(node.nodeId);
+      if (node.kind === "sequence" || node.kind === "parallel") collectIds(node.nodes);
+      else if (node.kind === "workflow" && node.plan) collectIds(node.plan.nodes);
+    }
+  };
+  collectIds(plan.nodes);
+  assert.equal(new Set(firstIds).size, firstIds.length);
+  const strict = validateWorkflowRecord(proposalRecord(result.workflow), prepared.context!);
+  assert.ok(strict);
+  assert.deepEqual(strict.plan, plan);
+  assert.deepEqual(strict.issues.map(item => item.code), result.workflow.issues.map(item => item.code));
 
-  const redacted = parseWorkflowInterpretation(JSON.stringify({
-    objective: "Use token=secret-objective-value",
-    reason: "The task contains Bearer abcdefghijklmnopqrstuvwxyz123456.",
-    sourceMessageIds: [sourceId],
-    workflow: {
-      rules: [
-        { index: 0, applies: true, reason: "password=secret-rule-value" },
-        { index: 1, applies: false, reason: "No API change." },
-      ],
-      steps: [
-        { blockId: "test-plan", reason: "api_key=secret-step-value" },
-      ],
-    },
-  }), sourceId, context);
-  assert.equal(redacted.workflow.status, "proposed");
-  assert.equal(redacted.objective, "Use token=[redacted]");
-  assert.equal(redacted.reason.includes("abcdefghijklmnopqrstuvwxyz123456"), false);
-  assert.equal(redacted.workflow.rules[0]?.reason, "password=[redacted]");
-  assert.equal(redacted.workflow.steps[0]?.reason, "api_key=[redacted]");
+  const revalidated = validateWorkflowPlan({requirements: [], plan}, prepared.context!);
+  assert.ok(revalidated);
+  assert.deepEqual(revalidated.plan, plan);
 });
 
-test("mixed task steps and project blocks normalize names from canonical definitions", () => {
-  const prepared = prepareWorkflowRequest(threadId, sourceId, "Add export support", definitions());
-  assert.ok(prepared.context);
-  const plan = validateWorkflowPlan({
-    rules: [
-      { index: 0, name: "Model rule label", applies: true, reason: "This task needs focused checks." },
-      { index: 1, applies: false, reason: "The public API does not change." },
-    ],
-    steps: [
-      { blockId: "test-plan", name: "Model block label", reason: "Use the project's required test instructions." },
-      { blockId: null, name: "Inspect current behavior", reason: "Map the existing export path before changing it." },
-    ],
-  }, prepared.context);
+test("repeated workflow templates create distinct occurrences without merging their source paths", async () => {
+  const {snapshot} = await load({...commonSteps, ...emptyConfig, "workflows/reviewer.yaml": reviewer()});
+  const {prepared, result} = interpret(snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "workflow", definitionId: "reviewer", reason: "Review the implementation."},
+    {kind: "workflow", definitionId: "reviewer", reason: "Review the follow-up."},
+  ]}});
+  assert.ok(result.workflow.plan);
+  const [first, second] = result.workflow.plan.nodes;
+  assert.ok(first && first.kind === "workflow" && first.plan && second && second.kind === "workflow" && second.plan);
+  assert.notEqual(first.nodeId, second.nodeId);
+  assert.equal(first.plan.nodes[0]?.templatePath, second.plan.nodes[0]?.templatePath);
+  assert.ok(validateWorkflowRecord(proposalRecord(result.workflow), prepared.context!));
+});
 
-  assert.deepEqual(plan, {
-    rules: [
-      { index: 0, name: "Tests first", applies: true, reason: "This task needs focused checks." },
-      { index: 1, name: "API compatibility", applies: false, reason: "The public API does not change." },
-    ],
-    steps: [
-      { blockId: "test-plan", name: "Test plan", reason: "Use the project's required test instructions." },
-      { blockId: null, name: "Inspect current behavior", reason: "Map the existing export path before changing it." },
-    ],
+test("a required workflow is satisfied by its exact recursive reference", async () => {
+  const {snapshot} = await load({
+    ...commonSteps,
+    "project.yaml": "required:\n  - workflow: delivery\n",
+    "workflows/reviewer.yaml": reviewer(),
+    "workflows/delivery.yaml": delivery(),
+  });
+  const {result} = interpret(snapshot, {
+    requirements: [{kind: "workflow", id: "delivery", applies: true, reason: "This task needs reviewed delivery."}],
+    plan: {kind: "sequence", nodes: [{kind: "workflow", definitionId: "delivery", reason: "Include reviewed delivery."}]},
   });
 
-  const parsed = parseWorkflowInterpretation(JSON.stringify({
-    ...validInterpretation(),
-    workflow: {
-      rules: [
-        { index: 0, applies: true, reason: "The behavior needs focused checks." },
-        { index: 1, applies: false, reason: "No public contract change." },
-      ],
-      steps: [
-        { blockId: "test-plan", reason: "Follow the required test plan." },
-        { blockId: null, name: "Review the existing export path", reason: "Understand current behavior." },
-      ],
+  assert.equal(result.workflow.status, "proposed");
+  assert.equal(result.workflow.requirements[0]?.state, "included");
+});
+
+test("a required reusable step inside a referenced workflow counts once for the main task", async () => {
+  const {snapshot} = await load({
+    ...commonSteps,
+    "project.yaml": "required:\n  - step: e2e\n",
+    "workflows/reviewer.yaml": reviewer(),
+  });
+  const {result} = interpret(snapshot, {
+    requirements: [{kind: "step", id: "e2e", applies: true, reason: "The user flow changes."}],
+    plan: {kind: "sequence", nodes: [{kind: "workflow", definitionId: "reviewer", reason: "Include review."}]},
+  });
+
+  assert.equal(result.workflow.requirements[0]?.state, "included");
+  assert.equal(result.workflow.status, "proposed");
+});
+
+test("applicable but omitted reusable requirements retain their canonical unresolved reason", async () => {
+  const cases = [
+    {
+      kind: "step" as const,
+      id: "e2e",
+      reason: "UI changes need E2E.",
+      files: {...commonSteps, "project.yaml": "required:\n  - step: e2e\n"},
     },
-  }), sourceId, prepared.context);
-  assert.equal(parsed.workflow.status, "proposed");
-  assert.deepEqual(parsed.workflow.steps.map((step) => [step.blockId, step.name]), [
-    ["test-plan", "Test plan"],
-    [null, "Review the existing export path"],
-  ]);
-});
-
-test("a ready empty project collection still accepts an all-free task plan", () => {
-  const prepared = prepareWorkflowRequest(threadId, sourceId, "Add a regression test", definitions({ rules: [], blocks: [] }));
-  assert.ok(prepared.context);
-  assert.deepEqual(prepared.context.rules, []);
-  assert.deepEqual(prepared.context.blocks, []);
-
-  const parsed = parseWorkflowInterpretation(JSON.stringify({
-    objective: "Add a regression test",
-    reason: "The request is a concrete code change.",
-    sourceMessageIds: [sourceId],
-    workflow: {
-      rules: [],
-      steps: [{ blockId: null, name: "Add a regression test", reason: "Capture the reported behavior." }],
+    {
+      kind: "workflow" as const,
+      id: "reviewer",
+      reason: "This task needs review.",
+      files: {...commonSteps, "project.yaml": "required:\n  - workflow: reviewer\n", "workflows/reviewer.yaml": reviewer()},
     },
-  }), sourceId, prepared.context);
-  assert.equal(parsed.workflow.status, "proposed");
-  assert.deepEqual(parsed.workflow.steps, [{ blockId: null, name: "Add a regression test", reason: "Capture the reported behavior." }]);
-});
-
-test("a free test step cannot satisfy an applicable rule's required E2E block", () => {
-  const context = {
-    workspaceRoot: "/workspace/feature-branch",
-    revision: "revision-e2e",
-    rules: [{ name: "Browser coverage", required_blocks: ["e2e-check"] }],
-    blocks: [{ id: "e2e-check", name: "Required E2E check" }],
-  };
-
-  assert.equal(validateWorkflowPlan({
-    rules: [{ index: 0, applies: true, reason: "The change affects the user flow." }],
-    steps: [{ blockId: null, name: "Run a generic test", reason: "Check the feature locally." }],
-  }, context), null);
-});
-
-test("unknown and duplicate project block references are rejected", () => {
-  const prepared = prepareWorkflowRequest(threadId, sourceId, "Add export support", definitions());
-  assert.ok(prepared.context);
-  const rules = [
-    { index: 0, applies: true, reason: "The feature needs focused checks." },
-    { index: 1, applies: false, reason: "The public API remains stable." },
   ];
+  const explanation = "The exact reusable definition is not integrated in the plan.";
 
-  assert.equal(validateWorkflowPlan({
-    rules,
-    steps: [
-      { blockId: "test-plan", reason: "Required block." },
-      { blockId: "missing-block", reason: "Unknown reference." },
-    ],
-  }, prepared.context), null);
-  assert.equal(validateWorkflowPlan({
-    rules,
-    steps: [
-      { blockId: "test-plan", reason: "First reference." },
-      { blockId: "test-plan", reason: "Duplicate reference." },
-    ],
-  }, prepared.context), null);
-  assert.equal(validateWorkflowPlan({
-    rules,
-    steps: [{ blockId: "test-plan", reason: "Unknown fields are rejected.", unexpected: true }],
-  }, prepared.context), null);
+  for (const scenario of cases) {
+    const {snapshot} = await load(scenario.files);
+    const {prepared, result} = interpret(snapshot, {
+      requirements: [{kind: scenario.kind, id: scenario.id, applies: true, reason: scenario.reason}],
+      plan: {kind: "sequence", nodes: []},
+    });
+    assert.equal(result.workflow.status, "provisional");
+    const requirement = result.workflow.requirements[0];
+    assert.ok(requirement);
+    assert.equal(requirement.state, "unresolved");
+    assert.ok(requirement.reason.endsWith(explanation));
+    assert.equal(requirement.reason.split(explanation).length - 1, 1);
+
+    const canonical = proposalRecord(result.workflow);
+    const strict = validateWorkflowRecord(canonical, prepared.context!);
+    assert.ok(strict);
+    assert.deepEqual(strict, canonical);
+    assert.deepEqual(validateWorkflowRecord(strict, prepared.context!), strict);
+  }
 });
 
-test("workflow plans enforce the 100-step, name, and reason caps and redact free text", () => {
-  const context = { workspaceRoot: "/workspace/feature-branch", revision: "revision-empty", rules: [], blocks: [] };
-  const steps = Array.from({ length: 100 }, (_, index) => ({ blockId: null, name: `Step ${index + 1}`, reason: "A bounded reason." }));
-  const hundredSteps = validateWorkflowPlan({ rules: [], steps }, context);
-  assert.equal(hundredSteps?.steps.length, 100);
-  assert.equal(validateWorkflowPlan({ rules: [], steps: [...steps, { blockId: null, name: "Extra step", reason: "Too many steps." }] }, context), null);
-  assert.equal(validateWorkflowPlan({ rules: [], steps: [{ blockId: null, name: "n".repeat(201), reason: "Too long." }] }, context), null);
-  assert.equal(validateWorkflowPlan({ rules: [], steps: [{ blockId: null, name: "Valid name", reason: "r".repeat(1001) }] }, context), null);
-  assert.equal(validateWorkflowPlan({ rules: [], steps: [{ blockId: null, name: "n".repeat(200), reason: "r".repeat(1000) }] }, context)?.steps.length, 1);
+test("near-limit required assessment reasons still round-trip after canonical unresolved explanation", async () => {
+  const {snapshot} = await load({...commonSteps, "project.yaml": "required:\n  - step: e2e\n"});
+  const reason = "R".repeat(1000);
+  const {prepared, result} = interpret(snapshot, {
+    requirements: [{kind: "step", id: "e2e", applies: true, reason}],
+    plan: {kind: "sequence", nodes: []},
+  });
+  assert.equal(result.workflow.status, "provisional");
+  const requirement = result.workflow.requirements[0];
+  assert.ok(requirement);
+  assert.equal(requirement.state, "unresolved");
+  assert.ok(requirement.reason.length > 1000);
 
-  const redacted = validateWorkflowPlan({ rules: [], steps: [{
-    blockId: null,
-    name: "token=secret-step-name",
-    reason: "Bearer abcdefghijklmnopqrstuvwxyz123456",
-  }] }, context);
-  assert.deepEqual(redacted?.steps, [{ blockId: null, name: "token=[redacted]", reason: "[redacted credential]" }]);
+  const canonical = proposalRecord(result.workflow);
+  const strict = validateWorkflowRecord(canonical, prepared.context!);
+  assert.ok(strict);
+  assert.deepEqual(strict, canonical);
 });
 
-test("requiredRuleIndexes keep previously applicable rules applicable", () => {
-  const context = {
-    workspaceRoot: "/workspace/feature-branch",
-    revision: "revision-required",
-    rules: [{ name: "Browser coverage", required_blocks: ["e2e-check"] }],
-    blocks: [{ id: "e2e-check", name: "Required E2E check" }],
+test("fixed workflow members may keep their order while support work is inserted in a new lane", async () => {
+  const {snapshot} = await load({...commonSteps, ...emptyConfig, "workflows/reviewer.yaml": reviewer(true)});
+  const {prepared, result} = interpret(snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "workflow", definitionId: "reviewer", reason: "Include fixed review."},
+  ]}});
+  const workflow = result.workflow.plan?.nodes[0];
+  assert.ok(workflow && workflow.kind === "workflow" && workflow.plan);
+  const [inspect, e2e, report] = workflow.plan.nodes;
+  assert.ok(inspect && inspect.kind === "step" && e2e && e2e.kind === "step" && report && report.kind === "step");
+  const original = (step: WorkflowPlanStepInfo) => ({kind: "step", nodeId: step.nodeId, definitionId: step.definitionId,
+    templatePath: step.templatePath, reason: step.reason});
+  const revised = validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [{kind: "workflow", nodeId: workflow.nodeId,
+    definitionId: "reviewer", reason: "Include fixed review.", plan: {kind: "sequence", nodes: [
+      original(inspect),
+      {kind: "parallel", nodes: [original(e2e), {kind: "step", definitionId: null, localId: "perf-probe", name: "Performance probe",
+        description: "Measure the changed path.", reason: "Add a focused measurement."}]},
+      original(report),
+    ]}}]}}, prepared.context!);
+
+  assert.ok(revised);
+  assert.equal(revised.issues.some(item => item.code === "fixed_workflow_changed"), false);
+});
+
+test("a fixed outer workflow protects original commitments inside a flexible nested workflow", async () => {
+  const {snapshot} = await load({...commonSteps, ...emptyConfig, "workflows/reviewer.yaml": reviewer(), "workflows/delivery.yaml": delivery(true)});
+  const {prepared, result} = interpret(snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "workflow", definitionId: "delivery", reason: "Include fixed delivery."},
+  ]}});
+  const outer = result.workflow.plan?.nodes[0];
+  assert.ok(outer && outer.kind === "workflow" && outer.plan);
+  const inner = outer.plan.nodes[0];
+  assert.ok(inner && inner.kind === "workflow" && inner.plan);
+  const shortenedInner = {...inner, plan: {...inner.plan, nodes: inner.plan.nodes.slice(1)}};
+  const changed = validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [{kind: "workflow", nodeId: outer.nodeId,
+    definitionId: "delivery", reason: outer.reason, plan: {...outer.plan, nodes: [shortenedInner, ...outer.plan.nodes.slice(1)]}}]}}, prepared.context!);
+
+  assert.ok(changed);
+  assert.ok(changed.issues.some(item => item.code === "fixed_workflow_changed"));
+});
+
+test("a local filler cannot make a required flexible workflow included after all original members are omitted", async () => {
+  const {snapshot} = await load({
+    ...commonSteps,
+    "project.yaml": "required:\n  - workflow: reviewer\n",
+    "workflows/reviewer.yaml": reviewer(),
+  });
+  const {prepared, result} = interpret(snapshot, {
+    requirements: [{kind: "workflow", id: "reviewer", applies: true, reason: "This task requires review."}],
+    plan: {kind: "sequence", nodes: [{kind: "workflow", definitionId: "reviewer", reason: "Include review."}]},
+  });
+  const workflow = result.workflow.plan?.nodes[0];
+  assert.ok(workflow && workflow.kind === "workflow" && workflow.plan);
+  const omissions = workflow.plan.nodes.map(node => {
+    assert.ok(node.kind === "step");
+    return {templatePath: node.templatePath, kind: "step", id: node.definitionId, name: node.name, source: node.source,
+      reason: "This member does not apply to the requested change."};
+  });
+  const shell = validateWorkflowPlan({
+    requirements: [{kind: "workflow", id: "reviewer", applies: true, reason: "This task requires review."}],
+    plan: {kind: "sequence", nodes: [{kind: "workflow", nodeId: workflow.nodeId, definitionId: "reviewer", reason: workflow.reason,
+      omissions, plan: {kind: "sequence", nodes: [{kind: "step", definitionId: null, localId: "note", name: "Release note",
+        description: "Write a short note.", reason: "Add supporting work."}]}}]},
+  }, prepared.context!);
+
+  assert.ok(shell);
+  assert.equal(shell.requirements[0]?.state, "unresolved");
+});
+
+test("a same-named local step cannot satisfy a required reusable step", async () => {
+  const {snapshot} = await load({
+    ...commonSteps,
+    "project.yaml": "required:\n  - step: e2e\n",
+  });
+  const {result} = interpret(snapshot, {
+    requirements: [{kind: "step", id: "e2e", applies: true, reason: "The flow changed."}],
+    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: null, localId: "local-e2e", name: "e2e",
+      description: "Run a generic test.", reason: "It sounds similar."}]},
+  });
+
+  assert.equal(result.workflow.requirements[0]?.state, "unresolved");
+  assert.equal(result.workflow.status, "provisional");
+});
+
+test("a missing project scope stays provisional instead of becoming a known empty policy", async () => {
+  const {snapshot} = await load({});
+  assert.notEqual(snapshot.status, "ready");
+  const {prepared, result} = interpret(snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "step", definitionId: null, localId: "inspect-task", name: "Inspect the request", description: "Read the relevant code.", reason: "Start with the reported behavior."},
+  ]}});
+
+  assert.ok(prepared.context);
+  assert.equal(prepared.context.requirementsKnown, false);
+  assert.equal(result.workflow.requirementsKnown, false);
+  assert.equal(result.workflow.status, "provisional");
+});
+
+test("known global requirements survive a missing local scope while the policy remains provisional", async () => {
+  const {snapshot} = await load({}, {globalEnabled: true, globalFiles: {
+    "project.yaml": "required:\n  - step: shared-e2e\n",
+    "steps/shared-e2e.md": stepSource("shared-e2e", "Verify the shared user flow."),
+    "workflows/.gitkeep": "",
+  }});
+  assert.notEqual(snapshot.status, "ready");
+  const globalRequirement = snapshot.config.required[0];
+  assert.ok(globalRequirement && "step" in globalRequirement);
+  const {prepared, result} = interpret(snapshot, {
+    requirements: [{kind: "step", id: globalRequirement.step, applies: true, reason: "The user flow changes."}],
+    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: globalRequirement.step, reason: "Include shared E2E."}]},
+  });
+
+  assert.ok(prepared.context!.knownRequirementKeys.includes(`step:${globalRequirement.step}`));
+  assert.equal(result.workflow.requirements[0]?.state, "included");
+  assert.equal(result.workflow.status, "provisional");
+});
+
+test("an invalid global config leaves readable local requirements included or unresolved, not unknown", async () => {
+  const {snapshot} = await load({
+    ...commonSteps,
+    "project.yaml": "required:\n  - step: e2e\n  - step: report\n",
+  }, {globalEnabled: true, globalFiles: {
+    "project.yaml": "required: nope\n",
+    "steps/.gitkeep": "",
+    "workflows/.gitkeep": "",
+  }});
+  const {prepared, result} = interpret(snapshot, {
+    requirements: [
+      {kind: "step", id: "e2e", applies: true, reason: "The flow changes."},
+      {kind: "step", id: "report", applies: true, reason: "Report results."},
+    ],
+    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "e2e", reason: "Include flow coverage."}]},
+  });
+
+  assert.deepEqual(prepared.context!.knownRequirementKeys, ["step:e2e", "step:report"]);
+  assert.deepEqual(result.workflow.requirements.map(item => item.state), ["included", "unresolved"]);
+  assert.equal(result.workflow.requirementsKnown, false);
+});
+
+test("a long task excerpt does not erase known references or make the unchanged source snapshot stale", async () => {
+  const {snapshot} = await load({...commonSteps, "project.yaml": "required:\n  - step: e2e\n"});
+  const task = `Fix this failure:\n${"x".repeat(80_000)}`;
+  const prepared = prepareWorkflowRequest(threadId, sourceMessageId, task, snapshot);
+  assert.ok(prepared.context);
+
+  assert.ok(prepared.requestText.length <= 120_000);
+  assert.match(prepared.requestText, /"step":"e2e"/u);
+  assert.deepEqual(prepared.workflow.requirements.map(item => item.id), ["e2e"]);
+  assert.equal(prepared.workflow.requirementsKnown, false);
+  assert.equal(prepared.context.promptComplete, false);
+  assert.equal(proposalContextMatches(prepared.context, snapshot), true);
+
+  const provisional = parseWorkflowInterpretation(reply({requirements: [{kind: "step", id: "e2e", applies: true, reason: "Test the flow."}],
+    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "e2e", reason: "Include flow coverage."}]}}), sourceMessageId, prepared.context);
+  assert.equal(provisional.workflow.requirements[0]?.state, "unknown");
+  assert.equal(provisional.workflow.status, "provisional");
+});
+
+test("long required descriptions stay complete while every configured reference remains in the prompt", async () => {
+  const ids = Array.from({length: 12}, (_, index) => `step-${index}`);
+  const files: Files = {
+    "project.yaml": `required:\n${ids.map(id => `  - step: ${id}`).join("\n")}\n`,
+    "workflows/.gitkeep": "",
+  };
+  for (const id of ids) files[`steps/${id}.md`] = stepSource(id, `Read the full subsystem and report its behavior. ${"detail ".repeat(600)}`);
+  const {snapshot} = await load(files);
+  const prepared = prepareWorkflowRequest(threadId, sourceMessageId, "Inspect the subsystem", snapshot);
+  assert.ok(prepared.context);
+
+  assert.ok(prepared.requestText.length <= 120_000);
+  assert.equal(prepared.context.promptComplete, true);
+  assert.equal(prepared.workflow.requirementsKnown, true);
+  assert.ok(prepared.requestText.includes("detail detail detail"));
+  for (const id of ids) assert.match(prepared.requestText, new RegExp(`"step":"${id}"`, "u"));
+  assert.deepEqual(prepared.workflow.requirements.map(item => item.id), ids);
+});
+
+test("cycles and invented reusable references stay visible in finite provisional plans", async () => {
+  const cycle = await load({
+    ...commonSteps,
+    ...emptyConfig,
+    "workflows/a.yaml": workflowSource("A", "  - workflow: b\n"),
+    "workflows/b.yaml": workflowSource("B", "  - workflow: a\n"),
+  });
+  const cycleResult = interpret(cycle.snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "workflow", definitionId: "a", reason: "Use the available workflow."},
+  ]}}).result;
+  assert.ok(cycleResult.workflow.plan);
+  assert.equal(cycleResult.workflow.status, "provisional");
+  assert.ok(cycleResult.workflow.issues.some(item => item.code === "workflow_cycle_in_plan"));
+
+  const empty = await load(emptyConfig);
+  const invented = interpret(empty.snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "step", definitionId: "security-audit", name: "Security audit", description: "Organization policy.", reason: "Mandatory."},
+  ]}}).result;
+  const node = invented.workflow.plan?.nodes[0];
+  assert.ok(node && node.kind === "step");
+  assert.equal(node.name, "Unresolved step security-audit");
+  assert.equal(node.resolution, "unresolved");
+  assert.equal(invented.workflow.status, "provisional");
+});
+
+test("a 12-workflow chain expands within the shared depth limit and fan-out reports its shared node limit", async () => {
+  const chainFiles: Files = {...commonSteps, ...emptyConfig};
+  for (let index = 0; index < 12; index++) chainFiles[`workflows/w${index}.yaml`] = workflowSource(`W${index}`,
+    index === 11 ? "  - step: inspect\n" : `  - workflow: w${index + 1}\n`);
+  const chain = await load(chainFiles);
+  assert.equal(chain.snapshot.status, "ready");
+  assert.equal(chain.snapshot.complete, true);
+  const chainResult = interpret(chain.snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "workflow", definitionId: "w0", reason: "Use the chain."},
+  ]}}).result;
+  assert.ok(chainResult.workflow.plan);
+
+  const fanout = await load({
+    ...commonSteps,
+    ...emptyConfig,
+    "workflows/top.yaml": workflowSource("Top", "  - workflow: mid\n".repeat(8)),
+    "workflows/mid.yaml": workflowSource("Mid", "  - workflow: low\n".repeat(8)),
+    "workflows/low.yaml": workflowSource("Low", "  - step: inspect\n".repeat(8), {group: "parallel"}),
+  });
+  const fanoutResult = interpret(fanout.snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "workflow", definitionId: "top", reason: "Use the bounded graph."},
+  ]}}).result;
+  assert.ok(fanoutResult.workflow.plan);
+  assert.equal(fanoutResult.workflow.status, "provisional");
+  assert.ok(fanoutResult.workflow.issues.some(item => item.code === "workflow_expansion_limit"));
+});
+
+test("strict record validation does not double-count repeated nested template expansions", async () => {
+  const {snapshot} = await load({
+    ...commonSteps,
+    ...emptyConfig,
+    "workflows/low.yaml": workflowSource("Low", "  - step: inspect\n".repeat(25)),
+    "workflows/mid.yaml": workflowSource("Mid", "  - workflow: low\n".repeat(3)),
+    "workflows/top.yaml": workflowSource("Top", "  - workflow: mid\n".repeat(3)),
+  });
+  const {prepared, result} = interpret(snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "workflow", definitionId: "top", reason: "Use the complete nested template."},
+  ]}});
+  assert.equal(result.workflow.status, "proposed");
+  assert.ok(result.workflow.plan);
+  const countOccurrences = (nodes: readonly WorkflowPlanNodeInfo[]): number => nodes.reduce((sum, node) => sum +
+    (node.kind === "sequence" || node.kind === "parallel" ? countOccurrences(node.nodes) : 1) +
+    (node.kind === "workflow" && node.plan ? countOccurrences(node.plan.nodes) : 0), 0);
+  assert.equal(countOccurrences(result.workflow.plan.nodes), 238);
+
+  const strict = validateWorkflowRecord(proposalRecord(result.workflow), prepared.context!);
+  assert.ok(strict);
+  assert.deepEqual(strict, proposalRecord(result.workflow));
+});
+
+test("long readable definition source text does not make a bounded canonical request incomplete", async () => {
+  const longDescription = "A".repeat(2500);
+  const {snapshot} = await load({
+    ...emptyConfig,
+    "steps/inspect.md": stepSource("inspect", longDescription),
+  });
+  const prepared = prepareWorkflowRequest(threadId, sourceMessageId, "Inspect the current behavior", snapshot);
+
+  assert.equal(prepared.context?.promptComplete, true);
+  assert.equal(prepared.context?.steps[0]?.description, longDescription);
+  assert.ok(prepared.requestText.length < 64_000);
+});
+
+test("unused optional fixed templates do not make a complete task context provisional", async () => {
+  const files: Files = {...commonSteps, ...emptyConfig};
+  for (let index = 0; index < 14; index++) files[`workflows/optional-${index}.yaml`] = workflowSource(`Optional ${index}`,
+    "  - step: inspect\n".repeat(40), {fixed: true});
+  const {snapshot} = await load(files);
+  const prepared = prepareWorkflowRequest(threadId, sourceMessageId, "Inspect the current behavior", snapshot);
+
+  assert.equal(prepared.context?.promptComplete, true);
+  assert.ok(prepared.requestText.length <= 120_000);
+  assert.ok(prepared.requestText.length < 64_000);
+});
+
+test("a fixed workflow named by the task receives its exact template paths on demand", async () => {
+  const {snapshot} = await load({...commonSteps, ...emptyConfig, "workflows/reviewer.yaml": reviewer(true)});
+  const prepared = prepareWorkflowRequest(threadId, sourceMessageId, "Use the reviewer workflow to check the change", snapshot);
+
+  assert.equal(prepared.context?.promptComplete, true);
+  assert.match(prepared.requestText, /workflow:reviewer\/root\/0/u);
+});
+
+test("apply validation retains existing occurrence IDs and execution state while assigning one ID to a new local step", async () => {
+  const {snapshot} = await load({...commonSteps, ...emptyConfig});
+  const {prepared, result} = interpret(snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "step", definitionId: null, localId: "task-check", name: "Task check", description: "Check the requested behavior.", reason: "Start here."},
+  ]}});
+  const context = prepared.context!;
+  const original = result.workflow;
+  assert.equal(original.status, "proposed", JSON.stringify({status: original.status, context: {status: context.status, complete: context.complete,
+    promptComplete: context.promptComplete, requirementsKnown: context.requirementsKnown}, issues: original.issues.map(item => item.code), plan: original.plan}));
+  assert.ok(original.plan);
+  const existing = original.plan.nodes[0];
+  assert.ok(existing && existing.kind === "step");
+  const contributor = "00000000-0000-4000-8000-000000000001";
+  const sourceHash = "a".repeat(64);
+  const candidate = {
+    sourceBinding: {
+      workspaceRoot: context.workspaceRoot,
+      revision: context.revision,
+      globalRevision: context.globalRevision ?? null,
+      definitionsStatus: context.status,
+      definitionsComplete: true,
+      requirementsKnown: true,
+      taskId: "task-a",
+      proposalId: "proposal-a",
+      sourceHash,
+    },
+    requirements: original.requirements,
+    issues: original.issues,
+    plan: {kind: "sequence", nodes: [
+      {kind: "step", nodeId: existing.nodeId, definitionId: null, localId: "task-check", name: existing.name,
+        description: existing.description, reason: existing.reason, status: "underway", contributorThreadIds: [contributor]},
+      {kind: "step", definitionId: null, localId: "follow-up", name: "Follow up", description: "Check the complete behavior.", reason: "Add a follow-up."},
+    ]},
+  };
+  const applied = validateWorkflowApplyAgainstPinnedContext(candidate, context, original, "task-a", "proposal-a",
+    sourceHash, {targetThreadId: threadId, mainThreadId: threadId}, [], original.plan);
+  assert.equal(validateWorkflowApplyAgainstPinnedContext(candidate, context, original, "task-a", "proposal-a",
+    "b".repeat(64), {targetThreadId: threadId, mainThreadId: threadId}, [], original.plan), null);
+
+  assert.ok(applied);
+  const retained = applied.plan.nodes[0];
+  const created = applied.plan.nodes[1];
+  assert.ok(retained && retained.kind === "step" && created && created.kind === "step");
+  assert.equal(retained.nodeId, existing.nodeId);
+  assert.equal(retained.status, "underway");
+  assert.deepEqual(retained.contributorThreadIds, [contributor]);
+  assert.match(created.nodeId, /^[0-9a-f-]{36}$/iu);
+  assert.notEqual(created.nodeId, existing.nodeId);
+});
+
+test("apply validation rejects a missing ID when it would regenerate an existing local occurrence", async () => {
+  const {snapshot} = await load({...commonSteps, ...emptyConfig});
+  const {prepared, result} = interpret(snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "step", definitionId: null, localId: "local-b", name: "Local B", description: "Existing local work.", reason: "Keep it."},
+  ]}});
+  const context = prepared.context!;
+  const original = result.workflow;
+  assert.ok(original.plan);
+  const sourceHash = "a".repeat(64);
+  const candidate = {
+    sourceBinding: {workspaceRoot: context.workspaceRoot, revision: context.revision, globalRevision: context.globalRevision ?? null,
+      definitionsStatus: context.status, definitionsComplete: true, requirementsKnown: true, taskId: "task-a", proposalId: "proposal-a", sourceHash},
+    requirements: original.requirements,
+    issues: original.issues,
+    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: null, localId: "local-b", name: "Local B",
+      description: "Existing local work.", reason: "Keep it."}]},
   };
 
-  assert.equal(validateWorkflowPlan({
-    rules: [{ index: 0, applies: false, reason: "The agent negotiated this rule away." }],
-    steps: [],
-  }, context, new Set([0])), null);
-  assert.equal(validateWorkflowPlan({
-    rules: [{ index: 0, applies: true, reason: "The agreed rule still applies." }],
-    steps: [{ blockId: "e2e-check", reason: "The agreed E2E instructions remain required." }],
-  }, context, new Set([0]))?.rules[0]?.applies, true);
-  assert.equal(validateWorkflowPlan({ rules: [{ index: 0, applies: true, reason: "Applicable." }], steps: [] }, context, new Set([1])), null);
+  assert.equal(validateWorkflowApplyAgainstPinnedContext(candidate, context, original, "task-a", "proposal-a",
+    sourceHash, {targetThreadId: threadId, mainThreadId: threadId}, [], original.plan), null);
+});
+
+test("only accepted or current fixed occurrences constrain the first workflow apply", async () => {
+  const {snapshot} = await load({...commonSteps, ...emptyConfig, "workflows/reviewer.yaml": reviewer(true)});
+  const {prepared, result} = interpret(snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "workflow", definitionId: "reviewer", reason: "Use fixed review if it fits."},
+    {kind: "step", definitionId: null, localId: "release-note", name: "Release note", description: "Summarize the change.", reason: "Prepare a handoff."},
+  ]}});
+  const context = prepared.context!;
+  const original = result.workflow;
+  assert.equal(original.status, "proposed");
+  assert.ok(original.plan);
+  const fixed = original.plan.nodes[0];
+  const local = original.plan.nodes[1];
+  assert.ok(fixed && fixed.kind === "workflow" && fixed.fixed);
+  assert.ok(local && local.kind === "step");
+  const sourceHash = "c".repeat(64);
+  const candidate = {
+    sourceBinding: {workspaceRoot: context.workspaceRoot, revision: context.revision, globalRevision: context.globalRevision ?? null,
+      definitionsStatus: context.status, definitionsComplete: true, requirementsKnown: true, taskId: "task-a", proposalId: "proposal-a", sourceHash},
+    requirements: original.requirements,
+    issues: original.issues,
+    plan: {kind: "sequence", nodes: [{kind: "step", nodeId: local.nodeId, definitionId: null, localId: local.localId,
+      name: local.name, description: local.description, reason: local.reason}]},
+  };
+  const target = {targetThreadId: threadId, mainThreadId: threadId};
+
+  assert.ok(validateWorkflowApplyAgainstPinnedContext(candidate, context, original, "task-a", "proposal-a", sourceHash, target, [], null));
+  assert.equal(validateWorkflowApplyAgainstPinnedContext(candidate, context, original, "task-a", "proposal-a", sourceHash, target, [original.plan], null), null);
+  assert.equal(validateWorkflowApplyAgainstPinnedContext(candidate, context, original, "task-a", "proposal-a", sourceHash, target, [], original.plan), null);
 });

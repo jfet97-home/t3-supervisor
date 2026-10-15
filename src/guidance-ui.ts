@@ -1,4 +1,4 @@
-import { Effect, Layer } from "effect";
+import { Context, Effect, Layer } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
 import { HttpRouter, HttpServer } from "effect/http";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -9,7 +9,7 @@ import { SupervisorApi, UiError } from "./guidance-contract.js";
 import type { GuidanceRuntime } from "./guidance.js";
 import type { SupervisorConfig } from "./types.js";
 import type { ProjectDefinitionLoader } from "./project-definitions.js";
-import type { ProjectRuleEditor } from "./project-rule-editor.js";
+import type { ProjectConfigEditor } from "./project-config-editor.js";
 import type { ProjectSupervisor } from "./project-supervisor.js";
 import { createServiceAuth } from "./service-auth.js";
 
@@ -40,7 +40,7 @@ export const startGuidanceUi = async (
   config: SupervisorConfig,
   runtime: GuidanceRuntime,
   definitions?: ProjectDefinitionLoader,
-  editor?: ProjectRuleEditor,
+  editor?: ProjectConfigEditor,
   supervision?: ProjectSupervisor,
   workflows?: WorkflowMcpEndpoint,
 ) => {
@@ -48,8 +48,8 @@ export const startGuidanceUi = async (
   if (mcpHosts.some(host => !/^(?:[a-z0-9.-]+|\[[a-f0-9:]+\]):[0-9]{1,5}$/u.test(host)))
     throw new Error("Workflow MCP hosts must be exact host:port values.");
   await rm(join(config.dataDirectory, "ui-login-code"), { force: true });
-  const requireLegacy = () => {if (runtime.retired !== false) throw new Error("Legacy guidance rules are retired. Edit project rules in Projects.");};
-  const legacyMessage = (fallback: string) => runtime.retired !== false ? "Legacy guidance rules are retired. Edit project rules in Projects." : fallback;
+  const requireLegacy = () => {if (runtime.retired !== false) throw new Error("Legacy guidance rules are retired. Edit project definitions in Projects.");};
+  const legacyMessage = (fallback: string) => runtime.retired !== false ? "Legacy guidance rules are retired. Edit project definitions in Projects." : fallback;
   const handlers = HttpApiBuilder.group(SupervisorApi, "guidance", (h) =>
     h.handleAll({
       snapshot: () => Effect.promise(() => runtime.snapshot()),
@@ -91,16 +91,16 @@ export const startGuidanceUi = async (
         try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.retry(payload, signal);},
         catch: () => new UiError({message: "Native access retry could not be confirmed. Refresh to inspect the retained state."}),
       }),
-      projectDefinitions: ({query}) => Effect.tryPromise({
+      projectConfiguration: ({query}) => Effect.tryPromise({
         try: (signal) => {
           if (!definitions) throw new Error("Project definition access is not configured.");
           return definitions.load(query.projectId, query.threadId ?? null, signal).then(result => ({...result, editingAvailable: Boolean(editor)}));
         },
         catch: () => new UiError({message: "Project definition access is unavailable."}),
       }),
-      saveProjectRules: ({payload}) => Effect.tryPromise({
+      saveProjectConfiguration: ({payload}) => Effect.tryPromise({
         try: signal => editor ? editor.save(payload, signal) : Promise.resolve({status: "permission_required" as const, message: "Project editing needs a dedicated filesystem:read/filesystem:write credential through deployment setup.", definitions: null}),
-        catch: () => new UiError({message: "The save outcome could not be confirmed. Refresh and inspect rules.yaml before retrying."}),
+        catch: () => new UiError({message: "The save outcome could not be confirmed. Refresh and inspect project.yaml before retrying."}),
       }),
       saveRule: ({ payload }) =>
         Effect.try({
@@ -108,7 +108,7 @@ export const startGuidanceUi = async (
           catch: () =>
             new UiError({
               message:
-                "Legacy guidance rules are retired, or the rule changed. Edit project rules in Projects.",
+                "Legacy guidance rules are retired, or the request changed. Use the project configuration editor in Projects.",
             }),
         }),
       settings: ({ payload }) =>
@@ -352,7 +352,7 @@ export const startGuidanceUi = async (
           return;
         }
         const input =
-          request.method === "GET" ? undefined : await body(request, url.pathname === "/api/guidance/project-rules" ? 256 * 1024 : 64_000);
+          request.method === "GET" ? undefined : await body(request, 64_000);
         const init: RequestInit = {
           method: request.method ?? "GET",
           headers: { "Content-Type": "application/json" },
@@ -364,7 +364,7 @@ export const startGuidanceUi = async (
         init.signal=controller.signal;
         if (input !== undefined) init.body = input;
         let result:Response;
-        try { result = await web.handler(new Request(url, init)); }
+        try { result = await web.handler(new Request(url, init), Context.empty() as unknown as Context.Context<unknown>); }
         finally { activeRequests.delete(controller);response.off("close",abort); }
         const resultHeaders: Record<string, string> = { ...headers };
         result.headers.forEach((value, key) => {

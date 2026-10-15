@@ -180,7 +180,7 @@ export class GuidanceRuntime {
   }
   retired = true;
   sendingReason(): string {
-    if (this.retired) return "Project rules are available; workflow supervision is not connected yet. Legacy reminders are retired.";
+    if (this.retired) return "Legacy reminders are retired. Configure project steps and workflows in Projects.";
     if (!this.token)
       return "A separate T3 guidance operate credential is not configured.";
     if (!this.store.settings().allowFollowupRace)

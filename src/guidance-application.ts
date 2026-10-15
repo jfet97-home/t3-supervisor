@@ -9,7 +9,7 @@ import { readFile } from "node:fs/promises";
 import { posix } from "node:path";
 import { makeProjectCommitter, makeProjectFiles, makeProjectWriter } from "./project-files.js";
 import { ProjectDefinitionLoader } from "./project-definitions.js";
-import { ProjectRuleEditor } from "./project-rule-editor.js";
+import { ProjectConfigEditor } from "./project-config-editor.js";
 import { existsSync } from "node:fs";
 import { ProjectSupervisorStore, loadSupervisorOwnership } from "./project-supervisor-store.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
@@ -71,7 +71,7 @@ export const runGuidanceApplication = (
       ...(setupWriter ? {setupWriter} : {}),
       ...(gitProbe ? {gitProbe: gitProbe.probe} : {}),
     });
-    const editor = projectWriter ? new ProjectRuleEditor(definitions, projectWriter, (snapshot, expectedRevision) => supervisionStore.recordDefinitionUserSave(snapshot, expectedRevision)) : undefined;
+    const editor = projectWriter ? new ProjectConfigEditor(definitions, projectWriter, (snapshot, expectedRevision) => supervisionStore.recordDefinitionUserSave(snapshot, expectedRevision)) : undefined;
     const operateToken = config.guidanceTokenFile && existsSync(config.guidanceTokenFile) ? yield* Effect.tryPromise(() => readFile(config.guidanceTokenFile!, "utf8")) : "";
     const readRpc = makeSupervisorRpc(config.t3Url, readToken.trim());
     const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, readRpc,
@@ -80,6 +80,7 @@ export const runGuidanceApplication = (
       supervisors: supervisionStore,
       workflows: supervision.workflowStates,
       isEnabled: projectId => supervision.workflowEditingEnabled(projectId),
+      loadDefinitions: (projectId, threadId, signal) => definitions.load(projectId, threadId, signal),
       native: {
         listThreads: readSupervisorThreads(config.t3Url, readToken.trim(), readRpc),
         projection: async (threadId, signal) => (await Effect.runPromise(t3.projection(threadId), {signal})).projection,

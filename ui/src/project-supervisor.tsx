@@ -6,6 +6,7 @@ import type {
   SupervisorModelSelection,
   SupervisorMonitoringSettings,
   WorkflowAgreementInfo,
+  WorkflowPlanNodeInfo,
   WorkflowProposalInfo,
 } from "../../src/project-supervisor-contract.js";
 import { defaultMonitoringSettings } from "../../src/project-supervisor-contract.js";
@@ -124,38 +125,124 @@ const formatWorkflowAgreementTime = (timestamp: number) => {
   return Number.isNaN(date.getTime()) ? null : date;
 };
 
-function WorkflowDetails({workflow, stepHeading, emptyStepsMessage}: {
-  workflow: WorkflowProposalInfo;
-  stepHeading: string;
-  emptyStepsMessage: string;
-}) {
-  const orderedRules = [...workflow.rules].sort((left, right) => left.index - right.index);
+const proposalStatusText: Record<WorkflowProposalInfo["status"], string> = {
+  pending: "Being prepared",
+  proposed: "Proposed for discussion",
+  provisional: "Provisional plan with open issues",
+  unavailable: "Unavailable",
+  stale: "Source changed; review needed",
+  invalid: "Invalid proposal",
+};
 
-  return <>
-    <div className="stack">
-      <h6>Rule applicability</h6>
-      {orderedRules.length > 0
-        ? <ol className="stack">{orderedRules.map(rule => <li key={`${rule.index}:${rule.name}`}>
-          <strong>{rule.name}</strong>
-          <p><strong>Decision:</strong> {rule.applies ? "Applies" : "Does not apply"}</p>
-          <p>{rule.reason}</p>
-        </li>)}</ol>
-        : <p className="muted">No rules were evaluated for this proposal.</p>}
-    </div>
+const proposalStatusDescription: Record<WorkflowProposalInfo["status"], string> = {
+  pending: "The plan is still being prepared; no agreement is recorded for it.",
+  proposed: "This is a draft for dialogue. No agreement is recorded for this proposal.",
+  provisional: "A finite working plan is available while unresolved requirements or definition issues remain visible.",
+  unavailable: "A usable plan could not be prepared from the available definitions.",
+  stale: "The source revision changed. Review the definitions and negotiate the plan again.",
+  invalid: "The proposal could not be accepted as a valid plan.",
+};
 
+const definitionStatusText: Record<WorkflowProposalInfo["definitionsStatus"], string> = {
+  ready: "Valid",
+  missing: "Missing in the selected scope",
+  invalid: "Needs attention",
+  permission_required: "File access needs setup",
+  unavailable: "Unavailable",
+};
+
+const requirementStateText: Record<WorkflowProposalInfo["requirements"][number]["state"], string> = {
+  included: "Included in the plan",
+  not_applicable: "Not applicable",
+  unresolved: "Unresolved",
+  unknown: "Unknown",
+};
+
+const planStatusText = {
+  planned: "Planned",
+  underway: "Reported underway",
+  completed: "Reported complete",
+  needs_attention: "Needs attention",
+} as const;
+
+function WorkflowSource({source, templatePath}: {source: WorkflowProposalInfo["requirements"][number]["source"]; templatePath?: string | null}) {
+  if (!source && !templatePath) return null;
+  return <p className="small muted">Source: {source?.origin ?? "not recorded"}{source?.path && <> · <code>{source.path}</code></>}{templatePath && <> · template <code>{templatePath}</code></>}</p>;
+}
+
+function WorkflowPlanNode({node}: {node: WorkflowPlanNodeInfo}) {
+  if ("nodes" in node) {
+    const List = node.kind === "sequence" ? "ol" : "ul";
+    return <div className="stack workflow-plan-group">
+      <p><strong>{node.kind === "sequence" ? "Sequence" : "Parallel group"}</strong> <span className="muted">{node.kind === "sequence" ? "— intended semantic order" : "— members have no declared order"}</span></p>
+      {node.templatePath && <p className="small muted">Template group: <code>{node.templatePath}</code></p>}
+      <List className="stack workflow-plan-nodes">{node.nodes.map((child, index) => <li key={"nodeId" in child ? child.nodeId : `group:${child.kind}:${index}`}><WorkflowPlanNode node={child}/></li>)}</List>
+    </div>;
+  }
+  if (node.kind === "step") return <article className="stack workflow-plan-node">
+    <p><strong>Step: {node.name}</strong></p>
+    {node.definitionId && <p className="small">Reusable step ID: <code>{node.definitionId}</code></p>}
+    {node.localId && <p className="small">Task-local step ID: <code>{node.localId}</code></p>}
+    <WorkflowSource source={node.source} templatePath={node.templatePath}/>
+    <p>{node.description}</p>
+    <p><strong>Plan status:</strong> {planStatusText[node.status]} · <strong>Definition:</strong> {node.resolution === "resolved" ? "Resolved" : "Unresolved"}</p>
+    <p>{node.reason}</p>
+    {node.contributorThreadIds.length > 0 && <div><strong>Contributors</strong><ul>{node.contributorThreadIds.map(threadId => <li key={threadId}><a href={`t3-thread://v1/${threadId}`}>Child conversation <code>{threadId}</code></a></li>)}</ul></div>}
+  </article>;
+  if (node.kind !== "workflow") return null;
+  return <article className="stack workflow-plan-node">
+    <p><strong>Workflow: {node.name}</strong> <span className="muted">({node.definitionId})</span></p>
+    <WorkflowSource source={node.source} templatePath={node.templatePath}/>
+    <p>{node.description}</p>
+    <p><strong>Resolution:</strong> {node.resolution} · <strong>Plan status:</strong> {planStatusText[node.status]} · <strong>Fixed:</strong> {node.fixed === null ? "Unknown" : node.fixed ? "Yes" : "No"}</p>
+    <p>{node.reason}</p>
+    {node.omissions.length > 0 && <div className="stack">
+      <strong>Not-applicable original commitments</strong>
+      <ul className="stack">{node.omissions.map((omission, index) => <li key={`${omission.templatePath}:${omission.kind}:${omission.id}:${index}`}>
+        <p><strong>{omission.kind}:</strong> {omission.name} <span className="muted">({omission.id})</span></p>
+        <WorkflowSource source={omission.source} templatePath={omission.templatePath}/>
+        <p>{omission.reason}</p>
+      </li>)}</ul>
+    </div>}
+    {node.plan && <WorkflowPlanNode node={node.plan}/>}
+    {!node.plan && node.resolution !== "resolved" && <p className="muted">The referenced workflow could not be expanded completely.</p>}
+    {node.contributorThreadIds.length > 0 && <div><strong>Contributors</strong><ul>{node.contributorThreadIds.map(threadId => <li key={threadId}><a href={`t3-thread://v1/${threadId}`}>Child conversation <code>{threadId}</code></a></li>)}</ul></div>}
+  </article>;
+}
+
+function WorkflowProposalDetails({workflow, title}: {workflow: WorkflowProposalInfo; title: string}) {
+  const requirementsMayBeEmpty = workflow.requirementsKnown && workflow.definitionsComplete && workflow.definitionsStatus === "ready";
+  return <div className="stack">
     <div className="stack">
-      <h6>{stepHeading}</h6>
-      {workflow.steps.length > 0
-        ? <ol className="stack">{workflow.steps.map((step, index) => <li key={`${step.blockId ?? "task-specific"}:${step.name}:${index}`}>
-          <strong>Step {index + 1}: {step.name}</strong>
-          {step.blockId === null
-            ? <p className="muted">Task-specific step</p>
-            : <p><strong>Block ID:</strong> <code>{step.blockId}</code></p>}
-          <p>{step.reason}</p>
-        </li>)}</ol>
-        : <p className="muted">{emptyStepsMessage}</p>}
+      <h6>Definition status</h6>
+      <p><strong>Collection:</strong> {definitionStatusText[workflow.definitionsStatus]} · <strong>Read complete:</strong> {workflow.definitionsComplete ? "Yes" : "No"}</p>
+      <p><strong>Requirements known:</strong> {workflow.requirementsKnown ? "Yes" : "No"}</p>
+      <p><strong>Workspace root:</strong> {workflow.workspaceRoot === null ? "Not recorded" : <code>{workflow.workspaceRoot}</code>}</p>
+      <p><strong>Definition revision:</strong> {workflow.revision === null ? "Not recorded" : <code>{workflow.revision}</code>}</p>
     </div>
-  </>;
+    {workflow.issues.length > 0 && <div className="stack">
+      <h6>Definition issues</h6>
+      <ul className="definition-issues">{workflow.issues.map((issue, index) => <li key={`${issue.path}:${issue.code}:${index}`}><code>{issue.path}</code><p>{issue.message}</p></li>)}</ul>
+    </div>}
+    <div className="stack">
+      <h6>Required definitions</h6>
+      {workflow.requirements.length > 0
+        ? <ol className="stack">{workflow.requirements.map((requirement, index) => <li key={`${requirement.kind}:${requirement.id}:${index}`}>
+          <p><strong>{requirement.kind === "step" ? "Step" : "Workflow"}:</strong> {requirement.name} <span className="muted">({requirement.id})</span></p>
+          <p><strong>Plan accounting:</strong> {requirementStateText[requirement.state]}</p>
+          <WorkflowSource source={requirement.source}/>
+          <p>{requirement.reason}</p>
+        </li>)}</ol>
+        : <p className="muted">{requirementsMayBeEmpty ? "No required definitions are configured." : "No requirement entries are available. Requirements may be unknown because the definitions are missing, invalid or incompletely read."}</p>}
+    </div>
+    <div className="stack">
+      <h6>{title}</h6>
+      {workflow.plan
+        ? <WorkflowPlanNode node={workflow.plan}/>
+        : <p className="muted">No plan structure is available for this proposal.</p>}
+      <p className="muted">Reported plan status is not independent execution evidence. A template reference or agreement does not prove that work was performed.</p>
+    </div>
+  </div>;
 }
 
 function WorkflowAgreementView({agreement}: {agreement: WorkflowAgreementInfo}) {
@@ -169,10 +256,7 @@ function WorkflowAgreementView({agreement}: {agreement: WorkflowAgreementInfo}) 
     {stale
       ? <p className="muted">This agreement is retained as history and is not the current agreed workflow.</p>
       : <p className="muted">Agreement records an accepted plan; it does not verify that any steps were completed.</p>}
-    <WorkflowDetails
-      workflow={agreement.workflow}
-      stepHeading={stale ? "Steps in this historical agreement" : "Agreed steps"}
-      emptyStepsMessage="No workflow steps are recorded in this agreement." />
+    <WorkflowProposalDetails workflow={agreement.workflow} title={stale ? "Plan in this historical agreement" : "Agreed plan"}/>
     <details className="stack">
       <summary>{stale ? "Historical agreement details" : "Agreement details"}</summary>
       <p><strong>Proposal ID:</strong> <code>{agreement.proposalId}</code></p>
@@ -180,7 +264,7 @@ function WorkflowAgreementView({agreement}: {agreement: WorkflowAgreementInfo}) 
         ? <time dateTime={agreedAt.toISOString()}>{agreedAt.toLocaleString()}</time>
         : "Unknown"}</p>
       <p><strong>Workspace root:</strong> {agreement.workflow.workspaceRoot === null ? "Not recorded" : <code>{agreement.workflow.workspaceRoot}</code>}</p>
-      <p><strong>Rules revision:</strong> {agreement.workflow.revision === null ? "Not recorded" : <code>{agreement.workflow.revision}</code>}</p>
+      <p><strong>Definition revision:</strong> {agreement.workflow.revision === null ? "Not recorded" : <code>{agreement.workflow.revision}</code>}</p>
       <p><strong>Supervisor message ID:</strong> <code>{agreement.supervisorMessageId}</code></p>
       <p><strong>Agent message ID:</strong> <code>{agreement.agentMessageId}</code></p>
     </details>
@@ -233,25 +317,15 @@ function WorkflowProposalView({workflow, proposalId, agreement, definitionReview
   return <section className="stack" aria-labelledby="workflow-proposal-title">
     <h4 id="workflow-proposal-title">Workflow proposal</h4>
     {definitionReview != null && <DefinitionReviewView review={definitionReview} />}
-    {noWorkflowRecord && <p className="muted">No workflow proposal was recorded for this task. Earlier objective-only records are not automatically reprocessed.</p>}
+    {noWorkflowRecord && <p className="muted">No workflow proposal was recorded for this task.</p>}
     {hasAgreement && <WorkflowAgreementView agreement={agreement} />}
     {workflow != null && !sameAsActiveAgreement && <section className="stack">
       <h5>Current workflow draft</h5>
-      <p><strong>Draft status:</strong> {workflow.status}</p>
+      <p><strong>Proposal status:</strong> {proposalStatusText[workflow.status]}</p>
       {proposalId && <p><strong>Proposal ID:</strong> <code>{proposalId}</code></p>}
       <p>{workflow.message}</p>
-      {workflow.status === "proposed" && <p className="muted">This is a draft. No agreement is recorded for this proposal.</p>}
-      {workflow.status === "pending" && <p className="muted">This proposal is still being prepared; no agreement is recorded for it.</p>}
-
-      <div className="stack">
-        <h6>Provenance</h6>
-        <p><strong>Workspace root:</strong> {workflow.workspaceRoot === null ? "Not recorded" : <code>{workflow.workspaceRoot}</code>}</p>
-        <p><strong>Rules revision:</strong> {workflow.revision === null ? "Not recorded" : <code>{workflow.revision}</code>}</p>
-      </div>
-      <WorkflowDetails
-        workflow={workflow}
-        stepHeading="Proposed steps"
-        emptyStepsMessage={workflow.status === "proposed" ? "No workflow steps were proposed." : "No workflow steps are available for this proposal."} />
+      <p className="muted">{proposalStatusDescription[workflow.status]}</p>
+      <WorkflowProposalDetails workflow={workflow} title="Current plan"/>
     </section>}
     {workflow == null && agreement?.status === "stale" && <p className="muted">No current workflow draft is recorded for this task.</p>}
     {sameAsActiveAgreement && <p className="muted">The latest proposal is the agreed workflow shown above.</p>}

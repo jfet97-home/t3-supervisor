@@ -151,12 +151,12 @@ function SupervisionSetupPanel({projectId, onComplete}: {projectId: string; onCo
 export function GlobalDefinitionsControlView({control, busy, blocked, message, onToggle, onReload}: {
   control: GlobalDefinitionsControlInfo; busy: boolean; blocked: boolean; message: string; onToggle: () => void; onReload: () => void;
 }) {
-  return <section className="panel stack" aria-label="Use global rules and blocks">
-    <h3>Use global rules and blocks</h3>
+  return <section className="panel stack" aria-label="Use global steps and workflows">
+    <h3>Use global steps and workflows</h3>
     <p><strong>{control.enabled ? "Enabled" : "Disabled"}</strong>{control.enabled && !control.effectiveEnabled ? " — the master supervision switch is off" : ""}</p>
-    <p>Shared definitions: <code>~/.t3-supervisor</code> in the T3 server user's home.</p>
-    <p>This starts disabled. First enabling creates empty rules and a blocks directory if needed. Existing definitions are preserved, and the files are left uncommitted.</p>
-    <p>These definitions are shared by enabled project Supervisors and Scratch. Disabling them leaves each enabled project's own rules available. The master switch overrides all supervision.</p>
+    <p>Shared definitions: <code>~/.t3-supervisor/project.yaml</code>, <code>steps/</code>, and <code>workflows/</code> in the T3 server user's home.</p>
+    <p>This starts disabled. First enabling creates the shared project.yaml and empty steps/ and workflows/ directories if needed. Existing definitions are preserved, and the files are left uncommitted.</p>
+    <p>These definitions are shared by enabled project Supervisors and Scratch. Disabling them leaves each enabled project's own definitions available. The master switch overrides all supervision.</p>
     <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>
     <div className="row">
       <button type="button" disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable global definitions" : "Enable global definitions"}</button>

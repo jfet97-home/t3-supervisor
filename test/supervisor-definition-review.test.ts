@@ -6,7 +6,8 @@ import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contr
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions, extractProjectDefinitionDecisionRecords, parseProjectDefinitionDecisionRecord } from "../src/supervisor-definition-review.js";
 import type { TaskRecord } from "../src/project-supervisor-store.js";
 import type { Projection } from "../src/types.js";
-import { prepareWorkflowRequest } from "../src/supervisor-workflow.js";
+import { prepareWorkflowRequest, validateWorkflowPlan } from "../src/supervisor-workflow.js";
+import { stepSource } from "./project-definitions-fixture.js";
 
 const projectId = "project-a";
 const operativeThreadId = "operative-thread";
@@ -21,10 +22,19 @@ const definitions = (overrides: Partial<ProjectDefinitionSnapshot> = {}): Projec
   threadId: operativeThreadId,
   workspaceRoot: root,
   revision: oldRevision,
+  globalOnly: false,
+  globalRevision: null,
   editingAvailable: true,
   status: "ready",
-  rules: [{name: "Required verification", description: "Verify behavior.", required_blocks: ["verify"]}],
-  blocks: [{id: "verify", name: "Verification", description: "Verify the change.", instructions: "Run the focused checks.", expected_result: "All checks pass."}],
+  steps: [{id: "verify", name: "Verification", description: "Verify the change.", origin: "project", path: ".t3-supervisor/steps/verify.md", sourceId: "verify"}],
+  workflows: [],
+  config: {required: [{step: "verify"}]},
+  projectConfig: {required: [{step: "verify"}]},
+  complete: true,
+  sources: [
+    {path: ".t3-supervisor/project.yaml", content: "required:\n  - step: verify\n", origin: "project"},
+    {path: ".t3-supervisor/steps/verify.md", content: stepSource("verify", "Verify the change."), origin: "project"},
+  ],
   issues: [],
   ...overrides,
 });
@@ -33,6 +43,9 @@ const task = (overrides: Partial<TaskRecord> = {}): TaskRecord => {
   const approved = definitions();
   const prepared = prepareWorkflowRequest(operativeThreadId, "source-0", sourceText, approved);
   assert.ok(prepared.context);
+  const plan = validateWorkflowPlan({requirements: [{kind: "step", id: "verify", applies: true, reason: "The task changes behavior."}],
+    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "verify", reason: "Check the change."}]}}, prepared.context);
+  assert.ok(plan);
   return {
     threadId: operativeThreadId,
     projectId,
@@ -42,9 +55,7 @@ const task = (overrides: Partial<TaskRecord> = {}): TaskRecord => {
     objective: "Add a carefully bounded feature.",
     reason: "The user requested a concrete feature.",
     updatedAt: 100,
-    workflow: {status: "proposed", message: "Draft.", workspaceRoot: root, revision: oldRevision,
-      rules: [{index: 0, name: "Required verification", applies: true, reason: "The task changes behavior."}],
-      steps: [{blockId: "verify", name: "Verification", reason: "Check the change."}]},
+    workflow: {status: "proposed", message: "Draft.", workspaceRoot: root, revision: oldRevision, globalRevision: null, ...plan},
     id: "task-1",
     sourceHash: fingerprint(sourceText),
     requestText: prepared.requestText,
@@ -102,16 +113,12 @@ const parseEnvelope = (request: string): Record<string, unknown> => {
   return JSON.parse(request.slice(start, end)) as Record<string, unknown>;
 };
 
-test("approved definitions come from the stored snapshot and strict legacy workflow envelope fallback", () => {
+test("approved definitions require the stored complete snapshot and do not use a legacy fallback", () => {
   const current = task();
   assert.deepEqual(extractApprovedProjectDefinitions(current), definitions());
 
   const fallback = task({definitionSnapshot: null});
-  const extracted = extractApprovedProjectDefinitions(fallback);
-  assert.ok(extracted);
-  assert.equal(extracted.revision, oldRevision);
-  assert.deepEqual(extracted.rules, definitions().rules);
-  assert.deepEqual(extracted.blocks, definitions().blocks);
+  assert.equal(extractApprovedProjectDefinitions(fallback), null);
 
   assert.equal(extractApprovedProjectDefinitions(task({definitionSnapshot: null, requestText: "partial prompt"})), null);
   assert.equal(extractApprovedProjectDefinitions(task({definitionSnapshot: null, workflow: {...current.workflow!, revision: newRevision}})), null);
@@ -143,7 +150,7 @@ test("authorized decisions require exact revisions and native main-root external
   assert.equal(parseProjectDefinitionDecisionRecord(decisionRecord({reason: "r".repeat(1001)}), current, definitions({revision: newRevision}), agent), null);
   assert.equal(parseProjectDefinitionDecisionRecord(decisionRecord({userMessageIds: []}), current, definitions({revision: newRevision}), agent), null);
   assert.equal(parseProjectDefinitionDecisionRecord(decisionRecord(), current, definitions({status: "invalid", revision: newRevision,
-    issues: [{path: ".t3-supervisor/rules.yaml", code: "invalid_definition", message: "Incomplete rules."}]}), agent), null);
+    issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "Invalid configuration."}]}), agent), null);
 });
 
 test("native primary user messages use the running root_turn node", () => {
@@ -215,7 +222,8 @@ test("stopped, failed and cancelled runs retain their real user request and auth
 
 test("revert decisions may cite no users and retain a null observed revision for missing definitions", () => {
   const current = task();
-  const missing = definitions({status: "missing", revision: null, rules: [], blocks: [], issues: [{path: ".t3-supervisor", code: "definitions_missing", message: "Missing."}]});
+  const missing = definitions({status: "missing", revision: null, projectConfig: null, config: {required: []}, steps: [], workflows: [], complete: false,
+    sources: [], issues: [{path: ".t3-supervisor/project.yaml", code: "configuration_missing", message: "Missing."}]});
   const parsed = parseProjectDefinitionDecisionRecord(decisionRecord({observedRevision: null, decision: "revert_requested", userMessageIds: [],
     reason: "No real user message authorized these agent-authored file changes."}), current, missing, agentProjection([]));
   assert.ok(parsed);
@@ -229,8 +237,10 @@ test("revert decisions may cite no users and retain a null observed revision for
 test("decision reasons and review envelopes redact credentials and preserve complete definition snapshots", () => {
   const current = task();
   const observed = definitions({revision: newRevision,
-    rules: [{name: "secret=rule-token", description: "Keep token=rule-secret private.", required_blocks: ["verify"]}],
-    blocks: [{id: "verify", name: "secret=block-token", description: "Check safely.", instructions: "Use api_key=private-instructions", expected_result: "password:private-result"}]});
+    steps: [{id: "verify", name: "secret=step-token", description: "Keep token=step-secret private.", origin: "project",
+      path: ".t3-supervisor/steps/verify.md", sourceId: "verify"}],
+    sources: definitions().sources.map(source => source.path.endsWith("steps/verify.md")
+      ? {...source, content: stepSource("verify", "Check safely with api_key=private-instructions and password:private-result.")} : source)});
   const parsed = parseProjectDefinitionDecisionRecord(decisionRecord({reason: "Bearer abcdefghijklmnopqrstuvwxyz123456"}), current, observed, agentProjection());
   assert.equal(parsed?.decision.reason, "[redacted credential]");
 
@@ -242,7 +252,7 @@ test("decision reasons and review envelopes redact credentials and preserve comp
   assert.match(prompt, /Never edit files/u);
   assert.match(prompt, /workflow-proposal/u);
   assert.match(prompt, /Review marker/u);
-  for (const secret of ["rule-secret", "block-token", "private-instructions", "private-result"]) assert.equal(prompt.includes(secret), false);
+  for (const secret of ["step-secret", "step-token", "private-instructions", "private-result"]) assert.equal(prompt.includes(secret), false);
   const envelope = parseEnvelope(prompt);
   assert.equal((envelope.approved as Record<string, unknown>).revision, oldRevision);
   assert.equal((envelope.observed as Record<string, unknown>).revision, newRevision);
@@ -254,8 +264,8 @@ test("decision reasons and review envelopes redact credentials and preserve comp
 
 test("review requests handle invalid snapshots and refresh proposals after restore or authorization", () => {
   const current = task();
-  const invalid = definitions({status: "invalid", revision: null, rules: [], blocks: [],
-    issues: [{path: ".t3-supervisor/rules.yaml", code: "invalid_definition", message: "The rules are incomplete."}]});
+  const invalid = definitions({status: "invalid", revision: null, projectConfig: null, config: {required: []}, steps: [], workflows: [], complete: false,
+    sources: [], issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "The configuration is invalid."}]});
   const invalidRequest = buildProjectDefinitionReviewRequest(current, definitions(), invalid, agentProjection(), "Invalid marker");
   assert.ok(invalidRequest);
   const invalidEnvelope = parseEnvelope(invalidRequest);
@@ -269,7 +279,7 @@ test("review requests handle invalid snapshots and refresh proposals after resto
   const refreshEnvelope = parseEnvelope(refreshRequest);
   assert.equal(refreshEnvelope.decisionTemplate, null);
   assert.equal(refreshEnvelope.proposalTemplate !== null, true);
-  assert.match(refreshRequest, /Reassess the real task against the complete current rules and blocks/u);
+  assert.match(refreshRequest, /Reassess the real task against the complete current project configuration and definition catalog/u);
 
   assert.equal(buildProjectDefinitionReviewRequest(current, definitions(), definitions({status: "permission_required", revision: null}), agentProjection(), "Blocked"), null);
   const staleSource = agentProjection();

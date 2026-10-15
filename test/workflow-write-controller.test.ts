@@ -3,13 +3,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GuidanceStore } from "../src/guidance-store.js";
-import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord } from "../src/project-supervisor-store.js";
+import { fingerprint, GuidanceStore } from "../src/guidance-store.js";
+import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
-import type { WorkflowApplyInput, WorkflowOwner } from "../src/workflow-state-contract.js";
+import type { WorkflowAgreementImport, WorkflowOwner } from "../src/workflow-state-contract.js";
 import { WorkflowWriteController, workflowReadToolDefinition, workflowWriteToolDefinition, type WorkflowApplyPatch, type WorkflowNativeAccess } from "../src/workflow-write-controller.js";
 import { workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, workflowTurnItemDetailMaxBytes } from "../src/workflow-write-evidence.js";
+import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo } from "../src/project-supervisor-contract.js";
+import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
+import { proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
 
 type Fixture = {
   directory: string;
@@ -29,6 +32,9 @@ type Fixture = {
   projectionCalls: string[];
   detailCalls: string[];
   native: WorkflowNativeAccess;
+  definitionReader: {current: ProjectDefinitionSnapshot; calls: number; fail?: boolean};
+  proposal: WorkflowProposalInfo;
+  sourceBinding: WorkflowSourceBindingInfo;
 };
 
 const thread = (id: string, projectId: string, parentThreadId: string | null = null, relationshipToParent: string | null = null,
@@ -43,6 +49,34 @@ const makeProjection = (supervisorThreadId: string, projectId: string): Projecti
   nodes: [],
   turnItems: [],
 });
+
+const localStep = (name: string, description: string, contributorThreadIds: readonly string[] = [], nodeId?: string) => ({
+  kind: "step" as const,
+  ...(nodeId ? {nodeId} : {}),
+  definitionId: null,
+  localId: name.toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-|-$/gu, "").slice(0, 180),
+  templatePath: null,
+  name,
+  description,
+  source: null,
+  resolution: "resolved" as const,
+  reason: description,
+  status: "planned" as const,
+  contributorThreadIds,
+});
+
+const sequencePlan = (nodes: readonly unknown[], templatePath: string | null = null): WorkflowPlanGroupInfo => ({
+  kind: "sequence",
+  templatePath,
+  nodes: [...nodes] as WorkflowPlanNodeInfo[],
+});
+
+const planEntities = (plan: WorkflowPlanGroupInfo | null): Extract<WorkflowPlanNodeInfo, {kind: "step" | "workflow"}>[] => {
+  if (!plan) return [];
+  return plan.nodes.flatMap(node => "nodes" in node ? planEntities(node) : [node, ...(node.kind === "workflow" ? planEntities(node.plan) : [])]);
+};
+
+const mainStep = (plan: WorkflowPlanGroupInfo | null, index = 0) => planEntities(plan).filter(node => node.kind === "step")[index];
 
 const makeFixture = async (mainThread = thread("main-workflows", "project-workflows")): Promise<Fixture> => {
   const directory = await mkdtemp(join(tmpdir(), "workflow-write-controller-test-"));
@@ -60,6 +94,79 @@ const makeFixture = async (mainThread = thread("main-workflows", "project-workfl
   supervisors.setBinding(binding);
   const workflows = new WorkflowStateStore(supervisors, id => supervisors.enabled(id));
   const supervisorThreadId = binding.threadId;
+  const definitionSnapshot: ProjectDefinitionSnapshot = {
+    projectId,
+    threadId: mainThreadId,
+    workspaceRoot: "/workspace/project-workflows",
+    globalOnly: false,
+    globalRevision: null,
+    revision: "definition-revision-1",
+    editingAvailable: true,
+    status: "ready",
+    steps: [],
+    workflows: [],
+    config: {required: []},
+    projectConfig: {required: []},
+    complete: true,
+    sources: [],
+    issues: [],
+  };
+  const definitionContext = proposalContextFromDefinitions(definitionSnapshot);
+  const normalized = validateWorkflowPlan({requirements: [], plan: sequencePlan([localStep("Baseline review", "Review the current task context.")])}, definitionContext);
+  if (!normalized?.plan) throw new Error("test_workflow_proposal_invalid");
+  const proposal: WorkflowProposalInfo = {
+    status: "proposed",
+    message: "A source-bound workflow proposal for this task.",
+    workspaceRoot: definitionSnapshot.workspaceRoot,
+    revision: definitionSnapshot.revision,
+    globalRevision: null,
+    definitionsStatus: "ready",
+    definitionsComplete: true,
+    requirementsKnown: true,
+    requirements: normalized.requirements,
+    issues: normalized.issues,
+    plan: normalized.plan,
+  };
+  const taskSourceHash = fingerprint("Complete the current project task.");
+  const taskId = "task-current";
+  const proposalId = "proposal-current";
+  const task: TaskRecord = {
+    id: taskId,
+    threadId: mainThreadId,
+    projectId,
+    sourceRunId: "source-run-current",
+    sourceMessageId: "source-message-current",
+    status: "inferred",
+    objective: "Complete the current project task.",
+    reason: "The latest user message describes an actionable task.",
+    updatedAt: Date.now(),
+    workflow: proposal,
+    agreement: null,
+    workflowProposalId: proposalId,
+    sourceHash: taskSourceHash,
+    requestText: "Complete the current project task.",
+    supervisorThreadId,
+    messageId: "source-message-current",
+    dispatchedAt: null,
+    replayCount: 0,
+    supervisorRunId: "source-run-current",
+    sourceOrdinal: 1,
+    definitionContext,
+    definitionSnapshot,
+  };
+  supervisors.saveTask(task);
+  const sourceBinding: WorkflowSourceBindingInfo = {
+    workspaceRoot: definitionSnapshot.workspaceRoot,
+    revision: definitionSnapshot.revision,
+    globalRevision: null,
+    definitionsStatus: "ready",
+    definitionsComplete: true,
+    requirementsKnown: true,
+    taskId,
+    proposalId,
+    sourceHash: taskSourceHash,
+  };
+  const definitionReader: Fixture["definitionReader"] = {current: definitionSnapshot, calls: 0};
   const threads = [mainThread, thread(supervisorThreadId, projectId)];
   const projection = makeProjection(supervisorThreadId, projectId);
   const projections = new Map([[supervisorThreadId, projection]]);
@@ -79,10 +186,13 @@ const makeFixture = async (mainThread = thread("main-workflows", "project-workfl
       return {item: details.get(itemId) ?? null};
     },
   };
-  const controller = new WorkflowWriteController({supervisors, workflows, native, isEnabled: id => supervisors.enabled(id), maxEvidenceWaitMs: 0});
+  const controller = new WorkflowWriteController({supervisors, workflows, native,
+    loadDefinitions: async () => {definitionReader.calls++;if (definitionReader.fail) throw new Error("definitions_unavailable");return definitionReader.current;},
+    isEnabled: id => supervisors.enabled(id), maxEvidenceWaitMs: 0});
   return {directory, guidance, supervisors, workflows, controller,
     owner: {projectId, mainThreadId, supervisorThreadId, bindingGeneration: binding.generation}, binding,
-    projectId, mainThreadId, supervisorThreadId, threads, projection, projections, details, projectionCalls, detailCalls, native};
+    projectId, mainThreadId, supervisorThreadId, threads, projection, projections, details, projectionCalls, detailCalls, native,
+    definitionReader, proposal, sourceBinding};
 };
 
 const closeFixture = async (fixture: Fixture): Promise<void> => {
@@ -161,11 +271,56 @@ const installMcpXEvidence = (fixture: Fixture, args: Record<string, unknown>, it
   installEvidence(fixture, args, {...(itemId ? {itemId} : {}), toolName: workflowToolNames.mcpxCall[0],
     input: {name: workflowToolNames.write.mcpxTarget, arguments: args}});
 
-const applyArgs = (fixture: Fixture, input: WorkflowApplyPatch) => ({
+const applyArgs = (fixture: Fixture, input: WorkflowApplyPatch) => {
+  const current = fixture.workflows.list(fixture.projectId, fixture.mainThreadId).find(document => document.workflowId === input.workflowId);
+  return {
   action: "apply",
   ...locator(fixture),
-  input,
-});
+    input: {
+      sourceBinding: fixture.sourceBinding,
+      requirements: current?.threadId === fixture.mainThreadId ? fixture.proposal.requirements : [],
+      issues: fixture.proposal.issues,
+      ...input,
+    },
+  };
+};
+
+const proposalForDefinitions = (definitions: ProjectDefinitionSnapshot, plan: WorkflowPlanGroupInfo): WorkflowProposalInfo => {
+  const context = proposalContextFromDefinitions(definitions);
+  const normalized = validateWorkflowPlan({requirements: [], plan}, context);
+  if (!normalized?.plan) throw new Error("test_workflow_proposal_invalid");
+  return {
+    status: "proposed",
+    message: "A current source-bound workflow proposal.",
+    workspaceRoot: definitions.workspaceRoot,
+    revision: definitions.revision,
+    globalRevision: definitions.globalRevision ?? null,
+    ...normalized,
+  };
+};
+
+const replaceCurrentProposal = (fixture: Fixture, proposalId: string, definitions: ProjectDefinitionSnapshot,
+  proposal: WorkflowProposalInfo, options: {sourceHash?: string; definitionReview?: NonNullable<TaskRecord["definitionReview"]>} = {}): void => {
+  const task = fixture.supervisors.task(fixture.mainThreadId);
+  if (!task) throw new Error("test_current_task_missing");
+  const sourceHash = options.sourceHash ?? task.sourceHash;
+  fixture.supervisors.saveTask({...task, sourceHash, workflowProposalId: proposalId, workflow: proposal,
+    definitionContext: proposalContextFromDefinitions(definitions), definitionSnapshot: definitions,
+    ...(options.definitionReview ? {definitionReview: options.definitionReview} : {})});
+  fixture.proposal = proposal;
+  fixture.definitionReader.current = definitions;
+  fixture.sourceBinding = {
+    workspaceRoot: definitions.workspaceRoot,
+    revision: definitions.revision,
+    globalRevision: definitions.globalRevision ?? null,
+    definitionsStatus: proposal.definitionsStatus,
+    definitionsComplete: proposal.definitionsComplete,
+    requirementsKnown: proposal.requirementsKnown,
+    taskId: task.id,
+    proposalId,
+    sourceHash,
+  };
+};
 
 test("unverified JSON stays pending without reserving an operation and a verified retry applies", async () => {
   const fixture = await makeFixture();
@@ -351,8 +506,8 @@ test("only verified Codex native item references authorize workflow writes", asy
       assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
     } finally {await closeFixture(fixture);}
   }
-  assert.match(workflowReadToolDefinition.description, /strong Codex native item references/u);
-  assert.match(workflowWriteToolDefinition.description, /Claude Agent and unknown source labels are not authorized/u);
+  assert.match(workflowReadToolDefinition.description, /strong native item references/u);
+  assert.match(workflowWriteToolDefinition.description, /Never include source run or message claims/u);
 });
 
 test("a child-thread tool record cannot authorize a write for the bound Supervisor", async () => {
@@ -392,13 +547,10 @@ test("write arguments above the inline-input bound are rejected before native re
       expectedRevision: 1,
       status: "planned",
       objective: "O".repeat(2000),
-      rules: Array.from({length: 100}, (_, index) => ({index, name: `Rule ${index} ${"N".repeat(1000)}`,
-        applies: true, reason: "R".repeat(1000)})),
-      steps: Array.from({length: 8}, (_, index) => ({blockId: null, name: `Step ${index} ${"N".repeat(1500)}`,
-        reason: "R".repeat(1500), status: "planned", contributorThreadIds: [fixture.mainThreadId]})),
+      plan: sequencePlan(Array.from({length: 120}, (_, index) => localStep(`Step ${index}`, "R".repeat(1000)))),
       note: "Reject before looking up native evidence.",
     };
-    const args = applyArgs(fixture, input as WorkflowApplyInput);
+    const args = applyArgs(fixture, input as WorkflowApplyPatch);
     assert.ok(workflowToolInputSize(args) > workflowToolInputMaxBytes);
     const result = await fixture.controller.write(args);
     assert.deepEqual(result, {status: "invalid", reason: "arguments_too_large"});
@@ -567,31 +719,456 @@ test("apply uses owner-scoped lookup and revision CAS without dropping contribut
     const created = await fixture.controller.write(mainArgs);
     assert.equal(created.status, "created");
     if (created.status !== "created") return;
-    const input: WorkflowApplyInput = {
+    const input: WorkflowApplyPatch = {
       operationId: "cas-apply",
       workflowId: created.workflowId,
       expectedRevision: created.revision,
       status: "planned",
       objective: "Track the export workflow.",
-      rules: [],
-      steps: [{blockId: null, name: "Inspect exporter", reason: "Find the current path.", status: "planned",
-        contributorThreadIds: [fixture.mainThreadId]}],
+      plan: sequencePlan([localStep("Inspect exporter", "Find the current path.", [fixture.mainThreadId])]),
       note: "Add the first implementation step.",
     };
     const args = applyArgs(fixture, input);
     installEvidence(fixture, args);
     const applied = await fixture.controller.write(args);
-    assert.equal(applied.status, "applied");
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
     const current = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
-    assert.equal(current.steps[0]?.contributorThreadIds[0], fixture.mainThreadId);
+    assert.equal(mainStep(current.plan)?.contributorThreadIds[0], fixture.mainThreadId);
 
-    const staleInput = {...input, operationId: "cas-stale", expectedRevision: 1, note: "A stale revision."};
+    const staleInput = {...input, operationId: "cas-stale", expectedRevision: 1, plan: current.plan!, note: "A stale revision."};
     const staleArgs = applyArgs(fixture, staleInput);
     installEvidence(fixture, staleArgs);
     const stale = await fixture.controller.write(staleArgs);
     assert.deepEqual(stale, {status: "conflict", operationId: "cas-stale", reason: "revision", currentRevision: 2});
     assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.revision, 2);
     assert.equal(Number(fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_write_receipts WHERE operation_id='cas-stale'").get()?.n), 0);
+  } finally {await closeFixture(fixture);}
+});
+
+test("apply requires a fresh definition pin that still matches the current task proposal", async () => {
+  const fixture = await makeFixture();
+  try {
+    const ensure = ensureArgs(fixture, "pin-create", "Create a draft before applying a pinned plan.");
+    installEvidence(fixture, ensure);
+    const created = await fixture.controller.write(ensure);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+    const input: WorkflowApplyPatch = {
+      operationId: "pin-stale-source",
+      workflowId: created.workflowId,
+      expectedRevision: created.revision,
+      plan: sequencePlan([localStep("Inspect source", "Use the task's pinned definitions.")]),
+      note: "Reject the stale source version.",
+    };
+    const args = applyArgs(fixture, input);
+    fixture.definitionReader.current = {...fixture.definitionReader.current, revision: "definition-revision-2"};
+    installEvidence(fixture, args);
+    assert.deepEqual(await fixture.controller.write(args), {
+      status: "invalid", operationId: "pin-stale-source", reason: "definition_source_changed_or_is_not_current",
+    });
+    assert.equal(fixture.definitionReader.calls, 1);
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.revision, 1);
+    assert.equal(Number(fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_write_receipts WHERE operation_id='pin-stale-source'").get()?.n), 0);
+
+    fixture.definitionReader.current = {...fixture.definitionReader.current, revision: fixture.proposal.revision!};
+    fixture.definitionReader.fail = true;
+    const unavailable = {...input, operationId: "pin-unavailable-source"};
+    const unavailableArgs = applyArgs(fixture, unavailable);
+    installEvidence(fixture, unavailableArgs);
+    assert.deepEqual(await fixture.controller.write(unavailableArgs), {
+      status: "unavailable", operationId: "pin-unavailable-source", reason: "definition_source_read_unavailable",
+    });
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.revision, 1);
+  } finally {await closeFixture(fixture);}
+});
+
+test("an unaccepted proposal can omit an optional fixed workflow on its first live apply", async () => {
+  const fixture = await makeFixture();
+  try {
+    const definitions: ProjectDefinitionSnapshot = {
+      ...fixture.definitionReader.current,
+      steps: [{id: "optional-review-step", name: "Review evidence", description: "Check the supporting evidence.",
+        origin: "project", path: ".t3-supervisor/steps/review-evidence.md", sourceId: "project:review-evidence"}],
+      workflows: [{id: "optional-fixed-review", name: "Fixed review", description: "Keep this sequence intact when selected.", fixed: true,
+        sequence: [{step: "optional-review-step"}], origin: "project", path: ".t3-supervisor/workflows/fixed-review.md", sourceId: "project:fixed-review"}],
+    };
+    const proposal = proposalForDefinitions(definitions, sequencePlan([
+      localStep("Task outcome", "Complete the current request."),
+      {kind: "workflow", definitionId: "optional-fixed-review", reason: "Use the review workflow if it fits this task."},
+    ]));
+    replaceCurrentProposal(fixture, "proposal-with-optional-fixed", definitions, proposal);
+
+    const ensure = ensureArgs(fixture, "optional-fixed-create", "Create a negotiable draft before editing its first plan.");
+    installEvidence(fixture, ensure);
+    const created = await fixture.controller.write(ensure);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+
+    const apply = applyArgs(fixture, {operationId: "optional-fixed-omit", workflowId: created.workflowId,
+      expectedRevision: created.revision, plan: sequencePlan([
+        localStep("Current task outcome", "Complete the interpreted task with a fresh plan occurrence."),
+      ]), note: "Choose a plan without the optional fixed review workflow."});
+    installEvidence(fixture, apply);
+    const result = await fixture.controller.write(apply);
+    assert.equal(result.status, "applied", JSON.stringify(result));
+    const current = fixture.workflows.get(fixture.projectId, fixture.mainThreadId);
+    assert.ok(current);
+    assert.equal(planEntities(current.plan).some(node => node.kind === "workflow" && node.definitionId === "optional-fixed-review"), false);
+    assert.equal(current.sourceBinding?.sourceHash, fixture.sourceBinding.sourceHash);
+  } finally {await closeFixture(fixture);}
+});
+
+test("an unchanged-source accepted fixed workflow survives when the mutable plan has diverged", async () => {
+  const fixture = await makeFixture();
+  try {
+    const definitions: ProjectDefinitionSnapshot = {
+      ...fixture.definitionReader.current,
+      steps: [{id: "accepted-review-step", name: "Review evidence", description: "Check the accepted evidence trail.",
+        origin: "project", path: ".t3-supervisor/steps/accepted-review.md", sourceId: "project:accepted-review-step"}],
+      workflows: [{id: "accepted-fixed-review", name: "Accepted fixed review", description: "Keep the accepted review sequence intact.", fixed: true,
+        sequence: [{step: "accepted-review-step"}], origin: "project", path: ".t3-supervisor/workflows/accepted-review.md", sourceId: "project:accepted-fixed-review"}],
+    };
+    const acceptedProposal = proposalForDefinitions(definitions, sequencePlan([
+      localStep("Accepted task outcome", "Complete the task that was reviewed."),
+      {kind: "workflow", definitionId: "accepted-fixed-review", reason: "Include the fixed review in the accepted plan."},
+    ]));
+    replaceCurrentProposal(fixture, "proposal-accepted-fixed", definitions, acceptedProposal);
+    const accepted: WorkflowAgreementImport = {
+      taskId: "task-current",
+      sourceThreadId: fixture.mainThreadId,
+      sourceRunId: "source-run-current",
+      sourceMessageId: "source-message-current",
+      sourceHash: fixture.sourceBinding.sourceHash,
+      objective: "Complete the current project task.",
+      agreement: {
+        status: "agreed",
+        message: "The operative Supervisor accepted the fixed review plan.",
+        proposalId: "proposal-accepted-fixed",
+        agreedAt: Date.now(),
+        supervisorMessageId: "accepted-fixed-supervisor-message",
+        agentMessageId: "accepted-fixed-agent-message",
+        workflow: acceptedProposal,
+      },
+    };
+    const imported = fixture.supervisors.store.transaction(() =>
+      fixture.workflows.importAcceptedAgreementInTransaction(fixture.owner, accepted, Date.now()));
+    assert.equal(imported.status, "applied");
+    const acceptedDocument = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    assert.equal(acceptedDocument.acceptedAgreements.length, 1);
+
+    const draftProposal = proposalForDefinitions(definitions,
+      sequencePlan([localStep("Mutable live draft", "A later same-source plan can evolve around accepted work.")]));
+    replaceCurrentProposal(fixture, "proposal-new-same-source", definitions, draftProposal);
+    const diverged = {...acceptedDocument, revision: acceptedDocument.revision + 1, currentAgreementKey: null,
+      plan: draftProposal.plan, updatedAt: Date.now()};
+    fixture.guidance.db.prepare("UPDATE supervisor_workflow_state SET revision=?,document=?,updated_at=? WHERE workflow_id=?")
+      .run(diverged.revision, JSON.stringify(diverged), diverged.updatedAt, diverged.workflowId);
+
+    const apply = applyArgs(fixture, {operationId: "accepted-fixed-omit", workflowId: diverged.workflowId,
+      expectedRevision: diverged.revision, plan: sequencePlan([
+        localStep("Fresh same-source plan", "Keep the task negotiable while preserving accepted fixed work."),
+      ]), note: "Attempt to remove an accepted fixed occurrence on the unchanged source."});
+    installEvidence(fixture, apply);
+    assert.deepEqual(await fixture.controller.write(apply), {
+      status: "invalid", operationId: "accepted-fixed-omit", reason: "pinned_definition_context_mismatch",
+    });
+    const retained = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    assert.equal(retained.revision, diverged.revision);
+    assert.equal(retained.acceptedAgreements[0]?.plan?.nodes.some(node => node.kind === "workflow" && node.definitionId === "accepted-fixed-review"), true);
+    assert.equal(planEntities(retained.plan).some(node => node.kind === "workflow" && node.definitionId === "accepted-fixed-review"), false);
+
+    const editedSourceHash = fingerprint("The accepted task request was edited and reinterpreted.");
+    const editedProposal = proposalForDefinitions(definitions,
+      sequencePlan([localStep("Edited task outcome", "Reassess the edited task request.")]));
+    replaceCurrentProposal(fixture, "proposal-edited-after-acceptance", definitions, editedProposal, {sourceHash: editedSourceHash});
+    const reconsider = applyArgs(fixture, {operationId: "accepted-fixed-release-after-source-edit", workflowId: diverged.workflowId,
+      expectedRevision: diverged.revision, plan: sequencePlan([
+        localStep("Reinterpreted task outcome", "Use a new plan occurrence for the edited source."),
+      ]), note: "Reconsider fixed commitments after the operative task source changed."});
+    installEvidence(fixture, reconsider);
+    const reconsidered = await fixture.controller.write(reconsider);
+    assert.equal(reconsidered.status, "applied", JSON.stringify(reconsidered));
+    const updated = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    assert.equal(updated.sourceBinding?.sourceHash, editedSourceHash);
+    assert.equal(updated.acceptedAgreements.length, 1, "the old acceptance remains historical evidence");
+    assert.equal(planEntities(updated.plan).some(node => node.kind === "workflow" && node.definitionId === "accepted-fixed-review"), false);
+  } finally {await closeFixture(fixture);}
+});
+
+test("a same-source accepted TaskRecord plan is protected when live agreement import is absent", async () => {
+  const fixture = await makeFixture();
+  try {
+    const definitions: ProjectDefinitionSnapshot = {
+      ...fixture.definitionReader.current,
+      steps: [{id: "task-record-review-step", name: "Review result", description: "Check the accepted result.",
+        origin: "project", path: ".t3-supervisor/steps/task-record-review.md", sourceId: "project:task-record-review-step"}],
+      workflows: [{id: "task-record-fixed-review", name: "Accepted task review", description: "Keep the accepted review sequence intact.", fixed: true,
+        sequence: [{step: "task-record-review-step"}], origin: "project", path: ".t3-supervisor/workflows/task-record-review.md", sourceId: "project:task-record-fixed-review"}],
+    };
+    const acceptedProposal = proposalForDefinitions(definitions, sequencePlan([
+      localStep("Accepted task", "Complete the accepted request."),
+      {kind: "workflow", definitionId: "task-record-fixed-review", reason: "Include the fixed review in the accepted proposal."},
+    ]));
+    const currentProposal = proposalForDefinitions(definitions,
+      sequencePlan([localStep("Current task", "Keep the current unaccepted proposal flexible.")]));
+    replaceCurrentProposal(fixture, "proposal-current-without-fixed", definitions, currentProposal);
+
+    const ensure = ensureArgs(fixture, "task-record-fixed-create", "Create an empty draft before live agreement import.");
+    installEvidence(fixture, ensure);
+    const created = await fixture.controller.write(ensure);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+
+    const task = fixture.supervisors.task(fixture.mainThreadId);
+    assert.ok(task);
+    fixture.supervisors.saveTask({...task, agreement: {
+      status: "agreed",
+      message: "The accepted plan is retained in task history.",
+      proposalId: "proposal-task-record-accepted",
+      agreedAt: Date.now(),
+      supervisorMessageId: "task-record-agreement-supervisor-message",
+      agentMessageId: "task-record-agreement-agent-message",
+      workflow: acceptedProposal,
+    }, agreementSourceHash: task.sourceHash, updatedAt: Date.now()});
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.acceptedAgreements.length, 0,
+      "the accepted TaskRecord is the only durable agreement evidence in this case");
+
+    const removeAccepted = applyArgs(fixture, {operationId: "task-record-fixed-drop-same-source", workflowId: created.workflowId,
+      expectedRevision: created.revision, plan: sequencePlan([
+        localStep("Current task outcome", "Use a fresh local occurrence for the current proposal."),
+      ]), note: "Try to remove a same-source accepted fixed workflow before it has a live import."});
+    installEvidence(fixture, removeAccepted);
+    assert.deepEqual(await fixture.controller.write(removeAccepted), {
+      status: "invalid", operationId: "task-record-fixed-drop-same-source", reason: "pinned_definition_context_mismatch",
+    });
+
+    const editedSourceHash = fingerprint("The task request changed after its accepted agreement.");
+    const editedProposal = proposalForDefinitions(definitions,
+      sequencePlan([localStep("Edited task", "Reinterpret the edited request.")]));
+    replaceCurrentProposal(fixture, "proposal-edited-without-fixed", definitions, editedProposal, {sourceHash: editedSourceHash});
+    const releaseAccepted = applyArgs(fixture, {operationId: "task-record-fixed-release-after-source-edit", workflowId: created.workflowId,
+      expectedRevision: created.revision, plan: sequencePlan([
+        localStep("Reinterpreted task outcome", "Use a new occurrence for the edited task source."),
+      ]), note: "Release the old accepted fixed workflow for the edited operative source."});
+    installEvidence(fixture, releaseAccepted);
+    const released = await fixture.controller.write(releaseAccepted);
+    assert.equal(released.status, "applied", JSON.stringify(released));
+    const current = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    assert.equal(current.sourceBinding?.sourceHash, editedSourceHash);
+    assert.equal(current.acceptedAgreements.length, 0);
+    assert.equal(planEntities(current.plan).some(node => node.kind === "workflow" && node.definitionId === "task-record-fixed-review"), false);
+  } finally {await closeFixture(fixture);}
+});
+
+test("same task and definition pin preserve added fixed workflows across proposal IDs but permit an adopted new pin", async () => {
+  const fixture = await makeFixture();
+  try {
+    const firstDefinitions: ProjectDefinitionSnapshot = {
+      ...fixture.definitionReader.current,
+      steps: [{id: "fixed-review-step", name: "Review evidence", description: "Check the complete evidence trail.",
+        origin: "project", path: ".t3-supervisor/steps/review-evidence.md", sourceId: "project:review-evidence"}],
+      workflows: [{id: "fixed-review", name: "Fixed review", description: "Preserve the original review sequence.", fixed: true,
+        sequence: [{step: "fixed-review-step"}], origin: "project", path: ".t3-supervisor/workflows/fixed-review.md", sourceId: "project:fixed-review"}],
+    };
+    const initialProposal = proposalForDefinitions(firstDefinitions,
+      sequencePlan([localStep("Baseline review", "Review the current task context.")]));
+    replaceCurrentProposal(fixture, "proposal-current", firstDefinitions, initialProposal);
+
+    const ensure = ensureArgs(fixture, "fixed-pin-create", "Create a draft before editing fixed workflow content.");
+    installEvidence(fixture, ensure);
+    const created = await fixture.controller.write(ensure);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+
+    const firstApply = applyArgs(fixture, {operationId: "fixed-pin-add", workflowId: created.workflowId,
+      expectedRevision: created.revision, plan: sequencePlan([
+        localStep("Baseline review", "Review the current task context."),
+        {kind: "workflow", definitionId: "fixed-review", reason: "Include the fixed review support workflow."},
+      ]), note: "Add the fixed review support workflow to this task plan."});
+    installEvidence(fixture, firstApply);
+    const firstResult = await fixture.controller.write(firstApply);
+    assert.equal(firstResult.status, "applied", JSON.stringify(firstResult));
+    if (firstResult.status !== "applied") return;
+    const afterFirst = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    const fixedOccurrence = planEntities(afterFirst.plan).find(node => node.kind === "workflow" && node.definitionId === "fixed-review");
+    assert.ok(fixedOccurrence?.kind === "workflow" && fixedOccurrence.fixed === true);
+
+    const nextProposal = proposalForDefinitions(firstDefinitions,
+      sequencePlan([localStep("Revised proposal", "Refine the same task scope.")]));
+    replaceCurrentProposal(fixture, "proposal-current-revised", firstDefinitions, nextProposal);
+    const omitFixed = applyArgs(fixture, {operationId: "fixed-pin-drop-same-source", workflowId: created.workflowId,
+      expectedRevision: afterFirst.revision, plan: sequencePlan([localStep("Revised proposal", "Refine the same task scope.")]),
+      note: "Try to drop a fixed occurrence under a new proposal ID for the same task and source pin."});
+    installEvidence(fixture, omitFixed);
+    assert.deepEqual(await fixture.controller.write(omitFixed), {
+      status: "invalid", operationId: "fixed-pin-drop-same-source", reason: "pinned_definition_context_mismatch",
+    });
+    const retained = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    assert.equal(retained.revision, afterFirst.revision);
+    assert.ok(planEntities(retained.plan).some(node => node.kind === "workflow" && node.definitionId === "fixed-review" && node.fixed === true));
+
+    const replacementDefinitions: ProjectDefinitionSnapshot = {
+      ...firstDefinitions,
+      revision: "definition-revision-2",
+      steps: [],
+      workflows: [],
+    };
+    const replacementProposal = proposalForDefinitions(replacementDefinitions,
+      sequencePlan([localStep("Reviewed replacement", "Use the newly authorized definition revision.")]));
+    replaceCurrentProposal(fixture, "proposal-authorized-replacement", replacementDefinitions, replacementProposal, {definitionReview: {
+      status: "authorized",
+      message: "The user explicitly authorized this complete source revision.",
+      expectedRevision: firstDefinitions.revision!,
+      observedRevision: replacementDefinitions.revision,
+      supervisorMessageId: "definition-review-supervisor-message",
+      userMessageIds: ["definition-review-user-message"],
+      updatedAt: Date.now(),
+    }});
+    const replaceOldPin = applyArgs(fixture, {operationId: "fixed-pin-replace-reviewed-source", workflowId: created.workflowId,
+      expectedRevision: retained.revision, plan: sequencePlan([localStep("Reviewed replacement", "Use the newly authorized definition revision.")]),
+      note: "Replace the old plan under the reviewed current definition revision."});
+    installEvidence(fixture, replaceOldPin);
+    const replacementResult = await fixture.controller.write(replaceOldPin);
+    assert.equal(replacementResult.status, "applied", JSON.stringify(replacementResult));
+    const replaced = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    assert.equal(replaced.sourceBinding?.revision, "definition-revision-2");
+    assert.equal(replaced.sourceBinding?.proposalId, "proposal-authorized-replacement");
+    assert.equal(planEntities(replaced.plan).some(node => node.kind === "workflow" && node.definitionId === "fixed-review"), false);
+    assert.ok(replaced.evidence.some(item => item.kind === "node_removed" && item.targetNodeId === fixedOccurrence.nodeId));
+  } finally {await closeFixture(fixture);}
+});
+
+test("a reinterpreted source hash releases fixed commitments from the prior task source", async () => {
+  const fixture = await makeFixture();
+  try {
+    const definitions: ProjectDefinitionSnapshot = {
+      ...fixture.definitionReader.current,
+      steps: [{id: "source-fixed-step", name: "Review prior source", description: "Keep the prior task's fixed review complete.",
+        origin: "project", path: ".t3-supervisor/steps/source-review.md", sourceId: "project:source-review"}],
+      workflows: [{id: "source-fixed-review", name: "Prior source review", description: "Review the original task source.", fixed: true,
+        sequence: [{step: "source-fixed-step"}], origin: "project", path: ".t3-supervisor/workflows/source-review.md", sourceId: "project:source-fixed-review"}],
+    };
+    const initialProposal = proposalForDefinitions(definitions,
+      sequencePlan([localStep("Original task", "Implement the original task request.")]));
+    replaceCurrentProposal(fixture, "proposal-original-source", definitions, initialProposal);
+    const ensure = ensureArgs(fixture, "source-pin-main-create", "Create a draft before adding fixed review support.");
+    installEvidence(fixture, ensure);
+    const created = await fixture.controller.write(ensure);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+
+    const initialPlan = applyArgs(fixture, {operationId: "source-pin-add-fixed", workflowId: created.workflowId,
+      expectedRevision: created.revision, plan: sequencePlan([
+        localStep("Original task", "Implement the original task request."),
+        {kind: "workflow", definitionId: "source-fixed-review", reason: "Include the fixed review for this source."},
+      ]), note: "Add the fixed workflow to the original interpreted task."});
+    installEvidence(fixture, initialPlan);
+    assert.equal((await fixture.controller.write(initialPlan)).status, "applied");
+    const committed = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    const oldFixedNode = planEntities(committed.plan).find(node => node.kind === "workflow" && node.definitionId === "source-fixed-review");
+    assert.ok(oldFixedNode?.kind === "workflow" && oldFixedNode.fixed === true);
+
+    const revisedProposal = proposalForDefinitions(definitions,
+      sequencePlan([localStep("Edited task", "Reinterpret the edited user request.")]));
+    const editedSourceHash = fingerprint("Complete the edited project task.");
+    replaceCurrentProposal(fixture, "proposal-edited-source", definitions, revisedProposal, {sourceHash: editedSourceHash});
+    const editedSourcePlan = applyArgs(fixture, {operationId: "source-pin-replace-edited-task", workflowId: created.workflowId,
+      expectedRevision: committed.revision, plan: sequencePlan([localStep("Edited task", "Reinterpret the edited user request.")]),
+      note: "Use the fresh task interpretation after the operative source message changed."});
+    installEvidence(fixture, editedSourcePlan);
+    const replaced = await fixture.controller.write(editedSourcePlan);
+    assert.equal(replaced.status, "applied", JSON.stringify(replaced));
+    const current = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    assert.equal(current.sourceBinding?.sourceHash, editedSourceHash);
+    assert.equal(planEntities(current.plan).some(node => node.kind === "workflow" && node.definitionId === "source-fixed-review"), false);
+    assert.ok(current.evidence.some(item => item.kind === "node_removed" && item.targetNodeId === oldFixedNode.nodeId));
+  } finally {await closeFixture(fixture);}
+});
+
+test("child fixed workflows survive a new same-pin main proposal without inheriting main requirements", async () => {
+  const fixture = await makeFixture();
+  try {
+    const definitions: ProjectDefinitionSnapshot = {
+      ...fixture.definitionReader.current,
+      steps: [{id: "child-fixed-step", name: "Review child output", description: "Inspect the child contribution.",
+        origin: "project", path: ".t3-supervisor/steps/child-review.md", sourceId: "project:child-review"}],
+      workflows: [{id: "child-fixed-review", name: "Child fixed review", description: "Keep the child review complete.", fixed: true,
+        sequence: [{step: "child-fixed-step"}], origin: "project", path: ".t3-supervisor/workflows/child-review.md", sourceId: "project:child-fixed-review"}],
+    };
+    const initialProposal = proposalForDefinitions(definitions,
+      sequencePlan([localStep("Main proposal", "Keep the parent task context.")]));
+    replaceCurrentProposal(fixture, "proposal-child-current", definitions, initialProposal);
+
+    const ensure = ensureArgs(fixture, "child-fixed-main-create", "Create the main draft for child workflow testing.");
+    installEvidence(fixture, ensure);
+    const main = await fixture.controller.write(ensure);
+    assert.equal(main.status, "created");
+    if (main.status !== "created") return;
+    const childThread = thread("fixed-review-child", fixture.projectId, fixture.mainThreadId, "subagent", fixture.mainThreadId);
+    fixture.threads.push(childThread);
+    const link = {action: "link_child", ...locator(fixture), operationId: "child-fixed-link", childThreadId: childThread.id,
+      note: "Link the verified child under the main draft."};
+    installEvidence(fixture, link);
+    const linked = await fixture.controller.write(link);
+    assert.equal(linked.status, "created");
+    if (linked.status !== "created") return;
+
+    const firstChildPlan = applyArgs(fixture, {operationId: "child-fixed-add", workflowId: linked.workflowId,
+      expectedRevision: linked.revision, plan: sequencePlan([
+        localStep("Implement child contribution", "Build the assigned part."),
+        {kind: "workflow", definitionId: "child-fixed-review", reason: "Retain the fixed child review."},
+      ]), note: "Add a fixed workflow only to this child plan."});
+    installEvidence(fixture, firstChildPlan);
+    const firstChildResult = await fixture.controller.write(firstChildPlan);
+    assert.equal(firstChildResult.status, "applied", JSON.stringify(firstChildResult));
+    if (firstChildResult.status !== "applied") return;
+    const afterFirst = fixture.workflows.get(fixture.projectId, fixture.mainThreadId, childThread.id)!;
+    const fixedNode = planEntities(afterFirst.plan).find(node => node.kind === "workflow" && node.definitionId === "child-fixed-review");
+    assert.ok(fixedNode?.kind === "workflow" && fixedNode.fixed === true);
+
+    const revisedProposal = proposalForDefinitions(definitions,
+      sequencePlan([localStep("Main task revised", "Reassess the parent task without copying child policy." )]));
+    replaceCurrentProposal(fixture, "proposal-child-current-revised", definitions, revisedProposal);
+    const omitChildFixed = applyArgs(fixture, {operationId: "child-fixed-drop-same-source", workflowId: linked.workflowId,
+      expectedRevision: afterFirst.revision, plan: sequencePlan([localStep("Revised child contribution", "Keep the child subflow flexible.")]),
+      note: "Do not erase child fixed commitments when the main proposal ID changes."});
+    installEvidence(fixture, omitChildFixed);
+    assert.deepEqual(await fixture.controller.write(omitChildFixed), {
+      status: "invalid", operationId: "child-fixed-drop-same-source", reason: "pinned_definition_context_mismatch",
+    });
+    const retained = fixture.workflows.get(fixture.projectId, fixture.mainThreadId, childThread.id)!;
+    assert.equal(retained.revision, afterFirst.revision);
+    assert.ok(planEntities(retained.plan).some(node => node.kind === "workflow" && node.definitionId === "child-fixed-review" && node.fixed === true));
+  } finally {await closeFixture(fixture);}
+});
+
+test("exact apply receipt replay survives a later definition revision change", async () => {
+  const fixture = await makeFixture();
+  try {
+    const ensure = ensureArgs(fixture, "pin-replay-create", "Create a draft before applying a pinned plan.");
+    installEvidence(fixture, ensure);
+    const created = await fixture.controller.write(ensure);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+    const args = applyArgs(fixture, {
+      operationId: "pin-replay-apply",
+      workflowId: created.workflowId,
+      expectedRevision: created.revision,
+      plan: sequencePlan([localStep("Review source", "Keep this committed edit durable.")]),
+      note: "Apply this source-bound edit once.",
+    });
+    installEvidence(fixture, args);
+    const applied = await fixture.controller.write(args);
+    assert.equal(applied.status, "applied");
+    const definitionReads = fixture.definitionReader.calls;
+    fixture.definitionReader.current = {...fixture.definitionReader.current, revision: "definition-revision-2"};
+    const currentTask = fixture.supervisors.task(fixture.mainThreadId)!;
+    fixture.supervisors.saveTask({...currentTask, sourceHash: fingerprint("The source changed after this receipt was recorded.")});
+    fixture.projection.runs = [];
+    fixture.projectionCalls.length = 0;
+    assert.deepEqual(await fixture.controller.write(args), applied);
+    assert.equal(fixture.definitionReader.calls, definitionReads);
+    assert.deepEqual(fixture.projectionCalls, []);
   } finally {await closeFixture(fixture);}
 });
 
@@ -603,15 +1180,13 @@ test("a partial apply keeps every omitted plan field from the current CAS revisi
     const created = await fixture.controller.write(ensure);
     assert.equal(created.status, "created");
     if (created.status !== "created") return;
-    const full: WorkflowApplyInput = {
+    const full: WorkflowApplyPatch = {
       operationId: "partial-initial-plan",
       workflowId: created.workflowId,
       expectedRevision: created.revision,
       status: "planned",
       objective: "Keep the original objective.",
-      rules: [{index: 0, name: "Preserve behavior", applies: true, reason: "Required for this plan."}],
-      steps: [{blockId: null, name: "Inspect current flow", reason: "Keep this step intact.", status: "planned",
-        contributorThreadIds: [fixture.mainThreadId]}],
+      plan: sequencePlan([localStep("Inspect current flow", "Keep this step intact.", [fixture.mainThreadId])]),
       note: "Record the complete starting plan.",
     };
     const fullArgs = applyArgs(fixture, full);
@@ -627,13 +1202,13 @@ test("a partial apply keeps every omitted plan field from the current CAS revisi
     const after = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
     assert.equal(after.objective, "Change only the objective.");
     assert.equal(after.status, before.status);
-    assert.deepEqual(after.rules, before.rules);
-    assert.deepEqual(after.steps, before.steps);
+    assert.deepEqual(after.requirements, before.requirements);
+    assert.deepEqual(after.plan, before.plan);
     assert.equal(after.revision, before.revision + 1);
   } finally {await closeFixture(fixture);}
 });
 
-test("a 40-rule and 12-step plan larger than 16 KiB remains editable", async () => {
+test("a nested plan larger than 185 KiB remains editable within the native tool bounds", async () => {
   const fixture = await makeFixture();
   try {
     const ensure = ensureArgs(fixture, "large-plan-create", "Create a draft for the imported plan.");
@@ -641,22 +1216,23 @@ test("a 40-rule and 12-step plan larger than 16 KiB remains editable", async () 
     const created = await fixture.controller.write(ensure);
     assert.equal(created.status, "created");
     if (created.status !== "created") return;
-    const input: WorkflowApplyInput = {
+    const largeNodes = Array.from({length: 25}, (_, index) => ({
+      ...localStep(`Step ${index}`, `Description ${"S".repeat(6650)}`, [fixture.mainThreadId]),
+      reason: `R${"T".repeat(650)}`,
+    }));
+    const input: WorkflowApplyPatch = {
       operationId: "large-plan-apply",
       workflowId: created.workflowId,
       expectedRevision: created.revision,
       status: "planned",
       objective: `Import the plan ${"O".repeat(900)}`,
-      rules: Array.from({length: 40}, (_, index) => ({index, name: `Rule ${index} ${"N".repeat(1900)}`,
-        applies: true, reason: `Rule rationale ${"R".repeat(1900)}`})),
-      steps: Array.from({length: 12}, (_, index) => ({blockId: null, name: `Step ${index} ${"S".repeat(1500)}`,
-        reason: `Step rationale ${"T".repeat(1500)}`, status: "planned" as const, contributorThreadIds: [fixture.mainThreadId]})),
-      note: "Import the full plan without dropping rule or step detail.",
+      plan: sequencePlan(largeNodes),
+      note: "Import the complete nested plan without dropping node detail.",
     };
     const args = applyArgs(fixture, input);
     const bytes = workflowToolInputSize(args);
     assert.ok(bytes > 16 * 1024);
-    assert.ok(bytes > 185 * 1024);
+    assert.ok(bytes > 185 * 1024, String(bytes));
     assert.ok(bytes < workflowToolInputMaxBytes);
     fixture.detailCalls.length = 0;
     installEvidence(fixture, args, {itemId: "large-plan-item", snapshotInput: "x".repeat(20 * 1024)});
@@ -665,8 +1241,7 @@ test("a 40-rule and 12-step plan larger than 16 KiB remains editable", async () 
     assert.ok(detailBytes < workflowTurnItemDetailMaxBytes);
     assert.equal((await fixture.controller.write(args)).status, "applied");
     const saved = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
-    assert.equal(saved.rules.length, 40);
-    assert.equal(saved.steps.length, 12);
+    assert.equal(planEntities(saved.plan).length, 25);
     assert.deepEqual(fixture.detailCalls, ["large-plan-item"]);
   } finally {await closeFixture(fixture);}
 });
@@ -690,17 +1265,16 @@ test("workflow read exposes bounded live lineage and every shared parent-step re
       assert.equal((await fixture.controller.write(linkArgs)).status, "created");
     }
 
-    const parentInput: WorkflowApplyInput = {
+    const parentInput: WorkflowApplyPatch = {
       operationId: "association-parent-steps",
       workflowId: created.workflowId,
       expectedRevision: 1,
       status: "planned",
       objective: "Coordinate two children.",
-      rules: [],
-      steps: [
-        {blockId: null, name: "Inspect output", reason: "One child checks the shape.", status: "planned", contributorThreadIds: [childA.id, childB.id]},
-        {blockId: null, name: "Review edge cases", reason: "The same child checks another area.", status: "planned", contributorThreadIds: [childA.id]},
-      ],
+      plan: sequencePlan([
+        localStep("Inspect output", "One child checks the shape.", [childA.id, childB.id]),
+        localStep("Review edge cases", "The same child checks another area.", [childA.id]),
+      ]),
       note: "Keep shared child associations on the parent steps.",
     };
     const parentArgs = applyArgs(fixture, parentInput);
@@ -713,19 +1287,18 @@ test("workflow read exposes bounded live lineage and every shared parent-step re
     assert.deepEqual(read.lineage.map(item => item.threadId), [fixture.mainThreadId, childA.id, childB.id]);
     const a = read.workflows.find(item => item.document.threadId === childA.id)!;
     const b = read.workflows.find(item => item.document.threadId === childB.id)!;
-    assert.deepEqual(a.parentStepReferences.map(step => step.stepName), ["Inspect output", "Review edge cases"]);
-    assert.deepEqual(b.parentStepReferences.map(step => step.stepName), ["Inspect output"]);
-    assert.equal(a.parentStepReferences[0]?.parentWorkflowId, created.workflowId);
+    assert.deepEqual(a.parentNodeReferences.map(step => step.nodeName), ["Inspect output", "Review edge cases"]);
+    assert.deepEqual(b.parentNodeReferences.map(step => step.nodeName), ["Inspect output"]);
+    assert.equal(a.parentNodeReferences[0]?.parentWorkflowId, created.workflowId);
 
     const childWorkflow = a.document;
-    const childInput: WorkflowApplyInput = {
+    const childInput: WorkflowApplyPatch = {
       operationId: "association-child-expansion",
       workflowId: childWorkflow.workflowId,
       expectedRevision: childWorkflow.revision,
       status: "underway",
       objective: "Break output inspection into child tasks.",
-      rules: [],
-      steps: [{blockId: null, name: "Check columns", reason: "Validate the output headers.", status: "planned", contributorThreadIds: [childA.id]}],
+      plan: sequencePlan([localStep("Check columns", "Validate the output headers.", [childA.id])]),
       note: "Expand the child subflow independently.",
       evidence: [{kind: "status_changed", note: "The child subflow started."}],
     };
@@ -734,11 +1307,11 @@ test("workflow read exposes bounded live lineage and every shared parent-step re
     const childUpdate = await fixture.controller.write(childArgs);
     assert.equal(childUpdate.status, "applied");
     assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.revision, 2);
-    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId, childA.id)?.steps[0]?.name, "Check columns");
+    assert.equal(mainStep(fixture.workflows.get(fixture.projectId, fixture.mainThreadId, childA.id)?.plan ?? null)?.name, "Check columns");
   } finally {await closeFixture(fixture);}
 });
 
-test("workflow read reports an oversized selected legacy document instead of omitting it", async () => {
+test("workflow read reports an incompatible stored document instead of omitting or rewriting it", async () => {
   const fixture = await makeFixture();
   try {
     const args = ensureArgs(fixture, "oversized-read-create", "Create a main workflow.");
@@ -747,12 +1320,15 @@ test("workflow read reports an oversized selected legacy document instead of omi
     assert.equal(created.status, "created");
     if (created.status !== "created") return;
     const current = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
-    const legacyDocument = {...current, objective: "L".repeat(1_100_000)};
+    const legacyDocument = {...current, formatVersion: 1};
     fixture.guidance.db.prepare("UPDATE supervisor_workflow_state SET document=? WHERE workflow_id=?")
       .run(JSON.stringify(legacyDocument), current.workflowId);
     assert.deepEqual(await fixture.controller.read({...locator(fixture), workflowId: current.workflowId, limit: 1}), {
-      status: "too_large", reason: "workflow_read_exceeds_response_limit",
+      status: "incompatible", workflowId: current.workflowId, formatVersion: 1,
+      reason: "This workflow uses an older or unknown storage format and is retained read-only.",
     });
+    assert.deepEqual(JSON.parse(String(fixture.guidance.db.prepare("SELECT document FROM supervisor_workflow_state WHERE workflow_id=?")
+      .get(current.workflowId)?.document)), legacyDocument);
   } finally {await closeFixture(fixture);}
 });
 
@@ -771,15 +1347,13 @@ test("archived descendants stay owned for reads and semantic edits but cannot ga
       childThreadId: archivedChild.id, note: "Link this live child before it is archived."};
     installEvidence(fixture, link);
     assert.equal((await fixture.controller.write(link)).status, "created");
-    const parentPlan: WorkflowApplyInput = {
+    const parentPlan: WorkflowApplyPatch = {
       operationId: "archive-parent-plan",
       workflowId: created.workflowId,
       expectedRevision: 1,
       status: "planned",
       objective: "Coordinate the child work.",
-      rules: [],
-      steps: [{blockId: null, name: "Inspect the result", reason: "The child owns this check.", status: "planned",
-        contributorThreadIds: [archivedChild.id]}],
+      plan: sequencePlan([localStep("Inspect the result", "The child owns this check.", [archivedChild.id])]),
       note: "Record the parent association.",
     };
     const parentPlanArgs = applyArgs(fixture, parentPlan);
@@ -787,15 +1361,13 @@ test("archived descendants stay owned for reads and semantic edits but cannot ga
     assert.equal((await fixture.controller.write(parentPlanArgs)).status, "applied");
 
     const childDocument = fixture.workflows.get(fixture.projectId, fixture.mainThreadId, archivedChild.id)!;
-    const childPlan: WorkflowApplyInput = {
+    const childPlan: WorkflowApplyPatch = {
       operationId: "archive-child-plan",
       workflowId: childDocument.workflowId,
       expectedRevision: childDocument.revision,
       status: "planned",
       objective: "Keep a child-owned subflow.",
-      rules: [],
-      steps: [{blockId: null, name: "Review inputs", reason: "Keep the prior contributor association.", status: "planned",
-        contributorThreadIds: [archivedChild.id]}],
+      plan: sequencePlan([localStep("Review inputs", "Keep the prior contributor association.", [archivedChild.id])]),
       note: "Create the child plan while its thread is live.",
     };
     const childPlanArgs = applyArgs(fixture, childPlan);
@@ -816,7 +1388,7 @@ test("archived descendants stay owned for reads and semantic edits but cannot ga
       expectedRevision: parent.revision, objective: "Keep the retained child association.", note: "Update parent semantics only."});
     installEvidence(fixture, parentUpdate);
     assert.equal((await fixture.controller.write(parentUpdate)).status, "applied");
-    assert.deepEqual(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.steps[0]?.contributorThreadIds, [archivedChild.id]);
+    assert.deepEqual(mainStep(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.plan ?? null)?.contributorThreadIds, [archivedChild.id]);
 
     const archivedWorkflow = fixture.workflows.get(fixture.projectId, fixture.mainThreadId, archivedChild.id)!;
     const archivedUpdate = applyArgs(fixture, {operationId: "archive-child-objective", workflowId: archivedWorkflow.workflowId,
@@ -842,30 +1414,34 @@ test("archived descendants stay owned for reads and semantic edits but cannot ga
     assert.equal((await fixture.controller.write(newArchivedLink)).status, "denied");
 
     const currentParent = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    const currentParentStep = mainStep(currentParent.plan)!;
     const moveArchivedContributor = applyArgs(fixture, {operationId: "archive-contributor-move", workflowId: currentParent.workflowId,
-      expectedRevision: currentParent.revision, steps: [
-        {...currentParent.steps[0]!, contributorThreadIds: [fixture.mainThreadId]},
-        {blockId: null, name: "New archived work", reason: "An archived child cannot move to a new step.", status: "planned",
-          contributorThreadIds: [archivedChild.id]},
-      ], note: "Do not move a retained archived contributor to another step."});
+      expectedRevision: currentParent.revision, plan: sequencePlan([
+        {...currentParentStep, contributorThreadIds: [fixture.mainThreadId]},
+        localStep("New archived work", "An archived child cannot move to a new step.", [archivedChild.id]),
+      ]), note: "Do not move a retained archived contributor to another step."});
     installEvidence(fixture, moveArchivedContributor);
     assert.deepEqual(await fixture.controller.write(moveArchivedContributor), {
       status: "denied", operationId: "archive-contributor-move", reason: "new_contributor_not_live",
     });
 
     const currentAfterMove = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    const movedParentStep = mainStep(currentAfterMove.plan)!;
     const removeArchivedContributor = applyArgs(fixture, {operationId: "archive-contributor-remove", workflowId: currentAfterMove.workflowId,
-      expectedRevision: currentAfterMove.revision, steps: [
-        {...currentAfterMove.steps[0]!, contributorThreadIds: [fixture.mainThreadId]},
-      ], note: "Remove an archived contributor from its original step."});
+      expectedRevision: currentAfterMove.revision, plan: sequencePlan([
+        {...movedParentStep, contributorThreadIds: [fixture.mainThreadId]},
+        ...currentAfterMove.plan!.nodes.slice(1),
+      ]), note: "Remove an archived contributor from its original step."});
     installEvidence(fixture, removeArchivedContributor);
     assert.equal((await fixture.controller.write(removeArchivedContributor)).status, "applied");
 
     const currentAfterRemoval = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    const removedParentStep = mainStep(currentAfterRemoval.plan)!;
     const readdArchivedContributor = applyArgs(fixture, {operationId: "archive-contributor-readd", workflowId: currentAfterRemoval.workflowId,
-      expectedRevision: currentAfterRemoval.revision, steps: [
-        {...currentAfterRemoval.steps[0]!, contributorThreadIds: [archivedChild.id]},
-      ], note: "Do not re-add an archived contributor after removing it."});
+      expectedRevision: currentAfterRemoval.revision, plan: sequencePlan([
+        {...removedParentStep, contributorThreadIds: [archivedChild.id]},
+        ...currentAfterRemoval.plan!.nodes.slice(1),
+      ]), note: "Do not re-add an archived contributor after removing it."});
     installEvidence(fixture, readdArchivedContributor);
     assert.deepEqual(await fixture.controller.write(readdArchivedContributor), {
       status: "denied", operationId: "archive-contributor-readd", reason: "new_contributor_not_live",
@@ -873,11 +1449,10 @@ test("archived descendants stay owned for reads and semantic edits but cannot ga
 
     const parentAfterRemoval = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
     const addArchivedContributor = applyArgs(fixture, {operationId: "new-archived-contributor", workflowId: currentParent.workflowId,
-      expectedRevision: parentAfterRemoval.revision, steps: [
-        {...parentAfterRemoval.steps[0]!, contributorThreadIds: [fixture.mainThreadId]},
-        {blockId: null, name: "New archived work", reason: "This contributor was not already present.", status: "planned",
-          contributorThreadIds: [unlinkedArchived.id]},
-      ], note: "Do not add an archived contributor."});
+      expectedRevision: parentAfterRemoval.revision, plan: sequencePlan([
+        {...mainStep(parentAfterRemoval.plan)!, contributorThreadIds: [fixture.mainThreadId]},
+        localStep("New archived work", "This contributor was not already present.", [unlinkedArchived.id]),
+      ]), note: "Do not add an archived contributor."});
     installEvidence(fixture, addArchivedContributor);
     assert.deepEqual(await fixture.controller.write(addArchivedContributor), {
       status: "denied", operationId: "new-archived-contributor", reason: "new_contributor_not_live",
@@ -901,9 +1476,9 @@ test("partial status edits retain contributors whose child is no longer in the c
     if (created.status !== "created") return;
 
     const initialPlan = applyArgs(fixture, {operationId: "deleted-contributor-plan", workflowId: created.workflowId,
-      expectedRevision: created.revision, status: "planned", objective: "Retain the planned association.", rules: [],
-      steps: [{blockId: null, name: "Review child output", reason: "The child was live when assigned.", status: "planned",
-        contributorThreadIds: [child.id]}], note: "Associate the live descendant with this step."});
+      expectedRevision: created.revision, status: "planned", objective: "Retain the planned association.",
+      plan: sequencePlan([localStep("Review child output", "The child was live when assigned.", [child.id])]),
+      note: "Associate the live descendant with this step."});
     installEvidence(fixture, initialPlan);
     assert.equal((await fixture.controller.write(initialPlan)).status, "applied");
 
@@ -917,7 +1492,7 @@ test("partial status edits retain contributors whose child is no longer in the c
     assert.equal((await fixture.controller.write(partial)).status, "applied");
     const updated = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
     assert.equal(updated.status, "underway");
-    assert.deepEqual(updated.steps[0]?.contributorThreadIds, [child.id]);
+    assert.deepEqual(mainStep(updated.plan)?.contributorThreadIds, [child.id]);
   } finally {await closeFixture(fixture);}
 });
 
@@ -935,8 +1510,7 @@ test("source IDs are not accepted as agent-authored progress evidence", async ()
       expectedRevision: created.revision,
       status: "planned",
       objective: "Keep the evidence source native.",
-      rules: [],
-      steps: [{blockId: null, name: "Check evidence", reason: "Avoid fabricated pointers.", status: "planned", contributorThreadIds: [fixture.mainThreadId]}],
+      plan: sequencePlan([localStep("Check evidence", "Avoid fabricated pointers.", [fixture.mainThreadId])]),
       note: "Try to attribute an arbitrary source.",
       evidence: [{kind: "observation", note: "Unverified source.", sourceThreadId: "foreign", sourceRunId: "run-x"}],
     };

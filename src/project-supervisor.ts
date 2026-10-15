@@ -12,6 +12,7 @@ import type { ProjectSupervisorInfo, ProjectSupervisorSaveInput, ProjectSupervis
 import { interpretationPrompt, parseInterpretation, prepareWorkflowRequest, parseWorkflowInterpretation } from "./supervisor-workflow.js";
 import type { ProjectDefinitionLoader } from "./project-definitions.js";
 export { interpretationPrompt, parseInterpretation } from "./supervisor-workflow.js";
+import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 import type { StoreShape } from "./store.js";
 import { T3TransportError, type T3ClientShape } from "./t3.js";
 import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "./types.js";
@@ -36,6 +37,19 @@ type ProjectSupervisorDefinitions = Pick<ProjectDefinitionLoader, "load"> & {
 const active = (projection: Projection) => projection.runs.some(r => ["preparing","queued","starting","running","waiting"].includes(r.status));
 const unavailable = (thread: ThreadInfo) => Boolean(thread.archivedAt || thread.deletedAt);
 const supervisorUnavailable = (thread: ThreadInfo) => Boolean(thread.archivedAt || thread.deletedAt);
+
+const unavailableDefinitions = (job: TaskRecord): ProjectDefinitionSnapshot => ({projectId: job.projectId, threadId: job.threadId,
+  workspaceRoot: "", revision: null, editingAvailable: false, status: "unavailable", steps: [], workflows: [], config: {required: []},
+  projectConfig: null, complete: false, sources: [], issues: [{path: "", code: "definition_read_failed",
+    message: "Definition sources could not be read. Requirements and policy remain unknown; make a finite provisional plan."}]});
+
+const sameDefinitionRead = (left: ProjectDefinitionSnapshot | null | undefined, right: ProjectDefinitionSnapshot): boolean =>
+  Boolean(left && fingerprint({projectId: left.projectId, threadId: left.threadId, workspaceRoot: left.workspaceRoot, globalOnly: left.globalOnly ?? null,
+    globalRevision: left.globalRevision ?? null, revision: left.revision, status: left.status, steps: left.steps, workflows: left.workflows,
+    config: left.config, projectConfig: left.projectConfig, complete: left.complete, sources: left.sources, issues: left.issues}) ===
+    fingerprint({projectId: right.projectId, threadId: right.threadId, workspaceRoot: right.workspaceRoot, globalOnly: right.globalOnly ?? null,
+      globalRevision: right.globalRevision ?? null, revision: right.revision, status: right.status, steps: right.steps, workflows: right.workflows,
+      config: right.config, projectConfig: right.projectConfig, complete: right.complete, sources: right.sources, issues: right.issues}));
 
 export const taskSource = (projection: Projection, afterOrdinal: number): {run: RunInfo; message: MessageInfo} | null => {
   for (const run of [...projection.runs].sort((a,b) => a.ordinal - b.ordinal)) {
@@ -167,7 +181,7 @@ export class ProjectSupervisor {
   }
   private globalDefinitionsPath(): string {return this.definitions?.globalDefinitionsPath?.() ?? "~/.t3-supervisor";}
   async globalDefinitionsControl(signal: AbortSignal) {
-    let presence: SupervisionFolderPresence = {status: "unavailable", message: "Global rules folder detection is not configured."};
+    let presence: SupervisionFolderPresence = {status: "unavailable", message: "Global definition folder detection is not configured."};
     if (this.definitions?.presenceGlobal) {
       const deadline = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
       try {presence = await this.definitions.presenceGlobal(deadline);}
@@ -179,35 +193,35 @@ export class ProjectSupervisor {
   async saveGlobalDefinitionsControl(input: GlobalDefinitionsControlInput, signal: AbortSignal) {
     const homePath = this.globalDefinitionsPath();
     const current = await this.globalDefinitionsControl(signal);
-    if (!this.store.scopeCompatible) return {status: "unavailable" as const, message: "Supervisor state is unavailable; no global rules setting was changed.", control: current};
-    if (current.generation !== input.expectedGeneration) return {status: "conflict" as const, message: "Global rules changed in another window. Reload before saving.", control: current};
+    if (!this.store.scopeCompatible) return {status: "unavailable" as const, message: "Supervisor state is unavailable; global definition settings were not changed.", control: current};
+    if (current.generation !== input.expectedGeneration) return {status: "conflict" as const, message: "Global definitions changed in another window. Reload before saving.", control: current};
     let outcome: GlobalSetupOutcome | null = null;
     let globalFingerprint: string | null = null;
     if (input.enabled) {
-      if (!this.definitions?.initializeGlobal) return {status: "unavailable" as const, message: "Global rules setup is not configured; no setting was changed.", control: current};
+      if (!this.definitions?.initializeGlobal) return {status: "unavailable" as const, message: "Global definition setup is not configured; no setting was changed.", control: current};
       try {outcome = await this.definitions.initializeGlobal(AbortSignal.any([signal, AbortSignal.timeout(30_000)]));}
-      catch {return {status: "uncertain" as const, message: "Global rules setup could not be confirmed. Inspect ~/.t3-supervisor before retrying.", control: this.store.globalDefinitionsControl(homePath)};}
+      catch {return {status: "uncertain" as const, message: "Global definition setup could not be confirmed. Inspect ~/.t3-supervisor before retrying.", control: this.store.globalDefinitionsControl(homePath)};}
       if (outcome.status !== "created" && outcome.status !== "unchanged") {
         const status = outcome.status === "uncertain" ? "uncertain" as const : outcome.status === "conflict" ? "conflict" as const : "unavailable" as const;
         return {status, message: outcome.message, control: this.store.globalDefinitionsControl(homePath)};
       }
-      if (!this.definitions.globalFingerprint) return {status: "unavailable" as const, message: "Global rules input verification is unavailable; the setting was not changed.", control: this.store.globalDefinitionsControl(homePath)};
+      if (!this.definitions.globalFingerprint) return {status: "unavailable" as const, message: "Global definition input verification is unavailable; the setting was not changed.", control: this.store.globalDefinitionsControl(homePath)};
       try {globalFingerprint = await this.definitions.globalFingerprint(AbortSignal.any([signal, AbortSignal.timeout(10_000)]));}
       catch (cause) {if (signal.aborted) throw cause;globalFingerprint = null;}
-      if (!globalFingerprint) return {status: "unavailable" as const, message: "The global rules folder could not be verified; the setting was not changed.", control: this.store.globalDefinitionsControl(homePath)};
+      if (!globalFingerprint) return {status: "unavailable" as const, message: "The global definition folder could not be verified; the setting was not changed.", control: this.store.globalDefinitionsControl(homePath)};
     } else if (this.definitions?.globalFingerprint) {
       try {globalFingerprint = await this.definitions.globalFingerprint(AbortSignal.any([signal, AbortSignal.timeout(10_000)]));}
       catch (cause) {if (signal.aborted) throw cause;globalFingerprint = null;}
     }
     if (this.store.globalDefinitionsControl(homePath).generation !== input.expectedGeneration) {
-      const message = outcome ? "The global rules folder is ready, but the setting changed before it could be enabled. Refresh before continuing." : "Global rules changed in another window. Reload before saving.";
+      const message = outcome ? "The global definition folder is ready, but the setting changed before it could be enabled. Refresh before continuing." : "Global definitions changed in another window. Reload before saving.";
       return {status: "conflict" as const, message, control: this.store.globalDefinitionsControl(homePath)};
     }
     if (this.definitions?.globalFingerprint && globalFingerprint) {
       let verified: string | null = null;
       try {verified = await this.definitions.globalFingerprint(AbortSignal.any([signal, AbortSignal.timeout(10_000)]));}
       catch (cause) {if (signal.aborted) throw cause;verified = null;}
-      if (input.enabled && verified !== globalFingerprint) return {status: "conflict" as const, message: "The global rules files changed while the switch was being saved. Reload and review the current folder before enabling them.", control: this.store.globalDefinitionsControl(homePath)};
+      if (input.enabled && verified !== globalFingerprint) return {status: "conflict" as const, message: "The global definition files changed while the switch was being saved. Reload and review the current folder before enabling them.", control: this.store.globalDefinitionsControl(homePath)};
       if (!input.enabled && verified !== globalFingerprint) globalFingerprint = null;
     }
     let scratchBoundaries: Array<{projectId: string; baseline: SupervisorBaseline}> = [];
@@ -221,15 +235,15 @@ export class ProjectSupervisor {
           const baseline = await this.activationSnapshot(signal);
           scratchBoundaries = activeScratch.map(projectId => ({projectId, baseline}));
         }
-      } catch {return {status: "unavailable" as const, message: "The enable boundary for global-only Scratch supervision could not be captured; the global rules setting was not changed.", control: this.store.globalDefinitionsControl(homePath)};}
+      } catch {return {status: "unavailable" as const, message: "The enable boundary for global-only Scratch supervision could not be captured; global definition settings were not changed.", control: this.store.globalDefinitionsControl(homePath)};}
     }
     if (this.store.globalDefinitionsControl(homePath).generation !== input.expectedGeneration) {
-      return {status: "conflict" as const, message: "Global rules changed before the setting could be enabled. Refresh before continuing.", control: this.store.globalDefinitionsControl(homePath)};
+      return {status: "conflict" as const, message: "Global definitions changed before the setting could be enabled. Refresh before continuing.", control: this.store.globalDefinitionsControl(homePath)};
     }
     try {
       const control = this.store.saveGlobalDefinitionsControl(input.expectedGeneration, input.enabled, homePath, globalFingerprint, scratchBoundaries);
-      return {status: "saved" as const, message: input.enabled ? "Global rules are now included in project Supervisor definitions. Existing folder contents were preserved." : "Global rules are no longer included. Project-local definitions remain available; existing plans are retained as stale history.", control};
-    } catch {return {status: "conflict" as const, message: "Global rules changed in another window. Reload before saving.", control: this.store.globalDefinitionsControl(homePath)};}
+      return {status: "saved" as const, message: input.enabled ? "Global definitions are now included in project Supervisor policy. Existing folder contents were preserved." : "Global definitions are no longer included. Project-local definitions remain available; existing plans are retained as stale history.", control};
+    } catch {return {status: "conflict" as const, message: "Global definitions changed in another window. Reload before saving.", control: this.store.globalDefinitionsControl(homePath)};}
   }
   async setupOptions(projectId: string, signal: AbortSignal) {
     const {project, catalog} = await this.project(projectId);
@@ -367,7 +381,7 @@ export class ProjectSupervisor {
     if (!this.store.scopeCompatible) return {status: "unavailable" as const, message: "Supervisor state is unavailable; no change was made.", control: visibleCurrent};
     if (current.generation !== input.expectedGeneration) return {status: "conflict" as const, message: "Supervision changed in another window. Reload before saving.", control: visibleCurrent};
     if (input.projectId !== null && input.enabled && registered && this.scratchProject(input.projectId, registered.workspaceRoot) && !this.store.useGlobalDefinitions(input.projectId)) {
-      return {status: "unavailable" as const, message: "Scratch uses the server-user global rules. Enable the separate global rules setting before enabling Scratch supervision.", control: visibleCurrent};
+      return {status: "unavailable" as const, message: "Scratch uses server-user global definitions. Enable the separate global definitions setting before enabling Scratch supervision.", control: visibleCurrent};
     }
     if (input.projectId !== null && input.enabled && !(current.manual && current.enabled)) {
       const presence = await this.detectFolder(input.projectId, signal);
@@ -648,26 +662,24 @@ export class ProjectSupervisor {
     const source = await this.projection(job.threadId, signal);
     if (!this.projectEnabled(binding.projectId)) return;
     if (!this.currentSource(job, source)) {this.complete(job, "unavailable", null, "The task source changed or became unavailable.");return;}
-    if (this.definitions && job.definitionContext === undefined) {
+    if (job.definitionContext == null) {
+      let definitions: ProjectDefinitionSnapshot;
       try {
-        let definitions = await this.definitions.load(job.projectId, job.threadId, signal);
+        definitions = this.definitions ? await this.definitions.load(job.projectId, job.threadId, signal) : unavailableDefinitions(job);
         if (definitions.projectId !== job.projectId || definitions.threadId !== job.threadId) throw new Error("definition_binding_mismatch");
-        if (job.definitionSnapshot?.status === "ready" && definitions.workspaceRoot === job.definitionSnapshot.workspaceRoot &&
-          definitions.revision !== job.definitionSnapshot.revision && definitions.status !== "unavailable" && definitions.status !== "permission_required")
-          definitions = job.definitionSnapshot;
         if (definitions.status === "unavailable") {
           job = {...job, definitionReadAttempts: (job.definitionReadAttempts ?? 0) + 1};
           if (job.definitionReadAttempts! < 3) {this.store.saveTask({...job, reason: "Project definitions are temporarily unavailable; workflow preparation will retry with a bounded budget.", updatedAt: Date.now()});return;}
         }
-        const message = source.messages.find(item => item.id === job!.sourceMessageId)!;
-        const prepared = prepareWorkflowRequest(job.threadId, job.sourceMessageId, message.text, definitions);
-        job = {...job, requestText: prepared.requestText, definitionContext: prepared.context, workflow: prepared.workflow,
-          definitionSnapshot: definitions.status === "ready" && prepared.context ? definitions : null};
       } catch {
         job = {...job, definitionReadAttempts: (job.definitionReadAttempts ?? 0) + 1};
         if (job.definitionReadAttempts! < 3) {this.store.saveTask({...job, reason: "Project definitions could not be read; workflow preparation will retry with a bounded budget.", updatedAt: Date.now()});return;}
-        job = {...job, definitionContext: null, workflow: {status: "unavailable", message: "Workflow proposal unavailable: project definitions could not be read.", workspaceRoot: null, revision: null, rules: [], steps: []}};
+        definitions = unavailableDefinitions(job);
       }
+      const message = source.messages.find(item => item.id === job!.sourceMessageId)!;
+      const prepared = prepareWorkflowRequest(job.threadId, job.sourceMessageId, message.text, definitions);
+      job = {...job, requestText: prepared.requestText, definitionContext: prepared.context, workflow: prepared.workflow,
+        definitionSnapshot: prepared.context ? definitions : null};
       this.store.saveTask(job);
       if (!this.currentSource(job, await this.projection(job.threadId, signal))) {this.complete(job, "unavailable", null, "The task source changed while project definitions were being loaded.");return;}
     }
@@ -702,7 +714,7 @@ export class ProjectSupervisor {
         fingerprint(message.text) === job.sourceHash) && this.store.binding(job.projectId, job.threadId)?.threadId === job.supervisorThreadId;
   }
   private complete(job: TaskRecord, status: TaskRecord["status"], objective: string | null, reason: string): void {
-    const workflow = job.workflow?.status === "pending" ? {...job.workflow, status: "unavailable" as const, message: reason, rules: [], steps: []} : job.workflow;
+    const workflow = job.workflow?.status === "pending" ? {...job.workflow, status: "unavailable" as const, message: reason} : job.workflow;
     this.store.saveTask({...job, status, objective, reason, workflow: workflow ?? null, requestText: "", updatedAt: Date.now()});
   }
   private async reconcile(job: TaskRecord, projection: Projection, signal: AbortSignal): Promise<void> {
@@ -730,16 +742,18 @@ export class ProjectSupervisor {
         let transientReadFailure = false;
         try {
           const definitions = await this.definitions?.load(job.projectId, job.threadId, signal);
-          transientReadFailure = !definitions || definitions.status === "unavailable";
-          currentDefinitions = definitions?.status === "ready" && definitions.projectId === job.projectId && definitions.threadId === job.threadId &&
-            definitions.revision === job.definitionContext!.revision && definitions.workspaceRoot === job.definitionContext!.workspaceRoot;
+          transientReadFailure = !definitions;
+          currentDefinitions = Boolean(definitions && definitions.projectId === job.projectId && definitions.threadId === job.threadId &&
+            sameDefinitionRead(job.definitionSnapshot, definitions));
         } catch {transientReadFailure = true;}
         if (transientReadFailure) {
           job = {...job, revalidationAttempts: (job.revalidationAttempts ?? 0) + 1};
           if (job.revalidationAttempts! < 3) {this.store.saveTask({...job, reason: "The model completed; project definition revalidation will retry with a bounded budget.", updatedAt: Date.now()});return;}
         }
-        job = {...job, workflow: currentDefinitions ? result.workflow : {...result.workflow, status: "stale", message: "Project definitions changed or could not be revalidated; this workflow proposal was not accepted.", rules: [], steps: []}};
-        if (!this.currentSource(job, await this.projection(job.threadId, signal))) {this.complete({...job, workflow: {...job.workflow!, status: "stale", steps: [], rules: []}}, "unavailable", null, "The task source changed while the workflow was being revalidated.");return;}
+        const staleWorkflow = currentDefinitions ? result.workflow : {...result.workflow, status: "stale" as const,
+          message: "The definition source changed or could not be revalidated. This plan is retained as provisional history with its requirements and diagnostics."};
+        job = {...job, workflow: staleWorkflow};
+        if (!this.currentSource(job, await this.projection(job.threadId, signal))) {this.complete(job, "unavailable", null, "The task source changed while the workflow was being revalidated.");return;}
       }
       this.complete(job, result.objective === null ? "needs_context" : "inferred", result.objective, result.reason);
     }

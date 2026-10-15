@@ -13,10 +13,25 @@ import { SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
+import { makeDefinitionFixture, stepSource } from "./project-definitions-fixture.js";
 
 const activationSequence = 10;
 const day = 24 * 60 * 60 * 1000;
 const baseTime = "2026-10-13T10:00:00.000Z";
+
+const missingDefinitions = (projectId: string, threadId: string | null, workspaceRoot: string) => ({
+  projectId, threadId, workspaceRoot, globalOnly: false, globalRevision: null, revision: null,
+  editingAvailable: false, status: "missing" as const, steps: [], workflows: [], config: {required: []}, projectConfig: null,
+  complete: false, sources: [], issues: [],
+});
+
+const workflowSnapshot = (withStep = true) => ({
+  status: "proposed" as const, message: "Current draft", workspaceRoot: "/work/a", revision: "definitions-1", globalRevision: null,
+  definitionsStatus: "ready" as const, definitionsComplete: true, requirementsKnown: true, requirements: [], issues: [],
+  plan: {kind: "sequence" as const, templatePath: null, nodes: withStep ? [{kind: "step" as const, nodeId: "00000000-0000-4000-8000-000000000001",
+    definitionId: null, localId: "csv-export", templatePath: null, name: "Implement CSV export", description: "Add the requested feature.",
+    source: null, resolution: "resolved" as const, reason: "Add the requested feature.", status: "planned" as const, contributorThreadIds: []}] : []},
+});
 
 const projects: ProjectInfo[] = [
   { id: "project-a", title: "Project A", workspaceRoot: "/work/a" },
@@ -180,6 +195,15 @@ const completeSupervisorRequest = (projection: Projection, messageId: string, re
   });
 };
 
+const workflowResult = (messageId: string, objective: string, reason: string): string => JSON.stringify({
+  objective,
+  reason,
+  sourceMessageIds: [messageId],
+  workflow: {requirements: [], plan: {kind: "sequence", nodes: [{kind: "step", definitionId: null, localId: "bounded-task-step",
+    name: "Review the available context", description: "State what remains unknown and keep the plan finite.",
+    reason: "The current task needs a bounded plan."}]}},
+});
+
 const retryInput = (
   projectId: string,
   expectedGeneration: number,
@@ -337,7 +361,12 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
     turnsByThread.set(threadId, turns);
     projections.set(threadId, makeSourceProjection(threadId, projectId, turns));
   };
-  const makeSupervisor = (definitions?: ConstructorParameters<typeof ProjectSupervisor>[7]) => new ProjectSupervisor(config, supervisorStore, source, t3, readRpc, operateRpc, activationSnapshot, definitions);
+  const defaultDefinitions = {load: async (projectId: string, threadId: string | null) => {
+    const workspaceRoot = registeredProjects.find(project => project.id === projectId)?.workspaceRoot ?? "";
+    return missingDefinitions(projectId, threadId, workspaceRoot);
+  }};
+  const makeSupervisor = (definitions: ConstructorParameters<typeof ProjectSupervisor>[7] | null = defaultDefinitions) =>
+    new ProjectSupervisor(config, supervisorStore, source, t3, readRpc, operateRpc, activationSnapshot, definitions ?? undefined);
   const restart = (): void => {
     guidance.close();
     guidance = new GuidanceStore(directory);
@@ -429,11 +458,7 @@ test("activation baseline excludes existing runs and gives independent mains sep
   assert.ok(firstTask);
   const supervisorProjection = fixture.projections.get(binding.threadId);
   assert.ok(supervisorProjection);
-  const linkedResult = JSON.stringify({
-    objective: "Build the invoice export",
-    reason: "The source request asks for an export to be built.",
-    sourceMessageIds: [firstTask.sourceMessageId],
-  });
+  const linkedResult = workflowResult(firstTask.sourceMessageId, "Build the invoice export", "The source request asks for an export to be built.");
   completeSupervisorRequest(supervisorProjection, firstTask.messageId, linkedResult);
   await supervisor.runOnce();
   assert.equal(fixture.supervisorStore.task("current-thread")?.status, "inferred");
@@ -458,8 +483,7 @@ test("a newly registered project reuses startup history bounds and auto-enables 
   ]}]);
   t.after(fixture.cleanup);
   const definitions = {
-    load: async (projectId: string, threadId: string | null) => ({projectId, threadId, workspaceRoot: "/work/new", revision: null,
-      editingAvailable: false, status: "missing" as const, rules: [], blocks: [], issues: []}),
+    load: async (projectId: string, threadId: string | null) => missingDefinitions(projectId, threadId, "/work/new"),
     presence: async (projectId: string) => ({status: projectId === "project-new" ? "present" as const : "missing" as const}),
   };
   const supervisor = fixture.makeSupervisor(definitions);
@@ -483,8 +507,7 @@ test("a project added with its first human task between polls supervises that ta
   const fixture = await makeFixture([{threadId: "existing-thread", projectId: "project-a", turns: []}]);
   t.after(fixture.cleanup);
   const definitions = {
-    load: async (projectId: string, threadId: string | null) => ({projectId, threadId, workspaceRoot: "/work/new", revision: null,
-      editingAvailable: false, status: "missing" as const, rules: [], blocks: [], issues: []}),
+    load: async (projectId: string, threadId: string | null) => missingDefinitions(projectId, threadId, "/work/new"),
     presence: async (projectId: string) => ({status: projectId === "project-new" ? "present" as const : "missing" as const}),
   };
   const supervisor = fixture.makeSupervisor(definitions);
@@ -506,8 +529,7 @@ test("a project that was unreadable recaptures its boundary before resuming disc
   t.after(fixture.cleanup);
   let folderStatus: "present" | "unavailable" = "unavailable";
   const definitions = {
-    load: async (projectId: string, threadId: string | null) => ({projectId, threadId, workspaceRoot: "/work/new", revision: null,
-      editingAvailable: false, status: "missing" as const, rules: [], blocks: [], issues: []}),
+    load: async (projectId: string, threadId: string | null) => missingDefinitions(projectId, threadId, "/work/new"),
     presence: async (projectId: string) => ({status: projectId === "project-new" ? folderStatus : "missing" as const}),
   };
   const supervisor = fixture.makeSupervisor(definitions);
@@ -981,11 +1003,8 @@ test("a changed source invalidates a completed Supervisor result without an oper
   assert.ok(task && binding);
   const supervisorProjection = fixture.projections.get(binding.threadId);
   assert.ok(supervisorProjection);
-  completeSupervisorRequest(supervisorProjection, task.messageId, JSON.stringify({
-    objective: "Deploy the release",
-    reason: "The source request asks for a deployment.",
-    sourceMessageIds: [task.sourceMessageId],
-  }));
+  completeSupervisorRequest(supervisorProjection, task.messageId,
+    workflowResult(task.sourceMessageId, "Deploy the release", "The source request asks for a deployment."));
 
   const sourceProjection = fixture.projections.get("source-thread");
   assert.ok(sourceProjection);
@@ -1010,11 +1029,9 @@ test("a completed interpretation with unrelated source IDs is rejected", async (
   assert.ok(task && binding);
   const supervisorProjection = fixture.projections.get(binding.threadId);
   assert.ok(supervisorProjection);
-  completeSupervisorRequest(supervisorProjection, task.messageId, JSON.stringify({
-    objective: "Publish a release",
-    reason: "This response cites another message.",
-    sourceMessageIds: ["unrelated-message"],
-  }));
+  const unrelated = JSON.parse(workflowResult(task.sourceMessageId, "Publish a release", "This response cites another message.")) as Record<string, unknown>;
+  unrelated.sourceMessageIds = ["unrelated-message"];
+  completeSupervisorRequest(supervisorProjection, task.messageId, JSON.stringify(unrelated));
 
   await supervisor.runOnce();
   const rejected = fixture.supervisorStore.task("source-thread");
@@ -1096,8 +1113,7 @@ test("agreement snapshots preserve mixed plans through restart and mark replaced
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const task = fixture.supervisorStore.task("agreement-source")!;
-  const workflow = {status: "proposed" as const, message: "Current draft", workspaceRoot: "/work/a", revision: "definitions-1", rules: [],
-    steps: [{blockId: null, name: "Implement CSV export", reason: "Add the requested feature"}]};
+  const workflow = workflowSnapshot();
   const agreement = {status: "agreed" as const, message: "Both conversations confirmed the plan", proposalId: "csv-1", agreedAt: Date.now(),
     supervisorMessageId: "supervisor-proof", agentMessageId: "operative-proof", workflow};
   fixture.supervisorStore.saveTask({...task, status: "inferred", objective: "Add CSV export", workflow, workflowProposalId: "csv-2", agreement});
@@ -1106,7 +1122,8 @@ test("agreement snapshots preserve mixed plans through restart and mark replaced
   const snapshot = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(await restored.snapshot("project-a", new AbortController().signal, "agreement-source"));
   assert.equal(snapshot.tasks[0]?.workflowProposalId, "csv-2");
   assert.deepEqual(snapshot.tasks[0]?.agreement, agreement);
-  assert.equal(snapshot.tasks[0]?.workflow?.steps[0]?.blockId, null);
+  assert.equal(snapshot.tasks[0]?.workflow?.plan?.nodes[0]?.kind, "step");
+  if (snapshot.tasks[0]?.workflow?.plan?.nodes[0]?.kind === "step") assert.equal(snapshot.tasks[0].workflow?.plan?.nodes[0]?.localId, "csv-export");
   const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null)!;
   fixture.supervisorStore.setBinding({...binding, state: "missing"});
   fixture.supervisorStore.replaceMissingBinding({...binding, state: "missing"}, defaultSupervisorModel);
@@ -1121,7 +1138,7 @@ test("task payload expiry clears retained agreement plans and current proposal i
   t.after(fixture.cleanup);
   await fixture.makeSupervisor().runOnce();
   const task = fixture.supervisorStore.task("expiry-source")!;
-  const workflow = {status: "proposed" as const, message: "Draft", workspaceRoot: "/work/a", revision: "definitions-1", rules: [], steps: []};
+  const workflow = workflowSnapshot(false);
   fixture.supervisorStore.saveTask({...task, status: "inferred", workflow, workflowProposalId: "csv-1", updatedAt: 1,
     agreement: {status: "agreed", message: "Accepted", proposalId: "csv-1", agreedAt: 1, supervisorMessageId: "supervisor-proof", agentMessageId: "operative-proof", workflow}});
   fixture.supervisorStore.prune(32 * day);
@@ -1138,20 +1155,24 @@ test("task payload expiry clears retained agreement plans and current proposal i
 
 test("explicit editor authorization binds exact complete definition contents and workspace", async t => {
   const fixture = await makeFixture([]);t.after(fixture.cleanup);
-  const definitions = {projectId: "project-a", threadId: null, workspaceRoot: "/work/a", revision: "ui-revision", editingAvailable: true,
-    status: "ready" as const, rules: [], blocks: [], issues: []};
-  fixture.supervisorStore.recordDefinitionUserSave(definitions, "edited-revision");
-  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, threadId: "operative", revision: "bound-revision"}, definitions, 0), true);
-  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, workspaceRoot: "/work/other"}, definitions, 0), false);
-  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, status: "invalid"}, definitions, 0), false);
-  assert.equal(fixture.supervisorStore.definitionUserSave({...definitions, rules: [{name: "Changed", description: "New", required_blocks: ["review"]}]}, definitions, 0), false);
-  assert.equal(fixture.supervisorStore.definitionUserSave(definitions, definitions, Date.now() + 1000), false);
-  const changedBlocks = {...definitions, blocks: [{id: "review", name: "Review", description: "Changed by agent", instructions: "Skip checks", expected_result: "Always approve"}]};
-  fixture.supervisorStore.recordDefinitionUserSave(changedBlocks, "agent-edited-block-revision");
-  assert.equal(fixture.supervisorStore.definitionUserSave(changedBlocks, definitions, 0), false);
-  fixture.supervisorStore.recordDefinitionUserSave(definitions, "edited-revision");
+  const source = makeDefinitionFixture({projectId: "project-a", root: "/work/a", threadRoot: "/work/a"});
+  source.addFile("/work/a", ".t3-supervisor/project.yaml", "required:\n  - step: verify\n");
+  source.addFile("/work/a", ".t3-supervisor/steps/verify.md", stepSource("verify", "Check the changed behavior."));
+  source.addDirectory("/work/a", ".t3-supervisor/workflows");
+  const approved = await source.loader.load("project-a", "thread", AbortSignal.timeout(2000));
+  assert.equal(approved.status, "ready");
+  assert.ok(approved.projectConfig);
+  const changedConfig = {...approved, revision: "edited-revision", projectConfig: {required: []}, config: {required: []}};
+  fixture.supervisorStore.recordDefinitionUserSave(changedConfig, approved.revision!);
+  assert.equal(fixture.supervisorStore.definitionUserSave({...changedConfig, threadId: "operative", revision: "bound-revision"}, approved, 0), true);
+  assert.equal(fixture.supervisorStore.definitionUserSave({...changedConfig, workspaceRoot: "/work/other"}, approved, 0), false);
+  assert.equal(fixture.supervisorStore.definitionUserSave({...changedConfig, status: "invalid"}, approved, 0), false);
+  const editedStep = {...changedConfig, steps: changedConfig.steps.map(step => ({...step, description: "Skip all checks."}))};
+  assert.equal(fixture.supervisorStore.definitionUserSave(editedStep, approved, 0), false);
+  assert.equal(fixture.supervisorStore.definitionUserSave(changedConfig, approved, Date.now() + 1000), false);
+  fixture.supervisorStore.recordDefinitionUserSave(approved, approved.revision!);
   fixture.restart();
-  assert.equal(fixture.supervisorStore.definitionUserSave(definitions, definitions, 0), true);
+  assert.equal(fixture.supervisorStore.definitionUserSave(approved, approved, 0), true);
 });
 
 test("parallel main worktrees retain distinct ownership and scoped recovery through restart", async t => {

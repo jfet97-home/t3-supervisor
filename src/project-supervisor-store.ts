@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { GuidanceStore } from "./guidance-store.js";
 import { fingerprint } from "./guidance-store.js";
-import { defaultMonitoringSettings, type SupervisorBinding, type SupervisorModelSelection, type SupervisorMonitoringSettings, type TaskInterpretationInfo } from "./project-supervisor-contract.js";
+import { defaultMonitoringSettings, type DefinitionReviewInfo, type SupervisorBinding, type SupervisorModelSelection, type SupervisorMonitoringSettings, type TaskInterpretationInfo } from "./project-supervisor-contract.js";
 import type { Projection, SupervisorConfig } from "./types.js";
 import { sameModel } from "./supervisor-native.js";
 import type { SupervisionControlInfo } from "./supervisor-control-contract.js";
@@ -18,7 +18,7 @@ export type ProjectModelSettings = {projectId: string; generation: number; model
 export type BindingRecord = SupervisorBinding & {mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string};
 export type SupervisorBaseline = {version?: 2; snapshotSequence: number; threads: Array<{id: string; latestRunId: string | null}>};
 export type SupervisionFolderPresence = {status: "present" | "missing" | "unavailable"; message?: string};
-export type TaskRecord = TaskInterpretationInfo & {id: string; sourceHash: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionSnapshot?: ProjectDefinitionSnapshot | null; definitionNoticeKey?: string; definitionReadAttempts?: number; revalidationAttempts?: number};
+export type TaskRecord = TaskInterpretationInfo & {id: string; sourceHash: string; agreementSourceHash?: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionSnapshot?: ProjectDefinitionSnapshot | null; definitionNoticeKey?: string; definitionReadAttempts?: number; revalidationAttempts?: number};
 
 /** Loads permanent ownership before any notification or input worker starts. */
 export const loadSupervisorOwnership = (directory: string): Set<string> => {
@@ -181,13 +181,14 @@ export class ProjectSupervisorStore {
         for (const row of this.store.db.prepare("SELECT document FROM supervisor_task_interpretations").all()) {
           const task = JSON.parse(String(row.document)) as TaskRecord;
           if (task.status === "queued" && task.dispatchedAt === null && task.definitionContext !== undefined) {
-            const refresh: {-readonly [K in keyof TaskRecord]: TaskRecord[K]} = {...task, requestText: "", reason: "Global rules inclusion changed; definitions will be refreshed before dispatch.", updatedAt: changedAt,
-              workflow: {status: "pending", message: "Global rules inclusion changed; refresh the complete definitions before sending this task.", workspaceRoot: null, revision: null, rules: [], steps: []}};
+            const refresh: {-readonly [K in keyof TaskRecord]: TaskRecord[K]} = {...task, requestText: "", reason: "Global definition inclusion changed; definitions will be refreshed before dispatch.", updatedAt: changedAt,
+              workflow: {status: "pending", message: "Global definition inclusion changed; refresh the complete definitions before sending this task.", workspaceRoot: null, revision: null, globalRevision: null,
+                definitionsStatus: "unavailable", definitionsComplete: false, requirementsKnown: false, requirements: [], issues: [], plan: null}};
             delete refresh.definitionContext;delete refresh.definitionSnapshot;delete refresh.definitionReadAttempts;delete refresh.revalidationAttempts;
             this.saveTask(refresh);continue;
           }
           if (task.status !== "inferred" || !task.workflow?.revision) continue;
-          const message = "The user changed whether global rules are included. The old plan and agreement are retained as stale history.";
+          const message = "The user changed whether global definitions are included. The old plan and agreement are retained as stale history.";
           this.saveTask({...task, workflow: {...task.workflow, status: "stale", message},
             ...(task.agreement ? {agreement: {...task.agreement, status: "stale", message}} : {}),
             definitionReview: {status: "checking", message, expectedRevision: task.workflow.revision, observedRevision: null,
@@ -206,16 +207,18 @@ export class ProjectSupervisorStore {
   hasGlobalDefinitionsEvent(): boolean {return Boolean(this.store.db.prepare("SELECT 1 FROM meta WHERE key='supervisor_global_definitions_event'").get());}
   globalDefinitionsChangeAuthorized(task: TaskRecord, globalFingerprint?: string | null): boolean {
     const row = this.store.db.prepare("SELECT value FROM meta WHERE key='supervisor_global_definitions_event'").get();
-    if (!row || !task.definitionSnapshot || task.definitionReview?.status !== "authorized" || !task.workflow?.revision) return false;
+    if (!row || !task.definitionSnapshot || task.definitionSnapshot.status !== "ready" || !task.definitionSnapshot.complete ||
+      task.definitionReview?.status !== "authorized" || !task.workflow?.revision) return false;
     const event = JSON.parse(String(row.value)) as {enabled?: boolean; changedAt?: number; globalFingerprint?: string | null};
     return event.enabled === this.useGlobalDefinitions(task.projectId) && Number.isFinite(event.changedAt) &&
       Boolean(event.globalFingerprint) && task.definitionReview.updatedAt >= event.changedAt! && task.workflow.revision === task.definitionSnapshot.revision &&
+      task.workflow.globalRevision === (task.definitionSnapshot.globalRevision ?? null) &&
       (!event.enabled || task.definitionSnapshot.globalRevision === event.globalFingerprint &&
         (globalFingerprint === undefined || globalFingerprint === event.globalFingerprint));
   }
   definitionUserGlobalToggle(definitions: ProjectDefinitionSnapshot, approved: ProjectDefinitionSnapshot, after: number, globalFingerprint: string | null): boolean {
     const row = this.store.db.prepare("SELECT value FROM meta WHERE key='supervisor_global_definitions_event'").get();
-    if (!row || definitions.status !== "ready" || approved.status !== "ready" || definitions.projectId !== approved.projectId ||
+    if (!row || !("projectConfig" in definitions) || !("projectConfig" in approved) || definitions.status !== "ready" || approved.status !== "ready" || !definitions.complete || !approved.complete || definitions.projectId !== approved.projectId ||
       definitions.threadId !== approved.threadId || definitions.workspaceRoot !== approved.workspaceRoot) return false;
     const event = JSON.parse(String(row.value)) as {generation?: number; enabled?: boolean; changedAt?: number; globalFingerprint?: string | null};
     if (event.enabled !== this.useGlobalDefinitions(definitions.projectId) || !Number.isFinite(event.changedAt) || event.changedAt! < after ||
@@ -224,8 +227,10 @@ export class ProjectSupervisorStore {
     if (!event.enabled && approved.globalRevision !== event.globalFingerprint) return false;
     const hasOrigins = (values: ReadonlyArray<{origin?: string | undefined}>) => values.every(value => value.origin === "global" || value.origin === "project");
     const local = <A extends {origin?: string | undefined}>(values: ReadonlyArray<A>) => values.filter(value => value.origin === "project");
-    return hasOrigins(definitions.rules) && hasOrigins(approved.rules) && hasOrigins(definitions.blocks) && hasOrigins(approved.blocks) &&
-      fingerprint(local(definitions.rules)) === fingerprint(local(approved.rules)) && fingerprint(local(definitions.blocks)) === fingerprint(local(approved.blocks));
+    return hasOrigins(definitions.steps) && hasOrigins(approved.steps) && hasOrigins(definitions.workflows) && hasOrigins(approved.workflows) &&
+      fingerprint(local(definitions.steps)) === fingerprint(local(approved.steps)) &&
+      fingerprint(local(definitions.workflows)) === fingerprint(local(approved.workflows)) &&
+      fingerprint(definitions.projectConfig) === fingerprint(approved.projectConfig);
   }
   enabled(projectId: string): boolean {return this.control(projectId).effectiveEnabled;}
   saveControl(projectId: string | null, expectedGeneration: number, enabled: boolean, baseline?: SupervisorBaseline): SupervisionControlInfo {
@@ -334,30 +339,48 @@ export class ProjectSupervisorStore {
     this.store.db.prepare("INSERT INTO supervisor_task_interpretations VALUES(?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET document=excluded.document,updated_at=excluded.updated_at").run(task.threadId, task.projectId, JSON.stringify(task), task.updatedAt);
   }
   recordDefinitionUserSave(definitions: ProjectDefinitionSnapshot, expectedRevision: string): void {
-    if (definitions.status !== "ready" || !definitions.revision || !expectedRevision) return;
+    if (definitions.status !== "ready" || !definitions.complete || !definitions.revision || !expectedRevision || !definitions.projectConfig) return;
     const now = Date.now();
     this.store.transaction(() => {
       this.store.db.prepare("INSERT INTO supervisor_definition_user_saves VALUES(?,?,?,?,?) ON CONFLICT(project_id,workspace_root) DO UPDATE SET signature=excluded.signature,saved_at=excluded.saved_at,expected_revision=excluded.expected_revision")
-        .run(definitions.projectId, definitions.workspaceRoot, fingerprint(definitions.rules), now, expectedRevision);
+        .run(definitions.projectId, definitions.workspaceRoot, fingerprint(definitions.projectConfig), now, expectedRevision);
       for (const task of this.tasks(definitions.projectId)) {
         if (task.status !== "inferred" || !task.workflow?.revision || task.workflow.workspaceRoot !== definitions.workspaceRoot) continue;
-        this.saveTask({...task, workflow: {...task.workflow, status: "stale", message: "Project rules were saved through the dashboard; the old plan needs revalidation."},
-          ...(task.agreement ? {agreement: {...task.agreement, status: "stale", message: "Rules were explicitly saved; this agreement is retained as history."}} : {}),
-          definitionReview: {status: "checking", message: "An explicit rule save is recorded. Independent block edits remain subject to authorization review.",
-            expectedRevision: task.workflow.revision, observedRevision: task.threadId === definitions.threadId ? definitions.revision : null,
-            supervisorMessageId: null, userMessageIds: [], updatedAt: now}, updatedAt: now});
+        const previousReview = task.definitionReview;
+        const definitionReview: DefinitionReviewInfo = {
+          status: "checking",
+          message: "An explicit project configuration save is recorded. Definition edits remain subject to authorization review.",
+          expectedRevision: task.workflow.revision,
+          observedRevision: previousReview?.observedRevision ?? null,
+          supervisorMessageId: null,
+          userMessageIds: [],
+          updatedAt: now,
+        };
+        this.saveTask({...task, workflow: {...task.workflow, status: "stale", message: "Project configuration was saved through the dashboard; the old plan needs revalidation."},
+          ...(task.agreement ? {agreement: {...task.agreement, status: "stale", message: "Project configuration was explicitly saved; this agreement is retained as history."}} : {}),
+          definitionReview, updatedAt: now});
       }
     });
   }
   definitionUserSave(definitions: ProjectDefinitionSnapshot, approved: ProjectDefinitionSnapshot, after: number): boolean {
+    if (!("projectConfig" in definitions) || !("projectConfig" in approved)) return false;
     const row = this.store.db.prepare("SELECT signature,saved_at,expected_revision FROM supervisor_definition_user_saves WHERE project_id=? AND workspace_root=?")
       .get(definitions.projectId, definitions.workspaceRoot);
-    const items: ReadonlyArray<{origin?: string | undefined}> = [...definitions.rules, ...definitions.blocks, ...approved.rules, ...approved.blocks];
+    const items: ReadonlyArray<{origin?: string | undefined}> = [...definitions.steps, ...definitions.workflows, ...approved.steps, ...approved.workflows];
     const originsKnown = items.every(item => item.origin === "global" || item.origin === "project");
-    const globalRulesUnchanged = fingerprint(definitions.rules.filter(rule => rule.origin === "global")) === fingerprint(approved.rules.filter(rule => rule.origin === "global"));
-    return definitions.status === "ready" && approved.status === "ready" && originsKnown && globalRulesUnchanged && approved.projectId === definitions.projectId &&
-      approved.workspaceRoot === definitions.workspaceRoot && fingerprint(definitions.blocks) === fingerprint(approved.blocks) &&
-      Boolean(row?.expected_revision) && row?.signature === fingerprint(definitions.rules) && Number(row.saved_at) >= after;
+    const globalStepsUnchanged = fingerprint(definitions.steps.filter(step => step.origin === "global")) === fingerprint(approved.steps.filter(step => step.origin === "global"));
+    const globalWorkflowsUnchanged = fingerprint(definitions.workflows.filter(workflow => workflow.origin === "global")) === fingerprint(approved.workflows.filter(workflow => workflow.origin === "global"));
+    const expectedRevision = typeof row?.expected_revision === "string" ? row.expected_revision : null;
+    const reviewedExpectedRevision = expectedRevision !== null && this.tasks(definitions.projectId).some(task =>
+      task.threadId === definitions.threadId && task.workflow?.revision === approved.revision &&
+      task.definitionReview?.expectedRevision === approved.revision && task.definitionReview.observedRevision === expectedRevision &&
+      task.definitionReview.updatedAt >= after && task.definitionReview.updatedAt <= Number(row?.saved_at));
+    return definitions.status === "ready" && approved.status === "ready" && definitions.complete && approved.complete && originsKnown &&
+      globalStepsUnchanged && globalWorkflowsUnchanged && definitions.globalRevision === approved.globalRevision &&
+      approved.projectId === definitions.projectId && approved.workspaceRoot === definitions.workspaceRoot &&
+      fingerprint(definitions.steps) === fingerprint(approved.steps) && fingerprint(definitions.workflows) === fingerprint(approved.workflows) &&
+      (expectedRevision === approved.revision || reviewedExpectedRevision) &&
+      row?.signature === fingerprint(definitions.projectConfig) && Number(row.saved_at) >= after;
   }
   recordGlobalDefinitionsPresence(presence: SupervisionFolderPresence): void {this.setGlobalFolderPresence(presence);}
   prune(now: number): string[] {

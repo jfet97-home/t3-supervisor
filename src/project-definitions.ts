@@ -5,13 +5,13 @@ import { parseDocument } from "yaml";
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import { ProjectFileError, type FreshGitProbe, type ProjectCommitter, type ProjectFiles } from "./project-files.js";
-import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
+import {workflowDefinitionExpansionLimits, type DefinitionNode, type DefinitionReference, type DefinitionStepInfo, type DefinitionWorkflowInfo, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
 
 const MAX_FILES = 100;
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_TOTAL_BYTES = 512 * 1024;
 type MutableSnapshot = {-readonly [K in keyof ProjectDefinitionSnapshot]: ProjectDefinitionSnapshot[K] extends ReadonlyArray<infer V> ? V[] : ProjectDefinitionSnapshot[K]};
-type MutableScopeSnapshot = {rules: ProjectDefinitionSnapshot["rules"][number][]; blocks: ProjectDefinitionSnapshot["blocks"][number][]; issues: ProjectDefinitionSnapshot["issues"][number][]};
+type MutableScopeSnapshot = {steps: DefinitionStepInfo[]; workflows: DefinitionWorkflowInfo[]; config: ProjectConfigurationInfo; projectConfig: ProjectConfigurationInfo | null; sources: ProjectDefinitionSnapshot["sources"][number][]; issues: ProjectDefinitionSnapshot["issues"][number][]};
 type DefinitionOrigin = "global" | "project";
 type DefinitionScopeStatus = "ready" | "missing" | "invalid" | "permission_required" | "unavailable";
 export type DefinitionCheckoutTarget = {origin: "project"; threadId: string | null; workspaceRoot: string; branch: string | null; isGitRepository: boolean};
@@ -33,10 +33,11 @@ export interface ProjectDefinitionLoaderOptions {
 }
 interface DefinitionScopeRead extends MutableScopeSnapshot {
   status: DefinitionScopeStatus;
+  complete: boolean;
   inputs: unknown[];
 }
 class DefinitionReadLimit extends Error {}
-const blockId = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const definitionId = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const record = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const text = (v: unknown, max = 8000): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= max;
 const exact = (v: Record<string, unknown>, fields: string[]) => Object.keys(v).length === fields.length && fields.every(f => Object.hasOwn(v, f));
@@ -48,54 +49,87 @@ const yaml = (contents: string): unknown => {
   catch {throw new Error("YAML aliases are not supported in project definitions.");}
 };
 
-export const parseDefinitionRules = (contents: string): ProjectDefinitionSnapshot["rules"] => {
-  const manifest = yaml(contents);
-  if (!record(manifest) || !exact(manifest, ["rules"]) || !Array.isArray(manifest.rules) || manifest.rules.length > MAX_FILES)
-    throw new Error("Expected a rules mapping containing at most 100 rules.");
-  const names = new Set<string>();
-  return manifest.rules.map(rule => {
-    if (!record(rule) || !exact(rule, ["name", "description", "required_blocks"]) || !text(rule.name, 160) || !text(rule.description) ||
-      !Array.isArray(rule.required_blocks) || rule.required_blocks.length === 0 || rule.required_blocks.length > MAX_FILES ||
-      !rule.required_blocks.every(id => typeof id === "string" && blockId.test(id)) || new Set(rule.required_blocks).size !== rule.required_blocks.length)
-      throw new Error("Each rule needs name, description and a nonempty list of unique block identifiers.");
-    const name = rule.name.trim();
-    if (names.has(name)) throw new Error("Rule names must be unique.");
-    names.add(name);
-    return {name, description: rule.description.trim(), required_blocks: rule.required_blocks as string[]};
+const definitionName = (value: unknown): value is string => text(value, 160);
+
+export const parseProjectConfiguration = (contents: string): ProjectConfigurationInfo => {
+  const config = yaml(contents);
+  if (!record(config) || !(exact(config, ["required"]) || exact(config, ["required", "default_workflow"])) ||
+    !Array.isArray(config.required) || config.required.length > MAX_FILES ||
+    config.default_workflow !== undefined && (typeof config.default_workflow !== "string" || !definitionId.test(config.default_workflow)))
+    throw new Error("project.yaml needs required: [] and an optional default_workflow identifier.");
+  const seen = new Set<string>();
+  const required = config.required.map(value => {
+    if (!record(value) || Object.keys(value).length !== 1 ||
+      !(typeof value.step === "string" && definitionId.test(value.step) || typeof value.workflow === "string" && definitionId.test(value.workflow)))
+      throw new Error("Each required item must name one reusable step or workflow.");
+    const reference: DefinitionReference = typeof value.step === "string" ? {step: value.step} : {workflow: value.workflow as string};
+    const key = "step" in reference ? `step:${reference.step}` : `workflow:${reference.workflow}`;
+    if (seen.has(key)) throw new Error("Required definition references must be unique.");
+    seen.add(key);
+    return reference;
   });
+  return {...(config.default_workflow === undefined ? {} : {default_workflow: config.default_workflow}), required};
 };
 
-export const parseDefinitionBlock = (id: string, contents: string): ProjectDefinitionSnapshot["blocks"][number] => {
+export const parseDefinitionStep = (id: string, contents: string): DefinitionStepInfo => {
   contents = contents.replace(/^\uFEFF/, "");
-  if (!blockId.test(id)) throw new Error("Invalid block filename.");
+  if (!definitionId.test(id)) throw new Error("Invalid step filename.");
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(contents);
-  if (!frontmatter) throw new Error("Block needs YAML frontmatter with name and description.");
+  if (!frontmatter) throw new Error("Step needs YAML frontmatter containing id, name and description.");
   const metadata = yaml(frontmatter[1]!);
-  if (!record(metadata) || !exact(metadata, ["name", "description"]) || !text(metadata.name, 160) || !text(metadata.description))
-    throw new Error("Block frontmatter needs only a nonempty name and description.");
-  const body = contents.slice(frontmatter[0].length);
-  const sections = new Map<string, string[]>();
-  let section: string | null = null;
-  let fence: {marker: string; length: number} | null = null;
-  for (const line of body.split(/\r?\n/)) {
-    const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-    const insideFence = fence !== null;
-    if (delimiter) {
-      if (!fence) fence = {marker: delimiter[1]![0]!, length: delimiter[1]!.length};
-      else if (delimiter[1]![0] === fence.marker && delimiter[1]!.length >= fence.length && delimiter[2]!.trim() === "") fence = null;
-    }
-    const heading = !insideFence && !delimiter ? /^ {0,3}##[ \t]+(.+?)\s*#*\s*$/.exec(line) : null;
-    if (heading) {
-      section = heading[1]!.trim();
-      if (sections.has(section)) throw new Error("Block section headings must be unique.");
-      sections.set(section, []);
-    } else if (section) sections.get(section)!.push(line);
+  if (!record(metadata) || !exact(metadata, ["id", "name", "description"]) || metadata.id !== id || !definitionName(metadata.name) || !text(metadata.description))
+    throw new Error("Step frontmatter needs only a matching id, name and nonempty description.");
+  if (contents.slice(frontmatter[0].length).trim() !== "") throw new Error("Step body must be empty; keep all guidance in description.");
+  return {id, name: metadata.name.trim(), description: metadata.description.trim()};
+};
+
+const parseNode = (value: unknown, depth: number, budget: {count: number}): DefinitionNode => {
+  if (depth > workflowDefinitionExpansionLimits.maxDepth || ++budget.count > workflowDefinitionExpansionLimits.maxNodes)
+    throw new Error("Workflow structure exceeds the nesting or expanded-node limit.");
+  if (!record(value) || Object.keys(value).length !== 1) throw new Error("Each workflow node must contain exactly one step, workflow, sequence or parallel key.");
+  if (Object.hasOwn(value, "step")) {
+    if (typeof value.step === "string" && definitionId.test(value.step)) return {step: value.step};
+    if (record(value.step) && exact(value.step, ["id", "name", "description"]) && typeof value.step.id === "string" &&
+      definitionId.test(value.step.id) && definitionName(value.step.name) && text(value.step.description))
+      return {step: {id: value.step.id, name: value.step.name.trim(), description: value.step.description.trim()}};
+    throw new Error("step must name a reusable step or define a local step with id, name and description.");
   }
-  const instructions = sections.get("Instructions")?.join("\n").trim();
-  const result = sections.get("Expected result")?.join("\n").trim();
-  if (!text(instructions, MAX_FILE_BYTES) || !text(result, MAX_FILE_BYTES))
-    throw new Error("Block needs nonempty Instructions and Expected result sections.");
-  return {id, name: metadata.name.trim(), description: metadata.description.trim(), instructions, expected_result: result};
+  if (Object.hasOwn(value, "workflow")) {
+    if (typeof value.workflow === "string" && definitionId.test(value.workflow)) return {workflow: value.workflow};
+    throw new Error("workflow must name a reusable workflow identifier.");
+  }
+  const key = Object.hasOwn(value, "sequence") ? "sequence" : "parallel";
+  const children = value[key];
+  if (!Array.isArray(children) || children.length === 0) throw new Error(`${key} must contain at least one workflow node.`);
+  return key === "sequence"
+    ? {sequence: children.map(child => parseNode(child, depth + 1, budget))}
+    : {parallel: children.map(child => parseNode(child, depth + 1, budget))};
+};
+
+const collectLocalStepIds = (nodes: readonly DefinitionNode[], into: string[] = []): string[] => {
+  for (const node of nodes) {
+    if ("step" in node && typeof node.step !== "string") into.push(node.step.id);
+    else if ("sequence" in node) collectLocalStepIds(node.sequence, into);
+    else if ("parallel" in node) collectLocalStepIds(node.parallel, into);
+  }
+  return into;
+};
+
+export const parseDefinitionWorkflow = (id: string, contents: string): DefinitionWorkflowInfo => {
+  if (!definitionId.test(id)) throw new Error("Invalid workflow filename.");
+  const metadata = yaml(contents.replace(/^\uFEFF/, ""));
+  const hasSequence = record(metadata) && Object.hasOwn(metadata, "sequence");
+  const hasParallel = record(metadata) && Object.hasOwn(metadata, "parallel");
+  const fields = ["name", "description", ...(record(metadata) && Object.hasOwn(metadata, "fixed") ? ["fixed"] : []), ...(hasSequence ? ["sequence"] : []), ...(hasParallel ? ["parallel"] : [])];
+  if (!record(metadata) || !exact(metadata, fields) || hasSequence === hasParallel || !definitionName(metadata.name) || !text(metadata.description) ||
+    metadata.fixed !== undefined && typeof metadata.fixed !== "boolean")
+    throw new Error("A workflow needs name, description, optional fixed and exactly one root sequence or parallel group.");
+  const root = hasSequence ? parseNode({sequence: metadata.sequence}, 0, {count: 0}) : parseNode({parallel: metadata.parallel}, 0, {count: 0});
+  const nodes = hasSequence ? (root as {sequence: readonly DefinitionNode[]}).sequence : (root as {parallel: readonly DefinitionNode[]}).parallel;
+  const localIds = collectLocalStepIds(nodes);
+  if (new Set(localIds).size !== localIds.length) throw new Error("Local step identifiers must be unique within a workflow.");
+  return {id, name: metadata.name.trim(), description: metadata.description.trim(), fixed: metadata.fixed === true,
+    ...(hasSequence ? {sequence: (root as {sequence: readonly DefinitionNode[]}).sequence} : {parallel: (root as {parallel: readonly DefinitionNode[]}).parallel})};
 };
 
 /** Loads validated definitions from the operative checkout and shared T3 user home. */
@@ -182,150 +216,265 @@ export class ProjectDefinitionLoader {
     }
   }
 
-  private async readScope(root: string, origin: DefinitionOrigin, signal: AbortSignal, byteCounter: {value: number}, rulesSource?: (contents: string) => void): Promise<DefinitionScopeRead> {
-    const scope: DefinitionScopeRead = {status: "unavailable", rules: [], blocks: [], issues: [], inputs: []};
+  private async readScope(root: string, origin: DefinitionOrigin, signal: AbortSignal, budget: {value: number; files: number}): Promise<DefinitionScopeRead> {
+    const scope: DefinitionScopeRead = {status: "unavailable", complete: false, steps: [], workflows: [], config: {required: []}, projectConfig: null, sources: [], issues: [], inputs: []};
     const base = origin === "global" ? this.globalDefinitionsPath() : ".t3-supervisor";
     const showPath = (path: string) => path === "" ? base : `${base}/${path.replace(/^\.t3-supervisor\//, "")}`;
     const issue = (path: string, code: string, message: string) => scope.issues.push({path, code, message});
+    const markIncomplete = () => {scope.complete = false;};
+    let permissionRequired = false;
+    let unavailable = false;
+    const noteReadFailure = (error: unknown) => {
+      if (error instanceof ProjectFileError && error.code === "permission_required") permissionRequired = true;
+      else if (error instanceof ProjectFileError && error.code !== "invalid_file" && error.code !== "missing") unavailable = true;
+    };
+    const readSource = async (path: string): Promise<string> => {
+      const safeChild = /^\.t3-supervisor\/(?:steps|workflows)\/[^/\\\0]+$/.test(path) && ![".", ".."].includes(path.slice(path.lastIndexOf("/") + 1));
+      if (path !== ".t3-supervisor/project.yaml" && !safeChild) throw new Error("Definition source paths must stay within project.yaml, steps/ or workflows/.");
+      const file = await this.files.read(root, path, signal);
+      scope.inputs.push([path, file]);
+      budget.value += file.byteLength;
+      if (budget.value > MAX_TOTAL_BYTES) throw new DefinitionReadLimit("Definition sources exceed the 512 KiB combined limit.");
+      if (file.truncated || file.byteLength > MAX_FILE_BYTES || (Buffer.byteLength(file.contents, "utf8") !== file.byteLength && Buffer.byteLength(file.contents, "utf8") + 3 !== file.byteLength))
+        throw new DefinitionReadLimit("Definition sources must be complete, at most 64 KiB each and 512 KiB combined.");
+      scope.sources.push({path: showPath(path), content: file.contents, origin});
+      return file.contents;
+    };
     try {
-      let entries: Awaited<ReturnType<ProjectFiles["list"]>>;
-      if (origin === "global") {
-        if (!await this.files.directoryExists(root, signal)) {
-          scope.inputs.push(["home", "unavailable"]);
-          issue(base, "global_home_unavailable", "The T3 server user's home directory is unavailable.");
+      if (!await this.files.directoryExists(root, signal)) {
+        scope.inputs.push(["root", "missing"]);
+        scope.status = "unavailable";
+        scope.complete = false;
+        issue(base, origin === "project" ? "workspace_missing" : "global_home_unavailable", origin === "project"
+          ? "The selected T3 workspace directory is unavailable."
+          : "The T3 server user's home directory is unavailable.");
+        return scope;
+      }
+      if (origin === "project" && !await this.files.directoryExists(posix.join(root, ".t3-supervisor"), signal)) {
+        scope.inputs.push(["folder", false]);
+        scope.status = "missing";
+        scope.complete = true;
+        return scope;
+      }
+      let listing: Awaited<ReturnType<ProjectFiles["list"]>>;
+      try {listing = await this.files.list(root, ".t3-supervisor", signal);}
+      catch (error) {
+        if (error instanceof ProjectFileError && error.code === "missing") {
+          scope.inputs.push(["folder", false]);
+          scope.status = "missing";
+          scope.complete = true;
+          if (origin === "global") issue(base, "global_definitions_missing", "The enabled global .t3-supervisor folder is missing; shared requirements remain unknown.");
           return scope;
         }
-        try {entries = await this.files.list(root, ".t3-supervisor", signal);}
-        catch (error) {
-          if (error instanceof ProjectFileError && error.code === "missing") {
-            scope.inputs.push(["home-folder", "missing"]);
-            scope.status = "missing";
-            return scope;
-          }
-          scope.status = error instanceof ProjectFileError && error.code === "permission_required" ? "permission_required" : "unavailable";
-          issue(base, scope.status, "The global definition folder became unreadable after its presence was observed.");
-          return scope;
+        throw error;
+      }
+      scope.inputs.push(["folder", true], ["listing", {...listing, entries: [...listing.entries].sort((a, b) => a.path.localeCompare(b.path))}]);
+      scope.complete = !listing.truncated && new Set(listing.entries.map(entry => entry.path)).size === listing.entries.length;
+      scope.status = "ready";
+      if (listing.truncated) issue(base, "listing_truncated", "The definition folder listing is incomplete.");
+      if (new Set(listing.entries.map(entry => entry.path)).size !== listing.entries.length) issue(base, "listing_duplicate", "The definition folder listing contains duplicate paths.");
+      if (!scope.complete) markIncomplete();
+
+      const entries = [...listing.entries].sort((a, b) => a.path.localeCompare(b.path));
+      const projectFile = ".t3-supervisor/project.yaml";
+      const configEntry = entries.find(entry => entry.path === projectFile);
+      for (const entry of entries) {
+        if ([projectFile, ".t3-supervisor/steps", ".t3-supervisor/workflows", ".t3-supervisor/.DS_Store"].includes(entry.path)) continue;
+        if ([".t3-supervisor/rules.yaml", ".t3-supervisor/blocks"].includes(entry.path))
+          issue(showPath(entry.path), "legacy_definition_format", "The old rules.yaml/blocks format is not loaded. Replace it with project.yaml, steps/ and workflows/; use required: [] for no requirements.");
+        else issue(base, "unexpected_definition_entry", "Only project.yaml, steps/ and workflows/ belong in the definition folder. Unexpected entries are reported but not read.");
+      }
+      if (configEntry?.kind === "file") {
+        budget.files++;
+        if (budget.files > MAX_FILES) {
+          issue(showPath(projectFile), "definition_file_limit", "The active scopes exceed the 100 definition-file limit.");
+          markIncomplete();
+        } else {
+          try {
+            const contents = await readSource(projectFile);
+            try {scope.config = scope.projectConfig = parseProjectConfiguration(contents);}
+            catch (error) {issue(showPath(projectFile), "project_configuration_invalid", error instanceof Error ? error.message : "project.yaml is invalid.");}
+          } catch (error) {markIncomplete();noteReadFailure(error);issue(showPath(projectFile), "definition_source_unreadable", error instanceof Error ? error.message : "project.yaml could not be read.");}
         }
-        scope.inputs.push(["home-folder", "directory"]);
       } else {
-        if (!await this.files.directoryExists(root, signal)) {
-          scope.inputs.push(["workspace", "unavailable"]);
-          issue("", "workspace_missing", "The T3 workspace directory is unavailable.");
-          return scope;
-        }
-        const folderExists = await this.files.directoryExists(posix.join(root, ".t3-supervisor"), signal);
-        scope.inputs.push(["folder", folderExists]);
-        if (!folderExists) {scope.status = "missing";return scope;}
-        try {entries = await this.files.list(root, ".t3-supervisor", signal);}
-        catch (error) {
-          if (error instanceof ProjectFileError && error.code === "missing") {scope.inputs.push(["folder", false]);scope.status = "missing";return scope;}
-          throw error;
-        }
-        scope.inputs.push(["folder", true]);
+        if (configEntry) markIncomplete();
+        issue(showPath(projectFile), configEntry ? "project_configuration_invalid_path" : "configuration_missing",
+          configEntry ? "project.yaml must be a regular file." : "Add project.yaml with a required list; use required: [] for no requirements.");
       }
-      scope.inputs.push(["listing", {...entries, entries: [...entries.entries].sort((a, b) => a.path.localeCompare(b.path))}]);
-      const read = async (path: string) => {
-        const file = await this.files.read(root, path, signal);
-        scope.inputs.push([path, file]);
-        const decodedBytes = Buffer.byteLength(file.contents, "utf8");
-        byteCounter.value += file.byteLength;
-        if (byteCounter.value > MAX_TOTAL_BYTES) throw new DefinitionReadLimit("Definition files exceed the 512 KiB combined limit.");
-        if (file.truncated || file.byteLength > MAX_FILE_BYTES || (decodedBytes !== file.byteLength && decodedBytes + 3 !== file.byteLength))
-          throw new Error("Definition files must be complete, at most 64 KiB each and 512 KiB combined.");
-        return file.contents;
-      };
-      const parseFile = async (path: string, accept: (contents: string) => void) => {
-        try {accept(await read(path));}
+
+      const readDefinitions = async (kind: "steps" | "workflows") => {
+        const directoryPath = `.t3-supervisor/${kind}`;
+        const directory = entries.find(entry => entry.path === directoryPath);
+        if (!directory) {
+          issue(showPath(directoryPath), `${kind}_directory_missing`, `Add the ${kind}/ directory to the definition folder.`);
+          return;
+        }
+        if (directory.kind !== "directory") {
+          markIncomplete();
+          issue(showPath(directoryPath), `${kind}_directory_invalid`, `${kind}/ must be a directory.`);
+          return;
+        }
+        let collection: Awaited<ReturnType<ProjectFiles["list"]>>;
+        try {collection = await this.files.list(root, directoryPath, signal);}
         catch (error) {
-          if (error instanceof DefinitionReadLimit) throw error;
-          if (error instanceof ProjectFileError && error.code !== "missing" && error.code !== "invalid_file") throw error;
-          issue(showPath(path), error instanceof ProjectFileError ? error.code === "missing" ? "file_missing" : "invalid_file" : "invalid_definition", error instanceof Error ? error.message : "Invalid definition.");
+          markIncomplete();
+          noteReadFailure(error);
+          issue(showPath(directoryPath), `${kind}_listing_unavailable`, error instanceof Error ? error.message : `The ${kind}/ directory could not be listed.`);
+          return;
+        }
+        scope.inputs.push([`${kind}-listing`, {...collection, entries: [...collection.entries].sort((a, b) => a.path.localeCompare(b.path))}]);
+        if (collection.truncated || new Set(collection.entries.map(entry => entry.path)).size !== collection.entries.length) {
+          markIncomplete();
+          issue(showPath(directoryPath), `${kind}_listing_incomplete`, `The ${kind}/ listing is truncated or contains duplicate paths.`);
+        }
+        const files = [...collection.entries].filter(entry => entry.kind === "file" && entry.path !== `${directoryPath}/.gitkeep` &&
+          entry.path !== `${directoryPath}/.DS_Store`)
+          .sort((a, b) => a.path.localeCompare(b.path));
+        const directChild = (candidate: string) => {
+          const prefix = `${directoryPath}/`;
+          if (!candidate.startsWith(prefix)) return false;
+          const name = candidate.slice(prefix.length);
+          return name.length > 0 && !name.includes("/") && !name.includes("\\") && !name.includes("\0") && name !== "." && name !== "..";
+        };
+        const namesByCase = new Map<string, string[]>();
+        for (const entry of files) {
+          const name = entry.path.slice(directoryPath.length + 1).toLowerCase();
+          namesByCase.set(name, [...(namesByCase.get(name) ?? []), entry.path]);
+        }
+        for (const names of namesByCase.values()) if (names.length > 1)
+          for (const name of names) issue(showPath(name), `${kind}_case_collision`, `${kind}/ contains filenames that differ only by letter case: ${names.join(", ")}.`);
+        if (collection.entries.some(entry => entry.kind === "directory")) {
+          issue(showPath(directoryPath), `${kind}_nested_directory`, `${kind}/ definitions must be direct files.`);
+        }
+        for (const entry of files) {
+          if (!directChild(entry.path)) {
+            markIncomplete();
+            issue(showPath(directoryPath), `${kind}_path_invalid`, `${kind}/ listings must contain direct child paths only.`);
+            continue;
+          }
+          const match = kind === "steps"
+            ? /^\.t3-supervisor\/steps\/([a-z0-9][a-z0-9_-]{0,63})\.md$/.exec(entry.path)
+            : /^\.t3-supervisor\/workflows\/([a-z0-9][a-z0-9_-]{0,63})\.yaml$/.exec(entry.path);
+          if (!match) {
+            issue(showPath(entry.path), `${kind}_path_invalid`, kind === "steps"
+              ? "Steps must be direct lowercase Markdown files named with simple identifiers. Unsupported files are reported but not read."
+              : "Workflows must be direct lowercase YAML files named with simple identifiers. Unsupported files are reported but not read.");
+            continue;
+          }
+          budget.files++;
+          if (budget.files > MAX_FILES) {
+            issue(showPath(entry.path), "definition_file_limit", "The active scopes exceed the 100 definition-file limit.");
+            markIncomplete();
+            continue;
+          }
+          let contents: string;
+          try {contents = await readSource(entry.path);}
+          catch (error) {
+            markIncomplete();
+            noteReadFailure(error);
+            issue(showPath(entry.path), "definition_source_unreadable", error instanceof Error ? error.message : "The definition source could not be read.");
+            continue;
+          }
+          try {
+            const value = kind === "steps" ? parseDefinitionStep(match[1]!, contents) : parseDefinitionWorkflow(match[1]!, contents);
+            if (kind === "steps") scope.steps.push({...value as DefinitionStepInfo, origin, path: showPath(entry.path), sourceId: match[1]!});
+            else scope.workflows.push({...value as DefinitionWorkflowInfo, origin, path: showPath(entry.path), sourceId: match[1]!});
+          } catch (error) {
+            issue(showPath(entry.path), `${kind}_invalid`, error instanceof Error ? error.message : `The ${kind} definition is invalid.`);
+          }
         }
       };
-      if (entries.truncated) issue(base, "listing_truncated", "The definition directory listing is incomplete.");
-      const rulesPath = ".t3-supervisor/rules.yaml";
-      if (entries.entries.some(entry => entry.path === rulesPath && entry.kind === "file")) {
-        await parseFile(rulesPath, contents => {
-          scope.rules = parseDefinitionRules(contents).map(rule => ({...rule, origin, path: showPath(rulesPath)}));
-          if (origin === "project") rulesSource?.(contents);
-        });
-      } else issue(showPath(rulesPath), "rules_missing", "Add rules.yaml with a rules list; use rules: [] for no requirements.");
-      const blocksPath = ".t3-supervisor/blocks";
-      if (entries.entries.some(entry => entry.path === blocksPath && entry.kind === "directory")) {
-        const blocks = await this.files.list(root, blocksPath, signal);
-        scope.inputs.push(["blocks-listing", {...blocks, entries: [...blocks.entries].sort((a, b) => a.path.localeCompare(b.path))}]);
-        const blockFiles = blocks.entries.filter(entry => entry.kind === "file" && entry.path.endsWith(".md"));
-        if (blocks.truncated || blockFiles.length > MAX_FILES || new Set(blocks.entries.map(entry => entry.path)).size !== blocks.entries.length)
-          issue(showPath(blocksPath), "block_limit", "The block listing is incomplete, duplicated or exceeds 100 Markdown blocks.");
-        for (const entry of blockFiles.slice(0, MAX_FILES).sort((a, b) => a.path.localeCompare(b.path))) {
-          const match = /^\.t3-supervisor\/blocks\/([a-z0-9][a-z0-9_-]{0,63})\.md$/.exec(entry.path);
-          if (!match) {issue(showPath(blocksPath), "block_path_invalid", "Blocks must be direct Markdown files with simple lowercase identifiers.");continue;}
-          await parseFile(entry.path, contents => {
-            scope.blocks.push({...parseDefinitionBlock(match[1]!, contents), origin, path: showPath(entry.path), sourceId: match[1]!});
-          });
-        }
-      }
-      scope.status = scope.issues.length ? "invalid" : "ready";
+      await readDefinitions("steps");
+      await readDefinitions("workflows");
+      scope.status = permissionRequired ? "permission_required" : unavailable ? "unavailable" : scope.issues.length ? "invalid" : "ready";
     } catch (error) {
-      scope.status = error instanceof DefinitionReadLimit ? "invalid" : error instanceof ProjectFileError && error.code === "permission_required" ? "permission_required" : "unavailable";
-      issue(base, scope.status, error instanceof ProjectFileError || error instanceof DefinitionReadLimit ? error.message : "Project definitions could not be read; check the T3 connection and workspace.");
-      if (!(error instanceof DefinitionReadLimit)) {
-        scope.rules = [];
-        scope.blocks = [];
-      }
+      const permission = error instanceof ProjectFileError && error.code === "permission_required";
+      scope.status = permission ? "permission_required" : error instanceof DefinitionReadLimit ? "invalid" : error instanceof ProjectFileError ? "unavailable" : "unavailable";
+      markIncomplete();
+      issue(base, permission ? "permission_required" : error instanceof DefinitionReadLimit ? "definition_source_limit" : "definition_scope_unavailable",
+        error instanceof Error ? error.message : "Project definitions could not be read; check the T3 connection and workspace.");
     }
     return scope;
   }
 
   private namespaceGlobal(global: DefinitionScopeRead, project: DefinitionScopeRead): DefinitionScopeRead {
-    const usedIds = new Set(project.blocks.map(block => block.id));
-    const sourceIds = new Set<string>();
-    for (const block of global.blocks) sourceIds.add(block.sourceId ?? block.id);
-    for (const rule of global.rules) for (const id of rule.required_blocks) sourceIds.add(id);
-    const idMap = new Map<string, string>();
-    for (const sourceId of [...sourceIds].sort()) {
-      let counter = 0;
-      let id: string;
-      do {
-        const digest = createHash("sha256").update(`global-block\0${sourceId}\0${counter++}`).digest("hex");
-        id = `g${digest.slice(0, 63)}`;
-      } while (usedIds.has(id));
-      usedIds.add(id);
-      idMap.set(sourceId, id);
+    const usedSteps = new Set(project.steps.map(step => step.id));
+    const usedWorkflows = new Set(project.workflows.map(workflow => workflow.id));
+    const knownSteps = new Set(global.steps.map(step => step.sourceId ?? step.id));
+    const knownWorkflows = new Set(global.workflows.map(workflow => workflow.sourceId ?? workflow.id));
+    const report = (path: string, code: string, message: string) => global.issues.push({path, code, message});
+    const stepRefs = new Set<string>(global.steps.map(step => step.sourceId ?? step.id));
+    const workflowRefs = new Set<string>(global.workflows.map(workflow => workflow.sourceId ?? workflow.id));
+    for (const reference of global.config.required) {
+      const id = "step" in reference ? reference.step : reference.workflow;
+      ("step" in reference ? stepRefs : workflowRefs).add(id);
+      if ("step" in reference && !knownSteps.has(id)) report(`${this.globalDefinitionsPath()}/project.yaml`, "required_step_missing", `Required global step ${id} is missing or invalid.`);
+      if ("workflow" in reference && !knownWorkflows.has(id)) report(`${this.globalDefinitionsPath()}/project.yaml`, "required_workflow_missing", `Required global workflow ${id} is missing or invalid.`);
     }
-    global.blocks = global.blocks.map(block => ({...block, id: idMap.get(block.sourceId ?? block.id)!}));
-    const usedNames = new Set(project.rules.map(rule => rule.name));
-    global.rules = global.rules.map(rule => {
-      let name = rule.name;
-      if (usedNames.has(name)) {
-        const baseSuffix = ` [global ${createHash("sha256").update(`global-rule\0${rule.name}`).digest("hex").slice(0, 12)}]`;
-        let suffix = baseSuffix;
-        const prefix = "Global: ";
-        let available = 160 - prefix.length - suffix.length;
-        name = `${prefix}${rule.name.slice(0, available)}${suffix}`;
-        let duplicate = 1;
-        while (usedNames.has(name)) {
-          suffix = `${baseSuffix.slice(0, -1)}-${duplicate++}]`;
-          available = 160 - prefix.length - suffix.length;
-          name = `${prefix}${rule.name.slice(0, available)}${suffix}`;
+    if (global.config.default_workflow) workflowRefs.add(global.config.default_workflow);
+    if (global.config.default_workflow && !knownWorkflows.has(global.config.default_workflow))
+      report(`${this.globalDefinitionsPath()}/project.yaml`, "default_workflow_missing", `Default global workflow ${global.config.default_workflow} is missing or invalid.`);
+    const collectReferences = (nodes: readonly DefinitionNode[]) => {
+      for (const node of nodes) {
+        if ("step" in node && typeof node.step === "string") {
+          stepRefs.add(node.step);
+          if (!knownSteps.has(node.step)) report("", "workflow_step_missing", `A global workflow references missing or invalid step ${node.step}.`);
+        } else if ("workflow" in node) {
+          workflowRefs.add(node.workflow);
+          if (!knownWorkflows.has(node.workflow)) report("", "workflow_reference_missing", `A global workflow references missing or invalid workflow ${node.workflow}.`);
         }
+        else if ("sequence" in node) collectReferences(node.sequence);
+        else if ("parallel" in node) collectReferences(node.parallel);
       }
-      usedNames.add(name);
-      return {...rule, name, required_blocks: rule.required_blocks.map(id => idMap.get(id)!), origin: "global", path: `${this.globalDefinitionsPath()}/rules.yaml`};
-    });
+    };
+    for (const workflow of global.workflows) {
+      const before = global.issues.length;
+      collectReferences(workflow.sequence ?? workflow.parallel ?? []);
+      for (let index = before; index < global.issues.length; index++) if (!global.issues[index]!.path) global.issues[index] = {...global.issues[index]!, path: workflow.path ?? this.globalDefinitionsPath()};
+    }
+    const makeMap = (ids: Set<string>, used: Set<string>, namespace: string) => {
+      const map = new Map<string, string>();
+      for (const sourceId of [...ids].sort()) {
+        let counter = 0;
+        let id: string;
+        do {id = `g${createHash("sha256").update(`${namespace}\0${sourceId}\0${counter++}`).digest("hex").slice(0, 63)}`;}
+        while (used.has(id));
+        used.add(id);
+        map.set(sourceId, id);
+      }
+      return map;
+    };
+    const stepMap = makeMap(stepRefs, usedSteps, "global-step");
+    const workflowMap = makeMap(workflowRefs, usedWorkflows, "global-workflow");
+    const rewriteNode = (node: DefinitionNode): DefinitionNode => {
+      if ("step" in node) return typeof node.step === "string" ? {step: stepMap.get(node.step)!} : node;
+      if ("workflow" in node) return {workflow: workflowMap.get(node.workflow)!};
+      if ("sequence" in node) return {sequence: node.sequence.map(rewriteNode)};
+      return {parallel: node.parallel.map(rewriteNode)};
+    };
+    global.steps = global.steps.map(step => ({...step, id: stepMap.get(step.sourceId ?? step.id)!}));
+    global.workflows = global.workflows.map(workflow => ({
+      ...workflow,
+      id: workflowMap.get(workflow.sourceId ?? workflow.id)!,
+      ...(workflow.sequence ? {sequence: workflow.sequence.map(rewriteNode)} : {}),
+      ...(workflow.parallel ? {parallel: workflow.parallel.map(rewriteNode)} : {}),
+    }));
+    global.config = {
+      required: global.config.required.map(reference => "step" in reference
+        ? {step: stepMap.get(reference.step)!} : {workflow: workflowMap.get(reference.workflow)!}),
+      ...(global.config.default_workflow ? {default_workflow: workflowMap.get(global.config.default_workflow)!} : {}),
+    };
     return global;
   }
 
   private fingerprintGlobalScope(scope: DefinitionScopeRead): string | null {
-    if (scope.status === "unavailable" || scope.status === "permission_required" ||
-      scope.issues.some(item => item.code === "listing_truncated" || item.code === "block_limit" || item.code === "invalid_file" ||
-        item.message.includes("512 KiB combined limit"))) return null;
+    if (!scope.complete || scope.status === "unavailable" || scope.status === "permission_required") return null;
     return createHash("sha256").update(JSON.stringify([this.globalDefinitionsPath(), scope.status, scope.inputs])).digest("hex");
   }
 
   async globalFingerprint(signal: AbortSignal): Promise<string | null> {
     if (!this.globalRoot) return null;
-    const scope = await this.readScope(this.globalRoot, "global", signal, {value: 0});
+    const scope = await this.readScope(this.globalRoot, "global", signal, {value: 0, files: 0});
     return this.fingerprintGlobalScope(scope);
   }
 
@@ -414,7 +563,7 @@ export class ProjectDefinitionLoader {
     if (!exactFreshPaths)
       return {status: "conflict", branch: fresh.branch, message: expectedPaths.length === 0
         ? "Create + commit requires a clean checkout with no existing tracked, staged or untracked changes."
-        : "Only the two new .t3-supervisor setup files may be changed before commit."};
+      : "Only the three new .t3-supervisor setup files may be changed before commit."};
     const latestRoot = await this.targetWorkspace(projectId, threadId, signal).catch(() => null);
     if (latestRoot !== root) return {status: "stale", branch: fresh.branch, message: "The selected checkout changed during the fresh Git check; reload the setup choices."};
     return {status: "safe", branch: fresh.branch};
@@ -461,9 +610,12 @@ export class ProjectDefinitionLoader {
       const currentVcs = await this.files.vcsInfo(root, signal);
       if (currentRoot !== root || currentVcs.branch !== expectedBranch) return this.setupOutcome("stale", root, currentVcs.branch, "The selected checkout changed before setup began.", path);
     }
-    const rulesPath = ".t3-supervisor/rules.yaml";
-    const markerPath = ".t3-supervisor/blocks/.gitkeep";
-    const rulesContents = "rules: []\n";
+    const configPath = ".t3-supervisor/project.yaml";
+    const stepsMarkerPath = ".t3-supervisor/steps/.gitkeep";
+    const workflowsMarkerPath = ".t3-supervisor/workflows/.gitkeep";
+    const configContents = "required: []\n";
+    const filesToCreate = [configPath, stepsMarkerPath, workflowsMarkerPath] as const;
+    const written = new Set<string>();
     let safetyMessage: string | null = null;
     const safeWrite = async (filePath: string, contents: string): Promise<"written" | "conflict" | "stale" | "permission_required" | "unavailable" | "uncertain"> => {
       try {
@@ -471,23 +623,37 @@ export class ProjectDefinitionLoader {
         // native writeFile has no create-only precondition, so the existence guard cannot eliminate external races.
         if (signal.aborted) return "stale";
         const presence = await this.scopePresence(root, origin === "global", signal);
-        if (filePath === rulesPath && presence.status === "present") return "conflict";
-        if (filePath === rulesPath && presence.status === "unavailable") return "uncertain";
-        if (filePath === markerPath) {
-          if (presence.status !== "present") return "uncertain";
-          const contentsListing = await this.files.list(root, ".t3-supervisor", signal);
-          if (contentsListing.truncated) return "uncertain";
-          const allowedEntries = new Set([rulesPath, ".t3-supervisor/blocks"]);
-          if (contentsListing.entries.some(entry => !allowedEntries.has(entry.path) || entry.path === rulesPath && entry.kind !== "file" || entry.path === ".t3-supervisor/blocks" && entry.kind !== "directory")) return "conflict";
-          if (contentsListing.entries.some(entry => entry.path === ".t3-supervisor/blocks")) return "conflict";
-          const rules = await this.files.read(root, rulesPath, signal);
-          if (rules.truncated || rules.contents !== rulesContents) return "conflict";
+        if (presence.status === "unavailable") return "uncertain";
+        if (filePath === configPath && presence.status === "present") return "conflict";
+        if (filePath !== configPath && presence.status !== "present") return "uncertain";
+        const folderListing = presence.status === "missing"
+          ? {truncated: false, entries: [] as Array<{path: string; kind: "file" | "directory"}>}
+          : await this.files.list(root, ".t3-supervisor", signal);
+        if (folderListing.truncated) return "uncertain";
+        const expectedRoot = new Map<string, "file" | "directory">();
+        if (written.has(configPath)) expectedRoot.set(configPath, "file");
+        if (written.has(stepsMarkerPath)) expectedRoot.set(".t3-supervisor/steps", "directory");
+        if (written.has(workflowsMarkerPath)) expectedRoot.set(".t3-supervisor/workflows", "directory");
+        const observedRoot = new Map(folderListing.entries.map(entry => [entry.path, entry.kind]));
+        if (observedRoot.size !== folderListing.entries.length || observedRoot.size !== expectedRoot.size ||
+          [...expectedRoot].some(([path, kind]) => observedRoot.get(path) !== kind)) return "conflict";
+        for (const [markerPath, directoryPath] of [[stepsMarkerPath, ".t3-supervisor/steps"], [workflowsMarkerPath, ".t3-supervisor/workflows"]] as const) {
+          if (!written.has(markerPath)) continue;
+          const directoryListing = await this.files.list(root, directoryPath, signal);
+          if (directoryListing.truncated) return "uncertain";
+          if (directoryListing.entries.length !== 1 || directoryListing.entries[0]?.path !== markerPath || directoryListing.entries[0]?.kind !== "file") return "conflict";
+          const marker = await this.files.read(root, markerPath, signal);
+          if (marker.truncated || marker.contents !== "") return "conflict";
         }
+        const existing = await this.files.read(root, filePath, signal).then(() => "present" as const).catch(error =>
+          error instanceof ProjectFileError && error.code === "missing" ? "missing" as const : "unknown" as const);
+        if (existing === "present") return "conflict";
+        if (existing === "unknown") return "uncertain";
         if (signal.aborted) return "stale";
         if (origin === "project" && projectId && action === "create_and_commit") {
-          const expectedPaths = filePath === markerPath ? [rulesPath] : [];
+          const expectedPaths = [...written];
           const safety = await this.checkCommitSafety(projectId, threadId ?? null, root, expectedBranch ?? null, expectedPaths, signal);
-          if (safety.status !== "safe") safetyMessage = safety.message;
+          if (safety.status !== "safe") safetyMessage = `${safety.message} ${written.size ? "Files created so far were left uncommitted." : "No setup files were written."}`;
           if (safety.status === "stale") return "stale";
           if (safety.status === "conflict") return "conflict";
           if (safety.status === "unavailable") return "unavailable";
@@ -499,54 +665,60 @@ export class ProjectDefinitionLoader {
         if (signal.aborted) return "stale";
         await setupWriter.writeFile(root, filePath, contents, signal);
         const readback = await this.files.read(root, filePath, signal);
-        return readback.truncated || readback.contents !== contents ? "uncertain" : "written";
+        if (readback.truncated || readback.contents !== contents) return "uncertain";
+        written.add(filePath);
+        return "written";
       } catch (error) {
         if (error instanceof ProjectFileError && error.code === "permission_required") return "permission_required";
         return "uncertain";
       }
     };
-    const rulesResult = await safeWrite(rulesPath, rulesContents);
-    if (rulesResult !== "written") return this.setupOutcome(rulesResult === "permission_required" ? "permission_required" : rulesResult === "conflict" ? "conflict" : rulesResult === "stale" ? "stale" : rulesResult === "unavailable" ? "unavailable" : "uncertain", root, expectedBranch ?? null,
-      rulesResult === "stale" ? "Setup stopped because the selected checkout changed or was canceled before writing." :
-        rulesResult === "conflict" ? safetyMessage ?? "The target changed during setup; existing files were preserved." :
-          rulesResult === "unavailable" ? safetyMessage ?? "A fresh local Git status could not be verified; no setup files were written." :
-            "The new rules file could not be confirmed; a partial scaffold may remain, left uncommitted, and setup was not enabled.", path);
-    const markerResult = await safeWrite(markerPath, "");
-    if (markerResult !== "written") return this.setupOutcome(markerResult === "permission_required" ? "permission_required" : markerResult === "conflict" ? "conflict" : markerResult === "stale" ? "stale" : markerResult === "unavailable" ? "unavailable" : "uncertain", root, expectedBranch ?? null,
-      markerResult === "stale" ? "Setup stopped because the selected checkout changed or was canceled. The rules file was created and left uncommitted." :
-        markerResult === "conflict" ? safetyMessage ? safetyMessage + " The rules file was created and left uncommitted." : "The target changed during setup. The rules file was created and left uncommitted; existing files were preserved." :
-          markerResult === "unavailable" ? (safetyMessage ?? "A fresh local Git status could not be confirmed.") + " The rules file was created and left uncommitted." :
-          "The blocks marker could not be confirmed. The rules file may remain, left uncommitted, and setup was not enabled.", path);
-    if (action === "create") return this.setupOutcome("created", root, expectedBranch ?? null, "Created .t3-supervisor/rules.yaml and blocks/.gitkeep; both files are uncommitted.", path);
+    for (const [index, filePath] of filesToCreate.entries()) {
+      const contents = filePath === configPath ? configContents : "";
+      const result = await safeWrite(filePath, contents);
+      if (result !== "written") return this.setupOutcome(result === "permission_required" ? "permission_required" : result === "conflict" ? "conflict" : result === "stale" ? "stale" : result === "unavailable" ? "unavailable" : "uncertain", root, expectedBranch ?? null,
+        result === "stale" ? (written.size ? "Setup stopped because the selected checkout changed or was canceled; files created so far were left uncommitted." : "Setup stopped because the selected checkout changed or was canceled before writing.") :
+          result === "conflict" ? safetyMessage ?? `The target changed or contains other files during setup; files created so far remain uncommitted (${written.size} of 3).` :
+            result === "unavailable" ? safetyMessage ?? "A fresh local Git status could not be verified; no further setup files were written." :
+              `The ${filePath} write could not be confirmed; a partial scaffold may remain, left uncommitted, and setup was not enabled.`, path);
+      if (index < filesToCreate.length - 1 && signal.aborted)
+        return this.setupOutcome("stale", root, expectedBranch ?? null, "Setup was canceled; files created so far were left uncommitted.", path);
+    }
+    if (action === "create") return this.setupOutcome("created", root, expectedBranch ?? null, "Created project.yaml, steps/.gitkeep and workflows/.gitkeep; all files are uncommitted.", path);
     if (!setupWriter.commitFiles) return this.setupOutcome("permission_required", root, expectedBranch ?? null, "The files were created, but a dedicated source-control write credential is required to commit them.", path);
     if (origin === "project" && projectId) {
-      const rules = await this.files.read(root, rulesPath, signal);
-      const marker = await this.files.read(root, markerPath, signal);
-      if (rules.truncated || marker.truncated || rules.contents !== rulesContents || marker.contents !== "")
+      const config = await this.files.read(root, configPath, signal);
+      const stepsMarker = await this.files.read(root, stepsMarkerPath, signal);
+      const workflowsMarker = await this.files.read(root, workflowsMarkerPath, signal);
+      if (config.truncated || stepsMarker.truncated || workflowsMarker.truncated || config.contents !== configContents || stepsMarker.contents !== "" || workflowsMarker.contents !== "")
         return this.setupOutcome("conflict", root, expectedBranch ?? null, "The setup files changed before commit; they were left uncommitted.", path);
       let folderEntries: Awaited<ReturnType<ProjectFiles["list"]>>;
-      let blockEntries: Awaited<ReturnType<ProjectFiles["list"]>>;
+      let stepsEntries: Awaited<ReturnType<ProjectFiles["list"]>>;
+      let workflowsEntries: Awaited<ReturnType<ProjectFiles["list"]>>;
       try {
         folderEntries = await this.files.list(root, ".t3-supervisor", signal);
-        blockEntries = await this.files.list(root, ".t3-supervisor/blocks", signal);
+        stepsEntries = await this.files.list(root, ".t3-supervisor/steps", signal);
+        workflowsEntries = await this.files.list(root, ".t3-supervisor/workflows", signal);
       } catch {
-        return this.setupOutcome("uncertain", root, expectedBranch ?? null, "T3 could not verify that the setup folder contains only the two new files; they were left uncommitted.", path);
+        return this.setupOutcome("uncertain", root, expectedBranch ?? null, "T3 could not verify that the setup folder contains only the three new files; they were left uncommitted.", path);
       }
-      if (folderEntries.truncated || blockEntries.truncated)
+      if (folderEntries.truncated || stepsEntries.truncated || workflowsEntries.truncated)
         return this.setupOutcome("uncertain", root, expectedBranch ?? null, "T3 returned an incomplete setup folder listing; the files were left uncommitted.", path);
       const folderContents = folderEntries.entries.map(entry => [entry.path, entry.kind] as const).sort(([a], [b]) => a.localeCompare(b));
-      const blockContents = blockEntries.entries.map(entry => [entry.path, entry.kind] as const).sort(([a], [b]) => a.localeCompare(b));
-      if (JSON.stringify(folderContents) !== JSON.stringify([[".t3-supervisor/blocks", "directory"], [rulesPath, "file"]]) ||
-        JSON.stringify(blockContents) !== JSON.stringify([[markerPath, "file"]]))
+      const stepsContents = stepsEntries.entries.map(entry => [entry.path, entry.kind] as const).sort(([a], [b]) => a.localeCompare(b));
+      const workflowsContents = workflowsEntries.entries.map(entry => [entry.path, entry.kind] as const).sort(([a], [b]) => a.localeCompare(b));
+      if (JSON.stringify(folderContents) !== JSON.stringify([[configPath, "file"], [".t3-supervisor/steps", "directory"], [".t3-supervisor/workflows", "directory"]]) ||
+        JSON.stringify(stepsContents) !== JSON.stringify([[stepsMarkerPath, "file"]]) ||
+        JSON.stringify(workflowsContents) !== JSON.stringify([[workflowsMarkerPath, "file"]]))
         return this.setupOutcome("conflict", root, expectedBranch ?? null, "The setup folder contains other files; the new setup files were left uncommitted.", path);
       if (signal.aborted) return this.setupOutcome("stale", root, expectedBranch ?? null, "Setup was canceled; the files were left uncommitted.", path);
-      const safety = await this.checkCommitSafety(projectId, threadId ?? null, root, expectedBranch ?? null, [rulesPath, markerPath], signal);
+      const safety = await this.checkCommitSafety(projectId, threadId ?? null, root, expectedBranch ?? null, filesToCreate, signal);
       if (safety.status !== "safe") return this.setupOutcome(safety.status, root, safety.branch, `${safety.message} The setup files were left uncommitted.`, path);
     }
     if (signal.aborted) return this.setupOutcome("stale", root, expectedBranch ?? null, "Setup was canceled; the files were left uncommitted.", path);
-    const actionId = `supervisor-setup-${createHash("sha256").update(JSON.stringify([origin, root, expectedBranch, rulesContents])).digest("hex").slice(0, 32)}`;
+    const actionId = `supervisor-setup-${createHash("sha256").update(JSON.stringify([origin, root, expectedBranch, configContents])).digest("hex").slice(0, 32)}`;
     try {
-      const commit = await setupWriter.commitFiles(root, [rulesPath, markerPath], "Initialize T3 Supervisor definitions", actionId, signal);
+      const commit = await setupWriter.commitFiles(root, filesToCreate, "Initialize T3 Supervisor definitions", actionId, signal);
       if (commit.status === "uncertain") return this.setupOutcome("uncertain", root, expectedBranch ?? null, "The commit result is uncertain. The setup paths were submitted and may remain staged; inspect the checkout and commit history before retrying.", path);
       if (!commit.commitSha) return this.setupOutcome("uncertain", root, expectedBranch ?? null, "The commit result could not be verified. Refresh the checkout before retrying.", path);
       return this.setupOutcome("committed", root, expectedBranch ?? null, "T3 completed the requested setup commit. Repository hooks and signing apply; hooks can change which files it contains.", path);
@@ -556,8 +728,9 @@ export class ProjectDefinitionLoader {
     }
   }
 
-  async load(projectId: string, threadId: string | null = null, parentSignal?: AbortSignal, rulesSource?: (contents: string) => void): Promise<ProjectDefinitionSnapshot> {
-    const result: MutableSnapshot = {projectId, threadId, workspaceRoot: "", globalOnly: false, revision: null, editingAvailable: false, status: "unavailable", rules: [], blocks: [], issues: []};
+  async load(projectId: string, threadId: string | null = null, parentSignal?: AbortSignal): Promise<ProjectDefinitionSnapshot> {
+    const result: MutableSnapshot = {projectId, threadId, workspaceRoot: "", globalOnly: false, revision: null, editingAvailable: false,
+      status: "unavailable", steps: [], workflows: [], config: {required: []}, projectConfig: null, complete: false, sources: [], issues: []};
     const inputs: unknown[] = [];
     const deadline = AbortSignal.timeout(30_000);
     const signal = parentSignal ? AbortSignal.any([deadline, parentSignal]) : deadline;
@@ -589,43 +762,162 @@ export class ProjectDefinitionLoader {
       result.globalOnly = scratch;
       const globalEnabled = this.globalEnabled(projectId);
       inputs.push(["globalDefinitionsEnabled", globalEnabled]);
-      const byteCounter = {value: 0};
-      const emptyScope = (): DefinitionScopeRead => ({status: "missing", rules: [], blocks: [], issues: [], inputs: []});
-      const globalScope = globalEnabled && this.globalRoot ? await this.readScope(this.globalRoot, "global", signal, byteCounter) : emptyScope();
+      const budget = {value: 0, files: 0};
+      const emptyScope = (): DefinitionScopeRead => ({status: "missing", complete: true, steps: [], workflows: [], config: {required: []}, projectConfig: null, sources: [], issues: [], inputs: []});
+      const globalScope = globalEnabled && this.globalRoot ? await this.readScope(this.globalRoot, "global", signal, budget) : emptyScope();
       result.globalRevision = globalEnabled ? this.fingerprintGlobalScope(globalScope) : null;
       inputs.push(["global", globalEnabled ? globalScope.inputs : ["disabled"]]);
-      const projectScope = scratch ? emptyScope() : await this.readScope(root, "project", signal, byteCounter, rulesSource);
+      const projectScope = scratch ? emptyScope() : await this.readScope(root, "project", signal, budget);
       inputs.push(["project", scratch ? ["global-only", root] : projectScope.inputs]);
       const namespacedGlobal = globalEnabled ? this.namespaceGlobal(globalScope, projectScope) : globalScope;
-      result.rules = [...namespacedGlobal.rules, ...projectScope.rules];
-      result.blocks = [...namespacedGlobal.blocks, ...projectScope.blocks];
+      result.steps = [...namespacedGlobal.steps, ...projectScope.steps];
+      result.workflows = [...namespacedGlobal.workflows, ...projectScope.workflows];
+      result.projectConfig = scratch ? null : projectScope.projectConfig;
+      result.config = {
+        required: [...(globalEnabled ? namespacedGlobal.config.required : []), ...projectScope.config.required],
+        ...((projectScope.config.default_workflow ?? (globalEnabled ? namespacedGlobal.config.default_workflow : undefined))
+          ? {default_workflow: projectScope.config.default_workflow ?? namespacedGlobal.config.default_workflow} : {}),
+      };
+      result.sources = [...(globalEnabled ? globalScope.sources : []), ...projectScope.sources];
       result.issues.push(...namespacedGlobal.issues, ...projectScope.issues);
-      if (result.rules.length > MAX_FILES) issue(".t3-supervisor/rules.yaml", "combined_rule_limit", "The combined global and project collection exceeds 100 rules.");
-      if (result.blocks.length > MAX_FILES) issue(".t3-supervisor/blocks", "combined_block_limit", "The combined global and project collection exceeds 100 blocks.");
-      const ids = new Set(result.blocks.map(block => block.id));
-      for (const rule of result.rules) for (const id of rule.required_blocks) {
-        if (!ids.has(id)) issue(rule.path ?? ".t3-supervisor/rules.yaml", "block_reference_missing", `Rule ${rule.name} references missing or invalid block ${id}.`);
-      }
       const activeScopes = [...(globalEnabled ? [globalScope] : []), ...(!scratch ? [projectScope] : [])];
+      result.complete = activeScopes.every(scope => scope.complete);
+      const stepsById = new Map(result.steps.map(step => [step.id, step]));
+      const workflowsById = new Map(result.workflows.map(workflow => [workflow.id, workflow]));
+      const globalRequiredCount = globalEnabled ? namespacedGlobal.config.required.length : 0;
+      for (const [index, reference] of result.config.required.entries()) {
+        if (index < globalRequiredCount) continue;
+        if ("step" in reference && !stepsById.has(reference.step))
+          issue(".t3-supervisor/project.yaml", "required_step_missing", `Required step ${reference.step} is missing or invalid.`);
+        if ("workflow" in reference && !workflowsById.has(reference.workflow))
+          issue(".t3-supervisor/project.yaml", "required_workflow_missing", `Required workflow ${reference.workflow} is missing or invalid.`);
+      }
+      if (projectScope.projectConfig?.default_workflow && !workflowsById.has(projectScope.projectConfig.default_workflow))
+        issue(".t3-supervisor/project.yaml", "default_workflow_missing", `Default workflow ${result.config.default_workflow} is missing or invalid.`);
+      const nodeReferences = (nodes: readonly DefinitionNode[], workflow: DefinitionWorkflowInfo): string[] => {
+        const refs: string[] = [];
+        for (const node of nodes) {
+          if ("step" in node && typeof node.step === "string") {
+            if (workflow.origin !== "global" && !stepsById.has(node.step)) issue(workflow.path ?? ".t3-supervisor/workflows", "workflow_step_missing", `Workflow ${workflow.sourceId ?? workflow.id} references missing or invalid step ${node.step}.`);
+          } else if ("workflow" in node) refs.push(node.workflow);
+          else if ("sequence" in node) refs.push(...nodeReferences(node.sequence, workflow));
+          else if ("parallel" in node) refs.push(...nodeReferences(node.parallel, workflow));
+        }
+        return refs;
+      };
+      const workflowEdges = new Map<string, string[]>();
+      for (const workflow of result.workflows) {
+        const refs = nodeReferences(workflow.sequence ?? workflow.parallel ?? [], workflow);
+        for (const ref of refs) if (workflow.origin !== "global" && !workflowsById.has(ref))
+          issue(workflow.path ?? ".t3-supervisor/workflows", "workflow_reference_missing", `Workflow ${workflow.sourceId ?? workflow.id} references missing or invalid workflow ${ref}.`);
+        workflowEdges.set(workflow.id, refs.filter(ref => workflowsById.has(ref)));
+      }
+      const states = new Map<string, "visiting" | "visited">();
+      const chain: string[] = [];
+      const reportedCycles = new Set<string>();
+      const cyclicWorkflowIds = new Set<string>();
+      const visit = (id: string) => {
+        const state = states.get(id);
+        if (state === "visited") return;
+        states.set(id, "visiting");
+        chain.push(id);
+        for (const next of workflowEdges.get(id) ?? []) {
+          if (states.get(next) === "visiting") {
+            const start = chain.indexOf(next);
+            const cycleIds = [...chain.slice(start), next];
+            for (const cycleId of cycleIds.slice(0, -1)) cyclicWorkflowIds.add(cycleId);
+            const cycleLabels = cycleIds.slice(0, -1).map(item => workflowsById.get(item)?.sourceId ?? item);
+            const cycleKey = cycleLabels.map((_item, index) => [...cycleLabels.slice(index), ...cycleLabels.slice(0, index)].join("\0")).sort()[0]!;
+            if (!reportedCycles.has(cycleKey)) {
+              reportedCycles.add(cycleKey);
+              const names = cycleIds.map(item => workflowsById.get(item)?.sourceId ?? item);
+              issue(workflowsById.get(id)?.path ?? ".t3-supervisor/workflows", "workflow_cycle", `Workflow reference cycle: ${names.join(" -> ")}.`);
+            }
+          } else visit(next);
+        }
+        chain.pop();
+        states.set(id, "visited");
+      };
+      for (const workflow of result.workflows) visit(workflow.id);
+      const workflowsReachingCycles = new Set(cyclicWorkflowIds);
+      let reachesAnotherCycle = true;
+      while (reachesAnotherCycle) {
+        reachesAnotherCycle = false;
+        for (const [id, targets] of workflowEdges) {
+          if (!workflowsReachingCycles.has(id) && targets.some(target => workflowsReachingCycles.has(target))) {
+            workflowsReachingCycles.add(id);
+            reachesAnotherCycle = true;
+          }
+        }
+      }
+      type ExpansionSummary = {nodes: number; depth: number; cyclic: boolean};
+      const summaries = new Map<string, ExpansionSummary>();
+      const maxExpandedNodes = workflowDefinitionExpansionLimits.maxNodes;
+      const maxExpansionDepth = workflowDefinitionExpansionLimits.maxDepth;
+      const workflowRootMemberDepth = 3; // root reference, expanded definition group, then its first member
+      const boundedAdd = (left: number, right: number) => Math.min(maxExpandedNodes + 1, left + right);
+      const summarizeNodes = (nodes: readonly DefinitionNode[], depth: number, stack: ReadonlySet<string>): ExpansionSummary => {
+        let count = 0;
+        let deepest = 0;
+        let cyclic = false;
+        for (const node of nodes) {
+          count = boundedAdd(count, 1);
+          deepest = Math.max(deepest, depth);
+          let child: ExpansionSummary | null = null;
+          if ("sequence" in node) child = summarizeNodes(node.sequence, depth + 1, stack);
+          else if ("parallel" in node) child = summarizeNodes(node.parallel, depth + 1, stack);
+          else if ("workflow" in node) child = summarizeWorkflow(node.workflow, stack);
+          if (child) {
+            count = boundedAdd(count, child.nodes);
+            deepest = Math.max(deepest, child.depth === 0 ? 0 : child.depth + ("workflow" in node ? depth - 1 : 0));
+            cyclic ||= child.cyclic;
+          }
+        }
+        return {nodes: count, depth: deepest, cyclic};
+      };
+      const summarizeWorkflow = (id: string, stack: ReadonlySet<string>): ExpansionSummary => {
+        if (stack.has(id)) return {nodes: 0, depth: 0, cyclic: true};
+        const cached = summaries.get(id);
+        if (cached) return cached;
+        const workflow = workflowsById.get(id);
+        if (!workflow) return {nodes: 0, depth: 0, cyclic: false};
+        const nextStack = new Set(stack);
+        nextStack.add(id);
+        const summary = summarizeNodes(workflow.sequence ?? workflow.parallel ?? [], workflowRootMemberDepth, nextStack);
+        if (!summary.cyclic) summaries.set(id, summary);
+        return summary;
+      };
+      for (const workflow of result.workflows) {
+        if (workflowsReachingCycles.has(workflow.id)) continue;
+        const summary = summarizeWorkflow(workflow.id, new Set());
+        if (summary.nodes > maxExpandedNodes)
+          issue(workflow.path ?? ".t3-supervisor/workflows", "workflow_expansion_limit",
+            `Expanding workflow ${workflow.sourceId ?? workflow.id} exceeds the ${maxExpandedNodes}-node bound.`);
+        if (summary.depth > maxExpansionDepth)
+          issue(workflow.path ?? ".t3-supervisor/workflows", "workflow_expansion_depth",
+            `Expanding workflow ${workflow.sourceId ?? workflow.id} exceeds the ${maxExpansionDepth}-level bound.`);
+      }
       if (activeScopes.some(scope => scope.status === "permission_required")) result.status = "permission_required";
       else if (activeScopes.some(scope => scope.status === "unavailable")) result.status = "unavailable";
-      else if (activeScopes.some(scope => scope.status === "invalid") || result.issues.length) result.status = "invalid";
+      else if (activeScopes.some(scope => scope.status === "invalid") || result.issues.some(item => item.code !== "global_definitions_missing")) result.status = "invalid";
+      else if (globalEnabled && globalScope.status === "missing") result.status = "missing";
       else if (scratch && globalEnabled) result.status = globalScope.status;
       else if (scratch) result.status = "ready";
       else if (projectScope.status === "missing") result.status = "missing";
       else result.status = "ready";
       if (result.status === "missing" && scratch && globalEnabled && !result.issues.length)
         issue(this.globalDefinitionsPath(), "global_definitions_missing", "Create the global .t3-supervisor folder to make shared definitions available in Scratch.");
-      if (result.status === "ready") result.revision = createHash("sha256").update(JSON.stringify([projectId, threadId, root, scratch, inputs])).digest("hex");
+      if (result.complete) result.revision = createHash("sha256").update(JSON.stringify([projectId, threadId, root, scratch, inputs])).digest("hex");
       if (result.status === "permission_required" || result.status === "unavailable") {
-        result.rules = [];
-        result.blocks = [];
+        result.complete = false;
+        result.revision = null;
         if (!result.issues.length) issue(this.globalDefinitionsPath(), result.status, result.status === "permission_required"
           ? "The active global or project definition scope requires filesystem:read access."
-          : "An active definition scope could not be read; no empty rules were assumed.");
+          : "An active definition scope could not be read; no empty requirements were assumed.");
       }
     } catch (error) {
-      result.rules = []; result.blocks = [];
+      result.complete = false;
+      result.revision = null;
       result.status = error instanceof DefinitionReadLimit ? "invalid" : error instanceof ProjectFileError && error.code === "permission_required" ? "permission_required" : "unavailable";
       issue(this.globalDefinitionsPath(), result.status, error instanceof ProjectFileError || error instanceof DefinitionReadLimit ? error.message : "Project definitions could not be read; check the T3 connection and workspace.");
     }

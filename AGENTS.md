@@ -25,6 +25,6 @@ Do not add or retain extra HTTP proxies, reverse proxies or relay sidecars to ma
 Supervisor integrations work. Fix endpoint exposure, authentication, accepted hosts
 and client configuration in Supervisor itself. MCPX must connect directly to the
 Supervisor MCP endpoint. The existing MCPX gateway remains the client connection;
-do not introduce another intermediary. The two workflow HTTP proxy services are
-being removed by the currently authorized direct-authentication batch. Never modify
+do not introduce another intermediary. The two legacy workflow HTTP proxy services were
+removed by the completed direct-authentication batch. Never modify
 T3 source or its installed app/server as a workaround.

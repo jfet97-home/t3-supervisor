@@ -24,21 +24,24 @@ function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: 
     tree.set(path, contents);
     directories.add(root);
     directories.add(`${root}/.t3-supervisor`);
-    if (path.startsWith(".t3-supervisor/blocks/")) directories.add(`${root}/.t3-supervisor/blocks`);
+    if (path.startsWith(".t3-supervisor/steps/")) directories.add(`${root}/.t3-supervisor/steps`);
+    if (path.startsWith(".t3-supervisor/workflows/")) directories.add(`${root}/.t3-supervisor/workflows`);
   };
   const files: ProjectFiles = {
-    directoryExists: async path => directories.has(path) || [...trees.keys()].some(root => path === `${root}/.t3-supervisor` || path === `${root}/.t3-supervisor/blocks` && directories.has(path)),
+    directoryExists: async path => directories.has(path),
     list: async (root, path) => {
       const tree = trees.get(root) ?? new Map<string, string>();
       if (path === "") return {truncated: false, entries: directories.has(`${root}/.t3-supervisor`) ? [{path: ".t3-supervisor", kind: "directory" as const}] : []};
       if (path === ".t3-supervisor") {
         if (!directories.has(`${root}/.t3-supervisor`)) throw new ProjectFileError("missing");
         const entries: Array<{path: string; kind: "file" | "directory"}> = [];
-        if (tree.has(".t3-supervisor/rules.yaml")) entries.push({path: ".t3-supervisor/rules.yaml", kind: "file"});
-        if (directories.has(`${root}/.t3-supervisor/blocks`)) entries.push({path: ".t3-supervisor/blocks", kind: "directory"});
+        if (tree.has(".t3-supervisor/project.yaml")) entries.push({path: ".t3-supervisor/project.yaml", kind: "file"});
+        if (directories.has(`${root}/.t3-supervisor/steps`)) entries.push({path: ".t3-supervisor/steps", kind: "directory"});
+        if (directories.has(`${root}/.t3-supervisor/workflows`)) entries.push({path: ".t3-supervisor/workflows", kind: "directory"});
         return {truncated: false, entries};
       }
-      if (path === ".t3-supervisor/blocks") return {truncated: false, entries: [...tree.keys()].filter(item => item.startsWith(`${path}/`)).map(item => ({path: item, kind: "file" as const}))};
+      if (path === ".t3-supervisor/steps" || path === ".t3-supervisor/workflows")
+        return {truncated: false, entries: [...tree.keys()].filter(item => item.startsWith(`${path}/`)).map(item => ({path: item, kind: "file" as const}))};
       throw new ProjectFileError("missing");
     },
     read: async (root, path) => {
@@ -112,18 +115,19 @@ test("global opt-in initializes a server-home scaffold once and preserves existi
   assert.equal(created.status, "created");
   assert.equal(created.workspaceRoot, "~");
   assert.equal(created.path, "~/.t3-supervisor");
-  assert.equal(f.trees.get("~")?.get(".t3-supervisor/rules.yaml"), "rules: []\n");
-  assert.equal(f.trees.get("~")?.get(".t3-supervisor/blocks/.gitkeep"), "");
+  assert.equal(f.trees.get("~")?.get(".t3-supervisor/project.yaml"), "required: []\n");
+  assert.equal(f.trees.get("~")?.get(".t3-supervisor/steps/.gitkeep"), "");
+  assert.equal(f.trees.get("~")?.get(".t3-supervisor/workflows/.gitkeep"), "");
   assert.equal(f.commits.length, 0);
   assert.ok(await f.loader.globalFingerprint(AbortSignal.timeout(5000)));
 
-  const existing = "rules:\n  - name: Shared\n    description: Existing global rule.\n    required_blocks: [shared]\n";
-  f.addFile("~", ".t3-supervisor/rules.yaml", existing);
+  const existing = "required: []\n";
+  f.addFile("~", ".t3-supervisor/project.yaml", existing);
   const before = f.writes.length;
   const unchanged = await f.loader.initializeGlobal(AbortSignal.timeout(5000));
   assert.equal(unchanged.status, "unchanged");
   assert.equal(f.writes.length, before);
-  assert.equal(f.trees.get("~")?.get(".t3-supervisor/rules.yaml"), existing);
+  assert.equal(f.trees.get("~")?.get(".t3-supervisor/project.yaml"), existing);
 });
 
 test("project Create writes only the scaffold files and Create plus commit stages only those paths", async () => {
@@ -133,8 +137,9 @@ test("project Create writes only the scaffold files and Create plus commit stage
   }, AbortSignal.timeout(5000));
   assert.equal(created.status, "created");
   assert.deepEqual(createFixture.writes.map(write => [write.path, write.contents]), [
-    [".t3-supervisor/rules.yaml", "rules: []\n"],
-    [".t3-supervisor/blocks/.gitkeep", ""],
+    [".t3-supervisor/project.yaml", "required: []\n"],
+    [".t3-supervisor/steps/.gitkeep", ""],
+    [".t3-supervisor/workflows/.gitkeep", ""],
   ]);
   assert.equal(createFixture.commits.length, 0);
 
@@ -144,7 +149,7 @@ test("project Create writes only the scaffold files and Create plus commit stage
   }, AbortSignal.timeout(5000));
   assert.equal(committed.status, "committed");
   assert.equal(commitFixture.commits.length, 1);
-  assert.deepEqual(commitFixture.commits[0]?.paths, [".t3-supervisor/rules.yaml", ".t3-supervisor/blocks/.gitkeep"]);
+  assert.deepEqual(commitFixture.commits[0]?.paths, [".t3-supervisor/project.yaml", ".t3-supervisor/steps/.gitkeep", ".t3-supervisor/workflows/.gitkeep"]);
   assert.equal(commitFixture.commits[0]?.root, "/worktrees/feature");
 });
 
@@ -176,8 +181,9 @@ test("Create plus commit uses fresh Git status when the native VCS subscription 
   assert.equal(outcome.status, "committed");
   assert.equal(f.commits.length, 1);
   assert.ok(f.vcsSnapshots.every(paths => paths.length === 0));
-  assert.ok(f.freshProbeSnapshots.some(paths => paths.length === 1 && paths[0] === ".t3-supervisor/rules.yaml"));
-  assert.ok(f.freshProbeSnapshots.some(paths => paths.length === 2 && paths.includes(".t3-supervisor/rules.yaml") && paths.includes(".t3-supervisor/blocks/.gitkeep")));
+  assert.ok(f.freshProbeSnapshots.some(paths => paths.length === 1 && paths[0] === ".t3-supervisor/project.yaml"));
+  assert.ok(f.freshProbeSnapshots.some(paths => paths.length === 2 && paths.includes(".t3-supervisor/project.yaml") && paths.includes(".t3-supervisor/steps/.gitkeep")));
+  assert.ok(f.freshProbeSnapshots.some(paths => paths.length === 3 && paths.includes(".t3-supervisor/project.yaml") && paths.includes(".t3-supervisor/steps/.gitkeep") && paths.includes(".t3-supervisor/workflows/.gitkeep")));
 });
 
 test("stale cached foreign paths cannot block setup when fresh Git status is clean", async () => {
@@ -200,12 +206,12 @@ test("setup refuses stale branches, existing folders, and Create plus commit out
   assert.equal(staleFixture.writes.length, 0);
 
   const existingFixture = fixture({isRepo: true, branch: "feature"});
-  existingFixture.addFile("/worktrees/feature", ".t3-supervisor/rules.yaml", "rules: []\n");
+  existingFixture.addFile("/worktrees/feature", ".t3-supervisor/project.yaml", "required: []\n");
   const conflict = await existingFixture.loader.initialize("project", "main-thread", {
     origin: "project", action: "create", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
   }, AbortSignal.timeout(5000));
   assert.equal(conflict.status, "conflict");
-  assert.equal(existingFixture.trees.get("/worktrees/feature")?.get(".t3-supervisor/rules.yaml"), "rules: []\n");
+  assert.equal(existingFixture.trees.get("/worktrees/feature")?.get(".t3-supervisor/project.yaml"), "required: []\n");
   assert.equal(existingFixture.writes.length, 0);
 
   const noGitFixture = fixture({isRepo: false, branch: null, worktree: null});
@@ -248,7 +254,7 @@ test("Create still leaves the scaffold uncommitted in a dirty or in-progress che
     origin: "project", action: "create", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
   }, AbortSignal.timeout(5000));
   assert.equal(outcome.status, "created");
-  assert.equal(f.writes.length, 2);
+  assert.equal(f.writes.length, 3);
   assert.equal(f.commits.length, 0);
 });
 
@@ -264,7 +270,7 @@ test("Create plus commit stops when any extra change appears with the new setup 
 });
 
 test("Create plus commit rejects extra setup content hidden by Git's collapsed untracked path", async () => {
-  const f = fixture({isRepo: true, branch: "feature", collapseSetupStatus: true, extraSetupFileAfterSecondWrite: ".t3-supervisor/blocks/extra.md"});
+  const f = fixture({isRepo: true, branch: "feature", collapseSetupStatus: true, extraSetupFileAfterSecondWrite: ".t3-supervisor/steps/extra.md"});
   const outcome = await f.loader.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
   }, AbortSignal.timeout(5000));
@@ -329,7 +335,7 @@ test("setup rechecks the operative checkout branch before each native file write
   }, AbortSignal.timeout(5000));
   assert.equal(outcome.status, "stale");
   assert.equal(f.writes.length, 1);
-  assert.equal(f.trees.get("/worktrees/feature")?.get(".t3-supervisor/rules.yaml"), "rules: []\n");
-  assert.equal(f.trees.get("/worktrees/feature")?.has(".t3-supervisor/blocks/.gitkeep"), false);
+  assert.equal(f.trees.get("/worktrees/feature")?.get(".t3-supervisor/project.yaml"), "required: []\n");
+  assert.equal(f.trees.get("/worktrees/feature")?.has(".t3-supervisor/steps/.gitkeep"), false);
   assert.match(outcome.message, /left uncommitted/);
 });

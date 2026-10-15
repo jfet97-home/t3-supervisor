@@ -1,19 +1,18 @@
 # T3 Supervisor
 
 A local dashboard and background service for inspecting T3 projects, editing
-repository-defined rules, and optionally handling Telegram notifications and input.
+repository-defined steps and workflows, and optionally handling Telegram notifications and input.
 
 ## Main features
 
-- **Project rules:** edit names, descriptions and required blocks in the selected
-  project's existing `.t3-supervisor/rules.yaml`. The UI and repository use one rule
-  model; there is no separate reminder-rule editor.
-- **Reusable blocks:** inspect Markdown instructions, expected results and rule
-  references. Select a project root or a conversation's worktree and see validation
-  problems and the actual source path. See [project definitions](docs/project-definitions.md).
+- **Steps and workflows:** inspect reusable steps and nested sequence/parallel
+  workflows in the operative checkout. Edit required references and the optional
+  default in `.t3-supervisor/project.yaml`. See [project definitions](docs/project-definitions.md).
+- **Guide:** in-app definitions, syntax examples and FAQ explain fixed workflows,
+  project requirements, child contributions, whole-workflow delegation and errors.
 - **Project Supervisor:** choose a T3 model and reasoning per project. A reusable
   conversation is created automatically to interpret new tasks and propose draft
-  workflows from their workspace rules and blocks, introduce them through active
+  workflows from their workspace steps, workflows and project configuration, introduce them through active
   steering and discuss them through T3 messages. Configure live check-in timing
   and activity thresholds per project. See
   [project supervision](docs/project-supervision.md).
@@ -24,8 +23,8 @@ repository-defined rules, and optionally handling Telegram notifications and inp
 - **Telegram input:** optional native T3 questionnaires and answers through Telegram.
 
 Supervising conversations can discuss workflows and read completed activity on
-demand. The service still records a draft, not a confirmed workflow or proof of
-block execution. The earlier condition/message reminders are retired; their stored history
+demand. Matching native proposal and acceptance records save an agreement; connected live
+plans remain editable. Neither agreement nor plan status alone proves execution. The earlier condition/message reminders are retired; their stored history
 and uncertain outcomes remain available without automatic retries.
 
 ## Dashboard
@@ -51,8 +50,8 @@ again. An expired session keeps an open draft in the tab and never automatically
 repeats a rejected write. The Docker dashboard port remains published only on
 the Mac's loopback address.
 
-The UI includes **Projects**, **Activity**, **Recaps and Telegram**, and **Settings**.
-Open Projects, select a workspace, then Edit project rules. Saving requires a
+The UI includes **Projects**, **Guide**, **Activity**, **Recaps and Telegram**, and **Settings**.
+Open Projects, select a workspace, then edit project configuration. Saving requires a
 separate native T3 filesystem read/write credential supplied through trusted setup.
 No credential can be entered or upgraded through the dashboard.
 

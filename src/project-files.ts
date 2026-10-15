@@ -28,8 +28,8 @@ export interface ProjectFiles {
   gitOperationState?(root: string, signal: AbortSignal): Promise<GitOperationState>;
 }
 export interface ProjectWriter {
-  checkRulesFile(root: string, signal: AbortSignal): Promise<boolean>;
-  writeRules(root: string, contents: string, signal: AbortSignal): Promise<void>;
+  checkProjectConfigFile(root: string, signal: AbortSignal): Promise<boolean>;
+  writeProjectConfig(root: string, contents: string, signal: AbortSignal): Promise<void>;
   writeFile?(root: string, path: string, contents: string, signal: AbortSignal): Promise<void>;
 }
 export interface ProjectCommitter {
@@ -148,15 +148,16 @@ export const makeProjectWriter = (baseUrl: string, token: string): ProjectWriter
     const result = await rpc("projects.writeFile", {cwd: root, relativePath: path, contents}, signal);
     if (!record(result) || result.relativePath !== path) throw new ProjectFileError("unavailable", "write");
   };
-  return {async checkRulesFile(root, signal) {
+  const checkProjectConfigFile = async (root: string, signal: AbortSignal) => {
     const rootEntries = await rpc("projects.listEntries", {cwd: root, directoryPath: ""}, signal);
     const includes = (value: unknown, path: string, kind: string) => record(value) && value.truncated === false && Array.isArray(value.entries) &&
       value.entries.some(e => record(e) && e.path === path && e.kind === kind);
     if (!includes(rootEntries, ".t3-supervisor", "directory")) return false;
     const folder = await rpc("projects.listEntries", {cwd: root, directoryPath: ".t3-supervisor"}, signal);
-    return Boolean(includes(folder, ".t3-supervisor/rules.yaml", "file"));
-  }, async writeRules(root, contents, signal) {
-    await writeFile(root, ".t3-supervisor/rules.yaml", contents, signal);
+    return Boolean(includes(folder, ".t3-supervisor/project.yaml", "file"));
+  };
+  return {checkProjectConfigFile, async writeProjectConfig(root, contents, signal) {
+    await writeFile(root, ".t3-supervisor/project.yaml", contents, signal);
   }, writeFile};
 };
 

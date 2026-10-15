@@ -1,188 +1,101 @@
 # Project definitions
 
-Supervisor can load declarative definitions from the working directory of a T3
-project, using T3's native file API. It does not need repository mounts inside its
-container, execute definitions, or grant itself permissions. A separately configured writer can save existing
-project rule files through the same native API.
+Supervisor reads `.t3-supervisor/project.yaml`, reusable Markdown steps in
+`steps/` and YAML workflows in `workflows/` through T3's native file API. It does
+not need repository mounts or execute definitions. The complete syntax is in
+[steps and workflows](steps-and-workflows.md), also explained by the dashboard's
+Guide. The earlier rules/blocks prototype is replaced without migration; existing
+instance settings, identities and unrelated history remain.
 
-## Files
+## Sources and validation
 
-```text
-.t3-supervisor/
-  rules.yaml
-  blocks/
-    adversarial-review.md
-```
-
-`rules.yaml` contains a `rules` list. Each rule has exactly these three fields:
-
-```yaml
-rules:
-  - name: Review implementation changes
-    description: >
-      Tasks that change application behavior require adversarial review.
-      Documentation-only changes are exempt.
-    required_blocks:
-      - adversarial-review
-```
-
-Use `rules: []` to explicitly declare no requirements. Rule names are unique;
-required block identifiers are nonempty and unique within a rule. Identifiers
-use lowercase ASCII letters, digits, hyphens and underscores, at most 64 characters.
-
-Blocks are direct Markdown files in `blocks/`. Their filename, without `.md`,
-supplies the identifier. Frontmatter has exactly `name` and `description`.
-Both second-level sections below must be nonempty; headings inside fenced code
-examples do not become block sections.
-
-```markdown
----
-name: Adversarial review
-description: Critically examine an implementation before completion.
----
-
-# Adversarial review
-
-## Instructions
-
-Check correctness, error handling and edge cases.
-Compare with analogous code in the base revision.
-Inspect tests for weakened assertions or skips.
-
-## Expected result
-
-Findings with file references, resolutions and checks that could not be completed.
-```
-
-Unknown fields, duplicate YAML keys, custom tags, YAML aliases and unresolved
-block references produce validation issues. Definitions are limited to 100 rules,
-100 block directory entries, 64 KiB per file and 512 KiB of read content in total.
-An incomplete native listing or truncated file cannot be accepted as ready.
-
-## Read API
-
-The dashboard's existing local API exposes:
+The selected conversation's operative checkout supplies local definitions. A root
+selection reads the registered project root. Enabled global definitions use the
+same layout in the T3 server user's `~/.t3-supervisor`, with visible source paths
+and namespaced references. Global inclusion and both scopes participate in revision
+identity. Caller-supplied filesystem roots are never accepted.
 
 ```text
-GET /api/guidance/project-definitions?projectId=<registered-project-id>
-GET /api/guidance/project-definitions?projectId=<id>&threadId=<conversation-id>
+GET /api/guidance/project-configuration?projectId=<id>&threadId=<optional-thread-id>
 ```
 
-Without a conversation, the loader uses the registered project's root. With one,
-it reads the fresh T3 projection, validates project membership and uses that
-conversation's worktree when present. Caller-supplied filesystem paths are not
-accepted. Workspace and definition-directory metadata are checked before listing,
-so missing folders do not depend on native serialized error details.
+The snapshot includes workspace/thread identity, revision, status, issues, steps,
+workflows, configuration, bounded readable sources, and `complete`. Completeness
+means fully observed, not syntactically valid. Complete invalid collections can
+retain a revision for safe correction. Missing folders, denied permissions,
+transport failures, truncated listings and malformed files remain explicit.
+Partial observations never become an empty requirement list.
 
-The result contains `projectId`, `threadId`, `workspaceRoot`, `revision`, `editingAvailable`, `rules`, `blocks` and
-`issues`. Its status is one of:
+Validation checks fields, identifiers, duplicate keys, references, composition
+bounds and direct/indirect workflow cycles. Reusing a workflow in independent
+branches is valid. Diagnostics include the cycle chain. The UI shows readable
+material and errors; the Supervisor still receives bounded diagnostic context and
+can negotiate a finite provisional plan. Unresolved required/fixed commitments
+stay visible, and invalid references are never expanded indefinitely.
 
-- `ready`: the definitions are valid and all required block references resolve.
-- `missing`: the `.t3-supervisor` directory does not exist.
-- `invalid`: definition validation or completeness checks failed.
-- `permission_required`: provision `filesystem:read` on the read credential.
-- `unavailable`: the project, conversation, workspace or transport cannot be read.
+Definitions are working-tree observations, not immutable policy attestations.
+Native filesystem permission covers the T3 environment; Supervisor restricts
+requests to the selected definition paths. Reads can follow symlinks within the
+workspace. These checks do not provide OS isolation or atomic filesystem enforcement.
 
-Invalid results may contain valid individual definitions for inspection; consumers
-must require `ready` before using the collection as a complete workflow input.
-The request has a 30-second deadline and observes its Effect cancellation signal;
-each native RPC is bounded to ten seconds.
-File contents are returned on demand, not persisted to the guidance databases.
-The existing Host/Origin and cross-site API protections also cover this endpoint.
+## Dashboard inspection
 
-## Permissions and current scope
+Projects shows reusable steps, workflow composition, requirements, source paths
+and diagnostics. Refresh definitions after repository edits or a workspace change.
+Definition reads are explicit, separate from ordinary polling. Switching selection
+cancels the old request; stale results cannot replace a newer workspace. An
+unavailable selected conversation never silently falls back to root.
 
-Trusted deployment setup supplies a native T3 session with `orchestration:read`
-and `filesystem:read` at `T3_TOKEN_FILE`. Guidance delivery keeps its separate
-read/operate credential. A missing filesystem scope is reported as a setup action;
-Supervisor does not issue or upgrade credentials.
+The Guide explains syntax and FAQ independently of any configured project. Steps
+have only `id`, `name` and `description`. Workflow contents use `sequence` and
+`parallel`; `step` accepts an ID or local step object, while `workflow` accepts a
+named reference only. Required means inclusion for the current main task; fixed
+preserves original commitments and relationships while allowing added work between
+them. Neither inclusion nor an accepted plan proves execution or delegation.
 
-T3's filesystem scope is environment-wide. Supervisor only submits relative
-`.t3-supervisor` requests against the selected workspace, and rejects unexpected
-block paths. T3 rejects reads resolving outside that workspace, but this is not
-a guarantee against symlinks targeting other files within the same workspace.
-These are working-tree reads, not immutable or authoritative policy attestations.
+## Editing project configuration
 
-The dashboard's **Projects** section shows rules, reusable blocks and validation. Select a
-project, then optionally a conversation to use its working directory. The
-conversation selector includes only available chats belonging to that project.
-Required-block buttons open the corresponding reusable block and focus its
-summary; missing or invalid references remain clearly marked. Instructions and
-expected results are displayed as text, never executed or interpreted as HTML.
+The configuration editor writes only the existing regular
+`.t3-supervisor/project.yaml`. It edits the complete `required` list and optional
+`default_workflow`, using valid reusable catalogs. Steps and workflows remain
+repository-authored files. An empty requirement list is `required: []`.
 
-Definitions load on selection and **Refresh definitions**, not on the dashboard's
-ordinary background snapshot refresh. The load time and actual source directory
-are displayed. Refresh after editing files or changing a conversation's workspace.
-Switching selection or leaving the section cancels its request; stale responses
-cannot replace the new selection's contents.
-If a selected conversation becomes unavailable, its contents are hidden and a new
-working directory must be selected; the page does not silently fall back to the
-project root. Invalid collections never imply that unreadable rules or their
-block references are absent.
+```text
+POST /api/guidance/project-configuration
+```
 
-## Editing project rules
+The payload is `projectId`, nullable `threadId`, `expectedRevision`, and `config`.
+The response distinguishes saved, conflict, invalid, permission_required,
+unavailable and uncertain, with fresh definitions when available. Native writes
+need separate trusted credentials; dashboard usage does not provision them. Saving
+configuration does not authorize independent edits to step/workflow definitions.
 
-Choose **Edit project rules** to add, rename, change or remove rules. Select required
-blocks from the valid Markdown blocks already in this working directory. Saving
-an empty collection explicitly writes `rules: []`. Block authoring remains a
-repository operation in this step.
+Each save confirms the exact checkout target, serializes writes per workspace,
+rechecks revision and conversation binding, and verifies fresh readback. YAML
+comments on retained nodes are preserved where possible; formatting can change.
+Missing paths and incomplete reads require repository repair rather than implicit
+file creation. Setup is a separate explicit action with existing grants/Git preflight.
 
-The UI writes the same `.t3-supervisor/rules.yaml` that manual repository edits use;
-there is no second database of active rules. YAML Document nodes preserve comments
-on retained rules/fields where possible; whitespace and YAML formatting may change.
-The output is reparsed to verify the intended normalized rules.
+Drafts survive navigation, conflicts and expired authentication. An uncertain
+outcome blocks another write until inspection/reload. Definite authentication
+rejection keeps the draft and requires another explicit Save after sign-in;
+refreshing access never automatically replays it. Host/Origin, session/CSRF and
+request size guards still apply.
 
-The owner confirms the exact working-tree target before each save, including when
-it belongs to an active conversation. Drafts survive section navigation and
-connection failures. Changing selection, refreshing or cancelling a dirty editor
-requires confirmation. Conflicts and uncertain writes keep the draft and block
-another save until explicit reload; there are no automatic write retries. A rejected
-CSRF session or request-format/size guard means definitely not saved. Session
-refresh keeps the draft editable and requires a new explicit Save, rather than
-automatically repeating the write. Access is also refreshed after reconnection.
+Native truncate/write is non-atomic and has no filesystem compare-and-swap.
+Preflight cannot prevent an external edit or symlink swap immediately before the
+write, and readers can observe partial contents. Failed readback means unknown
+saved state, not success or permission to retry automatically.
 
-`POST /api/guidance/project-rules` accepts `projectId`, nullable `threadId`,
-`expectedRevision` and the complete `rules` list. Host/Origin and CSRF checks apply.
-Its result distinguishes saved, conflict, invalid, permission_required, unavailable
-and uncertain. The endpoint caps JSON payloads at 256 KiB (413 when exceeded);
-the serialized YAML remains limited to 64 KiB.
+## Credentials and unrelated history
 
-The revision hashes normalized workspace and conversation binding, raw file reads,
-byte lengths and sorted listings/truncation flags. The server rechecks it against
-fresh definitions, validates required blocks, serializes saves per workspace and
-rechecks the conversation binding immediately before writing. It verifies identical
-written text/bytes, regular-file listings and a fresh definition readback.
+Read setup supplies `filesystem:read`; config writes use the separate
+`T3_PROJECT_WRITE_TOKEN_FILE` filesystem read/write grant. Setup commits and the
+clean-Git probe retain their separate credentials. Supervisor never self-grants.
+Dashboard sign-in and workflow MCP bearer authentication are independent of these
+native permissions and of per-Supervisor write authority.
 
-T3's native writer is a non-atomic truncate/write without compare-and-swap and can
-follow symlinks. Consequently this editor only writes an **existing regular
-rules.yaml in an existing regular .t3-supervisor directory**, checked through native
-listings immediately before and after writing. Missing, malformed or incompletely
-read files/blocks must be prepared or repaired in the repository first; the UI never
-creates missing paths. A complete collection with missing block references can be
-repaired by removing those references or selecting valid existing blocks.
-
-An external filesystem change between native preflight and write is not prevented;
-concurrent external editors and deliberate symlink swaps are outside this V1 write
-contract. A reader can observe partial contents during the native write. Readback
-failure means unknown saved state, not success or a safe retry.
-
-Trusted setup supplies a separate private native session with `filesystem:read`
-and `filesystem:write` at `T3_PROJECT_WRITE_TOKEN_FILE` (default mounted file:
-`/run/secrets/t3-project-write-token`). The permission covers the T3 environment;
-Supervisor restricts its writer to the fixed rules-file path. The service does not
-issue credentials or upgrade the read/operate sessions. Missing writer setup
-leaves project inspection available and reports editing unavailable.
-
-## Legacy reminder retirement
-
-The separate Guidance rules editor and automatic condition/message evaluations
-are retired. Production no longer calls their execution cycle or preview model;
-stale clients cannot modify legacy rules/settings, preview, mute, classify or reset
-old episodes. SQLite history and uncertain notices are retained, without automatic
-reconciliation or retry. The remaining connection poll performs no model calls.
-
-New task interpretation now supplies complete valid definitions to the project
-Supervisor to propose ordered workflows and assess rule applicability. Proposals
-compose existing blocks and include required blocks for applicable rules. See
-[project supervision](project-supervision.md) for validation and availability.
-Block authoring/review, agent dialogue and workflow execution monitoring remain later steps.
+The retired condition/message reminder evaluator remains inactive. Its history
+and uncertain notices are retained without replay. See
+[project supervision](project-supervision.md) for dialogue/definition-change review,
+and [workflow MCP](workflow-mcp.md) for connected mutable plans and authority.

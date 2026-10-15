@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { test } from "node:test";
-import { fingerprint, GuidanceStore } from "../src/guidance-store.js";
-import { defaultSupervisorModel, ProjectSupervisorStore } from "../src/project-supervisor-store.js";
-import { WorkflowStateStore } from "../src/workflow-state-store.js";
-import { workflowMutationLimits } from "../src/workflow-state-contract.js";
-import type { WorkflowAgreementImport, WorkflowApplyInput, WorkflowOwner } from "../src/workflow-state-contract.js";
+import {mkdtemp, rm} from "node:fs/promises";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
+import {randomUUID} from "node:crypto";
+import {test} from "node:test";
+import {fingerprint, GuidanceStore} from "../src/guidance-store.js";
+import {defaultSupervisorModel, ProjectSupervisorStore} from "../src/project-supervisor-store.js";
+import {proposalContextFromDefinitions, validateWorkflowApplyAgainstPinnedContext, validateWorkflowPlan} from "../src/supervisor-workflow.js";
+import {acceptedWorkflowPlansForBinding, WorkflowStateStore} from "../src/workflow-state-store.js";
+import {workflowMutationLimits} from "../src/workflow-state-contract.js";
+import type {WorkflowAgreementImport, WorkflowApplyInput, WorkflowOwner, WorkflowStatePlan, WorkflowStateSourceBinding} from "../src/workflow-state-contract.js";
+import type {ProjectDefinitionSnapshot} from "../src/project-definitions-contract.js";
+import type {WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo} from "../src/project-supervisor-contract.js";
 
 type Fixture = {
   directory: string;
@@ -15,9 +19,70 @@ type Fixture = {
   supervisors: ProjectSupervisorStore;
   workflows: WorkflowStateStore;
   owner: WorkflowOwner;
+  definitions: ProjectDefinitionSnapshot;
+  context: ReturnType<typeof proposalContextFromDefinitions>;
+  proposal: WorkflowProposalInfo;
+};
+const contributorThreadId = "00000000-0000-4000-8000-000000000001";
+const taskSourceHash = fingerprint("Prepare the export workflow.");
+
+const definitionSnapshot = (required: ProjectDefinitionSnapshot["config"]["required"] = [{workflow: "release"}]): ProjectDefinitionSnapshot => ({
+  projectId: "project-a",
+  threadId: "main-a",
+  workspaceRoot: "/workspace/project-a",
+  globalOnly: false,
+  globalRevision: null,
+  revision: "definition-revision-a",
+  editingAvailable: true,
+  status: "ready",
+  steps: [
+    {id: "prepare", name: "Prepare", description: "Prepare the release inputs.", origin: "project", path: "steps/prepare.md", sourceId: "project:step:prepare"},
+    {id: "verify", name: "Verify", description: "Run the release checks.", origin: "project", path: "steps/verify.md", sourceId: "project:step:verify"},
+    {id: "publish", name: "Publish", description: "Publish the release artifact.", origin: "project", path: "steps/publish.md", sourceId: "project:step:publish"},
+  ],
+  workflows: [{id: "release", name: "Release", description: "Prepare and publish a release.", fixed: true,
+    sequence: [{step: "prepare"}, {parallel: [{step: "verify"}, {step: "verify"}]}, {step: "publish"}],
+    origin: "project", path: "workflows/release.yaml", sourceId: "project:workflow:release"}],
+  config: {required, default_workflow: "release"},
+  projectConfig: {required, default_workflow: "release"},
+  complete: true,
+  sources: [],
+  issues: [],
+});
+
+const localPlanInput = (ids: readonly string[]): WorkflowPlanGroupInfo => ({kind: "sequence", templatePath: null, nodes: ids.map(id => ({
+  kind: "step",
+  nodeId: randomUUID(),
+  definitionId: null,
+  localId: id,
+  templatePath: null,
+  name: `Local ${id}`,
+  description: `Complete local task ${id}.`,
+  source: null,
+  resolution: "resolved",
+  reason: `This task adds ${id}.`,
+  status: "planned",
+  contributorThreadIds: [],
+}))});
+
+const makeProposal = (definitions: ProjectDefinitionSnapshot, context: NonNullable<Fixture["context"]>, plan: unknown,
+  assessments: readonly {kind: "step" | "workflow"; id: string; applies: boolean | "unknown"; reason: string}[]): WorkflowProposalInfo => {
+  const canonical = validateWorkflowPlan({requirements: assessments, plan}, context);
+  assert.ok(canonical);
+  return Object.assign({
+    status: "proposed",
+    message: "A source-bound draft plan.",
+    workspaceRoot: definitions.workspaceRoot,
+    revision: definitions.revision,
+    globalRevision: definitions.globalRevision ?? null,
+  }, canonical) as WorkflowProposalInfo;
 };
 
-const makeFixture = async (): Promise<Fixture> => {
+const proposalPlan = (includeRelease: boolean): unknown => includeRelease ? {kind: "sequence", templatePath: null, nodes: [
+  {kind: "workflow", definitionId: "release", reason: "Use the release template."},
+]} : localPlanInput(["local-a", "local-b"]);
+
+const makeFixture = async (required: ProjectDefinitionSnapshot["config"]["required"] = [{workflow: "release"}], includeRelease = true): Promise<Fixture> => {
   const directory = await mkdtemp(join(tmpdir(), "workflow-state-test-"));
   const guidance = new GuidanceStore(directory);
   const supervisors = new ProjectSupervisorStore(guidance, new Set());
@@ -27,8 +92,13 @@ const makeFixture = async (): Promise<Fixture> => {
   const reserved = supervisors.reserve(projectId, mainThreadId, "Main conversation", defaultSupervisorModel, 1, 1);
   const binding = {...reserved, state: "ready" as const};
   supervisors.setBinding(binding);
+  const definitions = definitionSnapshot(required);
+  const context = proposalContextFromDefinitions(definitions);
+  const assessments = required.map(reference => ({kind: "workflow" as const, id: "workflow" in reference ? reference.workflow : reference.step,
+    applies: true as const, reason: "This configured definition applies to the task."}));
+  const proposal = makeProposal(definitions, context, proposalPlan(includeRelease), assessments);
   return {directory, guidance, supervisors, workflows: new WorkflowStateStore(supervisors),
-    owner: {projectId, mainThreadId, supervisorThreadId: binding.threadId, bindingGeneration: binding.generation}};
+    owner: {projectId, mainThreadId, supervisorThreadId: binding.threadId, bindingGeneration: binding.generation}, definitions, context, proposal};
 };
 
 const closeFixture = async (fixture: Fixture) => {
@@ -36,12 +106,24 @@ const closeFixture = async (fixture: Fixture) => {
   await rm(fixture.directory, {recursive: true, force: true});
 };
 
-const acceptedAgreement = (): WorkflowAgreementImport => ({
+const sourceBinding = (proposal: WorkflowProposalInfo, taskId = "task-a", proposalId = "proposal-a"): WorkflowStateSourceBinding => ({
+  workspaceRoot: proposal.workspaceRoot!,
+  revision: proposal.revision,
+  globalRevision: proposal.globalRevision,
+  definitionsStatus: proposal.definitionsStatus,
+  definitionsComplete: proposal.definitionsComplete,
+  requirementsKnown: proposal.requirementsKnown,
+  taskId,
+  proposalId,
+  sourceHash: taskSourceHash,
+});
+
+const acceptedAgreement = (proposal: WorkflowProposalInfo): WorkflowAgreementImport => ({
   taskId: "task-a",
   sourceThreadId: "main-a",
   sourceRunId: "run-a",
   sourceMessageId: "message-a",
-  sourceHash: "source-hash-a",
+  sourceHash: taskSourceHash,
   objective: "Prepare the export workflow.",
   agreement: {
     status: "agreed",
@@ -50,16 +132,50 @@ const acceptedAgreement = (): WorkflowAgreementImport => ({
     agreedAt: 123,
     supervisorMessageId: "supervisor-message-a",
     agentMessageId: "agent-message-a",
-    workflow: {
-      status: "proposed",
-      message: "Draft workflow proposed from the task plan.",
-      workspaceRoot: "/workspace/project-a",
-      revision: "definition-revision-a",
-      rules: [{index: 0, name: "Tests", applies: true, reason: "This task changes code."}],
-      steps: [{blockId: null, name: "Implement export", reason: "Build the requested export."}],
-    },
+    workflow: proposal,
   },
 });
+
+const validationFor = (fixture: Fixture, originalProposal = fixture.proposal) => ({
+  pinnedContext: fixture.context!,
+  originalProposal,
+  expectedTaskId: "task-a",
+  expectedProposalId: "proposal-a",
+    expectedSourceHash: taskSourceHash,
+  acceptedTaskAgreement: null,
+  acceptedTaskAgreementSourceHash: null,
+});
+
+const applyInput = (fixture: Fixture, document: NonNullable<ReturnType<WorkflowStateStore["get"]>>, plan: WorkflowStatePlan,
+  operationId: string, options: {requirements?: WorkflowProposalInfo["requirements"]; issues?: WorkflowProposalInfo["issues"]; evidence?: WorkflowApplyInput["evidence"]; note?: string} = {}): WorkflowApplyInput => ({
+  operationId,
+  workflowId: document.workflowId,
+  expectedRevision: document.revision,
+  status: document.status,
+  objective: document.objective,
+  sourceBinding: sourceBinding(fixture.proposal),
+  requirements: [...(options.requirements ?? fixture.proposal.requirements)],
+  issues: [...(options.issues ?? fixture.proposal.issues)],
+  plan,
+  note: options.note ?? "The nested plan was reviewed and updated.",
+  ...(options.evidence !== undefined ? {evidence: options.evidence} : {}),
+});
+
+const planEntities = (plan: WorkflowStatePlan): Exclude<WorkflowPlanNodeInfo, WorkflowPlanGroupInfo>[] => {
+  const result: Exclude<WorkflowPlanNodeInfo, WorkflowPlanGroupInfo>[] = [];
+  const walk = (group: WorkflowPlanGroupInfo | null): void => {
+    if (!group) return;
+    for (const node of group.nodes) {
+      if (node.kind === "sequence" || node.kind === "parallel") walk(node);
+      else if (node.kind === "step" || node.kind === "workflow") {
+        result.push(node);
+        if (node.kind === "workflow") walk(node.plan);
+      }
+    }
+  };
+  walk(plan);
+  return result;
+};
 
 const reverseObjectKeys = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(reverseObjectKeys);
@@ -68,366 +184,246 @@ const reverseObjectKeys = (value: unknown): unknown => {
   return Object.fromEntries(Object.keys(record).reverse().map(key => [key, reverseObjectKeys(record[key])]));
 };
 
-const addStep = (workflowId: string, expectedRevision: number, operationId = "apply-a"): WorkflowApplyInput => ({
-  operationId,
-  workflowId,
-  expectedRevision,
-  status: "planned",
-  objective: "Prepare the export workflow.",
-  rules: [],
-  steps: [{blockId: null, name: "Inspect the export path", reason: "Find the relevant implementation.", status: "planned", contributorThreadIds: ["main-a"]}],
-  note: "The broad plan now includes the initial investigation.",
-});
-
-test("main draft edits use revision CAS and idempotent operation receipts", async () => {
+test("nested agreement imports preserve reusable occurrence IDs and exact history", async () => {
   const fixture = await makeFixture();
   try {
-    const created = fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(fixture.owner, "ensure-a", "Start a draft before any agreement."));
-    assert.equal(created.status, "created");
-    if (created.status !== "created") return;
-    assert.equal(created.revision, 1);
-    const initial = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId);
-    assert.ok(initial);
-    assert.equal(initial.currentAgreementKey, null);
-    assert.deepEqual(initial.acceptedAgreements, []);
-
-    const applied = fixture.workflows.apply(fixture.owner, addStep(created.workflowId, created.revision));
-    assert.equal(applied.status, "applied");
-    if (applied.status !== "applied") return;
-    assert.equal(applied.revision, 2);
-    assert.deepEqual(fixture.workflows.apply(fixture.owner, addStep(created.workflowId, created.revision)), applied);
-    assert.deepEqual(fixture.workflows.apply(reverseObjectKeys(fixture.owner) as WorkflowOwner,
-      reverseObjectKeys(addStep(created.workflowId, created.revision)) as WorkflowApplyInput), applied,
-    "reordered nested object keys preserve the canonical request replay");
-
-    const reused = fixture.workflows.apply(fixture.owner, {...addStep(created.workflowId, created.revision), note: "Different payload with the same ID."});
-    assert.deepEqual(reused, {status: "conflict", operationId: "apply-a", reason: "operation_id_reused", currentRevision: null});
-    const stale = fixture.workflows.apply(fixture.owner, {...addStep(created.workflowId, created.revision, "apply-stale"), note: "A stale write."});
-    assert.deepEqual(stale, {status: "conflict", operationId: "apply-stale", reason: "revision", currentRevision: 2});
-
-    const current = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
-    const step = current.steps[0]!;
-    const statusUpdate: WorkflowApplyInput = {...addStep(current.workflowId, current.revision, "apply-status"), steps: [{...step, status: "underway"}],
-      evidence: [{kind: "status_changed", targetStepId: step.id, note: "Work started in the main conversation.", sourceThreadId: "main-a"}]};
-    const statusResult = fixture.workflows.apply(fixture.owner, statusUpdate, 456);
-    assert.equal(statusResult.status, "applied");
-    const updated = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
-    assert.equal(updated.steps[0]?.status, "underway");
-    assert.ok(updated.evidence.some(item => item.kind === "status_changed" && item.targetStepId === step.id &&
-      item.statusFrom === "planned" && item.statusTo === "underway" && item.sourceThreadId === "main-a"));
-    assert.deepEqual(fixture.workflows.apply(fixture.owner, addStep(created.workflowId, created.revision)), applied);
-    assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, 3,
-      "replaying an earlier operation returns its receipt without reverting newer state");
-  } finally {await closeFixture(fixture);}
-});
-
-test("accepted agreement history stays exact when the current plan is structurally edited", async () => {
-  const fixture = await makeFixture();
-  try {
-    const source = acceptedAgreement();
+    const source = acceptedAgreement(fixture.proposal);
     const imported = fixture.supervisors.store.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(fixture.owner, source, 100));
     assert.equal(imported.status, "applied");
     if (imported.status !== "applied") return;
     const first = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    assert.equal(first.formatVersion, 2);
     assert.equal(first.revision, 1);
     assert.equal(first.currentAgreementKey, first.acceptedAgreements[0]?.key);
-    assert.equal(first.steps[0]?.status, "planned");
+    assert.deepEqual(first.plan, source.agreement.workflow.plan);
+    assert.deepEqual(first.acceptedAgreements[0]?.plan, source.agreement.workflow.plan);
     assert.deepEqual(first.acceptedAgreements[0]?.agreement, source.agreement);
-    assert.equal(first.acceptedAgreements[0]?.agreement.workflow.steps[0]?.name, "Implement export");
+    const verifyOccurrences = planEntities(first.plan).filter(node => node.kind === "step" && node.definitionId === "verify");
+    assert.equal(verifyOccurrences.length, 2);
+    assert.notEqual(verifyOccurrences[0]?.nodeId, verifyOccurrences[1]?.nodeId,
+      "reusing one step definition in separate branches creates separate occurrence identities");
+    assert.deepEqual(fixture.supervisors.store.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(
+      fixture.owner, source, 200)), imported, "an exact import replay does not regenerate occurrence IDs");
 
-    const duplicate = fixture.supervisors.store.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(
-      reverseObjectKeys(fixture.owner) as WorkflowOwner, reverseObjectKeys(source) as WorkflowAgreementImport, 200));
-    assert.deepEqual(duplicate, imported);
-    assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, 1);
-
-    const current = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
-    const edited = fixture.workflows.apply(fixture.owner, {...addStep(current.workflowId, current.revision, "plan-edit"),
-      objective: current.objective, rules: current.rules, steps: [{...current.steps[0]!, name: "Implement and review export"}],
-      note: "The plan was refined after work began."}, 300);
-    assert.equal(edited.status, "applied");
+    const extra = localPlanInput(["extra"]).nodes[0]!;
+    const editedPlan: WorkflowPlanGroupInfo = {...first.plan!, nodes: [...first.plan!.nodes, extra]};
+    const editedInput = applyInput(fixture, first, editedPlan, "append-local");
+    const direct = validateWorkflowApplyAgainstPinnedContext({plan: editedInput.plan, requirements: editedInput.requirements,
+      issues: editedInput.issues, sourceBinding: editedInput.sourceBinding!}, fixture.context!, fixture.proposal, "task-a", "proposal-a",
+    taskSourceHash, {targetThreadId: "main-a", mainThreadId: "main-a"}, acceptedWorkflowPlansForBinding(first, sourceBinding(fixture.proposal)), first.plan);
+    assert.ok(direct, JSON.stringify({proposalIssues: fixture.proposal.issues, requirementStates: fixture.proposal.requirements.map(item => item.state)}));
+    const edited = fixture.workflows.apply(fixture.owner, editedInput, validationFor(fixture), 300);
+    assert.equal(edited.status, "applied", JSON.stringify(edited));
     const afterEdit = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
     assert.equal(afterEdit.currentAgreementKey, null);
-    assert.equal(afterEdit.steps[0]?.name, "Implement and review export");
     assert.deepEqual(afterEdit.acceptedAgreements[0]?.agreement, source.agreement);
     assert.deepEqual(fixture.supervisors.store.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(fixture.owner, source, 400)), imported);
     assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, 2,
-      "an exact historical import replay leaves the edited plan untouched");
-
-    const conflictingImport = fixture.supervisors.store.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(fixture.owner,
-      {...source, agreement: {...source.agreement, workflow: {...source.agreement.workflow, steps: [{blockId: null, name: "Different", reason: "Changed under the same proposal."}]}}}));
-    assert.equal(conflictingImport.status, "conflict");
-    if (conflictingImport.status === "conflict") assert.equal(conflictingImport.reason, "operation_id_reused");
+      "historical acceptance replay leaves the edited plan untouched");
   } finally {await closeFixture(fixture);}
 });
 
-test("an oversized UTF-8 first agreement import leaves no partial root and can retry after reopen", async () => {
-  const fixture = await makeFixture();
-  let guidance: GuidanceStore | null = fixture.guidance;
+test("nested moves and insertions preserve occurrence status and contributor identity with CAS receipts", async () => {
+  const fixture = await makeFixture([], false);
   try {
-    const source = acceptedAgreement();
-    const oversized = {...source, agreement: {...source.agreement,
-      message: "é".repeat(Math.floor(workflowMutationLimits.maxDocumentBytes / 2))}};
-    const rejected = guidance!.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(fixture.owner, oversized, 150));
-    assert.deepEqual(rejected, {status: "invalid", operationId: rejected.operationId, reason: "document_capacity"});
-    assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId), null);
-    assert.equal(Number(guidance!.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_state").get()?.n), 0);
-    assert.equal(Number(guidance!.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_operations").get()?.n), 0);
+    const source = acceptedAgreement(fixture.proposal);
+    const created = fixture.supervisors.store.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(fixture.owner, source, 100));
+    assert.equal(created.status, "applied");
+    if (created.status !== "applied") return;
+    const initial = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const original = initial.plan!.nodes.filter((node): node is Exclude<WorkflowPlanNodeInfo, WorkflowPlanGroupInfo> => node.kind === "step");
+    const [firstStep, secondStep] = original;
+    assert.ok(firstStep && secondStep);
+    const moved = {...initial.plan!, nodes: [
+      {...secondStep, status: "planned" as const},
+      {...firstStep, status: "underway" as const, contributorThreadIds: [contributorThreadId]},
+    ]};
+    const statusEvidence = [{kind: "status_changed" as const, targetNodeId: firstStep.nodeId,
+      note: "The first occurrence started after its inputs were ready.", sourceThreadId: "child-a"}];
+    const input = applyInput(fixture, initial, moved, "move-and-start", {requirements: [], issues: [], evidence: statusEvidence});
+    const applied = fixture.workflows.apply(fixture.owner, input, validationFor(fixture), 200);
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
+    if (applied.status !== "applied") return;
+    const updated = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const retainedFirst = updated.plan!.nodes[1];
+    assert.equal(retainedFirst?.kind, "step");
+    if (retainedFirst?.kind !== "step") return;
+    assert.equal(retainedFirst.nodeId, firstStep.nodeId);
+    assert.equal(retainedFirst.status, "underway");
+    assert.deepEqual(retainedFirst.contributorThreadIds, [contributorThreadId]);
+    assert.ok(updated.evidence.some(item => item.kind === "status_changed" && item.targetNodeId === firstStep.nodeId &&
+      item.statusFrom === "planned" && item.statusTo === "underway" && item.sourceThreadId === "child-a"));
+    assert.deepEqual(fixture.workflows.apply(reverseObjectKeys(fixture.owner) as WorkflowOwner,
+      reverseObjectKeys(input) as WorkflowApplyInput, validationFor(fixture), 900), applied,
+    "object-key order does not change operation replay");
 
-    guidance!.close();
-    guidance = null;
-    const reopenedGuidance = new GuidanceStore(fixture.directory);
-    guidance = reopenedGuidance;
-    const supervisors = new ProjectSupervisorStore(reopenedGuidance, new Set());
-    const workflows = new WorkflowStateStore(supervisors);
-    assert.equal(workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId), null,
-      "a failed import did not persist a revision-zero root draft");
-    const retry = reopenedGuidance.transaction(() => workflows.importAcceptedAgreementInTransaction(fixture.owner, source, 200));
-    assert.equal(retry.status, "applied", "the failed payload did not reserve its deterministic operation ID");
-    assert.equal(workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, 1);
-  } finally {
-    guidance?.close();
-    await rm(fixture.directory, {recursive: true, force: true});
-  }
-});
+    const repeated = fixture.workflows.apply(fixture.owner, input, undefined, 901);
+    assert.deepEqual(repeated, applied, "an exact durable receipt replays even when a fresh definition pin is unavailable");
+    const reused = fixture.workflows.apply(fixture.owner, {...input, note: "A different request reused this operation ID."}, validationFor(fixture), 902);
+    assert.equal(reused.status, "conflict");
+    if (reused.status === "conflict") assert.equal(reused.reason, "operation_id_reused");
+    const stale = fixture.workflows.apply(fixture.owner, {...input, operationId: "stale-write", expectedRevision: initial.revision}, validationFor(fixture), 903);
+    assert.equal(stale.status, "conflict");
+    if (stale.status === "conflict") assert.equal(stale.reason, "revision");
 
-test("malformed evidence input is rejected without throwing or reserving its operation ID", async () => {
-  const fixture = await makeFixture();
-  try {
-    const created = fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(fixture.owner, "ensure-evidence-guard", "Create a draft."));
-    assert.equal(created.status, "created");
-    if (created.status !== "created") return;
-    const input = addStep(created.workflowId, created.revision, "evidence-guard-retry");
-    for (const evidence of [null, {length: 0}]) {
-      const malformed = {...input, evidence} as unknown as WorkflowApplyInput;
-      assert.deepEqual(fixture.workflows.apply(fixture.owner, malformed), {
-        status: "invalid", operationId: input.operationId, reason: "invalid_workflow_document",
-      });
-    }
-    assert.equal(fixture.workflows.apply(fixture.owner, input).status, "applied");
+    const current = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const newStep = {kind: "step" as const, definitionId: null, localId: "third", templatePath: null, name: "Local third",
+      description: "Complete local task third.", source: null, resolution: "resolved" as const,
+      reason: "This task adds third.", status: "planned" as const, contributorThreadIds: []};
+    const inserted: WorkflowPlanGroupInfo = {...current.plan!, nodes: [newStep as unknown as WorkflowPlanNodeInfo, ...current.plan!.nodes]};
+    const insertedInput = applyInput(fixture, current, inserted, "insert-third", {requirements: [], issues: []});
+    assert.equal(fixture.workflows.apply(fixture.owner, insertedInput, validationFor(fixture), 1_000).status, "applied");
+    const afterInsert = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const assignedNewStep = planEntities(afterInsert.plan).find(node => node.kind === "step" && node.localId === "third");
+    assert.ok(assignedNewStep?.nodeId, "the trusted validator assigns a stable ID to a proven new node");
+    const preserved = planEntities(afterInsert.plan).find(node => node.nodeId === firstStep.nodeId);
+    assert.equal(preserved?.status, "underway");
+    assert.deepEqual(preserved?.contributorThreadIds, [contributorThreadId]);
+
+    const omittedExistingId = {...afterInsert.plan!, nodes: afterInsert.plan!.nodes.map(node =>
+      node.kind === "step" && node.localId === "local-b" ? {...node, nodeId: undefined} : node)} as unknown as WorkflowPlanGroupInfo;
+    const identityLoss = fixture.workflows.apply(fixture.owner, applyInput(fixture, afterInsert, omittedExistingId, "omit-existing-id", {requirements: [], issues: []}),
+      validationFor(fixture), 1_050);
+    assert.equal(identityLoss.status, "invalid", "an omitted ID cannot silently turn an existing occurrence into a new node");
+    const withoutNew = {...afterInsert.plan!, nodes: afterInsert.plan!.nodes.filter(node => !("nodeId" in node) || node.nodeId !== assignedNewStep?.nodeId)};
+    const removeInput = applyInput(fixture, afterInsert, withoutNew, "remove-third", {requirements: [], issues: [], note: "The temporary local occurrence was removed after its work was folded into the parent."});
+    assert.equal(fixture.workflows.apply(fixture.owner, removeInput, validationFor(fixture), 1_100).status, "applied");
+    const removed = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!.evidence.find(item => item.kind === "node_removed" && item.targetNodeId === assignedNewStep?.nodeId);
+    assert.equal(removed?.note, removeInput.note, "removal history keeps the explicit note");
   } finally {await closeFixture(fixture);}
 });
 
-test("operation IDs are scoped by owner while preserving same-owner conflict checks", async () => {
-  const fixture = await makeFixture();
+test("a child can work a subset of main requirements without weakening its own fixed commitments", async () => {
+  const fixture = await makeFixture([], false);
   try {
-    const secondBinding = fixture.supervisors.reserve(fixture.owner.projectId, "main-b", "Second main", defaultSupervisorModel, 1, 1);
-    const readySecondBinding = {...secondBinding, state: "ready" as const};
-    fixture.supervisors.setBinding(readySecondBinding);
-    const secondOwner: WorkflowOwner = {...fixture.owner, mainThreadId: "main-b", supervisorThreadId: readySecondBinding.threadId,
-      bindingGeneration: readySecondBinding.generation};
-    const operationId = "shared-across-owners";
-    const first = fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(fixture.owner, operationId, "First owner's draft."));
-    const second = fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(secondOwner, operationId, "Second owner's draft."));
-    assert.equal(first.status, "created");
-    assert.equal(second.status, "created", "another authorized owner can use the same operation ID");
-    if (first.status !== "created" || second.status !== "created") return;
-    assert.notEqual(first.workflowId, second.workflowId);
-    assert.deepEqual(fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(
-      fixture.owner, operationId, "First owner's draft.")), first);
-    assert.deepEqual(fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(
-      secondOwner, operationId, "Second owner's draft.")), second);
-    assert.deepEqual(fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(
-      fixture.owner, operationId, "Changed content for the same owner.")), {
-      status: "conflict", operationId, reason: "operation_id_reused", currentRevision: null,
-    });
-  } finally {await closeFixture(fixture);}
-});
-
-test("an edit operation ID cannot reserve the agreement import namespace", async () => {
-  const fixture = await makeFixture();
-  try {
-    const source = acceptedAgreement();
-    const operationId = "agreement:" + fingerprint([source.taskId, source.agreement.proposalId]);
-    const created = fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(fixture.owner, "ensure-agreement-namespace", "Create a draft."));
-    assert.equal(created.status, "created");
-    if (created.status !== "created") return;
-    const edit = fixture.workflows.apply(fixture.owner, {...addStep(created.workflowId, created.revision, operationId),
-      note: "An authorized edit used a matching text ID."});
-    assert.equal(edit.status, "applied");
-    const imported = fixture.supervisors.store.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(fixture.owner, source));
-    assert.equal(imported.status, "applied", "the edit namespace cannot block validated agreement history");
-    const namespaces = fixture.guidance.db.prepare("SELECT operation_namespace FROM supervisor_workflow_operations WHERE operation_id=? ORDER BY operation_namespace")
-      .all(operationId).map(row => String(row.operation_namespace));
-    assert.deepEqual(namespaces, ["agreement", "edit"]);
-  } finally {await closeFixture(fixture);}
-});
-
-test("trusted child linkage creates an unaccepted workflow under its native parent", async () => {
-  const fixture = await makeFixture();
-  try {
-    const root = fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(fixture.owner, "ensure-root", "Create the parent workflow."));
-    assert.equal(root.status, "created");
+    const mainAgreement = acceptedAgreement(fixture.proposal);
+    assert.equal(fixture.supervisors.store.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(fixture.owner, mainAgreement, 100)).status, "applied");
     const linked = fixture.supervisors.store.transaction(() => fixture.workflows.linkChildInTransaction(fixture.owner,
-      {operationId: "lineage-child", lineage: {threadId: "child-a", parentThreadId: "main-a", relationshipToParent: "subagent"}, note: "The controller verified this native descendant."}));
+      {operationId: "link-child", lineage: {threadId: "child-a", parentThreadId: "main-a", relationshipToParent: "subagent"}, note: "The controller verified this native descendant."}));
     assert.equal(linked.status, "created");
-    if (root.status !== "created" || linked.status !== "created") return;
-    const child = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId, "child-a");
-    assert.ok(child);
-    assert.equal(child.parentWorkflowId, root.workflowId);
-    assert.equal(child.parentThreadId, "main-a");
-    assert.equal(child.currentAgreementKey, null);
-    assert.deepEqual(child.acceptedAgreements, []);
-    assert.ok(child.evidence.some(item => item.kind === "lineage_linked"));
-
-    const missingParent = fixture.supervisors.store.transaction(() => fixture.workflows.linkChildInTransaction(fixture.owner,
-      {operationId: "lineage-missing", lineage: {threadId: "child-b", parentThreadId: "unknown-parent", relationshipToParent: "subagent"}, note: "Unknown ancestry."}));
-    assert.equal(missingParent.status, "conflict");
-    if (missingParent.status === "conflict") assert.equal(missingParent.reason, "parent_missing");
+    const child = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId, "child-a")!;
+    const localChildPlan = localPlanInput(["child-local"]);
+    const childInput = applyInput(fixture, child, localChildPlan, "child-local-plan", {requirements: [], issues: []});
+    assert.equal(fixture.workflows.apply(fixture.owner, childInput, validationFor(fixture), 200).status, "applied",
+      "a child plan need not copy the main task's required workflow");
+    const fixedProposal = makeProposal(fixture.definitions, fixture.context!, proposalPlan(true), []);
+    const currentChild = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId, "child-a")!;
+    const fixedChild: WorkflowPlanGroupInfo = {...currentChild.plan!, nodes: [...currentChild.plan!.nodes, ...fixedProposal.plan!.nodes]};
+    const addFixedInput = applyInput(fixture, currentChild, fixedChild, "child-add-fixed", {requirements: [], issues: []});
+    assert.equal(fixture.workflows.apply(fixture.owner, addFixedInput, validationFor(fixture), 300).status, "applied");
+    const childWithFixed = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId, "child-a")!;
+    const omitFixedInput = applyInput(fixture, childWithFixed, localChildPlan, "child-remove-fixed", {requirements: [], issues: []});
+    const removal = fixture.workflows.apply(fixture.owner, omitFixedInput, validationFor(fixture), 400);
+    assert.equal(removal.status, "invalid", "a child cannot later remove a fixed workflow it committed to");
+    assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId, "child-a")?.revision, childWithFixed.revision);
   } finally {await closeFixture(fixture);}
 });
 
-test("replaced supervisor identity cannot write even when its generation is reused", async () => {
-  const fixture = await makeFixture();
+test("a fixed workflow added after the original proposal remains pinned in main state", async () => {
+  const fixture = await makeFixture([], false);
   try {
-    const created = fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(fixture.owner, "ensure-owner", "Create a draft."));
-    assert.equal(created.status, "created");
-    if (created.status !== "created") return;
-    const oldBinding = fixture.supervisors.binding(fixture.owner.projectId, fixture.owner.mainThreadId)!;
-    fixture.supervisors.setBinding({...oldBinding, state: "missing"});
-    const replacement = fixture.supervisors.replaceMissingBinding({...oldBinding, state: "missing"}, defaultSupervisorModel);
-    const ready = {...replacement, state: "ready" as const};
-    fixture.supervisors.setBinding(ready);
-    assert.equal(ready.generation, fixture.owner.bindingGeneration);
-    assert.notEqual(ready.threadId, fixture.owner.supervisorThreadId);
-
-    const oldAttempt = fixture.workflows.apply(fixture.owner, addStep(created.workflowId, created.revision, "old-owner-write"));
-    assert.deepEqual(oldAttempt, {status: "owner_mismatch", operationId: "old-owner-write"});
-    const newOwner = {...fixture.owner, supervisorThreadId: ready.threadId, bindingGeneration: ready.generation};
-    const newAttempt = fixture.workflows.apply(newOwner, addStep(created.workflowId, created.revision, "new-owner-write"));
-    assert.equal(newAttempt.status, "applied");
-    const operationCount = Number(fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_operations").get()?.n ?? 0);
-    assert.equal(operationCount, 2, "the rejected old-owner write did not reserve an operation ID");
+    const source = acceptedAgreement(fixture.proposal);
+    assert.equal(fixture.supervisors.store.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(fixture.owner, source, 100)).status, "applied");
+    const current = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const fixedProposal = makeProposal(fixture.definitions, fixture.context!, proposalPlan(true), []);
+    const withFixed: WorkflowPlanGroupInfo = {...current.plan!, nodes: [...current.plan!.nodes, ...fixedProposal.plan!.nodes]};
+    const add = applyInput(fixture, current, withFixed, "main-add-fixed", {requirements: [], issues: []});
+    assert.equal(fixture.workflows.apply(fixture.owner, add, validationFor(fixture), 200).status, "applied");
+    const pinned = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const remove = applyInput(fixture, pinned, current.plan, "main-remove-fixed", {requirements: [], issues: []});
+    const rejected = fixture.workflows.apply(fixture.owner, remove, validationFor(fixture), 300);
+    assert.equal(rejected.status, "invalid", "mutable current state is canonicalized against pinned definitions before preserving fixed nodes");
+    assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, pinned.revision);
   } finally {await closeFixture(fixture);}
 });
 
-test("owner coordinates must identify the current project, main thread, supervisor and generation", async () => {
+test("agreement size bounds reject without creating a row or reserving a receipt", async () => {
   const fixture = await makeFixture();
   try {
-    const created = fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(fixture.owner, "ensure-owner-coordinates", "Create a draft."));
-    assert.equal(created.status, "created");
-    if (created.status !== "created") return;
-    const invalidOwners: Array<[string, WorkflowOwner]> = [
-      ["wrong-project", {...fixture.owner, projectId: "project-b"}],
-      ["wrong-main", {...fixture.owner, mainThreadId: "main-b"}],
-      ["wrong-supervisor", {...fixture.owner, supervisorThreadId: "supervisor-b"}],
-      ["wrong-generation", {...fixture.owner, bindingGeneration: fixture.owner.bindingGeneration + 1}],
-    ];
-    for (const [operationId, owner] of invalidOwners) {
-      const result = fixture.workflows.apply(owner, addStep(created.workflowId, created.revision, operationId));
-      assert.deepEqual(result, {status: "owner_mismatch", operationId});
-    }
-    assert.equal(Number(fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_operations").get()?.n), 1,
-      "rejected owners do not reserve operation IDs");
-    const validRetry = fixture.workflows.apply(fixture.owner, addStep(created.workflowId, created.revision, "wrong-generation"));
-    assert.equal(validRetry.status, "applied", "the current owner can use an ID rejected before authorization");
+    const source = acceptedAgreement(fixture.proposal);
+    const oversized = {...source, agreement: {...source.agreement, message: "é".repeat(Math.ceil(workflowMutationLimits.maxDocumentBytes / 2))}};
+    const rejected = fixture.supervisors.store.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(fixture.owner, oversized, 150));
+    assert.equal(rejected.status, "invalid");
+    if (rejected.status === "invalid") assert.equal(rejected.reason, "document_capacity");
+    assert.equal(fixture.workflows.getState(fixture.owner.projectId, fixture.owner.mainThreadId).status, "not_found");
+    assert.equal(Number(fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_state").get()?.n), 0);
+    assert.equal(Number(fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_operations").get()?.n), 0);
   } finally {await closeFixture(fixture);}
 });
 
-test("the injected project-enabled gate blocks writes without reserving their operation ID", async () => {
+test("unversioned flat documents and receipts are reported incompatible and retained raw", async () => {
   const fixture = await makeFixture();
   try {
-    let projectEnabled = true;
-    const workflows = new WorkflowStateStore(fixture.supervisors,
-      projectId => projectEnabled && projectId === fixture.owner.projectId);
-    const created = fixture.supervisors.store.transaction(() => workflows.ensureMainInTransaction(fixture.owner, "ensure-enabled-gate", "Create a draft."));
-    assert.equal(created.status, "created");
-    if (created.status !== "created") return;
-    const input = addStep(created.workflowId, created.revision, "enabled-gate-retry");
-    projectEnabled = false;
-    assert.equal(fixture.supervisors.enabled(fixture.owner.projectId), true,
-      "the injected gate can add project-specific eligibility beyond persisted controls");
-    assert.deepEqual(workflows.apply(fixture.owner, input), {status: "owner_mismatch", operationId: input.operationId});
+    const workflowId = "legacy-workflow";
+    const raw = JSON.stringify({workflowId, projectId: fixture.owner.projectId, mainThreadId: fixture.owner.mainThreadId, threadId: fixture.owner.mainThreadId,
+      parentWorkflowId: null, parentThreadId: null, revision: 7, status: "planned", objective: "A retired flat plan.", rules: [],
+      steps: [{id: "old-step", blockId: null, name: "Old format", reason: "Preserve as raw data.", status: "planned", contributorThreadIds: []}],
+      currentAgreementKey: null, acceptedAgreements: [], evidence: [], createdAt: 10, updatedAt: 11});
+    fixture.guidance.db.prepare("INSERT INTO supervisor_workflow_state(workflow_id,project_id,main_thread_id,thread_id,parent_workflow_id,parent_thread_id,revision,document,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
+      .run(workflowId, fixture.owner.projectId, fixture.owner.mainThreadId, fixture.owner.mainThreadId, null, null, 7, raw, 10, 11);
+    const request = {kind: "ensure-main", owner: fixture.owner, note: "Start a draft."};
+    const canonical = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(canonical);
+      if (value === null || typeof value !== "object") return value;
+      const record = value as Record<string, unknown>;
+      return Object.fromEntries(Object.keys(record).sort().map(key => [key, canonical(record[key])]));
+    };
+    const oldResult = JSON.stringify({status: "created", operationId: "legacy-replay", workflowId, revision: 7, stateHash: "legacy-hash"});
+    fixture.guidance.db.prepare("INSERT INTO supervisor_workflow_operations(project_id,main_thread_id,actor_thread_id,binding_generation,operation_namespace,operation_id,request_hash,result,workflow_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
+      .run(fixture.owner.projectId, fixture.owner.mainThreadId, fixture.owner.supervisorThreadId, fixture.owner.bindingGeneration, "edit", "legacy-replay",
+        fingerprint(canonical(request)), oldResult, workflowId, 12);
+
+    assert.deepEqual(fixture.workflows.getState(fixture.owner.projectId, fixture.owner.mainThreadId),
+      {status: "incompatible", workflowId, formatVersion: null});
+    const lookup = fixture.supervisors.store.transaction(() => fixture.workflows.getByIdForOwnerInTransaction(fixture.owner, workflowId));
+    assert.deepEqual(lookup, {status: "incompatible", workflowId, formatVersion: null});
+    assert.deepEqual(fixture.workflows.listResult(fixture.owner.projectId, fixture.owner.mainThreadId), {documents: [], incompatible: [{workflowId, formatVersion: null}]});
+    assert.deepEqual(fixture.workflows.ensureMainInTransaction(fixture.owner, "ensure-existing-legacy", "Do not reinterpret this row."),
+      {status: "incompatible", workflowId, formatVersion: null, operationId: "ensure-existing-legacy"});
+    assert.equal(fixture.workflows.ensureMainInTransaction(fixture.owner, "legacy-replay", "Start a draft.").status, "incompatible",
+      "an old receipt is never replayed as a v2 successful write");
+    const applyLegacy: WorkflowApplyInput = {operationId: "apply-legacy", workflowId, expectedRevision: 7, status: "planned",
+      objective: "A retired flat plan.", sourceBinding: sourceBinding(fixture.proposal), requirements: [...fixture.proposal.requirements],
+      issues: [...fixture.proposal.issues], plan: fixture.proposal.plan, note: "Do not reinterpret or overwrite the old row."};
+    assert.deepEqual(fixture.workflows.apply(fixture.owner, applyLegacy, validationFor(fixture)),
+      {status: "incompatible", workflowId, formatVersion: null, operationId: "apply-legacy"});
+    assert.equal(fixture.guidance.db.prepare("SELECT document FROM supervisor_workflow_state WHERE workflow_id=?").get(workflowId)?.document, raw);
+    assert.equal(fixture.guidance.db.prepare("SELECT result FROM supervisor_workflow_operations WHERE operation_id=?").get("legacy-replay")?.result, oldResult);
+    assert.equal(Number(fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_state").get()?.n), 1);
     assert.equal(Number(fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_operations").get()?.n), 1);
-    projectEnabled = true;
-    assert.equal(workflows.apply(fixture.owner, input).status, "applied");
   } finally {await closeFixture(fixture);}
 });
 
-test("workflow ID lookups are owner-scoped inside the controller transaction", async () => {
-  const fixture = await makeFixture();
-  try {
-    const created = fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(fixture.owner, "ensure-lookup", "Create a draft."));
-    assert.equal(created.status, "created");
-    if (created.status !== "created") return;
-    const found = fixture.supervisors.store.transaction(() => fixture.workflows.getByIdForOwnerInTransaction(fixture.owner, created.workflowId));
-    assert.equal(found.status, "found");
-    if (found.status === "found") assert.equal(found.document.threadId, fixture.owner.mainThreadId);
-    assert.deepEqual(fixture.supervisors.store.transaction(() => fixture.workflows.getByIdForOwnerInTransaction(
-      {...fixture.owner, mainThreadId: "main-b"}, created.workflowId)), {status: "owner_mismatch"});
-    assert.deepEqual(fixture.supervisors.store.transaction(() => fixture.workflows.getByIdForOwnerInTransaction(
-      fixture.owner, "workflow-missing")), {status: "not_found"});
-  } finally {await closeFixture(fixture);}
-});
-
-test("an unsupported scope version blocks workflow writes while preserving retained rows", async () => {
+test("missing pinned context and incompatible supervisor scope fail closed without reserving operations", async () => {
   const fixture = await makeFixture();
   let guidance: GuidanceStore | null = fixture.guidance;
   try {
-    const created = guidance!.transaction(() => fixture.workflows.ensureMainInTransaction(fixture.owner, "ensure-scope-guard", "Create a draft."));
-    assert.equal(created.status, "created");
-    if (created.status !== "created") return;
-    const input = addStep(created.workflowId, created.revision, "unsupported-scope-write");
+    const source = acceptedAgreement(fixture.proposal);
+    const created = guidance!.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(fixture.owner, source, 100));
+    assert.equal(created.status, "applied");
+    if (created.status !== "applied") return;
+    const current = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const input = applyInput(fixture, current, current.plan, "missing-pin");
+    assert.deepEqual(fixture.workflows.apply(fixture.owner, input, undefined), {
+      status: "invalid", operationId: input.operationId, reason: "pinned_definition_context_required",
+    });
+    assert.equal(Number(guidance!.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_operations").get()?.n), 1);
+
     guidance!.db.prepare("UPDATE meta SET value='future' WHERE key='supervisor_scope_version'").run();
     guidance!.close();
     guidance = null;
-
-    const reopenedGuidance = new GuidanceStore(fixture.directory);
-    guidance = reopenedGuidance;
-    const supervisors = new ProjectSupervisorStore(reopenedGuidance, new Set());
-    assert.equal(supervisors.scopeCompatible, false);
+    const reopened = new GuidanceStore(fixture.directory);
+    guidance = reopened;
+    const supervisors = new ProjectSupervisorStore(reopened, new Set());
     const workflows = new WorkflowStateStore(supervisors);
-    assert.equal(reopenedGuidance.db.prepare("SELECT value FROM meta WHERE key='supervisor_scope_version'").get()?.value, "future");
-    assert.equal(supervisors.binding(fixture.owner.projectId, fixture.owner.mainThreadId)?.threadId, fixture.owner.supervisorThreadId);
-    assert.equal(workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, created.revision);
-    assert.deepEqual(workflows.apply(fixture.owner, input), {status: "owner_mismatch", operationId: input.operationId});
-    assert.equal(workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, created.revision);
-    assert.equal(Number(reopenedGuidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_state").get()?.n), 1);
-    assert.equal(Number(reopenedGuidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_operations").get()?.n), 1,
-      "the unsupported scope prevented reserving an operation ID");
+    assert.equal(supervisors.scopeCompatible, false);
+    assert.equal(workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, current.revision);
+    assert.deepEqual(workflows.apply(fixture.owner, {...input, operationId: "scope-retry"}, validationFor(fixture)),
+      {status: "owner_mismatch", operationId: "scope-retry"});
+    assert.equal(workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, current.revision);
+    assert.equal(Number(reopened.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_operations").get()?.n), 1);
   } finally {
     guidance?.close();
     await rm(fixture.directory, {recursive: true, force: true});
   }
-});
-
-test("controller-owned transaction methods compose and roll back with the caller", async () => {
-  const fixture = await makeFixture();
-  try {
-    const created = fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(fixture.owner, "ensure-transaction", "Create a draft."));
-    assert.equal(created.status, "created");
-    if (created.status !== "created") return;
-    const input = addStep(created.workflowId, created.revision, "transactional-apply");
-    assert.throws(() => fixture.supervisors.store.transaction(() => {
-      assert.equal(fixture.workflows.applyInTransaction(fixture.owner, input).status, "applied");
-      throw new Error("rollback workflow update");
-    }), /rollback workflow update/u);
-    assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, 1);
-    const committed = fixture.supervisors.store.transaction(() => fixture.workflows.applyInTransaction(fixture.owner, input));
-    assert.equal(committed.status, "applied", "the rolled-back operation ID remains available for retry");
-    assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, 2);
-  } finally {await closeFixture(fixture);}
-});
-
-test("workflow state and operation receipts survive a database reopen", async () => {
-  const fixture = await makeFixture();
-  const create = fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(fixture.owner, "ensure-persist", "Persist a draft."));
-  assert.equal(create.status, "created");
-  if (create.status !== "created") {
-    await closeFixture(fixture);
-    return;
-  }
-  const applied = fixture.workflows.apply(fixture.owner, addStep(create.workflowId, create.revision, "persisted-edit"), 500);
-  assert.equal(applied.status, "applied");
-  fixture.guidance.close();
-  try {
-    const guidance = new GuidanceStore(fixture.directory);
-    const supervisors = new ProjectSupervisorStore(guidance, new Set());
-    const workflows = new WorkflowStateStore(supervisors);
-    try {
-      const reopened = workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId);
-      assert.equal(reopened?.revision, 2);
-      assert.equal(reopened?.steps[0]?.name, "Inspect the export path");
-      assert.deepEqual(workflows.apply(fixture.owner, addStep(create.workflowId, create.revision, "persisted-edit"), 900), applied);
-    } finally {guidance.close();}
-  } finally {await rm(fixture.directory, {recursive: true, force: true});}
 });

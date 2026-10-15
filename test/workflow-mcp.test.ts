@@ -4,6 +4,14 @@ import {test} from "node:test";
 import {createWorkflowMcpEndpoint} from "../src/workflow-mcp.js";
 import type {WorkflowWriteController} from "../src/workflow-write-controller.js";
 
+type WorkflowJsonSchema = {
+  $ref?: string;
+  type?: string;
+  anyOf?: WorkflowJsonSchema[];
+  required?: string[];
+  properties?: Record<string, WorkflowJsonSchema>;
+};
+
 const postJson = async (url: string, body: unknown): Promise<Response> => fetch(url, {
   method: "POST",
   headers: {"Content-Type": "application/json", Accept: "application/json, text/event-stream"},
@@ -36,11 +44,17 @@ test("workflow MCP exposes only read/write tools and serves stateless JSON calls
     const tools = await postJson(url, {jsonrpc: "2.0", id: 2, method: "tools/list", params: {}});
     assert.equal(tools.status, 200);
     const listBody = await tools.json() as {result?: {tools?: Array<{name: string; inputSchema?: {
-      properties?: Record<string, {required?: string[]}>;
+      $defs?: Record<string, unknown>;
+      properties?: Record<string, WorkflowJsonSchema>;
     }}>}};
     assert.deepEqual(listBody.result?.tools?.map(tool => tool.name), ["workflow_read", "workflow_write"]);
     const writeSchema = listBody.result?.tools?.find(tool => tool.name === "workflow_write")?.inputSchema;
     assert.deepEqual(writeSchema?.properties?.input?.required, ["operationId", "workflowId", "expectedRevision", "note"]);
+    assert.ok(writeSchema?.$defs?.group, "recursive plan definitions are attached to the write schema root");
+    assert.ok(writeSchema?.properties?.input?.properties?.plan?.anyOf?.some(item => item.$ref === "#/$defs/group"));
+    const sourceBindingSchema = writeSchema?.properties?.input?.properties?.sourceBinding;
+    assert.ok(sourceBindingSchema?.required?.includes("sourceHash"));
+    assert.equal(sourceBindingSchema?.properties?.sourceHash?.type, "string");
 
     const args = {supervisorThreadId: "sx-current", bindingGeneration: 7};
     const called = await postJson(url, {

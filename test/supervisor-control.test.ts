@@ -12,6 +12,7 @@ import type { TaskRecord } from "../src/project-supervisor-store.js";
 import { T3TransportError } from "../src/t3.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import type { ProjectInfo, Projection, SupervisorConfig, ThreadInfo } from "../src/types.js";
+import { makeDefinitionFixture, stepSource } from "./project-definitions-fixture.js";
 
 const baseline = (latestRunId: string | null = null): SupervisorBaseline => ({version: 2, snapshotSequence: 20,
   threads: latestRunId ? [{id: "main", latestRunId}] : []});
@@ -53,6 +54,17 @@ const withStore = async <A>(work: (store: ProjectSupervisorStore, directory: str
   const store = new ProjectSupervisorStore(guidance, new Set());
   try {return await work(store, directory);}
   finally {guidance.close();await rm(directory, {recursive: true, force: true});}
+};
+
+const scopedDefinitionSnapshot = async (globalEnabled: boolean, scratch = false, projectId = "project-a", root = "/work/project-a"): Promise<ProjectDefinitionSnapshot> => {
+  const fixture = makeDefinitionFixture({projectId, root, threadRoot: root, globalEnabled, scratch});
+  fixture.addFile(root, ".t3-supervisor/project.yaml", "required:\n  - step: local-check\n");
+  fixture.addFile(root, ".t3-supervisor/steps/local-check.md", stepSource("local-check", "Verify local behavior."));
+  fixture.addDirectory(root, ".t3-supervisor/workflows");
+  fixture.addFile(fixture.globalRoot, ".t3-supervisor/project.yaml", "required:\n  - step: global-check\n");
+  fixture.addFile(fixture.globalRoot, ".t3-supervisor/steps/global-check.md", stepSource("global-check", "Verify shared behavior."));
+  fixture.addDirectory(fixture.globalRoot, ".t3-supervisor/workflows");
+  return fixture.loader.load(projectId, "thread", AbortSignal.timeout(2000));
 };
 
 test("global master starts on while project auto-detection persists the first known folder result", async () => {
@@ -368,7 +380,7 @@ test("unreadable project detection is not saved as an opt-out and another projec
   });
 });
 
-test("global rules stay off by default until explicitly enabled, even when the folder exists", async () => {
+test("global definitions stay off by default until explicitly enabled, even when the folder exists", async () => {
   await withStore(async (store, directory) => {
     const events: string[] = [];
     const supervisor = makeProjectSupervisor(store, {
@@ -410,7 +422,7 @@ test("global definitions effectiveEnabled follows the master and definitions tru
   });
 });
 
-test("first explicit global rules enable initializes a missing server-home folder before switching on", async () => {
+test("first explicit global definitions enable initializes a missing server-home folder before switching on", async () => {
   await withStore(async store => {
     const events: string[] = [];
     const settings = store.store.settings();
@@ -434,7 +446,7 @@ test("first explicit global rules enable initializes a missing server-home folde
   });
 });
 
-test("Scratch controls remain ineffective without the separate global rules switch", async () => {
+test("Scratch controls remain ineffective without the separate global definitions switch", async () => {
   await withStore(async store => {
     const settings = store.store.settings();
     store.store.classify("project-a", "scratch", settings.generation);
@@ -446,41 +458,54 @@ test("Scratch controls remain ineffective without the separate global rules swit
     assert.equal(control.effectiveEnabled, false);
     const result = await supervisor.saveControl({projectId: "project-a", expectedGeneration: control.generation, enabled: true}, signal);
     assert.equal(result.status, "unavailable");
-    assert.match(result.message, /Enable the separate global rules setting/);
+    assert.match(result.message, /Enable the separate global definitions setting/);
     store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-sha");
     assert.equal((await supervisor.control("project-a", signal)).effectiveEnabled, true);
   });
 });
 
-test("a global-definition toggle authorizes only that input scope and unchanged local files", async () => {
+test("a global-definition toggle authorizes only that input scope and unchanged local catalogs", async () => {
+  const approved = await scopedDefinitionSnapshot(true);
+  const disabled = await scopedDefinitionSnapshot(false);
+  assert.equal(approved.status, "ready");
+  assert.equal(disabled.status, "ready");
+  assert.ok(approved.globalRevision);
+  assert.equal(approved.steps.some(step => step.origin === "global"), true);
+  assert.equal(disabled.steps.some(step => step.origin === "global"), false);
   await withStore(store => {
-    const globalRule = {name: "Shared", description: "Shared rule", required_blocks: ["global-check"], origin: "global" as const, path: "~/.t3-supervisor/rules.yaml"};
-    const localRule = {name: "Local", description: "Local rule", required_blocks: ["local-check"], origin: "project" as const, path: ".t3-supervisor/rules.yaml"};
-    const globalBlock = {id: "global-check", name: "Global check", description: "", instructions: "Check", expected_result: "Done", origin: "global" as const};
-    const localBlock = {id: "local-check", name: "Local check", description: "", instructions: "Check", expected_result: "Done", origin: "project" as const};
-    const approved: ProjectDefinitionSnapshot = {projectId: "project-a", threadId: "main", workspaceRoot: "/work/project-a", revision: "old", globalRevision: "global-sha",
-      editingAvailable: true, status: "ready", rules: [globalRule, localRule], blocks: [globalBlock, localBlock], issues: []};
-    const disabled: ProjectDefinitionSnapshot = {...approved, revision: "off", globalRevision: null, rules: [localRule], blocks: [localBlock]};
-    store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-sha");
-    store.saveGlobalDefinitionsControl(1, false, "~/.t3-supervisor", "global-sha");
-    assert.equal(store.definitionUserGlobalToggle(disabled, approved, 0, "global-sha"), true);
+    store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", approved.globalRevision!);
+    store.saveGlobalDefinitionsControl(1, false, "~/.t3-supervisor", approved.globalRevision!);
+    assert.equal(store.definitionUserGlobalToggle(disabled, approved, 0, approved.globalRevision!), true);
     assert.equal(store.definitionUserGlobalToggle(disabled, approved, 0, "changed-global-sha"), false);
-    const editedLocal: ProjectDefinitionSnapshot = {...disabled, rules: [{...localRule, description: "Changed local rule"}]};
-    assert.equal(store.definitionUserGlobalToggle(editedLocal, approved, 0, "global-sha"), false);
+    const editedLocal: ProjectDefinitionSnapshot = {...disabled, steps: disabled.steps.map(step => step.id === "local-check"
+      ? {...step, description: "Changed local step."} : step)};
+    assert.equal(store.definitionUserGlobalToggle(editedLocal, approved, 0, approved.globalRevision!), false);
   });
 });
 
-test("Scratch workflow introductions point to shared definitions and omit a project-local folder", () => {
+test("Scratch workflow introductions point to shared definitions and omit a project-local folder", async () => {
+  const definitionSnapshot = await scopedDefinitionSnapshot(true, true, "scratch-project", "/scratch");
+  assert.equal(definitionSnapshot.globalOnly, true);
+  assert.equal(definitionSnapshot.status, "ready");
+  const globalReference = definitionSnapshot.config.required[0];
+  assert.ok(globalReference && "step" in globalReference);
+  const globalStep = definitionSnapshot.steps.find(step => step.id === globalReference.step);
+  assert.ok(globalStep);
   const task = {
-    id: "task-1", threadId: "main", projectId: "scratch-project", sourceRunId: "run-1", sourceMessageId: "message-1", sourceOrdinal: 1,
+    id: "task-1", threadId: "thread", projectId: "scratch-project", sourceRunId: "run-1", sourceMessageId: "message-1", sourceOrdinal: 1,
     sourceHash: "hash", status: "inferred", objective: "Check the task", reason: "new task", updatedAt: 1, requestText: "", supervisorThreadId: "supervisor",
     messageId: "supervisor-objective:task-1", supervisorRunId: null, dispatchedAt: null, replayCount: 0,
-    workflow: {status: "stale", message: "", workspaceRoot: "/scratch", revision: "revision", rules: [], steps: []}, workflowProposalId: "proposal-1",
-    definitionSnapshot: {projectId: "scratch-project", threadId: "main", workspaceRoot: "/scratch", revision: "revision", globalRevision: "global-revision",
-      globalOnly: true, editingAvailable: false, status: "ready", rules: [], blocks: [], issues: []},
+    workflow: {status: "stale", message: "", workspaceRoot: definitionSnapshot.workspaceRoot, revision: definitionSnapshot.revision,
+      globalRevision: definitionSnapshot.globalRevision ?? null, definitionsStatus: definitionSnapshot.status, definitionsComplete: definitionSnapshot.complete,
+      requirementsKnown: true, requirements: [{kind: "step", id: globalStep.id, name: globalStep.name,
+        source: {origin: globalStep.origin ?? null, path: globalStep.path ?? null, sourceId: globalStep.sourceId ?? null},
+        state: "unknown", reason: "The stale task assessment is not reusable."}], issues: definitionSnapshot.issues, plan: null},
+    workflowProposalId: "proposal-1",
+    definitionSnapshot,
   } as TaskRecord;
   const text = workflowIntroductionText(task);
-  assert.match(text, /~\/\.t3-supervisor\/rules\.yaml/);
-  assert.match(text, /sourceId and path/);
+  assert.match(text, /This checkout uses shared definitions only/);
+  assert.match(text, /\/server-home\/\.t3-supervisor\/project\.yaml/);
+  assert.match(text, /\/server-home\/\.t3-supervisor\/steps\/global-check\.md/);
   assert.doesNotMatch(text, /\/scratch\/\.t3-supervisor/);
 });

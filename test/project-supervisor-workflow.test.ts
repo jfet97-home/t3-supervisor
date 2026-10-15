@@ -13,6 +13,7 @@ import type { SupervisorModelSelection } from "../src/project-supervisor-contrac
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
+import { stepSource } from "./project-definitions-fixture.js";
 
 const projectId = "project-a";
 const sourceThreadId = "source-thread";
@@ -50,12 +51,28 @@ const definitionSnapshot = (overrides: Partial<ProjectDefinitionSnapshot> = {}):
   threadId: sourceThreadId,
   workspaceRoot: "/work/project/worktrees/feature",
   revision: "revision-1",
+  globalOnly: false,
+  globalRevision: null,
   editingAvailable: true,
   status: "ready",
-  rules: [{ name: "Focused verification", description: "Check the changed behavior.", required_blocks: ["test-plan"] }],
-  blocks: [{ id: "test-plan", name: "Test plan", description: "Verify behavior.", instructions: "Add a focused regression test.", expected_result: "The regression test passes." }],
+  steps: [{id: "test-plan", name: "Test plan", description: "Verify behavior.", origin: "project", path: ".t3-supervisor/steps/test-plan.md", sourceId: "test-plan"}],
+  workflows: [],
+  config: {required: [{step: "test-plan"}]},
+  projectConfig: {required: [{step: "test-plan"}]},
+  complete: true,
+  sources: [
+    {path: ".t3-supervisor/project.yaml", content: "required:\n  - step: test-plan\n", origin: "project"},
+    {path: ".t3-supervisor/steps/test-plan.md", content: stepSource("test-plan", "Verify behavior."), origin: "project"},
+  ],
   issues: [],
   ...overrides,
+});
+
+const unavailableDefinitionSnapshot = (): ProjectDefinitionSnapshot => ({...definitionSnapshot(),
+  workspaceRoot: "/work/project/worktrees/feature", revision: null, editingAvailable: false, status: "unavailable",
+  steps: [], workflows: [], config: {required: []}, projectConfig: null, complete: false, sources: [],
+  issues: [{path: ".t3-supervisor", code: "definition_read_failed",
+    message: "Definition sources could not be read. Requirements and policy remain unknown; make a finite provisional plan."}],
 });
 
 const sourceProjection = (): Projection => {
@@ -190,8 +207,8 @@ const workflowResponse = (messageId: string): string => JSON.stringify({
   reason: "The source conversation requests an export implementation.",
   sourceMessageIds: [messageId],
   workflow: {
-    rules: [{ index: 0, applies: true, reason: "The change needs a focused behavior check." }],
-    steps: [{ blockId: "test-plan", reason: "Verify the export behavior with a regression test." }],
+    requirements: [{kind: "step", id: "test-plan", applies: true, reason: "The change needs a focused behavior check."}],
+    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "test-plan", reason: "Verify the export behavior with a regression test."}]},
   },
 });
 
@@ -199,6 +216,17 @@ const objectiveResponse = (messageId: string): string => JSON.stringify({
   objective: "Implement the export workflow",
   reason: "The source conversation requests an export implementation.",
   sourceMessageIds: [messageId],
+});
+
+const provisionalWorkflowResponse = (messageId: string): string => JSON.stringify({
+  objective: "Implement the export workflow",
+  reason: "The source conversation requests an export implementation.",
+  sourceMessageIds: [messageId],
+  workflow: {
+    requirements: [],
+    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: null, localId: "bounded-review", name: "Review available context",
+      description: "State what remains unknown while making a finite plan.", reason: "The definition read is unavailable."}]},
+  },
 });
 
 const makeFixture = async (initialDefinitions: ProjectDefinitionSnapshot = definitionSnapshot()) => {
@@ -320,8 +348,8 @@ test("dispatch uses complete definitions from the operative source worktree", as
   assert.equal(task.definitionContext?.revision, "revision-1");
   assert.match(String(dispatch.text), /"workspaceRoot":"\/work\/project\/worktrees\/feature"/u);
   assert.match(String(dispatch.text), /"revision":"revision-1"/u);
-  assert.match(String(dispatch.text), /Add a focused regression test\./u);
-  assert.match(String(dispatch.text), /The regression test passes\./u);
+  assert.match(String(dispatch.text), /"required":\[\{"step":"test-plan"\}\]/u);
+  assert.match(String(dispatch.text), /Verify behavior\./u);
 });
 
 test("a correlated native result appears in the project DTO without repeating or self-triggering work", async (t) => {
@@ -341,14 +369,16 @@ test("a correlated native result appears in the project DTO without repeating or
   assert.equal(inferred?.status, "inferred");
   assert.equal(inferred?.objective, "Implement the export workflow");
   assert.equal(inferred?.workflow?.status, "proposed");
-  assert.deepEqual(inferred?.workflow?.steps.map((step) => step.blockId), ["test-plan"]);
+  assert.equal(inferred?.workflow?.requirements[0]?.state, "included");
+  assert.equal(inferred?.workflow?.plan?.nodes[0]?.kind, "step");
+  if (inferred?.workflow?.plan?.nodes[0]?.kind === "step") assert.equal(inferred.workflow.plan.nodes[0].definitionId, "test-plan");
 
   const snapshot = await supervisor.snapshot(projectId, AbortSignal.timeout(1000), sourceThreadId);
   const dto = snapshot.tasks.find((candidate) => candidate.threadId === sourceThreadId);
   assert.equal(dto?.workflow?.status, "proposed");
   assert.equal(dto?.workflow?.revision, "revision-1");
-  assert.deepEqual(dto?.workflow?.rules.map((rule) => [rule.index, rule.applies]), [[0, true]]);
-  assert.deepEqual(dto?.workflow?.steps.map((step) => [step.blockId, step.name]), [["test-plan", "Test plan"]]);
+  assert.deepEqual(dto?.workflow?.requirements.map(item => [item.kind, item.id, item.state]), [["step", "test-plan", "included"]]);
+  assert.equal(dto?.workflow?.plan?.nodes[0]?.kind, "step");
 
   await supervisor.runOnce();
   assert.equal(fixture.dispatches().length, 1);
@@ -382,8 +412,7 @@ test("changed or non-ready definitions stale the workflow while preserving the i
     assert.equal(completed?.status, "inferred", variant.name);
     assert.equal(completed?.objective, "Implement the export workflow", variant.name);
     assert.equal(completed?.workflow?.status, "stale", variant.name);
-    assert.deepEqual(completed?.workflow?.rules, [], variant.name);
-    assert.deepEqual(completed?.workflow?.steps, [], variant.name);
+    assert.ok(completed?.workflow?.plan?.nodes.length, variant.name);
     assert.equal(completed?.revalidationAttempts ?? 0, 0, variant.name);
   }
 });
@@ -412,13 +441,13 @@ test("a transient preparation read failure recovers across Supervisor instances 
   assert.equal(fixture.dispatches().length, 1, "preparation retry must not create duplicate native requests");
 });
 
-test("three unavailable preparation reads fall back to objective-only work and release the queue", async (t) => {
+test("bounded unavailable preparation reads still dispatch a provisional workflow with unknown requirements", async (t) => {
   const fixture = await makeFixture();
   t.after(fixture.cleanup);
   fixture.setDefinitionReadOutcomes([
-    definitionSnapshot({ status: "unavailable" }),
+    unavailableDefinitionSnapshot(),
     new Error("second temporary read failure"),
-    definitionSnapshot({ status: "unavailable" }),
+    unavailableDefinitionSnapshot(),
   ]);
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -434,11 +463,14 @@ test("three unavailable preparation reads fall back to objective-only work and r
   const dispatched = fixture.task();
   const request = fixture.dispatches()[0]?.payload.text;
   assert.equal(dispatched?.status, "waiting");
-  assert.equal(dispatched?.workflow?.status, "unavailable");
-  assert.match(dispatched?.workflow?.message ?? "", /Workflow proposal unavailable/u);
-  assert.equal(dispatched?.definitionContext, null);
-  assert.doesNotMatch(String(request), /UNTRUSTED_WORKFLOW_ENVELOPE/u);
-  assert.match(String(request), /UNTRUSTED_INPUT_ENVELOPE/u);
+  assert.equal(dispatched?.workflow?.status, "pending");
+  assert.equal(dispatched?.workflow?.definitionsStatus, "unavailable");
+  assert.equal(dispatched?.workflow?.definitionsComplete, false);
+  assert.equal(dispatched?.workflow?.requirementsKnown, false);
+  assert.equal(dispatched?.definitionContext?.revision, null);
+  assert.match(String(request), /UNTRUSTED_WORKFLOW_ENVELOPE/u);
+  assert.match(String(request), /"requirementsKnown":false/u);
+  assert.match(String(request), /Requirements and policy remain unknown/u);
   assert.equal(fixture.dispatches().length, 1);
 
   const binding = fixture.binding();
@@ -446,13 +478,16 @@ test("three unavailable preparation reads fall back to objective-only work and r
   const native = fixture.projections.get(binding.threadId);
   assert.ok(native);
   assert.equal(fixture.store.tasks(projectId).filter((task) => task.status === "queued").length, 0);
-  completeSupervisorRequest(native, dispatched!.messageId, objectiveResponse(dispatched!.sourceMessageId));
+  completeSupervisorRequest(native, dispatched!.messageId, provisionalWorkflowResponse(dispatched!.sourceMessageId));
   await fixture.makeSupervisor().runOnce();
   assert.equal(fixture.task()?.status, "inferred");
+  assert.equal(fixture.task()?.workflow?.status, "stale");
+  assert.equal(fixture.task()?.workflow?.requirementsKnown, false);
+  assert.ok(fixture.task()?.workflow?.plan?.nodes.length);
   assert.equal(fixture.dispatches().length, 1);
 });
 
-test("transient completion revalidation recovers and accepts the completed response without redispatch", async (t) => {
+test("a known unavailable completion read stales the proposal without redispatch", async (t) => {
   const fixture = await makeFixture();
   t.after(fixture.cleanup);
   await fixture.makeSupervisor().runOnce();
@@ -462,24 +497,17 @@ test("transient completion revalidation recovers and accepts the completed respo
   const native = fixture.projections.get(binding.threadId);
   assert.ok(native);
   completeSupervisorRequest(native, task.messageId, workflowResponse(task.sourceMessageId));
-  fixture.setDefinitionReadOutcomes([definitionSnapshot({ status: "unavailable" }), definitionSnapshot()]);
+  fixture.setDefinitionReadOutcomes([unavailableDefinitionSnapshot()]);
 
   await fixture.makeSupervisor().runOnce();
-  const pendingRevalidation = fixture.task();
-  assert.equal(pendingRevalidation?.status, "waiting");
-  assert.equal(pendingRevalidation?.objective, null);
-  assert.equal(pendingRevalidation?.revalidationAttempts, 1);
-  assert.equal(pendingRevalidation?.workflow?.status, "pending");
+  const stale = fixture.task();
+  assert.equal(stale?.status, "inferred");
+  assert.equal(stale?.objective, "Implement the export workflow");
+  assert.equal(stale?.revalidationAttempts ?? 0, 0);
+  assert.equal(stale?.workflow?.status, "stale");
+  assert.ok(stale?.workflow?.plan?.nodes.length);
   assert.equal(fixture.dispatches().length, 1);
-
-  await fixture.makeSupervisor().runOnce();
-  const accepted = fixture.task();
-  assert.equal(accepted?.status, "inferred");
-  assert.equal(accepted?.objective, "Implement the export workflow");
-  assert.equal(accepted?.revalidationAttempts, 1);
-  assert.equal(accepted?.workflow?.status, "proposed");
-  assert.equal(fixture.dispatches().length, 1, "revalidation retries inspect the original completed native run");
-  assert.equal(fixture.definitionReads.length, 4, "includes one bounded unsent-definition observation after acceptance");
+  assert.equal(fixture.definitionReads.length, 3, "preparation, completion revalidation and one bounded conversation observation read definitions");
 });
 
 test("three transient completion read failures stale only the proposal and preserve the objective", async (t) => {
@@ -494,7 +522,7 @@ test("three transient completion read failures stale only the proposal and prese
   completeSupervisorRequest(native, task.messageId, workflowResponse(task.sourceMessageId));
   fixture.setDefinitionReadOutcomes([
     new Error("first revalidation failure"),
-    definitionSnapshot({ status: "unavailable" }),
+    new Error("second revalidation failure"),
     new Error("third revalidation failure"),
   ]);
 
@@ -513,8 +541,7 @@ test("three transient completion read failures stale only the proposal and prese
   assert.equal(stale?.status, "inferred");
   assert.equal(stale?.objective, "Implement the export workflow");
   assert.equal(stale?.workflow?.status, "stale");
-  assert.deepEqual(stale?.workflow?.rules, []);
-  assert.deepEqual(stale?.workflow?.steps, []);
+  assert.ok(stale?.workflow?.plan?.nodes.length);
   assert.match(stale?.workflow?.message ?? "", /could not be revalidated/u);
   assert.equal(fixture.dispatches().length, 1);
   assert.equal(fixture.definitionReads.length, 5, "the separate unsent-definition observation does not change the three-attempt budget");
@@ -538,8 +565,7 @@ test("interrupted and definitively rejected requests clear pending workflow prop
   const interrupted = interruptedFixture.task();
   assert.equal(interrupted?.status, "unavailable");
   assert.equal(interrupted?.workflow?.status, "unavailable");
-  assert.deepEqual(interrupted?.workflow?.steps, []);
-  assert.deepEqual(interrupted?.workflow?.rules, []);
+  assert.equal(interrupted?.workflow?.plan, null);
 
   const rejectedFixture = await makeFixture();
   t.after(rejectedFixture.cleanup);
@@ -548,8 +574,7 @@ test("interrupted and definitively rejected requests clear pending workflow prop
   const rejected = rejectedFixture.task();
   assert.equal(rejected?.status, "unavailable");
   assert.equal(rejected?.workflow?.status, "unavailable");
-  assert.deepEqual(rejected?.workflow?.steps, []);
-  assert.deepEqual(rejected?.workflow?.rules, []);
+  assert.equal(rejected?.workflow?.plan, null);
   assert.match(rejected?.workflow?.message ?? "", /definitively rejected/u);
 });
 
@@ -587,14 +612,19 @@ test("unknown dispatch retry reuses the persisted request and definition context
   assert.equal(fixture.definitionReads.length, 1, "retry must not reread mutated project definitions");
 });
 
-test("legacy in-flight and completed objective-only records are not backfilled", async (t) => {
+test("persisted objective-only records are not backfilled or replayed", async (t) => {
   const fixture = await makeFixture();
   t.after(fixture.cleanup);
-  const legacySupervisor = fixture.makeSupervisor(false);
-  await legacySupervisor.runOnce();
-  const legacyTask = fixture.task();
+  await fixture.makeSupervisor(false).runOnce();
+  const queued = fixture.task();
   const binding = fixture.binding();
-  assert.ok(legacyTask && binding);
+  assert.ok(queued && binding);
+  const legacyText = "Interpret this previously persisted objective-only task.";
+  const legacyTask = {...queued, status: "waiting" as const, requestText: legacyText, dispatchedAt: Date.now()};
+  fixture.store.saveTask(legacyTask);
+  const native = fixture.projections.get(binding.threadId);
+  assert.ok(native);
+  addSupervisorRequest(native, {threadId: binding.threadId, messageId: legacyTask.messageId, text: legacyText});
   assert.equal(legacyTask.status, "waiting");
   assert.equal(legacyTask.definitionContext, undefined);
   assert.equal(legacyTask.workflow, undefined);
@@ -602,8 +632,6 @@ test("legacy in-flight and completed objective-only records are not backfilled",
   const definitionsEnabledSupervisor = fixture.makeSupervisor();
   await definitionsEnabledSupervisor.runOnce();
   assert.equal(fixture.definitionReads.length, 0, "the persisted in-flight request is not prepared again");
-  const native = fixture.projections.get(binding.threadId);
-  assert.ok(native);
   completeSupervisorRequest(native, legacyTask.messageId, objectiveResponse(legacyTask.sourceMessageId));
   await definitionsEnabledSupervisor.runOnce();
 
@@ -613,5 +641,6 @@ test("legacy in-flight and completed objective-only records are not backfilled",
   assert.equal(completed?.workflow, null);
   await definitionsEnabledSupervisor.runOnce();
   assert.equal(fixture.definitionReads.length, 0, "a completed objective-only record remains unchanged");
-  assert.equal(fixture.dispatches().length, 1);
+  assert.equal(native.runs.length, 1, "reconciliation does not replay the prior native request");
+  assert.equal(fixture.dispatches().length, 0, "the synthetic historical request is not dispatched again");
 });

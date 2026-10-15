@@ -16,7 +16,8 @@ const tools = [workflowReadToolDefinition, workflowWriteToolDefinition] as unkno
 
 const toolResult = (value: unknown): CallToolResult => {
   const result = value as {status?: unknown};
-  const isError = result.status === "denied" || result.status === "invalid" || result.status === "unavailable" || result.status === "too_large";
+  const isError = result.status === "denied" || result.status === "invalid" || result.status === "unavailable" ||
+    result.status === "incompatible" || result.status === "too_large";
   return {
     content: [{type: "text", text: JSON.stringify(value)}],
     ...(isError ? {isError: true} : {}),

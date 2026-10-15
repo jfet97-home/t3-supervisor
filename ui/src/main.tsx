@@ -19,6 +19,7 @@ import {
 } from "./api.js";
 import "./style.css";
 import { ProjectDefinitionsPanel } from "./project-definitions.js";
+import { StepsAndWorkflowsGuide } from "./steps-and-workflows-guide.js";
 import { SupervisionControlPanel, GlobalDefinitionsControlPanel } from "./supervisor-control.js";
 
 const labels: Record<string, string> = {
@@ -167,8 +168,8 @@ function Settings({data}: {data: GuidanceSnapshot}) {
   const [controlRevision, setControlRevision] = useState(0);
   return <section className="stack"><h2>Supervisor settings</h2><SupervisionControlPanel onChanged={() => setControlRevision(value => value + 1)} /><GlobalDefinitionsControlPanel refreshKey={controlRevision} /><ChatSettings data={data}/>
     <div className="panel stack"><h3>T3 connection</h3><p>{data.connected ? "Connected" : "Disconnected"} · Build: {data.serverVersion ?? "Unavailable"}</p><p>{data.coverage}</p>
-      <h3>Project file editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .t3-supervisor/rules.yaml in the selected working directory.</p>
-      <p>Legacy reminders are retired. Their history is retained; uncertain deliveries are not retried or resolved automatically. Workflow drafts use project rules and existing blocks. Native dialogue can save agreement; step execution tracking remains pending.</p>
+      <h3>Project configuration editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .t3-supervisor/project.yaml in the selected working directory. Step and workflow definitions are read-only in the dashboard.</p>
+      <p>Legacy reminders are retired. Their history is retained; uncertain deliveries are not retried or resolved automatically. Native dialogue can record plan proposals and agreement; those records do not prove step execution.</p>
     </div></section>;
 }
 function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
@@ -218,30 +219,29 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
   return (
     <main>
       <header className="head row between">
-        <div className="row"><span className="brand">S</span><div><h1>Supervisor</h1><p className="muted">Project rules and reusable workflow blocks.</p></div></div>
+        <div className="row"><span className="brand">S</span><div><h1>Supervisor</h1><p className="muted">Project steps, workflows and task plans.</p></div></div>
         <button disabled={projectDirty} title={projectDirty ? "Save or discard your draft before signing out." : undefined} onClick={() => { void onSignOut().catch(() => setSignOutError("Could not sign out. Try again.")); }}>Sign out</button>
       </header>
       {signOutError && <p role="alert">{signOutError}</p>}
-      {snapshot._tag === "Failure" && <p role="alert">Supervisor connection unavailable. Your project-rule draft is kept.</p>}
+      {snapshot._tag === "Failure" && <p role="alert">Supervisor connection unavailable. Your project configuration draft is kept.</p>}
       <div className="connection">
         <span className={`dot ${data.connected ? "online" : ""}`} />
         {data.connected ? "T3 connected" : "Connection gap"} ·{" "}
         {data.projects.filter((p) => p.available).length} projects
       </div>
       <nav aria-label="Supervisor sections">
-        {["projects", "activity", "telegram", "settings"].map((name) => (
+        {["projects", "guide", "activity", "telegram", "settings"].map((name) => (
           <button
             key={name}
             aria-current={view === name ? "page" : undefined}
             onClick={() => navigate(name)}
           >
-            {name === "telegram"
-              ? "Recaps & Telegram"
-              : name[0]!.toUpperCase() + name.slice(1)}
+            {name === "telegram" ? "Recaps & Telegram" : name === "guide" ? "Guide" : name[0]!.toUpperCase() + name.slice(1)}
           </button>
         ))}
       </nav>
       <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} csrfToken={getCsrfToken()} onDirtyChange={setProjectDirty}/></div>
+      {view === "guide" && <StepsAndWorkflowsGuide />}
       {view === "activity" && (
         <History items={data.activity} title="Supervision activity" />
       )}
@@ -250,7 +250,7 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
       )}
       {view === "settings" && <Settings data={data} />}
       <footer>
-        Project files define the rules and workflow blocks. Workflows are negotiated through native conversations; agreement does not prove execution.
+        Project files define reusable steps, workflows and requirements. Plans are negotiated through native conversations; agreement does not prove execution.
         Projects and chats sync automatically.
       </footer>
     </main>
