@@ -20,6 +20,11 @@ export const loadProjectSupervisor = async (projectId: string, signal: AbortSign
   if (!response.ok) throw new Error("Supervisor settings could not be loaded.");
   const value = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(await response.json());
   if (signal.aborted || value.projectId !== projectId || value.mainThreadId !== mainThreadId) throw new Error("The Supervisor response belongs to another project.");
+  if (value.settings.teamSettings && (!Number.isInteger(value.settings.teamSettings.maxHelpersPerRoot) ||
+    value.settings.teamSettings.maxHelpersPerRoot < 0 || value.settings.teamSettings.maxHelpersPerRoot > 20))
+    throw new Error("The Supervisor team settings are outside the supported range.");
+  if (value.team && value.binding && value.team.root.threadId !== value.binding.threadId)
+    throw new Error("The Supervisor team response belongs to another root conversation.");
   return value;
 };
 
@@ -53,6 +58,12 @@ export const loadWorkflowProgress = async (
   if (page.expectedBinding && value.scope && (value.scope.supervisorThreadId !== page.expectedBinding.threadId ||
     value.scope.bindingGeneration !== page.expectedBinding.generation))
     throw new Error("The live workflow progress response belongs to another Supervisor binding.");
+  if (value.coverage) {
+    const scopeThreadIds = new Set(value.scope?.threads.map(thread => thread.threadId) ?? []);
+    if (value.coverage.some(item => !scopeThreadIds.has(item.threadId)) ||
+      new Set(value.coverage.map(item => item.threadId)).size !== value.coverage.length)
+      throw new Error("The live workflow coverage response does not match its native scope page.");
+  }
   return value;
 };
 

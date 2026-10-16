@@ -1,3 +1,4 @@
+import type { SupervisorTeamStore } from "./supervisor-team-store.js";
 import type { ProjectSupervisorStore, BindingRecord } from "./project-supervisor-store.js";
 import {acceptedTaskPlanForBinding, acceptedWorkflowPlansForBinding, type WorkflowApplyValidationContext, type WorkflowStateStore} from "./workflow-state-store.js";
 import {
@@ -22,6 +23,7 @@ import {
   workflowTurnItemDetailMaxBytes,
   workflowToolInputMaxBytes,
   workflowToolInputSize,
+  type WorkflowEvidenceTool,
   type WorkflowEvidenceMatch,
   type WorkflowEvidenceCheck,
 } from "./workflow-write-evidence.js";
@@ -40,6 +42,7 @@ export type WorkflowNativeAccess = {
 
 export type WorkflowWriteControllerOptions = {
   supervisors: ProjectSupervisorStore;
+  team?: SupervisorTeamStore;
   workflows: WorkflowStateStore;
   native: WorkflowNativeAccess;
   loadDefinitions?: (projectId: string, threadId: string, signal: AbortSignal) => Promise<ProjectDefinitionSnapshot>;
@@ -53,6 +56,9 @@ export type WorkflowWriteControllerOptions = {
 export type WorkflowLocator = {
   supervisorThreadId: string;
   bindingGeneration: number;
+  memberEpoch?: number;
+  assignmentRootThreadId?: string;
+  assignmentEpoch?: number;
 };
 
 export type WorkflowApplyPatch = Pick<WorkflowApplyInput, "operationId" | "workflowId" | "expectedRevision" | "note"> &
@@ -83,6 +89,8 @@ export type WorkflowWriteResult = WorkflowEnsureResult | WorkflowMutationResult 
 export type WorkflowReadResult = {
   status: "ok";
   owner: WorkflowOwner;
+  coverage?: Array<{threadId: string; actorThreadId: string; actorTitle: string | null; state: "root" | "assigned" | "transferring" | "unavailable";
+    memberEpoch: number | null; assignmentRootThreadId: string | null; assignmentEpoch: number | null}>;
   mainTaskAgreementStatus: "agreed" | "stale" | null;
   agreementValidityNote: string;
   incompatibleWorkflows: Array<{workflowId: string; formatVersion: number | null}>;
@@ -151,6 +159,8 @@ const maxWorkflowReadBytes = 1024 * 1024;
 const maxActivityReferencesPerWrite = 16;
 const maxActivityReferenceThreadsPerWrite = 8;
 const writeOperationNamespace = "edit" as const;
+const operationNamespace = (owner: WorkflowOwner, payload: WorkflowLocator): string =>
+  payload.supervisorThreadId === owner.supervisorThreadId ? writeOperationNamespace : `edit:${payload.supervisorThreadId}`;
 
 const isText = (value: unknown, max: number, allowEmpty = false): value is string =>
   typeof value === "string" && value.length <= max && (allowEmpty || value.trim().length > 0);
@@ -240,10 +250,18 @@ const validIssueInput = (value: unknown): boolean => Array.isArray(value) && val
   value.every(item => isRecord(item) && hasExactKeys(item, ["path", "code", "message"]) && isText(item.path, 4096, true) &&
     isText(item.code, 160) && isText(item.message, maxDefinitionTextLength, true));
 
+const authorityKeys = ["memberEpoch", "assignmentRootThreadId", "assignmentEpoch"] as const;
+
 const parseLocator = (value: Record<string, unknown>): WorkflowLocator | null => {
   if (!isId(value.supervisorThreadId) || !Number.isSafeInteger(value.bindingGeneration) ||
     (value.bindingGeneration as number) < 1 || (value.bindingGeneration as number) > maxBindingGeneration) return null;
-  return {supervisorThreadId: value.supervisorThreadId, bindingGeneration: value.bindingGeneration as number};
+  if (value.memberEpoch !== undefined && (!Number.isSafeInteger(value.memberEpoch) || (value.memberEpoch as number) < 1) ||
+    value.assignmentEpoch !== undefined && (!Number.isSafeInteger(value.assignmentEpoch) || (value.assignmentEpoch as number) < 1) ||
+    value.assignmentRootThreadId !== undefined && !isId(value.assignmentRootThreadId)) return null;
+  return {supervisorThreadId: value.supervisorThreadId, bindingGeneration: value.bindingGeneration as number,
+    ...(typeof value.memberEpoch === "number" ? {memberEpoch: value.memberEpoch} : {}),
+    ...(typeof value.assignmentEpoch === "number" ? {assignmentEpoch: value.assignmentEpoch} : {}),
+    ...(typeof value.assignmentRootThreadId === "string" ? {assignmentRootThreadId: value.assignmentRootThreadId} : {})};
 };
 
 const parseApplyInput = (value: unknown): WorkflowApplyPatch | null => {
@@ -275,20 +293,20 @@ const parseWritePayload = (value: unknown): ParsedInput => {
   const locator = parseLocator(value);
   if (!locator) return {ok: false, reason: "invalid_owner_locator"};
   if (value.action === "ensure_main") {
-    if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "operationId", "note"]) ||
+    if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "operationId", "note"], authorityKeys) ||
       !isId(value.operationId) || !isText(value.note, workflowMutationLimits.maxTextLength))
       return {ok: false, reason: "invalid_ensure_main", ...(isId(value.operationId) ? {operationId: value.operationId} : {})};
     return {ok: true, value: {...locator, action: "ensure_main", operationId: value.operationId, note: value.note}};
   }
   if (value.action === "link_child") {
-    if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "operationId", "childThreadId", "note"]) ||
+    if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "operationId", "childThreadId", "note"], authorityKeys) ||
       !isId(value.operationId) || !isId(value.childThreadId) || !isText(value.note, workflowMutationLimits.maxTextLength))
       return {ok: false, reason: "invalid_link_child", ...(isId(value.operationId) ? {operationId: value.operationId} : {})};
     return {ok: true, value: {...locator, action: "link_child", operationId: value.operationId,
       childThreadId: value.childThreadId, note: value.note}};
   }
   if (value.action === "apply") {
-    if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "input"]))
+    if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "input"], authorityKeys))
       return {ok: false, reason: "invalid_apply"};
     const input = parseApplyInput(value.input);
     return input ? {ok: true, value: {...locator, action: "apply", input}} : {ok: false,
@@ -299,7 +317,7 @@ const parseWritePayload = (value: unknown): ParsedInput => {
 
 const parseReadPayload = (value: unknown): ParsedReadInput => {
   if (!isRecord(value) || !hasExactKeys(value, ["supervisorThreadId", "bindingGeneration"],
-    ["workflowId", "workflowOffset", "lineageOffset", "limit"])) return {ok: false, reason: "invalid_read_arguments"};
+    ["workflowId", "workflowOffset", "lineageOffset", "limit", ...authorityKeys])) return {ok: false, reason: "invalid_read_arguments"};
   const locator = parseLocator(value);
   if (!locator || value.workflowId !== undefined && !isId(value.workflowId) ||
     value.workflowOffset !== undefined && (!Number.isSafeInteger(value.workflowOffset) || (value.workflowOffset as number) < 0 || (value.workflowOffset as number) > 10_000) ||
@@ -346,6 +364,9 @@ const textSchema = (maxLength: number): Record<string, unknown> => ({type: "stri
 const idSchema = (maxLength = workflowMutationLimits.maxOperationIdLength): Record<string, unknown> => ({type: "string", minLength: 1, maxLength});
 const operationIdSchema = {...idSchema(), description: "Unique within this Supervisor binding and the edit namespace; use a stable action suffix."};
 const locatorProperties = {
+  memberEpoch: {type: "integer", minimum: 1},
+  assignmentRootThreadId: {type: "string", minLength: 1},
+  assignmentEpoch: {type: "integer", minimum: 1},
   supervisorThreadId: idSchema(),
   bindingGeneration: {type: "integer", minimum: 1, maximum: maxBindingGeneration},
 };
@@ -581,6 +602,11 @@ export class WorkflowWriteController {
     const result: WorkflowReadResult = {
       status: "ok",
       owner,
+      ...(this.options.team ? {coverage: requestedLineage.map(thread => {
+        const coverage = this.options.team!.coverage(binding, thread.threadId, new Map([...scope.byId].map(([id, value]) => [id, value.lineage.parentThreadId])));
+        const member = this.options.team!.snapshot(binding).members.find(value => value.threadId === coverage.actorThreadId);
+        return {threadId: thread.threadId, ...coverage, actorTitle: member?.title ?? (coverage.actorThreadId === binding.threadId ? binding.title : null)};
+      })} : {}),
       mainTaskAgreementStatus: task?.agreement?.status ?? null,
       agreementValidityNote: "Agreement status is current task metadata. currentAgreementKey only marks content matching a retained accepted snapshot; neither field proves execution or current definition validity.",
       incompatibleWorkflows: rows.incompatible,
@@ -613,7 +639,7 @@ export class WorkflowWriteController {
     const owner = ownerFor(binding);
     const operationId = operationIdOf(payload);
     const requestHash = workflowRequestHash({owner, arguments: payload});
-    const receipt = this.readOperationReceipt(owner, writeOperationNamespace, operationId, requestHash);
+    const receipt = this.readOperationReceipt(owner, operationNamespace(owner, payload), operationId, requestHash);
     if (receipt.kind === "replay") return receipt.result;
     if (receipt.kind === "conflict") return operationConflict(operationId);
 
@@ -768,24 +794,40 @@ export class WorkflowWriteController {
       acceptedTaskAgreement: task.agreement ?? null, acceptedTaskAgreementSourceHash: task.agreementSourceHash ?? null}};
   }
 
-  private resolveBinding(locator: WorkflowLocator): BindingRecord | null {
+  resolveBinding(locator: WorkflowLocator, allowRegistering = false): BindingRecord | null {
     if (!this.options.supervisors.scopeCompatible) return null;
     const rows = this.options.supervisors.store.db.prepare(
       "SELECT document FROM supervisor_main_bindings WHERE json_extract(document,'$.threadId')=? LIMIT 2",
     ).all(locator.supervisorThreadId);
-    if (rows.length !== 1) return null;
+    if (rows.length > 1) return null;
     let binding: BindingRecord;
-    try {binding = JSON.parse(String(rows[0]?.document)) as BindingRecord;}
+    try {binding = rows.length === 1 ? JSON.parse(String(rows[0]?.document)) as BindingRecord :
+      this.options.team?.bindingForActor(locator.supervisorThreadId, locator.bindingGeneration) as BindingRecord;}
     catch {return null;}
-    if (binding.threadId !== locator.supervisorThreadId || binding.generation !== locator.bindingGeneration ||
+    if (!binding || binding.generation !== locator.bindingGeneration ||
       binding.state !== "ready" || !this.options.supervisors.ownedIds.has(binding.threadId) ||
       !isId(binding.projectId) || !isId(binding.mainThreadId)) return null;
     try {if (!this.isEnabled(binding.projectId)) return null;}
     catch {return null;}
+    if (binding.threadId !== locator.supervisorThreadId) {
+      const member = this.options.team?.snapshot(binding).members.find(item => item.threadId === locator.supervisorThreadId);
+      if (!member || member.epoch !== locator.memberEpoch ||
+        member.state !== "ready" && !(allowRegistering && member.state === "registering")) return null;
+    }
     return binding;
   }
 
-  private async findEvidence(payload: WorkflowWritePayload, owner: WorkflowOwner, signal: AbortSignal): Promise<
+  async authorizeNative(input: WorkflowLocator & Record<string, unknown>, tool: WorkflowEvidenceTool, signal: AbortSignal,
+    allowRegistering = false) {
+    const binding = this.resolveBinding(input, allowRegistering);
+    if (!binding) return {status: "denied" as const, reason: "actor_not_current_ready_enabled"};
+    const result = await this.findEvidence(input, ownerFor(binding), signal, tool);
+    if (result.status !== "verified") return result;
+    if (!this.resolveBinding(input, allowRegistering)) return {status: "denied" as const, reason: "actor_changed"};
+    return {status: "verified" as const, binding, evidence: result.evidence};
+  }
+
+  private async findEvidence(payload: WorkflowLocator & Record<string, unknown>, owner: WorkflowOwner, signal: AbortSignal, tool: WorkflowEvidenceTool = "write"): Promise<
     | {status: "verified"; evidence: WorkflowEvidenceMatch}
     | {status: "pending"; reason: string}
     | {status: "denied"; reason: string; observedToolName?: string}
@@ -809,7 +851,7 @@ export class WorkflowWriteController {
       if (projection.thread.id !== payload.supervisorThreadId || projection.thread.projectId !== owner.projectId ||
         projection.thread.archivedAt != null || projection.thread.deletedAt != null)
         return {status: "denied", reason: "supervisor_projection_not_current"};
-      const candidates = workflowEvidenceCandidates(projection, payload.supervisorThreadId, "write", payload);
+      const candidates = workflowEvidenceCandidates(projection, payload.supervisorThreadId, tool, payload);
       for (const candidate of candidates) {
         if (signal.aborted) return {status: "pending", reason: "native_evidence_wait_interrupted"};
         const cached = inspected.get(candidate.itemId);
@@ -844,7 +886,7 @@ export class WorkflowWriteController {
               check = {status: "pending", reason: "native_item_detail_too_large"};
             } else {
               check = verifyWorkflowToolEvidence({projection, supervisorThreadId: payload.supervisorThreadId,
-                itemId: candidate.itemId, detail, tool: "write", arguments: payload});
+                itemId: candidate.itemId, detail, tool, arguments: payload});
             }
           }
           const retryCount = cached?.signature === candidate.snapshotSignature ? cached.retryCount + Number(canRetry) : 0;
@@ -896,7 +938,7 @@ export class WorkflowWriteController {
     this.pendingCandidates.set(requestHash, now);
   }
 
-  private readOperationReceipt(owner: WorkflowOwner, operationNamespace: "edit", operationId: string, requestHash: string):
+  private readOperationReceipt(owner: WorkflowOwner, operationNamespace: string, operationId: string, requestHash: string):
     | {kind: "none"}
     | {kind: "replay"; result: WorkflowWriteResult}
     | {kind: "conflict"} {
@@ -931,15 +973,27 @@ export class WorkflowWriteController {
     validatedEvidence?: WorkflowStateEvidenceInput[],
   ): WorkflowWriteResult {
     return this.commit(owner, payload, evidence, requestHash, () => {
+      if (this.options.team) {
+        const binding = this.resolveBinding(payload);
+        const document = payload.action === "apply" ? this.options.workflows.getByIdForOwnerInTransaction(owner, payload.input.workflowId) : null;
+        const targetId = payload.action === "link_child" ? payload.childThreadId :
+          document?.status === "found" ? document.document.threadId : owner.mainThreadId;
+        const parents = new Map([...scope.byId].map(([id, thread]) => [id, thread.lineage.parentThreadId]));
+        if (!binding || !this.options.team.authorizeWrite(binding, payload.supervisorThreadId, targetId, parents, payload))
+          return {status: "denied", operationId: operationIdOf(payload), reason: "actor_outside_current_assignment"};
+      }
       if (payload.action === "ensure_main")
         return this.options.workflows.ensureMainInTransaction(owner, payload.operationId, payload.note, this.now());
+      const internalOperationId = payload.supervisorThreadId === owner.supervisorThreadId ? operationIdOf(payload) :
+        `helper:${workflowRequestHash({actor: payload.supervisorThreadId, operationId: operationIdOf(payload)})}`;
       if (payload.action === "link_child") {
         const child = scope.byId.get(payload.childThreadId);
         const parentThreadId = child?.lineage.parentThreadId;
         if (!child || !scope.liveIds.has(child.id) || typeof parentThreadId !== "string" || !scope.allowedIds.has(parentThreadId))
           return {status: "denied", operationId: payload.operationId, reason: "child_parent_not_in_current_scope"};
         const lineage: WorkflowControllerLineage = {threadId: child.id, parentThreadId, relationshipToParent: "subagent"};
-        return this.options.workflows.linkChildInTransaction(owner, {operationId: payload.operationId, lineage, note: payload.note}, this.now());
+        const result = this.options.workflows.linkChildInTransaction(owner, {operationId: internalOperationId, lineage, note: payload.note}, this.now());
+        return {...result, operationId: payload.operationId};
       }
       const found = this.options.workflows.getByIdForOwnerInTransaction(owner, payload.input.workflowId);
       if (found.status === "owner_mismatch") return {status: "owner_mismatch", operationId: payload.input.operationId};
@@ -966,7 +1020,7 @@ export class WorkflowWriteController {
       };
       const effectiveSourceBinding = payload.input.sourceBinding ?? sourceBinding;
       const applyInput: WorkflowApplyInput = {
-        operationId: payload.input.operationId,
+        operationId: internalOperationId,
         workflowId: payload.input.workflowId,
         expectedRevision: payload.input.expectedRevision,
         status: payload.input.status ?? current.status,
@@ -1030,7 +1084,7 @@ export class WorkflowWriteController {
             return {status: "denied", operationId: applyInput.operationId, reason: "new_contributor_not_live"};
         }
       }
-      return this.options.workflows.applyInTransaction(owner, normalizedInput, this.now(), validation);
+      return {...this.options.workflows.applyInTransaction(owner, normalizedInput, this.now(), validation), operationId: payload.input.operationId};
     });
   }
 
@@ -1048,15 +1102,15 @@ export class WorkflowWriteController {
         if (!latest || !sameOwner(owner, ownerFor(latest))) return {status: "denied", operationId, reason: "owner_changed"};
         const existingEvidence = this.options.supervisors.store.db.prepare(
           "SELECT operation_id,operation_namespace,request_hash,project_id,main_thread_id,binding_generation,result FROM supervisor_workflow_write_evidence WHERE supervisor_thread_id=? AND item_id=?",
-        ).get(owner.supervisorThreadId, evidence.itemId);
+        ).get(payload.supervisorThreadId, evidence.itemId);
         if (existingEvidence) {
           const row = existingEvidence as {operation_id: string; operation_namespace: string; request_hash: string; project_id: string; main_thread_id: string; binding_generation: number; result: string};
-          if (row.operation_id !== operationId || row.operation_namespace !== writeOperationNamespace || row.request_hash !== requestHash || row.project_id !== owner.projectId ||
+          if (row.operation_id !== operationId || row.operation_namespace !== operationNamespace(owner, payload) || row.request_hash !== requestHash || row.project_id !== owner.projectId ||
             row.main_thread_id !== owner.mainThreadId || Number(row.binding_generation) !== owner.bindingGeneration)
             return {status: "denied", operationId, reason: "native_evidence_reused"};
           return JSON.parse(row.result) as WorkflowWriteResult;
         }
-        const prior = this.readOperationReceipt(owner, writeOperationNamespace, operationId, requestHash);
+        const prior = this.readOperationReceipt(owner, operationNamespace(owner, payload), operationId, requestHash);
         if (prior.kind === "conflict") return operationConflict(operationId);
         if (prior.kind === "replay") {
           this.recordEvidence(owner, payload, evidence, requestHash, prior.result, true);
@@ -1068,7 +1122,7 @@ export class WorkflowWriteController {
         if (successful) {
           this.options.supervisors.store.db.prepare(
             "INSERT INTO supervisor_workflow_write_receipts(operation_id,operation_namespace,request_hash,project_id,main_thread_id,supervisor_thread_id,binding_generation,result,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-          ).run(operationId, writeOperationNamespace, requestHash, owner.projectId, owner.mainThreadId, owner.supervisorThreadId,
+          ).run(operationId, operationNamespace(owner, payload), requestHash, owner.projectId, owner.mainThreadId, owner.supervisorThreadId,
             owner.bindingGeneration, JSON.stringify(result), this.now());
         }
         this.recordEvidence(owner, payload, evidence, requestHash, result, successful);
@@ -1098,10 +1152,11 @@ export class WorkflowWriteController {
       status: evidence.status,
       nativeItemRef: evidence.nativeItemRef,
       owner,
+      actorThreadId: payload.supervisorThreadId,
     });
     this.options.supervisors.store.db.prepare(
       "INSERT INTO supervisor_workflow_write_evidence(supervisor_thread_id,item_id,operation_id,operation_namespace,request_hash,project_id,main_thread_id,binding_generation,native_evidence,result,successful,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-    ).run(owner.supervisorThreadId, evidence.itemId, operationIdOf(payload), writeOperationNamespace, requestHash, owner.projectId, owner.mainThreadId,
+    ).run(payload.supervisorThreadId, evidence.itemId, operationIdOf(payload), operationNamespace(owner, payload), requestHash, owner.projectId, owner.mainThreadId,
       owner.bindingGeneration, nativeEvidence, JSON.stringify(result), successful ? 1 : 0, this.now());
   }
 

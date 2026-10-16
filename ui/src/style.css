@@ -157,6 +157,10 @@ small,
   background: #fff0d4;
   color: #745017;
 }
+.pill.critical {
+  background: #ffdedb;
+  color: #84251d;
+}
 .nav {
   display: flex;
   border-bottom: 1px solid var(--line);
@@ -217,6 +221,9 @@ small,
 .workflow-progress-document, .workflow-progress-thread {padding: 14px; border: 1px solid var(--line); border-radius: 10px; overflow-wrap: anywhere;}
 .workflow-progress-observation {padding: 10px 0 10px 12px; border-left: 2px solid var(--line);}
 .workflow-progress-thread summary {cursor: pointer; min-height: 44px; display: flex; align-items: center;}
+.supervisor-team-member {padding: 14px; border: 1px solid var(--line); border-radius: 10px; overflow-wrap: anywhere;}
+.supervisor-team-members {margin: 0; padding: 0; list-style: none;}
+.supervisor-team .small {overflow-wrap: anywhere;}
 .steps-guide {margin-top: 8px;}
 .guide-topic {padding-top: 4px;}
 .guide-example {margin: 0; display: grid; gap: 8px;}

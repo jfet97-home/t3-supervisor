@@ -20,10 +20,18 @@ export const workflowToolNames = {
     ],
     mcpxTarget: "t3-supervisor-workflows__workflow_write",
   },
+  team: {
+    direct: ["t3-supervisor-workflows.supervision_team", "mcp__t3-supervisor-workflows__supervision_team"],
+    mcpxTarget: "t3-supervisor-workflows__supervision_team",
+  },
+  guide: {
+    direct: ["t3-supervisor-workflows.supervision_guide", "mcp__t3-supervisor-workflows__supervision_guide"],
+    mcpxTarget: "t3-supervisor-workflows__supervision_guide",
+  },
   mcpxCall: ["mcpx.mcpx_call_tool", "mcp__mcpx__mcpx_call_tool"],
 } as const;
 
-export type WorkflowEvidenceTool = "read" | "write";
+export type WorkflowEvidenceTool = "read" | "write" | "team" | "guide";
 
 export type WorkflowEvidenceMatch = {
   itemId: string;
@@ -86,10 +94,14 @@ export const workflowToolInputSize = (value: unknown): number =>
 const knownDirectToolNames = new Set<string>([
   ...workflowToolNames.read.direct,
   ...workflowToolNames.write.direct,
+  ...workflowToolNames.team.direct,
+  ...workflowToolNames.guide.direct,
 ]);
 const knownMcpxTargets = new Set<string>([
   workflowToolNames.read.mcpxTarget,
   workflowToolNames.write.mcpxTarget,
+  workflowToolNames.team.mcpxTarget,
+  workflowToolNames.guide.mcpxTarget,
 ]);
 const isMcpxCall = (toolName: string): boolean => workflowToolNames.mcpxCall.includes(toolName as never);
 const maxObservedToolNameLength = 128;

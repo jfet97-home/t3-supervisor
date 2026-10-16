@@ -1664,6 +1664,7 @@ test("completed activity first observed on new and reused children is batched by
   fixture.addChildProjection(reused);
 
   const routeParent = makeProjection(makeThread({id: "operative-active-delegated-parent", title: "Active delegated parent"}));
+  routeParent.thread.projectId = "other-project";
   routeParent.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
   routeParent.thread.creationSource = "mcp";
   const routeParentRun = appendRun({projection: routeParent, id: "route-parent-active-run", ordinal: 1, status: "running",
@@ -1719,7 +1720,7 @@ test("completed activity first observed on new and reused children is batched by
   assert.deepEqual(routeEnvelope?.fallbackAncestors, [
     {threadId: routeParent.thread.id, main: false, eligible: true, contactable: true},
     {threadId: operativeThreadId, main: true, eligible: true, contactable: true},
-  ], "a delegated ancestor is offered only with matching running provider-turn evidence");
+  ], "a delegated ancestor is offered only with matching running provider-turn evidence and verified scope, not project ID equality");
   assert.equal(request.text.includes("PRIVATE_CHILD_BODY"), false);
   assert.equal(request.text.includes("PRIVATE_DELEGATED_BODY"), false);
   assert.equal(request.text.includes("PRIVATE_OLD_CHILD_BODY"), false);

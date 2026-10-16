@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { Schema } from "effect";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { defaultMonitoringSettings, ProjectSupervisorSave, ProjectSupervisorSnapshot, type DefinitionReviewInfo, type ProjectSupervisorInfo, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput, type SupervisorModelSelection, type WorkflowAgreementInfo, type WorkflowPlanGroupInfo, type WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
+import { defaultMonitoringSettings, defaultSupervisorTeamSettings, ProjectSupervisorSave, ProjectSupervisorSnapshot, type DefinitionReviewInfo, type ProjectSupervisorInfo, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput, type ProjectSupervisorTeamInfo, type SupervisorModelSelection, type WorkflowAgreementInfo, type WorkflowPlanGroupInfo, type WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import type { WorkflowProgressSnapshot } from "../src/workflow-progress.js";
 import { ProjectSupervisorView, WorkflowProgressPanel, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
@@ -37,6 +37,8 @@ const snapshot: ProjectSupervisorInfo = {
 
 const input: ProjectSupervisorSaveInput = {projectId: "project", mainThreadId: "task-thread", expectedGeneration: 7, modelSelection: selection};
 const monitoring = {intervalMinutes: "5", activityThreshold: "10"};
+const teamSettings = {maxHelpersPerRoot: String(defaultSupervisorTeamSettings.maxHelpersPerRoot)};
+const viewDefaults = {teamSettings, onTeamSettingsChange: () => {}};
 const plan: WorkflowPlanGroupInfo = {
   kind: "sequence", templatePath: "delivery.yaml/sequence", nodes: [
     {kind: "step", nodeId: "step-inspect", definitionId: "inspect-source", localId: null, templatePath: "delivery.yaml/sequence/0", name: "Inspect source", description: "Read the affected code.", source: {origin: "project", path: ".t3-supervisor/steps/inspect-source.md", sourceId: "inspect-source"}, resolution: "resolved", reason: "The task changes project code.", status: "planned", contributorThreadIds: ["child-one"]},
@@ -137,6 +139,7 @@ const progressSnapshot: WorkflowProgressSnapshot = {
 };
 
 const renderTaskView = (task: ProjectSupervisorInfo["tasks"][number]) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
+  ...viewDefaults,
   snapshot: {...snapshot, tasks: [task]}, selection, monitoring, threadId: task.threadId, connected: true,
   saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false, shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false,
   onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
@@ -148,6 +151,7 @@ test("Supervisor settings markup explains automatic conversation reuse and separ
     monitoringStatus: {state: "busy" as const, message: "A monitoring review is running.", pendingItems: 4, nextReviewAt: 1_800_000_000_000, lastNoticeAt: null},
   };
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+  ...viewDefaults,
     snapshot: {...monitoringSnapshot, message: '<img src=x onerror="alert(1)">'}, selection, monitoring, threadId: "task-thread", connected: true,
     saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false, shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false,
     onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
@@ -186,15 +190,85 @@ test("Supervisor settings markup explains automatic conversation reuse and separ
 
 test("monitoring settings default sensibly and remain optional for legacy snapshots and saves", () => {
   assert.deepEqual(defaultMonitoringSettings, {intervalMinutes: 5, activityThreshold: 10});
+  assert.deepEqual(defaultSupervisorTeamSettings, {maxHelpersPerRoot: 5});
   const decodedSnapshot = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(snapshot);
   const decodedInput = Schema.decodeUnknownSync(ProjectSupervisorSave)(input);
   assert.equal(decodedSnapshot.settings.monitoring, undefined);
+  assert.equal(decodedSnapshot.settings.teamSettings, undefined);
   assert.equal(decodedInput.monitoring, undefined);
+  assert.equal(decodedInput.teamSettings, undefined);
   assert.equal(decodedSnapshot.tasks[0]?.definitionReview, undefined);
+});
+
+test("Supervisor team stays distinct from operational workflows and shows member state, assignments and handovers", () => {
+  const team: ProjectSupervisorTeamInfo = {
+    status: "incomplete",
+    message: "One helper snapshot is delayed.",
+    observedAt: 1_800_000_000_200,
+    root: {
+      threadId: "exact-thread-123",
+      title: "Root Supervisor",
+      model: "steady-model",
+      readiness: "ready",
+      lifecycle: "active",
+      currentState: "Coordinating the main workflow",
+      lastAssessment: {summary: "The main remains on track.", assessedAt: 1_800_000_000_150},
+    },
+    members: [{
+      threadId: "helper-thread-1",
+      title: "Testing helper",
+      model: "quick-model",
+      readiness: "ready",
+      lifecycle: "active",
+      assignments: [{threadId: "child-one", title: "Test subtree", state: "active"}],
+      currentState: "Reviewing test evidence",
+      lastAssessment: {summary: "The child tests found a missing case.", assessedAt: 1_800_000_000_180},
+      pendingHandovers: [{targetThreadId: "child-two", targetTitle: "Integration subtree", direction: "outgoing", state: "uncertain", summary: "Delivery outcome is still being reconciled.", updatedAt: 1_800_000_000_190}],
+      issues: [{id: "issue-1", severity: "critical", summary: "A required test failed.", observedAt: 1_800_000_000_185}],
+    }],
+    issues: [{id: "team-issue-1", severity: "warning", summary: "The handover has not been acknowledged.", observedAt: 1_800_000_000_195}],
+  };
+  const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+    ...viewDefaults,
+    snapshot: {...snapshot, team, settings: {...snapshot.settings, teamSettings: {maxHelpersPerRoot: 6}}},
+    selection, monitoring, teamSettings: {maxHelpersPerRoot: "6"}, connected: true, saving: false, fieldsBusy: false,
+    blocked: false, dirty: false, canSave: false, shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false,
+    onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+  }));
+  assert.match(html, /Supervisor team/);
+  assert.match(html, /Saved maximum helpers per root: 6/);
+  assert.match(html, /Open root Supervisor in T3/);
+  assert.match(html, /t3-thread:\/\/v1\/helper-thread-1/);
+  assert.match(html, /Ready/);
+  assert.match(html, /Active/);
+  assert.match(html, /Current assignments/);
+  assert.match(html, /Test subtree/);
+  assert.match(html, /Last assessment: The child tests found a missing case/);
+  assert.match(html, /Pending handovers/);
+  assert.match(html, /Delivery outcome is still being reconciled/);
+  assert.match(html, /A required test failed/);
+  assert.match(html, /The team snapshot is incomplete/);
+  assert.match(html, /Root-to-helper notes and routine check-ins use Supervisor team operations/);
+  assert.match(html, /Maximum helpers per root/);
+  assert.match(html, /0 disables new recruitment/);
+  assert.doesNotMatch(html, /memberEpoch|assignmentEpoch/);
+});
+
+test("invalid team settings expose an associated accessible error", () => {
+  const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+    ...viewDefaults,
+    snapshot, selection, monitoring, teamSettings: {maxHelpersPerRoot: "21"}, connected: true,
+    saving: false, fieldsBusy: false, blocked: false, dirty: true, canSave: false, shouldOfferRetry: false,
+    retryButtonLabel: "Retry native access", canRetry: false, onSelectionChange: () => {}, onMonitoringChange: () => {},
+    onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+  }));
+  assert.match(html, /aria-describedby="supervisor-team-max-helpers-help supervisor-team-max-helpers-error"/);
+  assert.match(html, /Enter maximum helpers per root from 0 to 20/);
 });
 
 test("invalid monitoring drafts expose associated accessible errors", () => {
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+  ...viewDefaults,
     snapshot, selection, monitoring: {intervalMinutes: "1.5", activityThreshold: "101"}, connected: true,
     saving: false, fieldsBusy: false, blocked: false, dirty: true, canSave: false, shouldOfferRetry: false,
     retryButtonLabel: "Retry native access", canRetry: false, onSelectionChange: () => {}, onMonitoringChange: () => {},
@@ -414,6 +488,7 @@ test("unavailable saved models remain visible and disabled while an available mo
   const unavailableSelection: SupervisorModelSelection = {instanceId: unavailable.instanceId, model: unavailable.model, options: [{id: "thinking", value: true}]};
   const savedSnapshot = {...snapshot, settings: {...snapshot.settings, modelSelection: unavailableSelection}};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+  ...viewDefaults,
     snapshot: savedSnapshot, selection: unavailableSelection, monitoring, connected: true,
     saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false, shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false,
     onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
@@ -426,6 +501,7 @@ test("unavailable saved models remain visible and disabled while an available mo
 test("an uncertain result from another project thread exposes retry only after the draft is resolved", () => {
   const uncertainTask = {...snapshot.tasks[0]!, threadId: "other-thread", status: "uncertain" as const};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+  ...viewDefaults,
     snapshot: {...snapshot, tasks: [...snapshot.tasks, uncertainTask]}, selection, monitoring, threadId: "task-thread", connected: true,
     saving: false, fieldsBusy: false, blocked: false, dirty: true, canSave: true, shouldOfferRetry: true,
     retryButtonLabel: "Retry native access", canRetry: false, onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {},
@@ -440,6 +516,7 @@ test("an uncertain result from another project thread exposes retry only after t
 test("a deleted binding has a distinct explicit replacement action and no live link to the deleted thread", () => {
   const missingSnapshot = {...snapshot, binding: {...snapshot.binding!, state: "missing" as const}};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+  ...viewDefaults,
     snapshot: missingSnapshot, selection, monitoring, connected: true, saving: false, fieldsBusy: false, blocked: false,
     dirty: false, canSave: false, shouldOfferRetry: true, retryButtonLabel: "Replace deleted Supervisor conversation", canRetry: true,
     onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
@@ -471,6 +548,7 @@ test("monitoring retry suggestions respect saturation while preserving independe
     },
   };
   const renderRecoveryView = (value: ProjectSupervisorInfo) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
+  ...viewDefaults,
     snapshot: value, selection, monitoring, connected: true, saving: false, fieldsBusy: false, blocked: false,
     dirty: false, canSave: false, shouldOfferRetry: shouldOfferNativeRetry(value), retryButtonLabel: "Retry native access", canRetry: false,
     onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
@@ -502,6 +580,7 @@ test("monitoring retry suggestions respect saturation while preserving independe
 test("project task recovery remains visible but disabled until a bound conversation exists", () => {
   const unboundSnapshot = {...snapshot, binding: null};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+  ...viewDefaults,
     snapshot: unboundSnapshot, selection, monitoring, connected: true, saving: false, fieldsBusy: false, blocked: false,
     dirty: false, canSave: false, shouldOfferRetry: true, retryButtonLabel: "Retry native access", canRetry: false,
     onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
@@ -681,9 +760,33 @@ test("a response for another main in the same project is rejected by the client"
   } finally {globalThis.fetch = original;}
 });
 
+test("team and coverage APIs reject mismatched roots and off-scope assignments", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      ...snapshot,
+      team: {
+        status: "ok", message: null, observedAt: 1,
+        root: {threadId: "another-root", title: null, model: null, readiness: "unknown", lifecycle: "unknown", currentState: null, lastAssessment: null},
+        members: [], issues: [],
+      },
+    }), {status: 200});
+    await assert.rejects(loadProjectSupervisor("project", AbortSignal.timeout(1000), "task-thread"), /another root conversation/);
+
+    globalThis.fetch = async () => new Response(JSON.stringify({...snapshot, settings: {...snapshot.settings, teamSettings: {maxHelpersPerRoot: 21}}}), {status: 200});
+    await assert.rejects(loadProjectSupervisor("project", AbortSignal.timeout(1000), "task-thread"), /outside the supported range/);
+
+    globalThis.fetch = async () => new Response(JSON.stringify({...progressSnapshot, coverage: [
+      {threadId: "foreign-child", state: "assigned", assigneeThreadId: "helper", assigneeTitle: "Helper", assignmentRootThreadId: "foreign-child"},
+    ]}), {status: 200});
+    await assert.rejects(loadWorkflowProgress("project", "task-thread", AbortSignal.timeout(1000)), /does not match its native scope page/);
+  } finally {globalThis.fetch = original;}
+});
+
 test("project defaults without a selection expose no conversation readback or retry", () => {
   const defaults = {...snapshot, mainThreadId: null, binding: null, modelSelection: null, modelApplication: null, tasks: [], settings: {...snapshot.settings, pending: false}};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+  ...viewDefaults,
     snapshot: defaults, selection, monitoring, connected: true, saving: false, fieldsBusy: false, blocked: false,
     dirty: false, canSave: false, shouldOfferRetry: shouldOfferNativeRetry(defaults), retryButtonLabel: "Retry native access", canRetry: false,
     onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
@@ -732,6 +835,28 @@ test("live progress separates the current workflow from agreement history and pr
   assert.match(html, /Parent steps do not complete automatically when a child finishes/);
   assert.doesNotMatch(html, /Agreement status|Agreement context|accepted-key/);
   assert.doesNotMatch(html, /accept workflow|send workflow/i);
+});
+
+test("operational rows distinguish root, helper, transfer, unknown and missing assignment data", () => {
+  const withCoverage: WorkflowProgressSnapshot = {
+    ...progressSnapshot,
+    coverage: [
+      {threadId: "task-thread", state: "root", assigneeThreadId: null, assigneeTitle: null, assignmentRootThreadId: null},
+      {threadId: "child-one", state: "assigned", assigneeThreadId: "helper-thread-1", assigneeTitle: "Testing helper", assignmentRootThreadId: "child-one"},
+      {threadId: "child-two", state: "transfer", assigneeThreadId: null, assigneeTitle: null, assignmentRootThreadId: "child-two"},
+      {threadId: "failed-native", state: "unknown", assigneeThreadId: null, assigneeTitle: null, assignmentRootThreadId: null},
+    ],
+  };
+  const html = renderToStaticMarkup(createElement(WorkflowProgressPanel, {
+    mainThreadId: "task-thread", connected: true,
+    progress: {key: "progress-key", pages: [withCoverage], loading: false, error: null},
+    onRefresh: () => {}, onLoadMore: () => {},
+  }));
+  assert.match(html, /Assigned to:<\/strong> Supervisor root \(unassigned operational work\)/);
+  assert.match(html, /href="t3-thread:\/\/v1\/helper-thread-1">Testing helper<\/a>/);
+  assert.match(html, /Assigned to:<\/strong> Handover in progress/);
+  assert.match(html, /Assigned to:<\/strong> Unknown; the current owner could not be confirmed/);
+  assert.match(html, /Assigned to:<\/strong> Not reported in this snapshot/);
 });
 
 test("workflow progress API pages are scoped to the requested project, main, and independent offsets", async () => {

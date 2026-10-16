@@ -12,6 +12,59 @@ export const MonitoringSettings = Schema.Struct({
 });
 export type SupervisorMonitoringSettings = typeof MonitoringSettings.Type;
 export const defaultMonitoringSettings: SupervisorMonitoringSettings = {intervalMinutes: 5, activityThreshold: 10};
+export const SupervisorTeamSettings = Schema.Struct({maxHelpersPerRoot: Schema.Number});
+export type SupervisorTeamSettingsInfo = typeof SupervisorTeamSettings.Type;
+export const defaultSupervisorTeamSettings: SupervisorTeamSettingsInfo = {maxHelpersPerRoot: 5};
+const SupervisorTeamAssessment = Schema.Struct({summary: Schema.String, assessedAt: Schema.NullOr(Schema.Number)});
+const SupervisorTeamHandover = Schema.Struct({
+  targetThreadId: Schema.String,
+  targetTitle: Schema.NullOr(Schema.String),
+  direction: Schema.Literals(["incoming", "outgoing"]),
+  state: Schema.Literals(["pending", "uncertain"]),
+  summary: Schema.String,
+  updatedAt: Schema.Number,
+});
+const SupervisorTeamIssue = Schema.Struct({
+  id: Schema.String,
+  severity: Schema.Literals(["info", "warning", "critical"]),
+  summary: Schema.String,
+  observedAt: Schema.Number,
+});
+const SupervisorTeamRoot = Schema.Struct({
+  threadId: Schema.String,
+  title: Schema.NullOr(Schema.String),
+  model: Schema.NullOr(Schema.String),
+  readiness: Schema.Literals(["pending", "ready", "unavailable", "unknown"]),
+  lifecycle: Schema.Literals(["active", "idle", "failed", "retired", "unknown"]),
+  currentState: Schema.NullOr(Schema.String),
+  lastAssessment: Schema.NullOr(SupervisorTeamAssessment),
+});
+const SupervisorTeamAssignmentView = Schema.Struct({
+  threadId: Schema.String,
+  title: Schema.NullOr(Schema.String),
+  state: Schema.Literals(["active", "pending", "transfer", "released"]),
+});
+const SupervisorTeamMember = Schema.Struct({
+  threadId: Schema.String,
+  title: Schema.NullOr(Schema.String),
+  model: Schema.NullOr(Schema.String),
+  readiness: Schema.Literals(["pending", "ready", "unavailable", "unknown"]),
+  lifecycle: Schema.Literals(["active", "idle", "failed", "retired", "unknown"]),
+  assignments: Schema.Array(SupervisorTeamAssignmentView),
+  currentState: Schema.NullOr(Schema.String),
+  lastAssessment: Schema.NullOr(SupervisorTeamAssessment),
+  pendingHandovers: Schema.Array(SupervisorTeamHandover),
+  issues: Schema.Array(SupervisorTeamIssue),
+});
+export const ProjectSupervisorTeamSnapshot = Schema.Struct({
+  status: Schema.Literals(["ok", "incomplete", "unavailable"]),
+  message: Schema.NullOr(Schema.String),
+  observedAt: Schema.Number,
+  root: SupervisorTeamRoot,
+  members: Schema.Array(SupervisorTeamMember),
+  issues: Schema.Array(SupervisorTeamIssue),
+});
+export type ProjectSupervisorTeamInfo = typeof ProjectSupervisorTeamSnapshot.Type;
 export const SupervisorModel = Schema.Struct({
   instanceId: Schema.String,
   model: Schema.String,
@@ -242,7 +295,7 @@ export const ProjectSupervisorSnapshot = Schema.Struct({
   projectId: Schema.String,
   mainThreadId: Schema.NullOr(Schema.String),
   modelApplication: Schema.NullOr(Schema.Struct({pending: Schema.Boolean, attempts: Schema.Number, message: Schema.NullOr(Schema.String)})),
-  settings: Schema.Struct({generation: Schema.Number, modelSelection: ModelSelection, pending: Schema.Boolean, monitoring: Schema.optionalKey(MonitoringSettings)}),
+  settings: Schema.Struct({generation: Schema.Number, modelSelection: ModelSelection, pending: Schema.Boolean, monitoring: Schema.optionalKey(MonitoringSettings), teamSettings: Schema.optionalKey(SupervisorTeamSettings)}),
   binding: Schema.NullOr(ProjectSupervisorBinding),
   modelSelection: Schema.NullOr(ModelSelection),
   models: Schema.Array(SupervisorModel),
@@ -250,6 +303,7 @@ export const ProjectSupervisorSnapshot = Schema.Struct({
   available: Schema.Boolean,
   message: Schema.String,
   tasks: Schema.Array(TaskInterpretation),
+  team: Schema.optionalKey(Schema.NullOr(ProjectSupervisorTeamSnapshot)),
 });
 export type ProjectSupervisorInfo = typeof ProjectSupervisorSnapshot.Type;
 export const ProjectSupervisorSave = Schema.Struct({
@@ -258,6 +312,7 @@ export const ProjectSupervisorSave = Schema.Struct({
   expectedGeneration: Schema.Number,
   modelSelection: ModelSelection,
   monitoring: Schema.optionalKey(MonitoringSettings),
+  teamSettings: Schema.optionalKey(SupervisorTeamSettings),
 });
 export type ProjectSupervisorSaveInput = typeof ProjectSupervisorSave.Type;
 export const ProjectSupervisorRetry = Schema.Struct({

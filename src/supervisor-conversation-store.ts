@@ -19,6 +19,9 @@ export type ConversationRequest = {
   error: string | null;
   completionMarker: string;
   failureAcknowledged?: boolean;
+  teamNotificationIds?: string[];
+  teamEventIds?: string[];
+  teamMemberEpoch?: number;
 };
 export type WorkflowIntroduction = {
   taskId: string;
@@ -74,10 +77,11 @@ export class SupervisorConversationStore {
     this.store.db.prepare("INSERT INTO supervisor_conversation_requests VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document")
       .run(request.id, request.projectId, JSON.stringify(request), request.createdAt);
   }
-  prepare(input: Pick<ConversationRequest, "projectId" | "supervisorThreadId" | "kind" | "taskId" | "text" | "batch" | "completionMarker">, now: number): ConversationRequest {
+  prepare(input: Pick<ConversationRequest, "projectId" | "supervisorThreadId" | "kind" | "taskId" | "text" | "batch" | "completionMarker"> &
+    Partial<Pick<ConversationRequest, "id" | "teamNotificationIds" | "teamEventIds" | "teamMemberEpoch">>, now: number): ConversationRequest {
     if (this.pending(input.projectId, input.supervisorThreadId)) throw new Error("supervisor_request_inflight");
     this.prune(now);
-    const id = randomUUID();
+    const id = input.id ?? randomUUID();
     const request: ConversationRequest = {...input, id, messageId: `supervisor-review:${id}`, state: "prepared", createdAt: now, sentAt: null, runId: null, error: null};
     this.saveRequest(request);return request;
   }

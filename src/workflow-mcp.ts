@@ -1,3 +1,4 @@
+import {SupervisorTeamController, supervisionTeamToolDefinition, supervisionGuideToolDefinition} from "./supervisor-team-controller.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -12,7 +13,7 @@ import {
 const maxMcpRequestBodyBytes = 1024 * 1024;
 const callTimeoutMs = 9_000;
 const serverInfo = {name: "t3-supervisor-workflows", version: "0.1.0"};
-const tools = [workflowReadToolDefinition, workflowWriteToolDefinition] as unknown as Tool[];
+
 
 const toolResult = (value: unknown): CallToolResult => {
   const result = value as {status?: unknown};
@@ -36,7 +37,8 @@ export type WorkflowMcpEndpoint = {
 };
 
 /** Creates one stateless MCP server and transport for each HTTP request. */
-export const createWorkflowMcpEndpoint = (controller: WorkflowWriteController): WorkflowMcpEndpoint => {
+export const createWorkflowMcpEndpoint = (controller: WorkflowWriteController, team?: SupervisorTeamController): WorkflowMcpEndpoint => {
+  const tools = [workflowReadToolDefinition, workflowWriteToolDefinition, ...(team ? [supervisionTeamToolDefinition, supervisionGuideToolDefinition] : [])] as unknown as Tool[];
   let closed = false;
   const active = new Map<Server, AbortController>();
   return {
@@ -63,6 +65,8 @@ export const createWorkflowMcpEndpoint = (controller: WorkflowWriteController): 
         const signal = AbortSignal.any([requestController.signal, AbortSignal.timeout(callTimeoutMs)]);
         if (name === "workflow_read") return toolResult(await controller.read(args, signal));
         if (name === "workflow_write") return toolResult(await controller.write(args, signal));
+        if (name === "supervision_team" && team) return toolResult(await team.call(args, signal));
+        if (name === "supervision_guide" && team) return toolResult(await team.guide(args, signal));
         return toolResult({status: "invalid", reason: "unknown_tool"});
       });
       active.set(server, requestController);

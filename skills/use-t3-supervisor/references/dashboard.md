@@ -98,6 +98,36 @@ Native idle/no-AppRun mirrors are not child completion. The Supervisor observes
 normal actions/results and supplies the assessment without requiring constant agent
 reports. Its links explain the judgment, not independent proof of semantic success.
 
+## Supervisor team
+
+The selected main's Supervisor team appears in its own section, separate from the
+connected operational conversation list. Review the root and direct helpers, their
+T3 links, known models, readiness/lifecycle, subtree assignments, current state,
+last assessment, handovers and significant issues. Each operational row reports its
+effective assignee. A transfer or unknown owner is called out; missing coverage is
+not silently shown as root ownership.
+
+The maximum helpers per root defaults to 5 and is configurable from 0 to 20 in
+Supervisor settings. Zero stops new recruitment but preserves existing members.
+One helper may cover several operational subtree roots and verified future
+descendants. Assignment does not change workflow-step ownership, contributor links
+or automatic parent completion. Helpers inherit the root's T3 model unless the root
+chooses another model from the current configured T3 catalog.
+
+Team membership and assignments are managed through the owning root's Supervisor
+team operations. A human message entered in a helper conversation follows T3's
+native follow-up behavior. Root notes and routine check-ins go through Supervisor
+team operations, not raw `t3_thread_send`. During handover, pending or uncertain
+notifications remain visible and the root keeps responsibility until coverage is
+confirmed.
+
+The team snapshot includes an observation time. Incomplete or unavailable state is
+explicit; after a refresh failure, retained data is stale. Opening a T3 link does
+not make the team data fresher. Team and progress reads do not wake chats or change
+workflow state. During a handover, the root remains responsible until the new
+coverage is confirmed; an uncertain notification is not evidence that a transfer
+completed.
+
 Direct guidance is limited to verified active delegated children and active-only
 steering after fresh scope and contact checks. Native read-only children receive
 guidance through their verified ancestors. After a definite rejection or when a
@@ -151,3 +181,10 @@ not supported automatically. Login commits grant consumption and session creatio
 together. Existing session expiry and durable sign-out are unchanged. Maintenance
 preserves real credentials and sessions without requiring product compatibility
 layers for obsolete prototypes.
+
+Helper check-ins use a genuine event-triggered T3 webhook task bound to the child,
+without a timer or T3 Connect. The native job appears in T3's scheduler. Pausing or
+retargeting it stops delivery; the service does not silently undo that choice.
+Webhook credentials remain private. Unknown POSTs are not repeated; native message
+and delivery evidence reconcile the original attempt. A definite failed check-in
+needs an explicit root retry or reassignment.

@@ -1,16 +1,18 @@
 import React, { useEffect, useRef, useState, type FormEvent } from "react";
 import type {
   ProjectSupervisorInfo,
+  ProjectSupervisorTeamInfo,
   DefinitionReviewInfo,
   SupervisorModelInfo,
   SupervisorModelSelection,
   SupervisorMonitoringSettings,
+  SupervisorTeamSettingsInfo,
   WorkflowAgreementInfo,
   WorkflowPlanNodeInfo,
   WorkflowProposalInfo,
 } from "../../src/project-supervisor-contract.js";
-import type { WorkflowProgressSnapshot, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
-import { defaultMonitoringSettings } from "../../src/project-supervisor-contract.js";
+import type { WorkflowProgressCoverage, WorkflowProgressSnapshot, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
+import { defaultMonitoringSettings, defaultSupervisorTeamSettings } from "../../src/project-supervisor-contract.js";
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "./project-supervisor-api.js";
 import { SupervisionControlPanel } from "./supervisor-control.js";
 
@@ -18,6 +20,7 @@ type MonitoringDraft = {
   intervalMinutes: string;
   activityThreshold: string;
 };
+type TeamSettingsDraft = {maxHelpersPerRoot: string};
 
 type Draft = {
   projectId: string;
@@ -25,6 +28,8 @@ type Draft = {
   modelBaseline: SupervisorModelSelection;
   monitoringValue: MonitoringDraft;
   monitoringBaseline: MonitoringDraft;
+  teamSettingsValue: TeamSettingsDraft;
+  teamSettingsBaseline: TeamSettingsDraft;
   expectedGeneration: number;
 };
 type Drafts = Record<string, Draft>;
@@ -41,6 +46,7 @@ const copySelection = (selection: SupervisorModelSelection): SupervisorModelSele
   options: selection.options.map(option => ({...option})),
 });
 const copyMonitoringDraft = (monitoring: MonitoringDraft): MonitoringDraft => ({...monitoring});
+const copyTeamSettingsDraft = (settings: TeamSettingsDraft): TeamSettingsDraft => ({...settings});
 const monitoringDraft = (monitoring: SupervisorMonitoringSettings): MonitoringDraft => ({
   intervalMinutes: String(monitoring.intervalMinutes),
   activityThreshold: String(monitoring.activityThreshold),
@@ -48,8 +54,12 @@ const monitoringDraft = (monitoring: SupervisorMonitoringSettings): MonitoringDr
 const copyMonitoringSettings = (monitoring: SupervisorMonitoringSettings): SupervisorMonitoringSettings => ({...monitoring});
 const sameMonitoring = (left: MonitoringDraft, right: MonitoringDraft) =>
   left.intervalMinutes === right.intervalMinutes && left.activityThreshold === right.activityThreshold;
+const sameTeamSettings = (left: TeamSettingsDraft, right: TeamSettingsDraft) => left.maxHelpersPerRoot === right.maxHelpersPerRoot;
 const readMonitoring = (snapshot: ProjectSupervisorInfo) => copyMonitoringSettings(snapshot.settings.monitoring ?? defaultMonitoringSettings);
 const readMonitoringDraft = (snapshot: ProjectSupervisorInfo) => monitoringDraft(readMonitoring(snapshot));
+const readTeamSettings = (snapshot: ProjectSupervisorInfo): SupervisorTeamSettingsInfo => ({...(snapshot.settings.teamSettings ?? defaultSupervisorTeamSettings)});
+const teamSettingsDraft = (settings: SupervisorTeamSettingsInfo): TeamSettingsDraft => ({maxHelpersPerRoot: String(settings.maxHelpersPerRoot)});
+const readTeamSettingsDraft = (snapshot: ProjectSupervisorInfo) => teamSettingsDraft(readTeamSettings(snapshot));
 const formatMonitoringTime = (value: number | null) => value === null ? "Not scheduled" : new Date(value).toLocaleString();
 const monitoringError = (value: string, minimum: number, maximum: number, field: string) => {
   if (!value.trim()) return `Enter ${field} from ${minimum} to ${maximum}.`;
@@ -62,6 +72,10 @@ const parseMonitoringDraft = (value: MonitoringDraft): SupervisorMonitoringSetti
   if (monitoringError(value.intervalMinutes, 1, 60, "maximum pending activity age in minutes") ||
     monitoringError(value.activityThreshold, 3, 100, "finalized activity threshold")) return null;
   return {intervalMinutes: Number(value.intervalMinutes), activityThreshold: Number(value.activityThreshold)};
+};
+const parseTeamSettingsDraft = (value: TeamSettingsDraft): SupervisorTeamSettingsInfo | null => {
+  if (monitoringError(value.maxHelpersPerRoot, 0, 20, "maximum helpers per root")) return null;
+  return {maxHelpersPerRoot: Number(value.maxHelpersPerRoot)};
 };
 const modelKey = (model: Pick<SupervisorModelInfo, "instanceId" | "model">) => JSON.stringify([model.instanceId, model.model]);
 const selectedModelKey = (selection: SupervisorModelSelection) => JSON.stringify([selection.instanceId, selection.model]);
@@ -381,6 +395,121 @@ const lifecyclePresentation = (thread: WorkflowProgressScopeThread): {label: str
   return {label: "Unknown", tone: "amber"};
 };
 
+const readinessLabels = {
+  pending: "Readiness pending",
+  ready: "Ready",
+  unavailable: "Unavailable",
+  unknown: "Readiness unknown",
+} as const;
+const lifecycleLabels = {
+  active: "Active",
+  idle: "Idle",
+  failed: "Failed",
+  retired: "Retired",
+  unknown: "Lifecycle unknown",
+} as const;
+const readinessTone = (value: ProjectSupervisorTeamInfo["root"]["readiness"]) => value === "ready" ? "green" : value === "pending" ? "blue" : "amber";
+const lifecycleTone = (value: ProjectSupervisorTeamInfo["root"]["lifecycle"]) => value === "active" ? "blue" : value === "idle" ? "green" : "amber";
+const issueTone = (severity: ProjectSupervisorTeamInfo["issues"][number]["severity"]) => severity === "critical" ? "critical" : severity === "info" ? "blue" : "amber";
+
+function TeamAssessment({assessment}: {assessment: NonNullable<ProjectSupervisorTeamInfo["root"]["lastAssessment"]>}) {
+  return <p className="small muted">
+    Last assessment: {assessment.summary}{assessment.assessedAt === null ? "" : <> · {formatProgressTime(assessment.assessedAt)}</>}
+  </p>;
+}
+
+function ProjectSupervisorTeamPanel({team, settings, mainThreadId}: {team: ProjectSupervisorTeamInfo | null | undefined; settings: SupervisorTeamSettingsInfo; mainThreadId: string | null}) {
+  return <section className="panel stack supervisor-team" aria-labelledby="supervisor-team-title">
+    <div className="row between">
+      <h3 id="supervisor-team-title">Supervisor team</h3>
+      <span className="pill">Saved maximum helpers per root: {settings.maxHelpersPerRoot}</span>
+    </div>
+    <p className="muted">The Supervisor team is separate from the operational workflow tree. The root owns unassigned work; each helper covers its assigned subtree and future operational descendants.</p>
+    <p className="small muted">A person who messages a helper in T3 follows T3’s native follow-up behavior. Root-to-helper notes and routine check-ins use Supervisor team operations, not raw <code>t3_thread_send</code>.</p>
+    {!mainThreadId
+      ? <p className="muted">Select a main conversation to inspect its Supervisor team.</p>
+      : !team
+        ? <p className="muted">No team snapshot was reported for this main conversation.</p>
+      : <>
+        <p className="small muted">Observed {formatProgressTime(team.observedAt)}</p>
+        {team.status !== "ok" && <p className="panel" role={team.status === "unavailable" ? "alert" : "status"}>
+          {team.status === "incomplete" ? "The team snapshot is incomplete; some membership or assignment details may be missing." : "The team snapshot is unavailable."}
+          {team.message && <> {team.message}</>}
+        </p>}
+        <article className="stack supervisor-team-member">
+          <div className="row between">
+            <strong>{team.root.title ?? "Supervisor root"}</strong>
+            <div className="row">
+              <span className={`pill ${readinessTone(team.root.readiness)}`}>{readinessLabels[team.root.readiness]}</span>
+              <span className={`pill ${lifecycleTone(team.root.lifecycle)}`}>{lifecycleLabels[team.root.lifecycle]}</span>
+            </div>
+          </div>
+          <p><a href={threadHref(team.root.threadId)}>Open root Supervisor in T3</a> · <code>{team.root.threadId}</code></p>
+          <p className="small"><strong>Model:</strong> {team.root.model ?? "Not reported by T3"}</p>
+          {team.root.currentState && <p><strong>Current state:</strong> {team.root.currentState}</p>}
+          {team.root.lastAssessment && <TeamAssessment assessment={team.root.lastAssessment}/>}
+        </article>
+        {team.members.length === 0
+          ? <p className="muted">No Supervisor helpers are registered. Unassigned operational work remains with the root.</p>
+          : <div className="stack">
+            <h4>Helpers</h4>
+            <ul className="stack supervisor-team-members" role="list">{team.members.map(member => <li key={member.threadId} className="supervisor-team-member stack">
+              <div className="row between">
+                <strong>{member.title ?? "Supervisor helper"}</strong>
+                <div className="row">
+                  <span className={`pill ${readinessTone(member.readiness)}`}>{readinessLabels[member.readiness]}</span>
+                  <span className={`pill ${lifecycleTone(member.lifecycle)}`}>{lifecycleLabels[member.lifecycle]}</span>
+                </div>
+              </div>
+              <p><a href={threadHref(member.threadId)}>Open helper in T3</a> · <code>{member.threadId}</code></p>
+              <p className="small"><strong>Model:</strong> {member.model ?? "Not reported by T3"}</p>
+              {member.currentState && <p><strong>Current state:</strong> {member.currentState}</p>}
+              {member.lastAssessment && <TeamAssessment assessment={member.lastAssessment}/>}
+              <div>
+                <strong>Current assignments</strong>
+                {member.assignments.length === 0
+                  ? <p className="small muted">No operational subtree is assigned.</p>
+                  : <ul className="small">{member.assignments.map(assignment => <li key={`${assignment.threadId}:${assignment.state}`}>
+                    <a href={threadHref(assignment.threadId)}>{assignment.title ?? `Operational subtree ${assignment.threadId}`}</a> · {assignment.state === "active" ? "Active coverage" : assignment.state === "pending" ? "Assignment pending" : assignment.state === "transfer" ? "Transfer in progress" : "Released"}
+                  </li>)}</ul>}
+              </div>
+              {member.pendingHandovers.length > 0 && <div>
+                <strong>Pending handovers</strong>
+                <ul className="small">{member.pendingHandovers.map((handover, index) => <li key={`${handover.targetThreadId}:${handover.direction}:${index}`}>
+                  {handover.direction === "incoming" ? "Incoming" : "Outgoing"} · <a href={threadHref(handover.targetThreadId)}>{handover.targetTitle ?? `Operational subtree ${handover.targetThreadId}`}</a> · {handover.state}
+                  {handover.summary && <> — {handover.summary}</>}
+                </li>)}</ul>
+              </div>}
+              {member.issues.length > 0 && <div>
+                <strong>Significant issues</strong>
+                <ul className="small">{member.issues.map(issue => <li key={issue.id}>
+                  <span className={`pill ${issueTone(issue.severity)}`}>{issue.severity}</span> {issue.summary} · {formatProgressTime(issue.observedAt)}
+                </li>)}</ul>
+              </div>}
+            </li>)}</ul>
+          </div>}
+        {team.issues.length > 0 && <div>
+          <h4>Team issues</h4>
+          <ul className="small">{team.issues.map(issue => <li key={issue.id}>
+            <span className={`pill ${issueTone(issue.severity)}`}>{issue.severity}</span> {issue.summary} · {formatProgressTime(issue.observedAt)}
+          </li>)}</ul>
+        </div>}
+      </>}
+  </section>;
+}
+
+function WorkflowAssignee({coverage}: {coverage: WorkflowProgressCoverage | undefined}) {
+  if (!coverage) return <p className="small muted"><strong>Assigned to:</strong> Not reported in this snapshot.</p>;
+  if (coverage.state === "root") return <p className="small"><strong>Assigned to:</strong> Supervisor root (unassigned operational work).</p>;
+  if (coverage.state === "assigned") return <p className="small"><strong>Assigned to:</strong> {coverage.assigneeThreadId
+    ? <a href={threadHref(coverage.assigneeThreadId)}>{coverage.assigneeTitle ?? `Supervisor helper ${coverage.assigneeThreadId}`}</a>
+    : "A helper; its T3 identity was not reported."}
+    {coverage.assignmentRootThreadId && <> · subtree rooted at <a href={threadHref(coverage.assignmentRootThreadId)}>{coverage.assignmentRootThreadId}</a></>}
+  </p>;
+  if (coverage.state === "transfer") return <p className="small" role="status"><strong>Assigned to:</strong> Handover in progress{coverage.assignmentRootThreadId && <> for <a href={threadHref(coverage.assignmentRootThreadId)}>this subtree</a></>}.</p>;
+  return <p className="small muted"><strong>Assigned to:</strong> Unknown; the current owner could not be confirmed.</p>;
+}
+
 function WorkflowProgressDetails({workflow, scopeThread}: {workflow: WorkflowProgressWorkflow; scopeThread?: WorkflowProgressScopeThread}) {
   const lifecycle = scopeThread ? lifecyclePresentation(scopeThread) : null;
   return <article className="stack workflow-progress-document">
@@ -438,8 +567,10 @@ export function WorkflowProgressPanel({mainThreadId, connected, progress, onRefr
   const latest = pages.at(-1);
   const threadById = new Map<string, NonNullable<WorkflowProgressSnapshot["scope"]>["threads"][number]>();
   const workflowByThreadId = new Map<string, WorkflowProgressWorkflow>();
+  const coverageByThreadId = new Map<string, NonNullable<WorkflowProgressSnapshot["coverage"]>[number]>();
   for (const page of pages) {
     for (const thread of page.scope?.threads ?? []) threadById.set(thread.threadId, thread);
+    for (const coverage of page.coverage ?? []) coverageByThreadId.set(coverage.threadId, coverage);
     for (const workflow of page.workflows) {
       const previous = workflowByThreadId.get(workflow.threadId);
       if (!previous || workflow.updatedAt >= previous.updatedAt) workflowByThreadId.set(workflow.threadId, workflow);
@@ -485,6 +616,7 @@ export function WorkflowProgressPanel({mainThreadId, connected, progress, onRefr
               </div>
               <p>Lifecycle: {lifecycle.label}</p>
               {thread.lifecycleDetail && <p className="small muted">T3 lifecycle detail: {thread.lifecycleDetail}</p>}
+              <WorkflowAssignee coverage={coverageByThreadId.get(thread.threadId)}/>
               {thread.parentThreadId && <p className="small">Parent: <a href={threadHref(thread.parentThreadId)}>Open conversation {thread.parentThreadId}</a></p>}
               {!thread.deletedAt && <p className="small"><a href={threadHref(thread.threadId)}>Open conversation {thread.threadId}</a></p>}
               {lifecycle.label === "Unknown" && <p className="small muted">T3 has not established this conversation’s current lifecycle. An idle thread mirror alone does not establish that its work is finished.</p>}
@@ -529,6 +661,7 @@ export function ProjectSupervisorView({
   snapshot,
   selection,
   monitoring,
+  teamSettings,
   threadId,
   connected,
   saving,
@@ -544,6 +677,7 @@ export function ProjectSupervisorView({
   onWorkflowProgressLoadMore,
   onSelectionChange,
   onMonitoringChange,
+  onTeamSettingsChange,
   onDiscard,
   onRetry,
   onSubmit,
@@ -551,6 +685,7 @@ export function ProjectSupervisorView({
   snapshot: ProjectSupervisorInfo;
   selection: SupervisorModelSelection;
   monitoring: MonitoringDraft;
+  teamSettings: TeamSettingsDraft;
   threadId?: string;
   connected: boolean;
   saving: boolean;
@@ -566,6 +701,7 @@ export function ProjectSupervisorView({
   onWorkflowProgressLoadMore?: () => void;
   onSelectionChange: (selection: SupervisorModelSelection) => void;
   onMonitoringChange: (monitoring: MonitoringDraft) => void;
+  onTeamSettingsChange: (settings: TeamSettingsDraft) => void;
   onDiscard: () => void;
   onRetry: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -581,6 +717,7 @@ export function ProjectSupervisorView({
   const fieldsDisabled = !connected || !snapshot.available || fieldsBusy || blocked;
   const intervalError = monitoringError(monitoring.intervalMinutes, 1, 60, "maximum pending activity age in minutes");
   const thresholdError = monitoringError(monitoring.activityThreshold, 3, 100, "finalized activity threshold");
+  const teamSettingsError = monitoringError(teamSettings.maxHelpersPerRoot, 0, 20, "maximum helpers per root");
   const modelCanChange = !fieldsDisabled;
   const reasoningCanChange = !fieldsDisabled && Boolean(selected?.available && reasoning?.choices.length);
 
@@ -606,6 +743,8 @@ export function ProjectSupervisorView({
       {snapshot.settings.pending && !snapshot.binding && <p role="status">The saved model selection will apply when T3 creates the Supervisor conversation for the first needed task.</p>}
       {!snapshot.available && <p role="status">Supervisor settings are currently unavailable.</p>}
     </div>
+
+    <ProjectSupervisorTeamPanel team={snapshot.team} settings={readTeamSettings(snapshot)} mainThreadId={snapshot.mainThreadId}/>
 
     <form className="panel stack" onSubmit={onSubmit} aria-label="Supervisor settings">
       <fieldset disabled={fieldsDisabled} className="stack">
@@ -665,6 +804,17 @@ export function ProjectSupervisorView({
         </div>
         <p><strong>Supervisor cooldown:</strong> 60 seconds between monitoring sends.</p>
         <p><strong>Model review limit:</strong> one in-flight review per Supervisor.</p>
+      </fieldset>
+      <fieldset disabled={fieldsDisabled} className="stack">
+        <legend>Supervisor team</legend>
+        <p className="muted">Set the maximum number of helpers the root may recruit. The limit applies to new recruitment; existing helpers remain when the value is 0 or the limit is lowered.</p>
+        <label htmlFor="supervisor-team-max-helpers">Maximum helpers per root</label>
+        <input id="supervisor-team-max-helpers" name="maxHelpersPerRoot" type="number" min={0} max={20} step={1} required
+          value={teamSettings.maxHelpersPerRoot} aria-invalid={teamSettingsError ? true : undefined}
+          aria-describedby="supervisor-team-max-helpers-help supervisor-team-max-helpers-error"
+          onChange={event => onTeamSettingsChange({...teamSettings, maxHelpersPerRoot: event.target.value})} />
+        <span id="supervisor-team-max-helpers-help" className="small muted">Enter a whole number from 0 to 20. The default is 5; 0 disables new recruitment.</span>
+        <span id="supervisor-team-max-helpers-error" className="small" aria-live="polite">{teamSettingsError}</span>
       </fieldset>
       <button type="submit" disabled={!canSave || saving || blocked}>{saving ? "Saving…" : "Save Supervisor settings"}</button>
       {dirty && <button type="button" disabled={saving || blocked} onClick={onDiscard}>Discard draft</button>}
@@ -732,14 +882,16 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
   const activeDraft = drafts[projectId] ?? null;
   const modelDirty = Boolean(activeDraft && selectionKey(activeDraft.modelValue) !== selectionKey(activeDraft.modelBaseline));
   const monitoringDirty = Boolean(activeDraft && !sameMonitoring(activeDraft.monitoringValue, activeDraft.monitoringBaseline));
-  const dirty = modelDirty || monitoringDirty;
+  const teamSettingsDirty = Boolean(activeDraft && !sameTeamSettings(activeDraft.teamSettingsValue, activeDraft.teamSettingsBaseline));
+  const dirty = modelDirty || monitoringDirty || teamSettingsDirty;
   const requestKey = JSON.stringify([projectId, threadId || null, revision]);
   const isLoading = connected && loadState.key === requestKey && loadState.status === "loading";
   const loadError = loadState.key === requestKey && loadState.status === "error";
   const fieldsBusy = saving || isLoading;
   const selectedModel = activeSnapshot && activeDraft ? findModel(activeSnapshot, activeDraft.modelValue) : undefined;
   const validMonitoring = activeDraft ? parseMonitoringDraft(activeDraft.monitoringValue) : null;
-  const canSave = Boolean(activeSnapshot?.available && activeDraft && dirty && validMonitoring && (!modelDirty || selectedModel?.available) && connected && !fieldsBusy && !blocked);
+  const validTeamSettings = activeDraft ? parseTeamSettingsDraft(activeDraft.teamSettingsValue) : null;
+  const canSave = Boolean(activeSnapshot?.available && activeDraft && dirty && validMonitoring && validTeamSettings && (!modelDirty || selectedModel?.available) && connected && !fieldsBusy && !blocked);
   const needsRetry = Boolean(activeSnapshot && shouldOfferNativeRetry(activeSnapshot));
   const retryButtonLabel = activeSnapshot?.binding?.state === "missing" ? "Replace deleted Supervisor conversation" : "Retry native access";
   const canRetry = Boolean(needsRetry && activeSnapshot?.available && activeSnapshot.binding && activeDraft && !dirty && connected && !fieldsBusy && !blocked);
@@ -818,19 +970,24 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
       const priorDraft = draftRef.current[projectId] ?? null;
       const priorModelWasDirty = Boolean(priorDraft && selectionKey(priorDraft.modelValue) !== selectionKey(priorDraft.modelBaseline));
       const priorMonitoringWasDirty = Boolean(priorDraft && !sameMonitoring(priorDraft.monitoringValue, priorDraft.monitoringBaseline));
+      const priorTeamSettingsWereDirty = Boolean(priorDraft && !sameTeamSettings(priorDraft.teamSettingsValue, priorDraft.teamSettingsBaseline));
       const modelBaseline = copySelection(snapshot.settings.modelSelection);
       const modelValue = priorModelWasDirty ? copySelection(priorDraft!.modelValue) : copySelection(modelBaseline);
       const monitoringBaseline = readMonitoringDraft(snapshot);
       const monitoringValue = priorMonitoringWasDirty ? copyMonitoringDraft(priorDraft!.monitoringValue) : copyMonitoringDraft(monitoringBaseline);
+      const teamSettingsBaseline = readTeamSettingsDraft(snapshot);
+      const teamSettingsValue = priorTeamSettingsWereDirty ? copyTeamSettingsDraft(priorDraft!.teamSettingsValue) : copyTeamSettingsDraft(teamSettingsBaseline);
       completedLoadKey.current = requestKey;
       setSnapshotState({projectId, snapshot});
-      setDrafts(current => ({...current, [projectId]: {projectId, modelValue, modelBaseline, monitoringValue, monitoringBaseline, expectedGeneration: snapshot.settings.generation}}));
+      setDrafts(current => ({...current, [projectId]: {projectId, modelValue, modelBaseline, monitoringValue, monitoringBaseline,
+        teamSettingsValue, teamSettingsBaseline, expectedGeneration: snapshot.settings.generation}}));
       setLoadState({key: requestKey, status: "idle"});
       setBlocked(false);
       if (forceRefresh) setPanelMessage({
         projectId,
         text: (priorModelWasDirty && selectionKey(modelValue) !== selectionKey(modelBaseline)) ||
-          (priorMonitoringWasDirty && !sameMonitoring(monitoringValue, monitoringBaseline))
+          (priorMonitoringWasDirty && !sameMonitoring(monitoringValue, monitoringBaseline)) ||
+          (priorTeamSettingsWereDirty && !sameTeamSettings(teamSettingsValue, teamSettingsBaseline))
           ? "Supervisor settings refreshed. Your unsaved draft was kept against the latest saved generation."
           : "Supervisor settings refreshed from T3.",
         alert: false,
@@ -906,6 +1063,14 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
     setPanelMessage(null);
   };
 
+  const updateTeamSettings = (settings: TeamSettingsDraft) => {
+    setDrafts(current => {
+      const currentDraft = current[projectId];
+      return currentDraft ? {...current, [projectId]: {...currentDraft, teamSettingsValue: copyTeamSettingsDraft(settings)}} : current;
+    });
+    setPanelMessage(null);
+  };
+
   const discardDraft = () => {
     if (saving || blocked) return;
     setDrafts(current => {
@@ -914,6 +1079,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
         ...currentDraft,
         modelValue: copySelection(currentDraft.modelBaseline),
         monitoringValue: copyMonitoringDraft(currentDraft.monitoringBaseline),
+        teamSettingsValue: copyTeamSettingsDraft(currentDraft.teamSettingsBaseline),
       }} : current;
     });
     setPanelMessage(null);
@@ -921,7 +1087,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (savingRef.current || !canSave || !activeDraft || !activeSnapshot || !validMonitoring) return;
+    if (savingRef.current || !canSave || !activeDraft || !activeSnapshot || !validMonitoring || !validTeamSettings) return;
     const targetProject = projectId;
     const targetScope = activeScope.current;
     const input = {
@@ -930,6 +1096,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
       expectedGeneration: activeDraft.expectedGeneration,
       modelSelection: copySelection(activeDraft.modelValue),
       monitoring: copyMonitoringSettings(validMonitoring),
+      teamSettings: {...validTeamSettings},
     };
     savingRef.current = true;
     setSaving(true);
@@ -942,6 +1109,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
           const canonical = copySelection(result.snapshot.settings.modelSelection);
           const canonicalMonitoring = readMonitoring(result.snapshot);
           const canonicalMonitoringDraft = monitoringDraft(canonicalMonitoring);
+          const canonicalTeamSettings = readTeamSettingsDraft(result.snapshot);
           setSnapshotState({projectId: targetProject, snapshot: result.snapshot});
           setDrafts(current => ({...current, [targetProject]: {
             projectId: targetProject,
@@ -949,6 +1117,8 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
             modelBaseline: copySelection(canonical),
             monitoringValue: copyMonitoringDraft(canonicalMonitoringDraft),
             monitoringBaseline: copyMonitoringDraft(canonicalMonitoringDraft),
+            teamSettingsValue: copyTeamSettingsDraft(canonicalTeamSettings),
+            teamSettingsBaseline: copyTeamSettingsDraft(canonicalTeamSettings),
             expectedGeneration: result.snapshot!.settings.generation,
           }}));
           setBlocked(false);
@@ -962,6 +1132,8 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
               modelBaseline: copySelection(input.modelSelection),
               monitoringValue: monitoringDraft(input.monitoring),
               monitoringBaseline: monitoringDraft(input.monitoring),
+              teamSettingsValue: teamSettingsDraft(input.teamSettings),
+              teamSettingsBaseline: teamSettingsDraft(input.teamSettings),
             }} : current;
           });
           setBlocked(true);
@@ -973,6 +1145,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
       } else if (result.snapshot) {
         const modelBaseline = copySelection(result.snapshot.settings.modelSelection);
         const monitoringBaseline = readMonitoringDraft(result.snapshot);
+        const teamSettingsBaseline = readTeamSettingsDraft(result.snapshot);
         setSnapshotState({projectId: targetProject, snapshot: result.snapshot});
         setDrafts(current => {
           const currentDraft = current[targetProject];
@@ -980,6 +1153,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
             ...currentDraft,
             modelBaseline,
             monitoringBaseline,
+            teamSettingsBaseline,
             expectedGeneration: result.snapshot!.settings.generation,
           }} : current;
         });
@@ -1032,6 +1206,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
       } else if (result.snapshot) {
         const canonical = copySelection(result.snapshot.settings.modelSelection);
         const canonicalMonitoring = readMonitoringDraft(result.snapshot);
+        const canonicalTeamSettings = readTeamSettingsDraft(result.snapshot);
         setSnapshotState({projectId: targetProject, snapshot: result.snapshot});
         setDrafts(current => ({...current, [targetProject]: {
           projectId: targetProject,
@@ -1039,6 +1214,8 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
           modelBaseline: copySelection(canonical),
           monitoringValue: copyMonitoringDraft(canonicalMonitoring),
           monitoringBaseline: copyMonitoringDraft(canonicalMonitoring),
+          teamSettingsValue: copyTeamSettingsDraft(canonicalTeamSettings),
+          teamSettingsBaseline: copyTeamSettingsDraft(canonicalTeamSettings),
           expectedGeneration: result.snapshot!.settings.generation,
         }}));
         setBlocked(false);
@@ -1078,11 +1255,12 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
     {!projectId && <p className="panel muted">Select a project to manage its Supervisor settings.</p>}
     {projectId && !connected && <p className="panel" role="status">T3 is disconnected. Any unsaved Supervisor settings draft is kept.</p>}
     {projectId && connected && !activeSnapshot && isLoading && <p className="panel" role="status">Loading Supervisor settings…</p>}
-    {projectId && connected && loadError && <p className="panel" role="alert">Could not load Supervisor settings. Refresh to try again or check the T3 connection.</p>}
+    {projectId && connected && loadError && <p className="panel" role="alert">Could not refresh Supervisor settings. The previous snapshot remains visible; refresh to try again or check the T3 connection.</p>}
     {projectId && activeSnapshot && activeDraft && <ProjectSupervisorView
       snapshot={activeSnapshot}
       selection={activeDraft.modelValue}
       monitoring={activeDraft.monitoringValue}
+      teamSettings={activeDraft.teamSettingsValue}
       {...(threadId === undefined ? {} : {threadId})}
       connected={connected}
       saving={saving}
@@ -1100,6 +1278,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
       onWorkflowProgressLoadMore={loadMoreWorkflowProgress}
       onSelectionChange={updateSelection}
       onMonitoringChange={updateMonitoring}
+      onTeamSettingsChange={updateTeamSettings}
       onDiscard={discardDraft}
       onRetry={() => {void retryNativeAccess();}}
       onSubmit={save}

@@ -45,6 +45,15 @@ export const WorkflowProgressWorkflowSchema = Schema.Struct({
 });
 export type WorkflowProgressWorkflow = typeof WorkflowProgressWorkflowSchema.Type;
 
+export const WorkflowProgressCoverageSchema = Schema.Struct({
+  threadId: Schema.String,
+  state: Schema.Literals(["root", "assigned", "transfer", "unknown"]),
+  assigneeThreadId: NullableText,
+  assigneeTitle: NullableText,
+  assignmentRootThreadId: NullableText,
+});
+export type WorkflowProgressCoverage = typeof WorkflowProgressCoverageSchema.Type;
+
 export const WorkflowProgressSnapshotSchema = Schema.Struct({
   status: Schema.Literals(["ok", "unavailable", "denied", "invalid", "incompatible", "too_large"]),
   message: NullableText,
@@ -52,6 +61,7 @@ export const WorkflowProgressSnapshotSchema = Schema.Struct({
   mainThreadId: Schema.String,
   observedAt: Schema.Number,
   scope: Schema.NullOr(ProjectSupervisorScopeSnapshotSchema),
+  coverage: Schema.optionalKey(Schema.Array(WorkflowProgressCoverageSchema)),
   incompatibleWorkflows: Schema.Array(Schema.Struct({workflowId: Schema.String, formatVersion: Schema.NullOr(Schema.Number)})),
   workflows: Schema.Array(WorkflowProgressWorkflowSchema),
   workflowOffset: Schema.Number,
@@ -102,6 +112,7 @@ const emptyPage = (query: WorkflowProgressPageQuery, status: WorkflowProgressSna
   mainThreadId: query.mainThreadId,
   observedAt,
   scope,
+  coverage: [],
   incompatibleWorkflows: [],
   workflows: [],
   workflowOffset: query.workflowOffset,
@@ -222,6 +233,14 @@ export const readWorkflowProgressPage = async (
     mainThreadId: query.mainThreadId,
     observedAt: Date.now(),
     scope: threadScope,
+    coverage: (read.coverage ?? []).map(item => ({
+      threadId: item.threadId,
+      state: item.state === "root" ? "root" as const : item.state === "assigned" ? "assigned" as const :
+        item.state === "transferring" ? "transfer" as const : "unknown" as const,
+      assigneeThreadId: item.state === "assigned" ? item.actorThreadId : null,
+      assigneeTitle: item.state === "assigned" ? item.actorTitle : null,
+      assignmentRootThreadId: item.assignmentRootThreadId,
+    })),
     incompatibleWorkflows: read.incompatibleWorkflows,
     workflows: read.workflows.map(({document, parentNodeReferences}) => progressWorkflow(document, parentNodeReferences)),
     workflowOffset: read.workflowOffset,

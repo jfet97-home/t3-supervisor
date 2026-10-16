@@ -1,0 +1,424 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { GuidanceStore } from "../src/guidance-store.js";
+import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.js";
+import type { SupervisorMonitorBatch, SupervisorMonitorThreadBatch } from "../src/supervisor-monitor.js";
+import { SupervisorConversationStore } from "../src/supervisor-conversation-store.js";
+import { SupervisorConversation } from "../src/supervisor-conversation.js";
+import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord } from "../src/project-supervisor-store.js";
+import { SupervisorTeamStore, type TeamBinding, type TeamMember } from "../src/supervisor-team-store.js";
+import { SupervisorTeamRuntime } from "../src/supervisor-team-runtime.js";
+import { T3TransportError } from "../src/t3.js";
+import type { SupervisorHelperDeliveryTransport } from "../src/supervisor-helper-transport.js";
+import type { Projection, ThreadInfo } from "../src/types.js";
+
+const projectId = "project-team";
+const parents = new Map<string, string | null>([["main", null], ["branch", "main"], ["leaf", "branch"], ["other", "main"]]);
+const time = Date.parse("2026-10-16T10:00:00.000Z");
+const iso = (value: number) => new Date(value).toISOString();
+
+const makeThread = (id: string, parentThreadId: string | null = null, relationshipToParent: string | null = null): ThreadInfo => ({
+  id, title: id, projectId, lineage: {parentThreadId, relationshipToParent, rootThreadId: parentThreadId ? "main" : id},
+});
+
+const emptyProjection = (thread: ThreadInfo): Projection => ({thread, runs: [], messages: [], nodes: [], turnItems: [], providerTurns: [], runtimeRequests: []});
+
+const webhookTransport = (result: "waiting" | "busy" | "uncertain" | "rejected" = "waiting"):
+  {transport: SupervisorHelperDeliveryTransport; sent: Map<string, {threadId: string; text: string; taskId: string}>; attempts: string[]; retired: string[]} => {
+  const sent = new Map<string, {threadId: string; text: string; taskId: string}>();
+  const attempts: string[] = [];
+  const retired: string[] = [];
+  const transport: SupervisorHelperDeliveryTransport = {
+    send: async (_binding, message) => {attempts.push(message.messageId);sent.set(message.messageId, {threadId: message.threadId, text: message.text, taskId: `scheduled-${message.threadId}`});return result;},
+    matchesMessage: (_binding, logicalId, text, native) => {
+      const delivery = sent.get(logicalId);
+      return Boolean(delivery && delivery.text === text && native.threadId === delivery.threadId && native.text === text &&
+        native.scheduledTaskId === delivery.taskId && native.creationSource === "server");
+    },
+    retire: async (_binding, threadId) => {retired.push(threadId);return true;},
+  };
+  return {transport, sent, attempts, retired};
+};
+
+const fixture = async () => {
+  const directory = await mkdtemp(join(tmpdir(), "supervisor-team-runtime-"));
+  const guidance = new GuidanceStore(directory);
+  const store = new ProjectSupervisorStore(guidance, new Set());
+  const root = store.reserve(projectId, "main", "main", defaultSupervisorModel, 0, 1);
+  const binding = store.binding(projectId, "main")!;
+  const teamStore = new SupervisorTeamStore(store);
+  const requests = new SupervisorConversationStore(guidance);
+  const monitor = new ProjectSupervisorMonitorStore(guidance);
+  const threadList = [makeThread("main"), makeThread("branch", "main", "subagent"), makeThread("leaf", "branch", "subagent"), makeThread("other", "main", "subagent")];
+  const projections = new Map<string, Projection>(threadList.map(thread => [thread.id, emptyProjection(thread)]));
+  const runtime = (helperTransport?: SupervisorHelperDeliveryTransport,
+    projection: (threadId: string) => Promise<Projection> = async threadId => projections.get(threadId) ?? emptyProjection(makeThread(threadId))) =>
+    new SupervisorTeamRuntime({store, teamStore, requests, monitor, rpc: null, projection: async threadId => projection(threadId),
+      ...(helperTransport ? {helperTransport} : {})});
+  return {directory, guidance, store, binding, root, teamStore, requests, monitor, threadList, projections, runtime,
+    cleanup: async () => {guidance.close();await rm(directory, {recursive: true, force: true});}};
+};
+
+const readyMember = (team: SupervisorTeamStore, binding: TeamBinding, threadId: string, now = time): TeamMember => {
+  const registered = team.registerMember(binding, {threadId, taskId: `task-${threadId}`, bootstrapRunId: `bootstrap-${threadId}`, now});
+  return team.markReady(binding, threadId, registered.epoch, now + 1);
+};
+
+const activate = (team: SupervisorTeamStore, binding: TeamBinding, member: TeamMember, subtreeRoot: string, now = time): void => {
+  const assignment = team.assign(binding, subtreeRoot, member.threadId, parents, now);
+  for (const notice of team.snapshot(binding).notifications.filter(item => item.assignmentRootThreadId === subtreeRoot && item.assignmentEpoch === assignment.epoch)) {
+    team.updateNotificationDelivery(binding, binding.threadId, notice.id, "sending", now + 1);
+    team.updateNotificationDelivery(binding, binding.threadId, notice.id, "delivered", now + 2);
+    team.acknowledgeNotification(binding, notice.recipientThreadId, notice.id, notice.memberEpoch, now + 3);
+  }
+  team.completeTransfer(binding, subtreeRoot, assignment.epoch, now + 4);
+};
+
+const batchThread = (threadId: string): SupervisorMonitorThreadBatch => {
+  const item = {id: `run:${threadId}`, readItemId: null, type: "run_finished", status: "completed", ordinal: 1, detectedAt: time, version: `${threadId}-v1`, priority: "run_finished" as const};
+  return {threadId, trigger: "priority", finalizedActivityCount: 1, pendingItemCount: 1, oldestAt: time, priority: true,
+    priorityKinds: ["run_finished"], saturated: false, untrackedCount: 0, items: [item], previewItems: [item]};
+};
+
+const batchOf = (threadIds: readonly string[]): SupervisorMonitorBatch => ({projectId, createdAt: time, trigger: "priority",
+  finalizedActivityCount: threadIds.length, pendingItemCount: threadIds.length, truncated: false, threads: threadIds.map(batchThread)});
+
+const helperProjection = (member: TeamMember, rootThreadId: string): Projection => emptyProjection({
+  ...makeThread(member.threadId, rootThreadId, "subagent"), lineage: {parentThreadId: rootThreadId, relationshipToParent: "subagent", rootThreadId},
+});
+
+test("no helper leaves the existing root batch intact", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const runtime = f.runtime();
+  const batch = batchOf(["main", "branch", "other"]);
+  const partition = runtime.partition(f.binding, f.threadList, batch);
+  assert.deepEqual(partition.rootBatch?.threads.map(item => item.threadId), ["main", "branch", "other"]);
+  assert.equal(partition.helperBatches.length, 0);
+  assert.deepEqual(partition.rootEvents, []);
+  assert.equal(runtime.hasBlockingWork(f.binding), false);
+});
+
+test("one helper receives its assigned subtree while transfer activity stays pending", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const first = readyMember(f.teamStore, f.binding, "helper-one");
+  const second = readyMember(f.teamStore, f.binding, "helper-two", time + 10);
+  activate(f.teamStore, f.binding, first, "branch");
+  const runtime = f.runtime();
+  const batch = batchOf(["main", "branch", "leaf", "other"]);
+  const partition = runtime.partition(f.binding, f.threadList, batch);
+  assert.deepEqual(partition.rootBatch?.threads.map(item => item.threadId), ["main", "other"]);
+  assert.equal(partition.helperBatches.length, 1);
+  assert.equal(partition.helperBatches[0]?.actorThreadId, first.threadId);
+  assert.deepEqual(partition.helperBatches[0]?.batch.threads.map(item => item.threadId), ["branch", "leaf"]);
+  assert.deepEqual(partition.helperBatches[0]?.targets.map(item => item.assignmentRootThreadId), ["branch", "branch"]);
+
+  f.teamStore.assign(f.binding, "branch", second.threadId, parents, time + 20);
+  const transferring = runtime.partition(f.binding, f.threadList, batch);
+  assert.deepEqual(transferring.rootBatch?.threads.map(item => item.threadId), ["main", "other"]);
+  assert.equal(transferring.helperBatches.length, 0);
+  assert.equal(f.teamStore.coverage(f.binding, "leaf", parents).state, "transferring");
+  assert.equal(runtime.hasBlockingWork(f.binding), true);
+});
+
+test("runtime completes a transfer only after both helpers finish their exact handover check-ins", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const first = readyMember(f.teamStore, f.binding, "helper-transfer-from");
+  const second = readyMember(f.teamStore, f.binding, "helper-transfer-to", time + 10);
+  activate(f.teamStore, f.binding, first, "branch");
+  f.projections.set(first.threadId, helperProjection(first, f.binding.threadId));
+  f.projections.set(second.threadId, helperProjection(second, f.binding.threadId));
+  const transfer = f.teamStore.assign(f.binding, "branch", second.threadId, parents, time + 20);
+  const handovers = f.teamStore.snapshot(f.binding).notifications.filter(item => item.assignmentRootThreadId === "branch" && item.assignmentEpoch === transfer.epoch);
+  assert.equal(handovers.length, 2);
+  const transport = webhookTransport();
+  const runtime = f.runtime(transport.transport);
+  const completed = new Set<string>();
+
+  for (let cycle = 0; cycle < 6; cycle++) {
+    runtime.startCycle(f.binding);
+    await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+    for (const [logicalId, delivery] of transport.sent) {
+      if (!logicalId.startsWith("supervisor-team-notice:") || completed.has(logicalId)) continue;
+      const projection = f.projections.get(delivery.threadId)!;
+      const nativeMessageId = `native-${logicalId}`;
+      const runId = `run-${logicalId}`;
+      projection.runs.push({id: runId, threadId: delivery.threadId, ordinal: projection.runs.length + 1, status: "completed",
+        requestedAt: iso(time + cycle + 1), startedAt: iso(time + cycle + 1), completedAt: iso(time + cycle + 2),
+        rootNodeId: null, userMessageId: nativeMessageId});
+      projection.messages.push({id: nativeMessageId, threadId: delivery.threadId, runId, nodeId: null, role: "user", text: delivery.text,
+        streaming: false, createdAt: iso(time + cycle + 1), updatedAt: iso(time + cycle + 1), scheduledTaskId: delivery.taskId, creationSource: "server"});
+      const notificationId = logicalId.slice("supervisor-team-notice:".length);
+      projection.messages.push({id: `final-${logicalId}`, threadId: delivery.threadId, runId, nodeId: null, role: "assistant",
+        text: `Handover considered. Supervisor team notification ${notificationId} completed`, streaming: false,
+        createdAt: iso(time + cycle + 2), updatedAt: iso(time + cycle + 2), ordinal: 1});
+      completed.add(logicalId);
+    }
+  }
+
+  assert.deepEqual(f.teamStore.snapshot(f.binding).notifications.filter(item => item.assignmentRootThreadId === "branch" && item.assignmentEpoch === transfer.epoch)
+    .map(item => item.state), ["acknowledged", "acknowledged"]);
+  assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "assigned");
+  assert.equal(f.teamStore.coverage(f.binding, "branch", parents).actorThreadId, second.threadId);
+  assert.ok(f.teamStore.snapshot(f.binding).events.some(item => item.kind === "assignment_handover_completed" && item.targetThreadId === "branch"));
+});
+
+test("registration readiness uses a finite native check-in and exact member epoch", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const member = f.teamStore.registerMember(f.binding, {threadId: "helper-ready", taskId: "bootstrap-task", bootstrapRunId: "bootstrap-run", now: time});
+  f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
+  const transport = webhookTransport();
+  const runtime = f.runtime(transport.transport);
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  const request = f.requests.pending(projectId, member.threadId);
+  assert.ok(request);
+  if (!request) throw new Error("readiness_request_missing");
+  assert.ok(request.id.startsWith("team-ready:"));
+  assert.ok(request.text.includes("t3-supervisor-workflows__supervision_team"));
+  assert.ok(request.text.includes(`bindingGeneration=${f.binding.generation}`));
+  assert.ok(request.text.includes(`memberEpoch=${member.epoch}`));
+  const operation = JSON.parse(request.text.match(/operationId=("[^"]+")/u)?.[1] ?? "null") as string;
+  assert.ok(operation.length <= 128);
+  assert.equal(transport.sent.get(request.messageId)?.threadId, member.threadId);
+  assert.equal(runtime.hasBlockingWork(f.binding), true);
+
+  f.teamStore.markReady(f.binding, member.threadId, member.epoch, time + 5);
+  const projection = f.projections.get(member.threadId)!;
+  const runId = "ready-run";
+  const nativeMessageId = "native-ready-message";
+  projection.runs.push({id: runId, threadId: member.threadId, ordinal: 1, status: "completed", requestedAt: iso(time + 2),
+    startedAt: iso(time + 2), completedAt: iso(time + 3), rootNodeId: null, userMessageId: nativeMessageId});
+  projection.messages.push({id: nativeMessageId, threadId: member.threadId, runId, nodeId: null, role: "user", text: request.text,
+    streaming: false, createdAt: iso(time + 2), updatedAt: iso(time + 2), scheduledTaskId: `scheduled-${member.threadId}`, creationSource: "server"});
+  projection.messages.push({id: "ready-final", threadId: member.threadId, runId, nodeId: null, role: "assistant",
+    text: `Ready. ${request.completionMarker}`, streaming: false, createdAt: iso(time + 3), updatedAt: iso(time + 3), ordinal: 1});
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  assert.equal(f.requests.requests(projectId, member.threadId).find(item => item.id === request.id)?.state, "completed");
+  assert.equal(f.teamStore.resolveActor(f.binding, member.threadId, member.epoch), null);
+  assert.equal(f.teamStore.snapshot(f.binding).members.find(item => item.threadId === member.threadId)?.state, "ready");
+});
+
+test("failed readiness waits for the root retry acknowledgment before another attempt", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const member = f.teamStore.registerMember(f.binding, {threadId: "helper-ready-failed", taskId: "bootstrap-task", bootstrapRunId: "bootstrap-run", now: time});
+  f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
+  const transport = webhookTransport("rejected");
+  const runtime = f.runtime(transport.transport);
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  const failed = f.requests.requests(projectId, member.threadId).find(item => item.id.startsWith("team-ready:") && item.state === "failed");
+  assert.ok(failed);
+  assert.equal(transport.attempts.length, 1);
+  assert.ok(f.teamStore.snapshot(f.binding).events.some(item => item.kind === "service_attention" && item.memberThreadId === member.threadId));
+
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  assert.equal(transport.attempts.length, 1);
+
+  f.requests.saveRequest({...failed!, failureAcknowledged: true});
+  f.requests.noticeSent(member.threadId, 0);
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  assert.equal(transport.attempts.length, 2);
+  assert.equal(f.requests.requests(projectId, member.threadId).filter(item => item.id.startsWith("team-ready:")).length, 2);
+});
+
+test("failed helper review blocks automatic replacement until the root acknowledges it", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const member = readyMember(f.teamStore, f.binding, "helper-review-failed");
+  activate(f.teamStore, f.binding, member, "branch");
+  f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
+  const coverage = f.teamStore.coverage(f.binding, "branch", parents);
+  const batch = {actorThreadId: member.threadId, memberEpoch: member.epoch,
+    targets: [{targetThreadId: "branch", assignmentRootThreadId: coverage.assignmentRootThreadId!, assignmentEpoch: coverage.assignmentEpoch!}],
+    batch: batchOf(["branch"])};
+  const transport = webhookTransport("rejected");
+  const runtime = f.runtime(transport.transport);
+
+  runtime.startCycle(f.binding);
+  await runtime.runHelperBatch(f.binding, f.threadList, [batch], AbortSignal.timeout(5000));
+  const failed = f.requests.requests(projectId, member.threadId).find(item => item.id.startsWith("team-review:") && item.state === "failed");
+  assert.ok(failed);
+  assert.equal(f.teamStore.unresolvedRequests(f.binding).some(item => item.requestId === failed!.id), false);
+  assert.ok(f.teamStore.snapshot(f.binding).events.some(item => item.kind === "service_attention" && item.memberThreadId === member.threadId));
+
+  runtime.startCycle(f.binding);
+  await runtime.runHelperBatch(f.binding, f.threadList, [batch], AbortSignal.timeout(5000));
+  assert.equal(transport.attempts.length, 1);
+
+  f.requests.saveRequest({...failed!, failureAcknowledged: true});
+  f.requests.noticeSent(member.threadId, 0);
+  runtime.startCycle(f.binding);
+  await runtime.runHelperBatch(f.binding, f.threadList, [batch], AbortSignal.timeout(5000));
+  assert.equal(transport.attempts.length, 2);
+});
+
+for (const lossMode of ["404", "archived", "deleted"] as const) {
+  test(`${lossMode === "archived" ? "an archived" : `a ${lossMode}`} helper fails only its own pending check-ins and retires once`, async t => {
+    const f = await fixture();t.after(f.cleanup);
+    const member = readyMember(f.teamStore, f.binding, `helper-lost-${lossMode}`);
+    activate(f.teamStore, f.binding, member, "branch");
+    const coverage = f.teamStore.coverage(f.binding, "branch", parents);
+    const target = {targetThreadId: "branch", assignmentRootThreadId: coverage.assignmentRootThreadId!, assignmentEpoch: coverage.assignmentEpoch!};
+    const reviewId = "team-review:lost-helper";
+    const review = f.requests.prepare({id: reviewId, projectId, supervisorThreadId: member.threadId, kind: "review", taskId: null,
+      text: "Review this assigned activity.", batch: batchOf(["branch"]), completionMarker: "review complete"}, time);
+    f.requests.saveRequest({...review, state: "waiting", sentAt: time});
+    f.teamStore.recordRequest(f.binding, {requestId: reviewId, memberThreadId: member.threadId, memberEpoch: member.epoch,
+      targets: [target], parentById: parents, now: time});
+    const unsettledCrashId = "team-review:failed-before-settle";
+    f.requests.saveRequest({...review, id: unsettledCrashId, messageId: `supervisor-review:${unsettledCrashId}`, state: "failed",
+      error: "The prior runtime stopped between recording failure and settling its team request."});
+    f.teamStore.recordRequest(f.binding, {requestId: unsettledCrashId, memberThreadId: member.threadId, memberEpoch: member.epoch,
+      targets: [target], parentById: parents, now: time + 1});
+    f.teamStore.recordRequest(f.binding, {requestId: "guide:unknown", memberThreadId: member.threadId, memberEpoch: member.epoch,
+      targets: [target], parentById: parents, now: time + 2});
+    f.teamStore.setRequestState(f.binding, member.threadId, "guide:unknown", member.epoch, "uncertain", time + 3);
+    const transport = webhookTransport();
+    const projection = async (threadId: string): Promise<Projection> => {
+      if (threadId === member.threadId && lossMode === "404") throw new T3TransportError("helper deleted", 404);
+      const value = f.projections.get(threadId) ?? emptyProjection(makeThread(threadId));
+      if (threadId === member.threadId && lossMode === "archived") value.thread.archivedAt = iso(time + 10);
+      if (threadId === member.threadId && lossMode === "deleted") value.thread.deletedAt = iso(time + 10);
+      return value;
+    };
+    const runtime = f.runtime(transport.transport, projection);
+
+    runtime.startCycle(f.binding);
+    await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+    const lost = f.teamStore.snapshot(f.binding).members.find(item => item.threadId === member.threadId);
+    assert.equal(lost?.state, "missing");
+    assert.equal(lost?.epoch, member.epoch + 1);
+    assert.equal(f.requests.requests(projectId, member.threadId).find(item => item.id === reviewId)?.state, "failed");
+    assert.equal(f.teamStore.unresolvedRequests(f.binding).find(item => item.requestId === reviewId), undefined);
+    assert.equal(f.teamStore.unresolvedRequests(f.binding).find(item => item.requestId === unsettledCrashId), undefined);
+    assert.equal(f.teamStore.unresolvedRequests(f.binding).find(item => item.requestId === "guide:unknown")?.state, "uncertain");
+    assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "unavailable");
+    assert.deepEqual(transport.retired, [member.threadId]);
+
+    runtime.startCycle(f.binding);
+    await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+    assert.equal(f.teamStore.snapshot(f.binding).members.find(item => item.threadId === member.threadId)?.epoch, member.epoch + 1);
+    assert.equal(f.teamStore.snapshot(f.binding).events.filter(item => item.kind === "member_missing" && item.memberThreadId === member.threadId).length, 1);
+    assert.deepEqual(transport.retired, [member.threadId]);
+
+    f.teamStore.settleRequest(f.binding, "guide:unknown");
+    assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "root");
+  });
+}
+
+test("a lost registering helper fails and settles its own readiness request", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const member = f.teamStore.registerMember(f.binding, {threadId: "helper-readiness-lost", taskId: "bootstrap-task", bootstrapRunId: "bootstrap-run", now: time});
+  const request = f.requests.prepare({id: "team-ready:lost-registration", projectId, supervisorThreadId: member.threadId, kind: "review", taskId: null,
+    text: "Confirm readiness.", batch: null, completionMarker: "ready complete", teamMemberEpoch: member.epoch}, time + 1);
+  f.requests.saveRequest({...request, state: "waiting", sentAt: time + 1});
+  const transport = webhookTransport();
+  const runtime = f.runtime(transport.transport, async threadId => {
+    if (threadId === member.threadId) throw new T3TransportError("helper deleted", 404);
+    return f.projections.get(threadId) ?? emptyProjection(makeThread(threadId));
+  });
+
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  assert.equal(f.requests.requests(projectId, member.threadId).find(item => item.id === request.id)?.state, "failed");
+  assert.equal(f.teamStore.snapshot(f.binding).members.find(item => item.threadId === member.threadId)?.state, "missing");
+  assert.deepEqual(transport.retired, [member.threadId]);
+});
+
+test("a stale completed helper check-in settles its request without acknowledging reassigned activity", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const first = readyMember(f.teamStore, f.binding, "helper-stale");
+  const second = readyMember(f.teamStore, f.binding, "helper-successor", time + 10);
+  activate(f.teamStore, f.binding, first, "branch");
+  const opThread = makeThread("branch", "main", "subagent");
+  const op = emptyProjection(opThread);
+  const runId = "operational-run";
+  const providerThreadId = "provider-branch";
+  op.runs.push({id: runId, threadId: opThread.id, ordinal: 1, status: "completed", requestedAt: iso(time), startedAt: iso(time),
+    completedAt: iso(time + 1), rootNodeId: "root-node", providerThreadId});
+  op.nodes = [
+    {id: "root-node", kind: "root_turn", status: "completed", threadId: opThread.id, runId, rootNodeId: "root-node", providerThreadId},
+    {id: "tool-node", kind: "tool_call", status: "completed", threadId: opThread.id, runId, rootNodeId: "root-node", providerThreadId, parentNodeId: "root-node"},
+  ];
+  op.turnItems?.push({id: "tool-activity", threadId: opThread.id, runId, nodeId: "tool-node", type: "command_execution", status: "completed",
+    ordinal: 1, completedAt: iso(time + 1), updatedAt: iso(time + 1)});
+  f.monitor.observe({projectId, threadId: opThread.id, sourceOrdinal: 0, projection: op, now: time + 2});
+  const selected = f.monitor.select(projectId, {intervalMinutes: 5, activityThreshold: 1}, time + 3, null, {eligibleThreadIds: new Set([opThread.id])});
+  assert.ok(selected);
+  const helper = helperProjection(first, f.binding.threadId);
+  f.projections.set(first.threadId, helper);
+  f.projections.set(second.threadId, helperProjection(second, f.binding.threadId));
+  const transport = webhookTransport();
+  const runtime = f.runtime(transport.transport);
+  const partition = runtime.partition(f.binding, f.threadList, selected);
+  assert.equal(partition.helperBatches.length, 1);
+  runtime.startCycle(f.binding);
+  await runtime.runHelperBatch(f.binding, f.threadList, partition.helperBatches, AbortSignal.timeout(5000));
+  const request = f.requests.pending(projectId, first.threadId);
+  assert.ok(request);
+  if (!request?.batch) throw new Error("helper_review_request_missing");
+  const targetRequest = f.teamStore.unresolvedRequests(f.binding).find(item => item.requestId === request.id);
+  assert.ok(targetRequest);
+  const helperRunId = "helper-review-run";
+  const nativeMessageId = "native-helper-review-message";
+  helper.runs.push({id: helperRunId, threadId: first.threadId, ordinal: 1, status: "completed", requestedAt: iso(time + 10),
+    startedAt: iso(time + 10), completedAt: iso(time + 11), rootNodeId: null, userMessageId: nativeMessageId});
+  helper.messages.push({id: nativeMessageId, threadId: first.threadId, runId: helperRunId, nodeId: null, role: "user", text: request.text,
+    streaming: false, createdAt: iso(time + 10), updatedAt: iso(time + 10), scheduledTaskId: `scheduled-${first.threadId}`, creationSource: "server"});
+  helper.messages.push({id: "helper-review-final", threadId: first.threadId, runId: helperRunId, nodeId: null, role: "assistant",
+    text: `Current assignment reviewed. ${request.completionMarker}`, streaming: false, createdAt: iso(time + 11), updatedAt: iso(time + 11), ordinal: 1});
+  f.teamStore.assign(f.binding, "branch", second.threadId, parents, time + 12);
+  const pendingBefore = f.monitor.pending(projectId, opThread.id).map(item => item.id);
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  assert.deepEqual(f.monitor.pending(projectId, opThread.id).map(item => item.id), pendingBefore);
+  assert.equal(f.requests.requests(projectId, first.threadId).find(item => item.id === request.id)?.state, "completed");
+  assert.equal(f.teamStore.unresolvedRequests(f.binding).some(item => item.requestId === request.id), false);
+  assert.equal(f.teamStore.coverage(f.binding, opThread.id, parents).state, "transferring");
+  assert.equal(f.teamStore.snapshot(f.binding).events.some(item => item.kind === "service_attention" && item.memberThreadId === first.threadId), false);
+});
+
+test("a successful helper result creates an event-only root wake and is acknowledged after its marker", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const member = readyMember(f.teamStore, f.binding, "helper-result");
+  activate(f.teamStore, f.binding, member, "branch");
+  const coverage = f.teamStore.coverage(f.binding, "branch", parents);
+  const event = f.teamStore.assessment(f.binding, {eventId: "meaningful-result", actorThreadId: member.threadId, memberEpoch: member.epoch,
+    targets: [{targetThreadId: "branch", assignmentRootThreadId: coverage.assignmentRootThreadId!, assignmentEpoch: coverage.assignmentEpoch!}],
+    parentById: parents, summary: "The delegated test suite passed; assess the parent workflow separately.", severity: "result", now: time + 20});
+  const rootProjection = emptyProjection({...makeThread(f.binding.threadId), projectId, lineage: {parentThreadId: "main", relationshipToParent: "subagent", rootThreadId: "main"}});
+  let sequence = 0;
+  const rpc = async (_tag: string, _payload: Record<string, unknown>, _signal: AbortSignal) => ({sequence: ++sequence});
+  const conversation = new SupervisorConversation(f.store, rpc, async threadId => threadId === f.binding.threadId ? rootProjection : emptyProjection(makeThread(threadId)),
+    undefined, thread => thread.id === "main", () => true, undefined, undefined, f.teamStore);
+  await conversation.run(f.binding as BindingRecord, rootProjection, f.threadList, AbortSignal.timeout(5000));
+  const request = conversation.requests.pending(projectId, f.binding.threadId);
+  assert.ok(request);
+  assert.equal(request.batch, null);
+  assert.ok(request.teamEventIds?.includes(event.id));
+  assert.ok(request.text.includes(event.summary));
+  const runId = "root-events-run";
+  const rootNodeId = "root-events-root";
+  const providerThreadId = "root-events-provider";
+  const assistantNodeId = "root-events-assistant-node";
+  rootProjection.runs.push({id: runId, threadId: f.binding.threadId, ordinal: 1, status: "completed", requestedAt: iso(time + 30),
+    startedAt: iso(time + 30), completedAt: iso(time + 31), rootNodeId, providerThreadId, userMessageId: request.messageId});
+  rootProjection.nodes = [
+    {id: rootNodeId, kind: "root_turn", status: "completed", threadId: f.binding.threadId, runId, rootNodeId, providerThreadId},
+    {id: assistantNodeId, kind: "assistant_message", status: "completed", threadId: f.binding.threadId, runId,
+      rootNodeId, providerThreadId, parentNodeId: rootNodeId},
+  ];
+  rootProjection.messages.push({id: request.messageId, threadId: f.binding.threadId, runId, nodeId: rootNodeId, role: "user", text: request.text,
+    streaming: false, createdAt: iso(time + 30), updatedAt: iso(time + 30)});
+  rootProjection.messages.push({id: "root-events-final", threadId: f.binding.threadId, runId, nodeId: assistantNodeId, role: "assistant",
+    text: `Parent assessment completed. ${request.completionMarker}`, streaming: false, createdAt: iso(time + 31), updatedAt: iso(time + 31), ordinal: 1});
+  await conversation.run(f.binding as BindingRecord, rootProjection, f.threadList, AbortSignal.timeout(5000));
+  assert.equal(conversation.requests.requests(projectId, f.binding.threadId).find(item => item.id === request.id)?.state, "completed");
+  assert.ok(f.teamStore.snapshot(f.binding).events.find(item => item.id === event.id)?.acknowledgedAt);
+  assert.equal(conversation.teamRuntime?.hasBlockingWork(f.binding), false);
+});

@@ -77,6 +77,7 @@ export class SupervisorLifecycle {
 
   private mainNeedsAttention(binding: BindingRecord, supervisor: Projection, main: Projection | null, closedMain: boolean, source?: ThreadInfo): boolean {
     if (binding.manualKeepActive || userKeepsSupervisorActive(supervisor.thread) || this.store.modelState(binding).pending || projectionNeedsAttention(supervisor)) return true;
+    if (this.conversation.teamRuntime?.hasBlockingWork(binding)) return true;
     if (closedMain) return Boolean(main && projectionNeedsAttention(main, source ?? main.thread));
     const tasks = this.store.tasksFor(binding);
     const requests = this.conversation.requests.requests(binding.projectId, binding.threadId);

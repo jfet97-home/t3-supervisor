@@ -1,6 +1,6 @@
 ---
 name: use-t3-supervisor
-description: Use an existing T3 Supervisor dashboard to inspect steps and workflows, edit project configuration, configure Supervisor defaults and monitoring, inspect agreements and history, or adjust chat settings. For product usage, not source development, deployment or credential provisioning.
+description: Use an existing T3 Supervisor dashboard to inspect Supervisor teams, steps and workflows, edit project configuration, configure Supervisor defaults and monitoring, inspect agreements and history, or adjust chat settings. For product usage, not source development, deployment or credential provisioning.
 ---
 
 # Use T3 Supervisor
@@ -73,6 +73,30 @@ new Supervisor chats. Edit existing chats in T3; no silent model substitution.
 Select a main to inspect actual binding/model, objective, proposal, agreement and
 recovery. Native mode mismatches need an explicit T3 change before scoped retry.
 Project-root view shows shared defaults only.
+
+The Supervisor team section shows the root and direct helpers separately from
+operational child conversations. Review T3 links, reported model, readiness and
+lifecycle, each helper's assigned subtree roots, current state, last assessment,
+pending handovers and significant issues. Child rows show the effective assignee;
+unknown coverage is explicit and does not imply root ownership. Assignments cover
+verified operational descendants, including future children, and do not change
+workflow ownership or contributor links.
+
+The project setting `maximum helpers per root` defaults to 5 and accepts 0–20.
+Zero disables new recruitment; it does not remove existing helpers. Root and helper
+model choices come from T3's current catalog; helpers inherit the root model unless
+the root selects another configured T3 model for that helper. Team membership and
+assignments are managed through the owning root's Supervisor team operations, not
+by messaging a helper. A human message sent to a helper in T3 follows T3's native
+follow-up behavior. The root sends routine notes/check-ins through its Supervisor
+team route, not raw `t3_thread_send`.
+
+During a handover, inspect the notification state and assignment status. Pending or
+uncertain delivery remains unresolved; the root retains responsibility until new
+coverage is confirmed. The view is observational: read its timestamp and any
+incomplete/unavailable warning before relying on the data. See the
+[Supervisor team dashboard guidance](references/dashboard.md#supervisor-team) for
+the complete team-view and handover details.
 
 Monitoring observes the main and its native/delegated descendants under one shared
 per-main cooldown/request budget and the project's age/count thresholds. Forks are

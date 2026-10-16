@@ -178,6 +178,25 @@ wait while T3 prepares a target turn, but no gate guarantees that it arrives bef
 a tool starts. Consult T3 Lab's three maintained tracking documents for source
 checks, remote review, staged VM evidence and the installed revision.
 
+## Supervisor team authority and messages
+
+The Supervisor team is separate from operational workflow lineage. The root manages
+membership, assignments, shared policy and its main workflow. A registered helper's
+native calls are checked in that helper's own conversation and against its effective
+assigned child subtrees. Root calls, supplied identities, titles and claims in
+message text do not stand in for helper evidence. Helpers cannot recruit members,
+change the main workflow or agreements, or edit shared policy.
+
+The root sends helper context notes and routine check-ins through Supervisor team
+operations, which record and dispatch them with durable service identities. It must
+not use raw `t3_thread_send` as the routine helper route: that T3 tool can create
+another root-attached delegated task. A human who writes directly to a helper in T3
+gets T3's native follow-up behavior. An uncertain notification remains pending for
+reconciliation; it is not treated as delivered or resent under a new identity.
+
+See [Supervisor teams](supervisor-team.md) for subtree assignment, handovers,
+readiness and dashboard presentation.
+
 ## Local access and rotation
 
 Dashboard sign-in uses a freshly forged one-time token, valid for five minutes.
@@ -209,3 +228,20 @@ replace only its file with a fresh canonical32-byte base64url token, restart
 Supervisor and update only the matching MCPX header. Dashboard sessions keep their
 original expiry across that restart. Preserve all other service state; a volume reset is
 never a login recovery method.
+
+
+Team tools share the authenticated `/mcp/workflows` endpoint. `supervision_team`
+reads current state or accepts root register/assign/release/retire/note/retry
+operations and helper ready/report operations. `supervision_guide` accepts a
+helper's in-scope child guidance. Helper locators use their own supervisorThreadId,
+root bindingGeneration, memberEpoch and the current assignmentRootThreadId plus
+assignmentEpoch. `workflow_read` exposes current per-target coverage; unrelated
+assignment changes do not invalidate it. Workflow documents remain rooted at the
+main binding when responsibility moves. All mutating calls require the exact
+common native evidence contract in the calling actor's own AppRun. Read operations
+remain same-user contextual reads, not grants of write authority.
+
+A root `retry` acknowledges a definite helper check-in failure; it cannot reset
+unknown sends, alter their IDs or bypass pending-effect reconciliation. Helper
+check-ins use one genuine native T3 webhook job per helper as described in the
+team guide. Its private endpoint is never returned by the dashboard or MCP.

@@ -14,7 +14,7 @@ import type { ProposalContext } from "./supervisor-workflow.js";
 import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 
 export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "codex", model: "gpt-6-luna", options: [{id: "reasoningEffort", value: "high"}]};
-export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; applyAttempts?: number; applicationMessage?: string | null};
+export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; teamSettings?: {maxHelpersPerRoot: number}; applyAttempts?: number; applicationMessage?: string | null};
 export type BindingRecord = SupervisorBinding & {mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string};
 export type SupervisorBaseline = {version?: 2; snapshotSequence: number; threads: Array<{id: string; latestRunId: string | null}>};
 export type SupervisionFolderPresence = {status: "present" | "missing" | "unavailable"; message?: string};
@@ -252,16 +252,19 @@ export class ProjectSupervisorStore {
   }
   settings(projectId: string): ProjectModelSettings {
     const stored = this.read<Omit<ProjectModelSettings, "monitoring" | "modelMutationGeneration"> & {monitoring?: SupervisorMonitoringSettings; modelMutationGeneration?: number}>("supervisor_project_settings", "project_id", projectId);
-    return stored ? {...stored, modelMutationGeneration: stored.modelMutationGeneration ?? stored.generation, monitoring: normalizeMonitoringSettings(stored.monitoring)} : {
-      projectId, generation: 0, modelMutationGeneration: 0, modelSelection: defaultSupervisorModel, pending: false, monitoring: {...defaultMonitoringSettings},
+    return stored ? {...stored, modelMutationGeneration: stored.modelMutationGeneration ?? stored.generation, monitoring: normalizeMonitoringSettings(stored.monitoring), teamSettings: stored.teamSettings ?? {maxHelpersPerRoot: 5}} : {
+      projectId, generation: 0, modelMutationGeneration: 0, modelSelection: defaultSupervisorModel, pending: false, monitoring: {...defaultMonitoringSettings}, teamSettings: {maxHelpersPerRoot: 5},
     };
   }
-  saveSettings(projectId: string, expected: number, selection: SupervisorModelSelection, monitoring?: SupervisorMonitoringSettings): ProjectModelSettings {
+  saveSettings(projectId: string, expected: number, selection: SupervisorModelSelection, monitoring?: SupervisorMonitoringSettings, teamSettings?: {maxHelpersPerRoot: number}): ProjectModelSettings {
     return this.store.transaction(() => {
       const old = this.settings(projectId);
       if (old.generation !== expected) throw new Error("project_settings_conflict");
       const nextMonitoring = normalizeMonitoringSettings(monitoring ?? old.monitoring);
       if (!validMonitoringSettings(nextMonitoring)) throw new Error("invalid_monitoring_settings");
+      const nextTeamSettings = teamSettings ?? old.teamSettings ?? {maxHelpersPerRoot: 5};
+      if (!Number.isSafeInteger(nextTeamSettings.maxHelpersPerRoot) || nextTeamSettings.maxHelpersPerRoot < 0 || nextTeamSettings.maxHelpersPerRoot > 20)
+        throw new Error("invalid_team_settings");
       const modelChanged = !sameModel(old.modelSelection, selection);
       const next: ProjectModelSettings = {
         ...old,
@@ -270,6 +273,7 @@ export class ProjectSupervisorStore {
         modelMutationGeneration: old.modelMutationGeneration + (modelChanged ? 1 : 0),
         modelSelection: selection,
         monitoring: nextMonitoring,
+        teamSettings: nextTeamSettings,
         pending: false,
         ...(modelChanged ? {applyAttempts: 0, applicationMessage: null} : {}),
       };

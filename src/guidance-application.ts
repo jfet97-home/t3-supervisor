@@ -1,3 +1,4 @@
+import {SupervisorTeamController} from "./supervisor-team-controller.js";
 import { Effect } from "effect";
 import { GuidanceStore } from "./guidance-store.js";
 import { GuidanceRuntime, makeGuidanceModel } from "./guidance.js";
@@ -78,6 +79,7 @@ export const runGuidanceApplication = (
       operateToken.trim() ? makeSupervisorRpc(config.t3Url, operateToken.trim()) : null, readSupervisorBaseline(config.t3Url, readToken.trim()), definitions);
     const workflowReader = new WorkflowWriteController({
       supervisors: supervisionStore,
+      team: supervision.team,
       workflows: supervision.workflowStates,
       isEnabled: projectId => supervision.workflowEditingEnabled(projectId),
       loadDefinitions: (projectId, threadId, signal) => definitions.load(projectId, threadId, signal),
@@ -91,7 +93,9 @@ export const runGuidanceApplication = (
         },
       },
     });
-    const workflows = createWorkflowMcpEndpoint(workflowReader);
+    const teamController = new SupervisorTeamController(workflowReader, supervision.team, supervision.operateRpc, supervision.conversation.requests);
+    supervision.teamEffects = teamController;
+    const workflows = createWorkflowMcpEndpoint(workflowReader, teamController);
     runtime.retired = true;
     yield* Effect.acquireRelease(
       Effect.promise(() => startGuidanceUi(config, runtime, definitions, editor, supervision, workflows, workflowReader)),

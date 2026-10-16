@@ -111,6 +111,30 @@ const questions = [
     answer: "Requirements belong once to the current main task. Child tasks may contribute to parent steps, but delegation does not remove the parent's obligations or create a fresh requirement set for every child.",
   },
   {
+    question: "What does a Supervisor helper own?",
+    answer: "A helper monitors the operational subtree roots assigned to it, including verified future descendants. Assignment is monitoring responsibility, not workflow-step ownership or a contributor link. Work without an effective helper assignment stays with the root Supervisor.",
+  },
+  {
+    question: "Can a helper create more helpers?",
+    answer: "No. The Supervisor team is flat: one root and its direct helpers. A helper may cover several operational subtrees, but operational descendants do not create another Supervisor level.",
+  },
+  {
+    question: "What happens when I message a helper directly in T3?",
+    answer: "T3 applies its native follow-up behavior to that helper conversation. The root sends routine notes and check-ins through Supervisor team operations; it does not use raw `t3_thread_send` for those check-ins.",
+  },
+  {
+    question: "Does setting the helper limit to zero remove existing helpers?",
+    answer: "No. Zero disables new recruitment. Existing members and their history remain; lowering the limit also does not silently remove members.",
+  },
+  {
+    question: "Who is responsible during a handover?",
+    answer: "The root remains responsible while the old helper stops new guidance and outstanding effects are reconciled. New coverage becomes active only after the handover is confirmed. Pending or uncertain handovers stay visible and are not treated as complete.",
+  },
+  {
+    question: "How is a helper's model selected?",
+    answer: "A helper inherits the root's model by default. The root may select another model from T3's current configured catalog when delegating that helper; there is no separate Supervisor model catalog.",
+  },
+  {
     question: "What happens when a file is broken or workflows contain a cycle?",
     answer: "The UI and the operational Supervisor report definition errors, including the cycle chain. The Supervisor can continue with a finite provisional plan, while unreadable material and unresolved fixed or required items remain visible. A broken or incomplete collection is never reported as having no requirements.",
   },
@@ -175,6 +199,13 @@ export function StepsAndWorkflowsGuide() {
 
     <Topic id="guide-children-title" title="How child tasks contribute">
       <p>Requirements apply once to the current main task, not once for every child and not for the lifetime of the conversation. Children may contribute to parent steps, including overlapping contributions or expanding several parent steps into a child plan. Delegation does not remove the parent's requirements or automatically complete its work.</p>
+    </Topic>
+
+    <Topic id="supervisor-team-title" title="Supervisor team and operational assignments">
+      <p>The Supervisor team has one root and up to five helpers by default. Its project setting can be changed from 0 to 20; zero prevents new recruitment while preserving existing members. Each helper may cover several operational subtree roots, including verified descendants added later. The team stays flat even when the operational workflow is nested.</p>
+      <p>The root coordinates the main and unassigned work. Helpers assess and guide their assigned children. The Projects page displays this team separately from connected operational conversations and marks each row with its effective assignee. An unknown or transferring owner stays explicit. Team membership and assignments do not change step ownership, contributor links or parent completion.</p>
+      <p>Use a T3 link to open a helper conversation. A person writing there follows T3's native follow-up behavior. Root context notes and routine helper check-ins go through Supervisor team operations, not raw <code>t3_thread_send</code>. Pending handovers and significant issues remain visible until their state is resolved.</p>
+      <p>The team view is a current observation. Read its timestamp and any incomplete, unavailable or stale warning before relying on membership or assignment details. Reading the view does not wake chats or change workflow state.</p>
     </Topic>
 
     <Topic id="guide-errors-title" title="Cycles, invalid definitions and recovery">

@@ -1,3 +1,5 @@
+import {SupervisorTeamStore} from "../src/supervisor-team-store.js";
+import {SupervisorTeamController} from "../src/supervisor-team-controller.js";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1780,4 +1782,145 @@ test("activity references cannot relabel inherited projection records as local a
     });
     assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.revision, current.revision);
   } finally {await closeFixture(fixture);}
+});
+
+
+test("a registered helper writes only its assigned child using its own exact main-run evidence", async () => {
+  const f = await makeFixture();
+  try {
+    const team = new SupervisorTeamStore(f.supervisors);
+    const member = team.registerMember(f.binding, {threadId: "helper-own", taskId: "helper-task", bootstrapRunId: "bootstrap"});
+    const ready = team.markReady(f.binding, member.threadId, member.epoch);
+    const child = thread("operational-a", f.projectId, f.mainThreadId, "subagent");
+    const other = thread("operational-b", f.projectId, f.mainThreadId, "subagent");
+    f.threads.push(child, other, thread(member.threadId, f.projectId, f.supervisorThreadId, "subagent"));
+    const parents = new Map(f.threads.map(item => [item.id, item.lineage.parentThreadId]));
+    const assignment = team.assign(f.binding, child.id, member.threadId, parents);
+    for (const notification of team.snapshot(f.binding).notifications) {
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "sending");
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "delivered");
+      team.acknowledgeNotification(f.binding, member.threadId, notification.id, ready.epoch);
+    }
+    team.completeTransfer(f.binding, child.id, assignment.epoch);
+    f.workflows.ensureMainInTransaction(f.owner, "seed-main", "Main remains owned by root.");
+    const own = makeProjection(member.threadId, f.projectId);
+    own.thread = f.threads.find(item => item.id === member.threadId)!;
+    f.projections.set(member.threadId, own);
+    const actorFixture = {...f, supervisorThreadId: member.threadId, projection: own};
+    const controller = new WorkflowWriteController({...f.controller.options, team});
+    const authority = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation,
+      memberEpoch: ready.epoch, assignmentRootThreadId: child.id, assignmentEpoch: assignment.epoch};
+    const args = {...authority, action: "link_child", operationId: "shared-operation", childThreadId: child.id, note: "Helper child plan."};
+    installEvidence(f, args);
+    assert.equal((await controller.write(args)).status, "pending", "projected proof in root cannot authorize helper");
+    installEvidence(actorFixture, args);
+    const result = await controller.write(args);
+    assert.equal(result.status, "created");
+    const doc = f.workflows.get(f.projectId, f.mainThreadId, child.id)!;
+    assert.equal((await controller.read({...authority})).status, "ok");
+    assert.equal(f.workflows.getByIdForOwner(f.owner, doc.workflowId).status, "found");
+    const foreign = {...args, operationId: "foreign", childThreadId: other.id};
+    installEvidence(actorFixture, foreign);
+    assert.deepEqual(await controller.write(foreign), {status: "denied", operationId: "foreign", reason: "actor_outside_current_assignment"});
+    const main = {...authority, action: "ensure_main", operationId: "forbidden-main", note: "Cannot own root."};
+    installEvidence(actorFixture, main);
+    assert.equal((await controller.write(main)).status, "denied");
+    const transfer = team.release(f.binding, child.id, parents);
+    const stale = {...args, operationId: "stale-after-transfer"};
+    installEvidence(actorFixture, stale);
+    assert.equal((await controller.write(stale)).status, "denied");
+    assert(transfer.epoch > assignment.epoch);
+    assert.equal(f.workflows.get(f.projectId, f.mainThreadId, child.id)!.workflowId, doc.workflowId);
+  } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
+});
+
+test("team registration requires a completed app-owned bootstrap and readiness requires helper-own proof", async () => {
+  const f = await makeFixture();
+  try {
+    const team = new SupervisorTeamStore(f.supervisors);
+    const reader = new WorkflowWriteController({...f.controller.options, team});
+    const controller = new SupervisorTeamController(reader, team, null);
+    const args = {...locator(f), action: "register", operationId: "register-1", memberThreadId: "real-helper", taskId: "task-node", bootstrapRunId: "boot-run"};
+    installEvidence(f, args, {toolName: workflowToolNames.team.direct[0]});
+    const child = makeProjection("real-helper", f.projectId);
+    child.thread.lineage = {parentThreadId: f.supervisorThreadId, relationshipToParent: "subagent"};
+    child.thread.forkedFrom = {type: "node", nodeId: "task-node"};
+    child.runs = [{id: "boot-run", threadId: "real-helper", ordinal: 1, status: "completed", userMessageId: "bootstrap-message", requestedAt: "2026-10-16T10:00:00Z", startedAt: null, completedAt: null, rootNodeId: "boot-root"}];
+    child.messages = [{id: "bootstrap-message", threadId: "real-helper", runId: "boot-run", nodeId: "boot-root", role: "user", text: "Bootstrap ready", streaming: false, createdAt: "2026-10-16T10:00:00Z", updatedAt: "2026-10-16T10:00:00Z"}];
+    f.projections.set("real-helper", child);
+    f.threads.push(child.thread);
+    assert.equal((await controller.call(args, AbortSignal.timeout(1000)) as {status: string}).status, "denied");
+    assert.equal(team.snapshot(f.binding).members.length, 0);
+    f.projection.subagents = [{id: "task-node", threadId: f.supervisorThreadId, runId: "supervisor-run-current", origin: "app_owned", childThreadId: "real-helper", status: "completed", prompt: "Bootstrap ready", result: {summary: "Bootstrap complete."}}];
+    assert.equal((await controller.call(args, AbortSignal.timeout(1000)) as {status: string}).status, "ok");
+    const member = team.snapshot(f.binding).members[0]!;
+    const ready = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: member.epoch, action: "ready", operationId: "ready-1"};
+    assert.equal((await controller.call(ready, AbortSignal.timeout(1000)) as {status: string}).status, "pending");
+    installEvidence({...f, supervisorThreadId: member.threadId, projection: child}, ready, {toolName: workflowToolNames.team.direct[0]});
+    const result = await controller.call(ready, AbortSignal.timeout(1000)) as {status: string};
+    assert.equal(result.status, "ok");
+    assert.equal(team.snapshot(f.binding).members[0]!.state, "ready");
+    assert.deepEqual(await controller.call(ready, AbortSignal.timeout(1000)), result, "lost readiness response replays after epoch advances");
+  } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
+});
+
+test("helper guidance uses native steer only and retains uncertain identity across a handover", async () => {
+  const f = await makeFixture();
+  try {
+    const team = new SupervisorTeamStore(f.supervisors);
+    const member = team.registerMember(f.binding, {threadId: "guide-helper", taskId: "guide-task", bootstrapRunId: "guide-bootstrap"});
+    const ready = team.markReady(f.binding, member.threadId, member.epoch);
+    const target = thread("guide-target", f.projectId, f.mainThreadId, "subagent");
+    Object.assign(target, {creationSource: "mcp", runtimeMode: "full-access", interactionMode: "default", activeRunId: "guide-active"});
+    f.threads.push(target, thread(member.threadId, f.projectId, f.supervisorThreadId, "subagent"));
+    const parents = new Map(f.threads.map(item => [item.id, item.lineage.parentThreadId]));
+    const assignment = team.assign(f.binding, target.id, member.threadId, parents);
+    for (const notification of team.snapshot(f.binding).notifications) {
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "sending");
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "delivered");
+      team.acknowledgeNotification(f.binding, member.threadId, notification.id, ready.epoch);
+    }
+    team.completeTransfer(f.binding, target.id, assignment.epoch);
+    const targetProjection = makeProjection(target.id, f.projectId);
+    targetProjection.thread = target;
+    targetProjection.runtimeRequests = [];
+    targetProjection.runs = [{id: "guide-active", threadId: target.id, status: "running", ordinal: 1,
+      requestedAt: "2026-10-16T10:00:00Z", startedAt: null, completedAt: null, rootNodeId: "guide-root", activeAttemptId: "guide-attempt"}];
+    targetProjection.providerTurns = [{id: "guide-turn", nodeId: "guide-root", runAttemptId: "guide-attempt", status: "running"}];
+    f.projections.set(target.id, targetProjection);
+    const mainProjection = makeProjection(f.mainThreadId, f.projectId);
+    f.projections.set(f.mainThreadId, mainProjection);
+    const own = makeProjection(member.threadId, f.projectId);
+    Object.assign(own.thread, {runtimeMode: "full-access", interactionMode: "default"});
+    f.projections.set(member.threadId, own);
+    const actorFixture = {...f, supervisorThreadId: member.threadId, projection: own};
+    const reader = new WorkflowWriteController({...f.controller.options, team});
+    const sent: Record<string, unknown>[] = [];
+    const controller = new SupervisorTeamController(reader, team, async (_tag, command) => {sent.push(command);throw new Error("lost_send_reply");});
+    const args = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: ready.epoch,
+      assignmentRootThreadId: target.id, assignmentEpoch: assignment.epoch,
+      operationId: "uncertain-guidance", targetThreadId: target.id, text: "Reconsider the observed failed test before completing this step."};
+    installEvidence(actorFixture, args, {toolName: workflowToolNames.guide.direct[0]});
+    const first = await controller.guide(args, AbortSignal.timeout(1000)) as {status: string; messageId: string};
+    assert.equal(first.status, "uncertain");
+    assert.deepEqual(sent[0]!.dispatchMode, {type: "steer_active", targetRunId: "guide-active"});
+    assert.equal(sent[0]!.createdBy, "system");
+    assert.equal(sent[0]!.creationSource, "server");
+    assert.equal(team.unresolvedRequests(f.binding).length, 1);
+    const transfer = team.release(f.binding, target.id, parents);
+    await controller.guide(args, AbortSignal.timeout(1000));
+    assert.equal(sent.length, 1, "handover cannot create a second send or change route");
+    for (const notification of team.snapshot(f.binding).notifications.filter(item => item.state !== "acknowledged")) {
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "sending");
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "delivered");
+      team.acknowledgeNotification(f.binding, member.threadId, notification.id, ready.epoch);
+    }
+    assert.throws(() => team.completeTransfer(f.binding, target.id, transfer.epoch), /pending_effects/u);
+    targetProjection.messages.push({id: first.messageId, threadId: target.id, runId: "guide-active", nodeId: "guide-root", role: "user", text: args.text,
+      streaming: false, createdAt: "2026-10-16T10:00:00Z", updatedAt: "2026-10-16T10:00:00Z", createdBy: "user", creationSource: "server"});
+    await controller.reconcile(f.binding, AbortSignal.timeout(1000));
+    assert.equal(team.unresolvedRequests(f.binding).length, 0);
+    team.completeTransfer(f.binding, target.id, transfer.epoch);
+    assert.equal(team.coverage(f.binding, target.id, parents).state, "root");
+  } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
 });

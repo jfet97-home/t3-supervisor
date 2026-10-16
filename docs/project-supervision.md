@@ -154,6 +154,32 @@ input requires action. Unknown work stays unresolved. Background monitoring
 continues and relevant activity reuses the same Supervisor identity and binding;
 settlement is not deletion or agreement invalidation.
 
+## Supervisor teams
+
+The root may recruit direct T3 child conversations as helpers when parallel
+monitoring would reduce its workload or context pressure. The Supervisor team stays
+flat, while each helper may cover several operational subtree roots and their
+verified descendants. The root owns the main, shared policy and unassigned work;
+helpers assess and guide only their assigned child workflows. Assignment is
+monitoring responsibility, separate from operational task ownership and workflow
+contributor links. The default helper limit is five per root; the project setting
+accepts zero through twenty, with zero disabling new recruitment while preserving
+existing members.
+
+Helpers inherit the root's T3 model by default; the root may select another current
+T3 catalog model per helper. A helper receives responsibility only after its native
+identity and readiness are confirmed. Handover state and affected helper
+notifications remain visible while outstanding effects are settled; the root keeps
+responsibility until new coverage is confirmed.
+
+The Projects view keeps the root/helpers separate from operational conversations,
+and labels child rows with their effective assignee. It reports observed readiness,
+lifecycle, assignments, assessments, pending handovers and issues without turning
+missing data into root ownership. The [Supervisor team guide](supervisor-team.md)
+explains the view and the T3 messaging semantics: direct human messages follow
+T3's native behavior, while root-to-helper notes use Supervisor team operations,
+not raw `t3_thread_send`.
+
 The progress view is separate from definition authoring, proposals and saved
 agreements. It reads current main/child workflows, lifecycle and recent Supervisor
 observations without waking chats or changing plans. Missing child workflows,

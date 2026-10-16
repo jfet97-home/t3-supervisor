@@ -41,7 +41,8 @@ test("guide FAQs use native disclosures with visible summaries and no headings i
   const html = renderToStaticMarkup(createElement(StepsAndWorkflowsGuide));
   const disclosures = [...html.matchAll(/<details class="panel guide-faq">([\s\S]*?)<\/details>/g)];
 
-  assert.equal(disclosures.length, 10);
+  assert(disclosures.length > 0, "the Guide must expose native FAQ disclosures");
+  assert.equal(disclosures.length, [...html.matchAll(/<summary>/g)].length);
   for (const disclosure of disclosures) {
     assert.match(disclosure[1]!, /<summary>[^<]+<\/summary>/);
     assert.doesNotMatch(disclosure[1]!.match(/<summary>[\s\S]*?<\/summary>/)![0], /<h[1-6]/);
