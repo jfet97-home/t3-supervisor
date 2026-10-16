@@ -81,6 +81,15 @@ mirrors do not prove completion. Saved changes apply on the next check. There is
 pause-monitoring mode. Supervisors run through T3; optional Telegram recaps use a
 separate worker/authentication scope.
 
+An initial proposal waits in the existing Supervisor ready state while the main is
+preparing, starting or otherwise not ready for steering; `running` alone does not
+prove readiness. An idle main receives a normal new turn. Pending native
+owner questions or approvals defer potentially interrupting guidance, and the
+Supervisor never answers or resolves them. Ordinary model guidance to the main uses
+T3's automatic delivery after fresh reads. Unknown outcomes are reconciled with the
+same request identity; confirmed failures need a fresh read before later
+reconsideration. No pre-first-tool barrier is guaranteed.
+
 The live progress section shows current main/child workflows separately from
 proposals and accepted plans. Read the Supervisor's short assessment and supporting
 activity links; missing workflow, unknown lifecycle and incomplete/unavailable reads
@@ -88,11 +97,16 @@ remain explicit. Viewing progress does not wake chats or write state. Agents hav
 no continual reporting obligation. A linked result alone does not prove a step's
 description has been satisfied.
 
-Guidance to native children goes through their parent. Direct delegated guidance
-requires fresh active scope and contact checks and active-only steer delivery;
-never retry a rejected steer using a mode that wakes a finished child. A quiet
-unknown child may permit guarded standby while its work remains unresolved and
-background monitoring continues. New relevant activity reuses the same Supervisor.
+Guidance to native children goes through verified ancestors. Direct delegated guidance
+is limited to verified active children and uses fresh scope/contact checks with
+active-only steering. After a definite rejection or when steering is unavailable,
+the nearest verified eligible contactable ancestor is considered, then the main
+only when that route is valid and relevant. Terminal and unknown children are not contacted
+directly, and an unknown send must be reconciled before changing routes. T3 can
+convert a late steer into a started child delivery; if that happens, stop messaging
+the child and notify its parent when relevant. No automatic cancellation occurs.
+A quiet unknown child may permit guarded standby while its work remains unresolved
+and background monitoring continues. New relevant activity reuses the same Supervisor.
 
 Inspect nested plans, requirement accounting, source revision and diagnostics
 separately from native acceptance evidence and actual execution. Required inclusion

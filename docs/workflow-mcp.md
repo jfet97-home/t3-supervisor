@@ -170,10 +170,13 @@ evidence: missing or weak native references, incomplete/truncated inputs, or
 incomplete run graphs remain pending or denied regardless of provider identity.
 No T3 source, installed app/server, startup script or initial dispatch path is modified.
 
-The foundation does not add automatic child check-ins, per-step execution proofs,
-progress UI, a task scheduler, or a pre-start negotiation barrier. Those remain
-separate roadmap work. Consult T3 Lab's three maintained tracking documents for
-source checks, remote review, staged VM evidence and the installed revision.
+The workflow-editing foundation does not add automatic child check-ins, per-step
+execution proofs, a task scheduler, or a pre-first-tool negotiation barrier. The
+separate progress view and current delivery timing and child-routing limits are
+documented in [project supervision](project-supervision.md). Initial guidance can
+wait while T3 prepares a target turn, but no gate guarantees that it arrives before
+a tool starts. Consult T3 Lab's three maintained tracking documents for source
+checks, remote review, staged VM evidence and the installed revision.
 
 ## Local access and rotation
 

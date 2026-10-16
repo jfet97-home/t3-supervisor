@@ -100,6 +100,8 @@ const makeProjection = (thread: ThreadInfo): Projection => ({
   runs: [],
   messages: [],
   nodes: [],
+  providerTurns: [],
+  runtimeRequests: [],
   turnItems: [],
 });
 
@@ -129,6 +131,7 @@ const appendRun = (input: {
   const now = input.now ?? baseTime;
   const rootNodeId = `${input.id}-root`;
   const providerThreadId = `${input.id}-provider`;
+  const activeAttemptId = input.status === "running" ? `${input.id}-attempt` : null;
   const completed = input.status === "completed";
   const run: RunInfo = {
     id: input.id,
@@ -140,9 +143,12 @@ const appendRun = (input: {
     completedAt: completed ? iso(now) : null,
     rootNodeId,
     userMessageId: input.messageId,
+    activeAttemptId,
     providerThreadId,
   };
   projection.runs.push(run);
+  if (activeAttemptId) (projection.providerTurns as Record<string, unknown>[]).push({id: `${input.id}-provider-turn`, runAttemptId: activeAttemptId,
+    nodeId: rootNodeId, status: "running"});
   nodesOf(projection).push({
     id: rootNodeId,
     threadId,
@@ -170,6 +176,17 @@ const appendRun = (input: {
   return run;
 };
 
+const activateProviderTurn = (projection: Projection, run: RunInfo, attemptId = `${run.id}-attempt-ready`): void => {
+  run.status = "running";
+  run.activeAttemptId = attemptId;
+  run.startedAt = iso(baseTime);
+  const root = nodesOf(projection).find(node => node.id === run.rootNodeId);
+  assert.ok(root);
+  root.status = "running";
+  (projection.providerTurns as Record<string, unknown>[]).push({id: `${attemptId}-provider-turn`, runAttemptId: attemptId,
+    nodeId: run.rootNodeId, status: "running"});
+};
+
 const restartRun = (projection: Projection, run: RunInfo, input: {messageId: string; text: string; now: number; oldRootStatus?: string}) => {
   const oldRootId = run.rootNodeId;
   assert.ok(oldRootId);
@@ -192,8 +209,12 @@ const restartRun = (projection: Projection, run: RunInfo, input: {messageId: str
   run.rootNodeId = rootNodeId;
   run.userMessageId = input.messageId;
   run.status = "running";
+  const activeAttemptId = `${run.id}-attempt-${(projection.providerTurns as Record<string, unknown>[]).length + 1}`;
+  run.activeAttemptId = activeAttemptId;
   run.startedAt = iso(input.now);
   run.completedAt = null;
+  (projection.providerTurns as Record<string, unknown>[]).push({id: `${activeAttemptId}-provider-turn`, runAttemptId: activeAttemptId,
+    nodeId: rootNodeId, status: "running"});
   const message: MessageInfo = {
     id: input.messageId,
     threadId: projection.thread.id,
@@ -250,8 +271,11 @@ const appendMessageToRun = (
 };
 
 const completeRun = (projection: Projection, run: RunInfo, response: string, now = baseTime): void => {
+  const completedAttemptId = run.activeAttemptId;
   run.status = "completed";
   run.completedAt = iso(now);
+  run.activeAttemptId = null;
+  for (const turn of (projection.providerTurns ?? []) as Array<Record<string, unknown>>) if (turn.runAttemptId === completedAttemptId) turn.status = "completed";
   const root = nodesOf(projection).find(node => node.id === run.rootNodeId);
   assert.ok(root);
   root.status = "completed";
@@ -1165,10 +1189,10 @@ test("an unreadable introduced chat does not stop a healthy chat review or ackno
   }
 });
 
-test("starting and waiting operative runs are queued instead of actively steered", async t => {
+test("preparing, starting, and waiting operative runs keep the initial proposal ready without latching a mode", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);
-  for (const status of ["starting", "waiting"] as const) {
+  for (const status of ["preparing", "starting", "waiting"] as const) {
     const fixture = await makeFixture(clock, { operativeActive: false });
     t.after(fixture.cleanup);
     const run = appendRun({
@@ -1195,11 +1219,91 @@ test("starting and waiting operative runs are queued instead of actively steered
 
     await fixture.run();
 
-    const call = fixture.calls.find(item => item.payload.threadId === operativeThreadId);
-    assert.ok(call);
-    assert.deepEqual(call.payload.dispatchMode, { type: "queue_after_active" }, `${status} runs must not be steered`);
+    assert.equal(fixture.calls.some(item => item.payload.threadId === operativeThreadId), false, `${status} runs wait without an RPC`);
+    assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "ready");
+    assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.dispatchMode, undefined);
+    const reopened = fixture.makeRestartedConversation();
+    assert.equal(reopened.requests.introduction(fixture.task.id)?.state, "ready", "the existing durable ready proposal survives a service reopen");
+    assert.equal(reopened.requests.introduction(fixture.task.id)?.dispatchMode, undefined, "waiting does not latch a dispatch mode");
+
+    if (status !== "waiting") {
+      activateProviderTurn(fixture.operative, run);
+      fixture.operative.thread.activeRunId = run.id;
+      clock.now += 5_001;
+      await fixture.run();
+      const call = fixture.calls.find(item => item.payload.threadId === operativeThreadId);
+      assert.ok(call, `${status} proposal sends after a real provider turn starts`);
+      assert.deepEqual(call.payload.dispatchMode, {type: "steer_active", targetRunId: run.id});
+    }
     clock.now++;
   }
+});
+
+test("a running main without matching provider-turn evidence waits, then targets the live turn", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  fixture.operative.providerTurns = [];
+  fixture.conversation.requests.saveIntroduction({
+    taskId: fixture.task.id,
+    projectId,
+    threadId: operativeThreadId,
+    supervisorThreadId: fixture.binding.threadId,
+    state: "ready",
+    text: workflowIntroductionText(fixture.task),
+    messageId: `supervisor-notice:workflow:${fixture.task.id}`,
+    targetRunId: null,
+    error: null,
+  });
+
+  await fixture.run();
+  assert.equal(fixture.calls.some(item => item.payload.threadId === operativeThreadId), false);
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "ready");
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.dispatchMode, undefined);
+
+  const activeRun = fixture.operative.runs.find(run => run.id === fixture.operative.thread.activeRunId);
+  assert.ok(activeRun);
+  fixture.operative.providerTurns = [{id: "live-provider-turn", runAttemptId: activeRun.activeAttemptId, nodeId: activeRun.rootNodeId, status: "running"}];
+  clock.now += 5_001;
+  await fixture.run();
+  const call = fixture.calls.find(item => item.payload.threadId === operativeThreadId);
+  assert.ok(call);
+  assert.deepEqual(call.payload.dispatchMode, {type: "steer_active", targetRunId: activeRun.id});
+});
+
+test("a fresh pending owner runtime request holds the proposal until resolution", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const activeRun = fixture.operative.runs.find(run => run.id === fixture.operative.thread.activeRunId);
+  assert.ok(activeRun?.rootNodeId);
+  fixture.operative.runtimeRequests = [{id: "owner-question", kind: "user_input", status: "pending", nodeId: activeRun.rootNodeId,
+    providerTurnId: "owner-provider-turn", createdAt: iso(clock.now)}];
+  fixture.conversation.requests.saveIntroduction({
+    taskId: fixture.task.id,
+    projectId,
+    threadId: operativeThreadId,
+    supervisorThreadId: fixture.binding.threadId,
+    state: "ready",
+    text: workflowIntroductionText(fixture.task),
+    messageId: `supervisor-notice:workflow:${fixture.task.id}`,
+    targetRunId: null,
+    error: null,
+  });
+
+  await fixture.run();
+  assert.equal(fixture.calls.some(item => item.payload.threadId === operativeThreadId), false);
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "ready");
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.dispatchMode, undefined);
+
+  (fixture.operative.runtimeRequests as Array<Record<string, unknown>>)[0]!.status = "resolved";
+  clock.now += 5_001;
+  await fixture.run();
+  const call = fixture.calls.find(item => item.payload.threadId === operativeThreadId);
+  assert.ok(call);
+  assert.deepEqual(call.payload.dispatchMode, {type: "steer_active", targetRunId: activeRun.id});
 });
 
 test("a definite active-steering rejection falls back once with new queued IDs and retains the rejected attempt", async t => {
@@ -1305,6 +1409,50 @@ test("a rejected queued fallback waits for explicit retry, then uses fresh queue
   assert.deepEqual(attempts[2]?.payload.dispatchMode, { type: "queue_after_active" });
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "accepted");
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.rejectedAttempts?.length, 2);
+});
+
+test("a pending owner request does not block reconciliation of an uncertain queued fallback", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  fixture.conversation.requests.saveIntroduction({
+    taskId: fixture.task.id,
+    projectId,
+    threadId: operativeThreadId,
+    supervisorThreadId: fixture.binding.threadId,
+    state: "ready",
+    text: workflowIntroductionText(fixture.task),
+    messageId: `supervisor-notice:workflow:${fixture.task.id}`,
+    targetRunId: null,
+    error: null,
+  });
+  fixture.rejectNextIntroduction();
+
+  await fixture.run();
+  const rejectedSteer = fixture.calls.find(call => call.payload.threadId === operativeThreadId);
+  assert.ok(rejectedSteer);
+  assert.deepEqual(rejectedSteer.payload.dispatchMode, {type: "steer_active", targetRunId: "operative-active-run"});
+  fixture.failNextIntroduction();
+  await fixture.run();
+  const uncertainFallback = fixture.calls.filter(call => call.payload.threadId === operativeThreadId)[1];
+  assert.ok(uncertainFallback);
+  assert.deepEqual(uncertainFallback.payload.dispatchMode, {type: "queue_after_active"});
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "uncertain");
+
+  const activeRun = fixture.operative.runs.find(run => run.id === fixture.operative.thread.activeRunId);
+  assert.ok(activeRun?.rootNodeId);
+  fixture.operative.runtimeRequests = [{id: "owner-question-during-reconcile", kind: "user_input", status: "pending", nodeId: activeRun.rootNodeId,
+    providerTurnId: "owner-provider-turn", createdAt: iso(clock.now)}];
+  fixture.conversation.retry(projectId, fixture.binding.threadId);
+  clock.now += 5_001;
+  await fixture.run();
+
+  const attempts = fixture.calls.filter(call => call.payload.threadId === operativeThreadId);
+  assert.equal(attempts.length, 3);
+  assert.equal(attempts[2]?.payload.messageId, uncertainFallback.payload.messageId);
+  assert.equal(attempts[2]?.payload.commandId, uncertainFallback.payload.commandId);
+  assert.deepEqual(attempts[2]?.payload.dispatchMode, uncertainFallback.payload.dispatchMode);
 });
 
 test("one review stays in flight while activity changes and acknowledges only its frozen batch", async t => {
@@ -1472,13 +1620,22 @@ test("completed activity first observed on new and reused children is batched by
     supervisorThreadId: fixture.binding.threadId, state: "sent", text: "Existing workflow context.", messageId: "workflow-context",
     targetRunId: null, error: null});
   const child = makeProjection(makeThread({id: "operative-native-child", title: "Native child"}));
-  child.thread.projectId = null;
   child.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
   child.thread.creationSource = "provider";
   for (let index = 1; index <= 3; index++) turnItemsOf(child).push({id: `child-command-${index}`, threadId: child.thread.id,
     runId: null, type: "command_execution", status: "completed", ordinal: index, completedAt: iso(clock.now - 30_000 + index),
     updatedAt: iso(clock.now - 30_000 + index), input: `PRIVATE_CHILD_BODY_${index}`, output: "ok"});
   fixture.addChildProjection(child);
+
+  const nested = makeProjection(makeThread({id: "operative-nested-delegated-child", title: "Nested delegated child"}));
+  nested.thread.lineage = {parentThreadId: child.thread.id, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  nested.thread.creationSource = "mcp";
+  const nestedRun = appendRun({projection: nested, id: "nested-current-run", ordinal: 1, status: "completed",
+    messageId: "nested-current-input", text: "Nested delegated child work", now: clock.now - 25_000});
+  nested.thread.activeRunId = nestedRun.id;
+  addCommandActivity(nested, "nested-current-command", "PRIVATE_NESTED_BODY", clock.now - 20_000);
+  nested.thread.activeRunId = null;
+  fixture.addChildProjection(nested);
 
   const delegated = makeProjection(makeThread({id: "operative-new-delegated-child", title: "New delegated child"}));
   delegated.thread.projectId = "other-project";
@@ -1506,6 +1663,24 @@ test("completed activity first observed on new and reused children is batched by
   reused.thread.activeRunId = null;
   fixture.addChildProjection(reused);
 
+  const routeParent = makeProjection(makeThread({id: "operative-active-delegated-parent", title: "Active delegated parent"}));
+  routeParent.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  routeParent.thread.creationSource = "mcp";
+  const routeParentRun = appendRun({projection: routeParent, id: "route-parent-active-run", ordinal: 1, status: "running",
+    messageId: "route-parent-input", text: "Active delegated parent work", now: clock.now - 20_000});
+  routeParent.thread.activeRunId = routeParentRun.id;
+  fixture.addChildProjection(routeParent);
+
+  const routeTarget = makeProjection(makeThread({id: "operative-child-with-active-parent", title: "Child with active delegated parent"}));
+  routeTarget.thread.lineage = {parentThreadId: routeParent.thread.id, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  routeTarget.thread.creationSource = "mcp";
+  const routeTargetRun = appendRun({projection: routeTarget, id: "route-target-run", ordinal: 1, status: "completed",
+    messageId: "route-target-input", text: "Child work below the active delegated parent", now: clock.now - 30_000});
+  routeTarget.thread.activeRunId = routeTargetRun.id;
+  addCommandActivity(routeTarget, "route-target-command", "PRIVATE_ROUTE_TARGET_BODY", clock.now - 20_000);
+  routeTarget.thread.activeRunId = null;
+  fixture.addChildProjection(routeTarget);
+
   await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
   assert.equal(fixture.conversation.monitor.hasState(projectId, child.thread.id), true);
   assert.equal(fixture.conversation.monitor.pending(projectId, operativeThreadId).length, 0);
@@ -1517,28 +1692,48 @@ test("completed activity first observed on new and reused children is batched by
 
   const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.ok(request?.kind === "review" && request.batch);
-  assert.deepEqual(request.batch.threads.map(item => item.threadId).sort(), [child.thread.id, delegated.thread.id, reused.thread.id].sort());
+  assert.deepEqual(request.batch.threads.map(item => item.threadId).sort(), [child.thread.id, nested.thread.id, delegated.thread.id, reused.thread.id, routeTarget.thread.id].sort());
   assert.equal(request.batch.threads.find(item => item.threadId === child.thread.id)?.items.length, 3);
   assert.equal(request.batch.threads.find(item => item.threadId === reused.thread.id)?.items.some(item => item.id === "reused-current-command"), true);
   assert.equal(request.batch.threads.find(item => item.threadId === reused.thread.id)?.items.some(item => item.id === "reused-old-command"), false);
   assert.equal(request.batch.threads.find(item => item.threadId === delegated.thread.id)?.items.some(item => item.id === "delegated-current-command"), true);
   const envelopeStart = request.text.indexOf("UNTRUSTED_MONITOR_ENVELOPE\n") + "UNTRUSTED_MONITOR_ENVELOPE\n".length;
   const envelopeEnd = request.text.indexOf("\nEND_UNTRUSTED_MONITOR_ENVELOPE", envelopeStart);
-  const envelope = JSON.parse(request.text.slice(envelopeStart, envelopeEnd)) as {threads: Array<{threadId: string; origin: string; parentThreadId: string | null; activityRefs: Array<{sourceThreadId: string; sourceItemId: string | null}>}>};
+  const envelope = JSON.parse(request.text.slice(envelopeStart, envelopeEnd)) as {threads: Array<{threadId: string; origin: string; parentThreadId: string | null;
+    fallbackAncestors: Array<{threadId: string; main: boolean; eligible: boolean; contactable: boolean}>;
+    activityRefs: Array<{sourceThreadId: string; sourceItemId: string | null}>}>};
   const nativeEnvelope = envelope.threads.find(item => item.threadId === child.thread.id);
   assert.equal(nativeEnvelope?.origin, "native_child");
   assert.equal(nativeEnvelope?.parentThreadId, operativeThreadId);
+  assert.deepEqual(nativeEnvelope?.fallbackAncestors, [{threadId: operativeThreadId, main: true, eligible: true, contactable: true}]);
   assert.equal(nativeEnvelope?.activityRefs[0]?.sourceThreadId, child.thread.id);
   assert.ok(nativeEnvelope?.activityRefs[0]?.sourceItemId);
   assert.equal(envelope.threads.find(item => item.threadId === delegated.thread.id)?.origin, "delegated_child");
   assert.equal(envelope.threads.find(item => item.threadId === reused.thread.id)?.origin, "delegated_child");
+  const nestedEnvelope = envelope.threads.find(item => item.threadId === nested.thread.id);
+  assert.deepEqual(nestedEnvelope?.fallbackAncestors, [
+    {threadId: child.thread.id, main: false, eligible: false, contactable: false},
+    {threadId: operativeThreadId, main: true, eligible: true, contactable: true},
+  ], "native ancestors are not offered as direct delivery routes; the main remains a possible route");
+  const routeEnvelope = envelope.threads.find(item => item.threadId === routeTarget.thread.id);
+  assert.deepEqual(routeEnvelope?.fallbackAncestors, [
+    {threadId: routeParent.thread.id, main: false, eligible: true, contactable: true},
+    {threadId: operativeThreadId, main: true, eligible: true, contactable: true},
+  ], "a delegated ancestor is offered only with matching running provider-turn evidence");
   assert.equal(request.text.includes("PRIVATE_CHILD_BODY"), false);
   assert.equal(request.text.includes("PRIVATE_DELEGATED_BODY"), false);
   assert.equal(request.text.includes("PRIVATE_OLD_CHILD_BODY"), false);
   assert.equal(request.text.includes("PRIVATE_CURRENT_CHILD_BODY"), false);
-  assert.ok(request.text.includes("Contact the operative main for necessary guidance or workflow negotiation using mode steer when its turn is active and mode auto when it is idle."));
-  assert.ok(request.text.includes("Guide native children through their direct parent."));
-  assert.ok(request.text.includes("use mode steer only for a verified active delegated child"));
+  assert.equal(request.text.includes("PRIVATE_NESTED_BODY"), false);
+  assert.equal(request.text.includes("PRIVATE_ROUTE_TARGET_BODY"), false);
+  assert.ok(request.text.includes("Contact the operative main using mode auto; T3 will steer an active turn or start/queue a turn when idle."));
+  assert.ok(request.text.includes("Guide native children through their nearest verified eligible, contactable ancestor in fallbackAncestors."));
+  assert.ok(request.text.includes("For a verified active delegated child, use mode steer only."));
+  assert.ok(request.text.includes("If its result is delivery:started instead of steered, treat it as a wake"));
+  assert.ok(request.text.includes("route through the nearest verified eligible, contactable ancestor"));
+  assert.ok(request.text.includes("After a definite rejection from the main, fresh-read and reconsider at a later check-in"));
+  assert.ok(request.text.includes("When a child cannot be steered or a definite child-steer rejection occurs, use the supplied fallbackAncestors in order"));
+  assert.ok(request.text.includes("pending runtime question or approval, defer potentially interrupting guidance"));
   assert.equal(fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId && call.payload.type === "message.dispatch").length, 1);
 });
 

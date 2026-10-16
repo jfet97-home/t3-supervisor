@@ -63,6 +63,22 @@ request whose save outcome is unknown is never automatically repeated. Refresh t
 Select a task conversation to see a source-linked objective or its unavailable/
 needs-context state. Matching native proposal/acceptance records save a semantic agreement, not execution evidence.
 
+Initial proposal delivery follows the main's live state. An idle main receives a
+normal new turn through queued delivery. A steerable running main receives targeted active
+steering; a definite rejection uses the existing queue fallback. While the main
+is preparing, starting or running without a steerable provider turn, the proposal stays
+unsent in the existing Supervisor ready state until a later check. `running` alone
+does not prove readiness. There is no pre-first-tool barrier, so guidance can arrive
+after work begins.
+
+Pending native owner questions or approvals defer potentially interrupting
+guidance; the Supervisor does not answer or resolve those requests. Check-ins,
+objective/context introductions and replies from the main remain separate queued
+Supervisor turns with separate request identities. Ordinary model guidance to the
+main uses T3's automatic delivery after fresh reads. An uncertain send is reconciled
+with its original identity before retry; a confirmed failure requires a fresh read
+before reconsideration.
+
 ## Current workflow progress
 
 Select a main conversation to inspect current main and child workflow state in the
@@ -81,6 +97,16 @@ they do not mean an empty or completed workflow.
 Native idle/no-AppRun mirrors are not child completion. The Supervisor observes
 normal actions/results and supplies the assessment without requiring constant agent
 reports. Its links explain the judgment, not independent proof of semantic success.
+
+Direct guidance is limited to verified active delegated children and active-only
+steering after fresh scope and contact checks. Native read-only children receive
+guidance through their verified ancestors. After a definite rejection or when a
+child cannot be steered, the Supervisor considers the nearest verified eligible
+contactable ancestor, then the main only when that route is valid and relevant.
+Terminal or unknown children are not contacted directly, and an uncertain send must
+be reconciled before another route is chosen. T3 can turn a late child steer into a
+started delivery; if that happens, the Supervisor stops sending to the child,
+notifies the parent when relevant, and does not cancel the turn automatically.
 
 ## History and chat settings
 

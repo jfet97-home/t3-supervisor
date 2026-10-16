@@ -63,11 +63,24 @@ agent, schedules a task or proves successful execution.
 ## Dialogue and agreement
 
 The service initializes the Supervisor's context before introducing a validated
-proposal through native active steering. T3 delivery semantics can queue or start
-a follow-up when active delivery is unavailable. Definite rejection and uncertain
-delivery remain distinct; possibly accepted messages keep their original identity
-and are never blindly retried as a new effect. This is not a pre-start barrier;
-implementation may already have begun. Setup scripts remain deferred.
+proposal. When the main is idle, queued delivery starts a normal new turn on the main. When
+the main has a steerable running turn, the initial proposal targets it with active
+steering; a definite rejection uses the existing queue fallback. If the main is preparing, starting,
+or its running provider turn is not yet ready to accept steering, the proposal stays
+in the existing durable Supervisor ready state until a later check. A running status
+alone does not prove that steering is available. Unknown delivery is reconciled
+against the original effect identity before any retry; it is never sent again under
+a new identity. This is not a pre-first-tool barrier: work may already have begun
+when guidance arrives. Setup scripts remain deferred.
+
+Ordinary model guidance to the main uses T3's automatic delivery mode after fresh
+reads. Delivery can still fail: an unknown result is reconciled with the original
+request before retry, while a confirmed failure waits for a new read and later
+reconsideration. There is no retry loop. Check-ins, objective/context introductions
+and replies from the main remain separate queued Supervisor turns with separate
+request identities.
+When an owner question or approval is pending, potentially interrupting guidance
+waits; the Supervisor never answers or resolves that native request.
 
 The two bound chats negotiate by native messages. A saved agreement requires
 matching structured proposal and full-plan acceptance in completed, source-linked
@@ -121,11 +134,18 @@ and link supporting activity. A tool result or linked item alone does not establ
 semantic completion, and child completion never completes a parent step by itself.
 Clarification or changed plans are discussed and reflected in the live workflow.
 
-Direct guidance to a delegated child uses active-only steering after fresh scope,
-lifecycle and contact checks. If the child has finished or the send is rejected,
-guidance goes through its parent without retrying a mode that would start another
-run. Native read-only children receive guidance through their parent. These routing
-instructions are not a sandbox around the model's other native tools.
+Direct guidance to a delegated child is limited to a verified active child and uses
+active-only steering after fresh scope, lifecycle and contact checks. Terminal or
+unknown children are not contacted directly. After a definite rejection or when the
+child cannot be steered, guidance goes to the nearest verified, eligible and
+contactable ancestor within scope; the main is used only when it is valid and the
+guidance remains relevant. Native read-only children receive guidance through their
+verified ancestor path. An unknown send is reconciled before considering another
+route. T3 can turn a late child steer into a started delivery, so there is no
+guarantee that steering cannot wake a child. If that happens, the Supervisor stops
+sending to the child and notifies the parent when relevant; it does not cancel the
+turn automatically. These routing instructions are not a sandbox around the
+model's other native tools.
 
 Quiet completion/archive/deletion can settle the owned chat once children and
 pending work are quiet. An idle main's old lifecycle-unknown child can also permit
