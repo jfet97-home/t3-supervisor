@@ -107,7 +107,7 @@ test("malformed native RPC responses fail closed with a credential-free error", 
   );
 });
 
-test("native RPC treats a socket closed before open as definite non-delivery", async (t) => {
+test("native RPC marks a socket closed before open rejected without claiming a definite T3 rejection", async (t) => {
   const {server, url} = await startHttpServer(() => undefined);
   t.after(() => closeHttpServer(server));
   let requestFrameObserved = false;
@@ -118,12 +118,12 @@ test("native RPC treats a socket closed before open as definite non-delivery", a
 
   await assert.rejects(
     makeSupervisorRpc(url, "pre-send-close-token")("orchestration.dispatchCommand", {type: "message.dispatch"}, AbortSignal.timeout(1500)),
-    (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && cause.definiteRejection && !cause.dispatchCommandFailure,
+    (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && !cause.definiteRejection && !cause.dispatchCommandFailure,
   );
   assert.equal(requestFrameObserved, false, "the socket never opened and no native request frame was sent");
 });
 
-test("native RPC rejects an already-aborted call definitively without opening a socket", async (t) => {
+test("native RPC rejects an already-aborted call without opening a socket or claiming a T3 rejection", async (t) => {
   const {server, url} = await startServer();
   t.after(() => closeServer(server));
   let connections = 0;
@@ -133,7 +133,7 @@ test("native RPC rejects an already-aborted call definitively without opening a 
 
   await assert.rejects(
     makeSupervisorRpc(url, "pre-aborted-token")("orchestration.dispatchCommand", {type: "message.dispatch"}, controller.signal),
-    (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && cause.definiteRejection,
+    (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && !cause.definiteRejection,
   );
   assert.equal(connections, 0);
 });

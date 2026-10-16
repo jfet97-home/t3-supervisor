@@ -41,12 +41,12 @@ type GuideAttempt = {
   commandId: string;
   messageId: string;
   targetRunId: string;
-  status: "prepared" | "replaying" | "accepted" | "uncertain" | "rejected" | "delivered";
+  status: "prepared" | "replaying" | "accepted" | "uncertain" | "rejected" | "not_sent" | "delivered";
   dispatchFailureReplayAttempted?: boolean;
   reason?: string;
 };
 type GuideRecord = {
-  status: "prepared" | "replaying" | "needs_fallback" | "needs_escalation" | "accepted" | "uncertain" | "delivered" | "denied" | "escalated";
+  status: "prepared" | "replaying" | "needs_fallback" | "needs_escalation" | "accepted" | "uncertain" | "not_sent" | "delivered" | "denied" | "escalated";
   targetThreadId: string;
   supervisorThreadId: string;
   bindingGeneration: number;
@@ -400,6 +400,13 @@ export class SupervisorTeamController {
       return result;
     };
     const rejectedResult = async (current: GuideRecord, cause: unknown): Promise<GuideRecord> => {
+      if (cause instanceof SupervisorRpcError && cause.outcome === "rejected" && !cause.definiteRejection) {
+        const notSent: GuideRecord = {...this.changedAttempt(current, attemptIndex, "not_sent", "native_transport_not_sent"),
+          status: "not_sent", reason: "native_transport_not_sent"};
+        this.save(payload, binding, evidenceItemId, notSent);
+        this.team.setRequestState(binding, binding.threadId, record.requestId, 0, "settled");
+        return notSent;
+      }
       const definite = cause instanceof SupervisorRpcError && cause.definiteRejection;
       if (definite && attemptIndex === 0 && attempt.routedThreadId === record.targetThreadId) {
         const rejected = {...this.changedAttempt(current, attemptIndex, "rejected", "native_steer_rejected"), status: "needs_fallback" as const,
@@ -475,7 +482,7 @@ export class SupervisorTeamController {
           }
           return {...original, status: "uncertain", reason: "original_send_requires_reconciliation"};
         }
-        if (["accepted", "delivered", "denied", "escalated"].includes(original.status)) return prior.value;
+        if (["accepted", "delivered", "denied", "escalated", "not_sent"].includes(original.status)) return prior.value;
         if (original.status === "needs_fallback")
           return this.continueAfterDefiniteRejection(payload, binding, proof.evidence.itemId, original, signal);
         if (original.status === "needs_escalation")

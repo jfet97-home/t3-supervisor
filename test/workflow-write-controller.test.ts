@@ -4,6 +4,7 @@ import {SupervisorConversationStore} from "../src/supervisor-conversation-store.
 import {supervisorTeamView} from "../src/supervisor-team-view.js";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -1949,6 +1950,86 @@ test("helper guidance uses native steer only and retains uncertain identity acro
     team.completeTransfer(f.binding, target.id, transfer.epoch);
     assert.equal(team.coverage(f.binding, target.id, parents).state, "root");
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
+});
+
+test("helper guidance records a pre-open transport refusal as not sent without ancestor fallback or a pending-effect fence", async () => {
+  const f = await makeFixture();
+  const server = createServer();
+  let upgrades = 0;
+  server.on("upgrade", (_request, socket) => {upgrades += 1;socket.destroy();});
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  try {
+    const team = new SupervisorTeamStore(f.supervisors);
+    const member = team.registerMember(f.binding, {threadId: "guide-not-sent-helper", taskId: "guide-not-sent-task", bootstrapRunId: "guide-not-sent-bootstrap"});
+    const ready = team.markReady(f.binding, member.threadId, member.epoch);
+    const parent = thread("guide-not-sent-parent", f.projectId, f.mainThreadId, "subagent");
+    const target = thread("guide-not-sent-target", f.projectId, parent.id, "subagent");
+    const helper = thread(member.threadId, f.projectId, f.supervisorThreadId, "subagent");
+    for (const item of [parent, target]) Object.assign(item, {creationSource: "mcp", runtimeMode: "full-access", interactionMode: "default"});
+    f.threads.push(parent, target, helper);
+    const parents = new Map(f.threads.map(item => [item.id, item.lineage.parentThreadId]));
+    const assignment = team.assign(f.binding, parent.id, member.threadId, parents);
+    for (const notification of team.snapshot(f.binding).notifications) {
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "sending");
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "delivered");
+      team.acknowledgeNotification(f.binding, member.threadId, notification.id, ready.epoch);
+    }
+    team.completeTransfer(f.binding, parent.id, assignment.epoch);
+
+    const projectionForRun = (value: ThreadInfo, runId: string) => {
+      const projection = makeProjection(value.id, f.projectId);
+      projection.thread = value;
+      projection.runtimeRequests = [];
+      projection.runs = [{id: runId, threadId: value.id, status: "running", ordinal: 1,
+        requestedAt: "2026-10-16T10:00:00Z", startedAt: null, completedAt: null, rootNodeId: `${runId}-root`, activeAttemptId: `${runId}-attempt`}];
+      projection.providerTurns = [{id: `${runId}-turn`, nodeId: `${runId}-root`, runAttemptId: `${runId}-attempt`, status: "running"}];
+      return projection;
+    };
+    parent.activeRunId = "guide-not-sent-parent-run";
+    target.activeRunId = "guide-not-sent-target-run";
+    const parentProjection = projectionForRun(parent, parent.activeRunId);
+    const targetProjection = projectionForRun(target, target.activeRunId);
+    const own = makeProjection(member.threadId, f.projectId);
+    Object.assign(own.thread, {runtimeMode: "full-access", interactionMode: "default"});
+    f.projections.set(parent.id, parentProjection);
+    f.projections.set(target.id, targetProjection);
+    f.projections.set(f.mainThreadId, makeProjection(f.mainThreadId, f.projectId));
+    f.projections.set(member.threadId, own);
+
+    const actorFixture = {...f, supervisorThreadId: member.threadId, projection: own};
+    const reader = new WorkflowWriteController({...f.controller.options, team});
+    const controller = new SupervisorTeamController(reader, team,
+      makeSupervisorRpc(`http://127.0.0.1:${address.port}`, "team-guide-preopen-token"));
+    const args = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: ready.epoch,
+      assignmentRootThreadId: parent.id, assignmentEpoch: assignment.epoch, operationId: "guide-preopen-refusal",
+      targetThreadId: target.id, text: "Recheck the failing child before continuing."};
+    installEvidence(actorFixture, args, {toolName: workflowToolNames.guide.direct[0]});
+
+    const result = await controller.guide(args, AbortSignal.timeout(3000)) as {
+      status: string; reason: string; attempts: Array<{routedThreadId: string; status: string}>;
+    };
+    assert.equal(result.status, "not_sent");
+    assert.equal(result.reason, "native_transport_not_sent");
+    assert.equal(result.attempts.length, 1, "a pre-open failure does not create a second ancestor route");
+    assert.equal(result.attempts[0]?.routedThreadId, target.id);
+    assert.equal(result.attempts[0]?.status, "not_sent");
+    assert.equal(upgrades, 1);
+    assert.equal(team.unresolvedRequests(f.binding).length, 0, "a command that never reached T3 does not retain a pending-effect fence");
+    assert.equal(team.authorizeWrite(f.binding, member.threadId, target.id, parents,
+      {memberEpoch: ready.epoch, assignmentRootThreadId: parent.id, assignmentEpoch: assignment.epoch}), true);
+    assert.equal(team.snapshot(f.binding).events.some(event => event.kind === "service_attention"), false);
+    assert.deepEqual(await controller.guide(args, AbortSignal.timeout(1000)), result, "same-operation replay returns the settled not-sent receipt");
+    assert.equal(upgrades, 1, "same-operation receipt replay does not open another native connection");
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    f.guidance.close();
+    await rm(f.directory, {recursive: true, force: true});
+  }
 });
 
 test("helper guidance replays a received dispatch failure with the exact command before steering its nearest same-assignment ancestor", async () => {

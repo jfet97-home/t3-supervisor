@@ -17,7 +17,7 @@ const rejectedByName = (value: unknown, name: string, depth = 0): boolean => {
 /** Keeps native requests bounded and never exposes remote errors or credentials. */
 export const makeSupervisorRpc = (baseUrl: string, token: string) =>
   (tag: string, payload: Record<string, unknown>, signal: AbortSignal): Promise<unknown> => new Promise((resolve, reject) => {
-    if (signal.aborted) return reject(new SupervisorRpcError("rejected", true));
+    if (signal.aborted) return reject(new SupervisorRpcError("rejected"));
     const url = new URL("/ws?orchestrationProtocol=2", baseUrl);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(url, {headers: {Authorization: `Bearer ${token}`}, handshakeTimeout: 5000, maxPayload: 8 * 1024 * 1024});
@@ -28,13 +28,13 @@ export const makeSupervisorRpc = (baseUrl: string, token: string) =>
       finished = true;clearTimeout(timer);signal.removeEventListener("abort", abort);ws.terminate();
       if (error) reject(error); else resolve(value);
     };
-    const abort = () => finish(new SupervisorRpcError(sent ? "uncertain" : "rejected", !sent));
+    const abort = () => finish(new SupervisorRpcError(sent ? "uncertain" : "rejected"));
     const timer = setTimeout(abort, 20_000);
     signal.addEventListener("abort", abort, {once: true});
     ws.on("error", abort);ws.on("close", abort);
     ws.on("open", () => {
       if (finished || signal.aborted) return abort();
-      if (ws.readyState !== WebSocket.OPEN) return finish(new SupervisorRpcError("rejected", true));
+      if (ws.readyState !== WebSocket.OPEN) return finish(new SupervisorRpcError("rejected"));
       sent = true;
       try {ws.send(JSON.stringify({_tag: "Request", id: "supervisor", tag, payload, headers: []}), error => {if (error) abort();});}
       catch {abort();}
