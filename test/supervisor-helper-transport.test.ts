@@ -274,6 +274,61 @@ test("team runtime fails a lost-reply check-in only after exact native dispatch 
   } finally {await f.cleanup();}
 });
 
+test("a released waiting check-in reconciles its native failure without reposting before handover completes", async () => {
+  const f = await fixture();
+  try {
+    f.state.emitMessage = false;
+    const transport = new SupervisorHelperTransport(f.options);
+    const team = teamRuntime(f, transport);
+    team.runtime.startCycle(f.binding);
+    await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
+    const original = team.requests.pending("p", "helper");
+    assert.ok(original);
+    assert.equal(original?.state, "waiting");
+    assert.equal(f.state.posts, 1);
+
+    const parents = new Map<string, string | null>([["main", null], ["branch", "main"], ["helper", "main"]]);
+    const transfer = f.team.assign(f.binding, "branch", null, parents);
+    f.state.emitMessage = true;
+    team.runtime.startCycle(f.binding);
+    await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));
+    assert.equal(f.state.posts, 2, "only the release notice adds a POST");
+    const releaseNotice = f.team.snapshot(f.binding).notifications.find(item =>
+      item.kind === "handover_release" && item.assignmentRootThreadId === "branch" && item.assignmentEpoch === transfer.epoch);
+    assert.equal(releaseNotice?.state, "delivered");
+    assert.equal(team.requests.pending("p", "helper")?.id, original?.id);
+
+    f.state.nativeOutcome = "dispatch_failed";
+    team.runtime.startCycle(f.binding);
+    await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));
+    const failed = team.requests.requests("p", "helper").find(item => item.id === original?.id);
+    assert.equal(failed?.state, "failed");
+    assert.equal(f.state.posts, 2);
+    assert.equal(f.state.webhookDeliveryLookups, 2);
+    assert.equal(f.team.unresolvedRequests(f.binding).find(item => item.requestId === original?.id), undefined);
+    assert.ok(team.runtime.partition(f.binding, team.threads, team.batch[0]!.batch).rootEvents.some(event =>
+      event.kind === "service_attention" && event.memberThreadId === "helper"));
+    assert.equal(f.team.snapshot(f.binding).assignments.find(item => item.subtreeRootThreadId === "branch")?.state, "transferring");
+
+    const userMessage = f.helper.messages.find(item => item.text === (JSON.parse(f.state.lastPostedBody ?? "null") as {text?: string} | null)?.text);
+    assert.ok(userMessage);
+    if (!userMessage || !releaseNotice) throw new Error("release_notice_message_missing");
+    userMessage.runId = "release-notice-run";
+    f.helper.runs.push({id: "release-notice-run", threadId: "helper", ordinal: 1, status: "completed",
+      requestedAt: "2026-10-16T10:00:01Z", startedAt: "2026-10-16T10:00:01Z", completedAt: "2026-10-16T10:00:02Z",
+      rootNodeId: null, userMessageId: userMessage.id});
+    f.helper.messages.push({id: "release-notice-final", threadId: "helper", runId: "release-notice-run", nodeId: null, role: "assistant",
+      text: "Release handover reviewed. Supervisor team notification " + releaseNotice.id + " attempt 0 completed",
+      streaming: false, createdAt: "2026-10-16T10:00:02Z", updatedAt: "2026-10-16T10:00:02Z", ordinal: 1});
+
+    team.runtime.startCycle(f.binding);
+    await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));
+    assert.equal(f.team.snapshot(f.binding).notifications.find(item => item.id === releaseNotice.id)?.state, "acknowledged");
+    assert.equal(f.team.coverage(f.binding, "branch", parents).state, "root");
+    assert.equal(f.state.posts, 2);
+  } finally {await f.cleanup();}
+});
+
 test("a pre-render native rejection is recoverable from its exact body receipt", async () => {
   const f = await fixture();
   try {

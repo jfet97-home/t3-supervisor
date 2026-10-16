@@ -220,9 +220,9 @@ test("Supervisor team stays distinct from operational workflows and shows member
       title: "Testing helper",
       model: "quick-model",
       readiness: "ready",
-      lifecycle: "active",
+      lifecycle: "idle",
       assignments: [{threadId: "child-one", title: "Test subtree", state: "active"}],
-      currentState: "Reviewing test evidence",
+      currentState: "An operational-child guidance delivery is uncertain; its original target and native command remain pending reconciliation.",
       lastAssessment: {summary: "The child tests found a missing case.", assessedAt: 1_800_000_000_180},
       pendingHandovers: [{targetThreadId: "child-two", targetTitle: "Integration subtree", direction: "outgoing", state: "uncertain", summary: "Delivery outcome is still being reconciled.", updatedAt: 1_800_000_000_190}],
       issues: [{id: "issue-1", severity: "critical", summary: "A required test failed.", observedAt: 1_800_000_000_185}],
@@ -255,7 +255,9 @@ test("Supervisor team stays distinct from operational workflows and shows member
   assert.match(html, /Open root Supervisor in T3/);
   assert.match(html, /t3-thread:\/\/v1\/helper-thread-1/);
   assert.match(html, /Ready/);
-  assert.match(html, /Active/);
+  assert.match(html, /Idle/);
+  assert.match(html, /Current state:<\/strong> An operational-child guidance delivery is uncertain/);
+  assert.doesNotMatch(html, /Available for the next check-in/);
   assert.match(html, /Current assignments/);
   assert.match(html, /Test subtree/);
   assert.match(html, /Last assessment: The child tests found a missing case/);

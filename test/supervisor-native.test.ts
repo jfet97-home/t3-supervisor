@@ -107,6 +107,53 @@ test("malformed native RPC responses fail closed with a credential-free error", 
   );
 });
 
+test("native RPC treats a socket closed before open as definite non-delivery", async (t) => {
+  const {server, url} = await startHttpServer(() => undefined);
+  t.after(() => closeHttpServer(server));
+  let requestFrameObserved = false;
+  server.on("upgrade", (_request, socket) => {
+    socket.on("data", data => {if (data.toString().includes('"_tag":"Request"')) requestFrameObserved = true;});
+    socket.destroy();
+  });
+
+  await assert.rejects(
+    makeSupervisorRpc(url, "pre-send-close-token")("orchestration.dispatchCommand", {type: "message.dispatch"}, AbortSignal.timeout(1500)),
+    (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && cause.definiteRejection && !cause.dispatchCommandFailure,
+  );
+  assert.equal(requestFrameObserved, false, "the socket never opened and no native request frame was sent");
+});
+
+test("native RPC rejects an already-aborted call definitively without opening a socket", async (t) => {
+  const {server, url} = await startServer();
+  t.after(() => closeServer(server));
+  let connections = 0;
+  server.on("connection", () => {connections += 1;});
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    makeSupervisorRpc(url, "pre-aborted-token")("orchestration.dispatchCommand", {type: "message.dispatch"}, controller.signal),
+    (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && cause.definiteRejection,
+  );
+  assert.equal(connections, 0);
+});
+
+test("native RPC classifies a connection drop after sending as uncertain", async (t) => {
+  const {server, url} = await startServer();
+  t.after(() => closeServer(server));
+  let requestReceived = false;
+  server.on("connection", socket => socket.once("message", () => {
+    requestReceived = true;
+    socket.terminate();
+  }));
+
+  await assert.rejects(
+    makeSupervisorRpc(url, "post-send-drop-token")("orchestration.dispatchCommand", {type: "message.dispatch"}, AbortSignal.timeout(1500)),
+    (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "uncertain" && !cause.definiteRejection,
+  );
+  assert.equal(requestReceived, true);
+});
+
 test("native RPC preserves durable rejection identity through nested command failures", async (t) => {
   const { server, url } = await startServer();
   t.after(() => closeServer(server));

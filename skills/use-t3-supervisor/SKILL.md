@@ -99,13 +99,15 @@ a helper's service authority while effects remain unresolved, its native-proof
 `supervision_team` action `quarantine` restores root coverage but leaves affected
 work observe-only until unknown effects are reconciled. It does not stop or cancel
 the helper's native T3 conversation. Root `retry` starts a new attempt only for a
-definite failure when its recipient remains ready and no other unresolved request
-blocks retry; uncertain outcomes remain fenced. See the
+definite notice failure when its recipient remains ready; unrelated unknown guides
+stay fenced. Failed check-in acknowledgements wait for unresolved member requests.
+Observe-only rows join otherwise due root work/events without repeatedly waking it. See the
 [Supervisor team dashboard guidance](references/dashboard.md#supervisor-team) for
 the complete team-view and handover details.
 
-Monitoring observes the main and its native/delegated descendants under one shared
-per-main cooldown/request budget and the project's age/count thresholds. Forks are
+Monitoring observes the main and its native/delegated descendants under shared
+observation/read budgets and the project's age/count thresholds. Root and helper
+check-ins have separate cooldowns. Forks are
 independent. Native child lifecycle comes from its direct parent; idle/no-AppRun
 mirrors do not prove completion. Saved changes apply on the next check. There is no
 pause-monitoring mode. Supervisors run through T3; optional Telegram recaps use a

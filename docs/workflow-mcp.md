@@ -231,7 +231,7 @@ never a login recovery method.
 
 
 Team tools share the authenticated `/mcp/workflows` endpoint. `supervision_team`
-reads current state or accepts root register/assign/release/retire/note/retry
+reads current state or accepts root register/assign/release/retire/quarantine/note/retry
 operations, root-only quarantine, and helper ready/report operations. `supervision_guide` accepts a
 helper's in-scope child guidance. Helper locators use their own supervisorThreadId,
 root bindingGeneration, memberEpoch and the current assignmentRootThreadId plus
@@ -250,8 +250,9 @@ not change route. Cross-assignment or unavailable fallback raises root attention
 
 A root `retry` acknowledges definite helper check-in failures and starts a new
 attempt for definitely rejected handover notices when the recipient remains a
-current ready helper and no unresolved request blocks retry. It cannot reset
-unknown sends, alter their identities or bypass pending-effect reconciliation.
+current ready helper. Unrelated unknown guide requests stay unchanged and fenced;
+failed check-in acknowledgements still wait for unresolved member requests. Retry
+cannot reset unknown sends, alter their identities or bypass effect reconciliation.
 Quarantine is a root-native-authorized fencing action. It advances the helper
 epoch and returns coverage to the root while preserving unresolved requests and
 sent notices. The root remains observe-only while those effects are unresolved. Quarantine does not

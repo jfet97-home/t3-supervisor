@@ -168,11 +168,12 @@ export class SupervisorTeamRuntime {
 
   partition(binding: BindingRecord, threads: readonly ThreadInfo[], batch: SupervisorMonitorBatch | null): SupervisorTeamPartition {
     const snapshot = this.options.teamStore.snapshot(binding);
-    const rootEvents = snapshot.events.filter(event => event.acknowledgedAt === null && (event.severity === "attention" || event.severity === "result")).slice(-50);
+    const rootEvents = snapshot.events.filter(event => event.acknowledgedAt === null && event.kind !== "assignment_handover_completed" &&
+      (event.severity === "attention" || event.severity === "result")).slice(-50);
     if (!batch) return {rootBatch: null, helperBatches: [], rootEvents};
     const parents = this.parentById(binding, threads);
-    if (!parents) return {rootBatch: scopedBatch({...batch, projectId: binding.projectId}, batch.threads.map(thread =>
-      ({...thread, teamCoverageState: "unavailable" as const}))), helperBatches: [], rootEvents};
+    if (!parents) return {rootBatch: rootEvents.length ? scopedBatch({...batch, projectId: binding.projectId}, batch.threads.map(thread =>
+      ({...thread, teamCoverageState: "unavailable" as const}))) : null, helperBatches: [], rootEvents};
     const rootThreads: Array<SupervisorMonitorThreadBatch & {teamCoverageState?: SupervisorTeamRootCoverage}> = [];
     const helpers = new Map<string, {memberEpoch: number; targets: TeamRequestTarget[]; threads: SupervisorMonitorThreadBatch[]}>();
     for (const monitored of batch.threads) {
@@ -191,7 +192,9 @@ export class SupervisorTeamRuntime {
     }
     const helperBatches = [...helpers].map(([actorThreadId, group]) => ({actorThreadId, memberEpoch: group.memberEpoch,
       targets: group.targets, batch: this.subset(binding, batch, group.threads)!}));
-    return {rootBatch: this.subset(binding, batch, rootThreads), helperBatches, rootEvents};
+    const hasRootOwnedActivity = rootThreads.some(thread => thread.teamCoverageState === "root");
+    const rootBatch = hasRootOwnedActivity || rootEvents.length ? this.subset(binding, batch, rootThreads) : null;
+    return {rootBatch, helperBatches, rootEvents};
   }
 
   hasMembers(binding: BindingRecord): boolean {
@@ -210,8 +213,17 @@ export class SupervisorTeamRuntime {
   }
 
   hasBlockingWork(binding: BindingRecord): boolean {
-    if (this.options.teamStore.hasBlockingWork(binding)) return true;
-    return this.options.teamStore.snapshot(binding).members.some(member => member.state === "registering" ||
+    const snapshot = this.options.teamStore.snapshot(binding);
+    const members = new Map(snapshot.members.map(member => [member.threadId, member]));
+    const hasUnsettledTransfer = snapshot.assignments.some(assignment => assignment.state === "transferring");
+    const hasUnresolvedEffect = this.options.teamStore.unresolvedRequests(binding).length > 0;
+    const hasPendingNotification = snapshot.notifications.some(notification => notification.state !== "acknowledged" &&
+      notification.state !== "superseded" && members.get(notification.recipientThreadId)?.state === "ready" &&
+      members.get(notification.recipientThreadId)?.epoch === notification.memberEpoch);
+    const hasUnreviewedEvent = snapshot.events.some(event => event.acknowledgedAt === null && event.kind !== "assignment_handover_completed" &&
+      (event.severity === "attention" || event.severity === "result"));
+    if (hasUnsettledTransfer || hasUnresolvedEffect || hasPendingNotification || hasUnreviewedEvent) return true;
+    return snapshot.members.some(member => member.state === "registering" ||
       this.options.requests.pending(binding.projectId, member.threadId) !== null);
   }
 
@@ -547,7 +559,9 @@ export class SupervisorTeamRuntime {
     threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
     if (!this.options.helperTransport || !["prepared", "uncertain", "waiting"].includes(request.state)) return;
     if (request.state === "prepared" && Date.now() - (this.options.requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
-    if (!this.currentTargets(binding, member, teamRequest, threads)) return;
+    const input = {threadId: member.threadId, commandId: `supervisor-review:${request.id}`, messageId: request.messageId, text: request.text};
+    const current = this.currentTargets(binding, member, teamRequest, threads);
+    if (!current && !this.options.helperTransport.hasDelivery(binding, input)) return;
     if (!this.consumeReadBudget(binding)) return;
     const attemptedAt = Date.now();
     const sentAt = request.sentAt ?? attemptedAt;
@@ -555,8 +569,7 @@ export class SupervisorTeamRuntime {
       this.options.requests.saveRequest({...request, state: "sending", sentAt});
       if (request.sentAt === null) this.options.requests.noticeSent(member.threadId, attemptedAt);
     });
-    const result = await this.options.helperTransport.send(binding, {threadId: member.threadId, commandId: `supervisor-review:${request.id}`,
-      messageId: request.messageId, text: request.text}, signal);
+    const result = await this.options.helperTransport.send(binding, input, signal);
     if (result === "waiting") {
       const waiting = {...request, state: "waiting" as const, sentAt, error: null};
       this.options.requests.saveRequest(waiting);

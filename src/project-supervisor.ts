@@ -143,9 +143,30 @@ export class ProjectSupervisor {
   }
   private async projection(threadId: string, signal: AbortSignal): Promise<Projection> {return (await Effect.runPromise(this.t3.projection(threadId), {signal})).projection;}
   private async models(signal: AbortSignal) {return supervisorModels(await this.readRpc("server.getConfig", {}, signal));}
+  private finishMissingHelperRequests(binding: BindingRecord, memberThreadId: string, reason: string): void {
+    const ownedRequests = this.conversation.requests.requests(binding.projectId, memberThreadId).filter(request => request.kind === "review" &&
+      (request.id.startsWith("team-review:") || request.id.startsWith("team-ready:")) &&
+      (["prepared", "sending", "waiting", "uncertain"].includes(request.state) || request.state === "failed" && !request.failureAcknowledged));
+    for (const request of ownedRequests) {
+      const failed = request.state === "failed" ? {...request, error: request.error ?? reason} : {...request, state: "failed" as const, error: reason};
+      if (request.state !== "failed" || !request.error) this.conversation.requests.saveRequest(failed);
+      const targetThreadId = request.batch?.threads[0]?.threadId;
+      try {
+        this.team.serviceAttention(binding, {
+          eventId: `helper-checkin-failed:${fingerprint([binding.threadId, binding.generation, memberThreadId, request.id]).slice(0, 32)}`,
+          memberThreadId,
+          ...(targetThreadId ? {targetThreadId} : {}),
+          summary: `Helper check-in failed: ${request.error ?? reason}`,
+        });
+      } catch { /* request closure remains durable if the event could not be recorded */ }
+    }
+    for (const request of this.team.unresolvedRequests(binding).filter(value => value.memberThreadId === memberThreadId &&
+      (value.requestId.startsWith("team-review:") || value.requestId.startsWith("team-ready:"))))
+      this.team.settleRequest(binding, request.requestId);
+  }
   private async prepareMissingRootTeam(binding: BindingRecord, signal: AbortSignal): Promise<"ready" | "present_helper" | "unavailable" | "disabled"> {
     let presentHelper = false;
-    const members = this.team.snapshot(binding).members.filter(member => member.state === "ready" || member.state === "registering");
+    const members = this.team.snapshot(binding).members.filter(member => member.state === "ready" || member.state === "registering" || member.state === "missing");
     for (const member of members) {
       if (!this.projectEnabled(binding.projectId)) return "disabled";
       let helper: Projection;
@@ -153,7 +174,10 @@ export class ProjectSupervisor {
       catch (cause) {
         if (!(cause instanceof T3TransportError) || cause.httpStatus !== 404) return "unavailable";
         if (!await this.helperTransport.retire(binding, member.threadId, signal)) return "unavailable";
-        try {this.team.markMissing(binding, member.threadId);}
+        try {
+          if (member.state !== "missing") this.team.markMissing(binding, member.threadId);
+          this.finishMissingHelperRequests(binding, member.threadId, "The helper conversation is confirmed missing; its check-in was closed and pending operational effects remain fenced.");
+        }
         catch {return "unavailable";}
         continue;
       }
@@ -161,7 +185,10 @@ export class ProjectSupervisor {
         helper.thread.lineage.relationshipToParent !== "subagent") return "unavailable";
       if (!unavailable(helper.thread)) {presentHelper = true;continue;}
       if (!await this.helperTransport.retire(binding, member.threadId, signal)) return "unavailable";
-      try {this.team.markMissing(binding, member.threadId);}
+      try {
+        if (member.state !== "missing") this.team.markMissing(binding, member.threadId);
+        this.finishMissingHelperRequests(binding, member.threadId, "The helper conversation is archived or deleted; its check-in was closed and pending operational effects remain fenced.");
+      }
       catch {return "unavailable";}
     }
     return presentHelper ? "present_helper" : "ready";

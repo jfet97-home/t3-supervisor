@@ -17,6 +17,7 @@ const locator = {
   assignmentEpoch: {type: "integer", minimum: 1},
 };
 const text = (maxLength: number) => ({type: "string", minLength: 1, maxLength});
+const unresolvedGuideAttentionGraceMs = 60_000;
 export const supervisionTeamToolDefinition = {
   name: "supervision_team",
   description: "Read this root's flat Supervisor team. Root registers actual completed native delegate_task children, assigns or releases operational subtrees, retires or quarantines helpers, sends notes, and retries only definite failed deliveries. Helpers acknowledge readiness and report significant assessments/escalations. All mutations require exact native caller proof; IDs and transport credentials alone grant no authority. Later helper check-ins are service-managed, not raw t3_thread_send.",
@@ -182,7 +183,7 @@ export class SupervisorTeamController {
       });
     } catch (cause) {return fail(cause instanceof Error && /^[a-z_]+$/u.test(cause.message) ? cause.message : "team_operation_unavailable");}
   }
-  async reconcile(binding: BindingRecord, signal: AbortSignal): Promise<void> {
+  async reconcile(binding: BindingRecord, signal: AbortSignal, now = Date.now()): Promise<void> {
     const members = this.team.snapshot(binding).members;
     const actors = new Set(members.map(member => member.threadId));
     const rows = this.workflows.options.supervisors.store.db.prepare("SELECT actor_thread_id,actor_epoch,operation_id,evidence_item_id,document FROM supervisor_team_tool_receipts WHERE owner_thread_id=? AND binding_generation=? AND json_extract(document,'$.requestId') LIKE 'guide:%' AND json_extract(document,'$.status') IN ('prepared','replaying','needs_fallback','needs_escalation','accepted','uncertain') ORDER BY rowid")
@@ -203,19 +204,28 @@ export class SupervisorTeamController {
           continue;
         }
         if (!value.routedThreadId || !value.messageId) continue;
-        const projection = await this.workflows.options.native.projection(value.routedThreadId, signal);
-        const message = projection.messages.find(item => item.id === value.messageId && item.threadId === value.routedThreadId && item.text === value.text &&
-          item.createdBy === "user" && item.creationSource === "server");
-        if (!message) continue;
-        this.atomic(() => {
-          const result = {...value, status: "delivered" as const};
-          this.workflows.options.supervisors.store.db.prepare("UPDATE supervisor_team_tool_receipts SET document=? WHERE owner_thread_id=? AND actor_thread_id=? AND binding_generation=? AND actor_epoch=? AND operation_id=?")
-            .run(JSON.stringify(result), binding.threadId, String(row.actor_thread_id), binding.generation, Number(row.actor_epoch), String(row.operation_id));
-          this.team.setRequestState(binding, binding.threadId, value.requestId, 0, "settled");
-          if (message.runId && message.runId !== value.targetRunId) this.team.serviceAttention(binding, {
-            eventId: `late-guide:${value.requestId}`, memberThreadId: String(row.actor_thread_id), targetThreadId: value.targetThreadId,
-            summary: `The native steer reached a new run in ${value.routedThreadId} after the targeted run ended. Stop further direct guidance and assess whether its operational parent needs attention.`});
-        });
+        let message: Projection["messages"][number] | undefined;
+        try {
+          const projection = await this.workflows.options.native.projection(value.routedThreadId, signal);
+          message = projection.messages.find(item => item.id === value.messageId && item.threadId === value.routedThreadId && item.text === value.text &&
+            item.createdBy === "user" && item.creationSource === "server");
+        } catch { /* native uncertainty retains the original route and identities */ }
+        if (message) {
+          this.atomic(() => {
+            const result = {...value, status: "delivered" as const};
+            this.workflows.options.supervisors.store.db.prepare("UPDATE supervisor_team_tool_receipts SET document=? WHERE owner_thread_id=? AND actor_thread_id=? AND binding_generation=? AND actor_epoch=? AND operation_id=?")
+              .run(JSON.stringify(result), binding.threadId, String(row.actor_thread_id), binding.generation, Number(row.actor_epoch), String(row.operation_id));
+            this.team.setRequestState(binding, binding.threadId, value.requestId, 0, "settled");
+            if (message.runId && message.runId !== value.targetRunId) this.team.serviceAttention(binding, {
+              eventId: `late-guide:${value.requestId}`, memberThreadId: String(row.actor_thread_id), targetThreadId: value.targetThreadId,
+              summary: `The native steer reached a new run in ${value.routedThreadId} after the targeted run ended. Stop further direct guidance and assess whether its operational parent needs attention.`});
+          });
+          continue;
+        }
+        const request = this.team.unresolvedRequests(binding).find(item => item.requestId === value.requestId);
+        if (!signal.aborted && request && now - request.updatedAt >= unresolvedGuideAttentionGraceMs) this.team.serviceAttention(binding, {
+          eventId: `guide-unresolved:${value.requestId}`, memberThreadId: String(row.actor_thread_id), targetThreadId: value.targetThreadId,
+          summary: `A native guidance send to ${value.targetThreadId} remains unresolved after its reconciliation grace period. Its original target and command identities are retained; no alternate route is attempted.`});
       } catch { /* native uncertainty retains the original route and identities */ }
     }
   }

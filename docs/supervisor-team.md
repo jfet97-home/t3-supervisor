@@ -53,8 +53,8 @@ unresolved request and every sending, sent, uncertain or delivered notification;
 only a handover notice that is still pending and has never been sent may be superseded.
 These notices remain visible until acknowledged or otherwise reconciled. A known
 definite notification failure can be retried by the root when its recipient is
-still a current ready helper and no other request blocks the retry; an uncertain
-delivery cannot. Quarantine revokes Supervisor authority; it does not stop, cancel,
+still a current ready helper; unrelated unknown guide effects remain fenced. An
+uncertain delivery cannot be retried. Quarantine revokes Supervisor authority; it does not stop, cancel,
 archive or delete the
 helper's native T3 conversation or any turn already running there. Retiring the
 helper is a separate action and also does not claim to stop its T3 conversation.
@@ -77,9 +77,10 @@ key: an uncertain send is never posted again; the service reconciles its origina
 scheduled-message identity and request text, retaining unresolved work meanwhile.
 A definite failed check-in or handover notification requires the root's explicit
 `retry` team action or reassignment. The retry action only starts a new attempt for
-known definite failures for a current ready helper after other unresolved requests
-settle; an uncertain notice or request keeps its original identity and remains
-fenced.
+known definite notification failures for a current ready helper without clearing
+unrelated unknown effects. Failed check-in acknowledgements wait for unresolved
+member requests. An uncertain notice or request keeps its original identity and
+remains fenced.
 
 ## Helper guidance
 
@@ -95,8 +96,9 @@ or unavailable fallback raises root attention.
 
 An accepted send, generic server failure, timeout or lost response keeps its
 original target and identities. The service does not infer rejection from an
-uncertain result and does not switch routes. If the steer reaches a later child
-run, the late-wake event is retained for root attention.
+uncertain result and does not switch routes. Unresolved guidance is visible as
+waiting for confirmation and raises bounded root attention. If the steer reaches
+a later child run, the late-wake event is retained for root attention.
 
 ## Dashboard and messages
 
@@ -112,7 +114,9 @@ The team view is an observation with a timestamp. Incomplete or unavailable data
 and refresh failures remain visible; retained data after a failed refresh is stale.
 Progress pagination remains scoped to the selected main. Dashboard authentication
 is unchanged, and reading team or workflow progress does not wake a conversation or
-change workflow state.
+change workflow state. Observe-only rows accompany otherwise due root work or a
+new meaningful root event; they do not repeatedly wake the root on their own.
+Their activity stays pending for the eventual owner.
 
 A person who writes in a helper conversation follows T3's native follow-up
 semantics. The root sends routine context notes and check-ins through the

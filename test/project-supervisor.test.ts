@@ -442,6 +442,15 @@ const markRootMissing = (fixture: Awaited<ReturnType<typeof makeFixture>>, bindi
   return {...binding, state: "missing" as const};
 };
 
+const addPendingHelperCheckin = (supervisor: ProjectSupervisor, binding: ReturnType<typeof reserveReadyBinding>, memberThreadId: string,
+  requestId: string, now: number, state: "waiting" | "uncertain" = "waiting") => {
+  const prepared = supervisor.conversation.requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: memberThreadId,
+    kind: "review", taskId: null, text: "Bounded helper check-in", batch: null, completionMarker: `complete:${requestId}`}, now);
+  const pending = {...prepared, state, sentAt: now + 1, runId: `run:${requestId}`};
+  supervisor.conversation.requests.saveRequest(pending);
+  return pending;
+};
+
 test("scopeSnapshot returns current binding coordinates and verified descendant lineage across project mirrors", async t => {
   const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
   t.after(fixture.cleanup);
@@ -1037,6 +1046,57 @@ test("disabled supervision never settles a closed main with an active Supervisor
   assert.equal(fixture.supervisorStore.binding("project-a", "source-thread")?.settlement, undefined);
 });
 
+test("missing-root replacement terminalizes helper check-ins after confirming active and previously missing helpers", async t => {
+  const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
+  t.after(fixture.cleanup);
+  const binding = reserveReadyBinding(fixture);
+  const supervisor = fixture.makeSupervisor();
+  const reviewHelper = registerReadyHelper(fixture, supervisor, binding, "helper-review-missing");
+  const reviewTarget = makeSourceProjection("operational-review", binding.projectId, []);
+  reviewTarget.thread.lineage = {parentThreadId: binding.mainThreadId, relationshipToParent: "subagent", rootThreadId: binding.mainThreadId};
+  fixture.projections.set(reviewTarget.thread.id, reviewTarget);
+  const parents = new Map<string, string | null>([[binding.mainThreadId, null], [reviewTarget.thread.id, binding.mainThreadId]]);
+  const assignment = supervisor.team.assign(binding, reviewTarget.thread.id, reviewHelper.threadId, parents, 10);
+  const receive = supervisor.team.snapshot(binding).notifications.find(value => value.assignmentRootThreadId === reviewTarget.thread.id &&
+    value.assignmentEpoch === assignment.epoch && value.kind === "handover_receive");
+  assert.ok(receive);
+  supervisor.team.updateNotificationDelivery(binding, binding.threadId, receive.id, "sending", 11, receive.deliveryAttempt);
+  supervisor.team.updateNotificationDelivery(binding, binding.threadId, receive.id, "delivered", 12, receive.deliveryAttempt);
+  supervisor.team.acknowledgeNotification(binding, reviewHelper.threadId, receive.id, reviewHelper.epoch, 13, receive.deliveryAttempt);
+  supervisor.team.completeTransfer(binding, reviewTarget.thread.id, assignment.epoch, 14);
+  const reviewCheckin = addPendingHelperCheckin(supervisor, binding, reviewHelper.threadId, "team-review:lost", 15);
+  const reviewCoverage = supervisor.team.coverage(binding, reviewTarget.thread.id, parents);
+  supervisor.team.recordRequest(binding, {requestId: reviewCheckin.id, memberThreadId: reviewHelper.threadId, memberEpoch: reviewHelper.epoch,
+    targets: [{targetThreadId: reviewTarget.thread.id, assignmentRootThreadId: reviewCoverage.assignmentRootThreadId!,
+      assignmentEpoch: reviewCoverage.assignmentEpoch!}], parentById: parents, now: 16});
+
+  const readyThread = "helper-readiness-missing";
+  const readyProjection = makeSourceProjection(readyThread, binding.projectId, []);
+  readyProjection.thread.lineage = {parentThreadId: binding.threadId, relationshipToParent: "subagent", rootThreadId: binding.threadId};
+  fixture.projections.set(readyThread, readyProjection);
+  const registering = supervisor.team.registerMember(binding, {threadId: readyThread, taskId: `task-${readyThread}`, bootstrapRunId: `run-${readyThread}`, now: 17});
+  const readinessCheckin = addPendingHelperCheckin(supervisor, binding, readyThread, "team-ready:lost", 18, "uncertain");
+  supervisor.team.markMissing(binding, readyThread, 20);
+
+  fixture.projections.delete(reviewHelper.threadId);
+  fixture.projections.delete(readyThread);
+  const missing = markRootMissing(fixture, binding);
+  const outcome = await supervisor.retry(retryInput("project-a", 0, missing, "replace"), AbortSignal.timeout(5000));
+
+  assert.equal(outcome.status, "saved");
+  assert.notEqual(fixture.supervisorStore.binding("project-a", "source-thread")?.threadId, binding.threadId);
+  for (const checkin of [reviewCheckin, readinessCheckin]) {
+    const failed = supervisor.conversation.requests.requests(binding.projectId, checkin.supervisorThreadId).find(value => value.id === checkin.id);
+    assert.equal(failed?.state, "failed");
+    assert.match(failed?.error ?? "", /conversation is confirmed missing/u);
+  }
+  const teamReview = fixture.supervisorStore.store.db.prepare("SELECT document FROM supervisor_team_requests WHERE owner_thread_id=? AND owner_generation=? AND request_id=?")
+    .get(binding.threadId, binding.generation, reviewCheckin.id);
+  assert.equal(JSON.parse(String(teamReview?.document)).state, "settled");
+  assert.equal(fixture.supervisorStore.ownedIds.has(reviewHelper.threadId), true);
+  assert.equal(fixture.supervisorStore.ownedIds.has(registering.threadId), true);
+});
+
 test("explicit root replacement confirms missing helpers, retires owned webhook jobs, and retains team history", async t => {
   const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
   t.after(fixture.cleanup);
@@ -1136,6 +1196,9 @@ test("missing-root replacement preserves and remains blocked by an uncertain hel
   const coverage = supervisor.team.coverage(binding, target.thread.id, parents);
   const request = supervisor.team.recordRequest(binding, {requestId: "guide:unknown-result", memberThreadId: helper.threadId, memberEpoch: helper.epoch,
     targets: [{targetThreadId: target.thread.id, assignmentRootThreadId: coverage.assignmentRootThreadId!, assignmentEpoch: coverage.assignmentEpoch!}], parentById: parents});
+  const checkin = addPendingHelperCheckin(supervisor, binding, helper.threadId, "team-review:effect-checkin", 10, "uncertain");
+  supervisor.team.recordRequest(binding, {requestId: checkin.id, memberThreadId: helper.threadId, memberEpoch: helper.epoch,
+    targets: [{targetThreadId: target.thread.id, assignmentRootThreadId: coverage.assignmentRootThreadId!, assignmentEpoch: coverage.assignmentEpoch!}], parentById: parents, now: 11});
   supervisor.team.setRequestState(binding, helper.threadId, request.requestId, helper.epoch, "uncertain");
   const missing = markRootMissing(fixture, binding);
   fixture.projections.delete(helper.threadId);
@@ -1152,6 +1215,10 @@ test("missing-root replacement preserves and remains blocked by an uncertain hel
   const requestRow = fixture.supervisorStore.store.db.prepare("SELECT document FROM supervisor_team_requests WHERE owner_thread_id=? AND owner_generation=? AND request_id=?")
     .get(binding.threadId, binding.generation, request.requestId);
   assert.equal(JSON.parse(String(requestRow?.document)).state, "uncertain");
+  const checkinTeamRequest = fixture.supervisorStore.store.db.prepare("SELECT document FROM supervisor_team_requests WHERE owner_thread_id=? AND owner_generation=? AND request_id=?")
+    .get(binding.threadId, binding.generation, checkin.id);
+  assert.equal(JSON.parse(String(checkinTeamRequest?.document)).state, "settled");
+  assert.equal(supervisor.conversation.requests.requests(binding.projectId, helper.threadId).find(value => value.id === checkin.id)?.state, "failed");
   assert.equal(fixture.operations.some(call => call.tag === "orchestration.launchThread"), false);
 });
 

@@ -125,8 +125,9 @@ handover completes. Quarantine returns coverage to the root but leaves affected
 work observe-only while unresolved requests or delivery effects remain. It does not
 stop or cancel the native T3 conversation or a turn already running there. A root
 `retry` starts a new attempt only for definite failures when the recipient remains
-ready and no other unresolved request blocks retry; unknown outcomes retain their
-original identities and remain fenced. The dashboard
+ready. Unrelated unknown guide effects retain their identities and remain fenced;
+failed check-in acknowledgements wait for unresolved member requests. Observe-only
+rows accompany otherwise due root work/events without repeatedly waking it. The dashboard
 keeps failed, uncertain, delivered-but-unacknowledged, and superseded notices visible.
 
 The team snapshot includes an observation time. Incomplete or unavailable state is

@@ -37,6 +37,13 @@ export class SupervisorHelperTransport {
     this.options.store.store.db.prepare("INSERT INTO supervisor_helper_deliveries VALUES(?,?,?,?) ON CONFLICT(owner_thread_id,owner_generation,message_id) DO UPDATE SET document=excluded.document")
       .run(binding.threadId, binding.generation, value.messageId, JSON.stringify(value));
   }
+  hasDelivery(binding: BindingRecord, input: SupervisorHelperMessage): boolean {
+    const row = this.options.store.store.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
+      .get(binding.threadId, binding.generation, input.messageId);
+    if (!row) return false;
+    const delivery = JSON.parse(String(row.document)) as Delivery;
+    return delivery.hash === workflowRequestHash(input);
+  }
   matchesMessage(binding: BindingRecord, logicalMessageId: string, text: string, message: MessageInfo): boolean {
     const row = this.options.store.store.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
       .get(binding.threadId, binding.generation, logicalMessageId);
@@ -173,4 +180,4 @@ export class SupervisorHelperTransport {
     } catch {return false;}
   }
 }
-export type SupervisorHelperDeliveryTransport = Pick<SupervisorHelperTransport, "send" | "matchesMessage" | "retire">;
+export type SupervisorHelperDeliveryTransport = Pick<SupervisorHelperTransport, "send" | "hasDelivery" | "matchesMessage" | "retire">;

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.js";
-import type { SupervisorMonitorBatch, SupervisorMonitorThreadBatch } from "../src/supervisor-monitor.js";
+import { SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorBatch, type SupervisorMonitorThreadBatch } from "../src/supervisor-monitor.js";
 import { SupervisorConversationStore } from "../src/supervisor-conversation-store.js";
 import { SupervisorConversation } from "../src/supervisor-conversation.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
@@ -32,12 +32,17 @@ const nodesOf = (projection: Projection): Array<Record<string, unknown>> => {
 };
 
 const webhookTransport = (result: "waiting" | "busy" | "uncertain" | "rejected" = "waiting"):
-  {transport: SupervisorHelperDeliveryTransport; sent: Map<string, {threadId: string; text: string; taskId: string}>; attempts: string[]; retired: string[]} => {
-  const sent = new Map<string, {threadId: string; text: string; taskId: string}>();
+  {transport: SupervisorHelperDeliveryTransport; sent: Map<string, {threadId: string; commandId: string; text: string; taskId: string}>; attempts: string[]; retired: string[]} => {
+  const sent = new Map<string, {threadId: string; commandId: string; text: string; taskId: string}>();
   const attempts: string[] = [];
   const retired: string[] = [];
   const transport: SupervisorHelperDeliveryTransport = {
-    send: async (_binding, message) => {attempts.push(message.messageId);sent.set(message.messageId, {threadId: message.threadId, text: message.text, taskId: `scheduled-${message.threadId}`});return result;},
+    send: async (_binding, message) => {attempts.push(message.messageId);sent.set(message.messageId,
+      {threadId: message.threadId, commandId: message.commandId, text: message.text, taskId: `scheduled-${message.threadId}`});return result;},
+    hasDelivery: (_binding, message) => {
+      const delivery = sent.get(message.messageId);
+      return Boolean(delivery && delivery.threadId === message.threadId && delivery.commandId === message.commandId && delivery.text === message.text);
+    },
     matchesMessage: (_binding, logicalId, text, native) => {
       const delivery = sent.get(logicalId);
       return Boolean(delivery && delivery.text === text && native.threadId === delivery.threadId && native.text === text &&
@@ -211,6 +216,35 @@ test("root observes fenced coverage explicitly and does not acknowledge its acti
   assert.equal(conversation.requests.requests(projectId, f.binding.threadId).find(item => item.id === request!.id)?.state, "completed");
   assert.equal(f.monitor.pending(projectId, "branch").length, 1);
   assert.equal(f.teamStore.unresolvedRequests(f.binding).find(item => item.requestId === "guide:observe-only-unknown")?.state, "uncertain");
+
+  for (let cycle = 0; cycle < 3; cycle++) {
+    conversation.requests.noticeSent(f.binding.threadId, Date.now() - SUPERVISOR_MONITOR_COOLDOWN_MS - 1);
+    await conversation.run(f.binding as BindingRecord, rootProjection, f.threadList, AbortSignal.timeout(5000));
+    assert.equal(conversation.requests.pending(projectId, f.binding.threadId), null);
+    assert.equal(calls.length, 1);
+  }
+
+  f.teamStore.serviceAttention(f.binding, {eventId: "observe-only-followup", memberThreadId: member.threadId,
+    targetThreadId: "branch", summary: "A new root event accompanies the still-fenced branch activity."});
+  const eventPartition = conversation.teamRuntime!.partition(f.binding, f.threadList, batchOf(["branch"]));
+  assert.equal(eventPartition.rootBatch?.threads[0]?.teamCoverageState, "unavailable");
+  assert.ok(eventPartition.rootEvents.some(event => event.id === "observe-only-followup"));
+  conversation.requests.noticeSent(f.binding.threadId, Date.now() - SUPERVISOR_MONITOR_COOLDOWN_MS - 1);
+  await conversation.run(f.binding as BindingRecord, rootProjection, f.threadList, AbortSignal.timeout(5000));
+  const eventRequest = conversation.requests.pending(projectId, f.binding.threadId);
+  assert.ok(eventRequest, "the new attention event should wake the root");
+  const followupEnvelopeText = eventRequest.text.match(/UNTRUSTED_MONITOR_ENVELOPE\n([\s\S]*?)\nEND_UNTRUSTED_MONITOR_ENVELOPE/u)?.[1];
+  const followupEnvelope = JSON.parse(followupEnvelopeText ?? "null") as {threads?: Array<{threadId: string; teamCoverageState?: string}>};
+  assert.equal(followupEnvelope.threads?.find(item => item.threadId === "branch")?.teamCoverageState, "unavailable");
+  assert.ok(eventRequest?.text.includes("A new root event accompanies the still-fenced branch activity."));
+
+  f.teamStore.settleRequest(f.binding, "guide:observe-only-unknown");
+  const successor = readyMember(f.teamStore, f.binding, "helper-observe-successor", time + 20);
+  activate(f.teamStore, f.binding, successor, "branch");
+  const reassigned = conversation.teamRuntime!.partition(f.binding, f.threadList, batchOf(["branch"]));
+  assert.equal(reassigned.rootBatch, null);
+  assert.equal(reassigned.helperBatches[0]?.actorThreadId, successor.threadId);
+  assert.equal(f.monitor.pending(projectId, "branch").length, 1);
 });
 
 test("one helper receives its assigned subtree while transfer activity stays pending", async t => {
@@ -271,7 +305,7 @@ test("a quarantined helper retires its channel, preserves unknown effects, and e
   assert.deepEqual(transport.retired, [member.threadId]);
 });
 
-test("an unresolved helper review stays out of root observation while its target transfers", async t => {
+test("an unresolved helper review stays fenced and observe-only rows do not create a root wake alone", async t => {
   const f = await fixture();t.after(f.cleanup);
   const first = readyMember(f.teamStore, f.binding, "helper-review-handover");
   const second = readyMember(f.teamStore, f.binding, "helper-review-successor", time + 10);
@@ -285,10 +319,12 @@ test("an unresolved helper review stays out of root observation while its target
     targets: [{targetThreadId: "branch", assignmentRootThreadId: coverage.assignmentRootThreadId!, assignmentEpoch: coverage.assignmentEpoch!}],
     parentById: parents, now: time + 20});
   f.teamStore.assign(f.binding, "branch", second.threadId, parents, time + 21);
+  for (const event of f.teamStore.snapshot(f.binding).events.filter(value => value.acknowledgedAt === null &&
+    (value.severity === "attention" || value.severity === "result")))
+    f.teamStore.acknowledgeEvent(f.binding, f.binding.threadId, event.id);
 
   const partition = f.runtime().partition(f.binding, f.threadList, batchOf(["branch", "leaf"]));
-  assert.deepEqual(partition.rootBatch?.threads.map(item => item.threadId), ["leaf"]);
-  assert.equal(partition.rootBatch?.threads[0]?.teamCoverageState, "transferring");
+  assert.equal(partition.rootBatch, null);
   assert.deepEqual(partition.helperBatches, []);
   assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "transferring");
 });
