@@ -7,18 +7,13 @@ import type {
   RunInfo,
   ThreadInfo,
 } from "./types.js";
+import { timestampMs } from "./timestamp.js";
+export { timestampMs } from "./timestamp.js";
 
 const activeRunStates = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 const activeTaskStates = new Set(["pending", "running", "waiting"]);
 const maxContextChars = 60_000;
 const truncationMarker = "\n[content truncated]\n";
-
-export const timestampMs = (value: unknown): number | null => {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value !== "string" || value.trim() === "") return null;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : null;
-};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);

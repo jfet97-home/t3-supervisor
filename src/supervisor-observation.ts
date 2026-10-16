@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { timestampMs } from "./domain.js";
+import { timestampMs } from "./timestamp.js";
 import type { SupervisorMonitorActivity } from "./supervisor-monitor.js";
 import type { Projection, ThreadInfo } from "./types.js";
 

@@ -18,8 +18,8 @@ import type {
   WorkflowSourceBindingInfo,
   WorkflowSourceInfo,
 } from "./project-supervisor-contract.js";
+import { canonicalJson } from "./canonical-json.js";
 import { record } from "./supervisor-native.js";
-import { canonicalJson } from "./workflow-write-evidence.js";
 import {workflowMutationLimits} from "./workflow-state-contract.js";
 
 export const redact = (value: string) => value.replace(/\b(?:Bearer\s+\S+|(?:sk-|ghp_|github_pat_|eyJ)[A-Za-z0-9_.-]{15,})/giu, "[redacted credential]")
