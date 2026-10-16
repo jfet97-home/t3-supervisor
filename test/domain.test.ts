@@ -4,8 +4,10 @@ import {
   buildContext,
   deliveryKey,
   eligibleRuns,
+  freshRuntimeRequestStatus,
   formatMessage,
   formatReplyParts,
+  projectionHasOngoingWork,
   telegramRouteUpdateId,
   isMainThread,
 } from "../src/domain.js";
@@ -143,6 +145,39 @@ test("foreground, runtime, background, and undelivered subagent work block compl
   assert.deepEqual(eligibleRuns({ ...current, runtimeRequests: [{ status: "pending" }] }, 0), []);
   assert.deepEqual(eligibleRuns({ ...current, subagents: [{ status: "completed", completionDelivery: { state: "claimed" } }] }, 0), []);
   assert.deepEqual(eligibleRuns({ ...current, subagents: [{ status: "running", completionDelivery: { state: "delivered" } }] }, 0), []);
+});
+
+test("fresh terminal runtime-request status clears stale shell hints while missing evidence fails closed", () => {
+  const requestHint = {id: "owner-request", nodeId: "assistant-1", runId: "run-1", status: "pending"};
+  const shell = thread({pendingRuntimeRequest: requestHint});
+  for (const status of ["resolved", "expired", "cancelled"]) {
+    const current = projection({runtimeRequests: [{id: "owner-request", nodeId: "assistant-1", runId: "run-1", status}]});
+    assert.equal(freshRuntimeRequestStatus(current, {requestId: "owner-request", nodeId: "assistant-1"}), status);
+    assert.deepEqual(eligibleRuns(current, 0, shell).map(({id}) => id), ["run-1"], status);
+    assert.equal(projectionHasOngoingWork(current, shell), false, status);
+  }
+
+  const missing = projection({runtimeRequests: []});
+  assert.equal(freshRuntimeRequestStatus(missing, {requestId: "owner-request", nodeId: "assistant-1"}), "unknown");
+  assert.deepEqual(eligibleRuns(missing, 0, shell), [], "an absent matching request keeps the shell hint fail-closed");
+  assert.equal(projectionHasOngoingWork(missing, shell), true);
+  const mismatched = projection({runtimeRequests: [{id: "owner-request", nodeId: "other-node", status: "resolved"}]});
+  assert.equal(freshRuntimeRequestStatus(mismatched, {requestId: "owner-request", nodeId: "assistant-1"}), "unknown");
+  assert.deepEqual(eligibleRuns(mismatched, 0, shell), []);
+});
+
+test("a pending owner request remains ongoing after its run ends and does not mask other work", () => {
+  const pending = projection({runtimeRequests: [{id: "owner-request", nodeId: "assistant-1", runId: "run-1", status: "pending"}]});
+  assert.equal(freshRuntimeRequestStatus(pending, {requestId: "owner-request", nodeId: "assistant-1"}), "pending");
+  assert.deepEqual(eligibleRuns(pending, 0), [], "terminal run status does not imply the request expired");
+  assert.equal(projectionHasOngoingWork(pending), true);
+
+  const otherWork = projection({
+    runtimeRequests: [{id: "owner-request", nodeId: "assistant-1", runId: "run-1", status: "resolved"}],
+    subagents: [{parentRunId: "run-1", status: "running"}],
+  });
+  assert.deepEqual(eligibleRuns(otherWork, 0), []);
+  assert.equal(projectionHasOngoingWork(otherWork), true, "resolved requests do not hide active child work");
 });
 
 test("later running or queued turns cannot delay an already completed turn", () => {

@@ -109,7 +109,11 @@ Monitoring observes the main and its native/delegated descendants under shared
 observation/read budgets and the project's age/count thresholds. Root and helper
 check-ins have separate cooldowns. Forks are
 independent. Native child lifecycle comes from its direct parent; idle/no-AppRun
-mirrors do not prove completion. Saved changes apply on the next check. There is no
+mirrors do not prove completion.
+Verified terminal changes receive priority without waiting for age/count thresholds,
+while retaining cooldown and current assignment checks. The same observed terminal
+version does not repeatedly wake its Supervisor. Fresh resolved/expired/cancelled
+owner requests clear matching stale waiting hints; missing evidence remains unknown. Saved changes apply on the next check. There is no
 pause-monitoring mode. Supervisors run through T3; optional Telegram recaps use a
 separate worker/authentication scope.
 
@@ -117,7 +121,9 @@ An initial proposal waits in the existing Supervisor ready state while the main 
 preparing, starting or otherwise not ready for steering; `running` alone does not
 prove readiness. An idle main receives a normal new turn. Pending native
 owner questions or approvals defer potentially interrupting guidance, and the
-Supervisor never answers or resolves them. Ordinary model guidance to the main uses
+Supervisor never answers or resolves them.
+For helper guidance this also prevents routing to an ancestor around the target's
+pending owner decision. Ordinary model guidance to the main uses
 T3's automatic delivery after fresh reads. Unknown outcomes are reconciled with the
 same request identity; confirmed failures need a fresh read before later
 reconsideration. No pre-first-tool barrier is guaranteed.

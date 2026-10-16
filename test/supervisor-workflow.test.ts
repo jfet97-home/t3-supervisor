@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
+import { workflowDefinitionExpansionLimits } from "../src/project-definitions-contract.js";
 import type { WorkflowPlanNodeInfo, WorkflowPlanStepInfo, WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import {
   parseWorkflowInterpretation,
   prepareWorkflowRequest,
+  proposalContextFromDefinitions,
   proposalContextMatches,
   redact,
   validateWorkflowApplyAgainstPinnedContext,
@@ -205,6 +207,117 @@ test("applicable but omitted reusable requirements retain their canonical unreso
     assert.deepEqual(strict, canonical);
     assert.deepEqual(validateWorkflowRecord(strict, prepared.context!), strict);
   }
+});
+
+test("null-plan provisional records round-trip only in their exact service shape", async () => {
+  const {snapshot} = await load({...commonSteps, "project.yaml": "required:\n  - step: e2e\n"});
+  const {prepared, result} = interpret(snapshot, null);
+  assert.equal(result.workflow.status, "provisional");
+  assert.equal(result.workflow.plan, null);
+  assert.ok(prepared.context);
+  const canonical = proposalRecord(result.workflow);
+  assert.deepEqual(validateWorkflowRecord(canonical, prepared.context), canonical);
+
+  const marker = canonical.issues.find(item => item.code === "provisional_plan_required");
+  assert.ok(marker);
+  const rejected: unknown[] = [];
+  const changedRequirementState = {...canonical, requirements: canonical.requirements.map((item, index) =>
+    index === 0 ? {...item, state: "included" as const} : item)};
+  rejected.push(changedRequirementState);
+  const changedRequirementReason = {...canonical, requirements: canonical.requirements.map((item, index) =>
+    index === 0 ? {...item, reason: `${item.reason} Tampered.`} : item)};
+  rejected.push(changedRequirementReason);
+  const changedMarkerMessage = {...canonical, issues: canonical.issues.map(item => item.code === "provisional_plan_required"
+    ? {...item, message: `${item.message} Tampered.`} : item)};
+  rejected.push(changedMarkerMessage);
+  const missingMarker = {...canonical, issues: canonical.issues.filter(item => item.code !== "provisional_plan_required")};
+  rejected.push(missingMarker);
+  const duplicateMarker = {...canonical, issues: [...canonical.issues, marker]};
+  rejected.push(duplicateMarker);
+  const unexpectedIssue = {...canonical, issues: [...canonical.issues, {path: "/work/project", code: "unexpected", message: "Additional issue."}]};
+  rejected.push(unexpectedIssue);
+  const unexpectedField = {...canonical, confirmed: true};
+  rejected.push(unexpectedField);
+  const changedDefinitionsFlag = {...canonical, definitionsComplete: false};
+  rejected.push(changedDefinitionsFlag);
+  const changedRequirementsFlag = {...canonical, requirementsKnown: false};
+  rejected.push(changedRequirementsFlag);
+  const nullWithoutMarker = {...canonical, issues: [{path: "/work/project", code: "unexpected", message: marker.message}]};
+  rejected.push(nullWithoutMarker);
+  for (const candidate of rejected) assert.equal(validateWorkflowRecord(candidate, prepared.context), null);
+
+  const redactedMessage = "token=[redacted credential]";
+  const redactedMarker = {...canonical,
+    issues: canonical.issues.map(item => item.code === "provisional_plan_required" ? {...item, message: redactedMessage} : item),
+    requirements: canonical.requirements.map(item => ({...item, reason: redactedMessage})),
+  };
+  assert.deepEqual(validateWorkflowRecord(redactedMarker, prepared.context), redactedMarker);
+});
+
+test("a provisional marker survives bounded context diagnostics and its record still round-trips", async () => {
+  const {snapshot} = await load({...commonSteps, ...emptyConfig});
+  const issues = Array.from({length: workflowDefinitionExpansionLimits.maxNodes + 1}, (_, index) => ({
+    path: `.t3-supervisor/definitions/${index}.yaml`,
+    code: "definition_source_unreadable",
+    message: `Definition source ${index} could not be read.`,
+  }));
+  const context = proposalContextFromDefinitions({...snapshot, issues});
+  const result = parseWorkflowInterpretation(reply(null), sourceMessageId, context);
+  assert.equal(result.workflow.plan, null);
+
+  const canonical = proposalRecord(result.workflow);
+  assert.equal(canonical.issues.filter(item => item.code === "provisional_plan_required").length, 1);
+  assert.ok(canonical.issues.some(item => item.code === "supervisor_issue_limit"));
+  assert.ok(canonical.issues.length <= workflowDefinitionExpansionLimits.maxNodes);
+  assert.deepEqual(validateWorkflowRecord(canonical, context), canonical);
+});
+
+test("null-plan expansion limit and depth records round-trip exactly", async () => {
+  const {snapshot} = await load({...commonSteps, ...emptyConfig});
+  const context = prepareWorkflowRequest(threadId, sourceMessageId, "Ship export support", snapshot).context;
+  assert.ok(context);
+  const tooWide = Array.from({length: 500}, (_, index) => ({kind: "step", definitionId: null, localId: `support-${index}`,
+    name: `Support ${index}`, description: "Bounded support work.", reason: "Help the task."}));
+  const limited = validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: tooWide}}, context);
+  assert.ok(limited);
+  assert.equal(limited.plan, null);
+  assert.ok(limited.issues.some(item => item.code === "workflow_expansion_limit"));
+  assert.deepEqual(validateWorkflowRecord(limited, context), limited);
+  const extraLimit = limited.issues.find(item => item.code === "workflow_expansion_limit");
+  assert.ok(extraLimit);
+  assert.equal(validateWorkflowRecord({...limited, issues: limited.issues.map(item => item.code === "workflow_expansion_limit"
+    ? {...item, message: "The expansion issue no longer matches its provisional marker."} : item)}, context), null);
+  assert.equal(validateWorkflowRecord({...limited, issues: [...limited.issues, extraLimit]}, context), null);
+
+  let tooDeep: unknown = {kind: "sequence", nodes: []};
+  for (let index = 0; index < 40; index++) tooDeep = {kind: "sequence", nodes: [tooDeep]};
+  const depthLimited = validateWorkflowPlan({requirements: [], plan: tooDeep}, context);
+  assert.ok(depthLimited);
+  assert.equal(depthLimited.plan, null);
+  assert.ok(depthLimited.issues.some(item => item.code === "workflow_expansion_depth"));
+  assert.deepEqual(validateWorkflowRecord(depthLimited, context), depthLimited);
+});
+
+test("new workflow-reference wrappers keep null paths while their nested source plan keeps its copied root path", async () => {
+  const {snapshot} = await load({...commonSteps, ...emptyConfig, "workflows/reviewer.yaml": reviewer()});
+  const {prepared, result} = interpret(snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "workflow", definitionId: "reviewer", reason: "Use the available review workflow."},
+  ]}});
+  assert.ok(prepared.context);
+  const plan = result.workflow.plan;
+  assert.ok(plan);
+  const wrapper = plan.nodes[0];
+  assert.ok(wrapper && wrapper.kind === "workflow" && wrapper.plan);
+  assert.equal(wrapper.templatePath, null);
+  assert.equal(wrapper.plan.templatePath, "workflow:reviewer/root");
+  assert.match(prepared.requestText, /For a newly added workflow-reference node, set its own templatePath to null/u);
+  assert.ok(validateWorkflowPlan({requirements: [], plan}, prepared.context));
+
+  const wrongWrapper = structuredClone(plan);
+  const changed = wrongWrapper.nodes[0];
+  assert.ok(changed && changed.kind === "workflow");
+  changed.templatePath = "workflow:reviewer/root";
+  assert.equal(validateWorkflowPlan({requirements: [], plan: wrongWrapper}, prepared.context), null);
 });
 
 test("near-limit required assessment reasons still round-trip after canonical unresolved explanation", async () => {

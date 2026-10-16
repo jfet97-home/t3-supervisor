@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mainRunNodeReader, timestampMs } from "./domain.js";
+import { freshRuntimeRequestStatus, mainRunNodeReader, timestampMs } from "./domain.js";
 import type { SupervisorMonitoringSettings } from "./project-supervisor-contract.js";
 import type { Projection, RunInfo } from "./types.js";
 
@@ -71,7 +71,19 @@ export interface SupervisorMonitorDecision {
   cooldownUntil: number | null;
 }
 
+export interface SupervisorNativeChildLifecycleEvidence {
+  parentThreadId: string;
+  parentRunId: string | null;
+  recordId: string | null;
+  status: string;
+  completedAt: string | null;
+  updatedAt: string | null;
+}
+
 const finalizedStatuses = new Set(["completed", "failed", "cancelled", "interrupted", "resolved", "expired"]);
+const nativeChildTerminalStatuses = new Set(["completed", "failed", "interrupted", "cancelled", "resolved", "expired"]);
+const terminalRuntimeRequestStatuses = new Set(["resolved", "expired", "cancelled"]);
+const runTerminalStatuses = new Set(["completed", "failed", "interrupted", "cancelled"]);
 const countableTypes = new Set([
   "user_message",
   "assistant_message",
@@ -85,6 +97,10 @@ const countableTypes = new Set([
   "checkpoint",
   "dynamic_tool",
   "runtime_request",
+  "user_input_request",
+  "approval_request",
+  "secret_request",
+  "native_child_lifecycle",
 ]);
 const excludedTypes = new Set([
   "notification",
@@ -108,6 +124,15 @@ const isRecord = (value: unknown): value is RecordLike =>
 const stringValue = (value: unknown): string | null =>
   typeof value === "string" ? value : null;
 
+const runtimeRequestUpdatedAt = (projection: Projection, requestId: string | null, nodeId: string | null): string | null => {
+  if (!requestId || !nodeId || !Array.isArray(projection.runtimeRequests)) return null;
+  const matches = projection.runtimeRequests.filter(value => isRecord(value) &&
+    (stringValue(value.id) ?? stringValue(value.requestId)) === requestId && value.nodeId === nodeId);
+  if (matches.length !== 1) return null;
+  const request = matches[0]!;
+  return stringValue(request.resolvedAt) ?? stringValue(request.updatedAt) ?? stringValue(request.createdAt);
+};
+
 const inputIntentPriority = (value: RecordLike, ordinal: number, sourceOrdinal: number): SupervisorMonitorPriority | null => {
   if (value.type !== "user_message") return null;
   const intent = stringValue(value.inputIntent);
@@ -127,6 +152,9 @@ const nodeKindsByItemType: Record<string, readonly string[]> = {
   assistant_message: ["assistant_message"],
   proposed_plan: ["plan"],
   todo_list: ["todo_list"],
+  user_input_request: ["tool_call", "user_input_request"],
+  approval_request: ["tool_call", "approval_request"],
+  secret_request: ["tool_call", "secret_request"],
 };
 
 const validNodeForItem = (value: RecordLike, nodeKind: string): boolean => {
@@ -208,9 +236,10 @@ const runActivity = (
   rootNode: RecordLike,
 ): SupervisorMonitorActivity | null => {
   if (run.status === "rolled_back" || rootNode.status === "rolled_back") return null;
-  if (run.status !== "completed" && run.status !== "failed") return null;
-  const type = run.status === "completed" ? "run_finished" : "run_failed";
-  const priority = run.status === "completed" ? "run_finished" : "run_failed";
+  if (!runTerminalStatuses.has(run.status)) return null;
+  const completed = run.status === "completed";
+  const type = completed ? "run_finished" : "run_failed";
+  const priority = completed ? "run_finished" : "run_failed";
   const updatedAt = stringValue(run.completedAt);
   return activity({
     id: `run:${run.id}`,
@@ -223,6 +252,36 @@ const runActivity = (
     priority,
     nodeId: run.rootNodeId,
     rootNodeId: run.rootNodeId,
+  });
+};
+
+const nativeChildLifecycleActivity = (
+  childThreadId: string,
+  evidence: SupervisorNativeChildLifecycleEvidence,
+  ordinal: number,
+): SupervisorMonitorActivity | null => {
+  if (!childThreadId || !evidence.parentThreadId) return null;
+  if (!nativeChildTerminalStatuses.has(evidence.status)) return null;
+  const identity = evidence.recordId ?? evidence.parentRunId;
+  if (!identity) return null;
+  const completedAt = timestampMs(evidence.completedAt);
+  const updatedAt = timestampMs(evidence.updatedAt);
+  const terminalAt = completedAt ?? updatedAt;
+  if (terminalAt === null) return null;
+  const completed = ["completed", "resolved", "expired"].includes(evidence.status);
+  const priority = completed ? "run_finished" : "run_failed";
+  const versionTimestamp = JSON.stringify(completedAt === null ? ["updatedAt", updatedAt] : ["completedAt", completedAt]);
+  return activity({
+    id: `native-child-lifecycle:${evidence.parentThreadId}:${childThreadId}:${identity}`,
+    readItemId: null,
+    type: "native_child_lifecycle",
+    status: evidence.status,
+    ordinal,
+    detectedAt: terminalAt,
+    updatedAt: versionTimestamp,
+    priority,
+    nodeId: evidence.recordId,
+    rootNodeId: evidence.parentRunId,
   });
 };
 
@@ -279,6 +338,8 @@ const turnItemActivity = (
   pairedMessage: RecordLike | undefined,
   sourceOrdinal: number,
   now: number,
+  requestStatus: string,
+  requestUpdatedAt: string | null,
 ): SupervisorMonitorActivity | null => {
   const type = stringValue(item.type);
   const nativeId = stringValue(item.id);
@@ -303,15 +364,25 @@ const turnItemActivity = (
   if (type === "proposed_plan" && (typeof item.markdown !== "string" || (!streaming && item.markdown.trim() === ""))) return null;
 
   const rawMessageId = type === "user_message" || type === "assistant_message" ? stringValue(item.messageId) : null;
-  const id = rawMessageId ? `message:${rawMessageId}` : nativeId;
-  const status = streaming ? "streaming" : stringValue(item.status) ?? "unknown";
+  const isRequestItem = type === "user_input_request" || type === "approval_request" || type === "secret_request";
+  const requestId = isRequestItem ? stringValue(item.requestId) : null;
+  const id = rawMessageId ? `message:${rawMessageId}` : requestId ? `request:${requestId}` : nativeId;
+  const sourceStatus = streaming ? "streaming" : stringValue(item.status) ?? "unknown";
+  const status = isRequestItem && requestStatus === "pending"
+    ? "waiting"
+    : isRequestItem && terminalRuntimeRequestStatuses.has(requestStatus)
+      ? requestStatus
+      : sourceStatus;
   const updatedAt = rawMessageId && pairedMessage
     ? stringValue(pairedMessage.updatedAt)
+    : isRequestItem && terminalRuntimeRequestStatuses.has(requestStatus)
+      ? requestUpdatedAt ?? stringValue(item.updatedAt)
     : stringValue(item.updatedAt);
   let priority: SupervisorMonitorPriority | null = null;
   if (type === "user_message") priority = inputIntentPriority(item, run.ordinal, sourceOrdinal);
-  if (type === "user_input_request" || type === "approval_request" || type === "secret_request") {
-    if (status === "waiting" || status === "pending") priority = "waiting_input";
+  if (isRequestItem) {
+    if (requestStatus === "pending" || !terminalRuntimeRequestStatuses.has(requestStatus) &&
+      (sourceStatus === "waiting" || sourceStatus === "pending")) priority = "waiting_input";
   }
   return activity({
     id,
@@ -335,6 +406,7 @@ export const collectSupervisorActivity = (
   excludedIds: ReadonlySet<string> = new Set(),
   trackedIds: ReadonlySet<string> = new Set(),
   includeDetachedChildItems = false,
+  nativeChildLifecycle?: SupervisorNativeChildLifecycleEvidence,
 ): SupervisorMonitorActivity[] => {
   const ordinal = Number.isSafeInteger(sourceOrdinal) && sourceOrdinal >= 0 ? sourceOrdinal : 0;
   const runs = new Map<string, { run: RunInfo; nodeFor: (nodeId: string) => RecordLike | undefined; root: RecordLike }>();
@@ -375,6 +447,13 @@ export const collectSupervisorActivity = (
     );
     if (context.run.ordinal < ordinal && !tracked) continue;
     const pairedMessage = messageId ? messagesById.get(messageId) : undefined;
+    const requestType = ["user_input_request", "approval_request", "secret_request"].includes(String(value.type));
+    const requestStatus = requestType
+      ? freshRuntimeRequestStatus(projection, {requestId, nodeId: stringValue(value.nodeId)})
+      : "unknown";
+    const requestUpdatedAt = requestType && terminalRuntimeRequestStatuses.has(requestStatus)
+      ? runtimeRequestUpdatedAt(projection, requestId, stringValue(value.nodeId))
+      : null;
     const record = turnItemActivity(
       projection.thread.id,
       context.run,
@@ -383,6 +462,8 @@ export const collectSupervisorActivity = (
       pairedMessage,
       ordinal,
       now,
+      requestStatus,
+      requestUpdatedAt,
     );
     if (!record) continue;
     if (isExcluded(record.id, messageId ?? String(value.id), excludedIds)) continue;
@@ -411,19 +492,33 @@ export const collectSupervisorActivity = (
       const nativeId = stringValue(value.id);
       if (!type || !nativeId || excludedTypes.has(type) || !countableTypes.has(type)) continue;
       const messageId = stringValue(value.messageId);
-      const id = messageId ? `message:${messageId}` : nativeId;
+      const requestType = ["user_input_request", "approval_request", "secret_request"].includes(type);
+      const requestId = requestType ? stringValue(value.requestId) : null;
+      const id = messageId ? `message:${messageId}` : requestId ? `request:${requestId}` : nativeId;
       if (isExcluded(id, messageId ?? nativeId, excludedIds)) continue;
       if ((type === "assistant_message" || type === "user_message") &&
         (typeof value.text !== "string" || value.streaming !== true && value.text.trim() === "")) continue;
       if (type === "proposed_plan" &&
         (typeof value.markdown !== "string" || value.streaming !== true && value.markdown.trim() === "")) continue;
-      const status = value.streaming === true ? "streaming" : stringValue(value.status) ?? "unknown";
+      const sourceStatus = value.streaming === true ? "streaming" : stringValue(value.status) ?? "unknown";
       const itemOrdinal = Number.isSafeInteger(value.ordinal) && Number(value.ordinal) >= 0 ? Number(value.ordinal) : index + 1;
       if (itemOrdinal < ordinal && !trackedIds.has(id) && !trackedIds.has(nativeId)) continue;
       const pairedMessage = messageId ? messagesById.get(messageId) : undefined;
-      const updatedAt = pairedMessage ? stringValue(pairedMessage.updatedAt) : stringValue(value.updatedAt);
-      const priority = ["user_input_request", "approval_request", "secret_request"].includes(type) &&
-        (status === "waiting" || status === "pending") ? "waiting_input" : null;
+      const requestStatus = requestType
+        ? freshRuntimeRequestStatus(projection, {requestId, nodeId: stringValue(value.nodeId)})
+        : "unknown";
+      const requestUpdatedAt = requestType && terminalRuntimeRequestStatuses.has(requestStatus)
+        ? runtimeRequestUpdatedAt(projection, requestId, stringValue(value.nodeId))
+        : null;
+      const updatedAt = pairedMessage ? stringValue(pairedMessage.updatedAt) :
+        requestUpdatedAt ?? stringValue(value.updatedAt);
+      const status = requestType && requestStatus === "pending"
+        ? "waiting"
+        : requestType && terminalRuntimeRequestStatuses.has(requestStatus)
+          ? requestStatus
+          : sourceStatus;
+      const priority = requestType && (requestStatus === "pending" || !terminalRuntimeRequestStatuses.has(requestStatus) &&
+        (sourceStatus === "waiting" || sourceStatus === "pending")) ? "waiting_input" : null;
       records.set(id, activity({
         id,
         readItemId: nativeId,
@@ -436,6 +531,10 @@ export const collectSupervisorActivity = (
         nodeId: stringValue(value.nodeId),
         rootNodeId: null,
       }));
+    }
+    if (nativeChildLifecycle && projection.thread.lineage.parentThreadId === nativeChildLifecycle.parentThreadId) {
+      const terminal = nativeChildLifecycleActivity(projection.thread.id, nativeChildLifecycle, ordinal);
+      if (terminal && !isExcluded(terminal.id, terminal.id, excludedIds)) records.set(terminal.id, terminal);
     }
   }
 
@@ -463,18 +562,19 @@ export const collectSupervisorActivity = (
     const requestId = stringValue(value.id);
     const nodeId = stringValue(value.nodeId);
     const kind = stringValue(value.kind);
-    const status = stringValue(value.status);
-    if (!requestId || !nodeId || !kind || !status) continue;
+    if (!requestId || !nodeId || !kind) continue;
     const id = `request:${requestId}`;
     const context = [...runs.values()].find((candidate) => candidate.nodeFor(nodeId) !== undefined);
     if (!context || (context.run.ordinal < ordinal && !trackedIds.has(id))) continue;
     if (kind !== "user_input" && !approvalRequestKinds.has(kind)) continue;
+    const freshStatus = freshRuntimeRequestStatus(projection, {requestId, nodeId});
+    const status = freshStatus === "unknown" ? "pending" : freshStatus;
     if (status !== "pending" && !trackedIds.has(id)) continue;
     if (!isExcluded(id, requestId, excludedIds)) {
       const item = requestItems.get(requestId);
       const readItemId =
         item && item.nodeId === nodeId ? stringValue(item.id) : null;
-      const updatedAt = stringValue(value.resolvedAt) ?? stringValue(value.createdAt);
+      const updatedAt = stringValue(value.resolvedAt) ?? stringValue(value.updatedAt) ?? stringValue(value.createdAt);
       const priority = status === "pending" ? "waiting_input" : null;
       records.set(
         id,

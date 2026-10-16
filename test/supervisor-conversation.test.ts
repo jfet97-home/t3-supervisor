@@ -12,7 +12,7 @@ import { ProjectSupervisorStore, defaultSupervisorModel, type BindingRecord, typ
 import { ProjectSupervisor } from "../src/project-supervisor.js";
 import { SupervisorConversation, firstObservedOrdinal, workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
-import { prepareWorkflowRequest, validateWorkflowPlan, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
+import { parseWorkflowInterpretation, prepareWorkflowRequest, validateWorkflowPlan, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import type { ConversationRequest, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
 import { SupervisorRpcError, type SupervisorRpc } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
@@ -1738,6 +1738,145 @@ test("completed activity first observed on new and reused children is batched by
   assert.equal(fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId && call.payload.type === "message.dispatch").length, 1);
 });
 
+test("a fresh native child terminal record wakes the owning Supervisor without age/count and fences stale history", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock, {operativeActive: false, settings: {intervalMinutes: 60, activityThreshold: 10}});
+  t.after(fixture.cleanup);
+  fixture.projectStore.saveTask({...fixture.task, sourceOrdinal: 2});
+  fixture.conversation.requests.saveIntroduction({taskId: fixture.task.id, projectId, threadId: operativeThreadId,
+    supervisorThreadId: fixture.binding.threadId, state: "sent", text: "Existing workflow context.", messageId: "workflow-context",
+    targetRunId: null, error: null});
+
+  const current = makeProjection(makeThread({id: "native-terminal-current", title: "Current native child"}));
+  current.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  current.thread.creationSource = "provider";
+  current.thread.createdAt = iso(clock.now - 10_000);
+  current.thread.activityRunStatus = "idle";
+  fixture.addChildProjection(current);
+
+  const old = makeProjection(makeThread({id: "native-terminal-old", title: "Old native child"}));
+  old.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  old.thread.creationSource = "provider";
+  old.thread.createdAt = iso(clock.now - 10_000);
+  fixture.addChildProjection(old);
+
+  const ambiguous = makeProjection(makeThread({id: "native-terminal-ambiguous", title: "Ambiguous native child"}));
+  ambiguous.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  ambiguous.thread.creationSource = "provider";
+  ambiguous.thread.createdAt = iso(clock.now - 10_000);
+  fixture.addChildProjection(ambiguous);
+
+  const unknownTimestamp = makeProjection(makeThread({id: "native-terminal-unknown-time", title: "Native child without terminal time"}));
+  unknownTimestamp.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  unknownTimestamp.thread.creationSource = "provider";
+  unknownTimestamp.thread.createdAt = iso(clock.now - 10_000);
+  fixture.addChildProjection(unknownTimestamp);
+
+  const currentRecord = {id: "native-node-current", childThreadId: current.thread.id, providerThreadId: "provider-current",
+    runId: "parent-run-current", status: "completed", startedAt: iso(clock.now - 5_000), completedAt: iso(clock.now - 1_000), updatedAt: iso(clock.now - 900)};
+  const oldRecord = {id: "native-node-old", childThreadId: old.thread.id, providerThreadId: "provider-old",
+    runId: "parent-run-old", status: "completed", startedAt: iso(clock.now - 700_000), completedAt: iso(clock.now - 650_000), updatedAt: iso(clock.now - 500)};
+  const unknownTimestampRecord = {id: "native-node-unknown-time", childThreadId: unknownTimestamp.thread.id,
+    providerThreadId: "provider-unknown-time", runId: "parent-run-unknown-time", status: "completed",
+    startedAt: iso(clock.now - 5_000), completedAt: null, updatedAt: null};
+  fixture.operative.subagents = [currentRecord, oldRecord,
+    {...currentRecord, id: "native-node-ambiguous-running", childThreadId: ambiguous.thread.id, status: "running", completedAt: null},
+    unknownTimestampRecord];
+  turnItemsOf(fixture.operative).push(
+    {id: "parent-native-current", type: "subagent", threadId: operativeThreadId, childThreadId: current.thread.id,
+      subagentId: currentRecord.id, providerThreadId: currentRecord.providerThreadId, runId: currentRecord.runId, status: currentRecord.status,
+      startedAt: currentRecord.startedAt, completedAt: currentRecord.completedAt, updatedAt: currentRecord.updatedAt},
+    {id: "parent-native-old", type: "subagent", threadId: operativeThreadId, childThreadId: old.thread.id,
+      subagentId: oldRecord.id, providerThreadId: oldRecord.providerThreadId, runId: oldRecord.runId, status: oldRecord.status,
+      startedAt: oldRecord.startedAt, completedAt: oldRecord.completedAt, updatedAt: oldRecord.updatedAt},
+    {id: "parent-native-ambiguous", type: "subagent", threadId: operativeThreadId, childThreadId: ambiguous.thread.id,
+      subagentId: "native-node-ambiguous-completed", providerThreadId: "provider-ambiguous", runId: "parent-run-ambiguous",
+      status: "completed", startedAt: iso(clock.now - 5_000), completedAt: iso(clock.now - 1_000), updatedAt: iso(clock.now - 900)},
+    {id: "parent-native-unknown-time", type: "subagent", threadId: operativeThreadId, childThreadId: unknownTimestamp.thread.id,
+      subagentId: unknownTimestampRecord.id, providerThreadId: unknownTimestampRecord.providerThreadId, runId: unknownTimestampRecord.runId,
+      status: "completed", startedAt: unknownTimestampRecord.startedAt, completedAt: null, updatedAt: null},
+  );
+
+  await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
+  const currentPending = fixture.conversation.monitor.pending(projectId, current.thread.id);
+  assert.equal(currentPending.length, 1);
+  assert.equal(currentPending[0]?.type, "native_child_lifecycle");
+  assert.equal(currentPending[0]?.priority, "run_finished");
+  assert.deepEqual(fixture.conversation.monitor.pending(projectId, old.thread.id), []);
+  assert.deepEqual(fixture.conversation.monitor.pending(projectId, ambiguous.thread.id), []);
+  assert.deepEqual(fixture.conversation.monitor.pending(projectId, unknownTimestamp.thread.id), []);
+  await fixture.run();
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.ok(request?.kind === "review" && request.batch);
+  assert.equal(request.batch.trigger, "priority");
+  assert.deepEqual(request.batch.threads.map(item => item.threadId), [current.thread.id]);
+  assert.equal(request.batch.threads[0]?.items[0]?.type, "native_child_lifecycle");
+  const run = fixture.supervisor.runs.find(candidate => candidate.userMessageId === request.messageId);
+  assert.ok(run);
+  completeRun(fixture.supervisor, run, `Terminal child record reviewed. ${request.completionMarker}`, clock.now + 1);
+  clock.now++;
+  await fixture.run();
+  assert.deepEqual(fixture.conversation.monitor.pending(projectId, current.thread.id), []);
+});
+
+test("terminal child AppRuns are not duplicated when their parent completion arrives later", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock, {operativeActive: false, settings: {intervalMinutes: 60, activityThreshold: 10}});
+  t.after(fixture.cleanup);
+  fixture.projectStore.saveTask({...fixture.task, sourceOrdinal: 2});
+  fixture.conversation.requests.saveIntroduction({taskId: fixture.task.id, projectId, threadId: operativeThreadId,
+    supervisorThreadId: fixture.binding.threadId, state: "sent", text: "Existing workflow context.", messageId: "workflow-context",
+    targetRunId: null, error: null});
+
+  const child = makeProjection(makeThread({id: "delegated-terminal-child", title: "Delegated terminal child"}));
+  child.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  child.thread.creationSource = "mcp";
+  child.thread.createdAt = iso(clock.now - 10_000);
+  appendRun({projection: child, id: "delegated-terminal-run", ordinal: 1, status: "completed",
+    messageId: "delegated-terminal-input", text: "Finish delegated work.", createdBy: "system", creationSource: "server",
+    now: clock.now - 5_000});
+  child.messages = [];
+  fixture.addChildProjection(child);
+
+  const nativeMirror = makeProjection(makeThread({id: "provider-terminal-child", title: "Provider terminal child"}));
+  nativeMirror.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  nativeMirror.thread.creationSource = "provider";
+  nativeMirror.thread.createdAt = iso(clock.now - 10_000);
+  appendRun({projection: nativeMirror, id: "provider-terminal-run", ordinal: 1, status: "completed",
+    messageId: "provider-terminal-input", text: "Finish provider work.", createdBy: "system", creationSource: "server",
+    now: clock.now - 5_000});
+  nativeMirror.messages = [];
+  fixture.addChildProjection(nativeMirror);
+
+  const parentRecord = {id: "delegated-child-record", childThreadId: child.thread.id, runId: "parent-run-delegated",
+    status: "running", startedAt: iso(clock.now - 6_000), completedAt: null as string | null, updatedAt: iso(clock.now - 5_000)};
+  const nativeParentRecord = {id: "provider-child-record", childThreadId: nativeMirror.thread.id, runId: "parent-run-provider",
+    status: "running", startedAt: iso(clock.now - 6_000), completedAt: null as string | null, updatedAt: iso(clock.now - 5_000)};
+  fixture.operative.subagents = [parentRecord, nativeParentRecord];
+  await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
+  for (const childId of [child.thread.id, nativeMirror.thread.id]) {
+    const pending = fixture.conversation.monitor.pending(projectId, childId);
+    assert.equal(pending.filter(item => item.type === "run_finished").length, 1);
+    assert.equal(pending.some(item => item.type === "native_child_lifecycle"), false);
+  }
+
+  parentRecord.status = "completed";
+  parentRecord.completedAt = iso(clock.now - 1_000);
+  parentRecord.updatedAt = iso(clock.now - 900);
+  nativeParentRecord.status = "completed";
+  nativeParentRecord.completedAt = iso(clock.now - 1_000);
+  nativeParentRecord.updatedAt = iso(clock.now - 900);
+  await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now + 1);
+  for (const childId of [child.thread.id, nativeMirror.thread.id]) {
+    const pending = fixture.conversation.monitor.pending(projectId, childId);
+    assert.equal(pending.filter(item => item.type === "run_finished").length, 1);
+    assert.equal(pending.some(item => item.type === "native_child_lifecycle"), false,
+      "the delayed parent row must not create a second priority event for an existing terminal AppRun");
+  }
+});
+
 test("completed history is bounded to the latest 100 while ancient uncertain work remains durable and does not consume capacity", async t => {
   const clock = { now: baseTime };
   const fixture = await makeFixture(clock);
@@ -1955,6 +2094,64 @@ test("invalid and incomplete definitions still introduce finite provisional plan
     assert.equal(fixture.projectStore.task(provisionalTask.threadId)?.agreement, undefined);
     assert.equal(fixture.conversation.requests.agreementCandidate(provisionalTask.id, provisionalTask.id), null);
   }
+});
+
+test("an exact null-plan initial echo confirms provisional introduction and allows a later fresh proposal", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock, {operativeActive: false});
+  t.after(fixture.cleanup);
+  const snapshot = definitions();
+  const context = prepareWorkflowRequest(operativeThreadId, sourceMessageId, sourceText, snapshot).context;
+  assert.ok(context);
+  const provisional = parseWorkflowInterpretation(JSON.stringify({objective: "Implement the export workflow",
+    reason: "The source message requests the workflow.", sourceMessageIds: [sourceMessageId], workflow: null}), sourceMessageId, context).workflow;
+  assert.equal(provisional.status, "provisional");
+  assert.equal(provisional.plan, null);
+  const provisionalTask: TaskRecord = {...fixture.task, definitionContext: context, definitionSnapshot: snapshot,
+    workflowProposalId: fixture.task.id, workflow: provisional};
+  fixture.projectStore.saveTask(provisionalTask);
+  fixture.setDefinitions(snapshot);
+
+  await fixture.run();
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.equal(request?.kind, "context");
+  assert.match(request?.text ?? "", /"plan":null/u);
+  const run = fixture.supervisor.runs.find(item => item.userMessageId === request?.messageId);
+  assert.ok(run);
+  completeRun(fixture.supervisor, run, `Supervisor ready. ${request!.completionMarker}`, clock.now + 1);
+  clock.now++;
+
+  await fixture.run();
+  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId), null);
+  assert.equal(fixture.conversation.requests.introduction(provisionalTask.id)?.state, "ready");
+  assert.equal(fixture.projectStore.task(provisionalTask.threadId)?.workflow?.plan, null);
+  assert.equal(fixture.conversation.requests.agreementCandidate(provisionalTask.id, provisionalTask.id), null);
+
+  await fixture.run();
+  assert.equal(fixture.conversation.requests.introduction(provisionalTask.id)?.state, "accepted");
+  await fixture.run();
+  assert.equal(fixture.conversation.requests.introduction(provisionalTask.id)?.state, "sent");
+
+  const freshSnapshot = {...definitions(), revision: "steps-revision-8"};
+  const refreshed = installTaskDefinitions(fixture, freshSnapshot, []);
+  const proposalId = "proposal-after-provisional";
+  const freshTask = {...refreshed, workflowProposalId: proposalId};
+  fixture.projectStore.saveTask(freshTask);
+  const freshPlan = workflowPlan(freshTask);
+  assert.ok(freshPlan.plan);
+  const supervisorProposal = appendSupervisorProposal(fixture, proposalId, freshPlan, clock.now + 1, freshTask);
+  const acceptedRun = appendRun({projection: fixture.operative, id: "operative-fresh-plan-acceptance",
+    ordinal: Math.max(...fixture.operative.runs.map(item => item.ordinal)) + 1, status: "completed",
+    messageId: "operative-fresh-plan-input", text: "Review the fresh workflow proposal.", now: clock.now + 2});
+  const acceptance = appendOperativeAcceptance(fixture, workflowRecord(freshTask, proposalId, freshPlan), clock.now + 3, {run: acceptedRun});
+  await observeAgreement(fixture, clock.now + 30_000);
+
+  const updated = fixture.projectStore.task(freshTask.threadId);
+  assert.equal(updated?.agreement?.status, "agreed");
+  assert.equal(updated?.agreement?.proposalId, proposalId);
+  assert.equal(updated?.agreement?.supervisorMessageId, supervisorProposal.message.id);
+  assert.equal(updated?.agreement?.agentMessageId, acceptance.id);
+  assert.equal(fixture.conversation.requests.agreementCandidate(freshTask.id, proposalId)?.workflow.plan !== null, true);
 });
 
 test("an applicable required reference omitted from the initial plan still completes provisional dialogue", async t => {

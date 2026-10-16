@@ -11,6 +11,7 @@ import { SupervisorConversation } from "../src/supervisor-conversation.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { SupervisorTeamStore, type TeamBinding, type TeamMember } from "../src/supervisor-team-store.js";
 import { SupervisorTeamRuntime } from "../src/supervisor-team-runtime.js";
+import { directParentChildLifecycle } from "../src/supervisor-observation.js";
 import { T3TransportError } from "../src/t3.js";
 import type { SupervisorHelperDeliveryTransport } from "../src/supervisor-helper-transport.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
@@ -642,6 +643,56 @@ test("a stale completed helper check-in settles its request without acknowledgin
   assert.equal(f.teamStore.coverage(f.binding, opThread.id, parents).state, "transferring");
   assert.equal(f.teamStore.snapshot(f.binding).events.some(item => item.kind === "service_attention" && item.memberThreadId === first.threadId &&
     item.summary.includes("check-in failed")), false);
+});
+
+test("a parent-record native terminal event routes to its assigned helper and ACKs the frozen child row", async t => {
+  t.mock.method(Date, "now", () => time + 100);
+  const f = await fixture();t.after(f.cleanup);
+  const member = readyMember(f.teamStore, f.binding, "helper-native-terminal");
+  activate(f.teamStore, f.binding, member, "branch");
+  const parent = f.projections.get("main")!;
+  const child = f.projections.get("branch")!;
+  parent.subagents = [{id: "native-child-node", childThreadId: child.thread.id, providerThreadId: "provider-branch",
+    runId: "parent-run-native", status: "interrupted", startedAt: iso(time - 10), completedAt: iso(time - 1), updatedAt: iso(time)}];
+  parent.turnItems = [{id: "native-parent-item", type: "subagent", threadId: "main", childThreadId: child.thread.id,
+    subagentId: "native-child-node", providerThreadId: "provider-branch", runId: "parent-run-native", status: "interrupted",
+    startedAt: iso(time - 10), completedAt: iso(time - 1), updatedAt: iso(time)}];
+  const lifecycle = directParentChildLifecycle(parent, child.thread.id);
+  assert.ok(lifecycle);
+  f.monitor.observe({projectId, threadId: child.thread.id, sourceOrdinal: 1, projection: child, now: time,
+    includeDetachedChildItems: true, nativeChildLifecycle: {parentThreadId: parent.thread.id, parentRunId: lifecycle.parentRunId,
+      recordId: lifecycle.recordId, status: lifecycle.status, completedAt: lifecycle.completedAt, updatedAt: lifecycle.updatedAt}});
+  const selected = f.monitor.select(projectId, {intervalMinutes: 60, activityThreshold: 10}, time, null,
+    {eligibleThreadIds: new Set([child.thread.id])});
+  assert.ok(selected);
+  assert.equal(selected.trigger, "priority");
+  assert.equal(selected.threads[0]?.items[0]?.priority, "run_failed");
+
+  const helper = helperProjection(member, f.binding.threadId);
+  f.projections.set(member.threadId, helper);
+  const transport = webhookTransport();
+  const runtime = f.runtime(transport.transport);
+  const partition = runtime.partition(f.binding, f.threadList, selected);
+  assert.equal(partition.rootBatch, null);
+  assert.deepEqual(partition.helperBatches.map(batch => batch.actorThreadId), [member.threadId]);
+  runtime.startCycle(f.binding);
+  await runtime.runHelperBatch(f.binding, f.threadList, partition.helperBatches, AbortSignal.timeout(5000));
+  const request = f.requests.pending(projectId, member.threadId);
+  assert.ok(request?.batch);
+  assert.equal(request.batch.threads[0]?.threadId, child.thread.id);
+  assert.equal(request.batch.threads[0]?.items[0]?.type, "native_child_lifecycle");
+
+  const helperRunId = "helper-native-terminal-run";
+  helper.runs.push({id: helperRunId, threadId: member.threadId, ordinal: 1, status: "completed", requestedAt: iso(time + 10),
+    startedAt: iso(time + 10), completedAt: iso(time + 11), rootNodeId: null, userMessageId: request.messageId});
+  helper.messages.push({id: request.messageId, threadId: member.threadId, runId: helperRunId, nodeId: null, role: "user", text: request.text,
+    streaming: false, createdAt: iso(time + 10), updatedAt: iso(time + 10), scheduledTaskId: `scheduled-${member.threadId}`, creationSource: "server"});
+  helper.messages.push({id: "helper-native-terminal-final", threadId: member.threadId, runId: helperRunId, nodeId: null, role: "assistant",
+    text: `The interrupted native child was reviewed. ${request.completionMarker}`, streaming: false, createdAt: iso(time + 11), updatedAt: iso(time + 11), ordinal: 1});
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  assert.deepEqual(f.monitor.pending(projectId, child.thread.id), []);
+  assert.equal(f.requests.requests(projectId, member.threadId).find(item => item.id === request.id)?.state, "completed");
 });
 
 test("a successful helper result creates an event-only root wake and is acknowledged after its marker", async t => {

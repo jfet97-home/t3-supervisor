@@ -1,4 +1,4 @@
-import { projectionHasOngoingWork } from "./domain.js";
+import { freshRuntimeRequestStatus, projectionHasOngoingWork } from "./domain.js";
 import { randomUUID } from "node:crypto";
 import { fingerprint } from "./guidance-store.js";
 import { record, SupervisorRpcError, type SupervisorRpc } from "./supervisor-native.js";
@@ -16,8 +16,17 @@ const SUPERVISOR_LIFECYCLE_MAX_CACHE_REFRESHES = 20;
 const SUPERVISOR_LIFECYCLE_MAX_CACHE_ENTRIES = 10_000;
 const SUPERVISOR_LIFECYCLE_MAX_SCAN_OFFSETS = 256;
 export const userKeepsSupervisorActive = (thread: ThreadInfo): boolean => Boolean(thread.pinnedAt || thread.autoSettleDisabledAt || thread.settledOverride === "active");
+const hasUnresolvedRuntimeRequestHint = (projection: Projection, value: unknown): boolean => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value !== null && value !== undefined;
+  const request = value as Record<string, unknown>;
+  const requestId = typeof request.id === "string" ? request.id : typeof request.requestId === "string" ? request.requestId : null;
+  const nodeId = typeof request.nodeId === "string" ? request.nodeId : null;
+  const status = freshRuntimeRequestStatus(projection, {requestId, nodeId});
+  return !["resolved", "expired", "cancelled"].includes(status);
+};
+
 export const projectionNeedsAttention = (projection: Projection, shell?: ThreadInfo): boolean =>
-  projectionHasOngoingWork(projection, shell) || Boolean(projection.thread.activeRunId || projection.thread.pendingRuntimeRequest);
+  projectionHasOngoingWork(projection, shell) || Boolean(projection.thread.activeRunId || hasUnresolvedRuntimeRequestHint(projection, projection.thread.pendingRuntimeRequest));
 const activityVersion = (projection: Projection) => fingerprint({
   archivedAt: projection.thread.archivedAt ?? null,
   deletedAt: projection.thread.deletedAt ?? null,
@@ -45,9 +54,19 @@ const lifecycleShellVersion = (thread: ThreadInfo): string => fingerprint({
 });
 type QuietChildObservation = {childShellVersion: string; parentShellVersion: string; parentProjectionVersion: string; resultVersion: string};
 
-const activeDetachedChildWork = (projection: Projection): boolean => (projection.turnItems ?? []).some(item =>
-  item.threadId === projection.thread.id && item.runId === null && (item.streaming === true ||
-  ["preparing", "queued", "starting", "running", "waiting"].includes(String(item.status))));
+const activeDetachedChildWork = (projection: Projection): boolean => (projection.turnItems ?? []).some(item => {
+  if (item.threadId !== projection.thread.id || item.runId !== null) return false;
+  const requestItem = ["user_input_request", "approval_request", "secret_request"].includes(String(item.type));
+  if (requestItem) {
+    const requestStatus = freshRuntimeRequestStatus(projection, {
+      requestId: typeof item.requestId === "string" ? item.requestId : null,
+      nodeId: typeof item.nodeId === "string" ? item.nodeId : null,
+    });
+    if (["resolved", "expired", "cancelled"].includes(requestStatus)) return false;
+    if (requestStatus === "pending") return true;
+  }
+  return item.streaming === true || ["preparing", "queued", "starting", "running", "waiting"].includes(String(item.status));
+});
 
 /** Parks only owned idle conversations, retaining their identity for normal native dispatch. */
 export class SupervisorLifecycle {

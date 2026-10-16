@@ -94,6 +94,10 @@ metadata rather than a second top-level record field. Workspace and definition r
 rechecked. Formal agreement requires current, complete, valid definitions; invalid
 or incomplete material supports provisional dialogue, not saved acceptance. Stale agreements remain history; changed candidates require new matching
 confirmation. An agreement proves agreement, not execution, delegation or compliance.
+An initial service-generated provisional record with no plan can initialize
+repair dialogue only when its complete shape and current source context match
+exactly. It establishes no agreement or source-bound write authority; those require
+a later complete valid proposal.
 
 Interpretation turns have a no-tools role. Dialogue/check-ins permit native
 reading/messaging and scoped workflow MCP edits where available. New Supervisor
@@ -126,6 +130,17 @@ activities), one shared per-main cooldown and one service check-in in flight per
 Supervisor. Forks remain separate scopes. Native child lifecycle comes from its
 direct parent's child record; an idle child mirror with no AppRun is not completion.
 Bounded activity batches identify their source and show incomplete reads explicitly.
+Completed, failed, interrupted and cancelled runs have terminal priority. Verified
+native-child terminal changes use the exact direct-parent record and are routed to
+the current root/helper responsible for that child. Priority bypasses age/count,
+while the existing cooldown and acknowledgement rules still apply. Repeated reads
+of the same terminal version do not create another review.
+
+Fresh native request state controls waiting: resolved, expired or cancelled requests
+clear matching stale waiting summaries, while missing or mismatched evidence stays
+explicitly unresolved. A genuinely pending owner request remains pending even if
+its run has ended. A helper defers intervention on that target rather than sending
+guidance to its ancestor around the owner's decision.
 
 The Supervisor assesses adherence and progress from T3 actions, results and visible
 context. Agents work normally without continual status reports. The Supervisor can

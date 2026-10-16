@@ -19,6 +19,7 @@ import type {
   WorkflowSourceInfo,
 } from "./project-supervisor-contract.js";
 import { record } from "./supervisor-native.js";
+import { canonicalJson } from "./workflow-write-evidence.js";
 import {workflowMutationLimits} from "./workflow-state-contract.js";
 
 export const redact = (value: string) => value.replace(/\b(?:Bearer\s+\S+|(?:sk-|ghp_|github_pat_|eyJ)[A-Za-z0-9_.-]{15,})/giu, "[redacted credential]")
@@ -138,11 +139,15 @@ const initialRequirements = (context: ProposalContext, state: WorkflowRequiremen
 
 const issue = (path: string, code: string, message: string): WorkflowIssueInfo => ({path, code, message: redact(message)});
 
-const boundedIssues = (values: readonly WorkflowIssueInfo[], path: string): WorkflowIssueInfo[] => {
+const boundedIssues = (values: readonly WorkflowIssueInfo[], path: string, preserve?: WorkflowIssueInfo): WorkflowIssueInfo[] => {
   const unique = [...new Map(values.map(item => [`${item.path}\0${item.code}\0${item.message}`, item])).values()];
   if (unique.length <= maxExpandedNodes) return unique;
-  return [...unique.slice(0, maxExpandedNodes - 1), issue(path, "supervisor_issue_limit",
-    `${unique.length - maxExpandedNodes + 1} additional diagnostics were omitted to keep the workflow proposal bounded.`)];
+  const retained = unique.slice(0, maxExpandedNodes - 1);
+  const key = (item: WorkflowIssueInfo) => `${item.path}\0${item.code}\0${item.message}`;
+  if (preserve && unique.some(item => key(item) === key(preserve)) && !retained.some(item => key(item) === key(preserve)))
+    retained[retained.length - 1] = preserve;
+  return [...retained, issue(path, "supervisor_issue_limit",
+    `${unique.length - retained.length} additional diagnostics were omitted to keep the workflow proposal bounded.`)];
 };
 
 type PromptTemplateNode =
@@ -344,7 +349,7 @@ Definitions contain reusable steps and workflows. A step is a semantic item whos
 
 Assess every configured required reference once for this main task. Include the exact reusable definitionId in a meaningful place when it applies. A recursive exact reference inside another workflow counts; a local or same-named item does not. A not-applicable decision needs a task-specific reason. If the definition is missing, cyclic, unreadable, incomplete, or the applicability is unclear, keep it visible as unresolved/unknown. Do not claim no requirements when the context is incomplete. Invalid definitions do not stop planning: make a finite provisional plan using the readable material, leave broken refs unresolved, and cite the supplied diagnostics. Never recursively expand a broken workflow.
 
-Return exactly one JSON object with keys "objective", "reason", "sourceMessageIds", and "workflow". For a task, workflow is {"requirements":[{"kind":"step"|"workflow","id":"exact configured id","applies":true|false|"unknown","reason":"..."}],"plan":{"kind":"sequence"|"parallel","templatePath":null,"nodes":[... ]}}. For an unclear task, objective is null, sourceMessageIds is [], workflow is null. Otherwise sourceMessageIds contains only the supplied messageId. A plan node is either {"kind":"step","definitionId":"reusable step ID","reason":"..."}, {"kind":"step","definitionId":null,"localId":"local ID","name":"...","description":"...","reason":"..."}, {"kind":"workflow","definitionId":"reusable workflow ID","reason":"..."}, or a nested {"kind":"sequence"|"parallel","nodes":[...]}. Only add a nested plan for a workflow when its complete path tree appears in workflowTemplates; otherwise reference it without a plan and put support beside it. For a workflow expansion that needs support inserted inside it, add its "plan" with the complete nested group. Copy templatePath exactly from the matching supplied workflowTemplates tree for original members; added groups and steps use templatePath:null. Never invent or derive a templatePath. "omissions" is an array of {"templatePath":"exact original template path","kind":"step"|"workflow","id":"exact original id","name":"original name","source":null|{"origin":"global"|"project"|null,"path":string|null,"sourceId":string|null},"reason":"why this original member does not apply"}. Do not author source metadata. The service supplies canonical names, descriptions, and provenance. Keep response under 128000 characters.`;
+Return exactly one JSON object with keys "objective", "reason", "sourceMessageIds", and "workflow". For a task, workflow is {"requirements":[{"kind":"step"|"workflow","id":"exact configured id","applies":true|false|"unknown","reason":"..."}],"plan":{"kind":"sequence"|"parallel","templatePath":null,"nodes":[... ]}}. For an unclear task, objective is null, sourceMessageIds is [], workflow is null. Otherwise sourceMessageIds contains only the supplied messageId. A plan node is either {"kind":"step","definitionId":"reusable step ID","reason":"..."}, {"kind":"step","definitionId":null,"localId":"local ID","name":"...","description":"...","reason":"..."}, {"kind":"workflow","definitionId":"reusable workflow ID","reason":"..."}, or a nested {"kind":"sequence"|"parallel","nodes":[...]}. Only add a nested plan for a workflow when its complete path tree appears in workflowTemplates; otherwise reference it without a plan and put support beside it. For a workflow expansion that needs support inserted inside it, add its "plan" with the complete nested group. For a newly added workflow-reference node, set its own templatePath to null; the nested plan root carries the exact copied templatePath for that referenced workflow. Preserve exact path values on source-provided nested workflow-reference nodes and original members. Added groups and steps use templatePath:null. Never invent or derive a templatePath. "omissions" is an array of {"templatePath":"exact original template path","kind":"step"|"workflow","id":"exact original id","name":"original name","source":null|{"origin":"global"|"project"|null,"path":string|null,"sourceId":string|null},"reason":"why this original member does not apply"}. Do not author source metadata. The service supplies canonical names, descriptions, and provenance. Keep response under 128000 characters.`;
 
 /** Always provides bounded diagnostics, even for invalid or incomplete definition reads. */
 export const prepareWorkflowRequest = (threadId: string, messageId: string, text: string, definitions: ProjectDefinitionSnapshot): WorkflowRequest => {
@@ -985,8 +990,8 @@ export const validateWorkflowPlan = (value: unknown, context: ProposalContext): 
       const message = error.message === "workflow_expansion_limit"
         ? "The submitted plan exceeded the shared expansion node limit; unresolved commitments remain visible."
         : "The submitted plan exceeded the shared expansion depth limit; unresolved commitments remain visible.";
-      const provisional = provisionalPlan(context, message);
-      return {...provisional, issues: [...provisional.issues, issue(context.workspaceRoot, error.message, message)]};
+      const safeMessage = redact(message);
+      return provisionalRecord(context, safeMessage, [{path: context.workspaceRoot, code: error.message, message: safeMessage}]);
     }
     return null;
   }
@@ -999,6 +1004,22 @@ export const validateWorkflowRecord = (value: unknown, context: ProposalContext)
       value.definitionsStatus !== context.status || value.definitionsComplete !== (context.complete && context.promptComplete) ||
       value.requirementsKnown !== (context.requirementsKnown && context.promptComplete) || !Array.isArray(value.requirements))
       return null;
+    if (value.plan === null) {
+      if (!Array.isArray(value.issues)) return null;
+      const provisionalMarkers = value.issues.filter(item => record(item) && item.code === "provisional_plan_required");
+      if (provisionalMarkers.length !== 1) return null;
+      const marker = provisionalMarkers[0];
+      if (!record(marker) || !exactFields(marker, ["path", "code", "message"]) || typeof marker.message !== "string" ||
+        !validText(marker.message, maxReasonLength)) return null;
+      const sourceIssue = (item: unknown) => context.issues.some(candidate => canonicalJson(candidate) === canonicalJson(item));
+      const expansionIssues = value.issues.filter(item => record(item) &&
+        (item.code === "workflow_expansion_limit" || item.code === "workflow_expansion_depth") && !sourceIssue(item));
+      if (expansionIssues.length > 1 || expansionIssues.some(item => !record(item) || !exactFields(item, ["path", "code", "message"]) ||
+        item.message !== marker.message)) return null;
+      const extraIssues = expansionIssues.map(item => ({path: context.workspaceRoot, code: item.code as string, message: marker.message as string}));
+      const normalized = provisionalRecord(context, marker.message, extraIssues);
+      return canonicalJson(value) === canonicalJson(normalized) ? normalized : null;
+    }
     const assessments = value.requirements.map(item => {
       if (!record(item) || !exactFields(item, ["kind", "id", "name", "source", "state", "reason"]) ||
         !(item.state === "included" || item.state === "not_applicable" || item.state === "unresolved" || item.state === "unknown"))
@@ -1100,12 +1121,18 @@ export const validateWorkflowApplyAgainstPinnedContext = (
   } catch {return null;}
 };
 
-const provisionalPlan = (context: ProposalContext, message: string): WorkflowPlanValue => {
-  const requirements = initialRequirements(context, context.requirementsKnown && context.promptComplete ? "unresolved" : "unknown", message);
-  const issues = boundedIssues([...context.issues, issue(context.workspaceRoot, "provisional_plan_required", message)], context.workspaceRoot);
+const provisionalRecord = (context: ProposalContext, message: string, extraIssues: readonly WorkflowIssueInfo[] = []): WorkflowPlanValue => {
+  const state: WorkflowRequirementInfo["state"] = context.requirementsKnown && context.promptComplete ? "unresolved" : "unknown";
+  const requirements = context.config.required.map(reference => ({kind: "step" in reference ? "step" as const : "workflow" as const,
+    id: "step" in reference ? reference.step : reference.workflow,
+    name: definitionName(context, reference), source: definitionSource(context, reference), state, reason: message}));
+  const marker = {path: context.workspaceRoot, code: "provisional_plan_required", message};
+  const issues = [...boundedIssues([...context.issues, marker], context.workspaceRoot, marker), ...extraIssues];
   return {definitionsStatus: context.status, definitionsComplete: context.complete && context.promptComplete, requirementsKnown: context.requirementsKnown && context.promptComplete,
     requirements, issues, plan: null};
 };
+
+const provisionalPlan = (context: ProposalContext, message: string): WorkflowPlanValue => provisionalRecord(context, redact(message));
 
 /** Converts a native Supervisor reply into a bounded, source-bound proposal. */
 export const parseWorkflowInterpretation = (text: string, sourceId: string, context: ProposalContext): {

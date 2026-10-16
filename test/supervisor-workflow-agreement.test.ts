@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { prepareWorkflowRequest, validateWorkflowPlan, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
+import { parseWorkflowInterpretation, prepareWorkflowRequest, validateWorkflowPlan, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import { extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, parseWorkflowProposalRecord, workflowAgreementPlanHash } from "../src/supervisor-workflow-agreement.js";
 
 const definitions = (overrides: Partial<ProjectDefinitionSnapshot> = {}): ProjectDefinitionSnapshot => ({
@@ -102,6 +102,30 @@ test("invalid and revision-null definitions can be shown provisionally but canno
     assert.ok(parseWorkflowProposalRecord(record, "task-a", context));
     assert.equal(parseWorkflowAgreementRecord(record, "task-a", context), null);
   }
+});
+
+test("an exact null-plan provisional echo is a proposal but never a formal agreement", () => {
+  const snapshot = definitions();
+  const context = contextFor(snapshot);
+  const provisional = parseWorkflowInterpretation(JSON.stringify({
+    objective: "Check this task.",
+    reason: "The latest message describes a concrete task.",
+    sourceMessageIds: ["message-a"],
+    workflow: null,
+  }), "message-a", context).workflow;
+  assert.equal(provisional.plan, null);
+  assert.equal(provisional.issues.filter(item => item.code === "provisional_plan_required").length, 1);
+  const echoed = proposal(snapshot, {
+    definitionsStatus: provisional.definitionsStatus,
+    definitionsComplete: provisional.definitionsComplete,
+    requirementsKnown: provisional.requirementsKnown,
+    requirements: provisional.requirements,
+    issues: provisional.issues,
+    plan: provisional.plan,
+  });
+
+  assert.ok(parseWorkflowProposalRecord(echoed, "task-a", context));
+  assert.equal(parseWorkflowAgreementRecord(echoed, "task-a", context), null);
 });
 
 test("plan fingerprints bind source revision, nested identity, and meaningful order", () => {

@@ -23,6 +23,40 @@ export const timestampMs = (value: unknown): number | null => {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+export type FreshRuntimeRequestStatus = "pending" | "resolved" | "expired" | "cancelled" | "unknown";
+
+export const freshRuntimeRequestStatus = (
+  projection: Projection,
+  identity: {requestId?: string | null; nodeId?: string | null},
+): FreshRuntimeRequestStatus => {
+  if (!Array.isArray(projection.runtimeRequests) || !identity.requestId || !identity.nodeId) return "unknown";
+  const node = nodeIndex(projection).get(identity.nodeId);
+  if (!node || node.threadId !== projection.thread.id) return "unknown";
+  const matches = projection.runtimeRequests.filter((value) => {
+    if (!isRecord(value)) return false;
+    const requestId = typeof value.id === "string" ? value.id : typeof value.requestId === "string" ? value.requestId : null;
+    return requestId === identity.requestId && value.nodeId === identity.nodeId;
+  });
+  if (matches.length !== 1) return "unknown";
+  const status = matches[0]?.status;
+  return status === "pending" || status === "resolved" || status === "expired" || status === "cancelled"
+    ? status
+    : "unknown";
+};
+
+const runtimeRequestIdentity = (value: unknown): {requestId?: string; nodeId?: string} => {
+  if (!isRecord(value)) return {};
+  const requestId = typeof value.id === "string" ? value.id : typeof value.requestId === "string" ? value.requestId : undefined;
+  const nodeId = typeof value.nodeId === "string" ? value.nodeId : undefined;
+  return {...(requestId === undefined ? {} : {requestId}), ...(nodeId === undefined ? {} : {nodeId})};
+};
+
+const runtimeRequestMayBePending = (projection: Projection, value: unknown): boolean => {
+  if (!isRecord(value)) return true;
+  const status = freshRuntimeRequestStatus(projection, runtimeRequestIdentity(value));
+  return status === "pending" || status === "unknown" && value.status === "pending";
+};
+
 const hasBlockingBackgroundTask = (value: unknown): boolean => {
   if (!Array.isArray(value)) return false;
   return value.some((task) => !isRecord(task) || task.kind !== "command");
@@ -148,6 +182,10 @@ const runIsBusy = (projection: Projection, run: RunInfo, shell?: Record<string, 
   };
   const thread = projection.thread;
   const summary = shell ?? thread;
+  const requestHint = summary.pendingRuntimeRequest;
+  const requestHintStatus = requestHint === undefined || requestHint === null
+    ? null
+    : freshRuntimeRequestStatus(projection, runtimeRequestIdentity(requestHint));
   if (
     summary.activeRunId === run.id ||
     (isLatest && (
@@ -156,12 +194,11 @@ const runIsBusy = (projection: Projection, run: RunInfo, shell?: Record<string, 
       (typeof summary.status === "string" && activeRunStates.has(summary.status)) ||
       hasBlockingBackgroundTask(summary.pendingBackgroundTasks)
     )) ||
-    (summary.pendingRuntimeRequest !== undefined && summary.pendingRuntimeRequest !== null &&
-      belongsToRun(summary.pendingRuntimeRequest))
+    (requestHintStatus === "unknown" && belongsToRun(requestHint))
   ) return true;
 
   if (Array.isArray(projection.runtimeRequests) && projection.runtimeRequests.some((request) =>
-    isRecord(request) && request.status === "pending" && belongsToRun(request)
+    runtimeRequestMayBePending(projection, request) && belongsToRun(request)
   )) return true;
 
   if (Array.isArray(projection.turnItems) && projection.turnItems.some((item) =>
@@ -196,7 +233,7 @@ const runIsBusy = (projection: Projection, run: RunInfo, shell?: Record<string, 
 /** Reuses completion's ongoing-work signals for an entire native conversation. */
 export const projectionHasOngoingWork = (projection: Projection, shell?: ThreadInfo): boolean => {
   if (projection.runs.some(run => activeRunStates.has(run.status))) return true;
-  if (Array.isArray(projection.runtimeRequests) && projection.runtimeRequests.some(request => !isRecord(request) || request.status === "pending")) return true;
+  if (Array.isArray(projection.runtimeRequests) && projection.runtimeRequests.some(request => runtimeRequestMayBePending(projection, request))) return true;
   const latest = projection.runs.reduce<RunInfo | undefined>((old, run) => !old || run.ordinal > old.ordinal ? run : old, undefined);
   if (latest && runIsBusy(projection, latest, shell)) return true;
   if (hasPullRequestWatch(projection.thread) || hasBlockingBackgroundTask((shell ?? projection.thread).pendingBackgroundTasks)) return true;

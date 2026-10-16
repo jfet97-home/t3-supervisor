@@ -299,6 +299,42 @@ test("an active native child blocks settlement through its direct parent despite
   assert.equal(f.calls.length, 1);
 });
 
+for (const requestStatus of ["resolved", "expired", "cancelled"] as const) {
+  test(`a matched ${requestStatus} child request clears stale detached waiting state`, async t => {
+    const f = await fixture();t.after(f.cleanup);
+    const child = {...thread(`native-request-${requestStatus}`, "main", "subagent", "main"), projectId: null,
+      creationSource: "provider", latestRunId: null, activeRunId: null,
+      pendingRuntimeRequest: {id: `request-${requestStatus}`, nodeId: `node-${requestStatus}`, kind: "user_input"}};
+    f.threads.push(child);
+    f.main.subagents = [{childThreadId: child.id, status: "completed"}];
+    f.projections.set(child.id, {thread: child, runs: [], messages: [],
+      nodes: [{id: `node-${requestStatus}`, threadId: child.id, runId: null, kind: "tool_call"}],
+      turnItems: [{id: `item-${requestStatus}`, threadId: child.id, runId: null, type: "user_input_request", status: "waiting",
+        requestId: `request-${requestStatus}`, nodeId: `node-${requestStatus}`}],
+      runtimeRequests: [{id: `request-${requestStatus}`, nodeId: `node-${requestStatus}`, kind: "user_input", status: requestStatus}]});
+
+    await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+    assert.equal(f.calls.length, 1, "terminal native request evidence supersedes stale waiting mirrors");
+  });
+}
+
+test("a fresh pending child request still blocks settlement", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const child = {...thread("native-request-pending", "main", "subagent", "main"), projectId: null,
+    creationSource: "provider", latestRunId: null, activeRunId: null,
+    pendingRuntimeRequest: {id: "request-pending", nodeId: "node-pending", kind: "user_input"}};
+  f.threads.push(child);
+  f.main.subagents = [{childThreadId: child.id, status: "completed"}];
+  f.projections.set(child.id, {thread: child, runs: [], messages: [],
+    nodes: [{id: "node-pending", threadId: child.id, runId: null, kind: "tool_call"}],
+    turnItems: [{id: "item-pending", threadId: child.id, runId: null, type: "user_input_request", status: "waiting",
+      requestId: "request-pending", nodeId: "node-pending"}],
+    runtimeRequests: [{id: "request-pending", nodeId: "node-pending", kind: "user_input", status: "pending"}]});
+
+  await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(f.calls.length, 0);
+});
+
 test("quiet children with unknown lifecycle do not prevent standby while ongoing T3 effects still do", async t => {
   const f = await fixture();t.after(f.cleanup);
   const child = {...thread("old-child", "main", "subagent", "main"), projectId: null,

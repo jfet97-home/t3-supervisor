@@ -86,7 +86,11 @@ remains fenced.
 
 `supervision_guide` accepts guidance only from a ready helper in its current
 assigned subtree. The service checks fresh native scope, lineage, runtime
-questions, active provider turns and contactability. Direct guidance to a delegated
+questions, active provider turns and contactability.
+A pending owner question or approval on the target defers intervention; it does not
+cause guidance to be sent to an ancestor around that pending decision. Fresh
+resolved/expired/cancelled request state takes precedence over a matching stale
+waiting hint, while unavailable or mismatched evidence remains conservative. Direct guidance to a delegated
 child uses targeted active-only steer. If T3 returns the specific dispatch command
 failure, the service replays that exact command once with the same command ID,
 message ID, target and run ID to read T3's durable result. It changes route only

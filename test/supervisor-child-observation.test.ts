@@ -5,10 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { defaultMonitoringSettings } from "../src/project-supervisor-contract.js";
-import { monitorActivityReference, observeScopeThread } from "../src/supervisor-observation.js";
+import { directParentChildLifecycle, monitorActivityReference, observeScopeThread } from "../src/supervisor-observation.js";
 import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.js";
 import { collectSupervisorActivity } from "../src/supervisor-monitor.js";
-import { directParentChildLifecycle } from "../src/supervisor-observation.js";
 import { resolveSupervisorScope } from "../src/supervisor-scope.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
 
@@ -201,6 +200,46 @@ test("Mac3145 native child activity stays detached, child-scoped, and traceable 
     assert.deepEqual(batch?.threads.map(item => item.threadId), [nativeChild.id]);
     assert.equal(batch?.threads[0]?.items.some(item => item.id.includes("supervisor-peer:")), false);
   });
+});
+
+test("a 3190-style duplicated parent lifecycle record resolves to one exact deterministic record", () => {
+  const childThreadId = "native-child-3190-shape";
+  const nativeRecordId = "node:provider:codex:native-item:call_fixture:child";
+  const parentRunId = "parent-run-ordinal-10";
+  const startedAt = new Date(now - 4_000).toISOString();
+  const completedAt = new Date(now - 1_000).toISOString();
+  const subagentUpdatedAt = new Date(now - 950).toISOString();
+  const turnItemUpdatedAt = new Date(now - 900).toISOString();
+  const parent: Projection = {
+    ...parentProjection,
+    subagents: [{id: nativeRecordId, childThreadId, runId: parentRunId, status: "completed", startedAt, completedAt, updatedAt: subagentUpdatedAt}],
+    turnItems: [{id: "turn-item:provider:codex:native-item:fixture", nodeId: nativeRecordId, type: "subagent",
+      threadId: mainThread.id, childThreadId, runId: parentRunId, status: "completed", startedAt, completedAt, updatedAt: turnItemUpdatedAt}],
+  };
+
+  const lifecycle = directParentChildLifecycle(parent, childThreadId);
+  assert.deepEqual(lifecycle, {
+    status: "completed",
+    source: "parent_turn_item",
+    parentRunId,
+    recordId: nativeRecordId,
+    startedAt,
+    completedAt,
+    updatedAt: turnItemUpdatedAt,
+  });
+  const child = makeThread(childThreadId, mainThread.id, "subagent", null, {creationSource: "provider"});
+  const childProjection = makeDetachedChildProjection(child, []);
+  const lifecycleActivity = collectSupervisorActivity(childProjection, 1, now, new Set(), new Set(), true, {
+    parentThreadId: mainThread.id,
+    parentRunId: lifecycle!.parentRunId,
+    recordId: lifecycle!.recordId,
+    status: lifecycle!.status,
+    completedAt: lifecycle!.completedAt,
+    updatedAt: lifecycle!.updatedAt,
+  }).filter(item => item.type === "native_child_lifecycle");
+  assert.equal(lifecycleActivity.length, 1);
+  const ambiguous = {...parent, turnItems: parent.turnItems!.map(item => ({...item, status: "running"}))};
+  assert.equal(directParentChildLifecycle(ambiguous, childThreadId), null);
 });
 
 test("native and delegated child activity joins one main-scoped batch", async () => {

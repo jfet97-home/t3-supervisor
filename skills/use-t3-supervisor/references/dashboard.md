@@ -138,7 +138,11 @@ coverage is confirmed; an uncertain notification is not evidence that a transfer
 completed.
 
 Direct guidance is limited to verified active delegated children and active-only
-steering after fresh scope and contact checks. Native read-only children receive
+steering after fresh scope and contact checks.
+A pending owner request on that target defers guidance, including an ancestor route.
+Resolved/expired/cancelled native request state clears matching stale waiting hints;
+missing or mismatched records remain uncertain. Terminal child changes are priority
+observations under the existing cooldown and current assignee, not proof of success. Native read-only children receive
 guidance through their verified ancestors. After a definite rejection or when a
 child cannot be steered, the Supervisor considers the nearest verified eligible
 contactable ancestor, then the main only when that route is valid and relevant.

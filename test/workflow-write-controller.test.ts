@@ -17,7 +17,7 @@ import { WorkflowWriteController, workflowReadToolDefinition, workflowWriteToolD
 import { workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, workflowTurnItemDetailMaxBytes } from "../src/workflow-write-evidence.js";
 import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo } from "../src/project-supervisor-contract.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
+import { parseWorkflowInterpretation, proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
 import { WebSocketServer } from "ws";
 import { makeSupervisorRpc } from "../src/supervisor-native.js";
 
@@ -910,6 +910,36 @@ test("apply requires a fresh definition pin that still matches the current task 
       status: "unavailable", operationId: "pin-unavailable-source", reason: "definition_source_read_unavailable",
     });
     assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.revision, 1);
+  } finally {await closeFixture(fixture);}
+});
+
+test("apply denies a null-plan provisional current task before reading or changing the draft", async () => {
+  const fixture = await makeFixture();
+  try {
+    const ensure = ensureArgs(fixture, "null-plan-provisional-create", "Create a draft before checking its current proposal.");
+    installEvidence(fixture, ensure);
+    const created = await fixture.controller.write(ensure);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+
+    const context = proposalContextFromDefinitions(fixture.definitionReader.current);
+    const provisional = parseWorkflowInterpretation(JSON.stringify({objective: "Complete the current project task.",
+      reason: "The latest message describes an actionable task.", sourceMessageIds: ["source-message-current"], workflow: null}),
+    "source-message-current", context).workflow;
+    assert.equal(provisional.status, "provisional");
+    assert.equal(provisional.plan, null);
+    replaceCurrentProposal(fixture, "proposal-null-plan-provisional", fixture.definitionReader.current, provisional);
+
+    const args = applyArgs(fixture, {operationId: "null-plan-provisional-apply", workflowId: created.workflowId,
+      expectedRevision: created.revision, plan: sequencePlan([localStep("Inspect source", "Use the task's pinned definitions.")]),
+      note: "The provisional task has no source-bound plan."});
+    installEvidence(fixture, args);
+    assert.deepEqual(await fixture.controller.write(args), {
+      status: "invalid", operationId: "null-plan-provisional-apply", reason: "current_task_has_no_valid_source_bound_plan",
+    });
+    assert.equal(fixture.definitionReader.calls, 0);
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.revision, created.revision);
+    assert.equal(Number(fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_write_receipts WHERE operation_id='null-plan-provisional-apply'").get()?.n), 0);
   } finally {await closeFixture(fixture);}
 });
 
@@ -1949,6 +1979,85 @@ test("helper guidance uses native steer only and retains uncertain identity acro
     assert.equal(team.unresolvedRequests(f.binding).length, 0);
     team.completeTransfer(f.binding, target.id, transfer.epoch);
     assert.equal(team.coverage(f.binding, target.id, parents).state, "root");
+  } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
+});
+
+test("helper guidance defers on target owner input without routing to an eligible ancestor", async () => {
+  const f = await makeFixture();
+  try {
+    const team = new SupervisorTeamStore(f.supervisors);
+    const member = team.registerMember(f.binding, {threadId: "guide-owner-input-helper", taskId: "guide-owner-input-task", bootstrapRunId: "guide-owner-input-bootstrap"});
+    const ready = team.markReady(f.binding, member.threadId, member.epoch);
+    const parent = thread("guide-owner-input-parent", f.projectId, f.mainThreadId, "subagent");
+    const targets = [
+      thread("guide-owner-input-pending", f.projectId, parent.id, "subagent"),
+      thread("guide-owner-input-resolved", f.projectId, parent.id, "subagent"),
+      thread("guide-owner-input-expired", f.projectId, parent.id, "subagent"),
+    ];
+    const helper = thread(member.threadId, f.projectId, f.supervisorThreadId, "subagent");
+    for (const item of [parent, ...targets]) Object.assign(item, {creationSource: "mcp", runtimeMode: "full-access", interactionMode: "default"});
+    f.threads.push(parent, ...targets, helper);
+    const parents = new Map(f.threads.map(item => [item.id, item.lineage.parentThreadId]));
+    const assignment = team.assign(f.binding, parent.id, member.threadId, parents);
+    for (const notification of team.snapshot(f.binding).notifications) {
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "sending");
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "delivered");
+      team.acknowledgeNotification(f.binding, member.threadId, notification.id, ready.epoch);
+    }
+    team.completeTransfer(f.binding, parent.id, assignment.epoch);
+
+    const projectionForRun = (value: ThreadInfo, runId: string, requestStatus?: string): Projection => {
+      const rootNodeId = `${runId}-root`;
+      const result = makeProjection(value.id, f.projectId);
+      result.thread = value;
+      result.runtimeRequests = requestStatus ? [{id: `${value.id}-question`, nodeId: rootNodeId, kind: "user_input", status: requestStatus}] : [];
+      result.runs = [{id: runId, threadId: value.id, status: "running", ordinal: 1,
+        requestedAt: "2026-10-16T10:00:00Z", startedAt: null, completedAt: null, rootNodeId, activeAttemptId: `${runId}-attempt`}];
+      result.nodes = [{id: rootNodeId, threadId: value.id, runId, kind: "root_turn", rootNodeId, parentNodeId: null}];
+      result.providerTurns = [{id: `${runId}-turn`, nodeId: rootNodeId, runAttemptId: `${runId}-attempt`, status: "running"}];
+      if (requestStatus) result.turnItems = [{id: `${value.id}-question-item`, threadId: value.id, runId, nodeId: rootNodeId,
+        type: "user_input_request", requestId: `${value.id}-question`, status: "pending"}];
+      return result;
+    };
+    parent.activeRunId = "guide-owner-input-parent-run";
+    const parentProjection = projectionForRun(parent, parent.activeRunId);
+    f.projections.set(parent.id, parentProjection);
+    const requestStatuses = ["pending", "resolved", "expired"] as const;
+    for (const [index, status] of requestStatuses.entries()) {
+      const target = targets[index]!;
+      const runId = `guide-owner-input-target-run-${status}`;
+      target.activeRunId = runId;
+      Object.assign(target, {pendingRuntimeRequest: {id: `${target.id}-question`, nodeId: `${runId}-root`, kind: "user_input", status: "pending"}});
+      f.projections.set(target.id, projectionForRun(target, runId, status));
+    }
+    f.projections.set(f.mainThreadId, makeProjection(f.mainThreadId, f.projectId));
+    const own = makeProjection(member.threadId, f.projectId);
+    Object.assign(own.thread, {runtimeMode: "full-access", interactionMode: "default"});
+    f.projections.set(member.threadId, own);
+    const actorFixture = {...f, supervisorThreadId: member.threadId, projection: own};
+    const reader = new WorkflowWriteController({...f.controller.options, team});
+    const sent: Record<string, unknown>[] = [];
+    const controller = new SupervisorTeamController(reader, team, async (_tag, command) => {
+      sent.push(command);
+      return {sequence: sent.length};
+    });
+    const guide = async (target: ThreadInfo, operationId: string) => {
+      const args = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: ready.epoch,
+        assignmentRootThreadId: parent.id, assignmentEpoch: assignment.epoch, operationId,
+        targetThreadId: target.id, text: "Recheck the current native owner request before continuing."};
+      installEvidence(actorFixture, args, {toolName: workflowToolNames.guide.direct[0]});
+      return controller.guide(args, AbortSignal.timeout(1000)) as Promise<{status: string; reason?: string}>;
+    };
+
+    const pendingResult = await guide(targets[0]!, "guide-owner-input-pending");
+    assert.deepEqual(pendingResult, {status: "denied", reason: "target_pending_owner_input"});
+    assert.equal(sent.length, 0, "pending owner input prevents both target and ancestor dispatch");
+
+    for (const [index, status] of ["resolved", "expired"].entries()) {
+      const result = await guide(targets[index + 1]!, `guide-owner-input-${status}`);
+      assert.equal(result.status, "accepted", `${status} current request status must clear stale shell and turn-item hints`);
+      assert.equal(sent[index]?.threadId, targets[index + 1]!.id);
+    }
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
 });
 

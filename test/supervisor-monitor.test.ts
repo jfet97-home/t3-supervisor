@@ -10,6 +10,7 @@ import {
   SUPERVISOR_MONITOR_AGE_MS,
   SUPERVISOR_MONITOR_COOLDOWN_MS,
   type SupervisorMonitorActivity,
+  type SupervisorNativeChildLifecycleEvidence,
 } from "../src/supervisor-monitor.js";
 import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.js";
 import { defaultMonitoringSettings } from "../src/project-supervisor-contract.js";
@@ -305,11 +306,15 @@ test("a sparse finalized activity becomes due after five minutes, and waiting in
   assert.deepEqual(decision.priorityKinds.sort(), ["user_instruction", "waiting_input"]);
 });
 
-test("run completion and failure are immediate priorities while rolled-back roots are ignored", () => {
+test("completed, failed, interrupted and cancelled runs are immediate priorities while rolled-back roots are ignored", () => {
   const completed = collect([], "completed");
   const failed = collect([], "failed");
+  const interrupted = collect([], "interrupted");
+  const cancelled = collect([], "cancelled");
   assert.deepEqual(completed.map((item) => [item.type, item.priority]), [["run_finished", "run_finished"]]);
   assert.deepEqual(failed.map((item) => [item.type, item.priority]), [["run_failed", "run_failed"]]);
+  assert.deepEqual(interrupted.map((item) => [item.type, item.priority]), [["run_failed", "run_failed"]]);
+  assert.deepEqual(cancelled.map((item) => [item.type, item.priority]), [["run_failed", "run_failed"]]);
 
   const rolledBack = makeProjection({ runStatus: "rolled_back" });
   rolledBack.nodes = (rolledBack.nodes as Record<string, unknown>[]).map((node) =>
@@ -342,8 +347,145 @@ test("pending native runtime requests need an eligible main-graph node and ignor
     status: "pending",
     createdAt: new Date(now - 1000).toISOString(),
   }];
+  (projection.turnItems as Record<string, unknown>[])[0]!.status = "completed";
   (projection.thread as unknown as Record<string, unknown>).pendingRuntimeRequest = { kind: "user_input" };
   assert.equal(collectSupervisorActivity(projection, 1, now).some((item) => item.priority === "waiting_input"), false);
+});
+
+for (const terminalStatus of ["resolved", "expired", "cancelled"] as const) {
+  test(`a matched ${terminalStatus} native request clears stale turn-item waiting priority and remains acknowledgeable`, async () => {
+    await withStore((monitor) => {
+      const projection = makeProjection({
+        events: [{id: "question", type: "user_input_request", requestId: "request-1", status: "waiting", nodeKind: "tool_call"}],
+        runtimeRequests: [{id: "request-1", nodeId: "node-question", kind: "user_input", status: "pending", createdAt: new Date(now - 1_000).toISOString()}],
+      });
+      monitor.observe({projectId, threadId, sourceOrdinal: 1, projection, now});
+      assert.ok(monitor.pending(projectId, threadId).some(item => item.priority === "waiting_input"));
+
+      const requests = projection.runtimeRequests as Record<string, unknown>[];
+      requests[0]!.status = terminalStatus;
+      requests[0]!.resolvedAt = new Date(now + 1_000).toISOString();
+      monitor.observe({projectId, threadId, sourceOrdinal: 1, projection, now: now + 1_000});
+      const terminal = monitor.pending(projectId, threadId).filter(item => item.id === "request:request-1");
+      assert.equal(terminal.length, 1, "the turn-item mirror and runtime request share one request identity");
+      assert.ok(terminal.every(item => item.status === terminalStatus && item.priority === null));
+      assert.equal(monitor.select(projectId, {...defaultMonitoringSettings, activityThreshold: 10}, now + 1_000, null), null,
+        "terminal requests follow age/count policy rather than waking as pending input");
+      const due = monitor.select(projectId, {...defaultMonitoringSettings, activityThreshold: 1}, now + 1_000, null);
+      assert.equal(due?.trigger, "activity_threshold");
+      assert.equal(monitor.acknowledge(due!, now + 1_001).acknowledged, 1);
+      assert.deepEqual(monitor.pending(projectId, threadId), []);
+      assert.deepEqual(monitor.hasPendingReviewableActivity(projectId, [threadId]), {status: "complete", pending: false});
+    });
+  });
+}
+
+test("a terminal run does not clear an exactly matched pending native request", () => {
+  const projection = makeProjection({
+    runStatus: "completed",
+    events: [{id: "question", type: "user_input_request", requestId: "request-1", status: "waiting", nodeKind: "tool_call"}],
+    runtimeRequests: [{id: "request-1", nodeId: "node-question", kind: "user_input", status: "pending", createdAt: new Date(now - 1_000).toISOString()}],
+  });
+  const request = collectSupervisorActivity(projection, 1, now).find(item => item.id === "request:request-1");
+  assert.equal(request?.status, "waiting");
+  assert.equal(request?.priority, "waiting_input");
+});
+
+test("a terminal request with mismatched node identity cannot clear a waiting turn item", () => {
+  const projection = makeProjection({
+    events: [{id: "question", type: "user_input_request", requestId: "request-1", status: "waiting", nodeKind: "tool_call"}],
+    runtimeRequests: [{id: "request-1", nodeId: "different-node", kind: "user_input", status: "expired", createdAt: new Date(now - 1_000).toISOString()}],
+  });
+  const request = collectSupervisorActivity(projection, 1, now).find(item => item.id === "request:request-1");
+  assert.equal(request?.status, "waiting");
+  assert.equal(request?.priority, "waiting_input");
+});
+
+test("native child terminal evidence is deterministic, priority-ranked and versioned from its direct parent", () => {
+  const child = makeProjection({threadId: "native-child"});
+  child.runs = [];
+  child.thread.lineage = {parentThreadId: "operative-parent", relationshipToParent: "subagent", rootThreadId: "operative-parent"};
+  const evidence: SupervisorNativeChildLifecycleEvidence = {parentThreadId: "operative-parent", parentRunId: "parent-run-1",
+    recordId: "native-item-1", status: "completed", completedAt: new Date(now - 1_000).toISOString(), updatedAt: new Date(now - 900).toISOString()};
+  const first = collectSupervisorActivity(child, 4, now, new Set(), new Set(), true, evidence).find(item => item.type === "native_child_lifecycle");
+  const repeated = collectSupervisorActivity(child, 4, now + 10_000, new Set(), new Set(), true,
+    {...evidence, updatedAt: new Date(now + 5_000).toISOString()}).find(item => item.type === "native_child_lifecycle");
+  assert.ok(first && repeated);
+  assert.equal(first.id, "native-child-lifecycle:operative-parent:native-child:native-item-1");
+  assert.equal(first.ordinal, 4);
+  assert.equal(first.priority, "run_finished");
+  assert.equal(first.version, repeated.version);
+  assert.equal(first.detectedAt, now - 1_000);
+  const decision = evaluateSupervisorMonitoring([first], {...defaultMonitoringSettings, intervalMinutes: 30, activityThreshold: 100}, now, null);
+  assert.equal(decision.due, true);
+  assert.equal(decision.trigger, "priority");
+
+  const changed = collectSupervisorActivity(child, 4, now + 2_000, new Set(), new Set(), true,
+    {...evidence, status: "interrupted", completedAt: new Date(now + 1_000).toISOString(), updatedAt: new Date(now + 1_100).toISOString()})
+    .find(item => item.type === "native_child_lifecycle");
+  assert.ok(changed);
+  assert.equal(changed.id, first.id);
+  assert.notEqual(changed.version, first.version);
+  assert.equal(changed.priority, "run_failed");
+  assert.equal(collectSupervisorActivity(child, 4, now, new Set(), new Set(), false, evidence).some(item => item.type === "native_child_lifecycle"), false);
+  const fallback = collectSupervisorActivity(child, 4, now, new Set(), new Set(), true,
+    {...evidence, completedAt: null, updatedAt: new Date(now - 500).toISOString()}).find(item => item.type === "native_child_lifecycle");
+  assert.equal(fallback?.detectedAt, now - 500);
+  assert.equal(collectSupervisorActivity(child, 4, now, new Set(), new Set(), true,
+    {...evidence, completedAt: null, updatedAt: null}).some(item => item.type === "native_child_lifecycle"), false);
+});
+
+test("native child terminal monitor checkpoints survive restart and ACK only their frozen version", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "supervisor-native-terminal-test-"));
+  let store = new GuidanceStore(directory);
+  try {
+    let monitor = new ProjectSupervisorMonitorStore(store);
+    const childId = "native-child-restart";
+    const child = makeProjection({threadId: childId});
+    child.runs = [];
+    child.thread.lineage = {parentThreadId: "operative-parent", relationshipToParent: "subagent", rootThreadId: "operative-parent"};
+    const evidence: SupervisorNativeChildLifecycleEvidence = {parentThreadId: "operative-parent", parentRunId: "parent-run-1",
+      recordId: "native-item-1", status: "completed", completedAt: new Date(now - 1_000).toISOString(), updatedAt: new Date(now - 900).toISOString()};
+    const settings = {...defaultMonitoringSettings, intervalMinutes: 30, activityThreshold: 100};
+    const observe = (lifecycle: SupervisorNativeChildLifecycleEvidence, at: number): void => {
+      monitor.observe({projectId, threadId: childId, sourceOrdinal: 2, projection: child, now: at,
+        includeDetachedChildItems: true, nativeChildLifecycle: lifecycle});
+    };
+    observe(evidence, now);
+    const first = monitor.select(projectId, settings, now, null, {eligibleThreadIds: new Set([childId])});
+    assert.ok(first);
+    const firstItem = first.threads[0]?.items[0];
+    assert.ok(firstItem);
+
+    store.close();
+    store = new GuidanceStore(directory);
+    monitor = new ProjectSupervisorMonitorStore(store);
+    const metadataOnly: SupervisorNativeChildLifecycleEvidence = {...evidence, updatedAt: new Date(now + 1_000).toISOString()};
+    observe(metadataOnly, now + 1);
+    const resumed = monitor.select(projectId, settings, now + 1, null, {eligibleThreadIds: new Set([childId])});
+    assert.ok(resumed);
+    assert.equal(resumed.threads[0]?.items[0]?.id, firstItem.id);
+    assert.equal(resumed.threads[0]?.items[0]?.version, firstItem.version);
+    assert.equal(monitor.acknowledge(first, now + 2).acknowledged, 1,
+      "metadata-only updates do not invalidate the frozen completion version");
+    observe(metadataOnly, now + 3);
+    assert.equal(monitor.select(projectId, settings, now + 3, null, {eligibleThreadIds: new Set([childId])}), null);
+
+    const interrupted: SupervisorNativeChildLifecycleEvidence = {...evidence, status: "interrupted",
+      completedAt: new Date(now + 4).toISOString(), updatedAt: new Date(now + 5).toISOString()};
+    observe(interrupted, now + 5);
+    const revised = monitor.select(projectId, settings, now + 5, null, {eligibleThreadIds: new Set([childId])});
+    assert.ok(revised);
+    assert.notEqual(revised.threads[0]?.items[0]?.version, firstItem.version);
+    assert.equal(monitor.acknowledge(first, now + 6).stale, 1);
+    assert.equal(monitor.pending(projectId, childId)[0]?.priority, "run_failed");
+    assert.equal(monitor.acknowledge(revised, now + 7).acknowledged, 1);
+    observe(interrupted, now + 8);
+    assert.equal(monitor.select(projectId, settings, now + 8, null, {eligibleThreadIds: new Set([childId])}), null);
+  } finally {
+    store.close();
+    await rm(directory, {recursive: true, force: true});
+  }
 });
 
 test("direct peer tool sends are excluded from the activity count", () => {

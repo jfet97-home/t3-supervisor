@@ -1,6 +1,6 @@
 import { mainRunNodeReader, nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { ProjectSupervisorMonitorStore } from "./supervisor-monitor-store.js";
-import { SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch } from "./supervisor-monitor.js";
+import { isCurrentMainGraphRun, SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch, type SupervisorNativeChildLifecycleEvidence } from "./supervisor-monitor.js";
 import { SupervisorConversationStore, type ConversationRequest, type WorkflowAgreementCandidate, type WorkflowIntroduction } from "./supervisor-conversation-store.js";
 import { record, SupervisorRpcError, type SupervisorRpc } from "./supervisor-native.js";
 import { fixedOccurrencesPreserved, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
@@ -13,7 +13,7 @@ import { fingerprint } from "./guidance-store.js";
 import { T3TransportError } from "./t3.js";
 import type { Projection, ThreadInfo } from "./types.js";
 import { resolveSupervisorScope } from "./supervisor-scope.js";
-import { childOrigin, observeScopeThread, monitorActivityReference } from "./supervisor-observation.js";
+import { childOrigin, directParentChildLifecycle, observeScopeThread, monitorActivityReference } from "./supervisor-observation.js";
 import { randomUUID } from "node:crypto";
 import type { WorkflowStateStore } from "./workflow-state-store.js";
 import { SupervisorTeamStore } from "./supervisor-team-store.js";
@@ -27,6 +27,7 @@ const acceptedReceipt = (value: unknown): boolean => record(value) && Number.isS
 const MAX_DESCENDANT_OBSERVATIONS_PER_CYCLE = 100;
 const MAX_DESCENDANT_OBSERVATIONS_PER_MAIN = 20;
 const MAX_THREAD_PROJECTIONS_PER_CHECKIN = 100;
+const terminalRunStatuses = new Set(["completed", "failed", "interrupted", "cancelled"]);
 const taskSourceTimestamp = (task: TaskRecord, projection: Projection): number | null => {
   const message = projection.messages.find(candidate => candidate.id === task.sourceMessageId && candidate.threadId === task.threadId &&
     candidate.runId === task.sourceRunId);
@@ -314,22 +315,72 @@ export class SupervisorConversation {
           const liveDescendants = scope.main && scope.allowedIds.has(scope.main.id) ? scope.descendants.filter(child => scope.allowedIds.has(child.id) && scope.liveIds.has(child.id)) : [];
           const previousOffset = liveDescendants.length ? (this.descendantOffsets.get(task.threadId) ?? 0) % liveDescendants.length : 0;
           const orderedDescendants = [...liveDescendants.slice(previousOffset), ...liveDescendants.slice(0, previousOffset)];
+          const projectionCache = new Map<string, Projection>([[task.threadId, agent]]);
+          const unavailableProjections = new Set<string>();
+          const readScopedProjection = async (threadId: string): Promise<Projection | null> => {
+            const cached = projectionCache.get(threadId);
+            if (cached) return cached;
+            if (unavailableProjections.has(threadId) || descendantBudget <= 0) return null;
+            descendantBudget--;
+            try {
+              const projection = await this.projection(threadId, signal);
+              if (projection.thread.id !== threadId) {
+                unavailableProjections.add(threadId);
+                return null;
+              }
+              projectionCache.set(threadId, projection);
+              return projection;
+            } catch {
+              unavailableProjections.add(threadId);
+              return null;
+            }
+          };
           let observed = 0;
           for (const child of orderedDescendants) {
             if (signal.aborted || descendantBudget <= 0 || observed >= MAX_DESCENDANT_OBSERVATIONS_PER_MAIN) break;
-            if (now - (this.descendantObservedAt.get(child.id) ?? 0) < 5_000) continue;
+            if (!projectionCache.has(child.id) && now - (this.descendantObservedAt.get(child.id) ?? 0) < 5_000) continue;
             this.descendantObservedAt.set(child.id, now);
             try {
-              const childProjection = await this.projection(child.id, signal);
+              const childProjection = await readScopedProjection(child.id);
+              if (!childProjection) continue;
               if (!this.enabled(task.projectId) || childProjection.thread.id !== child.id ||
                 childProjection.thread.lineage.relationshipToParent !== "subagent" ||
                 childProjection.thread.lineage.parentThreadId !== child.lineage.parentThreadId) continue;
               const sourceOrdinal = this.monitor.hasState(task.projectId, child.id)
                 ? this.monitor.state(task.projectId, child.id).sourceOrdinal : firstObservedOrdinal(childProjection, taskSourceTimestamp(task, agent));
+              const parentId = child.lineage.parentThreadId;
+              const parentInfo = parentId ? scope.byId.get(parentId) : null;
+              const parentProjection = parentId && parentInfo && scope.allowedIds.has(parentId)
+                ? await readScopedProjection(parentId)
+                : null;
+              const parentVerified = Boolean(parentId && parentProjection && parentInfo && parentProjection.thread.id === parentId &&
+                (parentId === task.threadId || parentProjection.thread.lineage.relationshipToParent === "subagent" &&
+                  parentProjection.thread.lineage.parentThreadId === parentInfo.lineage.parentThreadId));
+              const lifecycle = parentVerified && parentProjection && parentId
+                ? directParentChildLifecycle(parentProjection, child.id)
+                : null;
+              const taskStartedAt = taskSourceTimestamp(task, agent);
+              const lifecycleTerminalAt = timestampMs(lifecycle?.completedAt) ?? timestampMs(lifecycle?.updatedAt);
+              const lifecycleIsCurrent = taskStartedAt !== null && lifecycleTerminalAt !== null && lifecycleTerminalAt >= taskStartedAt;
+              const nativeOrigin = Boolean(parentVerified && parentProjection && childOrigin(child, parentProjection) === "native_child");
+              const pendingRunIds = new Set(this.monitor.pending(task.projectId, child.id).map(item => item.id));
+              const equivalentTerminalRun = childProjection.runs.some(run => {
+                if (!terminalRunStatuses.has(run.status) || !isCurrentMainGraphRun(childProjection, run)) return false;
+                if (pendingRunIds.has(`run:${run.id}`) || run.ordinal >= sourceOrdinal) return true;
+                const completedAt = timestampMs(run.completedAt);
+                return Boolean(completedAt !== null && (
+                  run.status === lifecycle?.status && completedAt === lifecycleTerminalAt
+                ));
+              });
+              const nativeChildLifecycle: SupervisorNativeChildLifecycleEvidence | undefined =
+                lifecycle && lifecycleIsCurrent && nativeOrigin && !equivalentTerminalRun && parentId
+                  ? {parentThreadId: parentId, parentRunId: lifecycle.parentRunId, recordId: lifecycle.recordId,
+                    status: lifecycle.status, completedAt: lifecycle.completedAt, updatedAt: lifecycle.updatedAt}
+                  : undefined;
               this.monitor.observe({projectId: task.projectId, threadId: child.id, sourceOrdinal,
-                projection: childProjection, now, includeDetachedChildItems: true});
+                projection: childProjection, now, includeDetachedChildItems: true,
+                ...(nativeChildLifecycle ? {nativeChildLifecycle} : {})});
               observed++;
-              descendantBudget--;
             } catch {
               // a later cycle retries the same scoped descendant without moving its durable monitor baseline
             }

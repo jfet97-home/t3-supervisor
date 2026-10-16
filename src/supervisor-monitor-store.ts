@@ -14,6 +14,7 @@ import {
   type SupervisorMonitorBatch,
   type SupervisorMonitorPriority,
   type SupervisorMonitorThreadBatch,
+  type SupervisorNativeChildLifecycleEvidence,
 } from "./supervisor-monitor.js";
 import type { SupervisorMonitoringSettings } from "./project-supervisor-contract.js";
 import type { Projection } from "./types.js";
@@ -86,7 +87,7 @@ const knownPriority = (value: unknown): SupervisorMonitorPriority | null =>
     : null;
 
 const isFinalized = (item: Pick<SupervisorMonitorActivity, "status">): boolean =>
-  ["completed", "failed", "cancelled", "interrupted"].includes(item.status);
+  ["completed", "failed", "cancelled", "interrupted", "resolved", "expired"].includes(item.status);
 
 const isReviewable = (item: SupervisorMonitorActivity): boolean =>
   isFinalized(item) || item.priority === "waiting_input";
@@ -226,6 +227,7 @@ export class ProjectSupervisorMonitorStore {
     now?: number;
     excludedIds?: ReadonlySet<string>;
     includeDetachedChildItems?: boolean;
+    nativeChildLifecycle?: SupervisorNativeChildLifecycleEvidence;
   }): SupervisorMonitorObservation {
     if (
       !input.projectId.trim() ||
@@ -281,6 +283,7 @@ export class ProjectSupervisorMonitorStore {
         input.excludedIds,
         trackedIds,
         input.includeDetachedChildItems === true,
+        input.nativeChildLifecycle,
       );
       this.store.db
         .prepare("UPDATE supervisor_monitor_items SET active=0 WHERE project_id=? AND thread_id=?")
@@ -452,7 +455,7 @@ export class ProjectSupervisorMonitorStore {
         const match = this.store.db.prepare(`SELECT 1 AS pending FROM supervisor_monitor_items
           WHERE project_id=? AND thread_id IN (${placeholders}) AND eligible=1 AND active=1
           AND (reviewed_version IS NULL OR reviewed_version<>version)
-          AND (status IN ('completed','failed','cancelled','interrupted') OR priority='waiting_input') LIMIT 1`)
+          AND (status IN ('completed','failed','cancelled','interrupted','resolved','expired') OR priority='waiting_input') LIMIT 1`)
           .get(projectId, ...ids);
         if (match) return {status: "complete", pending: true};
       } catch {return {status: "incomplete"};}

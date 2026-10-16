@@ -271,6 +271,11 @@ export class SupervisorTeamController {
       return {route: null, parents, reason: "helper_identity_changed", freshScope: true};
     const original = scope.byId.get(String(payload.targetThreadId));
     if (!original) return {route: null, parents, reason: "target_lineage_unavailable", freshScope: true};
+    const target = await this.workflows.options.native.projection(original.id, signal);
+    if (target.thread.id !== original.id || target.thread.lineage.parentThreadId !== original.lineage.parentThreadId ||
+      target.thread.lineage.relationshipToParent !== original.lineage.relationshipToParent)
+      return {route: null, parents, reason: "target_lineage_changed", freshScope: true};
+    if (hasPendingOwnerInput(target)) return {route: null, parents, reason: "target_pending_owner_input", freshScope: true};
     let candidate = includeTarget ? original : original.lineage.parentThreadId ? scope.byId.get(original.lineage.parentThreadId) : undefined;
     while (candidate && candidate.id !== binding.mainThreadId) {
       if (!scope.liveIds.has(candidate.id)) {
@@ -281,7 +286,7 @@ export class SupervisorTeamController {
         return {route: null, parents, reason: "guidance_assignment_changed", freshScope: true};
       if (!this.team.authorizeWrite(binding, payload.supervisorThreadId, candidate.id, parents, payload))
         return {route: null, parents, reason: "ancestor_outside_current_assignment", freshScope: true};
-      const current = await this.workflows.options.native.projection(candidate.id, signal);
+      const current = candidate.id === original.id ? target : await this.workflows.options.native.projection(candidate.id, signal);
       if (current.thread.id !== candidate.id || current.thread.lineage.parentThreadId !== candidate.lineage.parentThreadId ||
         current.thread.lineage.relationshipToParent !== candidate.lineage.relationshipToParent)
         return {route: null, parents, reason: "target_lineage_changed", freshScope: true};
@@ -342,6 +347,11 @@ export class SupervisorTeamController {
     try {
       const search = await this.findGuideRoute(binding, payload, false, signal);
       if (search.route && search.reason === null) return this.sendGuideAttempt(payload, binding, evidenceItemId, record, search.route, search.parents, signal);
+      if (search.reason === "target_pending_owner_input") {
+        const deferred: GuideRecord = {...record, status: "needs_fallback", reason: search.reason};
+        this.save(payload, binding, evidenceItemId, deferred);
+        return deferred;
+      }
       const needsEscalation: GuideRecord = {...record, status: "needs_escalation", escalationSummary: summary,
         reason: search.reason ?? "no_contactable_ancestor_in_assignment"};
       this.save(payload, binding, evidenceItemId, needsEscalation);

@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { timestampMs } from "./domain.js";
 import type { SupervisorMonitorActivity } from "./supervisor-monitor.js";
 import type { Projection, ThreadInfo } from "./types.js";
 
@@ -54,21 +55,45 @@ export const ProjectSupervisorScopeSnapshotSchema = Schema.Struct({
 export type ProjectSupervisorScopeSnapshot = typeof ProjectSupervisorScopeSnapshotSchema.Type;
 export type SupervisorScopeObservedThread = ProjectSupervisorScopeThread;
 
-export type SupervisorChildLifecycleRecord = {status: string; source: "parent_subagents" | "parent_turn_item"};
+export type SupervisorChildLifecycleRecord = {
+  status: string;
+  source: "parent_subagents" | "parent_turn_item";
+  parentRunId: string | null;
+  recordId: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string | null;
+};
 
 /** Matches lifecycle only on the child's direct parent, never the root's stale grandchild record. */
 export const directParentChildLifecycle = (parent: Projection, childThreadId: string): SupervisorChildLifecycleRecord | null => {
   const matches: SupervisorChildLifecycleRecord[] = [];
   for (const value of parent.subagents ?? []) {
     if (value.childThreadId === childThreadId && typeof value.status === "string")
-      matches.push({status: value.status, source: "parent_subagents"});
+      matches.push({status: value.status, source: "parent_subagents", parentRunId: typeof value.runId === "string" ? value.runId : null,
+        recordId: typeof value.id === "string" ? value.id : null,
+        startedAt: typeof value.startedAt === "string" ? value.startedAt : null,
+        completedAt: typeof value.completedAt === "string" ? value.completedAt : null,
+        updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : null});
   }
   for (const value of parent.turnItems ?? []) {
     if (value.type === "subagent" && value.childThreadId === childThreadId && typeof value.status === "string")
-      matches.push({status: value.status, source: "parent_turn_item"});
+      matches.push({status: value.status, source: "parent_turn_item", parentRunId: typeof value.runId === "string" ? value.runId : null,
+        recordId: typeof value.subagentId === "string" ? value.subagentId : typeof value.nodeId === "string" ? value.nodeId : typeof value.id === "string" ? value.id : null,
+        startedAt: typeof value.startedAt === "string" ? value.startedAt : null,
+        completedAt: typeof value.completedAt === "string" ? value.completedAt : null,
+        updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : null});
   }
   const statuses = [...new Set(matches.map(match => match.status))];
-  return statuses.length === 1 ? matches[0]! : null;
+  if (statuses.length !== 1) return null;
+  return matches.sort((left, right) => {
+    const leftAt = Math.max(timestampMs(left.completedAt) ?? 0, timestampMs(left.updatedAt) ?? 0);
+    const rightAt = Math.max(timestampMs(right.completedAt) ?? 0, timestampMs(right.updatedAt) ?? 0);
+    const leftSourceRank = left.source === "parent_turn_item" ? 0 : 1;
+    const rightSourceRank = right.source === "parent_turn_item" ? 0 : 1;
+    return rightAt - leftAt || leftSourceRank - rightSourceRank ||
+      (left.recordId ?? "").localeCompare(right.recordId ?? "");
+  })[0]!;
 };
 
 export const monitorActivityReference = (
