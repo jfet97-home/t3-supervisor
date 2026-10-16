@@ -24,6 +24,21 @@ Helpers inherit the root's model by default. The root may select another model
 from T3's current configured catalog for a helper. T3 remains responsible for
 native model selection; the Supervisor does not maintain a separate model catalog.
 
+### Temporary provider-session isolation
+
+Until the installed T3 build contains the parent-detach correction in upstream
+PR #20361, an installation can set `SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID` to a
+second configured native provider instance. New helpers must use that instance;
+the root defaults to its current native model and explicit options, with compatible
+deliberate overrides still allowed. Registration requires a different root instance
+and nonempty, disjoint native sessions belonging to the exact root/helper threads.
+Unavailable or unverifiable isolation blocks recruitment and raises root attention.
+Existing helpers are not moved. Unset configuration retains normal recruitment.
+
+This is a temporary installation workaround. The Lab's
+`supervisor-provider-isolation-workaround-2026-10-16.md` records configuration,
+verification and removal after the fixed published build is actually installed.
+
 The default maximum is five helpers per root. Project settings accept an integer
 from zero to twenty. Zero disables new recruitment, and lowering the limit does
 not delete existing members or their history.

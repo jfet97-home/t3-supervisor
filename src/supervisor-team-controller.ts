@@ -2,7 +2,7 @@ import type {SupervisorConversationStore} from "./supervisor-conversation-store.
 import {isRecord, workflowRequestHash, workflowToolInputSize, workflowToolInputMaxBytes} from "./workflow-write-evidence.js";
 import {WorkflowWriteController, type WorkflowLocator} from "./workflow-write-controller.js";
 import {resolveSupervisorScope} from "./supervisor-scope.js";
-import {SupervisorRpcError, type SupervisorRpc} from "./supervisor-native.js";
+import {modelSelection, SupervisorRpcError, type SupervisorRpc} from "./supervisor-native.js";
 import {canSupervisorContact, hasPendingOwnerInput, hasRunningProviderTurn} from "./supervisor-conversation.js";
 import {childOrigin} from "./supervisor-observation.js";
 import type {BindingRecord} from "./project-supervisor-store.js";
@@ -251,6 +251,39 @@ export class SupervisorTeamController {
       !bootstrap || bootstrap.status !== "completed" ||
       child.runs.filter(run => run.threadId === payload.memberThreadId).sort((a, b) => a.ordinal - b.ordinal)[0]?.id !== bootstrap.id ||
       !child.messages.some(message => message.id === bootstrap.userMessageId && message.runId === bootstrap.id && message.text === task.prompt)) throw new Error("native_completed_bootstrap_not_verified");
+    this.verifyHelperProviderIsolation(binding, payload, root, child);
+  }
+  private verifyHelperProviderIsolation(binding: BindingRecord, payload: Payload, root: Projection, child: Projection): void {
+    const configuredInstanceId = this.workflows.options.helperProviderInstanceId;
+    if (!configuredInstanceId) return;
+    const rootSelection = modelSelection(root.thread.modelSelection);
+    const childSelection = modelSelection(child.thread.modelSelection);
+    const ownProviderThreads = (projection: Projection, ownerThreadId: string) => Array.isArray(projection.providerThreads)
+      ? projection.providerThreads.filter(row => isRecord(row) && row.appThreadId === ownerThreadId)
+      : [];
+    const rootProviderThreads = ownProviderThreads(root, root.thread.id);
+    const childProviderThreads = ownProviderThreads(child, child.thread.id);
+    const hasSession = (row: Record<string, unknown>): row is Record<string, unknown> & {providerSessionId: string} =>
+      typeof row.providerSessionId === "string" && row.providerSessionId.trim().length > 0;
+    const rootSessions = new Set(rootProviderThreads.filter(hasSession).map(row => row.providerSessionId));
+    const childSessionThreads = childProviderThreads.filter(hasSession);
+    const childSessions = new Set(childSessionThreads.map(row => row.providerSessionId));
+    const failIsolation = (reason: string): never => {
+      const memberThreadId = String(payload.memberThreadId);
+      const eventIdentity = workflowRequestHash({supervisorThreadId: binding.threadId, bindingGeneration: binding.generation,
+        memberThreadId, taskId: payload.taskId, bootstrapRunId: payload.bootstrapRunId});
+      this.team.serviceAttention(binding, {eventId: `helper-provider-isolation:${eventIdentity.slice(0, 32)}`,
+        memberThreadId: binding.threadId, targetThreadId: memberThreadId,
+        summary: `Helper ${memberThreadId} was not registered because its configured provider isolation could not be verified (${reason}). No helper membership or webhook was created, and no shared-session fallback occurred.`});
+      throw new Error(reason);
+    };
+
+    if (!rootSelection || rootSelection.instanceId === configuredInstanceId) failIsolation("helper_provider_instance_matches_root");
+    if (!childSelection || childSelection.instanceId !== configuredInstanceId ||
+      childSessionThreads.some(row => row.providerInstanceId !== configuredInstanceId))
+      failIsolation("helper_provider_instance_mismatch");
+    if (!rootSessions.size || !childSessions.size) failIsolation("helper_provider_session_unavailable");
+    if ([...childSessions].some(sessionId => rootSessions.has(sessionId))) failIsolation("helper_provider_session_shared");
   }
   private guidePayload(record: GuideRecord): Payload {
     return {supervisorThreadId: record.supervisorThreadId, bindingGeneration: record.bindingGeneration, memberEpoch: record.memberEpoch,

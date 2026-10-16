@@ -45,10 +45,19 @@ export interface MessageInfo {
   [key: string]: unknown;
 }
 
+export interface ProviderThreadInfo {
+  id?: unknown;
+  providerInstanceId?: unknown;
+  providerSessionId?: unknown;
+  appThreadId?: unknown;
+  [key: string]: unknown;
+}
+
 export interface Projection {
   thread: ThreadInfo;
   runs: RunInfo[];
   messages: MessageInfo[];
+  providerThreads?: ProviderThreadInfo[];
   subagents?: JsonRecord[];
   turnItems?: JsonRecord[];
   [key: string]: unknown;
@@ -98,6 +107,7 @@ export interface SupervisorConfig {
   threadPolicy?: import("./thread-policy.js").ThreadPolicyStore;
   healthPort: number;
   modelTimeoutMs: number;
+  helperProviderInstanceId?: string;
   telegramEnabled?: boolean;
   inputEnabled?: boolean;
   inputTokenFile?: string;

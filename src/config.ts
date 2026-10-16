@@ -8,7 +8,16 @@ import type { SupervisorConfig } from "./types.js";
 export const loadDataDirectory = (): string => process.env.DATA_DIRECTORY ??
   join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "t3-supervisor");
 
-export const loadConfig = (): SupervisorConfig => ({
+const loadHelperProviderInstanceId = (): string | undefined => {
+  const value = process.env.SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID?.trim();
+  if (!value) return undefined;
+  if (value.length > 256 || /\s/u.test(value)) throw new Error("invalid_helper_provider_instance_id");
+  return value;
+};
+
+export const loadConfig = (): SupervisorConfig => {
+  const helperProviderInstanceId = loadHelperProviderInstanceId();
+  return {
   dataDirectory: loadDataDirectory(),
   t3Url: process.env.T3_URL ?? "http://127.0.0.1:3773",
   t3TokenFile: process.env.T3_TOKEN_FILE ?? "/run/secrets/t3-read-token",
@@ -21,6 +30,7 @@ export const loadConfig = (): SupervisorConfig => ({
   healthPort: Number(process.env.HEALTH_PORT ?? "9007"),
   modelTimeoutMs: Number(process.env.MODEL_TIMEOUT_MS ?? "360000"),
   telegramEnabled: process.env.TELEGRAM_ENABLED === "true",
+  ...(helperProviderInstanceId ? {helperProviderInstanceId} : {}),
   inputEnabled: process.env.TELEGRAM_ENABLED === "true" && process.env.INPUT_ENABLED === "true",
   inputTokenFile: process.env.T3_INPUT_TOKEN_FILE ?? "/run/secrets/t3-input-token",
   inputPollMs: Number(process.env.INPUT_POLL_MS ?? "1000"),
@@ -35,7 +45,8 @@ export const loadConfig = (): SupervisorConfig => ({
   projectCommitTokenFile: process.env.T3_PROJECT_COMMIT_TOKEN_FILE ?? "/run/secrets/t3-project-commit-token",
   gitProbeTokenFile: process.env.T3_GIT_PROBE_TOKEN_FILE ?? "/run/secrets/t3-git-probe-token",
   ...(process.env.T3_MANAGED_SCRATCH_ROOT ? { managedScratchRoot: process.env.T3_MANAGED_SCRATCH_ROOT } : {}),
-});
+  };
+};
 
 export const initializeRuntimeAuth = (config: SupervisorConfig) => Effect.tryPromise(async () => {
   process.umask(0o077);

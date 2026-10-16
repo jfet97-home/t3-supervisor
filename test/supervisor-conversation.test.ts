@@ -331,6 +331,7 @@ interface FixtureOptions {
   operativeActive?: boolean;
   settings?: { intervalMinutes: number; activityThreshold: number };
   queuePeerDuringNextSupervisorDispatch?: boolean;
+  helperProviderInstanceId?: string;
 }
 
 interface Clock { now: number }
@@ -534,6 +535,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     excludedThreadIds: [],
     healthPort: 0,
     modelTimeoutMs: 1,
+    ...(options.helperProviderInstanceId ? {helperProviderInstanceId: options.helperProviderInstanceId} : {}),
   } satisfies SupervisorConfig;
   const modelConfig = {
     providers: [{
@@ -766,6 +768,28 @@ const appendOperativeAcceptance = (fixture: Awaited<ReturnType<typeof makeFixtur
 
 const observeAgreement = (fixture: Awaited<ReturnType<typeof makeFixture>>, now: number) =>
   fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), now);
+
+test("helper provider isolation is opt-in in root roles and uses the current native selection", async t => {
+  const clock = {now: baseTime};
+  const standard = await makeFixture(clock);
+  t.after(standard.cleanup);
+  const roleFor = (conversation: unknown, binding: BindingRecord): string =>
+    (conversation as {roleFor(binding: BindingRecord): string}).roleFor(binding);
+  const standardRole = roleFor(standard.makeProjectSupervisor().conversation, standard.binding);
+  assert.doesNotMatch(standardRole, /t3_thread_configuration|target\.providerInstanceId/u);
+
+  const isolated = await makeFixture(clock, {helperProviderInstanceId: "supervisor-helpers-20348"});
+  t.after(isolated.cleanup);
+  const isolatedRole = roleFor(isolated.makeProjectSupervisor().conversation, isolated.binding);
+  assert.match(isolatedRole, /t3_thread_configuration/u);
+  assert.match(isolatedRole, /target\.providerInstanceId to "supervisor-helpers-20348"/u);
+  assert.match(isolatedRole, /use native delegate_task for a short bootstrap as your direct child/u);
+  assert.doesNotMatch(isolatedRole, /inherit this root's model unless a configured T3 override is selected/u);
+  assert.match(isolatedRole, /current native model selection and options/u);
+  assert.match(isolatedRole, /never use project defaults or a saved Supervisor selection/u);
+  assert.match(isolatedRole, /A different compatible helper model\/options is allowed only when this root explicitly selects it/u);
+  assert.match(isolatedRole, /do not fall back to a shared session or another provider instance/u);
+});
 
 test("first descendant observation seeds past quiet history but includes active native or delegated work", () => {
   const projection = makeProjection(makeThread({id: "child", title: "Child"}));

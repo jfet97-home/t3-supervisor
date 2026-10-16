@@ -79,6 +79,7 @@ export const runGuidanceApplication = (
       operateToken.trim() ? makeSupervisorRpc(config.t3Url, operateToken.trim()) : null, readSupervisorBaseline(config.t3Url, readToken.trim()), definitions);
     const workflowReader = new WorkflowWriteController({
       supervisors: supervisionStore,
+      ...(config.helperProviderInstanceId ? {helperProviderInstanceId: config.helperProviderInstanceId} : {}),
       team: supervision.team,
       workflows: supervision.workflowStates,
       isEnabled: projectId => supervision.workflowEditingEnabled(projectId),

@@ -1900,7 +1900,10 @@ test("team registration requires a completed app-owned bootstrap and readiness r
     assert.equal((await controller.call(args, AbortSignal.timeout(1000)) as {status: string}).status, "denied");
     assert.equal(team.snapshot(f.binding).members.length, 0);
     f.projection.subagents = [{id: "task-node", threadId: f.supervisorThreadId, runId: "supervisor-run-current", origin: "app_owned", childThreadId: "real-helper", status: "completed", prompt: "Bootstrap ready", result: {summary: "Bootstrap complete."}}];
+    const beforeRegistrationReads = f.projectionCalls.length;
     assert.equal((await controller.call(args, AbortSignal.timeout(1000)) as {status: string}).status, "ok");
+    assert.deepEqual(f.projectionCalls.slice(beforeRegistrationReads), [f.supervisorThreadId, f.supervisorThreadId, "real-helper"],
+      "unset helper isolation preserves the existing native reads");
     const member = team.snapshot(f.binding).members[0]!;
     const ready = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: member.epoch, action: "ready", operationId: "ready-1"};
     assert.equal((await controller.call(ready, AbortSignal.timeout(1000)) as {status: string}).status, "pending");
@@ -1910,6 +1913,68 @@ test("team registration requires a completed app-owned bootstrap and readiness r
     assert.equal(team.snapshot(f.binding).members[0]!.state, "ready");
     assert.deepEqual(await controller.call(ready, AbortSignal.timeout(1000)), result, "lost readiness response replays after epoch advances");
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
+});
+
+test("opt-in helper provider isolation accepts only a distinct configured instance and owned provider sessions", async () => {
+  const configuredInstanceId = "supervisor-helpers-20348";
+  const register = async (variant: "isolated" | "wrong-instance" | "same-instance" | "shared-session" | "missing-session" | "missing-owner") => {
+    const f = await makeFixture();
+    const team = new SupervisorTeamStore(f.supervisors);
+    const reader = new WorkflowWriteController({...f.controller.options, team, helperProviderInstanceId: configuredInstanceId});
+    const controller = new SupervisorTeamController(reader, team, null);
+    const args = {...locator(f), action: "register", operationId: `register-${variant}`, memberThreadId: "isolated-helper",
+      taskId: `task-${variant}`, bootstrapRunId: `boot-${variant}`};
+    installEvidence(f, args, {toolName: workflowToolNames.team.direct[0]});
+    f.projection.thread.modelSelection = {instanceId: variant === "same-instance" ? configuredInstanceId : "codex", model: "gpt-6-luna", options: []};
+    f.projection.subagents = [{id: args.taskId, threadId: f.supervisorThreadId, runId: "supervisor-run-current", origin: "app_owned",
+      childThreadId: args.memberThreadId, status: "completed", prompt: "Bootstrap ready", result: {summary: "Bootstrap complete."}}];
+    const child = makeProjection(args.memberThreadId, f.projectId);
+    child.thread.lineage = {parentThreadId: f.supervisorThreadId, relationshipToParent: "subagent"};
+    child.thread.forkedFrom = {type: "node", nodeId: args.taskId};
+    const childInstanceId = variant === "wrong-instance" ? "codex" : configuredInstanceId;
+    child.thread.modelSelection = {instanceId: childInstanceId, model: "gpt-6-luna", options: []};
+    child.runs = [{id: args.bootstrapRunId, threadId: args.memberThreadId, ordinal: 1, status: "completed", userMessageId: "bootstrap-message",
+      requestedAt: "2026-10-16T10:00:00Z", startedAt: null, completedAt: null, rootNodeId: "boot-root"}];
+    child.messages = [{id: "bootstrap-message", threadId: args.memberThreadId, runId: args.bootstrapRunId, nodeId: "boot-root", role: "user",
+      text: "Bootstrap ready", streaming: false, createdAt: "2026-10-16T10:00:00Z", updatedAt: "2026-10-16T10:00:00Z"}];
+    const childSessionId = variant === "shared-session" ? "root-session" : variant === "missing-session" ? null : "helper-session";
+    const childOwner = variant === "missing-owner" ? null : args.memberThreadId;
+    child.providerThreads = [{id: "child-provider-thread", appThreadId: childOwner, providerSessionId: childSessionId,
+      providerInstanceId: childInstanceId}];
+    f.projection.providerThreads = [
+      {id: "root-provider-thread", appThreadId: f.supervisorThreadId, providerSessionId: "root-session", providerInstanceId: "codex"},
+      {id: "joined-child-provider-thread", appThreadId: args.memberThreadId, providerSessionId: childSessionId,
+        providerInstanceId: childInstanceId},
+    ];
+    f.projections.set(args.memberThreadId, child);
+    f.threads.push(child.thread);
+    try {
+      return {f, team, result: await controller.call(args, AbortSignal.timeout(1000)) as {status: string; reason?: string}};
+    } catch (cause) {
+      f.guidance.close();await rm(f.directory, {recursive: true, force: true});throw cause;
+    }
+  };
+
+  for (const variant of ["isolated", "wrong-instance", "same-instance", "shared-session", "missing-session", "missing-owner"] as const) {
+    const {f, team, result} = await register(variant);
+    try {
+      if (variant === "isolated") {
+        assert.equal(result.status, "ok");
+        assert.equal(team.snapshot(f.binding).members.length, 1);
+      } else {
+        assert.deepEqual(result, {status: "denied", reason: variant === "same-instance" ? "helper_provider_instance_matches_root" :
+          variant === "shared-session" ? "helper_provider_session_shared" : variant === "missing-session" || variant === "missing-owner"
+            ? "helper_provider_session_unavailable" : "helper_provider_instance_mismatch"});
+        const snapshot = team.snapshot(f.binding);
+        assert.equal(snapshot.members.length, 0, "rejected isolation evidence creates no member");
+        assert.equal(snapshot.notifications.length, 0, "rejected isolation evidence creates no helper notification");
+        assert.equal(snapshot.events.filter(event => event.kind === "service_attention" && event.targetThreadId === "isolated-helper").length, 1,
+          "the rejected helper attempt raises one root-attention event");
+      }
+      assert.equal(f.projectionCalls.filter(id => id === f.supervisorThreadId).length, 2);
+      assert.equal(f.projectionCalls.filter(id => id === "isolated-helper").length, 1);
+    } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
+  }
 });
 
 test("helper guidance uses native steer only and retains uncertain identity across a handover", async () => {

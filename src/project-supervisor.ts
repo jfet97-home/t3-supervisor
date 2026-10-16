@@ -100,7 +100,7 @@ export class ProjectSupervisor {
       this.conversation = new SupervisorConversation(store, operateRpc, (threadId, signal) => this.projection(threadId, signal), definitions,
         (thread, threads) => this.eligible(thread, threads), projectId => this.projectEnabled(projectId), this.workflowStates,
         thread => !isSupervisorThread(config, thread) && !thread.archivedAt && !thread.deletedAt, this.team,
-        this.helperTransport);
+        this.helperTransport, config.helperProviderInstanceId);
       this.lifecycle = new SupervisorLifecycle(store, this.conversation, (id, signal) => this.projection(id, signal), operateRpc, this.workflowStates);
     }
   private async serial<A>(projectId: string, work: () => Promise<A>): Promise<A> {

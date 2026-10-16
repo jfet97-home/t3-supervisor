@@ -42,6 +42,7 @@ export type WorkflowNativeAccess = {
 
 export type WorkflowWriteControllerOptions = {
   supervisors: ProjectSupervisorStore;
+  helperProviderInstanceId?: string;
   team?: SupervisorTeamStore;
   workflows: WorkflowStateStore;
   native: WorkflowNativeAccess;
