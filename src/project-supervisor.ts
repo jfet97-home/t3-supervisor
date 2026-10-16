@@ -85,6 +85,7 @@ export class ProjectSupervisor {
   private bindingOffset = 0;
   teamEffects: {reconcile(binding: BindingRecord, signal: AbortSignal): Promise<void>} | null = null;
   readonly team: SupervisorTeamStore;
+  readonly helperTransport: SupervisorHelperTransport;
   readonly conversation: SupervisorConversation;
   readonly lifecycle: SupervisorLifecycle;
   readonly workflowStates: WorkflowStateStore;
@@ -93,11 +94,13 @@ export class ProjectSupervisor {
     readonly activationSnapshot: (signal: AbortSignal) => Promise<SupervisorBaseline>,
     readonly definitions?: ProjectSupervisorDefinitions, private readonly now: () => number = Date.now) {
       this.team = new SupervisorTeamStore(store);
+      this.helperTransport = new SupervisorHelperTransport({store, rpc: operateRpc, baseUrl: config.t3Url,
+        projection: (threadId, signal) => this.projection(threadId, signal)});
       this.workflowStates = new WorkflowStateStore(store, projectId => this.workflowEditingEnabled(projectId));
       this.conversation = new SupervisorConversation(store, operateRpc, (threadId, signal) => this.projection(threadId, signal), definitions,
         (thread, threads) => this.eligible(thread, threads), projectId => this.projectEnabled(projectId), this.workflowStates,
         thread => !isSupervisorThread(config, thread) && !thread.archivedAt && !thread.deletedAt, this.team,
-        new SupervisorHelperTransport({store, rpc: operateRpc, baseUrl: config.t3Url, projection: (threadId, signal) => this.projection(threadId, signal)}));
+        this.helperTransport);
       this.lifecycle = new SupervisorLifecycle(store, this.conversation, (id, signal) => this.projection(id, signal), operateRpc, this.workflowStates);
     }
   private async serial<A>(projectId: string, work: () => Promise<A>): Promise<A> {
@@ -140,6 +143,29 @@ export class ProjectSupervisor {
   }
   private async projection(threadId: string, signal: AbortSignal): Promise<Projection> {return (await Effect.runPromise(this.t3.projection(threadId), {signal})).projection;}
   private async models(signal: AbortSignal) {return supervisorModels(await this.readRpc("server.getConfig", {}, signal));}
+  private async prepareMissingRootTeam(binding: BindingRecord, signal: AbortSignal): Promise<"ready" | "present_helper" | "unavailable" | "disabled"> {
+    let presentHelper = false;
+    const members = this.team.snapshot(binding).members.filter(member => member.state === "ready" || member.state === "registering");
+    for (const member of members) {
+      if (!this.projectEnabled(binding.projectId)) return "disabled";
+      let helper: Projection;
+      try {helper = await this.projection(member.threadId, signal);}
+      catch (cause) {
+        if (!(cause instanceof T3TransportError) || cause.httpStatus !== 404) return "unavailable";
+        if (!await this.helperTransport.retire(binding, member.threadId, signal)) return "unavailable";
+        try {this.team.markMissing(binding, member.threadId);}
+        catch {return "unavailable";}
+        continue;
+      }
+      if (helper.thread.id !== member.threadId || helper.thread.lineage.parentThreadId !== binding.threadId ||
+        helper.thread.lineage.relationshipToParent !== "subagent") return "unavailable";
+      if (!unavailable(helper.thread)) {presentHelper = true;continue;}
+      if (!await this.helperTransport.retire(binding, member.threadId, signal)) return "unavailable";
+      try {this.team.markMissing(binding, member.threadId);}
+      catch {return "unavailable";}
+    }
+    return presentHelper ? "present_helper" : "ready";
+  }
   async scopeSnapshot(projectId: string, mainThreadId: string, signal: AbortSignal,
     options?: ProjectSupervisorScopeSnapshotOptions): Promise<ProjectSupervisorScopeSnapshot> {
     const observedAt = this.now();
@@ -646,8 +672,13 @@ export class ProjectSupervisor {
           catch (cause) {if (!(cause instanceof T3TransportError) || cause.httpStatus !== 404) return {status: "unavailable", message: "T3 could not confirm that the conversation is missing.", snapshot: null};}
           if (!validModelSelection(settings.modelSelection, await this.models(signal))) return {status: "invalid", message: "Choose an available model before replacing a deleted conversation.", snapshot: null};
           if (!this.projectEnabled(input.projectId)) return {status: "unavailable", message: "Supervision was disabled before replacement; retained work was left unchanged.", snapshot: null};
-          if (this.team.hasBlockingWork(binding) || this.team.snapshot(binding).members.some(member => member.state === "ready" || member.state === "registering"))
-            return {status: "unavailable", message: "The Supervisor team still has live members or unresolved handovers/effects. Reconcile and retire them before replacing the root; their identities are retained.", snapshot: null};
+          const teamRecovery = await this.prepareMissingRootTeam(binding, signal);
+          if (teamRecovery === "disabled") return {status: "unavailable", message: "Supervision was disabled before replacement; retained work was left unchanged.", snapshot: null};
+          if (teamRecovery === "present_helper") return {status: "unavailable", message: "A registered helper is still present in T3. The missing root was not replaced; archive or delete the helper, or quarantine and retire it while the root is available, then retry. No helper was treated as missing.", snapshot: null};
+          if (teamRecovery !== "ready") return {status: "unavailable", message: "T3 could not verify every registered helper or retire its verified webhook job. The missing root was not replaced; restore native access and retry.", snapshot: null};
+          const teamSnapshot = this.team.snapshot(binding);
+          if (teamSnapshot.assignments.some(assignment => assignment.state === "transferring") || this.team.unresolvedRequests(binding).length)
+            return {status: "unavailable", message: "The Supervisor team still has unresolved handover state or native effects. Their original identities and history remain retained; reconcile them before replacing the root.", snapshot: null};
           const previousBinding = binding;
           binding = this.store.replaceMissingBinding(binding, settings.modelSelection);
           for (const job of this.store.tasksFor(previousBinding)) if (["queued", "dispatching", "waiting", "uncertain"].includes(job.status)) this.complete(job, "unavailable", null, "The bound Supervisor conversation was deleted; its request identity remains retained.");

@@ -120,7 +120,33 @@ test("native RPC preserves durable rejection identity through nested command fai
 
   await assert.rejects(
     makeSupervisorRpc(url, "durable-rejection-token")("orchestration.launchThread", { commandId: "stable-command" }, AbortSignal.timeout(1500)),
-    (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && cause.definiteRejection && !cause.providerDisabled && !cause.message.includes("durable-rejection-token"),
+    (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && cause.definiteRejection && !cause.providerDisabled &&
+      !cause.dispatchCommandFailure && !cause.message.includes("durable-rejection-token"),
+  );
+});
+
+test("native RPC marks only the received dispatch-command failure for same-ID reconciliation", async (t) => {
+  const { server, url } = await startServer();
+  t.after(() => closeServer(server));
+  server.on("connection", (socket) => socket.once("message", (data) => {
+    const request: unknown = JSON.parse(data.toString());
+    assert.ok(typeof request === "object" && request !== null);
+    const tag = (request as Record<string, unknown>).tag;
+    socket.send(JSON.stringify({
+      _tag: "Exit",
+      requestId: "supervisor",
+      exit: { _tag: "Failure", cause: { _tag: "Fail", failure: { _tag: tag === "orchestration.dispatchCommand"
+        ? "OrchestrationV2DispatchCommandError" : "UnrelatedServerError" } } },
+    }));
+  }));
+
+  await assert.rejects(
+    makeSupervisorRpc(url, "dispatch-failure-token")("orchestration.dispatchCommand", {commandId: "same-command"}, AbortSignal.timeout(1500)),
+    (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "uncertain" && !cause.definiteRejection && cause.dispatchCommandFailure,
+  );
+  await assert.rejects(
+    makeSupervisorRpc(url, "generic-failure-token")("server.getConfig", {}, AbortSignal.timeout(1500)),
+    (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "uncertain" && !cause.dispatchCommandFailure,
   );
 });
 

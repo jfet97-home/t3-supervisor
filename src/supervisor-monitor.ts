@@ -38,6 +38,7 @@ export type SupervisorMonitorActivityItem = SupervisorMonitorActivity;
 
 export interface SupervisorMonitorThreadBatch {
   threadId: string;
+  teamCoverageState?: "root" | "transferring" | "unavailable";
   trigger: SupervisorMonitorTrigger;
   finalizedActivityCount: number;
   pendingItemCount: number;

@@ -101,7 +101,7 @@ const progressSnapshot: WorkflowProgressSnapshot = {
     bindingGeneration: 4,
     observedAt: 1_800_000_000_090,
     complete: true,
-    lineageTotal: 5,
+    lineageTotal: 6,
     lineageOffset: 0,
     lineageHasMore: false,
     issues: [],
@@ -113,6 +113,7 @@ const progressSnapshot: WorkflowProgressSnapshot = {
       {threadId: "child-two", parentThreadId: "task-thread", depth: 1, origin: "delegated_child", lifecycle: "completed", lifecycleDetail: "completed", archivedAt: null, deletedAt: null, activityRefs: [], contactLimit: "Terminal child; route follow-up through the parent."},
       {threadId: "failed-native", parentThreadId: "task-thread", depth: 1, origin: "native_child", lifecycle: "interrupted", lifecycleDetail: "failed", archivedAt: null, deletedAt: null, activityRefs: [], contactLimit: "Terminal child; route follow-up through the parent."},
       {threadId: "cancelled-delegated", parentThreadId: "task-thread", depth: 1, origin: "delegated_child", lifecycle: "interrupted", lifecycleDetail: "cancelled", archivedAt: null, deletedAt: null, activityRefs: [], contactLimit: "Terminal child; route follow-up through the parent."},
+      {threadId: "unreported-child", parentThreadId: "task-thread", depth: 1, origin: "delegated_child", lifecycle: "unknown", lifecycleDetail: null, archivedAt: null, deletedAt: null, activityRefs: [], contactLimit: "Unknown; route through the parent."},
     ],
   },
   incompatibleWorkflows: [],
@@ -225,6 +226,20 @@ test("Supervisor team stays distinct from operational workflows and shows member
       lastAssessment: {summary: "The child tests found a missing case.", assessedAt: 1_800_000_000_180},
       pendingHandovers: [{targetThreadId: "child-two", targetTitle: "Integration subtree", direction: "outgoing", state: "uncertain", summary: "Delivery outcome is still being reconciled.", updatedAt: 1_800_000_000_190}],
       issues: [{id: "issue-1", severity: "critical", summary: "A required test failed.", observedAt: 1_800_000_000_185}],
+    }, {
+      threadId: "quarantined-helper",
+      title: "Quarantined helper",
+      model: null,
+      readiness: "unavailable",
+      lifecycle: "quarantined",
+      assignments: [],
+      currentState: "Quarantined: the root owns its former operational coverage; unresolved writes and notices remain fenced, and the native conversation may still exist or run.",
+      lastAssessment: null,
+      pendingHandovers: [
+        {targetThreadId: "child-three", targetTitle: "Release subtree", direction: "incoming", state: "delivered", summary: "Notice delivered, awaiting acknowledgment.", updatedAt: 1_800_000_000_198},
+        {targetThreadId: "child-four", targetTitle: "Build subtree", direction: "outgoing", state: "failed", summary: "Native delivery was definitely rejected.", updatedAt: 1_800_000_000_199},
+      ],
+      issues: [],
     }],
     issues: [{id: "team-issue-1", severity: "warning", summary: "The handover has not been acknowledged.", observedAt: 1_800_000_000_195}],
   };
@@ -246,9 +261,14 @@ test("Supervisor team stays distinct from operational workflows and shows member
   assert.match(html, /Last assessment: The child tests found a missing case/);
   assert.match(html, /Pending handovers/);
   assert.match(html, /Delivery outcome is still being reconciled/);
+  assert.match(html, /Quarantined/);
+  assert.match(html, /Delivered; acknowledgment pending/);
+  assert.match(html, /Delivery definitely failed; root recovery required/);
+  assert.match(html, /the native conversation may still exist or run/);
   assert.match(html, /A required test failed/);
   assert.match(html, /The team snapshot is incomplete/);
   assert.match(html, /Root-to-helper notes and routine check-ins use Supervisor team operations/);
+  assert.match(html, /Quarantine revokes a helper’s Supervisor authority/);
   assert.match(html, /Maximum helpers per root/);
   assert.match(html, /0 disables new recruitment/);
   assert.doesNotMatch(html, /memberEpoch|assignmentEpoch/);
@@ -837,14 +857,15 @@ test("live progress separates the current workflow from agreement history and pr
   assert.doesNotMatch(html, /accept workflow|send workflow/i);
 });
 
-test("operational rows distinguish root, helper, transfer, unknown and missing assignment data", () => {
+test("operational rows distinguish root, helper, observe-only, transfer, unknown and missing assignment data", () => {
   const withCoverage: WorkflowProgressSnapshot = {
     ...progressSnapshot,
     coverage: [
       {threadId: "task-thread", state: "root", assigneeThreadId: null, assigneeTitle: null, assignmentRootThreadId: null},
       {threadId: "child-one", state: "assigned", assigneeThreadId: "helper-thread-1", assigneeTitle: "Testing helper", assignmentRootThreadId: "child-one"},
       {threadId: "child-two", state: "transfer", assigneeThreadId: null, assigneeTitle: null, assignmentRootThreadId: "child-two"},
-      {threadId: "failed-native", state: "unknown", assigneeThreadId: null, assigneeTitle: null, assignmentRootThreadId: null},
+      {threadId: "failed-native", state: "observe_only", assigneeThreadId: "supervisor-thread", assigneeTitle: "Root Supervisor", assignmentRootThreadId: "failed-native"},
+      {threadId: "cancelled-delegated", state: "unknown", assigneeThreadId: null, assigneeTitle: null, assignmentRootThreadId: null},
     ],
   };
   const html = renderToStaticMarkup(createElement(WorkflowProgressPanel, {
@@ -855,6 +876,7 @@ test("operational rows distinguish root, helper, transfer, unknown and missing a
   assert.match(html, /Assigned to:<\/strong> Supervisor root \(unassigned operational work\)/);
   assert.match(html, /href="t3-thread:\/\/v1\/helper-thread-1">Testing helper<\/a>/);
   assert.match(html, /Assigned to:<\/strong> Handover in progress/);
+  assert.match(html, /href="t3-thread:\/\/v1\/supervisor-thread">Root Supervisor<\/a> · observe-only while unresolved effects block writes/);
   assert.match(html, /Assigned to:<\/strong> Unknown; the current owner could not be confirmed/);
   assert.match(html, /Assigned to:<\/strong> Not reported in this snapshot/);
 });

@@ -139,6 +139,31 @@ test("workflow progress reuses the owner-bound reader and returns only current s
   assert.deepEqual(Schema.decodeUnknownSync(WorkflowProgressSnapshotSchema)(result), result);
 });
 
+test("workflow progress keeps root identity visible for observe-only coverage without turning other unavailable owners into root", async () => {
+  const base = readerResult();
+  const workflowReader = {read: async () => ({...base, coverage: [
+    {threadId: "child-thread", actorThreadId: "supervisor-thread", actorTitle: "Root Supervisor", state: "unavailable" as const,
+      memberEpoch: null, assignmentRootThreadId: "child-thread", assignmentEpoch: 9},
+    {threadId: "main-thread", actorThreadId: "another-actor", actorTitle: null, state: "unavailable" as const,
+      memberEpoch: null, assignmentRootThreadId: null, assignmentEpoch: null},
+  ]})} as unknown as WorkflowWriteController;
+  const supervision = {
+    workflowLocator: () => ({supervisorThreadId: "supervisor-thread", bindingGeneration: 7}),
+    scopeSnapshot: async () => scopeSnapshot(),
+  } as unknown as ProjectSupervisor;
+
+  const result = await readWorkflowProgressPage(supervision, workflowReader, {
+    projectId: "project", mainThreadId: "main-thread", workflowOffset: 0, lineageOffset: 0, limit: 20,
+  }, AbortSignal.timeout(1000));
+
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.coverage, [
+    {threadId: "child-thread", state: "observe_only", assigneeThreadId: "supervisor-thread", assigneeTitle: "Root Supervisor", assignmentRootThreadId: "child-thread"},
+    {threadId: "main-thread", state: "unknown", assigneeThreadId: null, assigneeTitle: null, assignmentRootThreadId: null},
+  ]);
+  assert.deepEqual(Schema.decodeUnknownSync(WorkflowProgressSnapshotSchema)(result), result);
+});
+
 test("workflow progress preserves scope limitations when the binding is missing or changes during the read", async () => {
   let readerCalls = 0;
   const query = {projectId: "project", mainThreadId: "main-thread", workflowOffset: 0, lineageOffset: 0, limit: 20};

@@ -171,6 +171,102 @@ test("confirmed member loss releases coverage but fences targets with unresolved
   f.team.acknowledgeEvent(f.binding, f.binding.threadId, missing.id, 24);
 });
 
+test("quarantine fences a present helper, preserves uncertain handovers and guide effects, then permits retirement", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const first = member(f.team, f.binding, "helper-quarantined", 1);
+  const second = member(f.team, f.binding, "helper-next", 10);
+  activate(f.team, f.binding, "branch-a", first.threadId, 20);
+  const coverage = f.team.coverage(f.binding, "leaf-a", parents);
+  const request = f.team.recordRequest(f.binding, {requestId: "guide-quarantined", memberThreadId: first.threadId, memberEpoch: first.epoch,
+    targets: [{targetThreadId: "leaf-a", assignmentRootThreadId: "branch-a", assignmentEpoch: coverage.assignmentEpoch!}], parentById: parents, now: 30});
+  f.team.setRequestState(f.binding, first.threadId, request.requestId, first.epoch, "uncertain", 31);
+  const transfer = f.team.beginTransfer(f.binding, "branch-a", second.threadId, parents, 32);
+  const handovers = f.team.snapshot(f.binding).notifications.filter(value => value.assignmentRootThreadId === "branch-a" && value.assignmentEpoch === transfer.epoch);
+  const release = handovers.find(value => value.kind === "handover_release");
+  const receive = handovers.find(value => value.kind === "handover_receive");
+  assert.ok(release && receive);
+  f.team.updateNotificationDelivery(f.binding, f.binding.threadId, release.id, "sending", 33);
+  f.team.updateNotificationDelivery(f.binding, f.binding.threadId, release.id, "uncertain", 34);
+
+  const quarantined = f.team.quarantineMember(f.binding, first.threadId, 35);
+  assert.equal(quarantined.state, "quarantined");
+  assert.equal(quarantined.epoch, first.epoch + 1);
+  assert.equal(f.team.quarantineMember(f.binding, first.threadId, 36).epoch, quarantined.epoch, "repeat quarantine is idempotent");
+  assert.equal(f.team.bindingForActor(first.threadId, f.binding.generation), null);
+  assert.equal(f.team.resolveActor(f.binding, first.threadId, first.epoch), null);
+  assert.throws(() => f.team.setRequestState(f.binding, first.threadId, request.requestId, first.epoch, "settled", 37), /supervisor_team_actor_stale/u);
+  assert.throws(() => f.team.acknowledgeNotification(f.binding, first.threadId, release.id, first.epoch, 37), /supervisor_team_actor_stale/u);
+  assert.equal(f.team.retryFailedNotifications(f.binding, first.threadId, 37), 0);
+  assert.equal(f.team.unresolvedRequests(f.binding).find(value => value.requestId === request.requestId)?.state, "uncertain");
+  assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === release.id)?.state, "uncertain");
+  assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === receive.id)?.state, "superseded",
+    "a never-sent receive notice is superseded, not acknowledged");
+  const rootAssignment = f.team.snapshot(f.binding).assignments.find(value => value.subtreeRootThreadId === "branch-a");
+  assert.equal(rootAssignment?.memberThreadId, null);
+  assert.equal(rootAssignment?.state, "active");
+  assert.equal(rootAssignment?.epoch, transfer.epoch + 1);
+  assert.equal(rootAssignment?.fromMemberThreadId, undefined);
+  assert.equal(f.team.coverage(f.binding, "leaf-a", parents).state, "unavailable", "unknown guide effects remain fenced");
+  assert.equal(f.team.authorizeWrite(f.binding, f.binding.threadId, "leaf-a", parents), false);
+  assert.equal(f.team.retireMember(f.binding, first.threadId, 38).state, "retired");
+  assert.equal(f.team.snapshot(f.binding).events.some(event => event.kind === "member_quarantined" && event.severity === "attention"), true);
+
+  f.team.settleRequest(f.binding, request.requestId, 39);
+  const nextTransfer = f.team.assign(f.binding, "branch-a", second.threadId, parents, 40);
+  assert.equal(nextTransfer.state, "transferring");
+  assert.throws(() => f.team.completeTransfer(f.binding, "branch-a", nextTransfer.epoch, 41), /supervisor_team_handover_unacknowledged/u,
+    "a later assignment still requires its own receive acknowledgement");
+  const nextReceive = f.team.snapshot(f.binding).notifications.find(value => value.assignmentRootThreadId === "branch-a" &&
+    value.assignmentEpoch === nextTransfer.epoch && value.kind === "handover_receive");
+  assert.ok(nextReceive);
+  f.team.updateNotificationDelivery(f.binding, f.binding.threadId, nextReceive.id, "sending", 42);
+  f.team.updateNotificationDelivery(f.binding, f.binding.threadId, nextReceive.id, "delivered", 43);
+  f.team.acknowledgeNotification(f.binding, second.threadId, nextReceive.id, second.epoch, 44);
+  f.team.completeTransfer(f.binding, "branch-a", nextTransfer.epoch, 45);
+  assert.equal(f.team.coverage(f.binding, "leaf-a", parents).actorThreadId, second.threadId);
+});
+
+test("definite notification failure is latched and only explicit retry creates a fresh attempt", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const helper = member(f.team, f.binding, "helper-notification-retry", 1);
+  const assignment = f.team.assign(f.binding, "branch-a", helper.threadId, parents, 10);
+  const receive = f.team.snapshot(f.binding).notifications.find(value => value.assignmentRootThreadId === "branch-a" &&
+    value.assignmentEpoch === assignment.epoch && value.kind === "handover_receive");
+  assert.ok(receive);
+  assert.equal(receive.deliveryAttempt, 0);
+  f.team.updateNotificationDelivery(f.binding, f.binding.threadId, receive.id, "sending", 11);
+  const failed = f.team.markNotificationRejected(f.binding, f.binding.threadId, receive.id, "native_definite_rejection", 0, 12);
+  assert.equal(failed.state, "failed");
+  assert.equal(failed.deliveryAttempt, 0);
+  assert.equal(failed.failureReason, "native_definite_rejection");
+  assert.throws(() => f.team.acknowledgeNotification(f.binding, helper.threadId, receive.id, helper.epoch, 13, 0),
+    /supervisor_team_notification_not_delivered/u);
+
+  const note = f.team.note(f.binding, {eventId: "uncertain-note-event", notificationId: "uncertain-note", memberThreadId: helper.threadId,
+    memberEpoch: helper.epoch, message: "Keep this uncertain notice unchanged.", now: 14});
+  f.team.updateNotificationDelivery(f.binding, f.binding.threadId, note.id, "sending", 15);
+  f.team.updateNotificationDelivery(f.binding, f.binding.threadId, note.id, "uncertain", 16);
+  assert.equal(f.team.retryFailedNotifications(f.binding, helper.threadId, 17), 1);
+  const retried = f.team.snapshot(f.binding).notifications.find(value => value.id === receive.id);
+  assert.equal(retried?.state, "pending");
+  assert.equal(retried?.deliveryAttempt, 1);
+  assert.equal(retried?.failureReason, undefined);
+  const unchanged = f.team.snapshot(f.binding).notifications.find(value => value.id === note.id);
+  assert.equal(unchanged?.state, "uncertain");
+  assert.equal(unchanged?.deliveryAttempt, 0);
+  assert.throws(() => f.team.markNotificationRejected(f.binding, f.binding.threadId, receive.id, "stale_failure", 0, 18),
+    /supervisor_team_notification_attempt_conflict/u);
+  assert.throws(() => f.team.updateNotificationDelivery(f.binding, f.binding.threadId, receive.id, "uncertain", 18, 0),
+    /supervisor_team_notification_attempt_conflict/u);
+  assert.throws(() => f.team.acknowledgeNotification(f.binding, helper.threadId, receive.id, helper.epoch, 18, 0),
+    /supervisor_team_notification_attempt_conflict/u);
+  f.team.updateNotificationDelivery(f.binding, f.binding.threadId, receive.id, "sending", 19);
+  f.team.updateNotificationDelivery(f.binding, f.binding.threadId, receive.id, "delivered", 20);
+  f.team.acknowledgeNotification(f.binding, helper.threadId, receive.id, helper.epoch, 21, 1);
+  f.team.completeTransfer(f.binding, "branch-a", assignment.epoch, 22);
+  assert.equal(f.team.coverage(f.binding, "leaf-a", parents).actorThreadId, helper.threadId);
+});
+
 test("helper limit uses project settings, permits zero, and retains idle reusable helpers", async t => {
   const f = await fixture();t.after(f.cleanup);
   assert.equal(f.team.settings(f.binding).maxHelpersPerRoot, 5);

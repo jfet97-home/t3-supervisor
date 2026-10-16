@@ -8,6 +8,9 @@ export type SupervisorHelperSendResult = "waiting" | "busy" | "uncertain" | "rej
 type Channel = {taskId: string; helperThreadId: string; createdAt: string | null; state: "creating" | "ready" | "retiring" | "retired"};
 type Delivery = SupervisorHelperMessage & {hash: string; taskId: string; state: "posting" | "posted" | "rejected"; nativeDeliveryId?: string};
 const promptTemplate = "{{body.text}}";
+const MAX_WEBHOOK_DELIVERY_DETAILS = 5;
+const rejectedWebhookOutcomes = new Set(["dispatch_failed", "rejected_signature", "disabled", "rate_limited", "expired"]);
+const preRenderRejectionOutcomes = new Set(["rejected_signature", "disabled", "rate_limited", "expired"]);
 
 /** Uses a genuine native webhook task, without timers or repeated tasks on the root. */
 export class SupervisorHelperTransport {
@@ -47,6 +50,39 @@ export class SupervisorHelperTransport {
     if (!record(result) || !Array.isArray(result.tasks) || !result.tasks.every(record)) throw new Error("native_helper_channels_unavailable");
     return result.tasks;
   }
+  private async resolveWebhookDelivery(delivery: Delivery, signal: AbortSignal): Promise<{id: string; outcome: string} | null> {
+    const result = await this.options.rpc!("scheduledTasks.listWebhookDeliveries", {id: delivery.taskId}, signal);
+    if (!record(result) || !Array.isArray(result.deliveries) || !result.deliveries.every(record)) return null;
+    if (delivery.nativeDeliveryId) {
+      const summary = result.deliveries.find(item => item.id === delivery.nativeDeliveryId && item.taskId === delivery.taskId);
+      return summary && typeof summary.outcome === "string" ? {id: delivery.nativeDeliveryId, outcome: summary.outcome} : null;
+    }
+
+    const expectedBody = JSON.stringify({batchId: delivery.messageId, text: delivery.text});
+    const expectedBodyBytes = new TextEncoder().encode(expectedBody).length;
+    const candidates = result.deliveries.filter(item => item.taskId === delivery.taskId && item.method === "POST" &&
+      item.contentType === "application/json" && item.bodyBytes === expectedBodyBytes && typeof item.id === "string");
+    if (candidates.length === 0 || candidates.length > MAX_WEBHOOK_DELIVERY_DETAILS) return null;
+
+    const bodyMatches: Array<{detail: Record<string, unknown>; outcome: string}> = [];
+    for (const summary of candidates) {
+      const value = await this.options.rpc!("scheduledTasks.getWebhookDelivery", {id: delivery.taskId, deliveryId: summary.id}, signal);
+      if (!record(value) || !record(value.delivery)) return null;
+      const detail = value.delivery;
+      if (detail.id !== summary.id || detail.taskId !== delivery.taskId || detail.receivedAt !== summary.receivedAt ||
+        detail.method !== summary.method || detail.contentType !== summary.contentType || detail.bodyBytes !== summary.bodyBytes ||
+        detail.outcome !== summary.outcome || typeof detail.body !== "string") return null;
+      if (detail.bodyTruncated === true) return null;
+      if (detail.body === expectedBody && typeof detail.outcome === "string") bodyMatches.push({detail, outcome: detail.outcome});
+    }
+    if (bodyMatches.length !== 1) return null;
+    const {detail, outcome} = bodyMatches[0]!;
+    if (!Array.isArray(detail.missingFields) || detail.missingFields.length !== 0) return null;
+    const renderedPromptMatches = detail.renderedPrompt === delivery.text;
+    const preRenderRejection = preRenderRejectionOutcomes.has(outcome) && detail.renderedPrompt === null;
+    if (!renderedPromptMatches && !preRenderRejection) return null;
+    return {id: String(detail.id), outcome};
+  }
   private owned(task: Record<string, unknown>, channel: Channel, binding: BindingRecord): boolean {
     return task.id === channel.taskId && task.threadId === channel.helperThreadId && task.projectId === binding.projectId &&
       task.prompt === promptTemplate && record(task.schedule) && task.schedule.type === "webhook" &&
@@ -74,7 +110,7 @@ export class SupervisorHelperTransport {
         schedule: {type: "webhook"}, projectId: binding.projectId, threadId: helper.thread.id, workspaceStrategy: {type: "root"},
         modelSelection: helper.thread.modelSelection, runtimeMode: helper.thread.runtimeMode, interactionMode: helper.thread.interactionMode,
         createdBy: "system", creationSource: "server"}, signal);
-      if (!record(result) || !record(result.task) || !this.owned(result.task, channel, binding)) return null;
+      if (!record(result) || !record(result.task) || result.task.enabled !== true || !this.owned(result.task, channel, binding)) return null;
       task = result.task;
     }
     if (typeof task.createdAt !== "string" || !record(task.webhook) || typeof task.webhook.path !== "string" || !task.webhook.path.startsWith("/api/hooks/")) return null;
@@ -98,16 +134,13 @@ export class SupervisorHelperTransport {
         !this.options.store.ownedIds.has(input.threadId)) return "rejected";
       if (delivery) {
         if (helper.messages.some(message => this.matchesMessage(binding, input.messageId, input.text, message))) return "waiting";
-        if (delivery.nativeDeliveryId) {
-          const observed = await this.options.rpc("scheduledTasks.listWebhookDeliveries", {id: delivery.taskId}, signal);
-          if (record(observed) && Array.isArray(observed.deliveries)) {
-            const native = observed.deliveries.find(item => record(item) && item.id === delivery.nativeDeliveryId);
-            if (record(native) && ["dispatch_failed", "rejected_signature", "disabled", "rate_limited", "expired"].includes(String(native.outcome))) {
-              this.save(binding, {...delivery, state: "rejected"});return "rejected";
-            }
-          }
+        const native = await this.resolveWebhookDelivery(delivery, signal);
+        if (native && rejectedWebhookOutcomes.has(native.outcome)) {
+          this.save(binding, {...delivery, nativeDeliveryId: native.id, state: "rejected"});return "rejected";
         }
-        return delivery.state === "posted" ? "waiting" : "uncertain";
+        if (native) this.save(binding, {...delivery, nativeDeliveryId: native.id, state: "posted"});
+        return native?.outcome === "accepted" ? "waiting" :
+          delivery.state === "posted" && delivery.nativeDeliveryId ? "waiting" : "uncertain";
       }
       if (!Array.isArray(helper.runtimeRequests) || helper.runtimeRequests.some(item => !record(item) || item.status === "pending")) return "busy";
       const channel = await this.readyChannel(binding, helper, signal);
@@ -122,8 +155,9 @@ export class SupervisorHelperTransport {
       if (response.status >= 400 && response.status < 500) {this.save(binding, {...posting, state: "rejected"});return "rejected";}
       if (!response.ok) return "uncertain";
       const result: unknown = await response.json();
-      this.save(binding, {...posting, state: "posted", ...(record(result) && typeof result.deliveryId === "string" ? {nativeDeliveryId: result.deliveryId} : {})});
-      return "waiting";
+      const nativeDeliveryId = record(result) && typeof result.deliveryId === "string" ? result.deliveryId : undefined;
+      this.save(binding, {...posting, state: "posted", ...(nativeDeliveryId ? {nativeDeliveryId} : {})});
+      return nativeDeliveryId ? "waiting" : "uncertain";
     } catch {return "uncertain";}
   }
   async retire(binding: BindingRecord, helperThreadId: string, signal: AbortSignal): Promise<boolean> {

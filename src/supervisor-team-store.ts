@@ -3,7 +3,7 @@ import type { ProjectSupervisorStore, BindingRecord } from "./project-supervisor
 import type { SupervisorModelSelection } from "./project-supervisor-contract.js";
 
 export type TeamBinding = Pick<BindingRecord, "projectId" | "mainThreadId" | "threadId" | "generation">;
-export type TeamMemberState = "registering" | "ready" | "missing" | "retired";
+export type TeamMemberState = "registering" | "ready" | "missing" | "quarantined" | "retired";
 export type TeamAssignmentState = "active" | "transferring";
 export type TeamCoverageState = "root" | "assigned" | "transferring" | "unavailable";
 
@@ -47,7 +47,7 @@ export type TeamAuthority = { actorThreadId: string; role: "root" | "helper"; me
 export type TeamExpectedAuthority = { memberEpoch?: number; assignmentRootThreadId?: string | null; assignmentEpoch?: number | null };
 
 export type TeamNotificationKind = "handover_release" | "handover_receive" | "note";
-export type TeamNotificationState = "pending" | "sending" | "uncertain" | "delivered" | "acknowledged" | "superseded";
+export type TeamNotificationState = "pending" | "sending" | "uncertain" | "delivered" | "failed" | "acknowledged" | "superseded";
 export type TeamNotification = {
   id: string;
   kind: TeamNotificationKind;
@@ -58,11 +58,13 @@ export type TeamNotification = {
   message: string;
   remainingAssignmentRoots: string[];
   state: TeamNotificationState;
+  deliveryAttempt: number;
+  failureReason?: string;
   createdAt: number;
   updatedAt: number;
 };
 
-export type TeamEventKind = "member_registered" | "member_ready" | "member_missing" | "member_retired" |
+export type TeamEventKind = "member_registered" | "member_ready" | "member_missing" | "member_quarantined" | "member_retired" |
   "service_attention" | "assignment_handover_started" | "assignment_handover_completed" | "note" | "assessment" | "escalation";
 export type TeamEvent = {
   id: string;
@@ -340,7 +342,11 @@ export class SupervisorTeamStore {
 
   private notificationsFor(binding: TeamBinding): TeamNotification[] {
     return this.supervisors.store.db.prepare("SELECT document FROM supervisor_team_notifications WHERE owner_thread_id=? AND owner_generation=? ORDER BY created_at")
-      .all(binding.threadId, binding.generation).map(row => parseDocument<TeamNotification>(row.document));
+      .all(binding.threadId, binding.generation).map(row => this.normalizeNotification(parseDocument<TeamNotification>(row.document)));
+  }
+
+  private normalizeNotification(notification: TeamNotification): TeamNotification {
+    return { ...notification, deliveryAttempt: Number.isSafeInteger(notification.deliveryAttempt) && notification.deliveryAttempt >= 0 ? notification.deliveryAttempt : 0 };
   }
 
   private saveNotification(binding: TeamBinding, notification: TeamNotification): void {
@@ -348,11 +354,11 @@ export class SupervisorTeamStore {
       .run(binding.threadId, binding.generation, notification.id, notification.recipientThreadId, notification.state, notification.createdAt, JSON.stringify(notification));
   }
 
-  private addNotification(binding: TeamBinding, input: Omit<TeamNotification, "createdAt" | "updatedAt" | "state">, now: number): TeamNotification {
+  private addNotification(binding: TeamBinding, input: Omit<TeamNotification, "createdAt" | "updatedAt" | "state" | "deliveryAttempt"> & {deliveryAttempt?: number}, now: number): TeamNotification {
     const count = Number(this.supervisors.store.db.prepare("SELECT count(*) AS n FROM supervisor_team_notifications WHERE owner_thread_id=? AND owner_generation=?")
       .get(binding.threadId, binding.generation)?.n);
     if (count >= MAX_NOTIFICATIONS) throw new Error("supervisor_team_notification_capacity");
-    const notification: TeamNotification = { ...input, state: "pending", createdAt: now, updatedAt: now };
+    const notification: TeamNotification = { ...input, deliveryAttempt: input.deliveryAttempt ?? 0, state: "pending", createdAt: now, updatedAt: now };
     this.saveNotification(binding, notification);
     return notification;
   }
@@ -493,6 +499,33 @@ export class SupervisorTeamStore {
     });
   }
 
+  quarantineMember(binding: TeamBinding, memberThreadId: string, now = Date.now()): TeamMember {
+    this.currentBinding(binding);
+    return this.atomic(() => {
+      const member = this.member(binding, memberThreadId);
+      if (!member || member.state === "retired") throw new Error("supervisor_team_member_missing");
+      if (member.state === "quarantined") return member;
+      const next: TeamMember = { ...member, state: "quarantined", epoch: member.epoch + 1, updatedAt: now };
+      this.saveMember(binding, next);
+      for (const assignment of this.assignmentsFor(binding)) {
+        const involved = assignment.memberThreadId === memberThreadId || assignment.fromMemberThreadId === memberThreadId ||
+          assignment.toMemberThreadId === memberThreadId;
+        if (!involved) continue;
+        if (assignment.state === "transferring") {
+          for (const notification of this.notificationsFor(binding).filter(value => value.assignmentRootThreadId === assignment.subtreeRootThreadId &&
+            value.assignmentEpoch === assignment.epoch && ["handover_release", "handover_receive"].includes(value.kind) && value.state === "pending"))
+            this.saveNotification(binding, { ...notification, state: "superseded", updatedAt: now });
+        }
+        this.saveAssignment(binding, { id: assignment.id, subtreeRootThreadId: assignment.subtreeRootThreadId, memberThreadId: null,
+          state: "active", epoch: assignment.epoch + 1, createdAt: assignment.createdAt, updatedAt: now });
+      }
+      this.addEvent(binding, { kind: "member_quarantined", actorThreadId: binding.threadId, memberThreadId, targetThreadId: null,
+        assignmentRootThreadId: null, summary: "A helper was explicitly quarantined; its current and future service writes are fenced, while unresolved effects remain retained.",
+        severity: "attention", createdAt: now });
+      return next;
+    });
+  }
+
   retireMember(binding: TeamBinding, memberThreadId: string, now = Date.now()): TeamMember {
     this.currentBinding(binding);
     return this.atomic(() => {
@@ -553,7 +586,8 @@ export class SupervisorTeamStore {
       if (!row) throw new Error("supervisor_team_request_missing");
       const request = parseDocument<TeamRequest>(row.document);
       const isRoot = actorThreadId === binding.threadId;
-      if (!isRoot && (actorThreadId !== request.memberThreadId || expectedMemberEpoch !== request.memberEpoch)) throw new Error("supervisor_team_actor_stale");
+      if (!isRoot && (actorThreadId !== request.memberThreadId || expectedMemberEpoch !== request.memberEpoch ||
+        !this.resolveActor(binding, actorThreadId, expectedMemberEpoch))) throw new Error("supervisor_team_actor_stale");
       if (request.state === "settled") return request;
       const next: TeamRequest = { ...request, state, updatedAt: now };
       this.supervisors.store.db.prepare("UPDATE supervisor_team_requests SET state=?,updated_at=?,document=? WHERE owner_thread_id=? AND owner_generation=? AND request_id=?")
@@ -578,7 +612,7 @@ export class SupervisorTeamStore {
       const old = this.supervisors.store.db.prepare("SELECT document FROM supervisor_team_notifications WHERE owner_thread_id=? AND owner_generation=? AND id=?")
         .get(binding.threadId, binding.generation, input.notificationId);
       if (old) {
-        const value = parseDocument<TeamNotification>(old.document);
+        const value = this.normalizeNotification(parseDocument<TeamNotification>(old.document));
         if (value.kind !== "note" || value.recipientThreadId !== input.memberThreadId || value.memberEpoch !== input.memberEpoch || value.message !== input.message)
           throw new Error("supervisor_team_notification_identity_conflict");
         return value;
@@ -624,14 +658,17 @@ export class SupervisorTeamStore {
     });
   }
 
-  updateNotificationDelivery(binding: TeamBinding, actorThreadId: string, notificationId: string, state: "sending" | "delivered" | "uncertain", now = Date.now()): TeamNotification {
+  updateNotificationDelivery(binding: TeamBinding, actorThreadId: string, notificationId: string, state: "sending" | "delivered" | "uncertain", now = Date.now(),
+    expectedDeliveryAttempt?: number): TeamNotification {
     this.currentBinding(binding);
     if (!this.resolveActor(binding, actorThreadId)) throw new Error("supervisor_team_root_actor_required");
     return this.atomic(() => {
       const row = this.supervisors.store.db.prepare("SELECT document FROM supervisor_team_notifications WHERE owner_thread_id=? AND owner_generation=? AND id=?")
         .get(binding.threadId, binding.generation, notificationId);
       if (!row) throw new Error("supervisor_team_notification_missing");
-      const value = parseDocument<TeamNotification>(row.document);
+      const value = this.normalizeNotification(parseDocument<TeamNotification>(row.document));
+      if (expectedDeliveryAttempt !== undefined && value.deliveryAttempt !== expectedDeliveryAttempt)
+        throw new Error("supervisor_team_notification_attempt_conflict");
       const allowed = value.state === state || value.state === "pending" && state === "sending" || value.state === "sending" && ["delivered", "uncertain"].includes(state) ||
         value.state === "uncertain" && ["sending", "delivered"].includes(state);
       if (!allowed || value.state === "acknowledged" || value.state === "superseded") throw new Error("supervisor_team_notification_state_conflict");
@@ -641,14 +678,17 @@ export class SupervisorTeamStore {
     });
   }
 
-  acknowledgeNotification(binding: TeamBinding, actorThreadId: string, notificationId: string, expectedMemberEpoch: number, now = Date.now()): TeamNotification {
+  acknowledgeNotification(binding: TeamBinding, actorThreadId: string, notificationId: string, expectedMemberEpoch: number, now = Date.now(),
+    expectedDeliveryAttempt?: number): TeamNotification {
     this.currentBinding(binding);
     if (!this.resolveActor(binding, actorThreadId, expectedMemberEpoch)) throw new Error("supervisor_team_actor_stale");
     return this.atomic(() => {
       const row = this.supervisors.store.db.prepare("SELECT document FROM supervisor_team_notifications WHERE owner_thread_id=? AND owner_generation=? AND id=?")
         .get(binding.threadId, binding.generation, notificationId);
       if (!row) throw new Error("supervisor_team_notification_missing");
-      const notification = parseDocument<TeamNotification>(row.document);
+      const notification = this.normalizeNotification(parseDocument<TeamNotification>(row.document));
+      if (expectedDeliveryAttempt !== undefined && notification.deliveryAttempt !== expectedDeliveryAttempt)
+        throw new Error("supervisor_team_notification_attempt_conflict");
       if (notification.recipientThreadId !== actorThreadId || notification.memberEpoch !== expectedMemberEpoch) throw new Error("supervisor_team_notification_recipient_mismatch");
       if (notification.state === "acknowledged") return notification;
       if (notification.state === "superseded") throw new Error("supervisor_team_notification_superseded");
@@ -656,6 +696,52 @@ export class SupervisorTeamStore {
       const next = { ...notification, state: "acknowledged" as const, updatedAt: now };
       this.saveNotification(binding, next);
       return next;
+    });
+  }
+
+  markNotificationRejected(binding: TeamBinding, actorThreadId: string, notificationId: string, reason: string,
+    expectedDeliveryAttempt: number, now = Date.now()): TeamNotification {
+    this.currentBinding(binding);
+    if (actorThreadId !== binding.threadId || !this.resolveActor(binding, actorThreadId)) throw new Error("supervisor_team_root_actor_required");
+    if (!isNonEmpty(reason) || reason.length > 4000 || !Number.isSafeInteger(expectedDeliveryAttempt) || expectedDeliveryAttempt < 0)
+      throw new Error("supervisor_team_invalid_notification_failure");
+    return this.atomic(() => {
+      const row = this.supervisors.store.db.prepare("SELECT document FROM supervisor_team_notifications WHERE owner_thread_id=? AND owner_generation=? AND id=?")
+        .get(binding.threadId, binding.generation, notificationId);
+      if (!row) throw new Error("supervisor_team_notification_missing");
+      const notification = this.normalizeNotification(parseDocument<TeamNotification>(row.document));
+      if (expectedDeliveryAttempt !== undefined && notification.deliveryAttempt !== expectedDeliveryAttempt)
+        throw new Error("supervisor_team_notification_attempt_conflict");
+      if (notification.state === "failed") return notification;
+      if (!["pending", "sending", "uncertain"].includes(notification.state)) throw new Error("supervisor_team_notification_state_conflict");
+      const next: TeamNotification = { ...notification, state: "failed", failureReason: reason, updatedAt: now };
+      this.saveNotification(binding, next);
+      this.addEvent(binding, { id: `notification-failed:${notification.id}:${notification.deliveryAttempt}`, kind: "service_attention",
+        actorThreadId: binding.threadId, memberThreadId: notification.recipientThreadId, targetThreadId: null,
+        assignmentRootThreadId: notification.assignmentRootThreadId,
+        summary: `A helper notification was definitively rejected: ${reason}`, severity: "attention", createdAt: now });
+      return next;
+    });
+  }
+
+  retryFailedNotifications(binding: TeamBinding, memberThreadId: string, now = Date.now()): number {
+    this.currentBinding(binding);
+    return this.atomic(() => {
+      const member = this.member(binding, memberThreadId);
+      if (!member || member.state !== "ready") return 0;
+      let retried = 0;
+      for (const notification of this.notificationsFor(binding).filter(value => value.recipientThreadId === memberThreadId && value.state === "failed")) {
+        if (notification.memberEpoch !== member.epoch) continue;
+        if (notification.assignmentRootThreadId !== null) {
+          const assignment = this.assignment(binding, notification.assignmentRootThreadId);
+          if (!assignment || assignment.state !== "transferring" || assignment.epoch !== notification.assignmentEpoch) continue;
+        }
+        const next: TeamNotification = { ...notification, state: "pending", deliveryAttempt: notification.deliveryAttempt + 1, updatedAt: now };
+        delete next.failureReason;
+        this.saveNotification(binding, next);
+        retried += 1;
+      }
+      return retried;
     });
   }
 

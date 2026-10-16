@@ -19,24 +19,51 @@ const locator = {
 const text = (maxLength: number) => ({type: "string", minLength: 1, maxLength});
 export const supervisionTeamToolDefinition = {
   name: "supervision_team",
-  description: "Read this root's flat Supervisor team. Root registers actual completed native delegate_task children, assigns operational subtrees, releases, retires or sends notes. Helpers acknowledge readiness and report significant assessments/escalations. All mutations require exact native caller proof; IDs and transport credentials alone grant no authority. Later helper check-ins are service-managed, not raw t3_thread_send.",
+  description: "Read this root's flat Supervisor team. Root registers actual completed native delegate_task children, assigns or releases operational subtrees, retires or quarantines helpers, sends notes, and retries only definite failed deliveries. Helpers acknowledge readiness and report significant assessments/escalations. All mutations require exact native caller proof; IDs and transport credentials alone grant no authority. Later helper check-ins are service-managed, not raw t3_thread_send.",
   inputSchema: {type: "object", additionalProperties: false, required: ["supervisorThreadId", "bindingGeneration", "action"], properties: {
-    ...locator, action: {type: "string", enum: ["read", "register", "assign", "release", "retire", "note", "retry", "ready", "report"]},
+    ...locator, action: {type: "string", enum: ["read", "register", "assign", "release", "retire", "quarantine", "note", "retry", "ready", "report"]},
     operationId: text(128), memberThreadId: text(512), taskId: text(512), bootstrapRunId: text(512),
     targetThreadId: text(512), summary: text(4000), reportKind: {type: "string", enum: ["assessment", "escalation", "group_result"]},
   }},
 } as const;
 export const supervisionGuideToolDefinition = {
   name: "supervision_guide",
-  description: "Guide an operational child within your CURRENT assigned subtree through the Supervisor service. Fresh native ownership, pending-input and running-turn checks apply. Only targeted steer is used on delegated children. Native/read-only or unavailable children use an in-scope eligible ancestor; cross-scope guidance escalates to the root. Unknown sends retain their identity; never retry via t3_thread_send or change route.",
+  description: "Guide an operational child within your CURRENT assigned subtree through the Supervisor service. Fresh native ownership, pending-input and running-turn checks apply. Only targeted steer is used on delegated children. After T3's specific dispatch-command failure, the service retries the exact command once with the same IDs, target and run to read its durable result. Only a definite rejection permits a fresh read and one steer to the nearest contactable ancestor in the same assignment; cross-assignment or unavailable routes escalate to the root. Accepted or uncertain sends keep their original route and identities; never retry via t3_thread_send or change route.",
   inputSchema: {type: "object", additionalProperties: false,
     required: ["supervisorThreadId", "bindingGeneration", "operationId", "targetThreadId", "text"],
     properties: {...locator, operationId: text(128), targetThreadId: text(512), text: text(12000)}},
 } as const;
 
 type Payload = WorkflowLocator & Record<string, unknown>;
-type GuideRecord = {status: "prepared" | "accepted" | "uncertain" | "delivered" | "denied"; targetThreadId: string; routedThreadId: string;
-  commandId: string; messageId: string; requestId: string; targetRunId: string; text: string; reason?: string};
+type GuideAttempt = {
+  routedThreadId: string;
+  commandId: string;
+  messageId: string;
+  targetRunId: string;
+  status: "prepared" | "replaying" | "accepted" | "uncertain" | "rejected" | "delivered";
+  dispatchFailureReplayAttempted?: boolean;
+  reason?: string;
+};
+type GuideRecord = {
+  status: "prepared" | "replaying" | "needs_fallback" | "needs_escalation" | "accepted" | "uncertain" | "delivered" | "denied" | "escalated";
+  targetThreadId: string;
+  supervisorThreadId: string;
+  bindingGeneration: number;
+  memberEpoch: number;
+  assignmentRootThreadId: string;
+  assignmentEpoch: number;
+  operationId: string;
+  routedThreadId: string;
+  commandId: string;
+  messageId: string;
+  requestId: string;
+  targetRunId: string;
+  text: string;
+  attempts: GuideAttempt[];
+  escalationSummary?: string;
+  reason?: string;
+};
+type GuideRouteSearch = {route: Projection | null; parents: ReadonlyMap<string, string | null>; reason: string | null; freshScope: boolean};
 const fail = (reason: string) => ({status: "denied", reason});
 const id = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= 512;
 const bounded = (value: unknown, max: number): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= max;
@@ -122,12 +149,17 @@ export class SupervisorTeamController {
         } else if (payload.action === "retire") {
           if (!id(payload.memberThreadId)) return fail("member_required");
           result = this.team.retireMember(binding, payload.memberThreadId);
+        } else if (payload.action === "quarantine") {
+          if (!root || !id(payload.memberThreadId)) return fail("root_authority_required");
+          result = this.team.quarantineMember(binding, payload.memberThreadId);
         } else if (payload.action === "retry") {
-          if (!id(payload.memberThreadId) || !this.requests || this.team.unresolvedRequests(binding).some(item => item.memberThreadId === payload.memberThreadId))
-            return fail("member_has_unresolved_delivery");
-          const failed = this.requests.requests(binding.projectId, payload.memberThreadId).filter(item => item.state === "failed" && !item.failureAcknowledged);
-          for (const request of failed) this.requests.saveRequest({...request, failureAcknowledged: true});
-          result = {acknowledgedFailures: failed.length};
+          if (!id(payload.memberThreadId)) return fail("member_required");
+          const pendingRequestsRemain = this.team.unresolvedRequests(binding).some(item => item.memberThreadId === payload.memberThreadId);
+          const failed = pendingRequestsRemain ? [] :
+            this.requests?.requests(binding.projectId, payload.memberThreadId).filter(item => item.state === "failed" && !item.failureAcknowledged) ?? [];
+          if (this.requests) for (const request of failed) this.requests.saveRequest({...request, failureAcknowledged: true});
+          const retriedNotifications = this.team.retryFailedNotifications(binding, payload.memberThreadId);
+          result = {acknowledgedFailures: failed.length, retriedNotifications, pendingRequestsRemain};
         } else if (payload.action === "note") {
           if (!id(payload.memberThreadId) || !bounded(payload.summary, 4000)) return fail("member_and_summary_required");
           const member = this.team.snapshot(binding).members.find(item => item.threadId === payload.memberThreadId);
@@ -153,7 +185,7 @@ export class SupervisorTeamController {
   async reconcile(binding: BindingRecord, signal: AbortSignal): Promise<void> {
     const members = this.team.snapshot(binding).members;
     const actors = new Set(members.map(member => member.threadId));
-    const rows = this.workflows.options.supervisors.store.db.prepare("SELECT actor_thread_id,actor_epoch,operation_id,document FROM supervisor_team_tool_receipts WHERE owner_thread_id=? AND binding_generation=? AND json_extract(document,'$.requestId') LIKE 'guide:%' AND json_extract(document,'$.status') IN ('prepared','accepted','uncertain') ORDER BY rowid")
+    const rows = this.workflows.options.supervisors.store.db.prepare("SELECT actor_thread_id,actor_epoch,operation_id,evidence_item_id,document FROM supervisor_team_tool_receipts WHERE owner_thread_id=? AND binding_generation=? AND json_extract(document,'$.requestId') LIKE 'guide:%' AND json_extract(document,'$.status') IN ('prepared','replaying','needs_fallback','needs_escalation','accepted','uncertain') ORDER BY rowid")
       .all(binding.threadId, binding.generation).filter(row => actors.has(String(row.actor_thread_id)));
     const offset = rows.length ? (this.reconcileOffsets.get(binding.threadId) ?? 0) % rows.length : 0;
     this.reconcileOffsets.set(binding.threadId, offset + 4);
@@ -161,12 +193,22 @@ export class SupervisorTeamController {
       if (signal.aborted) return;
       const value = JSON.parse(String(row.document)) as GuideRecord;
       try {
+        const payload = this.guidePayload(value);
+        if (value.status === "needs_fallback") {
+          await this.continueAfterDefiniteRejection(payload, binding, String(row.evidence_item_id), value, signal);
+          continue;
+        }
+        if (value.status === "needs_escalation") {
+          await this.finishRootEscalation(payload, binding, String(row.evidence_item_id), value, value.attempts?.length > 0);
+          continue;
+        }
+        if (!value.routedThreadId || !value.messageId) continue;
         const projection = await this.workflows.options.native.projection(value.routedThreadId, signal);
         const message = projection.messages.find(item => item.id === value.messageId && item.threadId === value.routedThreadId && item.text === value.text &&
           item.createdBy === "user" && item.creationSource === "server");
         if (!message) continue;
         this.atomic(() => {
-          const result = {...value, status: "delivered"};
+          const result = {...value, status: "delivered" as const};
           this.workflows.options.supervisors.store.db.prepare("UPDATE supervisor_team_tool_receipts SET document=? WHERE owner_thread_id=? AND actor_thread_id=? AND binding_generation=? AND actor_epoch=? AND operation_id=?")
             .run(JSON.stringify(result), binding.threadId, String(row.actor_thread_id), binding.generation, Number(row.actor_epoch), String(row.operation_id));
           this.team.setRequestState(binding, binding.threadId, value.requestId, 0, "settled");
@@ -194,6 +236,214 @@ export class SupervisorTeamController {
       child.runs.filter(run => run.threadId === payload.memberThreadId).sort((a, b) => a.ordinal - b.ordinal)[0]?.id !== bootstrap.id ||
       !child.messages.some(message => message.id === bootstrap.userMessageId && message.runId === bootstrap.id && message.text === task.prompt)) throw new Error("native_completed_bootstrap_not_verified");
   }
+  private guidePayload(record: GuideRecord): Payload {
+    return {supervisorThreadId: record.supervisorThreadId, bindingGeneration: record.bindingGeneration, memberEpoch: record.memberEpoch,
+      assignmentRootThreadId: record.assignmentRootThreadId, assignmentEpoch: record.assignmentEpoch, operationId: record.operationId,
+      targetThreadId: record.targetThreadId, text: record.text};
+  }
+  private guideRecord(payload: Payload, binding: BindingRecord): GuideRecord {
+    const requestId = `guide:${workflowRequestHash(payload)}`;
+    return {status: "prepared", targetThreadId: String(payload.targetThreadId), supervisorThreadId: payload.supervisorThreadId,
+      bindingGeneration: binding.generation, memberEpoch: Number(payload.memberEpoch), assignmentRootThreadId: String(payload.assignmentRootThreadId),
+      assignmentEpoch: Number(payload.assignmentEpoch), operationId: String(payload.operationId), routedThreadId: "", commandId: "", messageId: "",
+      requestId, targetRunId: "", text: String(payload.text), attempts: []};
+  }
+  private async findGuideRoute(binding: BindingRecord, payload: Payload, includeTarget: boolean, signal: AbortSignal): Promise<GuideRouteSearch> {
+    const threads = await this.workflows.options.native.listThreads(signal);
+    const scope = resolveSupervisorScope(threads, binding.projectId, binding.mainThreadId, this.workflows.options.supervisors.ownedIds);
+    const parents = parentMap(threads);
+    if (!scope.complete || !scope.main || !scope.liveIds.has(String(payload.targetThreadId)))
+      return {route: null, parents, reason: "native_scope_unavailable", freshScope: false};
+    if (!this.current(payload, binding) || !this.team.authorizeWrite(binding, payload.supervisorThreadId, String(payload.targetThreadId), parents, payload))
+      return {route: null, parents, reason: "guidance_assignment_changed", freshScope: true};
+    const actor = await this.workflows.options.native.projection(payload.supervisorThreadId, signal);
+    if (actor.thread.id !== payload.supervisorThreadId || actor.thread.archivedAt != null || actor.thread.deletedAt != null || !this.current(payload, binding))
+      return {route: null, parents, reason: "helper_identity_changed", freshScope: true};
+    const original = scope.byId.get(String(payload.targetThreadId));
+    if (!original) return {route: null, parents, reason: "target_lineage_unavailable", freshScope: true};
+    let candidate = includeTarget ? original : original.lineage.parentThreadId ? scope.byId.get(original.lineage.parentThreadId) : undefined;
+    while (candidate && candidate.id !== binding.mainThreadId) {
+      if (!scope.liveIds.has(candidate.id)) {
+        candidate = candidate.lineage.parentThreadId ? scope.byId.get(candidate.lineage.parentThreadId) : undefined;
+        continue;
+      }
+      if (!this.current(payload, binding) || !this.team.authorizeWrite(binding, payload.supervisorThreadId, String(payload.targetThreadId), parents, payload))
+        return {route: null, parents, reason: "guidance_assignment_changed", freshScope: true};
+      if (!this.team.authorizeWrite(binding, payload.supervisorThreadId, candidate.id, parents, payload))
+        return {route: null, parents, reason: "ancestor_outside_current_assignment", freshScope: true};
+      const current = await this.workflows.options.native.projection(candidate.id, signal);
+      if (current.thread.id !== candidate.id || current.thread.lineage.parentThreadId !== candidate.lineage.parentThreadId ||
+        current.thread.lineage.relationshipToParent !== candidate.lineage.relationshipToParent)
+        return {route: null, parents, reason: "target_lineage_changed", freshScope: true};
+      if (current.thread.archivedAt == null && current.thread.deletedAt == null && !hasPendingOwnerInput(current)) {
+        const parentThread = candidate.lineage.parentThreadId ? scope.byId.get(candidate.lineage.parentThreadId) : undefined;
+        const parent = parentThread ? await this.workflows.options.native.projection(parentThread.id, signal) : undefined;
+        const run = current.runs.find(item => item.id === current.thread.activeRunId && item.status === "running" &&
+          (item.threadId === undefined || item.threadId === candidate!.id));
+        if (childOrigin(current.thread, parent) === "delegated_child" && run && hasRunningProviderTurn(current, run) &&
+          canSupervisorContact(actor.thread, current.thread) && this.current(payload, binding) &&
+          this.team.authorizeWrite(binding, payload.supervisorThreadId, String(payload.targetThreadId), parents, payload) &&
+          this.team.authorizeWrite(binding, payload.supervisorThreadId, candidate.id, parents, payload)) return {route: current, parents, reason: null, freshScope: true};
+      }
+      candidate = candidate.lineage.parentThreadId ? scope.byId.get(candidate.lineage.parentThreadId) : undefined;
+    }
+    return {route: null, parents, reason: "no_contactable_ancestor_in_assignment", freshScope: true};
+  }
+  private changedAttempt(record: GuideRecord, attemptIndex: number, status: GuideAttempt["status"], reason?: string): GuideRecord {
+    const attempts = [...record.attempts];
+    const attempt = attempts[attemptIndex];
+    if (!attempt) return record;
+    attempts[attemptIndex] = {...attempt, status, ...(reason ? {reason} : {})};
+    return {...record, attempts, ...(attemptIndex === attempts.length - 1 ? {routedThreadId: attempt.routedThreadId,
+      commandId: attempt.commandId, messageId: attempt.messageId, targetRunId: attempt.targetRunId} : {})};
+  }
+  private guideCommand(attempt: GuideAttempt, textValue: string): Record<string, unknown> {
+    return {type: "message.dispatch", commandId: attempt.commandId, messageId: attempt.messageId,
+      threadId: attempt.routedThreadId, text: textValue, attachments: [], createdBy: "system", creationSource: "server",
+      dispatchMode: {type: "steer_active", targetRunId: attempt.targetRunId}};
+  }
+  private currentGuide(payload: Payload, binding: BindingRecord): GuideRecord | null {
+    const current = this.receipt(payload, binding);
+    return current ? current.value as GuideRecord : null;
+  }
+  private async finishRootEscalation(payload: Payload, binding: BindingRecord, evidenceItemId: string, record: GuideRecord,
+    requestRecorded: boolean): Promise<GuideRecord> {
+    const summary = record.escalationSummary ??
+      `A definite steer rejection left ${record.targetThreadId} without a contactable ancestor in the helper's current assignment. Root intervention is required.`;
+    const escalated: GuideRecord = {...record, status: "escalated", escalationSummary: summary, reason: "root_intervention_required"};
+    try {
+      this.atomic(() => {
+        this.team.serviceAttention(binding, {eventId: `guide-service-attention:${record.requestId}`, memberThreadId: record.supervisorThreadId,
+          targetThreadId: record.targetThreadId, summary});
+        if (requestRecorded) this.team.setRequestState(binding, binding.threadId, record.requestId, 0, "settled");
+        this.save(payload, binding, evidenceItemId, escalated);
+      });
+      return escalated;
+    } catch {
+      const pending: GuideRecord = {...record, status: "needs_escalation", escalationSummary: summary, reason: "root_attention_recording_unavailable"};
+      this.save(payload, binding, evidenceItemId, pending);
+      return pending;
+    }
+  }
+  private async continueAfterDefiniteRejection(payload: Payload, binding: BindingRecord, evidenceItemId: string, record: GuideRecord,
+    signal: AbortSignal): Promise<GuideRecord> {
+    const summary = record.escalationSummary ??
+      `A definite steer rejection left ${record.targetThreadId} without a contactable ancestor in the helper's current assignment. Root intervention is required.`;
+    try {
+      const search = await this.findGuideRoute(binding, payload, false, signal);
+      if (search.route && search.reason === null) return this.sendGuideAttempt(payload, binding, evidenceItemId, record, search.route, search.parents, signal);
+      const needsEscalation: GuideRecord = {...record, status: "needs_escalation", escalationSummary: summary,
+        reason: search.reason ?? "no_contactable_ancestor_in_assignment"};
+      this.save(payload, binding, evidenceItemId, needsEscalation);
+      return this.finishRootEscalation(payload, binding, evidenceItemId, needsEscalation, record.attempts.length > 0);
+    } catch {
+      const needsEscalation: GuideRecord = {...record, status: "needs_escalation", escalationSummary: summary, reason: "ancestor_route_read_unavailable"};
+      this.save(payload, binding, evidenceItemId, needsEscalation);
+      return this.finishRootEscalation(payload, binding, evidenceItemId, needsEscalation, record.attempts.length > 0);
+    }
+  }
+  private async sendGuideAttempt(payload: Payload, binding: BindingRecord, evidenceItemId: string, record: GuideRecord,
+    route: Projection, parents: ReadonlyMap<string, string | null>, signal: AbortSignal): Promise<GuideRecord> {
+    const targetRunId = route.thread.activeRunId;
+    if (typeof targetRunId !== "string") {
+      const needsEscalation: GuideRecord = {...record, status: "needs_escalation", escalationSummary:
+        `A definite steer rejection left ${record.targetThreadId} without a contactable ancestor in the helper's current assignment. Root intervention is required.`,
+      reason: "route_run_unavailable"};
+      this.save(payload, binding, evidenceItemId, needsEscalation);
+      return this.finishRootEscalation(payload, binding, evidenceItemId, needsEscalation, record.attempts.length > 0);
+    }
+    const reservation: {record: GuideRecord | null; attemptIndex: number} = {record: null, attemptIndex: -1};
+    this.atomic(() => {
+      const existing = this.currentGuide(payload, binding);
+      const current = existing ?? record;
+      const attempts = current.attempts ?? [];
+      if (existing && (current.status !== "needs_fallback" || attempts.length !== record.attempts.length)) {
+        reservation.record = current;
+        return;
+      }
+      if (!this.current(payload, binding) || !this.team.authorizeWrite(binding, payload.supervisorThreadId, record.targetThreadId, parents, payload) ||
+        !this.team.authorizeWrite(binding, payload.supervisorThreadId, route.thread.id, parents, payload)) throw new Error("guidance_assignment_changed");
+      reservation.attemptIndex = attempts.length;
+      const attempt: GuideAttempt = {routedThreadId: route.thread.id, commandId: `${record.requestId}:command:${reservation.attemptIndex}`,
+        messageId: `${record.requestId}:message:${reservation.attemptIndex}`, targetRunId, status: "prepared"};
+      reservation.record = {...current, status: "prepared", routedThreadId: attempt.routedThreadId, commandId: attempt.commandId,
+        messageId: attempt.messageId, targetRunId: attempt.targetRunId, attempts: [...attempts, attempt]};
+      delete reservation.record.reason;
+      delete reservation.record.escalationSummary;
+      if (attempts.length === 0) {
+        const coverage = this.team.coverage(binding, record.targetThreadId, parents);
+        this.team.recordRequest(binding, {requestId: record.requestId, memberThreadId: payload.supervisorThreadId,
+          memberEpoch: coverage.memberEpoch ?? 0, targets: [{targetThreadId: record.targetThreadId,
+            assignmentRootThreadId: coverage.assignmentRootThreadId ?? binding.mainThreadId, assignmentEpoch: coverage.assignmentEpoch ?? 0}], parentById: parents});
+      }
+      this.save(payload, binding, evidenceItemId, reservation.record);
+    });
+    const prepared = reservation.record;
+    const attemptIndex = reservation.attemptIndex;
+    if (!prepared || attemptIndex < 0) return prepared ?? record;
+    const attempt = prepared.attempts[attemptIndex]!;
+    const command = this.guideCommand(attempt, record.text);
+    const acceptedResult = (current: GuideRecord): GuideRecord => {
+      const result = {...this.changedAttempt(current, attemptIndex, "accepted"), status: "accepted" as const,
+        reason: "Native steer command accepted; late completion can still start a turn. Do not send another route."};
+      this.save(payload, binding, evidenceItemId, result);
+      return result;
+    };
+    const rejectedResult = async (current: GuideRecord, cause: unknown): Promise<GuideRecord> => {
+      const definite = cause instanceof SupervisorRpcError && cause.definiteRejection;
+      if (definite && attemptIndex === 0 && attempt.routedThreadId === record.targetThreadId) {
+        const rejected = {...this.changedAttempt(current, attemptIndex, "rejected", "native_steer_rejected"), status: "needs_fallback" as const,
+          reason: "native_steer_rejected"};
+        this.save(payload, binding, evidenceItemId, rejected);
+        return this.continueAfterDefiniteRejection(payload, binding, evidenceItemId, rejected, signal);
+      }
+      if (definite) {
+        const needsEscalation: GuideRecord = {...this.changedAttempt(current, attemptIndex, "rejected", "native_steer_rejected"),
+          status: "needs_escalation", escalationSummary:
+            `A definite steer rejection left ${record.targetThreadId} without a contactable ancestor in the helper's current assignment. Root intervention is required.`,
+          reason: "native_steer_rejected"};
+        this.save(payload, binding, evidenceItemId, needsEscalation);
+        return this.finishRootEscalation(payload, binding, evidenceItemId, needsEscalation, true);
+      }
+      const reason = cause instanceof SupervisorRpcError && cause.dispatchCommandFailure
+        ? "dispatch_failure_replay_requires_reconciliation" : "original_send_requires_reconciliation";
+      const uncertain: GuideRecord = {...this.changedAttempt(current, attemptIndex, "uncertain", reason), status: "uncertain", reason};
+      this.save(payload, binding, evidenceItemId, uncertain);
+      this.team.setRequestState(binding, binding.threadId, record.requestId, 0, "uncertain");
+      return uncertain;
+    };
+    try {
+      const receipt = await this.rpc!("orchestration.dispatchCommand", command, signal);
+      if (!isRecord(receipt) || !Number.isSafeInteger(receipt.sequence)) throw new SupervisorRpcError("uncertain");
+      return acceptedResult(prepared);
+    } catch (cause) {
+      if (!(cause instanceof SupervisorRpcError) || !cause.dispatchCommandFailure) return rejectedResult(prepared, cause);
+      const replayState: {record: GuideRecord | null; reserved: boolean} = {record: null, reserved: false};
+      this.atomic(() => {
+        const current = this.currentGuide(payload, binding) ?? prepared!;
+        const latestAttempt = current.attempts?.[attemptIndex];
+        if (!latestAttempt || latestAttempt.dispatchFailureReplayAttempted || latestAttempt.status !== "prepared") {
+          replayState.record = current;
+          return;
+        }
+        const attempts = [...current.attempts];
+        attempts[attemptIndex] = {...latestAttempt, status: "replaying", dispatchFailureReplayAttempted: true,
+          reason: "received_dispatch_command_failure"};
+        replayState.record = {...current, attempts, status: "replaying"};
+        replayState.reserved = true;
+        this.save(payload, binding, evidenceItemId, replayState.record);
+      });
+      const replaying = replayState.record;
+      if (!replayState.reserved || !replaying) return replaying ?? prepared;
+      try {
+        const receipt = await this.rpc!("orchestration.dispatchCommand", command, signal);
+        if (!isRecord(receipt) || !Number.isSafeInteger(receipt.sequence)) throw new SupervisorRpcError("uncertain");
+        return acceptedResult(replaying);
+      } catch (replayCause) {
+        return rejectedResult(this.currentGuide(payload, binding) ?? replaying, replayCause);
+      }
+    }
+  }
   async guide(input: unknown, signal: AbortSignal): Promise<unknown> {
     const payload = this.parse(input, ["operationId", "targetThreadId", "text"]);
     if (!payload || !id(payload.targetThreadId) || !bounded(payload.operationId, 128) || !bounded(payload.text, 12000)) return {status: "invalid", reason: "invalid_guidance_arguments"};
@@ -202,76 +452,62 @@ export class SupervisorTeamController {
     const binding = proof.binding;
     const prior = this.receipt(payload, binding);
     if (prior && prior.hash !== workflowRequestHash(payload)) return fail("operation_id_conflict");
-    if (prior && !["uncertain", "prepared"].includes(String(prior.value.status))) return prior.value;
     if (!this.rpc) return fail("native_guidance_unavailable");
     if (payload.supervisorThreadId === binding.threadId) return fail("helper_guidance_only_use_main_dialogue");
     try {
-      const threads = await this.workflows.options.native.listThreads(signal);
-      const scope = resolveSupervisorScope(threads, binding.projectId, binding.mainThreadId, this.workflows.options.supervisors.ownedIds);
-      const parents = parentMap(threads);
-      if (!scope.complete || !scope.liveIds.has(payload.targetThreadId)) return fail("native_scope_unavailable");
-      if (!this.current(payload, binding) || !this.team.authorizeWrite(binding, payload.supervisorThreadId, payload.targetThreadId, parents, payload))
-        return fail("guidance_outside_current_assignment");
       if (prior) {
         const original = prior.value as GuideRecord;
-        const projection = await this.workflows.options.native.projection(original.routedThreadId, signal);
-        if (projection.messages.some(message => message.id === original.messageId && message.threadId === original.routedThreadId && message.text === payload.text)) {
-          const result = {...original, status: "delivered"};this.save(payload, binding, proof.evidence.itemId, result);
-          this.team.setRequestState(binding, binding.threadId, original.requestId, 0, "settled");return result;
+        if (!Array.isArray(original.attempts)) {
+          const projection = await this.workflows.options.native.projection(original.routedThreadId, signal);
+          if (projection.messages.some(message => message.id === original.messageId && message.threadId === original.routedThreadId && message.text === payload.text)) {
+            const result = {...original, status: "delivered"};this.save(payload, binding, proof.evidence.itemId, result);
+            this.team.setRequestState(binding, binding.threadId, original.requestId, 0, "settled");return result;
+          }
+          return {...original, status: "uncertain", reason: "original_send_requires_reconciliation"};
         }
-        return {...original, status: "uncertain", reason: "original_send_requires_reconciliation"};
+        if (["accepted", "delivered", "denied", "escalated"].includes(original.status)) return prior.value;
+        if (original.status === "needs_fallback")
+          return this.continueAfterDefiniteRejection(payload, binding, proof.evidence.itemId, original, signal);
+        if (original.status === "needs_escalation")
+          return this.finishRootEscalation(payload, binding, proof.evidence.itemId, original, original.attempts.length > 0);
+        if (original.routedThreadId) {
+          const projection = await this.workflows.options.native.projection(original.routedThreadId, signal);
+          const message = projection.messages.find(item => item.id === original.messageId && item.threadId === original.routedThreadId && item.text === payload.text &&
+            item.createdBy === "user" && item.creationSource === "server");
+          if (message) {
+            const result = {...original, status: "delivered"};this.save(payload, binding, proof.evidence.itemId, result);
+            this.team.setRequestState(binding, binding.threadId, original.requestId, 0, "settled");
+            if (message.runId && message.runId !== original.targetRunId) this.team.serviceAttention(binding, {
+              eventId: `late-guide:${original.requestId}`, memberThreadId: original.supervisorThreadId, targetThreadId: original.targetThreadId,
+              summary: `The native steer reached a new run in ${original.routedThreadId} after the targeted run ended. Stop further direct guidance and assess whether its operational parent needs attention.`});
+            return result;
+          }
+        }
+        const uncertain: GuideRecord = {...original, status: "uncertain", reason: "original_send_requires_reconciliation"};
+        this.save(payload, binding, proof.evidence.itemId, uncertain);
+        return uncertain;
       }
       if (this.team.unresolvedRequests(binding).some(request => request.requestId.startsWith("guide:") &&
         request.targets.some(target => target.targetThreadId === payload.targetThreadId))) return {status: "pending", reason: "prior_guidance_requires_reconciliation"};
-      const actor = await this.workflows.options.native.projection(payload.supervisorThreadId, signal);
-      let target = scope.byId.get(payload.targetThreadId);
-      let routed: Projection | null = null;
-      while (target) {
-        if (!this.team.authorizeWrite(binding, payload.supervisorThreadId, target.id, parents, payload)) break;
-        const current = await this.workflows.options.native.projection(target.id, signal);
-        if (current.thread.id !== target.id || current.thread.lineage.parentThreadId !== target.lineage.parentThreadId ||
-          current.thread.lineage.relationshipToParent !== target.lineage.relationshipToParent) return fail("target_lineage_changed");
-        if (hasPendingOwnerInput(current)) return fail("pending_owner_input");
-        const parent = target.lineage.parentThreadId ? await this.workflows.options.native.projection(target.lineage.parentThreadId, signal) : undefined;
-        const run = current.runs.find(item => item.id === current.thread.activeRunId && item.status === "running");
-        if (target.id !== binding.mainThreadId && childOrigin(current.thread, parent) === "delegated_child" && run &&
-          hasRunningProviderTurn(current, run) && canSupervisorContact(actor.thread, current.thread)) {routed = current;break;}
-        if (target.id === binding.mainThreadId) break;
-        target = target.lineage.parentThreadId ? scope.byId.get(target.lineage.parentThreadId) : undefined;
+      const record = this.guideRecord(payload, binding);
+      const search = await this.findGuideRoute(binding, payload, true, signal);
+      if (!search.route) {
+        if (search.reason === "no_contactable_ancestor_in_assignment" || search.reason === "ancestor_outside_current_assignment")
+          this.team.escalate(binding, {eventId: `guide-escalation:${workflowRequestHash(payload)}`, actorThreadId: payload.supervisorThreadId,
+            memberEpoch: payload.memberEpoch!, targets: [{targetThreadId: payload.targetThreadId,
+              assignmentRootThreadId: payload.assignmentRootThreadId!, assignmentEpoch: payload.assignmentEpoch!}], parentById: search.parents,
+            summary: `Guidance needs root attention for ${payload.targetThreadId}: ${payload.text.slice(0, 3000)}`});
+        if (search.reason === "no_contactable_ancestor_in_assignment" || search.reason === "ancestor_outside_current_assignment")
+          return fail("no_contactable_ancestor_in_assignment_escalated");
+        return fail(search.reason ?? "no_contactable_ancestor_in_assignment_escalated");
       }
-      if (!routed) {
-        if (payload.supervisorThreadId !== binding.threadId) this.team.escalate(binding, {eventId: `guide-escalation:${workflowRequestHash(payload)}`, actorThreadId: payload.supervisorThreadId,
-          memberEpoch: payload.memberEpoch!, targets: [{targetThreadId: payload.targetThreadId,
-            assignmentRootThreadId: payload.assignmentRootThreadId!, assignmentEpoch: payload.assignmentEpoch!}], parentById: parents,
-          summary: `Guidance needs root attention for ${payload.targetThreadId}: ${payload.text.slice(0, 3000)}`});
-        return fail("no_contactable_ancestor_in_assignment_escalated");
+      if (!this.current(payload, binding) || !this.team.authorizeWrite(binding, payload.supervisorThreadId, record.targetThreadId, search.parents, payload) ||
+        !this.team.authorizeWrite(binding, payload.supervisorThreadId, search.route.thread.id, search.parents, payload)) {
+        return fail("assignment_changed");
       }
-      const coverage = this.team.coverage(binding, payload.targetThreadId, parents);
-      if (!this.current(payload, binding) || !this.team.authorizeWrite(binding, payload.supervisorThreadId, payload.targetThreadId, parents, payload) ||
-        !this.team.authorizeWrite(binding, payload.supervisorThreadId, routed.thread.id, parents, payload)) return fail("assignment_changed");
-      const requestId = `guide:${workflowRequestHash(payload)}`;
-      const record: GuideRecord = {status: "prepared", targetThreadId: String(payload.targetThreadId), routedThreadId: routed.thread.id,
-        commandId: requestId, messageId: requestId, requestId, text: payload.text, targetRunId: String(routed.thread.activeRunId)};
-      this.atomic(() => {
-        this.team.recordRequest(binding, {requestId, memberThreadId: payload.supervisorThreadId, memberEpoch: coverage.memberEpoch ?? 0,
-          targets: [{targetThreadId: String(payload.targetThreadId), assignmentRootThreadId: coverage.assignmentRootThreadId ?? binding.mainThreadId, assignmentEpoch: coverage.assignmentEpoch ?? 0}], parentById: parents});
-        this.save(payload, binding, proof.evidence.itemId, record);
-      });
-      try {
-        const receipt = await this.rpc("orchestration.dispatchCommand", {type: "message.dispatch", commandId: record.commandId, messageId: record.messageId,
-          threadId: record.routedThreadId, text: payload.text, attachments: [], createdBy: "system", creationSource: "server",
-          dispatchMode: {type: "steer_active", targetRunId: record.targetRunId}}, signal);
-        if (!isRecord(receipt) || !Number.isSafeInteger(receipt.sequence)) throw new SupervisorRpcError("uncertain");
-        const result = {...record, status: "accepted", reason: "Native steer command accepted; late completion can still start a turn. Do not send another route."};
-        this.save(payload, binding, proof.evidence.itemId, result);
-        return result;
-      } catch (cause) {
-        const definite = cause instanceof SupervisorRpcError && cause.definiteRejection;
-        const result = {...record, status: definite ? "denied" : "uncertain", reason: definite ? "native_steer_rejected" : "original_send_requires_reconciliation"};
-        this.save(payload, binding, proof.evidence.itemId, result);
-        this.team.setRequestState(binding, binding.threadId, requestId, 0, definite ? "settled" : "uncertain");
-        return result;
-      }
-    } catch {return fail("guidance_native_read_unavailable");}
+      return this.sendGuideAttempt(payload, binding, proof.evidence.itemId, record, search.route, search.parents, signal);
+    } catch {
+      return fail("guidance_native_read_unavailable");
+    }
   }
 }

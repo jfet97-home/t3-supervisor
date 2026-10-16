@@ -42,6 +42,23 @@ confirmed. Pending or uncertain notifications remain visible, and the root remai
 responsible while ownership is unresolved. An old helper may keep working on its
 remaining assignments or become idle for reuse.
 
+## Quarantine and recovery
+
+When the root must revoke a helper's service authority before normal handover can
+finish, it may use the root-only `supervision_team` action `quarantine` with fresh
+native caller proof. Quarantine advances the helper epoch and returns its assigned
+coverage to active root ownership, but keeps the root observe-only for affected
+work while unresolved writes or delivery effects remain. It preserves every
+unresolved request and every sending, sent, uncertain or delivered notification;
+only a handover notice that is still pending and has never been sent may be superseded.
+These notices remain visible until acknowledged or otherwise reconciled. A known
+definite notification failure can be retried by the root when its recipient is
+still a current ready helper and no other request blocks the retry; an uncertain
+delivery cannot. Quarantine revokes Supervisor authority; it does not stop, cancel,
+archive or delete the
+helper's native T3 conversation or any turn already running there. Retiring the
+helper is a separate action and also does not claim to stop its T3 conversation.
+
 ## Native check-in delivery
 
 Each registered helper has one genuine T3 webhook task bound to its existing child
@@ -58,7 +75,28 @@ follow-up task records or completion wakes to the root. Direct WebSocket or MCP
 helper messages have different T3 semantics. Webhook POSTs have no client idempotency
 key: an uncertain send is never posted again; the service reconciles its original
 scheduled-message identity and request text, retaining unresolved work meanwhile.
-A definite failed check-in requires the root's explicit retry or reassignment.
+A definite failed check-in or handover notification requires the root's explicit
+`retry` team action or reassignment. The retry action only starts a new attempt for
+known definite failures for a current ready helper after other unresolved requests
+settle; an uncertain notice or request keeps its original identity and remains
+fenced.
+
+## Helper guidance
+
+`supervision_guide` accepts guidance only from a ready helper in its current
+assigned subtree. The service checks fresh native scope, lineage, runtime
+questions, active provider turns and contactability. Direct guidance to a delegated
+child uses targeted active-only steer. If T3 returns the specific dispatch command
+failure, the service replays that exact command once with the same command ID,
+message ID, target and run ID to read T3's durable result. It changes route only
+after T3 confirms a definite rejection. The nearest eligible contactable ancestor
+is freshly checked and must still be inside the same assignment; a cross-assignment
+or unavailable fallback raises root attention.
+
+An accepted send, generic server failure, timeout or lost response keeps its
+original target and identities. The service does not infer rejection from an
+uncertain result and does not switch routes. If the steer reaches a later child
+run, the late-wake event is retained for root attention.
 
 ## Dashboard and messages
 
@@ -100,6 +138,11 @@ The assignment and pending notification remain visible. Unknown outcomes are
 reconciled using their original identities; they are not treated as successful or
 replayed under new identities. The root retains responsibility until coverage is
 confirmed.
+
+**What if a helper must lose authority while effects remain unresolved?**
+The root may use the native-proof `quarantine` team action. Coverage returns to
+the root, but unresolved writes and notices stay fenced and visible. This does not
+stop the helper's T3 conversation or any turn already in progress.
 
 Source behavior, staged acceptance and live deployment are separate evidence.
 Consult the Lab tracking records before making claims about an installed revision

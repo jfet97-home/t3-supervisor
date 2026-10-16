@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import type { WorkflowStateStore } from "./workflow-state-store.js";
 import { SupervisorTeamStore } from "./supervisor-team-store.js";
 import { SupervisorTeamRuntime } from "./supervisor-team-runtime.js";
-import { SupervisorHelperTransport } from "./supervisor-helper-transport.js";
+import type { SupervisorHelperDeliveryTransport } from "./supervisor-helper-transport.js";
 
 const busy = (projection: Projection) => projection.runs.some(run => ["preparing", "queued", "starting", "running", "waiting"].includes(run.status));
 const failedRunStates = new Set(["failed", "interrupted", "cancelled", "rolled_back"]);
@@ -228,7 +228,7 @@ export class SupervisorConversation {
     readonly workflows?: WorkflowStateStore,
     readonly descendantContactable: (thread: ThreadInfo, threads: readonly ThreadInfo[]) => boolean = thread => !thread.archivedAt && !thread.deletedAt,
     teamStore?: SupervisorTeamStore,
-    helperTransport?: SupervisorHelperTransport) {
+    helperTransport?: SupervisorHelperDeliveryTransport) {
     this.requests = new SupervisorConversationStore(store.store);
     this.monitor = new ProjectSupervisorMonitorStore(store.store);
     this.teamRuntime = teamStore ? new SupervisorTeamRuntime({store, teamStore, requests: this.requests, monitor: this.monitor, rpc, projection,
@@ -236,7 +236,7 @@ export class SupervisorConversation {
   }
   private roleFor(binding: BindingRecord): string {
     const teamPolicy = this.teamRuntime?.coordinatorPolicy(binding);
-    const teamRole = this.teamRuntime ? `\nRoot team coordination: Delegation is optional and useful only when parallel monitoring or context pressure warrants it. Current helper limit is ${teamPolicy!.maxHelpersPerRoot}; ready=${teamPolicy!.readyHelpers}; registering=${teamPolicy!.registeringHelpers}. Read existing membership and assignments before delegating, group related operational subtrees, and reuse ready helpers. For a new helper, inspect live T3 capabilities/models, then use native delegate_task for a short bootstrap as your direct child; inherit this root's model unless a configured T3 override is selected. Do not start a polling loop. Register only the completed native child using its exact task/thread/run evidence through t3-supervisor-workflows__supervision_team. Assign operational subtree coverage only after readiness. Helpers cannot recruit or manage other helpers. For transfer, use the service's assignment operation and allow its notices and in-flight effects to settle. Root check-ins review only the main and unassigned targets; assigned routine activity is handled by helpers. Review meaningful root events and cross-assignment escalations, keeping child assessments separate from the parent workflow. If a service-attention event reports a definite helper review/readiness failure, inspect that helper's failed request and acknowledge it with t3-supervisor-workflows__supervision_team action retry, memberThreadId, and a stable operationId before the service may start another check-in. This retry only clears a confirmed failed-request latch; it never resends an uncertain native delivery or clears unresolved guide effects. The service acknowledges only event IDs included in this request after the exact completed marker.` : "";
+    const teamRole = this.teamRuntime ? `\nRoot team coordination: Delegation is optional and useful only when parallel monitoring or context pressure warrants it. Current helper limit is ${teamPolicy!.maxHelpersPerRoot}; ready=${teamPolicy!.readyHelpers}; registering=${teamPolicy!.registeringHelpers}. Read existing membership and assignments before delegating, group related operational subtrees, and reuse ready helpers. For a new helper, inspect live T3 capabilities/models, then use native delegate_task for a short bootstrap as your direct child; inherit this root's model unless a configured T3 override is selected. Do not start a polling loop. Register only the completed native child using its exact task/thread/run evidence through t3-supervisor-workflows__supervision_team. Assign operational subtree coverage only after readiness. Helpers cannot recruit or manage other helpers. For transfer, use the service's assignment operation and allow its notices and in-flight effects to settle. Root check-ins review only the main and unassigned targets; assigned routine activity is handled by helpers. Rows marked teamCoverageState=transferring or unavailable are observe-only: describe only the visible state, do not guide or edit their workflows, and leave their monitor items pending until coverage resolves. Review meaningful root events and cross-assignment escalations, keeping child assessments separate from the parent workflow. If a service-attention event reports a definite helper review/readiness or notification delivery failure, inspect that member's status and use t3-supervisor-workflows__supervision_team action retry with memberThreadId and a stable operationId before another check-in or notification attempt; this acknowledges failed check-ins and creates a new notification identity only for confirmed native rejection. For a helper that should stop acting or remains unsafe to contact, use action quarantine: it revokes the helper epoch and releases coverage to root while preserving unresolved requests and notification outcomes. Quarantine does not confirm delivery or clear unknown guide effects. Never mark a helper missing unless native evidence confirms its conversation is unavailable. Unknown delivery identities remain unchanged. The service acknowledges only event IDs included in this request after the exact completed marker.` : "";
     let baseRole = monitoringRole;
     if (this.teamRuntime) {
       baseRole = baseRole
@@ -848,11 +848,35 @@ export class SupervisorConversation {
     if (!this.enabled(binding.projectId)) return;
     this.teamRuntime?.startCycle(binding);
     await this.teamRuntime?.reconcile(binding, threads, signal);
+    const tasks = this.store.tasks(binding.projectId).filter(task => task.status === "inferred" &&
+      (task.workflow?.status === "proposed" || task.workflow?.status === "provisional" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale") && task.supervisorThreadId === binding.threadId);
+    const taskScopes = new Map<string, {task: TaskRecord; scope: ReturnType<typeof resolveSupervisorScope>}>();
+    const eligibleThreadIds = new Set<string>();
+    for (const task of tasks) {
+      const main = threads.find(thread => thread.id === task.threadId);
+      if (!main || !this.eligible(main, threads)) continue;
+      const scope = resolveSupervisorScope(threads, binding.projectId, task.threadId, this.store.ownedIds);
+      if (!scope.main || !scope.allowedIds.has(scope.main.id)) continue;
+      eligibleThreadIds.add(task.threadId);
+      taskScopes.set(task.threadId, {task, scope});
+      for (const child of scope.descendants) if (scope.allowedIds.has(child.id) && scope.liveIds.has(child.id)) {
+        eligibleThreadIds.add(child.id);
+        taskScopes.set(child.id, {task, scope});
+      }
+    }
+    const settings = this.store.settings(binding.projectId).monitoring;
+    const now = Date.now();
+    const lastNotice = this.teamRuntime ? null : this.requests.lastNotice(binding.threadId);
+    const fullBatch = this.monitor.select(binding.projectId, settings, now, lastNotice, {eligibleThreadIds});
+    let teamPartition = this.teamRuntime?.partition(binding, threads, fullBatch) ?? {rootBatch: fullBatch, helperBatches: [], rootEvents: []};
+    await this.teamRuntime?.runHelperBatch(binding, threads, teamPartition.helperBatches, signal);
+    if (this.teamRuntime) teamPartition = this.teamRuntime.partition(binding, threads, fullBatch);
+    const rootCooldown = Boolean(this.teamRuntime && Date.now() - (this.requests.lastNotice(binding.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS);
+    const batch = rootCooldown ? null : teamPartition.rootBatch;
+    const rootEvents = teamPartition.rootEvents;
     const inflight = this.requests.pending(binding.projectId, binding.threadId);
     if (inflight) {await this.reconcile(inflight, supervisor, threads, signal);return;}
     if (!this.rpc) return;
-    const tasks = this.store.tasks(binding.projectId).filter(task => task.status === "inferred" &&
-      (task.workflow?.status === "proposed" || task.workflow?.status === "provisional" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale") && task.supervisorThreadId === binding.threadId);
     for (const task of tasks) {
       if (!this.enabled(binding.projectId)) return;
       const previous = this.requests.introduction(task.id);
@@ -920,28 +944,8 @@ export class SupervisorConversation {
       });
       await this.dispatch(this.requests.pending(binding.projectId, binding.threadId)!, signal);return;
     }
-    const settings = this.store.settings(binding.projectId).monitoring;
     if (this.requests.requests(binding.projectId, binding.threadId).some(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged)) return;
     if (await this.runDefinitionRecovery(binding, supervisor, tasks, threads, signal)) return;
-    const taskScopes = new Map<string, {task: TaskRecord; scope: ReturnType<typeof resolveSupervisorScope>}>();
-    const eligibleThreadIds = new Set<string>();
-    for (const task of tasks) {
-      const main = threads.find(thread => thread.id === task.threadId);
-      if (!main || !this.eligible(main, threads)) continue;
-      const scope = resolveSupervisorScope(threads, binding.projectId, task.threadId, this.store.ownedIds);
-      if (!scope.main || !scope.allowedIds.has(scope.main.id)) continue;
-      eligibleThreadIds.add(task.threadId);
-      taskScopes.set(task.threadId, {task, scope});
-      for (const child of scope.descendants) if (scope.allowedIds.has(child.id) && scope.liveIds.has(child.id)) {
-        eligibleThreadIds.add(child.id);
-        taskScopes.set(child.id, {task, scope});
-      }
-    }
-    const fullBatch = this.monitor.select(binding.projectId, settings, Date.now(), this.requests.lastNotice(binding.threadId), {eligibleThreadIds});
-    const teamPartition = this.teamRuntime?.partition(binding, threads, fullBatch) ?? {rootBatch: fullBatch, helperBatches: [], rootEvents: []};
-    await this.teamRuntime?.runHelperBatch(binding, threads, teamPartition.helperBatches, signal);
-    const batch = teamPartition.rootBatch;
-    const rootEvents = teamPartition.rootEvents;
     if (busy(supervisor)) return;
     if (!batch && !rootEvents.length) return;
     const included: Array<SupervisorMonitorThreadBatch & {proposalId: string; workflowProposalId: string; objective: string; draft: WorkflowProposalInfo | null | undefined; agreement: WorkflowAgreementInfo | null | undefined; definitionReview: TaskRecord["definitionReview"]; staleRecovery: boolean;
@@ -1120,7 +1124,10 @@ export class SupervisorConversation {
         if (task) {const retry = {...task};delete retry.definitionNoticeKey;this.store.saveTask(retry);}
       }
       if (confirmedCompletion && request.kind === "review") this.requests.reviewMisses(request.supervisorThreadId, true);
-      if (confirmedCompletion && request.batch) this.monitor.acknowledgeInTransaction(request.batch);
+      if (confirmedCompletion && request.batch) {
+        const batch = ownerBinding && this.teamRuntime ? this.teamRuntime.rootOwnedBatch(ownerBinding, request.batch, threads) : request.batch;
+        if (batch) this.monitor.acknowledgeInTransaction(batch);
+      }
       if (confirmedCompletion && ownerBinding && request.teamEventIds?.length) this.teamRuntime?.acknowledgeRootEvents(ownerBinding, request.teamEventIds);
     if (request.taskId && request.kind === "context") {
         const introduction = this.requests.introduction(request.taskId);

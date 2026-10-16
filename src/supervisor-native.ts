@@ -3,7 +3,8 @@ import type { SupervisorModelInfo, SupervisorModelSelection } from "./project-su
 import type { ThreadInfo } from "./types.js";
 
 export class SupervisorRpcError extends Error {
-  constructor(readonly outcome: "rejected" | "uncertain", readonly definiteRejection = false, readonly providerDisabled = false) {super("T3 Supervisor access is unavailable.");}
+  constructor(readonly outcome: "rejected" | "uncertain", readonly definiteRejection = false, readonly providerDisabled = false,
+    readonly dispatchCommandFailure = false) {super("T3 Supervisor access is unavailable.");}
 }
 export const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 512;
@@ -49,7 +50,8 @@ export const makeSupervisorRpc = (baseUrl: string, token: string) =>
           else {
             const providerDisabled = rejectedByName(frame.exit, "ThreadManagementProviderInstanceDisabledError");
             const definite = providerDisabled || rejectedByName(frame.exit, "OrchestratorCommandPreviouslyRejectedError");
-            finish(new SupervisorRpcError(definite ? "rejected" : "uncertain", definite, providerDisabled));
+            const dispatchCommandFailure = tag === "orchestration.dispatchCommand" && rejectedByName(frame.exit, "OrchestrationV2DispatchCommandError");
+            finish(new SupervisorRpcError(definite ? "rejected" : "uncertain", definite, providerDisabled, dispatchCommandFailure));
           }
         }
       } catch {abort();}

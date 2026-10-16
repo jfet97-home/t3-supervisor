@@ -1,5 +1,5 @@
 import {SupervisorTeamStore} from "../src/supervisor-team-store.js";
-import {SupervisorTeamController} from "../src/supervisor-team-controller.js";
+import {SupervisorTeamController, supervisionTeamToolDefinition} from "../src/supervisor-team-controller.js";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,6 +15,8 @@ import { workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, wo
 import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo } from "../src/project-supervisor-contract.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
+import { WebSocketServer } from "ws";
+import { makeSupervisorRpc } from "../src/supervisor-native.js";
 
 type Fixture = {
   directory: string;
@@ -1922,5 +1924,194 @@ test("helper guidance uses native steer only and retains uncertain identity acro
     assert.equal(team.unresolvedRequests(f.binding).length, 0);
     team.completeTransfer(f.binding, target.id, transfer.epoch);
     assert.equal(team.coverage(f.binding, target.id, parents).state, "root");
+  } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
+});
+
+test("helper guidance replays a received dispatch failure with the exact command before steering its nearest same-assignment ancestor", async () => {
+  const f = await makeFixture();
+  const server = new WebSocketServer({port: 0});
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const calls: Record<string, unknown>[] = [];
+  const counts = new Map<string, number>();
+  server.on("connection", socket => socket.on("message", data => {
+    const frame: unknown = JSON.parse(data.toString());
+    assert.ok(typeof frame === "object" && frame !== null);
+    const request = frame as Record<string, unknown>;
+    if (request._tag !== "Request" || request.tag !== "orchestration.dispatchCommand" || typeof request.payload !== "object" || request.payload === null) return;
+    const command = request.payload as Record<string, unknown>;
+    calls.push(command);
+    const commandId = String(command.commandId);
+    const count = (counts.get(commandId) ?? 0) + 1;
+    counts.set(commandId, count);
+    const exit = command.threadId === "guide-replay-target"
+      ? { _tag: "Failure", cause: { _tag: "Fail", failure: { _tag: count === 1
+        ? "OrchestrationV2DispatchCommandError" : "OrchestratorCommandPreviouslyRejectedError" } } }
+      : { _tag: "Success", value: {sequence: calls.length} };
+    socket.send(JSON.stringify({_tag: "Exit", requestId: request.id, exit}));
+  }));
+  try {
+    const team = new SupervisorTeamStore(f.supervisors);
+    const member = team.registerMember(f.binding, {threadId: "guide-replay-helper", taskId: "guide-replay-task", bootstrapRunId: "guide-replay-bootstrap"});
+    const ready = team.markReady(f.binding, member.threadId, member.epoch);
+    const parent = thread("guide-replay-parent", f.projectId, f.mainThreadId, "subagent");
+    const target = thread("guide-replay-target", f.projectId, parent.id, "subagent");
+    const helper = thread(member.threadId, f.projectId, f.supervisorThreadId, "subagent");
+    for (const item of [parent, target]) Object.assign(item, {creationSource: "mcp", runtimeMode: "full-access", interactionMode: "default"});
+    f.threads.push(parent, target, helper);
+    const parents = new Map(f.threads.map(item => [item.id, item.lineage.parentThreadId]));
+    const assignment = team.assign(f.binding, parent.id, member.threadId, parents);
+    for (const notification of team.snapshot(f.binding).notifications) {
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "sending");
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "delivered");
+      team.acknowledgeNotification(f.binding, member.threadId, notification.id, ready.epoch);
+    }
+    team.completeTransfer(f.binding, parent.id, assignment.epoch);
+
+    const projectionForRun = (value: ThreadInfo, runId: string) => {
+      const projection = makeProjection(value.id, f.projectId);
+      projection.thread = value;
+      projection.runtimeRequests = [];
+      projection.runs = [{id: runId, threadId: value.id, status: "running", ordinal: 1,
+        requestedAt: "2026-10-16T10:00:00Z", startedAt: null, completedAt: null, rootNodeId: `${runId}-root`, activeAttemptId: `${runId}-attempt`}];
+      projection.providerTurns = [{id: `${runId}-turn`, nodeId: `${runId}-root`, runAttemptId: `${runId}-attempt`, status: "running"}];
+      return projection;
+    };
+    parent.activeRunId = "guide-replay-parent-run";
+    target.activeRunId = "guide-replay-target-run";
+    const parentProjection = projectionForRun(parent, "guide-replay-parent-run");
+    const targetProjection = projectionForRun(target, "guide-replay-target-run");
+    const mainProjection = makeProjection(f.mainThreadId, f.projectId);
+    const own = makeProjection(member.threadId, f.projectId);
+    Object.assign(own.thread, {runtimeMode: "full-access", interactionMode: "default"});
+    f.projections.set(parent.id, parentProjection);
+    f.projections.set(target.id, targetProjection);
+    f.projections.set(f.mainThreadId, mainProjection);
+    f.projections.set(member.threadId, own);
+    const actorFixture = {...f, supervisorThreadId: member.threadId, projection: own};
+    const reader = new WorkflowWriteController({...f.controller.options, team});
+    const controller = new SupervisorTeamController(reader, team,
+      makeSupervisorRpc(`http://127.0.0.1:${address.port}`, "team-guide-test-token"));
+    const args = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: ready.epoch,
+      assignmentRootThreadId: parent.id, assignmentEpoch: assignment.epoch, operationId: "guide-replay",
+      targetThreadId: target.id, text: "Recheck the blocked test before marking this subtree complete."};
+    installEvidence(actorFixture, args, {toolName: workflowToolNames.guide.direct[0]});
+
+    const result = await controller.guide(args, AbortSignal.timeout(3000)) as {
+      status: string; attempts: Array<{routedThreadId: string; commandId: string; messageId: string; targetRunId: string; status: string; dispatchFailureReplayAttempted?: boolean}>;
+    };
+    assert.equal(result.status, "accepted");
+    assert.equal(calls.length, 3);
+    assert.deepEqual(calls[0], calls[1], "the server-failure replay must preserve the full native command payload");
+    assert.equal(JSON.stringify(calls[0]), JSON.stringify(calls[1]), "the persisted replay uses the same serialized command bytes");
+    assert.equal(calls[0]!.threadId, target.id);
+    assert.equal(calls[0]!.commandId, calls[1]!.commandId);
+    assert.equal(calls[0]!.messageId, calls[1]!.messageId);
+    assert.deepEqual(calls[0]!.dispatchMode, {type: "steer_active", targetRunId: target.activeRunId});
+    assert.equal(calls[2]!.threadId, parent.id, "fallback uses the nearest eligible ancestor in the assigned subtree");
+    assert.notEqual(calls[2]!.commandId, calls[0]!.commandId);
+    assert.notEqual(calls[2]!.messageId, calls[0]!.messageId);
+    assert.deepEqual(calls[2]!.dispatchMode, {type: "steer_active", targetRunId: parent.activeRunId});
+    assert.equal(result.attempts[0]?.dispatchFailureReplayAttempted, true);
+    assert.equal(result.attempts[0]?.status, "rejected");
+    assert.equal(result.attempts[1]?.status, "accepted");
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    f.guidance.close();
+    await rm(f.directory, {recursive: true, force: true});
+  }
+});
+
+test("root quarantine uses native team proof and preserves unresolved requests while fencing helper authority", async () => {
+  assert.ok((supervisionTeamToolDefinition.inputSchema.properties.action.enum as readonly string[]).includes("quarantine"));
+  const f = await makeFixture();
+  try {
+    const team = new SupervisorTeamStore(f.supervisors);
+    const member = team.registerMember(f.binding, {threadId: "quarantine-helper", taskId: "quarantine-task", bootstrapRunId: "quarantine-bootstrap"});
+    const ready = team.markReady(f.binding, member.threadId, member.epoch);
+    const target = thread("quarantine-target", f.projectId, f.mainThreadId, "subagent");
+    f.threads.push(target, thread(member.threadId, f.projectId, f.supervisorThreadId, "subagent"));
+    const parents = new Map(f.threads.map(item => [item.id, item.lineage.parentThreadId]));
+    const assignment = team.assign(f.binding, target.id, member.threadId, parents);
+    for (const notification of team.snapshot(f.binding).notifications) {
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "sending");
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "delivered");
+      team.acknowledgeNotification(f.binding, member.threadId, notification.id, ready.epoch);
+    }
+    team.completeTransfer(f.binding, target.id, assignment.epoch);
+    team.recordRequest(f.binding, {requestId: "guide:uncertain-before-quarantine", memberThreadId: member.threadId, memberEpoch: ready.epoch,
+      targets: [{targetThreadId: target.id, assignmentRootThreadId: target.id, assignmentEpoch: assignment.epoch}], parentById: parents});
+    team.setRequestState(f.binding, f.binding.threadId, "guide:uncertain-before-quarantine", 0, "uncertain");
+
+    const args = {supervisorThreadId: f.supervisorThreadId, bindingGeneration: f.binding.generation,
+      action: "quarantine", operationId: "quarantine-helper", memberThreadId: member.threadId};
+    installEvidence(f, args, {toolName: workflowToolNames.team.direct[0]});
+    const reader = new WorkflowWriteController({...f.controller.options, team});
+    const controller = new SupervisorTeamController(reader, team, null);
+    const result = await controller.call(args, AbortSignal.timeout(1000)) as {status: string; result: {state: string; epoch: number}};
+
+    assert.equal(result.status, "ok");
+    assert.equal(result.result.state, "quarantined");
+    assert.equal(result.result.epoch, ready.epoch + 1);
+    assert.equal(team.coverage(f.binding, target.id, parents).state, "unavailable", "unresolved requests keep root coverage observe-only");
+    assert.equal(team.authorizeWrite(f.binding, f.supervisorThreadId, target.id, parents), false);
+    assert.equal(team.unresolvedRequests(f.binding).some(request => request.requestId === "guide:uncertain-before-quarantine"), true);
+    assert.equal(team.snapshot(f.binding).events.some(event => event.kind === "member_quarantined" && event.memberThreadId === member.threadId), true);
+  } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
+});
+
+test("root team retry restarts a definitely rejected note without changing an unknown guide effect", async () => {
+  const f = await makeFixture();
+  try {
+    const team = new SupervisorTeamStore(f.supervisors);
+    const member = team.registerMember(f.binding, {threadId: "retry-notice-helper", taskId: "retry-notice-task", bootstrapRunId: "retry-notice-bootstrap"});
+    const ready = team.markReady(f.binding, member.threadId, member.epoch);
+    const target = thread("retry-notice-target", f.projectId, f.mainThreadId, "subagent");
+    f.threads.push(target, thread(member.threadId, f.projectId, f.supervisorThreadId, "subagent"));
+    const parents = new Map(f.threads.map(item => [item.id, item.lineage.parentThreadId]));
+    const assignment = team.assign(f.binding, target.id, member.threadId, parents);
+    for (const notification of team.snapshot(f.binding).notifications) {
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "sending");
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "delivered");
+      team.acknowledgeNotification(f.binding, member.threadId, notification.id, ready.epoch);
+    }
+    team.completeTransfer(f.binding, target.id, assignment.epoch);
+    const targetCoverage = team.coverage(f.binding, target.id, parents);
+    team.recordRequest(f.binding, {requestId: "guide:unrelated-unknown-target", memberThreadId: member.threadId, memberEpoch: ready.epoch,
+      targets: [{targetThreadId: target.id, assignmentRootThreadId: targetCoverage.assignmentRootThreadId!, assignmentEpoch: targetCoverage.assignmentEpoch!}], parentById: parents});
+    team.setRequestState(f.binding, f.binding.threadId, "guide:unrelated-unknown-target", 0, "uncertain");
+    const unresolvedBefore = team.unresolvedRequests(f.binding);
+    const failed = team.note(f.binding, {eventId: "failed-notice-event", notificationId: "failed-notice", memberThreadId: member.threadId,
+      memberEpoch: ready.epoch, message: "Review the handover plan."});
+    team.markNotificationRejected(f.binding, f.supervisorThreadId, failed.id, "T3 rejected the notice.", failed.deliveryAttempt);
+    const uncertain = team.note(f.binding, {eventId: "uncertain-notice-event", notificationId: "uncertain-notice", memberThreadId: member.threadId,
+      memberEpoch: ready.epoch, message: "The second handover outcome is unknown."});
+    team.updateNotificationDelivery(f.binding, f.supervisorThreadId, uncertain.id, "sending");
+    team.updateNotificationDelivery(f.binding, f.supervisorThreadId, uncertain.id, "uncertain");
+
+    const args = {supervisorThreadId: f.supervisorThreadId, bindingGeneration: f.binding.generation,
+      action: "retry", operationId: "retry-failed-team-notices", memberThreadId: member.threadId};
+    installEvidence(f, args, {toolName: workflowToolNames.team.direct[0]});
+    const reader = new WorkflowWriteController({...f.controller.options, team});
+    const controller = new SupervisorTeamController(reader, team, null);
+    const result = await controller.call(args, AbortSignal.timeout(1000)) as {
+      status: string; result: {retriedNotifications: number; pendingRequestsRemain: boolean};
+    };
+    const notifications = team.snapshot(f.binding).notifications;
+    const retried = notifications.find(item => item.id === failed.id);
+    const retained = notifications.find(item => item.id === uncertain.id);
+
+    assert.equal(result.status, "ok");
+    assert.equal(result.result.retriedNotifications, 1);
+    assert.equal(result.result.pendingRequestsRemain, true);
+    assert.deepEqual(team.unresolvedRequests(f.binding), unresolvedBefore, "the unknown guide request stays byte-for-byte unchanged");
+    assert.equal(team.coverage(f.binding, target.id, parents).state, "assigned", "retry leaves the operational assignment unchanged");
+    assert.equal(team.coverage(f.binding, target.id, parents).actorThreadId, member.threadId);
+    assert.equal(team.authorizeWrite(f.binding, f.binding.threadId, target.id, parents), false);
+    assert.equal(retried?.state, "pending");
+    assert.equal(retried?.deliveryAttempt, failed.deliveryAttempt + 1);
+    assert.equal(retained?.state, "uncertain");
+    assert.equal(retained?.deliveryAttempt, uncertain.deliveryAttempt);
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
 });

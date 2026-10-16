@@ -131,6 +131,10 @@ const questions = [
     answer: "The root remains responsible while the old helper stops new guidance and outstanding effects are reconciled. New coverage becomes active only after the handover is confirmed. Pending or uncertain handovers stay visible and are not treated as complete.",
   },
   {
+    question: "What does quarantining a helper do?",
+    answer: "A root-authorized quarantine revokes the helper's Supervisor service authority and returns coverage to the root. Unresolved requests and notices remain fenced, so affected work is observe-only until they are reconciled. Quarantine does not stop or cancel the native T3 conversation or a turn already running there.",
+  },
+  {
     question: "How is a helper's model selected?",
     answer: "A helper inherits the root's model by default. The root may select another model from T3's current configured catalog when delegating that helper; there is no separate Supervisor model catalog.",
   },

@@ -20,7 +20,7 @@ const SupervisorTeamHandover = Schema.Struct({
   targetThreadId: Schema.String,
   targetTitle: Schema.NullOr(Schema.String),
   direction: Schema.Literals(["incoming", "outgoing"]),
-  state: Schema.Literals(["pending", "uncertain"]),
+  state: Schema.Literals(["pending", "sending", "uncertain", "delivered", "failed", "superseded"]),
   summary: Schema.String,
   updatedAt: Schema.Number,
 });
@@ -49,7 +49,7 @@ const SupervisorTeamMember = Schema.Struct({
   title: Schema.NullOr(Schema.String),
   model: Schema.NullOr(Schema.String),
   readiness: Schema.Literals(["pending", "ready", "unavailable", "unknown"]),
-  lifecycle: Schema.Literals(["active", "idle", "failed", "retired", "unknown"]),
+  lifecycle: Schema.Literals(["active", "idle", "failed", "quarantined", "retired", "unknown"]),
   assignments: Schema.Array(SupervisorTeamAssignmentView),
   currentState: Schema.NullOr(Schema.String),
   lastAssessment: Schema.NullOr(SupervisorTeamAssessment),

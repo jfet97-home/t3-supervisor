@@ -8,7 +8,7 @@ import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.j
 import type { SupervisorMonitorBatch, SupervisorMonitorThreadBatch } from "../src/supervisor-monitor.js";
 import { SupervisorConversationStore } from "../src/supervisor-conversation-store.js";
 import { SupervisorConversation } from "../src/supervisor-conversation.js";
-import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord } from "../src/project-supervisor-store.js";
+import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { SupervisorTeamStore, type TeamBinding, type TeamMember } from "../src/supervisor-team-store.js";
 import { SupervisorTeamRuntime } from "../src/supervisor-team-runtime.js";
 import { T3TransportError } from "../src/t3.js";
@@ -25,6 +25,11 @@ const makeThread = (id: string, parentThreadId: string | null = null, relationsh
 });
 
 const emptyProjection = (thread: ThreadInfo): Projection => ({thread, runs: [], messages: [], nodes: [], turnItems: [], providerTurns: [], runtimeRequests: []});
+
+const nodesOf = (projection: Projection): Array<Record<string, unknown>> => {
+  if (!Array.isArray(projection.nodes)) projection.nodes = [];
+  return projection.nodes as Array<Record<string, unknown>>;
+};
 
 const webhookTransport = (result: "waiting" | "busy" | "uncertain" | "rejected" = "waiting"):
   {transport: SupervisorHelperDeliveryTransport; sent: Map<string, {threadId: string; text: string; taskId: string}>; attempts: string[]; retired: string[]} => {
@@ -101,6 +106,113 @@ test("no helper leaves the existing root batch intact", async t => {
   assert.equal(runtime.hasBlockingWork(f.binding), false);
 });
 
+test("helper observations run while a root-native check-in remains unresolved", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const member = readyMember(f.teamStore, f.binding, "helper-before-root-gate");
+  activate(f.teamStore, f.binding, member, "branch");
+  f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
+  const branch = f.projections.get("branch")!;
+  const runId = "branch-completed-run";
+  branch.runs.push({id: runId, threadId: "branch", ordinal: 1, status: "completed", requestedAt: iso(time),
+    startedAt: iso(time), completedAt: iso(time + 1), rootNodeId: "branch-root", providerThreadId: "branch-provider"});
+  nodesOf(branch).push({id: "branch-root", kind: "root_turn", status: "completed", threadId: "branch", runId,
+    rootNodeId: "branch-root", providerThreadId: "branch-provider"});
+  f.monitor.observe({projectId, threadId: "branch", sourceOrdinal: 0, projection: branch, now: time + 2});
+
+  const transport = webhookTransport();
+  const rootProjection = emptyProjection(makeThread(f.binding.threadId, "main", "subagent"));
+  const conversation = new SupervisorConversation(f.store, null, async threadId =>
+    threadId === f.binding.threadId ? rootProjection : f.projections.get(threadId) ?? emptyProjection(makeThread(threadId)),
+  undefined, thread => thread.id === "main", () => true, undefined, undefined, f.teamStore, transport.transport);
+  const task = {id: "root-task", threadId: "main", projectId, sourceRunId: "source-run", sourceMessageId: "source-message",
+    sourceHash: "source-hash", sourceOrdinal: 0, status: "inferred", objective: "Monitor the operational tree", reason: "Test",
+    updatedAt: time, requestText: "", supervisorThreadId: f.binding.threadId, messageId: "source-message", dispatchedAt: null,
+    replayCount: 0, supervisorRunId: null,
+    workflow: {status: "proposed", message: "Draft", workspaceRoot: "/workspace", revision: "revision", globalRevision: null, steps: [], workflows: []},
+  } as unknown as TaskRecord;
+  f.store.saveTask(task);
+  const pendingRoot = conversation.requests.prepare({projectId, supervisorThreadId: f.binding.threadId, kind: "review", taskId: null,
+    text: "Existing root check-in.", batch: null, completionMarker: "root check-in complete"}, time + 3);
+  conversation.requests.saveRequest({...pendingRoot, state: "waiting", sentAt: time + 3});
+
+  await conversation.run(f.binding as BindingRecord, rootProjection, f.threadList, AbortSignal.timeout(5000));
+
+  assert.equal(conversation.requests.pending(projectId, f.binding.threadId)?.id, pendingRoot.id);
+  assert.equal(conversation.requests.pending(projectId, member.threadId)?.id.startsWith("team-review:"), true);
+  assert.equal(transport.attempts.length, 1);
+});
+
+test("root observes fenced coverage explicitly and does not acknowledge its activity", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const member = readyMember(f.teamStore, f.binding, "helper-observe-only");
+  activate(f.teamStore, f.binding, member, "branch");
+  const assignment = f.teamStore.coverage(f.binding, "branch", parents);
+  f.teamStore.recordRequest(f.binding, {requestId: "guide:observe-only-unknown", memberThreadId: member.threadId, memberEpoch: member.epoch,
+    targets: [{targetThreadId: "branch", assignmentRootThreadId: assignment.assignmentRootThreadId!, assignmentEpoch: assignment.assignmentEpoch!}],
+    parentById: parents, now: time + 2});
+  f.teamStore.setRequestState(f.binding, member.threadId, "guide:observe-only-unknown", member.epoch, "uncertain", time + 3);
+  f.teamStore.quarantineMember(f.binding, member.threadId, time + 4);
+  const branch = f.projections.get("branch")!;
+  branch.thread.runtimeMode = "full-access";
+  branch.thread.interactionMode = "default";
+  const runId = "observe-only-branch-run";
+  branch.runs.push({id: runId, threadId: "branch", ordinal: 1, status: "completed", requestedAt: iso(time),
+    startedAt: iso(time), completedAt: iso(time + 1), rootNodeId: "observe-only-root", providerThreadId: "observe-only-provider"});
+  nodesOf(branch).push({id: "observe-only-root", kind: "root_turn", status: "completed", threadId: "branch", runId,
+    rootNodeId: "observe-only-root", providerThreadId: "observe-only-provider"});
+  f.monitor.observe({projectId, threadId: "branch", sourceOrdinal: 0, projection: branch, now: time + 5});
+
+  const rootProjection = emptyProjection({...makeThread(f.binding.threadId, "main", "subagent"), runtimeMode: "full-access", interactionMode: "default"});
+  const mainProjection = f.projections.get("main")!;
+  mainProjection.thread.runtimeMode = "full-access";
+  mainProjection.thread.interactionMode = "default";
+  const transport = webhookTransport();
+  const calls: Array<{payload: Record<string, unknown>}> = [];
+  const rpc = async (_tag: string, payload: Record<string, unknown>) => {calls.push({payload});return {sequence: calls.length};};
+  const conversation = new SupervisorConversation(f.store, rpc, async threadId =>
+    threadId === f.binding.threadId ? rootProjection : f.projections.get(threadId) ?? emptyProjection(makeThread(threadId)),
+  undefined, thread => thread.id === "main", () => true, undefined, undefined, f.teamStore, transport.transport);
+  const task = {id: "observe-only-task", threadId: "main", projectId, sourceRunId: "source-run", sourceMessageId: "source-message",
+    sourceHash: "source-hash", sourceOrdinal: 0, status: "inferred", objective: "Monitor the operational tree", reason: "Test",
+    updatedAt: time, requestText: "", supervisorThreadId: f.binding.threadId, messageId: "source-message", dispatchedAt: null,
+    replayCount: 0, supervisorRunId: null,
+    workflow: {status: "proposed", message: "Draft", workspaceRoot: "/workspace", revision: "revision", globalRevision: null, steps: [], workflows: []},
+  } as unknown as TaskRecord;
+  f.store.saveTask(task);
+  conversation.requests.saveIntroduction({taskId: task.id, projectId, threadId: task.threadId, supervisorThreadId: f.binding.threadId,
+    state: "sent", text: "", messageId: "intro-sent", targetRunId: null, error: null});
+
+  await conversation.run(f.binding as BindingRecord, rootProjection, f.threadList, AbortSignal.timeout(5000));
+
+  const request = conversation.requests.pending(projectId, f.binding.threadId);
+  assert.ok(request?.batch);
+  assert.ok(request?.text.includes("Rows marked teamCoverageState=transferring or unavailable are observe-only"));
+  const envelopeText = request?.text.match(/UNTRUSTED_MONITOR_ENVELOPE\n([\s\S]*?)\nEND_UNTRUSTED_MONITOR_ENVELOPE/u)?.[1];
+  const envelope = JSON.parse(envelopeText ?? "null") as {threads?: Array<{threadId: string; teamCoverageState?: string}>};
+  assert.equal(envelope.threads?.find(item => item.threadId === "branch")?.teamCoverageState, "unavailable");
+  assert.equal(f.monitor.pending(projectId, "branch").length, 1);
+
+  const run = {id: "root-observe-run", threadId: f.binding.threadId, ordinal: 1, status: "completed", requestedAt: iso(time + 10),
+    startedAt: iso(time + 10), completedAt: iso(time + 11), rootNodeId: "root-observe-node", providerThreadId: "root-observe-provider",
+    userMessageId: request!.messageId};
+  rootProjection.runs.push(run);
+  nodesOf(rootProjection).push({id: "root-observe-node", kind: "root_turn", status: "completed", threadId: f.binding.threadId, runId: run.id,
+    rootNodeId: run.rootNodeId, providerThreadId: run.providerThreadId});
+  const assistantNodeId = "root-observe-assistant";
+  nodesOf(rootProjection).push({id: assistantNodeId, kind: "assistant_message", status: "completed", threadId: f.binding.threadId, runId: run.id,
+    rootNodeId: run.rootNodeId, providerThreadId: run.providerThreadId, parentNodeId: run.rootNodeId});
+  rootProjection.messages.push({id: request!.messageId, threadId: f.binding.threadId, runId: run.id, nodeId: run.rootNodeId, role: "user",
+    text: request!.text, streaming: false, createdAt: iso(time + 10), updatedAt: iso(time + 10)});
+  rootProjection.messages.push({id: "root-observe-final", threadId: f.binding.threadId, runId: run.id, nodeId: assistantNodeId, role: "assistant",
+    text: "I observed the fenced activity. " + request!.completionMarker, streaming: false,
+    createdAt: iso(time + 11), updatedAt: iso(time + 11), ordinal: 1});
+  await conversation.run(f.binding as BindingRecord, rootProjection, f.threadList, AbortSignal.timeout(5000));
+
+  assert.equal(conversation.requests.requests(projectId, f.binding.threadId).find(item => item.id === request!.id)?.state, "completed");
+  assert.equal(f.monitor.pending(projectId, "branch").length, 1);
+  assert.equal(f.teamStore.unresolvedRequests(f.binding).find(item => item.requestId === "guide:observe-only-unknown")?.state, "uncertain");
+});
+
 test("one helper receives its assigned subtree while transfer activity stays pending", async t => {
   const f = await fixture();t.after(f.cleanup);
   const first = readyMember(f.teamStore, f.binding, "helper-one");
@@ -117,10 +229,68 @@ test("one helper receives its assigned subtree while transfer activity stays pen
 
   f.teamStore.assign(f.binding, "branch", second.threadId, parents, time + 20);
   const transferring = runtime.partition(f.binding, f.threadList, batch);
-  assert.deepEqual(transferring.rootBatch?.threads.map(item => item.threadId), ["main", "other"]);
+  assert.deepEqual(transferring.rootBatch?.threads.map(item => item.threadId), ["main", "branch", "leaf", "other"]);
+  assert.equal(transferring.rootBatch?.threads.find(item => item.threadId === "branch")?.teamCoverageState, "transferring");
+  assert.equal(transferring.rootBatch?.threads.find(item => item.threadId === "leaf")?.teamCoverageState, "transferring");
+  assert.deepEqual(runtime.rootOwnedBatch(f.binding, transferring.rootBatch!, f.threadList)?.threads.map(item => item.threadId), ["main", "other"]);
   assert.equal(transferring.helperBatches.length, 0);
   assert.equal(f.teamStore.coverage(f.binding, "leaf", parents).state, "transferring");
   assert.equal(runtime.hasBlockingWork(f.binding), true);
+});
+
+test("a quarantined helper retires its channel, preserves unknown effects, and exposes only observe-only root coverage", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const member = readyMember(f.teamStore, f.binding, "helper-quarantined");
+  activate(f.teamStore, f.binding, member, "branch");
+  const assignment = f.teamStore.coverage(f.binding, "branch", parents);
+  f.teamStore.recordRequest(f.binding, {requestId: "guide:quarantined-unknown", memberThreadId: member.threadId, memberEpoch: member.epoch,
+    targets: [{targetThreadId: "branch", assignmentRootThreadId: assignment.assignmentRootThreadId!, assignmentEpoch: assignment.assignmentEpoch!}],
+    parentById: parents, now: time + 10});
+  f.teamStore.setRequestState(f.binding, member.threadId, "guide:quarantined-unknown", member.epoch, "uncertain", time + 11);
+  const quarantined = f.teamStore.quarantineMember(f.binding, member.threadId, time + 12);
+  const transport = webhookTransport();
+  const runtime = f.runtime(transport.transport);
+
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  const partition = runtime.partition(f.binding, f.threadList, batchOf(["branch", "leaf"]));
+  assert.equal(quarantined.state, "quarantined");
+  assert.equal(f.teamStore.snapshot(f.binding).members.find(item => item.threadId === member.threadId)?.epoch, member.epoch + 1);
+  assert.equal(f.teamStore.unresolvedRequests(f.binding).find(item => item.requestId === "guide:quarantined-unknown")?.state, "uncertain");
+  assert.deepEqual(transport.retired, [member.threadId]);
+  assert.deepEqual(partition.helperBatches, []);
+  assert.deepEqual(partition.rootBatch?.threads.map(item => [item.threadId, item.teamCoverageState]), [
+    ["branch", "unavailable"], ["leaf", "unavailable"],
+  ]);
+  assert.equal(runtime.rootOwnedBatch(f.binding, partition.rootBatch!, f.threadList), null);
+  assert.equal(runtime.hasBlockingWork(f.binding), true);
+
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  assert.equal(f.teamStore.snapshot(f.binding).members.find(item => item.threadId === member.threadId)?.epoch, member.epoch + 1);
+  assert.deepEqual(transport.retired, [member.threadId]);
+});
+
+test("an unresolved helper review stays out of root observation while its target transfers", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const first = readyMember(f.teamStore, f.binding, "helper-review-handover");
+  const second = readyMember(f.teamStore, f.binding, "helper-review-successor", time + 10);
+  activate(f.teamStore, f.binding, first, "branch");
+  const coverage = f.teamStore.coverage(f.binding, "branch", parents);
+  const requestId = "team-review:handover-pending";
+  const request = f.requests.prepare({id: requestId, projectId, supervisorThreadId: first.threadId, kind: "review", taskId: null,
+    text: "Assess branch activity.", batch: batchOf(["branch"]), completionMarker: "review complete"}, time + 20);
+  f.requests.saveRequest({...request, state: "waiting", sentAt: time + 20});
+  f.teamStore.recordRequest(f.binding, {requestId, memberThreadId: first.threadId, memberEpoch: first.epoch,
+    targets: [{targetThreadId: "branch", assignmentRootThreadId: coverage.assignmentRootThreadId!, assignmentEpoch: coverage.assignmentEpoch!}],
+    parentById: parents, now: time + 20});
+  f.teamStore.assign(f.binding, "branch", second.threadId, parents, time + 21);
+
+  const partition = f.runtime().partition(f.binding, f.threadList, batchOf(["branch", "leaf"]));
+  assert.deepEqual(partition.rootBatch?.threads.map(item => item.threadId), ["leaf"]);
+  assert.equal(partition.rootBatch?.threads[0]?.teamCoverageState, "transferring");
+  assert.deepEqual(partition.helperBatches, []);
+  assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "transferring");
 });
 
 test("runtime completes a transfer only after both helpers finish their exact handover check-ins", async t => {
@@ -150,9 +320,11 @@ test("runtime completes a transfer only after both helpers finish their exact ha
         rootNodeId: null, userMessageId: nativeMessageId});
       projection.messages.push({id: nativeMessageId, threadId: delivery.threadId, runId, nodeId: null, role: "user", text: delivery.text,
         streaming: false, createdAt: iso(time + cycle + 1), updatedAt: iso(time + cycle + 1), scheduledTaskId: delivery.taskId, creationSource: "server"});
-      const notificationId = logicalId.slice("supervisor-team-notice:".length);
+      const identity = logicalId.slice("supervisor-team-notice:".length);
+      const [notificationId, attemptText] = identity.split(":attempt:");
+      const attempt = Number(attemptText);
       projection.messages.push({id: `final-${logicalId}`, threadId: delivery.threadId, runId, nodeId: null, role: "assistant",
-        text: `Handover considered. Supervisor team notification ${notificationId} completed`, streaming: false,
+        text: `Handover considered. Supervisor team notification ${notificationId} attempt ${attempt} completed`, streaming: false,
         createdAt: iso(time + cycle + 2), updatedAt: iso(time + cycle + 2), ordinal: 1});
       completed.add(logicalId);
     }
@@ -163,6 +335,58 @@ test("runtime completes a transfer only after both helpers finish their exact ha
   assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "assigned");
   assert.equal(f.teamStore.coverage(f.binding, "branch", parents).actorThreadId, second.threadId);
   assert.ok(f.teamStore.snapshot(f.binding).events.some(item => item.kind === "assignment_handover_completed" && item.targetThreadId === "branch"));
+});
+
+test("only explicit retry creates a fresh rejected notification attempt and stale markers cannot acknowledge it", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const member = readyMember(f.teamStore, f.binding, "helper-notice-retry");
+  activate(f.teamStore, f.binding, member, "branch");
+  const transfer = f.teamStore.assign(f.binding, "branch", null, parents, time + 10);
+  const notification = f.teamStore.snapshot(f.binding).notifications.find(item =>
+    item.assignmentRootThreadId === "branch" && item.assignmentEpoch === transfer.epoch && item.kind === "handover_release");
+  assert.ok(notification);
+  if (!notification) throw new Error("release_notification_missing");
+  f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
+  const transport = webhookTransport("rejected");
+  const runtime = f.runtime(transport.transport);
+
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  const failed = f.teamStore.snapshot(f.binding).notifications.find(item => item.id === notification.id);
+  assert.equal(failed?.state, "failed");
+  assert.equal(failed?.deliveryAttempt, 0);
+  assert.equal(transport.attempts.length, 1);
+  assert.ok(f.teamStore.snapshot(f.binding).events.some(item => item.id === `notification-failed:${notification.id}:0`));
+  assert.ok(f.runtime(transport.transport).partition(f.binding, f.threadList, null).rootEvents.some(item =>
+    item.id === `notification-failed:${notification.id}:0`));
+
+  assert.equal(f.teamStore.retryFailedNotifications(f.binding, member.threadId, time + 20), 1);
+  const retried = f.teamStore.snapshot(f.binding).notifications.find(item => item.id === notification.id);
+  assert.equal(retried?.state, "pending");
+  assert.equal(retried?.deliveryAttempt, 1);
+  const projection = f.projections.get(member.threadId)!;
+  const oldLogicalId = `supervisor-team-notice:${notification.id}:attempt:0`;
+  const oldText = transport.sent.get(oldLogicalId)?.text;
+  assert.ok(oldText);
+  const oldRunId = "old-notification-run";
+  const oldMessageId = "native-old-notification";
+  projection.runs.push({id: oldRunId, threadId: member.threadId, ordinal: 1, status: "completed", requestedAt: iso(time + 15),
+    startedAt: iso(time + 15), completedAt: iso(time + 16), rootNodeId: null, userMessageId: oldMessageId});
+  projection.messages.push({id: oldMessageId, threadId: member.threadId, runId: oldRunId, nodeId: null, role: "user", text: oldText!,
+    streaming: false, createdAt: iso(time + 15), updatedAt: iso(time + 15), scheduledTaskId: `scheduled-${member.threadId}`, creationSource: "server"});
+  projection.messages.push({id: "old-notification-final", threadId: member.threadId, runId: oldRunId, nodeId: null, role: "assistant",
+    text: `Old notice completed. Supervisor team notification ${notification.id} attempt 0 completed`, streaming: false,
+    createdAt: iso(time + 16), updatedAt: iso(time + 16), ordinal: 1});
+
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  const failedRetry = f.teamStore.snapshot(f.binding).notifications.find(item => item.id === notification.id);
+  assert.equal(failedRetry?.state, "failed");
+  assert.equal(failedRetry?.deliveryAttempt, 1);
+  assert.equal(transport.attempts.length, 2);
+  assert.ok(transport.attempts[0]?.endsWith(":attempt:0"));
+  assert.ok(transport.attempts[1]?.endsWith(":attempt:1"));
+  assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "transferring");
 });
 
 test("registration readiness uses a finite native check-in and exact member epoch", async t => {
@@ -380,7 +604,8 @@ test("a stale completed helper check-in settles its request without acknowledgin
   assert.equal(f.requests.requests(projectId, first.threadId).find(item => item.id === request.id)?.state, "completed");
   assert.equal(f.teamStore.unresolvedRequests(f.binding).some(item => item.requestId === request.id), false);
   assert.equal(f.teamStore.coverage(f.binding, opThread.id, parents).state, "transferring");
-  assert.equal(f.teamStore.snapshot(f.binding).events.some(item => item.kind === "service_attention" && item.memberThreadId === first.threadId), false);
+  assert.equal(f.teamStore.snapshot(f.binding).events.some(item => item.kind === "service_attention" && item.memberThreadId === first.threadId &&
+    item.summary.includes("check-in failed")), false);
 });
 
 test("a successful helper result creates an event-only root wake and is acknowledged after its marker", async t => {

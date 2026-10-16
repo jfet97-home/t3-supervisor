@@ -232,7 +232,7 @@ never a login recovery method.
 
 Team tools share the authenticated `/mcp/workflows` endpoint. `supervision_team`
 reads current state or accepts root register/assign/release/retire/note/retry
-operations and helper ready/report operations. `supervision_guide` accepts a
+operations, root-only quarantine, and helper ready/report operations. `supervision_guide` accepts a
 helper's in-scope child guidance. Helper locators use their own supervisorThreadId,
 root bindingGeneration, memberEpoch and the current assignmentRootThreadId plus
 assignmentEpoch. `workflow_read` exposes current per-target coverage; unrelated
@@ -241,7 +241,20 @@ main binding when responsibility moves. All mutating calls require the exact
 common native evidence contract in the calling actor's own AppRun. Read operations
 remain same-user contextual reads, not grants of write authority.
 
-A root `retry` acknowledges a definite helper check-in failure; it cannot reset
-unknown sends, alter their IDs or bypass pending-effect reconciliation. Helper
+For `supervision_guide`, the service uses a targeted active-only steer on a verified
+delegated child. After T3's specific dispatch-command failure, it replays the exact
+command once with the original IDs, target and run ID; only a durable definite
+rejection allows a fresh route to the nearest eligible ancestor in the same helper
+assignment. Accepted sends, generic server failures, timeouts and lost responses do
+not change route. Cross-assignment or unavailable fallback raises root attention.
+
+A root `retry` acknowledges definite helper check-in failures and starts a new
+attempt for definitely rejected handover notices when the recipient remains a
+current ready helper and no unresolved request blocks retry. It cannot reset
+unknown sends, alter their identities or bypass pending-effect reconciliation.
+Quarantine is a root-native-authorized fencing action. It advances the helper
+epoch and returns coverage to the root while preserving unresolved requests and
+sent notices. The root remains observe-only while those effects are unresolved. Quarantine does not
+stop a native helper conversation or any turn already running there. Helper
 check-ins use one genuine native T3 webhook job per helper as described in the
 team guide. Its private endpoint is never returned by the dashboard or MCP.

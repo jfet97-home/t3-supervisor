@@ -119,7 +119,15 @@ team operations. A human message entered in a helper conversation follows T3's
 native follow-up behavior. Root notes and routine check-ins go through Supervisor
 team operations, not raw `t3_thread_send`. During handover, pending or uncertain
 notifications remain visible and the root keeps responsibility until coverage is
-confirmed.
+confirmed. The root can use the native-proof `supervision_team` action
+`quarantine` when it must revoke a helper's service authority before normal
+handover completes. Quarantine returns coverage to the root but leaves affected
+work observe-only while unresolved requests or delivery effects remain. It does not
+stop or cancel the native T3 conversation or a turn already running there. A root
+`retry` starts a new attempt only for definite failures when the recipient remains
+ready and no other unresolved request blocks retry; unknown outcomes retain their
+original identities and remain fenced. The dashboard
+keeps failed, uncertain, delivered-but-unacknowledged, and superseded notices visible.
 
 The team snapshot includes an observation time. Incomplete or unavailable state is
 explicit; after a refresh failure, retained data is stale. Opening a T3 link does
@@ -133,8 +141,13 @@ steering after fresh scope and contact checks. Native read-only children receive
 guidance through their verified ancestors. After a definite rejection or when a
 child cannot be steered, the Supervisor considers the nearest verified eligible
 contactable ancestor, then the main only when that route is valid and relevant.
-Terminal or unknown children are not contacted directly, and an uncertain send must
-be reconciled before another route is chosen. T3 can turn a late child steer into a
+After T3 returns the specific dispatch failure, the service replays the same native
+command once with its original command/message IDs, target and run ID; only a
+confirmed definite rejection permits a fresh ancestor check inside the same helper
+assignment. A cross-assignment route raises root attention. Generic server errors,
+timeouts and lost responses keep the original route. Terminal or unknown children
+are not contacted directly, and an uncertain send must be reconciled before another
+route is chosen. T3 can turn a late child steer into a
 started delivery; if that happens, the Supervisor stops sending to the child,
 notifies the parent when relevant, and does not cancel the turn automatically.
 

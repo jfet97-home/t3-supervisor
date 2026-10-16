@@ -405,11 +405,20 @@ const lifecycleLabels = {
   active: "Active",
   idle: "Idle",
   failed: "Failed",
+  quarantined: "Quarantined",
   retired: "Retired",
   unknown: "Lifecycle unknown",
 } as const;
+const handoverStateLabels = {
+  pending: "Pending",
+  sending: "Delivery in progress",
+  uncertain: "Delivery uncertain",
+  delivered: "Delivered; acknowledgment pending",
+  failed: "Delivery definitely failed; root recovery required",
+  superseded: "Superseded; acknowledgment still pending",
+} as const;
 const readinessTone = (value: ProjectSupervisorTeamInfo["root"]["readiness"]) => value === "ready" ? "green" : value === "pending" ? "blue" : "amber";
-const lifecycleTone = (value: ProjectSupervisorTeamInfo["root"]["lifecycle"]) => value === "active" ? "blue" : value === "idle" ? "green" : "amber";
+const lifecycleTone = (value: ProjectSupervisorTeamInfo["root"]["lifecycle"] | ProjectSupervisorTeamInfo["members"][number]["lifecycle"]) => value === "active" ? "blue" : value === "idle" ? "green" : "amber";
 const issueTone = (severity: ProjectSupervisorTeamInfo["issues"][number]["severity"]) => severity === "critical" ? "critical" : severity === "info" ? "blue" : "amber";
 
 function TeamAssessment({assessment}: {assessment: NonNullable<ProjectSupervisorTeamInfo["root"]["lastAssessment"]>}) {
@@ -426,6 +435,7 @@ function ProjectSupervisorTeamPanel({team, settings, mainThreadId}: {team: Proje
     </div>
     <p className="muted">The Supervisor team is separate from the operational workflow tree. The root owns unassigned work; each helper covers its assigned subtree and future operational descendants.</p>
     <p className="small muted">A person who messages a helper in T3 follows T3’s native follow-up behavior. Root-to-helper notes and routine check-ins use Supervisor team operations, not raw <code>t3_thread_send</code>.</p>
+    <p className="small muted">Quarantine revokes a helper’s Supervisor authority and returns coverage to the root. Unresolved effects stay fenced, and the helper’s native T3 conversation or a turn already running there may continue.</p>
     {!mainThreadId
       ? <p className="muted">Select a main conversation to inspect its Supervisor team.</p>
       : !team
@@ -476,7 +486,7 @@ function ProjectSupervisorTeamPanel({team, settings, mainThreadId}: {team: Proje
               {member.pendingHandovers.length > 0 && <div>
                 <strong>Pending handovers</strong>
                 <ul className="small">{member.pendingHandovers.map((handover, index) => <li key={`${handover.targetThreadId}:${handover.direction}:${index}`}>
-                  {handover.direction === "incoming" ? "Incoming" : "Outgoing"} · <a href={threadHref(handover.targetThreadId)}>{handover.targetTitle ?? `Operational subtree ${handover.targetThreadId}`}</a> · {handover.state}
+                  {handover.direction === "incoming" ? "Incoming" : "Outgoing"} · <a href={threadHref(handover.targetThreadId)}>{handover.targetTitle ?? `Operational subtree ${handover.targetThreadId}`}</a> · {handoverStateLabels[handover.state]}
                   {handover.summary && <> — {handover.summary}</>}
                 </li>)}</ul>
               </div>}
@@ -507,6 +517,9 @@ function WorkflowAssignee({coverage}: {coverage: WorkflowProgressCoverage | unde
     {coverage.assignmentRootThreadId && <> · subtree rooted at <a href={threadHref(coverage.assignmentRootThreadId)}>{coverage.assignmentRootThreadId}</a></>}
   </p>;
   if (coverage.state === "transfer") return <p className="small" role="status"><strong>Assigned to:</strong> Handover in progress{coverage.assignmentRootThreadId && <> for <a href={threadHref(coverage.assignmentRootThreadId)}>this subtree</a></>}.</p>;
+  if (coverage.state === "observe_only") return <p className="small" role="status"><strong>Assigned to:</strong> {coverage.assigneeThreadId
+    ? <a href={threadHref(coverage.assigneeThreadId)}>{coverage.assigneeTitle ?? "Supervisor root"}</a>
+    : "Supervisor root"} · observe-only while unresolved effects block writes{coverage.assignmentRootThreadId && <> for <a href={threadHref(coverage.assignmentRootThreadId)}>this subtree</a></>}.</p>;
   return <p className="small muted"><strong>Assigned to:</strong> Unknown; the current owner could not be confirmed.</p>;
 }
 

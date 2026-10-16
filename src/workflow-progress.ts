@@ -47,7 +47,7 @@ export type WorkflowProgressWorkflow = typeof WorkflowProgressWorkflowSchema.Typ
 
 export const WorkflowProgressCoverageSchema = Schema.Struct({
   threadId: Schema.String,
-  state: Schema.Literals(["root", "assigned", "transfer", "unknown"]),
+  state: Schema.Literals(["root", "assigned", "transfer", "observe_only", "unknown"]),
   assigneeThreadId: NullableText,
   assigneeTitle: NullableText,
   assignmentRootThreadId: NullableText,
@@ -233,14 +233,17 @@ export const readWorkflowProgressPage = async (
     mainThreadId: query.mainThreadId,
     observedAt: Date.now(),
     scope: threadScope,
-    coverage: (read.coverage ?? []).map(item => ({
-      threadId: item.threadId,
-      state: item.state === "root" ? "root" as const : item.state === "assigned" ? "assigned" as const :
-        item.state === "transferring" ? "transfer" as const : "unknown" as const,
-      assigneeThreadId: item.state === "assigned" ? item.actorThreadId : null,
-      assigneeTitle: item.state === "assigned" ? item.actorTitle : null,
-      assignmentRootThreadId: item.assignmentRootThreadId,
-    })),
+    coverage: (read.coverage ?? []).map(item => {
+      const observeOnlyRoot = item.state === "unavailable" && item.actorThreadId === locator.supervisorThreadId;
+      return {
+        threadId: item.threadId,
+        state: item.state === "root" ? "root" as const : item.state === "assigned" ? "assigned" as const :
+          item.state === "transferring" ? "transfer" as const : observeOnlyRoot ? "observe_only" as const : "unknown" as const,
+        assigneeThreadId: item.state === "assigned" || observeOnlyRoot ? item.actorThreadId : null,
+        assigneeTitle: item.state === "assigned" || observeOnlyRoot ? item.actorTitle : null,
+        assignmentRootThreadId: item.assignmentRootThreadId,
+      };
+    }),
     incompatibleWorkflows: read.incompatibleWorkflows,
     workflows: read.workflows.map(({document, parentNodeReferences}) => progressWorkflow(document, parentNodeReferences)),
     workflowOffset: read.workflowOffset,

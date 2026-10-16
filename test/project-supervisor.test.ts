@@ -229,8 +229,10 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
   let durableModelRejections = 0;
   let nextModelReadback: SupervisorModelSelection | null = null;
   let nextMissingProjectionFailure: T3TransportError | null = null;
+  const projectionFailures = new Map<string, T3TransportError>();
   let snapshotSequence = activationSequence;
   let baselineReads = 0;
+  let scheduledTasks: Record<string, unknown>[] = [];
   for (const source of initial) {
     projections.set(source.threadId, makeSourceProjection(source.threadId, source.projectId, source.turns));
     turnsByThread.set(source.threadId, [...source.turns]);
@@ -261,6 +263,8 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
   const t3 = {
     projection: (threadId: string) => {
       projectionReads.push(threadId);
+      const knownFailure = projectionFailures.get(threadId);
+      if (knownFailure) return Effect.fail(knownFailure);
       const projection = projections.get(threadId);
       if (projection) return Effect.succeed({ projection, snapshotSequence: 20 });
       if (nextMissingProjectionFailure) {
@@ -277,6 +281,11 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
   };
   const operateRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
     operations.push({ tag, payload });
+    if (tag === "scheduledTasks.list") return {tasks: scheduledTasks};
+    if (tag === "scheduledTasks.delete") {
+      scheduledTasks = scheduledTasks.filter(task => task.id !== payload.id);
+      return {deleted: true};
+    }
     if (tag === "orchestration.launchThread") {
       const threadId = String(payload.threadId);
       const projectId = String(payload.projectId);
@@ -397,6 +406,9 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
     setDurableModelRejections: (count: number) => { durableModelRejections = count; },
     setNextModelReadback: (selection: SupervisorModelSelection) => { nextModelReadback = selection; },
     setNextMissingProjectionFailure: (error: T3TransportError) => { nextMissingProjectionFailure = error; },
+    setProjectionFailure: (threadId: string, error: T3TransportError) => {projectionFailures.set(threadId, error);},
+    setScheduledTasks: (tasks: Record<string, unknown>[]) => {scheduledTasks = tasks;},
+    get scheduledTasks() {return scheduledTasks;},
     setLegacyBaseline: (baseline: Record<string, unknown>) => {
       supervisorStore.store.db.prepare("INSERT INTO meta VALUES('supervisor_activation_baseline',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(baseline));
     },
@@ -413,6 +425,21 @@ const reserveReadyBinding = (fixture: Awaited<ReturnType<typeof makeFixture>>, m
   fixture.supervisorStore.setBinding(ready);
   fixture.projections.set(ready.threadId, emptySupervisorProjection(ready.threadId, ready.projectId, defaultSupervisorModel));
   return ready;
+};
+
+const registerReadyHelper = (fixture: Awaited<ReturnType<typeof makeFixture>>, supervisor: ProjectSupervisor,
+  binding: ReturnType<typeof reserveReadyBinding>, threadId: string) => {
+  const helperProjection = makeSourceProjection(threadId, binding.projectId, []);
+  helperProjection.thread.lineage = {parentThreadId: binding.threadId, relationshipToParent: "subagent", rootThreadId: binding.threadId};
+  fixture.projections.set(threadId, helperProjection);
+  const registering = supervisor.team.registerMember(binding, {threadId, taskId: `task-${threadId}`, bootstrapRunId: `run-${threadId}`});
+  return supervisor.team.markReady(binding, threadId, registering.epoch);
+};
+
+const markRootMissing = (fixture: Awaited<ReturnType<typeof makeFixture>>, binding: ReturnType<typeof reserveReadyBinding>) => {
+  fixture.projections.delete(binding.threadId);
+  fixture.supervisorStore.setBinding({...binding, state: "missing"});
+  return {...binding, state: "missing" as const};
 };
 
 test("scopeSnapshot returns current binding coordinates and verified descendant lineage across project mirrors", async t => {
@@ -1008,6 +1035,124 @@ test("disabled supervision never settles a closed main with an active Supervisor
   assert.equal(fixture.operations.some(call => call.payload.type === "thread.settle"), false);
   assert.equal(fixture.operations.some(call => call.payload.type === "message.dispatch" || call.tag === "orchestration.launchThread"), false);
   assert.equal(fixture.supervisorStore.binding("project-a", "source-thread")?.settlement, undefined);
+});
+
+test("explicit root replacement confirms missing helpers, retires owned webhook jobs, and retains team history", async t => {
+  const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
+  t.after(fixture.cleanup);
+  const binding = reserveReadyBinding(fixture);
+  const supervisor = fixture.makeSupervisor();
+  const deletedHelper = registerReadyHelper(fixture, supervisor, binding, "helper-deleted");
+  const archivedHelper = registerReadyHelper(fixture, supervisor, binding, "helper-archived");
+  fixture.projections.delete(deletedHelper.threadId);
+  fixture.projections.get(archivedHelper.threadId)!.thread.archivedAt = baseTime;
+  const ownedTasks = [deletedHelper, archivedHelper].map((helper, index) => {
+    const taskId = `owned-helper-webhook-${index}`;
+    const createdAt = `2026-10-16T10:0${index}:00.000Z`;
+    fixture.supervisorStore.store.db.prepare("INSERT INTO supervisor_helper_channels VALUES(?,?,?,?)")
+      .run(binding.threadId, binding.generation, helper.threadId, JSON.stringify({taskId, helperThreadId: helper.threadId, createdAt, state: "ready"}));
+    return {id: taskId, threadId: helper.threadId, projectId: binding.projectId, prompt: "{{body.text}}", schedule: {type: "webhook"}, createdAt};
+  });
+  fixture.setScheduledTasks(ownedTasks);
+  const missing = markRootMissing(fixture, binding);
+
+  const outcome = await supervisor.retry(retryInput("project-a", 0, missing, "replace"), AbortSignal.timeout(5000));
+
+  assert.equal(outcome.status, "saved");
+  const current = fixture.supervisorStore.binding("project-a", "source-thread");
+  assert.ok(current);
+  assert.notEqual(current.threadId, binding.threadId);
+  assert.ok(fixture.supervisorStore.ownedIds.has(binding.threadId));
+  for (const helper of [deletedHelper, archivedHelper]) {
+    const memberRow = fixture.supervisorStore.store.db.prepare("SELECT document FROM supervisor_team_members WHERE owner_thread_id=? AND owner_generation=? AND member_thread_id=?")
+      .get(binding.threadId, binding.generation, helper.threadId);
+    assert.equal(JSON.parse(String(memberRow?.document)).state, "missing");
+    assert.ok(fixture.supervisorStore.ownedIds.has(helper.threadId));
+    assert.ok(fixture.operations.some(call => call.tag === "scheduledTasks.delete" && ownedTasks.some(task =>
+      task.threadId === helper.threadId && call.payload.id === task.id)));
+  }
+  assert.equal(fixture.scheduledTasks.length, 0);
+  assert.equal(fixture.supervisorStore.store.db.prepare("SELECT count(*) AS n FROM supervisor_team_events WHERE owner_thread_id=? AND owner_generation=? AND json_extract(document,'$.kind')='member_missing'")
+    .get(binding.threadId, binding.generation)?.n, 2);
+});
+
+test("missing-root replacement refuses a still-present helper without retiring or relabeling it", async t => {
+  const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
+  t.after(fixture.cleanup);
+  const binding = reserveReadyBinding(fixture);
+  const supervisor = fixture.makeSupervisor();
+  const helper = registerReadyHelper(fixture, supervisor, binding, "helper-still-present");
+  const missing = markRootMissing(fixture, binding);
+
+  const outcome = await supervisor.retry(retryInput("project-a", 0, missing, "replace"), AbortSignal.timeout(5000));
+
+  assert.equal(outcome.status, "unavailable");
+  assert.match(outcome.message, /still present in T3/u);
+  assert.equal(fixture.supervisorStore.binding("project-a", "source-thread")?.threadId, binding.threadId);
+  const memberRow = fixture.supervisorStore.store.db.prepare("SELECT document FROM supervisor_team_members WHERE owner_thread_id=? AND owner_generation=? AND member_thread_id=?")
+    .get(binding.threadId, binding.generation, helper.threadId);
+  assert.equal(JSON.parse(String(memberRow?.document)).state, "ready");
+  assert.equal(fixture.operations.some(call => call.tag === "scheduledTasks.delete" || call.tag === "orchestration.launchThread"), false);
+});
+
+test("missing-root replacement fails closed when a known helper lookup is uncertain", async t => {
+  const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
+  t.after(fixture.cleanup);
+  const binding = reserveReadyBinding(fixture);
+  const supervisor = fixture.makeSupervisor();
+  const helper = registerReadyHelper(fixture, supervisor, binding, "helper-lookup-unknown");
+  const missing = markRootMissing(fixture, binding);
+  fixture.setProjectionFailure(helper.threadId, new T3TransportError("projection unavailable", 503));
+
+  const outcome = await supervisor.retry(retryInput("project-a", 0, missing, "replace"), AbortSignal.timeout(5000));
+
+  assert.equal(outcome.status, "unavailable");
+  assert.match(outcome.message, /could not verify every registered helper/u);
+  assert.equal(fixture.supervisorStore.binding("project-a", "source-thread")?.threadId, binding.threadId);
+  const memberRow = fixture.supervisorStore.store.db.prepare("SELECT document FROM supervisor_team_members WHERE owner_thread_id=? AND owner_generation=? AND member_thread_id=?")
+    .get(binding.threadId, binding.generation, helper.threadId);
+  assert.equal(JSON.parse(String(memberRow?.document)).state, "ready");
+  assert.equal(fixture.operations.some(call => call.tag === "scheduledTasks.delete" || call.tag === "orchestration.launchThread"), false);
+});
+
+test("missing-root replacement preserves and remains blocked by an uncertain helper effect", async t => {
+  const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
+  t.after(fixture.cleanup);
+  const binding = reserveReadyBinding(fixture);
+  const supervisor = fixture.makeSupervisor();
+  const helper = registerReadyHelper(fixture, supervisor, binding, "helper-uncertain-effect");
+  const target = makeSourceProjection("operational-thread", binding.projectId, []);
+  target.thread.lineage = {parentThreadId: binding.mainThreadId, relationshipToParent: "subagent", rootThreadId: binding.mainThreadId};
+  fixture.projections.set(target.thread.id, target);
+  const parents = new Map<string, string | null>([[binding.mainThreadId, null], [target.thread.id, binding.mainThreadId]]);
+  const assignment = supervisor.team.assign(binding, target.thread.id, helper.threadId, parents);
+  const receive = supervisor.team.snapshot(binding).notifications.find(value => value.assignmentRootThreadId === target.thread.id &&
+    value.assignmentEpoch === assignment.epoch && value.kind === "handover_receive");
+  assert.ok(receive);
+  supervisor.team.updateNotificationDelivery(binding, binding.threadId, receive.id, "sending");
+  supervisor.team.updateNotificationDelivery(binding, binding.threadId, receive.id, "delivered");
+  supervisor.team.acknowledgeNotification(binding, helper.threadId, receive.id, helper.epoch);
+  supervisor.team.completeTransfer(binding, target.thread.id, assignment.epoch);
+  const coverage = supervisor.team.coverage(binding, target.thread.id, parents);
+  const request = supervisor.team.recordRequest(binding, {requestId: "guide:unknown-result", memberThreadId: helper.threadId, memberEpoch: helper.epoch,
+    targets: [{targetThreadId: target.thread.id, assignmentRootThreadId: coverage.assignmentRootThreadId!, assignmentEpoch: coverage.assignmentEpoch!}], parentById: parents});
+  supervisor.team.setRequestState(binding, helper.threadId, request.requestId, helper.epoch, "uncertain");
+  const missing = markRootMissing(fixture, binding);
+  fixture.projections.delete(helper.threadId);
+
+  const outcome = await supervisor.retry(retryInput("project-a", 0, missing, "replace"), AbortSignal.timeout(5000));
+
+  assert.equal(outcome.status, "unavailable");
+  assert.match(outcome.message, /unresolved handover state or native effects/u);
+  assert.equal(fixture.supervisorStore.binding("project-a", "source-thread")?.threadId, binding.threadId);
+  assert.equal(fixture.supervisorStore.ownedIds.has(helper.threadId), true);
+  const memberRow = fixture.supervisorStore.store.db.prepare("SELECT document FROM supervisor_team_members WHERE owner_thread_id=? AND owner_generation=? AND member_thread_id=?")
+    .get(binding.threadId, binding.generation, helper.threadId);
+  assert.equal(JSON.parse(String(memberRow?.document)).state, "missing");
+  const requestRow = fixture.supervisorStore.store.db.prepare("SELECT document FROM supervisor_team_requests WHERE owner_thread_id=? AND owner_generation=? AND request_id=?")
+    .get(binding.threadId, binding.generation, request.requestId);
+  assert.equal(JSON.parse(String(requestRow?.document)).state, "uncertain");
+  assert.equal(fixture.operations.some(call => call.tag === "orchestration.launchThread"), false);
 });
 
 test("a stale retry intent cannot replace a missing binding; explicit replacement retains old ownership", async (t) => {

@@ -94,7 +94,13 @@ team route, not raw `t3_thread_send`.
 During a handover, inspect the notification state and assignment status. Pending or
 uncertain delivery remains unresolved; the root retains responsibility until new
 coverage is confirmed. The view is observational: read its timestamp and any
-incomplete/unavailable warning before relying on the data. See the
+incomplete/unavailable warning before relying on the data. If the root must revoke
+a helper's service authority while effects remain unresolved, its native-proof
+`supervision_team` action `quarantine` restores root coverage but leaves affected
+work observe-only until unknown effects are reconciled. It does not stop or cancel
+the helper's native T3 conversation. Root `retry` starts a new attempt only for a
+definite failure when its recipient remains ready and no other unresolved request
+blocks retry; uncertain outcomes remain fenced. See the
 [Supervisor team dashboard guidance](references/dashboard.md#supervisor-team) for
 the complete team-view and handover details.
 
@@ -123,10 +129,13 @@ description has been satisfied.
 
 Guidance to native children goes through verified ancestors. Direct delegated guidance
 is limited to verified active children and uses fresh scope/contact checks with
-active-only steering. After a definite rejection or when steering is unavailable,
-the nearest verified eligible contactable ancestor is considered, then the main
-only when that route is valid and relevant. Terminal and unknown children are not contacted
-directly, and an unknown send must be reconciled before changing routes. T3 can
+active-only steering. After T3 returns the specific dispatch failure, the service
+replays the exact command once with the same identity, target and run ID; only a
+confirmed definite rejection permits a fresh check of the nearest contactable
+ancestor in that same assignment. A cross-assignment route raises root attention.
+Generic server errors, timeouts and lost responses keep their original route and
+must be reconciled before changing routes. Terminal and unknown children are not contacted
+directly. T3 can
 convert a late steer into a started child delivery; if that happens, stop messaging
 the child and notify its parent when relevant. No automatic cancellation occurs.
 A quiet unknown child may permit guarded standby while its work remains unresolved
