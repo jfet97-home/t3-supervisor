@@ -1833,15 +1833,27 @@ test("activity references cannot relabel inherited projection records as local a
 });
 
 
-test("a registered helper writes only its assigned child using its own exact main-run evidence", async () => {
+test("a ready helper links and plans a completed unarchived assigned child using its own exact main-run evidence", async () => {
   const f = await makeFixture();
   try {
     const team = new SupervisorTeamStore(f.supervisors);
     const member = team.registerMember(f.binding, {threadId: "helper-own", taskId: "helper-task", bootstrapRunId: "bootstrap"});
     const ready = team.markReady(f.binding, member.threadId, member.epoch);
     const child = thread("operational-a", f.projectId, f.mainThreadId, "subagent");
+    Object.assign(child, {activeRunId: null, latestRunCompletedAt: "2026-10-16T10:00:01.000Z", archivedAt: null, deletedAt: null});
+    const childProjection = makeProjection(child.id, f.projectId);
+    childProjection.thread = child;
+    childProjection.runs = [{id: "operational-a-completed-run", threadId: child.id, ordinal: 1, status: "completed",
+      requestedAt: "2026-10-16T10:00:00.000Z", startedAt: "2026-10-16T10:00:00.000Z",
+      completedAt: child.latestRunCompletedAt!, rootNodeId: "operational-a-root"}];
+    f.projections.set(child.id, childProjection);
     const other = thread("operational-b", f.projectId, f.mainThreadId, "subagent");
-    f.threads.push(child, other, thread(member.threadId, f.projectId, f.supervisorThreadId, "subagent"));
+    const archived = thread("archived-operational", f.projectId, child.id, "subagent");
+    archived.archivedAt = "2026-10-16T10:00:02.000Z";
+    const archivedProjection = makeProjection(archived.id, f.projectId);
+    archivedProjection.thread = archived;
+    f.projections.set(archived.id, archivedProjection);
+    f.threads.push(child, other, archived, thread(member.threadId, f.projectId, f.supervisorThreadId, "subagent"));
     const parents = new Map(f.threads.map(item => [item.id, item.lineage.parentThreadId]));
     const assignment = team.assign(f.binding, child.id, member.threadId, parents);
     for (const notification of team.snapshot(f.binding).notifications) {
@@ -1851,6 +1863,7 @@ test("a registered helper writes only its assigned child using its own exact mai
     }
     team.completeTransfer(f.binding, child.id, assignment.epoch);
     f.workflows.ensureMainInTransaction(f.owner, "seed-main", "Main remains owned by root.");
+    const mainBefore = f.workflows.get(f.projectId, f.mainThreadId)!;
     const own = makeProjection(member.threadId, f.projectId);
     own.thread = f.threads.find(item => item.id === member.threadId)!;
     f.projections.set(member.threadId, own);
@@ -1865,6 +1878,31 @@ test("a registered helper writes only its assigned child using its own exact mai
     const result = await controller.write(args);
     assert.equal(result.status, "created");
     const doc = f.workflows.get(f.projectId, f.mainThreadId, child.id)!;
+    const assignedCoverage = team.coverage(f.binding, child.id, parents);
+    assert.deepEqual(assignedCoverage, {actorThreadId: member.threadId, state: "assigned", memberEpoch: ready.epoch,
+      assignmentRootThreadId: child.id, assignmentEpoch: assignment.epoch});
+    assert.equal(team.resolveActor(f.binding, member.threadId, ready.epoch)?.role, "helper");
+
+    const archivedLink = {...authority, action: "link_child", operationId: "archived-helper-link",
+      childThreadId: archived.id, note: "Archived operational children cannot be newly linked."};
+    installEvidence(actorFixture, archivedLink);
+    assert.deepEqual(await controller.write(archivedLink), {status: "denied", operationId: "archived-helper-link",
+      reason: "child_not_current_native_descendant"});
+
+    const childPlan = {...authority, action: "apply", input: {
+      operationId: "helper-child-plan", workflowId: doc.workflowId, expectedRevision: doc.revision,
+      status: "planned", objective: "Complete the assigned child contribution.",
+      plan: sequencePlan([localStep("Check the child output", "Review the completed operational result.")]),
+      note: "Keep this personal plan in the assigned child document.", sourceBinding: f.sourceBinding,
+      requirements: [], issues: f.proposal.issues,
+    }};
+    installEvidence(actorFixture, childPlan);
+    const applied = await controller.write(childPlan);
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
+    const childAfter = f.workflows.get(f.projectId, f.mainThreadId, child.id)!;
+    assert.equal(mainStep(childAfter.plan)?.name, "Check the child output");
+    assert.deepEqual(f.workflows.get(f.projectId, f.mainThreadId), mainBefore, "helper child writes preserve the root-owned main document");
+    assert.deepEqual(team.coverage(f.binding, child.id, parents), assignedCoverage, "writes preserve the member and assignment epochs");
     assert.equal((await controller.read({...authority})).status, "ok");
     assert.equal(f.workflows.getByIdForOwner(f.owner, doc.workflowId).status, "found");
     const foreign = {...args, operationId: "foreign", childThreadId: other.id};
@@ -1879,6 +1917,14 @@ test("a registered helper writes only its assigned child using its own exact mai
     assert.equal((await controller.write(stale)).status, "denied");
     assert(transfer.epoch > assignment.epoch);
     assert.equal(f.workflows.get(f.projectId, f.mainThreadId, child.id)!.workflowId, doc.workflowId);
+    const quarantineController = new SupervisorTeamController(controller, team, null);
+    const quarantine = {...locator(f), action: "quarantine", operationId: "revoke-helper-after-child-write", memberThreadId: member.threadId};
+    installEvidence(f, quarantine, {toolName: workflowToolNames.team.direct[0]});
+    assert.equal((await quarantineController.call(quarantine, AbortSignal.timeout(1000)) as {status: string}).status, "ok");
+    assert.equal(team.resolveActor(f.binding, member.threadId, ready.epoch), null);
+    const revoked = {...args, operationId: "revoked-helper-write"};
+    installEvidence(actorFixture, revoked);
+    assert.equal((await controller.write(revoked)).status, "denied");
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
 });
 

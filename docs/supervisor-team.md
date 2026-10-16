@@ -14,15 +14,63 @@ it, including verified descendants added later. Helpers may update child workflo
 inside their current scope. They cannot change the main workflow or agreements,
 edit shared policy, recruit helpers or grant authority.
 
-When a currently live, actively assigned child has no workflow document, its helper
-may use `workflow_write` action `link_child` for that exact child, with its own
+For workflow link and apply, a target is eligible when it is unarchived, undeleted
+and currently assigned to the helper. Its T3 run may be idle or finished; this is
+separate from the steerable active-run requirement for `supervision_guide`.
+Normal monitor envelopes carry complete `workflow_read` and link arguments plus
+locator bases for apply, guide and report. An entry's `input` is the complete MCP
+argument object; pass it as the arguments without nesting it again. The
+`workflow_write_link_child` envelope label is not a tool name: pass its `input` to
+`workflow_write`, with top-level `childThreadId`.
+`workflow_read` has no `targetThreadId`; guide and report do use `targetThreadId`.
+The direct aliases are `t3-supervisor-workflows.workflow_read` /
+`mcp__t3-supervisor-workflows__workflow_read`, `t3-supervisor-workflows.workflow_write` /
+`mcp__t3-supervisor-workflows__workflow_write`,
+`t3-supervisor-workflows.supervision_guide` /
+`mcp__t3-supervisor-workflows__supervision_guide`, and
+`t3-supervisor-workflows.supervision_team` /
+`mcp__t3-supervisor-workflows__supervision_team`. For MCPX, call
+`mcpx.mcpx_call_tool` or `mcp__mcpx__mcpx_call_tool` with only `{name, arguments}`;
+`name` is the MCPX target `t3-supervisor-workflows__workflow_write` and `arguments`
+is the complete schema object. That target name is not a direct alias. Do not wrap
+calls in code-mode/`functions.exec` or string-encoded scripts.
+
+Apply has `action` and authority locators at the top level, with mutation fields
+nested under `input`: `{action:"apply", ...locatorBases.workflow_write_apply,
+input:{operationId, workflowId, expectedRevision, note, plan}}`. The `workflowId`
+and `expectedRevision` come from a fresh child read, and `note` is required. Omit
+`sourceBinding`, `requirements` and `issues` so the service supplies trusted context.
+Guide and report need fresh action-specific content, so their locator bases are not
+callable payloads. Each new mutation gets a unique operation ID; reuse one only to
+retry the exact same arguments after an uncertain result.
+
+Each helper review is sized against the serialized prompt. It may include only a
+subset of assigned targets; its counts and trigger cover that subset, and completion
+acknowledges only the included monitor versions and notifications. Fitting targets
+left out by the size bound remain pending for a later review. If a target cannot fit
+even in a one-target review, the root receives a stable attention event and its
+monitor activity remains pending.
+
+When an eligible assigned child has no workflow document, its helper may use the
+supplied `link_child` input for that exact child. It includes the helper's own
 `supervisorThreadId`, `bindingGeneration`, `memberEpoch`, `assignmentRootThreadId`,
-`assignmentEpoch`, a stable operation ID and a note. This creates a separate child
-document beneath the verified immediate parent and does not modify the parent's
-workflow, including the main. The helper then reads and updates only that child
-document. If the immediate parent document is missing or coverage is inactive,
-transferring, unavailable or uncertain, the helper escalates to the root instead;
-it does not create a parent workflow or rely on automatic child creation.
+`assignmentEpoch`, operation ID and note. Linking creates a separate child document
+beneath the verified immediate parent and does not modify the parent's workflow,
+including the main. The helper then reads and updates only that child document. If
+the immediate parent document is missing or coverage is inactive, transferring,
+unavailable or uncertain, the helper escalates to the root; it does not create a
+parent workflow or rely on automatic child creation. A not-found read alone does
+not prove unavailable coverage: verify the target and current epochs against fresh
+lineage/coverage. Notifications carry a read-only `workflow_read` input; their
+assignment values do not authorize writes. Writes, guidance and reports wait for a
+normal monitor envelope that confirms current coverage. A missing target thread is
+marked unavailable and must also be escalated.
+
+When applying a child plan, omit `sourceBinding`, `requirements` and `issues`; the
+service supplies trusted task and definition context. New plan occurrences start
+`planned`, even when the work described already finished. Record completion in a
+separate apply only after fresh child evidence and an explicit evidence note, using
+the current child `workflowId` and revision.
 
 An assignment is monitoring responsibility. It does not change a workflow's
 operational owner, a step's ownership or a contributor-thread association. Child

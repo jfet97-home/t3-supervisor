@@ -11,6 +11,8 @@ import { SupervisorConversation } from "../src/supervisor-conversation.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { SupervisorTeamStore, type TeamBinding, type TeamMember } from "../src/supervisor-team-store.js";
 import { SupervisorTeamRuntime } from "../src/supervisor-team-runtime.js";
+import { supervisionGuideToolDefinition, supervisionTeamToolDefinition } from "../src/supervisor-team-controller.js";
+import { workflowReadToolDefinition, workflowWriteToolDefinition } from "../src/workflow-write-controller.js";
 import { directParentChildLifecycle } from "../src/supervisor-observation.js";
 import { T3TransportError } from "../src/t3.js";
 import type { SupervisorHelperDeliveryTransport } from "../src/supervisor-helper-transport.js";
@@ -78,8 +80,9 @@ const readyMember = (team: SupervisorTeamStore, binding: TeamBinding, threadId: 
   return team.markReady(binding, threadId, registered.epoch, now + 1);
 };
 
-const activate = (team: SupervisorTeamStore, binding: TeamBinding, member: TeamMember, subtreeRoot: string, now = time): void => {
-  const assignment = team.assign(binding, subtreeRoot, member.threadId, parents, now);
+const activate = (team: SupervisorTeamStore, binding: TeamBinding, member: TeamMember, subtreeRoot: string, now = time,
+  parentById: Map<string, string | null> = parents): void => {
+  const assignment = team.assign(binding, subtreeRoot, member.threadId, parentById, now);
   for (const notice of team.snapshot(binding).notifications.filter(item => item.assignmentRootThreadId === subtreeRoot && item.assignmentEpoch === assignment.epoch)) {
     team.updateNotificationDelivery(binding, binding.threadId, notice.id, "sending", now + 1);
     team.updateNotificationDelivery(binding, binding.threadId, notice.id, "delivered", now + 2);
@@ -96,6 +99,34 @@ const batchThread = (threadId: string): SupervisorMonitorThreadBatch => {
 
 const batchOf = (threadIds: readonly string[]): SupervisorMonitorBatch => ({projectId, createdAt: time, trigger: "priority",
   finalizedActivityCount: threadIds.length, pendingItemCount: threadIds.length, truncated: false, threads: threadIds.map(batchThread)});
+
+const parseEnvelope = (text: string, start: string, end: string): Record<string, unknown> => {
+  const opening = `${start}\n`;
+  const startAt = text.indexOf(opening);
+  assert.notEqual(startAt, -1, `missing ${start} fence`);
+  const contentStart = startAt + opening.length;
+  const endAt = text.indexOf(`\n${end}`, contentStart);
+  assert.notEqual(endAt, -1, `missing ${end} fence`);
+  return JSON.parse(text.slice(contentStart, endAt)) as Record<string, unknown>;
+};
+
+const assertAdvertisedInput = (definition: {inputSchema: unknown}, input: Record<string, unknown>, complete = true): void => {
+  const schema = definition.inputSchema as {
+    additionalProperties?: boolean;
+    properties: Record<string, unknown>;
+    required?: string[];
+    oneOf?: Array<{properties?: {action?: {const?: unknown}}; required?: string[]}>;
+  };
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(Object.keys(input).filter(key => !Object.prototype.hasOwnProperty.call(schema.properties, key)), []);
+  if (!complete) return;
+  for (const key of schema.required ?? []) assert.ok(Object.prototype.hasOwnProperty.call(input, key), `missing schema-required field ${key}`);
+  if (schema.oneOf) {
+    const branch = schema.oneOf.find(item => item.properties?.action?.const === input.action);
+    assert.ok(branch, `no advertised action branch for ${String(input.action)}`);
+    for (const key of branch?.required ?? []) assert.ok(Object.prototype.hasOwnProperty.call(input, key), `missing action-required field ${key}`);
+  }
+};
 
 const helperProjection = (member: TeamMember, rootThreadId: string): Projection => emptyProjection({
   ...makeThread(member.threadId, rootThreadId, "subagent"), lineage: {parentThreadId: rootThreadId, relationshipToParent: "subagent", rootThreadId},
@@ -347,6 +378,34 @@ test("runtime completes a transfer only after both helpers finish their exact ha
   for (let cycle = 0; cycle < 6; cycle++) {
     runtime.startCycle(f.binding);
     await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+    if (cycle === 0) {
+      const notificationDelivery = [...transport.sent.entries()].find(([logicalId]) => logicalId.startsWith("supervisor-team-notice:"));
+      assert.ok(notificationDelivery);
+      if (!notificationDelivery) throw new Error("handover_notification_delivery_missing");
+      const [logicalId, delivery] = notificationDelivery;
+      const envelope = parseEnvelope(delivery.text, "UNTRUSTED_TEAM_NOTIFICATION", "END_UNTRUSTED_TEAM_NOTIFICATION");
+      const member = f.teamStore.snapshot(f.binding).members.find(item => item.threadId === delivery.threadId);
+      const notice = f.teamStore.snapshot(f.binding).notifications.find(item => item.id ===
+        (envelope.notification as Record<string, unknown> | undefined)?.id);
+      assert.ok(member);
+      assert.ok(notice);
+      assert.equal(envelope.supervisorThreadId, delivery.threadId);
+      assert.equal(envelope.helperThreadId, delivery.threadId);
+      assert.equal(envelope.bindingGeneration, f.binding.generation);
+      assert.equal(envelope.memberEpoch, member?.epoch);
+      assert.ok(logicalId.startsWith("supervisor-team-notice:"));
+      const toolInputs = envelope.toolInputs as Record<string, {input: Record<string, unknown>}>;
+      assert.deepEqual(Object.keys(toolInputs), ["workflow_read"]);
+      const readCall = toolInputs.workflow_read;
+      assert.ok(readCall);
+      const readAuthority = {supervisorThreadId: delivery.threadId, bindingGeneration: f.binding.generation, memberEpoch: member?.epoch,
+        ...(notice?.assignmentRootThreadId ? {assignmentRootThreadId: notice.assignmentRootThreadId} : {}),
+        ...(notice?.assignmentEpoch ? {assignmentEpoch: notice.assignmentEpoch} : {})};
+      assert.deepEqual(readCall.input, readAuthority);
+      assert.equal(Object.hasOwn(readCall.input, "targetThreadId"), false);
+      assertAdvertisedInput(workflowReadToolDefinition, readCall.input);
+      assert.equal(envelope.locatorBases, undefined, "handover notifications do not carry stale write locators");
+    }
     for (const [logicalId, delivery] of transport.sent) {
       if (!logicalId.startsWith("supervisor-team-notice:") || completed.has(logicalId)) continue;
       const projection = f.projections.get(delivery.threadId)!;
@@ -611,18 +670,65 @@ test("a stale completed helper check-in settles its request without acknowledgin
   f.monitor.observe({projectId, threadId: opThread.id, sourceOrdinal: 0, projection: op, now: time + 2});
   const selected = f.monitor.select(projectId, {intervalMinutes: 5, activityThreshold: 1}, time + 3, null, {eligibleThreadIds: new Set([opThread.id])});
   assert.ok(selected);
+  const archivedTarget = f.threadList.find(thread => thread.id === "leaf")!;
+  archivedTarget.archivedAt = iso(time + 2);
   const helper = helperProjection(first, f.binding.threadId);
   f.projections.set(first.threadId, helper);
   f.projections.set(second.threadId, helperProjection(second, f.binding.threadId));
   const transport = webhookTransport();
   const runtime = f.runtime(transport.transport);
-  const partition = runtime.partition(f.binding, f.threadList, selected);
+  const selectedWithArchived = {...selected!, finalizedActivityCount: selected!.finalizedActivityCount + 1,
+    pendingItemCount: selected!.pendingItemCount + 1, threads: [...selected!.threads, batchThread(archivedTarget.id)]};
+  const partition = runtime.partition(f.binding, f.threadList, selectedWithArchived);
   assert.equal(partition.helperBatches.length, 1);
   runtime.startCycle(f.binding);
   await runtime.runHelperBatch(f.binding, f.threadList, partition.helperBatches, AbortSignal.timeout(5000));
   const request = f.requests.pending(projectId, first.threadId);
   assert.ok(request);
   if (!request?.batch) throw new Error("helper_review_request_missing");
+  const monitorEnvelope = parseEnvelope(request.text, "UNTRUSTED_TEAM_MONITOR_ENVELOPE", "END_UNTRUSTED_TEAM_MONITOR_ENVELOPE");
+  assert.equal(monitorEnvelope.rootThreadId, f.binding.threadId);
+  assert.equal(monitorEnvelope.supervisorThreadId, first.threadId);
+  assert.equal(monitorEnvelope.helperThreadId, first.threadId);
+  assert.equal(monitorEnvelope.bindingGeneration, f.binding.generation);
+  assert.equal(monitorEnvelope.memberEpoch, first.epoch);
+  const envelopeTargets = monitorEnvelope.targets as Array<Record<string, unknown>>;
+  assert.equal(envelopeTargets.length, 2);
+  const targetEnvelope = envelopeTargets.find(item => item.targetThreadId === "branch")!;
+  const archivedEnvelope = envelopeTargets.find(item => item.targetThreadId === archivedTarget.id)!;
+  assert.deepEqual({targetThreadId: targetEnvelope.targetThreadId, assignmentRootThreadId: targetEnvelope.assignmentRootThreadId,
+    assignmentEpoch: targetEnvelope.assignmentEpoch}, {targetThreadId: "branch", assignmentRootThreadId: "branch",
+    assignmentEpoch: f.teamStore.coverage(f.binding, "branch", parents).assignmentEpoch});
+  const authority = {supervisorThreadId: first.threadId, bindingGeneration: f.binding.generation, memberEpoch: first.epoch,
+    assignmentRootThreadId: "branch", assignmentEpoch: f.teamStore.coverage(f.binding, "branch", parents).assignmentEpoch!};
+  const toolInputs = targetEnvelope.toolInputs as Record<string, {input: Record<string, unknown>}>;
+  assert.ok(toolInputs.workflow_read);
+  const readInput = toolInputs.workflow_read.input;
+  assert.deepEqual(readInput, authority);
+  assert.equal(Object.hasOwn(readInput, "targetThreadId"), false, "workflow_read has no targetThreadId field");
+  assertAdvertisedInput(workflowReadToolDefinition, readInput);
+  assert.ok(toolInputs.workflow_write_link_child);
+  const linkInput = toolInputs.workflow_write_link_child.input;
+  const {operationId: linkOperationId, note: linkNote, ...linkLocators} = linkInput;
+  assert.deepEqual(linkLocators, {...authority, action: "link_child", childThreadId: "branch"});
+  assert.equal(typeof linkOperationId, "string");
+  assert.equal(typeof linkNote, "string");
+  assert.equal(linkInput.targetThreadId, undefined, "link_child uses childThreadId rather than targetThreadId");
+  assertAdvertisedInput(workflowWriteToolDefinition, linkInput);
+  const locatorBases = targetEnvelope.locatorBases as Record<string, Record<string, unknown>>;
+  assert.deepEqual(locatorBases.workflow_write_apply, authority);
+  assert.deepEqual(locatorBases.supervision_guide, {...authority, targetThreadId: "branch"});
+  assert.deepEqual(locatorBases.supervision_team_report, {...authority, targetThreadId: "branch", action: "report"});
+  assertAdvertisedInput(workflowWriteToolDefinition, locatorBases.workflow_write_apply, false);
+  assertAdvertisedInput(supervisionGuideToolDefinition, locatorBases.supervision_guide, false);
+  assertAdvertisedInput(supervisionTeamToolDefinition, locatorBases.supervision_team_report, false);
+  const archivedToolInputs = archivedEnvelope.toolInputs as Record<string, {input: Record<string, unknown>}>;
+  assert.deepEqual(Object.keys(archivedToolInputs), ["workflow_read"]);
+  assert.equal(archivedEnvelope.workflowWriteEligibility, "target_archived_or_deleted");
+  assert.ok(archivedToolInputs.workflow_read);
+  assert.equal(Object.hasOwn(archivedToolInputs.workflow_read.input, "targetThreadId"), false);
+  assertAdvertisedInput(workflowReadToolDefinition, archivedToolInputs.workflow_read.input);
+  assert.equal(archivedEnvelope.locatorBases, undefined);
   const targetRequest = f.teamStore.unresolvedRequests(f.binding).find(item => item.requestId === request.id);
   assert.ok(targetRequest);
   const helperRunId = "helper-review-run";
@@ -643,6 +749,140 @@ test("a stale completed helper check-in settles its request without acknowledgin
   assert.equal(f.teamStore.coverage(f.binding, opThread.id, parents).state, "transferring");
   assert.equal(f.teamStore.snapshot(f.binding).events.some(item => item.kind === "service_attention" && item.memberThreadId === first.threadId &&
     item.summary.includes("check-in failed")), false);
+});
+
+test("an oversized helper batch is split without acknowledging activity reserved for its next check-in", async t => {
+  let now = time + 100;
+  t.mock.method(Date, "now", () => now);
+  const f = await fixture();t.after(f.cleanup);
+  const helperThreadId = "thread:delegated-task:command%3Amcp%3A7ad44b46-41f3-4133-8db5-6199fb9b109b%3Adelegate-task%3A508b27d1-3107-47bf-97cd-f1b522adb9ba-helper-bootstrap-64b376ad-ebc6-47f7-b37f-345d6f45583f";
+  const assignmentRootId = "thread:delegated-task:command%3Amcp%3Afd38e33d-d163-4deb-8fd2-490fdb5e01e3%3Adelegate-task%3Ainvoice-delivery-receipt-parent-508b27d1-3107-47bf-97cd-f1b522adb9ba";
+  const targetThreadIds = Array.from({length: 25}, (_, index) =>
+    `thread:delegated-task:command%3Amcp%3Afd38e33d-d163-4deb-8fd2-490fdb5e01e3%3Adelegate-task%3Ainvoice-delivery-receipt-target-${String(index).padStart(2, "0")}-508b27d1-3107-47bf-97cd-f1b522adb9ba`);
+  assert.ok([helperThreadId, assignmentRootId, ...targetThreadIds].every(id => id.length <= 512));
+  const operationalRoot = makeThread(assignmentRootId, "main", "subagent");
+  const operationalThreads = targetThreadIds.map(id => makeThread(id, assignmentRootId, "subagent"));
+  const allThreads = [operationalRoot, ...operationalThreads];
+  f.threadList.push(...allThreads);
+  const parentById = new Map(parents);
+  parentById.set(assignmentRootId, "main");
+  for (const id of targetThreadIds) parentById.set(id, assignmentRootId);
+  const member = readyMember(f.teamStore, f.binding, helperThreadId);
+  activate(f.teamStore, f.binding, member, assignmentRootId, time, parentById);
+  f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
+
+  for (const [targetIndex, operationalThread] of operationalThreads.entries()) {
+    const projection = emptyProjection(operationalThread);
+    assert.ok(Array.isArray(projection.nodes));
+    for (let runIndex = 0; runIndex < 4; runIndex++) {
+      const taskSuffix = `invoice-delivery-receipt-target-${String(targetIndex).padStart(2, "0")}-run-${runIndex}`;
+      const runId = `run:command%3Amcp%3Afd38e33d-d163-4deb-8fd2-490fdb5e01e3%3Adelegate-task%3A${taskSuffix}-508b27d1-3107-47bf-97cd-f1b522adb9ba`;
+      const rootNodeId = `root:${taskSuffix}`;
+      const completedAt = iso(time + runIndex + 1);
+      projection.runs.push({id: runId, threadId: operationalThread.id, ordinal: runIndex + 1, status: "completed",
+        requestedAt: iso(time + runIndex), startedAt: iso(time + runIndex), completedAt, rootNodeId,
+        providerThreadId: `provider:${taskSuffix}`});
+      projection.nodes.push({id: rootNodeId, kind: "root_turn", status: "completed", threadId: operationalThread.id,
+        runId, rootNodeId, providerThreadId: `provider:${taskSuffix}`});
+    }
+    f.projections.set(operationalThread.id, projection);
+    f.monitor.observe({projectId, threadId: operationalThread.id, sourceOrdinal: 0, projection, now: time + 10});
+  }
+
+  const settings = {intervalMinutes: 5, activityThreshold: 1};
+  const allTargetSet = new Set(targetThreadIds);
+  const completeBatch = f.monitor.select(projectId, settings, time + 11, null, {eligibleThreadIds: allTargetSet});
+  assert.ok(completeBatch);
+  if (!completeBatch) throw new Error("oversized_helper_monitor_batch_missing");
+  assert.equal(completeBatch.threads.length, targetThreadIds.length);
+  assert.equal(completeBatch.pendingItemCount, targetThreadIds.length * 4);
+  const pendingBefore = new Map(targetThreadIds.map(id => [id, f.monitor.pending(projectId, id).map(item => item.id)]));
+  const transport = webhookTransport();
+  const runtime = f.runtime(transport.transport);
+  const partition = runtime.partition(f.binding, f.threadList, completeBatch);
+  assert.equal(partition.helperBatches.length, 1);
+  assert.equal(partition.helperBatches[0]?.targets.length, targetThreadIds.length);
+
+  const deliverNextCheckin = async () => {
+    runtime.startCycle(f.binding);
+    await runtime.runHelperBatch(f.binding, f.threadList, partition.helperBatches, AbortSignal.timeout(5000));
+  };
+  await deliverNextCheckin();
+  const firstRequest = f.requests.pending(projectId, member.threadId);
+  assert.ok(firstRequest?.batch);
+  if (!firstRequest?.batch) throw new Error("first_bounded_helper_checkin_missing");
+  assert.ok(firstRequest.text.length <= 120_000, "the delivered protocol payload stays within the native check-in bound");
+  assert.equal(f.teamStore.snapshot(f.binding).events.some(item => item.kind === "service_attention"), false,
+    "a fitting tail deferred by the protocol bound is normal pagination, not a root attention event");
+  const firstEnvelope = parseEnvelope(firstRequest.text, "UNTRUSTED_TEAM_MONITOR_ENVELOPE", "END_UNTRUSTED_TEAM_MONITOR_ENVELOPE");
+  const firstTargets = firstEnvelope.targets as Array<Record<string, unknown>>;
+  const firstTargetIds = firstTargets.map(target => String(target.targetThreadId));
+  const completeTargetIds = completeBatch.threads.map(thread => thread.threadId);
+  assert.ok(firstTargetIds.length > 0 && firstTargetIds.length < completeTargetIds.length,
+    "the realistic full helper batch is larger than one supported delivery");
+  assert.deepEqual(firstTargetIds, completeTargetIds.slice(0, firstTargetIds.length));
+  const firstExpectedThreads = completeBatch.threads.slice(0, firstTargetIds.length);
+  assert.deepEqual(firstRequest.batch.threads, firstExpectedThreads);
+  const firstExpectedPending = firstExpectedThreads.reduce((count, thread) => count + thread.pendingItemCount, 0);
+  const firstExpectedFinalized = firstExpectedThreads.reduce((count, thread) => count + thread.finalizedActivityCount, 0);
+  assert.equal(firstRequest.batch.pendingItemCount, firstExpectedPending);
+  assert.equal(firstRequest.batch.finalizedActivityCount, firstExpectedFinalized);
+  const firstEnvelopeBatch = firstEnvelope.batch as SupervisorMonitorBatch;
+  assert.deepEqual(firstEnvelopeBatch.threads.map(thread => thread.threadId), firstTargetIds);
+  assert.equal(firstEnvelopeBatch.pendingItemCount, firstExpectedPending);
+  assert.equal(firstEnvelopeBatch.finalizedActivityCount, firstExpectedFinalized);
+  const remainingTargetIds = completeTargetIds.slice(firstTargetIds.length);
+  assert.ok(remainingTargetIds.length > 0);
+
+  const completeHelperTurn = (request: NonNullable<typeof firstRequest>, runLabel: string, completedAt: number): void => {
+    const helper = f.projections.get(member.threadId)!;
+    const runId = `${runLabel}-run`;
+    helper.runs.push({id: runId, threadId: member.threadId, ordinal: helper.runs.length + 1, status: "completed",
+      requestedAt: iso(completedAt - 1), startedAt: iso(completedAt - 1), completedAt: iso(completedAt),
+      rootNodeId: null, userMessageId: request.messageId});
+    helper.messages.push({id: request.messageId, threadId: member.threadId, runId, nodeId: null, role: "user", text: request.text,
+      streaming: false, createdAt: iso(completedAt - 1), updatedAt: iso(completedAt - 1),
+      scheduledTaskId: `scheduled-${member.threadId}`, creationSource: "server"});
+    helper.messages.push({id: `${runLabel}-final`, threadId: member.threadId, runId, nodeId: null, role: "assistant",
+      text: `Reviewed the selected monitor scope. ${request.completionMarker}`, streaming: false,
+      createdAt: iso(completedAt), updatedAt: iso(completedAt), ordinal: 1});
+  };
+  completeHelperTurn(firstRequest, "bounded-helper-first", now + 1);
+  now += 2;
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  assert.equal(f.requests.requests(projectId, member.threadId).find(item => item.id === firstRequest.id)?.state, "completed");
+  for (const id of firstTargetIds) assert.deepEqual(f.monitor.pending(projectId, id), [], `selected target ${id} is acknowledged`);
+  for (const id of remainingTargetIds)
+    assert.deepEqual(f.monitor.pending(projectId, id).map(item => item.id), pendingBefore.get(id), `unselected target ${id} remains pending`);
+
+  const remainingBatch = f.monitor.select(projectId, settings, time + 12, null, {eligibleThreadIds: allTargetSet});
+  assert.ok(remainingBatch);
+  if (!remainingBatch) throw new Error("remaining_helper_monitor_batch_missing");
+  assert.deepEqual(remainingBatch.threads.map(thread => thread.threadId), remainingTargetIds);
+  const remainingPartition = runtime.partition(f.binding, f.threadList, remainingBatch);
+  assert.equal(remainingPartition.helperBatches.length, 1);
+  assert.deepEqual(remainingPartition.helperBatches[0]?.targets.map(target => target.targetThreadId), remainingTargetIds);
+  now += SUPERVISOR_MONITOR_COOLDOWN_MS + 1;
+  runtime.startCycle(f.binding);
+  await runtime.runHelperBatch(f.binding, f.threadList, remainingPartition.helperBatches, AbortSignal.timeout(5000));
+  const secondRequest = f.requests.pending(projectId, member.threadId);
+  assert.ok(secondRequest?.batch);
+  if (!secondRequest?.batch) throw new Error("remaining_bounded_helper_checkin_missing");
+  assert.ok(secondRequest.text.length <= 120_000);
+  const secondEnvelope = parseEnvelope(secondRequest.text, "UNTRUSTED_TEAM_MONITOR_ENVELOPE", "END_UNTRUSTED_TEAM_MONITOR_ENVELOPE");
+  assert.deepEqual((secondEnvelope.targets as Array<Record<string, unknown>>).map(target => target.targetThreadId), remainingTargetIds);
+  assert.deepEqual(secondRequest.batch.threads.map(thread => thread.threadId), remainingTargetIds);
+  assert.equal(secondRequest.batch.pendingItemCount, remainingBatch.pendingItemCount);
+  assert.equal(secondRequest.batch.finalizedActivityCount, remainingBatch.finalizedActivityCount);
+  assert.equal(firstTargetIds.some(id => remainingTargetIds.includes(id)), false, "the next check-in does not duplicate acknowledged targets");
+
+  completeHelperTurn(secondRequest, "bounded-helper-second", now + 1);
+  now += 2;
+  runtime.startCycle(f.binding);
+  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  assert.equal(f.requests.requests(projectId, member.threadId).find(item => item.id === secondRequest.id)?.state, "completed");
+  for (const id of targetThreadIds) assert.deepEqual(f.monitor.pending(projectId, id), [], `target ${id} is acknowledged after its check-in`);
 });
 
 test("a parent-record native terminal event routes to its assigned helper and ACKs the frozen child row", async t => {
