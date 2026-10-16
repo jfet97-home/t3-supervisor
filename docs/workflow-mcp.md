@@ -98,6 +98,14 @@ actor-authenticated to a particular T3 conversation and grant no edit authority.
   repeated reusable references remain distinct, and new nodes begin planned. Read the current document before refining it.
 
 A valid unaccepted draft can be edited: formal agreement is not a write gate.
+During initialization the root publishes the supplied initial record unchanged and
+does not contact the operative main. In later check-ins, if the current task has
+no valid source-bound plan, creating an empty draft does
+not repair the missing proposal and `apply` remains unavailable. The root repairs
+it with a fresh complete canonical chat proposal, publishes and sends the identical
+record, then finishes its check-in. It waits until the service exposes that valid
+current proposal before retrying `apply`. Invalid definitions or unresolved
+requirements keep the proposal provisional; they do not authorize weaker edits.
 The controller supplies the current task's trusted canonical proposal and a fresh
 matching valid definition snapshot; live edits cannot self-authorize their source
 binding or weaken fixed/required commitments. Invalid/incomplete source material
