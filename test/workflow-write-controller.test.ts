@@ -1977,14 +1977,15 @@ test("opt-in helper provider isolation accepts only a distinct configured instan
   }
 });
 
-test("helper guidance uses native steer only and retains uncertain identity across a handover", async () => {
+test("helper guidance resolves an omitted activeRunId and retains uncertain identity across a handover", async () => {
   const f = await makeFixture();
   try {
     const team = new SupervisorTeamStore(f.supervisors);
     const member = team.registerMember(f.binding, {threadId: "guide-helper", taskId: "guide-task", bootstrapRunId: "guide-bootstrap"});
     const ready = team.markReady(f.binding, member.threadId, member.epoch);
     const target = thread("guide-target", f.projectId, f.mainThreadId, "subagent");
-    Object.assign(target, {creationSource: "mcp", runtimeMode: "full-access", interactionMode: "default", activeRunId: "guide-active"});
+    Object.assign(target, {creationSource: "mcp", runtimeMode: "full-access", interactionMode: "default"});
+    assert.equal(Object.prototype.hasOwnProperty.call(target, "activeRunId"), false, "the T3 projection omits this field");
     f.threads.push(target, thread(member.threadId, f.projectId, f.supervisorThreadId, "subagent"));
     const parents = new Map(f.threads.map(item => [item.id, item.lineage.parentThreadId]));
     const assignment = team.assign(f.binding, target.id, member.threadId, parents);

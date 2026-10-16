@@ -14,6 +14,16 @@ it, including verified descendants added later. Helpers may update child workflo
 inside their current scope. They cannot change the main workflow or agreements,
 edit shared policy, recruit helpers or grant authority.
 
+When a currently live, actively assigned child has no workflow document, its helper
+may use `workflow_write` action `link_child` for that exact child, with its own
+`supervisorThreadId`, `bindingGeneration`, `memberEpoch`, `assignmentRootThreadId`,
+`assignmentEpoch`, a stable operation ID and a note. This creates a separate child
+document beneath the verified immediate parent and does not modify the parent's
+workflow, including the main. The helper then reads and updates only that child
+document. If the immediate parent document is missing or coverage is inactive,
+transferring, unavailable or uncertain, the helper escalates to the root instead;
+it does not create a parent workflow or rely on automatic child creation.
+
 An assignment is monitoring responsibility. It does not change a workflow's
 operational owner, a step's ownership or a contributor-thread association. Child
 completion does not complete a parent step. Work without an effective helper

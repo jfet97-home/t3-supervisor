@@ -3,7 +3,7 @@ import {isRecord, workflowRequestHash, workflowToolInputSize, workflowToolInputM
 import {WorkflowWriteController, type WorkflowLocator} from "./workflow-write-controller.js";
 import {resolveSupervisorScope} from "./supervisor-scope.js";
 import {modelSelection, SupervisorRpcError, type SupervisorRpc} from "./supervisor-native.js";
-import {canSupervisorContact, hasPendingOwnerInput, hasRunningProviderTurn} from "./supervisor-conversation.js";
+import {canSupervisorContact, hasPendingOwnerInput, resolveSteerableRun} from "./supervisor-conversation.js";
 import {childOrigin} from "./supervisor-observation.js";
 import type {BindingRecord} from "./project-supervisor-store.js";
 import type {SupervisorTeamStore} from "./supervisor-team-store.js";
@@ -332,9 +332,8 @@ export class SupervisorTeamController {
       if (current.thread.archivedAt == null && current.thread.deletedAt == null && !hasPendingOwnerInput(current)) {
         const parentThread = candidate.lineage.parentThreadId ? scope.byId.get(candidate.lineage.parentThreadId) : undefined;
         const parent = parentThread ? await this.workflows.options.native.projection(parentThread.id, signal) : undefined;
-        const run = current.runs.find(item => item.id === current.thread.activeRunId && item.status === "running" &&
-          (item.threadId === undefined || item.threadId === candidate!.id));
-        if (childOrigin(current.thread, parent) === "delegated_child" && run && hasRunningProviderTurn(current, run) &&
+        const run = resolveSteerableRun(current);
+        if (childOrigin(current.thread, parent) === "delegated_child" && run &&
           canSupervisorContact(actor.thread, current.thread) && this.current(payload, binding) &&
           this.team.authorizeWrite(binding, payload.supervisorThreadId, String(payload.targetThreadId), parents, payload) &&
           this.team.authorizeWrite(binding, payload.supervisorThreadId, candidate.id, parents, payload)) return {route: current, parents, reason: null, freshScope: true};
@@ -403,8 +402,8 @@ export class SupervisorTeamController {
   }
   private async sendGuideAttempt(payload: Payload, binding: BindingRecord, evidenceItemId: string, record: GuideRecord,
     route: Projection, parents: ReadonlyMap<string, string | null>, signal: AbortSignal): Promise<GuideRecord> {
-    const targetRunId = route.thread.activeRunId;
-    if (typeof targetRunId !== "string") {
+    const targetRunId = resolveSteerableRun(route)?.id;
+    if (typeof targetRunId !== "string" || targetRunId.length === 0) {
       const needsEscalation: GuideRecord = {...record, status: "needs_escalation", escalationSummary:
         `A definite steer rejection left ${record.targetThreadId} without a contactable ancestor in the helper's current assignment. Root intervention is required.`,
       reason: "route_run_unavailable"};

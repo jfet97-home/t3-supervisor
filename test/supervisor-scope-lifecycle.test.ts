@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { ProjectSupervisorStore, defaultSupervisorModel } from "../src/project-supervisor-store.js";
-import { SupervisorConversation } from "../src/supervisor-conversation.js";
+import { resolveSteerableRun, SupervisorConversation } from "../src/supervisor-conversation.js";
 import { SupervisorLifecycle, SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
 import { mainConversation, resolveSupervisorScope } from "../src/supervisor-scope.js";
 import { childOrigin, delegatedLifecycle, directParentChildLifecycle, normalizeLifecycle, observeScopeThread } from "../src/supervisor-observation.js";
@@ -50,6 +50,50 @@ test("verified descendants with native published metadata attach across project 
     parentProjection, lineageVerified: false, activityRefs: [{sourceThreadId: native.id, sourceRunId: null, sourceMessageId: null,
       sourceItemId: "stale-item", kind: "command", observedAt: 1, label: "old activity"}]});
   assert.equal(staleLineage.origin, "unknown_child");assert.equal(staleLineage.lifecycle, "unknown");assert.deepEqual(staleLineage.activityRefs, []);
+});
+
+test("steerable run resolution falls back only to one exact own run when activeRunId is omitted", () => {
+  const makeRun = (id: string, overrides: Record<string, unknown> = {}): Projection["runs"][number] => ({
+    id, threadId: "child", ordinal: 1, status: "running", requestedAt: "2026-10-17T10:00:00Z",
+    startedAt: null, completedAt: null, rootNodeId: `${id}-root`, activeAttemptId: `${id}-attempt`, ...overrides,
+  });
+  const makeProjection = (runs: Projection["runs"], options: {
+    pointer?: {present: boolean; value?: unknown};
+    providerTurns?: unknown[];
+  } = {}): Projection => {
+    const child = thread("child", "main", "subagent", "main");
+    if (options.pointer?.present) Object.assign(child, {activeRunId: options.pointer.value});
+    const providerTurns = options.providerTurns ?? runs.map(run => ({id: `${run.id}-turn`, nodeId: run.rootNodeId,
+      runAttemptId: run.activeAttemptId, status: "running"}));
+    return {thread: child, runs, messages: [], providerTurns};
+  };
+  const run = makeRun("active");
+  const absent = makeProjection([run]);
+  assert.equal(Object.prototype.hasOwnProperty.call(absent.thread, "activeRunId"), false);
+  assert.equal(resolveSteerableRun(absent)?.id, "active");
+
+  const activePointer = makeProjection([run], {pointer: {present: true, value: "active"}});
+  assert.equal(resolveSteerableRun(activePointer)?.id, "active", "a valid explicit pointer keeps its existing path");
+
+  const cases: Array<{name: string; projection: Projection}> = [
+    {name: "ambiguous own running runs", projection: makeProjection([makeRun("one"), makeRun("two")])},
+    {name: "explicit null", projection: makeProjection([run], {pointer: {present: true, value: null}})},
+    {name: "malformed explicit pointer", projection: makeProjection([run], {pointer: {present: true, value: 17}})},
+    {name: "stale explicit pointer", projection: makeProjection([run], {pointer: {present: true, value: "stale"}})},
+    {name: "foreign run", projection: makeProjection([makeRun("foreign", {threadId: "other"})])},
+    {name: "missing run thread id", projection: makeProjection([makeRun("unbound", {threadId: undefined})])},
+    {name: "non-running run", projection: makeProjection([makeRun("finished", {status: "completed"})])},
+    {name: "missing active attempt", projection: makeProjection([makeRun("no-attempt", {activeAttemptId: undefined})])},
+    {name: "missing root node", projection: makeProjection([makeRun("no-root", {rootNodeId: null})])},
+    {name: "missing provider turn", projection: makeProjection([run], {providerTurns: []})},
+    {name: "non-running provider turn", projection: makeProjection([run], {providerTurns: [{id: "completed-turn",
+      nodeId: run.rootNodeId, runAttemptId: run.activeAttemptId, status: "completed"}]})},
+    {name: "mismatched provider attempt", projection: makeProjection([run], {providerTurns: [{id: "wrong-attempt-turn",
+      nodeId: run.rootNodeId, runAttemptId: "other-attempt", status: "running"}]})},
+    {name: "mismatched provider node", projection: makeProjection([run], {providerTurns: [{id: "wrong-node-turn",
+      nodeId: "other-root", runAttemptId: run.activeAttemptId, status: "running"}]})},
+  ];
+  for (const item of cases) assert.equal(resolveSteerableRun(item.projection), null, item.name);
 });
 
 test("an incomplete unrelated lineage retains verified sibling scope for read-only observation", () => {
