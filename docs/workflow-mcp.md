@@ -18,6 +18,41 @@ historical accepted snapshot; current task-source and definition validity remain
 part of the existing agreement/recovery system. Neither acceptance nor an
 observation note proves execution.
 
+## Native workflow proposal and acceptance records
+
+Native chat negotiation uses complete fenced `workflow-proposal` and
+`workflow-acceptance` records; these are separate from `workflow_write` arguments
+and receipts. Each chat record has exactly `taskId`, `proposalId`,
+`workspaceRoot`, `revision` and `workflow`. Preserve the entire canonical `workflow`
+value from the proposal, including its definition/requirement state, issues,
+canonical node IDs, source and contributor metadata, nested template paths and
+omissions. Service normalization derives canonical fields from the trusted task
+and current definitions. A raw draft such as requirement applicability decisions
+and a plan is only normalization input; it is not a proposal or acceptance record.
+When no candidate is recognized, bounded canonical authoring examples may appear
+in the Supervisor's input. Use them only as format guidance: they are not
+proposals, agreement, applicability decisions or edit authority. Incomplete
+definitions keep explicit issues and omissions visible; preserve every canonical
+field, including `null` and empty arrays, source provenance and `templatePath`
+values. New wrapper groups use `templatePath: null`; never invent a path. JSON
+object key order may vary, but values, text and array order remain significant.
+
+The operative main assistant records agreement only in its own completed assistant
+message after the proposal introduction, by returning the exact same five-field
+envelope and full canonical workflow value inside `workflow-acceptance`. A short
+acknowledgement, a reduced `{taskId, mainThreadId, proposalId, accepted: true}`
+object, omitted canonical fields or extra fields do not establish agreement.
+MCP transport access and a successful `workflow_write` remain separate capabilities
+and cannot stand in for native-message agreement.
+
+The current task stores at most one bounded `workflowProtocolDiagnostic` when a
+completed message's record is not usable for the dialogue. A new diagnostic
+replaces the previous one; it does not build a separate history or queue. The
+dashboard identifies the message role and a fixed code without exposing the body.
+Treat it as information that the dialogue needs correction: it does not change
+agreement history, authorize an edit, prove execution, or schedule an automatic
+retry or new chat turn.
+
 ## MCP interface
 
 The service provides a stateless Streamable HTTP MCP route at `/mcp/workflows`.

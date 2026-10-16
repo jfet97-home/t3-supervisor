@@ -1,5 +1,5 @@
 import { fingerprint } from "./guidance-store.js";
-import { validateWorkflowRecord, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
+import { validateWorkflowRecord, workflowRecordDiagnostic, workflowRecordDiagnosticCodes, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
 import type { WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
 
 export type WorkflowAgreementRecordKind = "workflow-proposal" | "workflow-acceptance";
@@ -18,6 +18,9 @@ const idText = (value: unknown): value is string => typeof value === "string" &&
 const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const exactFields = (value: Record<string, unknown>, fields: readonly string[]): boolean =>
   Object.keys(value).length === fields.length && fields.every(field => Object.hasOwn(value, field));
+
+export const workflowProtocolDiagnosticCodes = ["record_json_invalid", "task_mismatch", "plan_not_formal", ...workflowRecordDiagnosticCodes] as const;
+export type WorkflowProtocolDiagnosticCode = typeof workflowProtocolDiagnosticCodes[number];
 
 /** Reads only exact named proposal or acceptance fences from completed message text. */
 export const extractWorkflowAgreementRecords = (text: string, kind: WorkflowAgreementRecordKind): unknown[] => {
@@ -44,6 +47,22 @@ const parseProposal = (value: unknown, taskId: string, context: ProposalContext)
 /** Validates a canonical proposal for presentation, including provisional source states. */
 export const parseWorkflowProposalRecord = (value: unknown, taskId: string, context: ProposalContext): ParsedWorkflowProposalRecord | null =>
   parseProposal(value, taskId, context);
+
+export const diagnoseWorkflowProposalRecord = (value: unknown, taskId: string, context: ProposalContext, requireFormal = false): string | null => {
+  try {
+    if (!record(value) || !exactFields(value, ["taskId", "proposalId", "workspaceRoot", "revision", "workflow"])) return "record_fields";
+    if (value.taskId !== taskId) return "task_mismatch";
+    if (!idText(value.proposalId) || typeof value.workspaceRoot !== "string" || value.workspaceRoot.length > 4096 ||
+      !(value.revision === null || typeof value.revision === "string")) return "record_fields";
+    if (value.workspaceRoot !== context.workspaceRoot || value.revision !== context.revision) return "source_pin_mismatch";
+    const workflowDiagnostic = workflowRecordDiagnostic(value.workflow, context);
+    if (workflowDiagnostic) return workflowDiagnostic;
+    if (requireFormal && !parseWorkflowAgreementRecord(value, taskId, context)) return "plan_not_formal";
+    return null;
+  } catch {
+    return "invalid";
+  }
+};
 
 const fullyResolvedPlan = (workflow: WorkflowPlanValue): boolean => {
   if (!workflow.plan || !workflow.requirementsKnown || workflow.requirements.some(item => item.state === "unknown" || item.state === "unresolved")) return false;

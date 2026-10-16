@@ -99,6 +99,48 @@ repair dialogue only when its complete shape and current source context match
 exactly. It establishes no agreement or source-bound write authority; those require
 a later complete valid proposal.
 
+### Canonical dialogue records
+
+Use the exact fenced `workflow-proposal` and `workflow-acceptance` records published
+for the current task. Both have exactly five top-level fields:
+`taskId`, `proposalId`, `workspaceRoot`, `revision` and `workflow`. The complete
+`workflow` value has `definitionsStatus`, `definitionsComplete`,
+`requirementsKnown`, `requirements`, `issues` and `plan`. Preserve the whole
+service-published value, including generated node IDs, canonical source metadata,
+contributor thread IDs, nested `templatePath` values, workflow omissions and other
+canonical plan fields. These values bind the record to the task, workspace,
+definition revision and exact candidate; do not regenerate, omit or summarize them.
+Object key order is insignificant, but field values, text and array order must match.
+
+Raw proposal or MCP draft input, such as requirement applicability plus a plan,
+is only input for service canonicalization. It is not a native chat record and
+cannot substitute for the complete canonical proposal. While no candidate is
+recognized, the Supervisor's bounded input may include service-generated canonical
+authoring examples to show the record shape. Examples are guidance only: they are
+not proposals, agreement, requirement-applicability decisions or authority. Preserve
+explicit issues and omissions when definitions or obligations are incomplete;
+do not silently drop known requirements. Canonical node objects retain all fields,
+including `null` and empty-array values, and trusted source/provenance. New wrapper
+groups use `templatePath: null`; do not invent or derive paths.
+
+A valid `workflow-proposal` is a candidate for discussion, including when it is
+provisional. The operative
+main assistant can establish agreement only with a completed `workflow-acceptance`
+that echoes the same five-field envelope and the entire canonical workflow value.
+Short acknowledgements, partial copies, extra fields, or a reduced object such as
+`{"taskId":"…","mainThreadId":"…","proposalId":"…","accepted":true}`
+do not establish agreement. `mainThreadId` and `accepted` are not fields in the
+acceptance record.
+
+When a completed message's record cannot be used for the current proposal or
+acceptance, the task stores at most one current bounded `workflowProtocolDiagnostic`
+with its role, fixed diagnostic code, source message ID and observation time. A
+new diagnostic replaces the previous one instead of accumulating a separate
+history or queue. The dashboard explains that the task still needs dialogue
+correction. This diagnostic does not create or remove agreement history, authorize
+workflow edits or prove execution; it also does not trigger an automatic retry or
+wake a chat.
+
 Interpretation turns have a no-tools role. Dialogue/check-ins permit native
 reading/messaging and scoped workflow MCP edits where available. New Supervisor
 chats use full-access/default for native message permissions. These instructions

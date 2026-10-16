@@ -330,6 +330,32 @@ test("workflow proposal shows recursive requirements, nested plan groups, fixed 
   assert.doesNotMatch(html, /Accept workflow|Send workflow/i);
 });
 
+test("workflow protocol diagnostics explain which complete record needs correction and escape message IDs", () => {
+  const supervisorHtml = renderTaskView({...snapshot.tasks[0]!, workflowProtocolDiagnostic: {
+    role: "supervisor",
+    proposalId: "proposal-current",
+    messageId: '<img src=x onerror="alert(1)">',
+    code: "record_fields",
+    observedAt: 1_800_000_000_200,
+  }});
+  assert.match(supervisorHtml, /Supervisor’s workflow proposal was not recognized/);
+  assert.match(supervisorHtml, /Code:<\/strong> <code>record_fields<\/code>/);
+  assert.match(supervisorHtml, /Message ID:<\/strong> <code>&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;<\/code>/);
+  assert.doesNotMatch(supervisorHtml, /<img src=x onerror/);
+  assert.match(supervisorHtml, /does not create or remove a saved agreement or prove execution/);
+
+  const operativeHtml = renderTaskView({...snapshot.tasks[0]!, workflowProtocolDiagnostic: {
+    role: "operative",
+    proposalId: "proposal-current",
+    messageId: "operative-message-9",
+    code: "plan_not_formal",
+    observedAt: 1_800_000_000_300,
+  }});
+  assert.match(operativeHtml, /This workflow record is provisional or has unresolved obligations/);
+  assert.match(operativeHtml, /continue the dialogue with a complete record/);
+  assert.match(operativeHtml, /Message ID:<\/strong> <code>operative-message-9<\/code>/);
+});
+
 test("invalid and incomplete definitions keep requirements unknown instead of implying an empty policy", () => {
   const partial = workflow({
     status: "provisional",

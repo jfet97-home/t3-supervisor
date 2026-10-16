@@ -347,6 +347,19 @@ test("unverified JSON stays pending without reserving an operation and a verifie
   } finally {await closeFixture(fixture);}
 });
 
+test("workflow_read exposes the main task's bounded workflow protocol diagnostic", async () => {
+  const fixture = await makeFixture();
+  try {
+    const diagnostic = {role: "operative" as const, proposalId: "proposal-current", messageId: "compact-acceptance",
+      code: "record_fields", observedAt: 1234};
+    fixture.supervisors.saveTask({...fixture.supervisors.task(fixture.mainThreadId)!, workflowProtocolDiagnostic: diagnostic});
+    const read = await fixture.controller.read({...locator(fixture), limit: 10});
+    assert.equal(read.status, "ok");
+    if (read.status !== "ok") return;
+    assert.deepEqual(read.workflowProtocolDiagnostic, diagnostic);
+  } finally {await closeFixture(fixture);}
+});
+
 test("MCPX input unwrap is exact and the verified native item is stored with the mutation", async () => {
   const fixture = await makeFixture();
   try {

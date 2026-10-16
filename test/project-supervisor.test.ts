@@ -1383,12 +1383,15 @@ test("agreement snapshots preserve mixed plans through restart and mark replaced
   const workflow = workflowSnapshot();
   const agreement = {status: "agreed" as const, message: "Both conversations confirmed the plan", proposalId: "csv-1", agreedAt: Date.now(),
     supervisorMessageId: "supervisor-proof", agentMessageId: "operative-proof", workflow};
-  fixture.supervisorStore.saveTask({...task, status: "inferred", objective: "Add CSV export", workflow, workflowProposalId: "csv-2", agreement});
+  const diagnostic = {role: "operative" as const, proposalId: "csv-2", messageId: "compact-acceptance", code: "record_fields", observedAt: Date.now()};
+  fixture.supervisorStore.saveTask({...task, status: "inferred", objective: "Add CSV export", workflow, workflowProposalId: "csv-2", agreement,
+    workflowProtocolDiagnostic: diagnostic});
   fixture.restart();
   const restored = fixture.makeSupervisor();
   const snapshot = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(await restored.snapshot("project-a", new AbortController().signal, "agreement-source"));
   assert.equal(snapshot.tasks[0]?.workflowProposalId, "csv-2");
   assert.deepEqual(snapshot.tasks[0]?.agreement, agreement);
+  assert.deepEqual(snapshot.tasks[0]?.workflowProtocolDiagnostic, diagnostic);
   assert.equal(snapshot.tasks[0]?.workflow?.plan?.nodes[0]?.kind, "step");
   if (snapshot.tasks[0]?.workflow?.plan?.nodes[0]?.kind === "step") assert.equal(snapshot.tasks[0].workflow?.plan?.nodes[0]?.localId, "csv-export");
   const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null)!;

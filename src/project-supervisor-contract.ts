@@ -257,6 +257,14 @@ export const WorkflowAgreement = Schema.Struct({
   workflow: WorkflowProposal,
 });
 export type WorkflowAgreementInfo = typeof WorkflowAgreement.Type;
+export const WorkflowProtocolDiagnosticSchema = Schema.Struct({
+  role: Schema.Literals(["supervisor", "operative"]),
+  proposalId: Schema.NullOr(Schema.String.check(Schema.isMaxLength(200))),
+  messageId: Schema.String.check(Schema.isMaxLength(512)),
+  code: Schema.String.check(Schema.isMaxLength(80)),
+  observedAt: Schema.Finite,
+});
+export type WorkflowProtocolDiagnostic = typeof WorkflowProtocolDiagnosticSchema.Type;
 export const DefinitionReview = Schema.Struct({
   status: Schema.Literals(["checking", "revert_requested", "authorized", "restored"]),
   message: Schema.String,
@@ -289,6 +297,7 @@ export const TaskInterpretation = Schema.Struct({
   agreement: Schema.optionalKey(Schema.NullOr(WorkflowAgreement)),
   workflowProposalId: Schema.optionalKey(Schema.String),
   definitionReview: Schema.optionalKey(Schema.NullOr(DefinitionReview)),
+  workflowProtocolDiagnostic: Schema.optionalKey(Schema.NullOr(WorkflowProtocolDiagnosticSchema)),
 });
 export type TaskInterpretationInfo = typeof TaskInterpretation.Type;
 export const ProjectSupervisorSnapshot = Schema.Struct({

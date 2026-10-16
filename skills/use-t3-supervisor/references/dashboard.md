@@ -178,6 +178,19 @@ The workspace and definition revision identify the snapshot used. Unavailable,
 invalid or stale proposals do not become agreed workflows. Legacy objective-only
 records remain unchanged. The service introduces valid drafts and batches later check-ins.
 
+Agreement requires the current full fenced `workflow-proposal` and the operative
+main assistant's own completed `workflow-acceptance` with the exact same five-field
+envelope and entire canonical workflow value. A short acknowledgement or reduced
+`accepted: true` record is insufficient. If the selected task shows a workflow
+protocol diagnostic, read its role, fixed code and source message ID, then continue
+the dialogue with a corrected complete record in that chat. The diagnostic is
+informational and does not alter saved agreement history, authorize edits or prove
+execution.
+Bounded canonical authoring examples shown in a Supervisor input are only format
+guidance, not proposals, acceptance or authority. Preserve explicit unresolved
+issues/omissions and all canonical fields, including `null`, empty arrays, source
+details and template paths, when continuing the dialogue.
+
 ## Enable controls and settlement
 
 The master switch disables every semantic Supervisor. Project switches are independent

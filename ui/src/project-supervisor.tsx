@@ -9,6 +9,7 @@ import type {
   SupervisorTeamSettingsInfo,
   WorkflowAgreementInfo,
   WorkflowPlanNodeInfo,
+  WorkflowProtocolDiagnostic,
   WorkflowProposalInfo,
 } from "../../src/project-supervisor-contract.js";
 import type { WorkflowProgressCoverage, WorkflowProgressSnapshot, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
@@ -345,6 +346,23 @@ function WorkflowProposalView({workflow, proposalId, agreement, definitionReview
     </section>}
     {workflow == null && agreement?.status === "stale" && <p className="muted">No current workflow draft is recorded for this task.</p>}
     {sameAsActiveAgreement && <p className="muted">The latest proposal is the agreed workflow shown above.</p>}
+  </section>;
+}
+
+function WorkflowProtocolDiagnosticView({diagnostic}: {diagnostic: WorkflowProtocolDiagnostic | null | undefined}) {
+  if (!diagnostic) return null;
+  const isSupervisor = diagnostic.role === "supervisor";
+  const notFormal = diagnostic.code === "plan_not_formal";
+
+  return <section className="notice stack" aria-labelledby="workflow-protocol-diagnostic-title">
+    <h5 id="workflow-protocol-diagnostic-title">Workflow dialogue needs follow-up</h5>
+    <p>{notFormal
+      ? "This workflow record is provisional or has unresolved obligations, so it cannot establish formal agreement. Resolve the outstanding definitions or requirements and continue the dialogue with a complete record."
+      : isSupervisor
+        ? "The Supervisor’s workflow proposal was not recognized as the current canonical record. The task needs a complete proposal tied to its current task and source before the main assistant can establish agreement."
+        : "The main assistant’s workflow acceptance was not recognized as an exact match for the current proposal. The task needs a complete acceptance record that echoes the current proposal."}</p>
+    <p className="muted">This diagnostic is informational. It does not create or remove a saved agreement or prove execution.</p>
+    <p className="small muted"><strong>Record:</strong> {isSupervisor ? "Supervisor proposal" : "Main assistant acceptance"} · <strong>Code:</strong> <code>{diagnostic.code}</code> · <strong>Message ID:</strong> <code>{diagnostic.messageId}</code></p>
   </section>;
 }
 
@@ -848,6 +866,7 @@ export function ProjectSupervisorView({
       <p><strong>Status:</strong> {selectedTask.status}</p>
       {selectedTask.objective && <p><strong>Interpreted task:</strong> {selectedTask.objective}</p>}
       <p>{selectedTask.reason}</p>
+      <WorkflowProtocolDiagnosticView diagnostic={selectedTask.workflowProtocolDiagnostic} />
       <WorkflowProposalView workflow={selectedTask.workflow} proposalId={selectedTask.workflowProposalId} agreement={selectedTask.agreement} definitionReview={selectedTask.definitionReview} />
     </section>}
     {workflowProgress && <WorkflowProgressPanel mainThreadId={snapshot.mainThreadId} connected={connected} progress={workflowProgress}

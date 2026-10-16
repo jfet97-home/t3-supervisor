@@ -35,6 +35,8 @@ const maxPromptIssues = 40;
 const maxExpandedNodes = workflowDefinitionExpansionLimits.maxNodes;
 const maxExpansionDepth = workflowDefinitionExpansionLimits.maxDepth;
 const opaqueId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const canonicalJsonEqual = (left: unknown, right: unknown): boolean => left === undefined || right === undefined
+  ? left === right : canonicalJson(left) === canonicalJson(right);
 const missingRequirementExplanation = "The exact reusable definition is not integrated in the plan.";
 
 export type ProposalContext = Pick<ProjectDefinitionSnapshot,
@@ -503,8 +505,8 @@ const canonicalSourceNode = (value: unknown, context: ProposalContext, options: 
     }
     const execution = canonicalExecution(value, stateExpected?.kind === "step" ? stateExpected : sourceExpected?.kind === "step" ? sourceExpected : undefined, options);
     if (options.strict && (value.definitionId !== definitionId || value.localId !== localId || value.name !== name || value.description !== description ||
-      JSON.stringify(value.source) !== JSON.stringify(source) || value.resolution !== resolution || value.status !== execution.status ||
-      JSON.stringify(value.contributorThreadIds) !== JSON.stringify(execution.contributorThreadIds))) throw new Error("noncanonical_step_node");
+      !canonicalJsonEqual(value.source, source) || value.resolution !== resolution || value.status !== execution.status ||
+      !canonicalJsonEqual(value.contributorThreadIds, execution.contributorThreadIds))) throw new Error("noncanonical_step_node");
     return {kind: "step", nodeId: id, definitionId, localId, templatePath, name, description, source, resolution,
       reason: redact(value.reason.trim()), status: execution.status, contributorThreadIds: execution.contributorThreadIds};
   }
@@ -537,7 +539,7 @@ const canonicalSourceNode = (value: unknown, context: ProposalContext, options: 
     const unresolved: WorkflowPlanWorkflowInfo = {kind: "workflow", nodeId: id, definitionId, templatePath, name, description,
       fixed: definition.fixed, source, resolution: "unresolved", reason: redact(value.reason.trim()), status: "planned", contributorThreadIds: [], omissions: [], plan: null};
     options.issues.push(issue(definition.path ?? definition.id, "workflow_cycle_in_plan", `Workflow ${definitionId} closes a cycle and was not recursively expanded.`));
-    if (options.strict && (value.name !== name || value.description !== description || value.fixed !== definition.fixed || JSON.stringify(value.source) !== JSON.stringify(source) ||
+    if (options.strict && (value.name !== name || value.description !== description || value.fixed !== definition.fixed || !canonicalJsonEqual(value.source, source) ||
       value.resolution !== "unresolved" || value.status !== "planned" || !Array.isArray(value.contributorThreadIds) || value.contributorThreadIds.length !== 0 ||
       !Array.isArray(value.omissions) || value.omissions.length !== 0 || value.plan !== null)) throw new Error("noncanonical_cyclic_workflow");
     return unresolved;
@@ -557,9 +559,9 @@ const canonicalSourceNode = (value: unknown, context: ProposalContext, options: 
     resolution, reason: redact(value.reason.trim()), status: execution.status, contributorThreadIds: execution.contributorThreadIds, omissions, plan};
   if (definition.fixed && !fixedWorkflowPreserved(base.plan, plan))
     options.issues.push(issue(definition.path ?? definition.id, "fixed_workflow_changed", `Fixed workflow ${definitionId} lost an original member, description, order, or parallel relationship.`));
-  if (options.strict && (value.name !== name || value.description !== description || value.fixed !== definition.fixed || JSON.stringify(value.source) !== JSON.stringify(source) ||
-    value.resolution !== resolution || value.status !== execution.status || JSON.stringify(value.contributorThreadIds) !== JSON.stringify(execution.contributorThreadIds) ||
-    JSON.stringify(value.omissions) !== JSON.stringify(omissions) || JSON.stringify(value.plan) !== JSON.stringify(plan))) throw new Error("noncanonical_workflow_node");
+  if (options.strict && (value.name !== name || value.description !== description || value.fixed !== definition.fixed || !canonicalJsonEqual(value.source, source) ||
+    value.resolution !== resolution || value.status !== execution.status || !canonicalJsonEqual(value.contributorThreadIds, execution.contributorThreadIds) ||
+    !canonicalJsonEqual(value.omissions, omissions) || !canonicalJsonEqual(value.plan, plan))) throw new Error("noncanonical_workflow_node");
   return result;
 };
 
@@ -680,7 +682,7 @@ const normalizeGroup = (value: unknown, context: ProposalContext, options: Canon
   const result: WorkflowPlanGroupInfo = {kind: value.kind, templatePath: rootPath, nodes: normalized};
   if (owner?.fixed && expected && !fixedWorkflowPreserved(expected, result))
     options.issues.push(issue(owner.path ?? owner.id, "fixed_workflow_changed", `Fixed workflow ${owner.id} lost an original member, description, order, or parallel relationship.`));
-  if (options.strict && (value.kind !== result.kind || JSON.stringify(value.nodes) !== JSON.stringify(result.nodes))) throw new Error("noncanonical_plan_group");
+  if (options.strict && (value.kind !== result.kind || !canonicalJsonEqual(value.nodes, result.nodes))) throw new Error("noncanonical_plan_group");
   return result;
 };
 
@@ -716,7 +718,7 @@ const normalizeOmissions = (value: unknown, context: ProposalContext, owner: Def
       throw new Error("invalid_workflow_omission");
     const expected = templateLeaves.get(item.templatePath);
     if (!expected || present.has(item.templatePath) || item.kind !== expected.kind || item.id !== expected.id || item.name !== expected.name ||
-      JSON.stringify(item.source) !== JSON.stringify(expected.source) || owner.fixed) throw new Error("noncanonical_workflow_omission");
+      !canonicalJsonEqual(item.source, expected.source) || owner.fixed) throw new Error("noncanonical_workflow_omission");
     normalized.push({...expected, templatePath: item.templatePath, reason: redact(item.reason.trim())});
   }
   const requiredByPath = new Set(normalized.map(item => item.templatePath));
@@ -725,18 +727,18 @@ const normalizeOmissions = (value: unknown, context: ProposalContext, owner: Def
       options.issues.push(issue(owner.path ?? owner.id, "workflow_member_unresolved", `Workflow ${owner.id} has an omitted member without an explicit not-applicable reason.`));
     }
   }
-  if (strict && JSON.stringify(value) !== JSON.stringify(normalized)) throw new Error("noncanonical_workflow_omissions");
+  if (strict && !canonicalJsonEqual(value, normalized)) throw new Error("noncanonical_workflow_omissions");
   return normalized;
 };
 
 const nodeMatchesTemplate = (template: WorkflowPlanNodeInfo, actual: WorkflowPlanNodeInfo): boolean => {
   if (template.kind !== actual.kind || template.templatePath !== actual.templatePath) return false;
   if (template.kind === "step" && actual.kind === "step") return template.definitionId === actual.definitionId && template.localId === actual.localId &&
-    template.name === actual.name && template.description === actual.description && JSON.stringify(template.source) === JSON.stringify(actual.source) &&
+    template.name === actual.name && template.description === actual.description && canonicalJsonEqual(template.source, actual.source) &&
     template.resolution === actual.resolution;
   if (template.kind === "workflow" && actual.kind === "workflow") return template.definitionId === actual.definitionId &&
     template.name === actual.name && template.description === actual.description && template.fixed === actual.fixed &&
-    JSON.stringify(template.source) === JSON.stringify(actual.source) && template.resolution === actual.resolution &&
+    canonicalJsonEqual(template.source, actual.source) && template.resolution === actual.resolution &&
     (template.plan === null ? actual.plan === null : actual.plan !== null);
   if ((template.kind === "sequence" || template.kind === "parallel") && (actual.kind === "sequence" || actual.kind === "parallel"))
     return template.kind === actual.kind;
@@ -772,7 +774,7 @@ const fixedWorkflowPreserved = (template: WorkflowPlanGroupInfo, actual: Workflo
     const expected = expectedLocations.get(path);
     const candidate = actualLocations.get(path);
     return !expected || !candidate || !nodeMatchesTemplate(expected.node, candidate.node) ||
-      JSON.stringify(expected.workflowAncestors) !== JSON.stringify(candidate.workflowAncestors);
+      !canonicalJsonEqual(expected.workflowAncestors, candidate.workflowAncestors);
   })) return false;
   for (const path of originalPaths) {
     const expected = expectedLocations.get(path);
@@ -805,7 +807,7 @@ const fixedWorkflowPreserved = (template: WorkflowPlanGroupInfo, actual: Workflo
     const actualLeft = actualLocations.get(left.path)!;
     for (let rightIndex = leftIndex + 1; rightIndex < commitments.length; rightIndex++) {
       const right = commitments[rightIndex]!;
-      if (JSON.stringify(left.location.workflowAncestors) !== JSON.stringify(right.location.workflowAncestors)) continue;
+      if (!canonicalJsonEqual(left.location.workflowAncestors, right.location.workflowAncestors)) continue;
       const actualRight = actualLocations.get(right.path)!;
       if (relation(left.location, right.location) !== relation(actualLeft, actualRight)) return false;
     }
@@ -997,28 +999,163 @@ export const validateWorkflowPlan = (value: unknown, context: ProposalContext): 
   }
 };
 
+export type CanonicalWorkflowAuthoringMaterial = {
+  /** False means definitions are incomplete, a source reference is unresolved, or the starter exceeded the size bound. */
+  complete: boolean;
+  /** Canonical, source-pinned authoring starter; null when omitted to stay within maxChars. */
+  workflow: WorkflowPlanValue | null;
+  /** Every effective configured requirement, in its exact kind:id form. */
+  requiredReferences: string[];
+  /** Default/required starter references omitted because the canonical starter exceeded maxChars. */
+  omittedReferences: string[];
+  /** Canonical workflow and definition-context issues, preserved even when the starter is omitted. */
+  issues: WorkflowIssueInfo[];
+  /** A schema-complete local-step example with a fresh UUID; use a distinct UUID for each new occurrence. */
+  localStepExample: WorkflowPlanStepInfo;
+};
+
+const definitionReferenceKey = (reference: DefinitionReference): string => "step" in reference ? `step:${reference.step}` : `workflow:${reference.workflow}`;
+
+/** Builds authoring input only; this material does not establish applicability, validity, or agreement. */
+export const canonicalAuthoringMaterial = (context: ProposalContext, maxChars = 24_000): CanonicalWorkflowAuthoringMaterial => {
+  const requiredReferences = context.config.required.map(definitionReferenceKey);
+  const requirements = context.config.required.map(reference => ({
+    kind: "step" in reference ? "step" as const : "workflow" as const,
+    id: "step" in reference ? reference.step : reference.workflow,
+    applies: true as const,
+    reason: "Included in the service-generated authoring sample; reassess applicability for this task.",
+  }));
+  const defaultReference = context.config.default_workflow ? `workflow:${context.config.default_workflow}` : null;
+  const initialReferences = [...new Set([...(defaultReference ? [defaultReference] : []), ...requiredReferences])];
+  const nodeForReference = (reference: string) => {
+    const separator = reference.indexOf(":");
+    const kind = reference.slice(0, separator);
+    const id = reference.slice(separator + 1);
+    return kind === "step"
+      ? {kind: "step", definitionId: id, reason: "Included as a configured required reference."}
+      : {kind: "workflow", definitionId: id, reason: defaultReference === reference
+        ? "Included as the configured default workflow." : "Included as a configured required reference."};
+  };
+  const emptyPlan = {kind: "sequence", nodes: [] as unknown[]};
+  const defaultPlan = defaultReference
+    ? validateWorkflowPlan({requirements, plan: {kind: "sequence", nodes: [nodeForReference(defaultReference)]}}, context)
+    : validateWorkflowPlan({requirements, plan: emptyPlan}, context);
+  const coveredReferences = new Set(defaultPlan?.plan ? allNodes(defaultPlan.plan).flatMap(node => {
+    if (node.kind === "step" && node.definitionId) return [`step:${node.definitionId}`];
+    if (node.kind === "workflow") return [`workflow:${node.definitionId}`];
+    return [];
+  }) : []);
+  const missingReferences = [...new Set(requiredReferences.filter(reference => !coveredReferences.has(reference)))];
+  const candidate = defaultPlan?.plan
+    ? missingReferences.length
+      ? validateWorkflowPlan({requirements, plan: {...defaultPlan.plan,
+        nodes: [...defaultPlan.plan.nodes, ...missingReferences.map(nodeForReference)]}}, context)
+      : defaultPlan
+    : validateWorkflowPlan({requirements, plan: {kind: "sequence", nodes: initialReferences.map(nodeForReference)}}, context);
+  const issues = [...(candidate?.issues ?? context.issues)];
+  const maxWorkflowChars = Number.isFinite(maxChars) ? Math.max(0, Math.floor(maxChars)) : 24_000;
+  const localStepExample: WorkflowPlanStepInfo = {
+    kind: "step",
+    nodeId: randomUUID(),
+    definitionId: null,
+    localId: "local-example-step",
+    templatePath: null,
+    name: "Example local step",
+    description: "A task-specific action that has no reusable definition.",
+    source: null,
+    resolution: "resolved",
+    reason: "Add a concise task-specific reason; use a distinct UUID for each new occurrence.",
+    status: "planned",
+    contributorThreadIds: [],
+  };
+  const candidateFits = candidate !== null && JSON.stringify({workflow: candidate, requiredReferences, issues, localStepExample}).length <= maxWorkflowChars;
+  const workflow = candidateFits ? candidate : null;
+  const omittedReferences = workflow ? [] : [...new Set(initialReferences)];
+  const sourceIssues = new Set([
+    "unresolved_step_reference", "unresolved_workflow_reference", "workflow_cycle_in_plan", "workflow_cycle_in_definition",
+    "workflow_expansion_limit", "workflow_expansion_depth", "workflow_template_expansion_failed",
+  ]);
+  const hasUnresolvedSource = Boolean(candidate && (candidate.requirements.some(item => item.state === "unresolved") ||
+    issues.some(item => sourceIssues.has(item.code)) || candidate.plan && allNodes(candidate.plan).some(node =>
+      node.kind === "step" ? node.resolution === "unresolved" : node.kind === "workflow" && node.resolution !== "resolved")));
+  const complete = Boolean(context.complete && context.promptComplete && context.requirementsKnown && candidate && candidateFits && !hasUnresolvedSource);
+  return {
+    complete,
+    workflow,
+    requiredReferences,
+    omittedReferences,
+    issues,
+    localStepExample,
+  };
+};
+
+export const workflowRecordDiagnosticCodes = [
+  "record_fields", "source_pin_mismatch", "provisional_record_mismatch", "noncanonical_workflow_requirements", "noncanonical_workflow_issues",
+  "invalid_workflow_execution_state", "workflow_expansion_limit", "workflow_expansion_depth", "invalid_or_duplicate_node_id", "invalid_workflow_node",
+  "template_member_kind_changed", "node_id_missing_for_existing_occurrence", "node_identity_kind_changed", "invalid_step_node_fields",
+  "invalid_step_reason", "template_local_step_changed", "template_path_mismatch", "template_step_reference_changed", "invalid_step_reference",
+  "invalid_local_step", "noncanonical_step_node", "unsupported_workflow_node_kind", "invalid_workflow_reference_fields",
+  "invalid_workflow_reference", "template_reference_changed", "noncanonical_unresolved_workflow", "noncanonical_cyclic_workflow",
+  "workflow_template_expansion_failed", "noncanonical_workflow_node", "invalid_plan_group", "noncanonical_plan_group_fields", "invalid_plan_group_fields",
+  "plan_group_template_mismatch", "unknown_template_path", "noncanonical_plan_group", "invalid_workflow_omissions", "invalid_workflow_omission",
+  "noncanonical_workflow_omission", "noncanonical_workflow_omissions", "invalid_workflow_requirements", "invalid_requirement_assessment",
+  "duplicate_requirement_assessment", "unexpected_requirement_assessment", "incomplete_requirement_assessment", "invalid_canonical_workflow_requirement",
+  "invalid_canonical_workflow_requirement_reason", "invalid_workflow_root", "invalid_workflow_root_path", "invalid_workflow_plan", "invalid",
+] as const;
+const workflowRecordDiagnosticCodeSet = new Set<string>(workflowRecordDiagnosticCodes);
+
+type WorkflowRecordDiagnosticState = {code: string | null};
+
+const workflowRecordDiagnosticCode = (cause: unknown): string =>
+  cause instanceof Error && workflowRecordDiagnosticCodeSet.has(cause.message) ? cause.message : "invalid";
+
 /** Validates an already published proposal record without regenerating occurrence IDs. */
-export const validateWorkflowRecord = (value: unknown, context: ProposalContext): WorkflowPlanValue | null => {
+const validateWorkflowRecordInternal = (value: unknown, context: ProposalContext, diagnostic?: WorkflowRecordDiagnosticState): WorkflowPlanValue | null => {
   try {
-    if (!record(value) || !exactFields(value, ["definitionsStatus", "definitionsComplete", "requirementsKnown", "requirements", "issues", "plan"]) ||
-      value.definitionsStatus !== context.status || value.definitionsComplete !== (context.complete && context.promptComplete) ||
-      value.requirementsKnown !== (context.requirementsKnown && context.promptComplete) || !Array.isArray(value.requirements))
+    if (!record(value) || !exactFields(value, ["definitionsStatus", "definitionsComplete", "requirementsKnown", "requirements", "issues", "plan"])) {
+      if (diagnostic) diagnostic.code = "record_fields";
       return null;
+    }
+    if (value.definitionsStatus !== context.status || value.definitionsComplete !== (context.complete && context.promptComplete) ||
+      value.requirementsKnown !== (context.requirementsKnown && context.promptComplete)) {
+      if (diagnostic) diagnostic.code = "source_pin_mismatch";
+      return null;
+    }
+    if (!Array.isArray(value.requirements)) {
+      if (diagnostic) diagnostic.code = "record_fields";
+      return null;
+    }
     if (value.plan === null) {
-      if (!Array.isArray(value.issues)) return null;
+      if (!Array.isArray(value.issues)) {
+        if (diagnostic) diagnostic.code = "record_fields";
+        return null;
+      }
       const provisionalMarkers = value.issues.filter(item => record(item) && item.code === "provisional_plan_required");
-      if (provisionalMarkers.length !== 1) return null;
+      if (provisionalMarkers.length !== 1) {
+        if (diagnostic) diagnostic.code = "provisional_record_mismatch";
+        return null;
+      }
       const marker = provisionalMarkers[0];
       if (!record(marker) || !exactFields(marker, ["path", "code", "message"]) || typeof marker.message !== "string" ||
-        !validText(marker.message, maxReasonLength)) return null;
+        !validText(marker.message, maxReasonLength)) {
+        if (diagnostic) diagnostic.code = "provisional_record_mismatch";
+        return null;
+      }
       const sourceIssue = (item: unknown) => context.issues.some(candidate => canonicalJson(candidate) === canonicalJson(item));
       const expansionIssues = value.issues.filter(item => record(item) &&
         (item.code === "workflow_expansion_limit" || item.code === "workflow_expansion_depth") && !sourceIssue(item));
       if (expansionIssues.length > 1 || expansionIssues.some(item => !record(item) || !exactFields(item, ["path", "code", "message"]) ||
-        item.message !== marker.message)) return null;
+        item.message !== marker.message)) {
+        if (diagnostic) diagnostic.code = "provisional_record_mismatch";
+        return null;
+      }
       const extraIssues = expansionIssues.map(item => ({path: context.workspaceRoot, code: item.code as string, message: marker.message as string}));
       const normalized = provisionalRecord(context, marker.message, extraIssues);
-      return canonicalJson(value) === canonicalJson(normalized) ? normalized : null;
+      if (canonicalJson(value) !== canonicalJson(normalized)) {
+        if (diagnostic) diagnostic.code = "provisional_record_mismatch";
+        return null;
+      }
+      return normalized;
     }
     const assessments = value.requirements.map(item => {
       if (!record(item) || !exactFields(item, ["kind", "id", "name", "source", "state", "reason"]) ||
@@ -1032,10 +1169,28 @@ export const validateWorkflowRecord = (value: unknown, context: ProposalContext)
       return {kind: item.kind, id: item.id, applies, reason};
     });
     const normalized = makeProposalPlan({requirements: assessments, plan: value.plan}, context, true, true);
-    if (JSON.stringify(value.requirements) !== JSON.stringify(normalized.requirements)) return null;
-    if (JSON.stringify(value.issues) !== JSON.stringify(normalized.issues)) return null;
+    if (!canonicalJsonEqual(value.requirements, normalized.requirements)) {
+      if (diagnostic) diagnostic.code = "noncanonical_workflow_requirements";
+      return null;
+    }
+    if (!canonicalJsonEqual(value.issues, normalized.issues)) {
+      if (diagnostic) diagnostic.code = "noncanonical_workflow_issues";
+      return null;
+    }
     return normalized;
-  } catch {return null;}
+  } catch (cause) {
+    if (diagnostic) diagnostic.code = workflowRecordDiagnosticCode(cause);
+    return null;
+  }
+};
+
+export const validateWorkflowRecord = (value: unknown, context: ProposalContext): WorkflowPlanValue | null =>
+  validateWorkflowRecordInternal(value, context);
+
+export const workflowRecordDiagnostic = (value: unknown, context: ProposalContext): string | null => {
+  const diagnostic: WorkflowRecordDiagnosticState = {code: null};
+  const workflow = validateWorkflowRecordInternal(value, context, diagnostic);
+  return workflow ? null : diagnostic.code ?? "invalid";
 };
 
 export const fixedOccurrencesPreserved = (baseline: WorkflowPlanGroupInfo, candidate: WorkflowPlanGroupInfo): boolean => {
@@ -1044,7 +1199,7 @@ export const fixedOccurrencesPreserved = (baseline: WorkflowPlanGroupInfo, candi
   for (const template of required) {
     const actual = current.find(node => (node.kind === "step" || node.kind === "workflow") && node.nodeId === template.nodeId);
     if (actual?.kind !== "workflow" || actual.definitionId !== template.definitionId || actual.fixed !== true ||
-      actual.name !== template.name || actual.description !== template.description || JSON.stringify(actual.source) !== JSON.stringify(template.source) ||
+      actual.name !== template.name || actual.description !== template.description || !canonicalJsonEqual(actual.source, template.source) ||
       template.plan === null || actual.plan === null || !fixedWorkflowPreserved(template.plan, actual.plan)) return false;
   }
   return true;
@@ -1101,8 +1256,8 @@ export const validateWorkflowApplyAgainstPinnedContext = (
     const isMainTarget = target.targetThreadId === target.mainThreadId;
     const agreedRequirements = isMainTarget ? originalProposal.requirements : [];
     const agreedIssues = originalProposal.issues;
-    if (!Array.isArray(candidate.requirements) || JSON.stringify(candidate.requirements) !== JSON.stringify(agreedRequirements) ||
-      !Array.isArray(candidate.issues) || JSON.stringify(candidate.issues) !== JSON.stringify(agreedIssues)) return null;
+    if (!Array.isArray(candidate.requirements) || !canonicalJsonEqual(candidate.requirements, agreedRequirements) ||
+      !Array.isArray(candidate.issues) || !canonicalJsonEqual(candidate.issues, agreedIssues)) return null;
 
     const context = isMainTarget ? pinnedContext : {...pinnedContext, config: {required: []}, requirementsKnown: true, knownRequirementKeys: []};
     const accepted = acceptedPlans.map(plan => canonicalPlan(plan, pinnedContext, true, false, true));
@@ -1116,7 +1271,7 @@ export const validateWorkflowApplyAgainstPinnedContext = (
     const priorFixed = [...accepted.map(item => item.plan), ...(existing?.plan ? [existing.plan] : [])];
     if (priorFixed.some(plan => !fixedOccurrencesPreserved(plan, canonical.plan))) return null;
     if (canonical.issues.length > 0 || requirements.some(item => item.state === "unknown" || item.state === "unresolved") ||
-      JSON.stringify(requirements) !== JSON.stringify(agreedRequirements)) return null;
+      !canonicalJsonEqual(requirements, agreedRequirements)) return null;
     return {plan: canonical.plan, requirements, issues: [...agreedIssues]};
   } catch {return null;}
 };
@@ -1169,10 +1324,10 @@ export const proposalContextMatches = (context: ProposalContext, definitions: Pr
   return context.projectId === fresh.projectId && context.threadId === fresh.threadId && context.workspaceRoot === fresh.workspaceRoot &&
     context.globalOnly === fresh.globalOnly && context.globalRevision === fresh.globalRevision && context.revision === fresh.revision &&
     context.status === fresh.status && context.complete === fresh.complete &&
-    context.requirementsKnown === fresh.requirementsKnown && JSON.stringify(context.config) === JSON.stringify(fresh.config) &&
-    JSON.stringify(context.projectConfig) === JSON.stringify(fresh.projectConfig) &&
-    JSON.stringify(context.steps) === JSON.stringify(fresh.steps) && JSON.stringify(context.workflows) === JSON.stringify(fresh.workflows) &&
-    JSON.stringify(context.sources) === JSON.stringify(fresh.sources) && JSON.stringify(context.issues) === JSON.stringify(fresh.issues);
+    context.requirementsKnown === fresh.requirementsKnown && canonicalJsonEqual(context.config, fresh.config) &&
+    canonicalJsonEqual(context.projectConfig, fresh.projectConfig) &&
+    canonicalJsonEqual(context.steps, fresh.steps) && canonicalJsonEqual(context.workflows, fresh.workflows) &&
+    canonicalJsonEqual(context.sources, fresh.sources) && canonicalJsonEqual(context.issues, fresh.issues);
 };
 
 export const proposalDefinitionSources = (context: ProposalContext): ProposalContext["sources"] => context.sources;

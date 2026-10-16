@@ -83,6 +83,7 @@ const readerResult = (): Extract<WorkflowReadResult, {status: "ok"}> => ({
   status: "ok",
   owner: {projectId: "project", mainThreadId: "main-thread", supervisorThreadId: "supervisor-thread", bindingGeneration: 7},
   mainTaskAgreementStatus: "agreed",
+  workflowProtocolDiagnostic: null,
   agreementValidityNote: "Agreement is not execution proof.",
   incompatibleWorkflows: [],
   workflows: [{document: document(), parentNodeReferences: []}],

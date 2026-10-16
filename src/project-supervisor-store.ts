@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { GuidanceStore } from "./guidance-store.js";
 import { fingerprint } from "./guidance-store.js";
-import { defaultMonitoringSettings, type DefinitionReviewInfo, type SupervisorBinding, type SupervisorModelSelection, type SupervisorMonitoringSettings, type TaskInterpretationInfo } from "./project-supervisor-contract.js";
+import { defaultMonitoringSettings, type DefinitionReviewInfo, type SupervisorBinding, type SupervisorModelSelection, type SupervisorMonitoringSettings, type TaskInterpretationInfo, type WorkflowProtocolDiagnostic } from "./project-supervisor-contract.js";
 import type { Projection, SupervisorConfig } from "./types.js";
 import { sameModel } from "./supervisor-native.js";
 import type { SupervisionControlInfo } from "./supervisor-control-contract.js";
@@ -18,7 +18,7 @@ export type ProjectModelSettings = {projectId: string; generation: number; model
 export type BindingRecord = SupervisorBinding & {mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string};
 export type SupervisorBaseline = {version?: 2; snapshotSequence: number; threads: Array<{id: string; latestRunId: string | null}>};
 export type SupervisionFolderPresence = {status: "present" | "missing" | "unavailable"; message?: string};
-export type TaskRecord = TaskInterpretationInfo & {id: string; sourceHash: string; agreementSourceHash?: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionSnapshot?: ProjectDefinitionSnapshot | null; definitionNoticeKey?: string; definitionReadAttempts?: number; revalidationAttempts?: number};
+export type TaskRecord = TaskInterpretationInfo & {id: string; sourceHash: string; agreementSourceHash?: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionSnapshot?: ProjectDefinitionSnapshot | null; definitionNoticeKey?: string; definitionReadAttempts?: number; revalidationAttempts?: number; workflowProtocolDiagnostic?: WorkflowProtocolDiagnostic | null};
 
 /** Loads permanent ownership before any notification or input worker starts. */
 export const loadSupervisorOwnership = (directory: string): Set<string> => {

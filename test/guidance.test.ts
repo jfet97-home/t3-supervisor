@@ -1002,6 +1002,7 @@ test("workflow progress is a dashboard-session-authenticated read-only endpoint"
     status: "ok",
     owner: {projectId: "project", mainThreadId: "main-thread", supervisorThreadId: "supervisor-thread", bindingGeneration: 2},
     mainTaskAgreementStatus: null,
+    workflowProtocolDiagnostic: null,
     agreementValidityNote: "Not shown by the dashboard progress projection.",
     incompatibleWorkflows: [],
     workflows: [{document: {

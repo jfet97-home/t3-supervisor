@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Schema } from "effect";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { parseWorkflowInterpretation, prepareWorkflowRequest, validateWorkflowPlan, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
-import { extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, parseWorkflowProposalRecord, workflowAgreementPlanHash } from "../src/supervisor-workflow-agreement.js";
+import { WorkflowProtocolDiagnosticSchema } from "../src/project-supervisor-contract.js";
+import { parseWorkflowInterpretation, prepareWorkflowRequest, validateWorkflowPlan, workflowRecordDiagnostic, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
+import { diagnoseWorkflowProposalRecord, extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, parseWorkflowProposalRecord, workflowAgreementPlanHash, workflowProtocolDiagnosticCodes } from "../src/supervisor-workflow-agreement.js";
 
 const definitions = (overrides: Partial<ProjectDefinitionSnapshot> = {}): ProjectDefinitionSnapshot => ({
   projectId: "project-a",
@@ -49,6 +51,52 @@ const proposal = (snapshot: ProjectDefinitionSnapshot, workflow = validPlan(snap
   workflow,
   ...overrides,
 });
+
+const deliveryDefinitions = (): ProjectDefinitionSnapshot => definitions({
+  workflows: [{
+    id: "delivery",
+    name: "Delivery",
+    description: "Use the reusable delivery guidance.",
+    fixed: false,
+    sequence: [
+      {step: {id: "subtotal", name: "Review the subtotal", description: "Check the subtotal."}},
+      {step: "verify"},
+    ],
+    origin: "project",
+    path: ".t3-supervisor/workflows/delivery.yaml",
+    sourceId: "delivery",
+  }],
+});
+
+const deliveryProposal = (snapshot: ProjectDefinitionSnapshot) => {
+  const context = contextFor(snapshot);
+  const workflow = validateWorkflowPlan({
+    requirements: [{kind: "step", id: "verify", applies: true, reason: "The task needs verification."}],
+    plan: {kind: "sequence", nodes: [
+      {kind: "step", definitionId: null, localId: "inspect", name: "Inspect the requested behavior",
+        description: "Inspect the current behavior before updating it.", reason: "Inspect the current behavior."},
+      {kind: "workflow", definitionId: "delivery", reason: "Use the reusable delivery guidance."},
+    ]},
+  }, context);
+  assert.ok(workflow);
+  return {context, record: proposal(snapshot, workflow)};
+};
+
+type MutableRecord = Record<string, unknown>;
+const asRecord = (value: unknown): MutableRecord | null => typeof value === "object" && value !== null && !Array.isArray(value)
+  ? value as MutableRecord : null;
+const cloneRecord = (value: unknown): MutableRecord => JSON.parse(JSON.stringify(value)) as MutableRecord;
+const visitPlanNodes = (group: unknown, visit: (node: MutableRecord) => void): void => {
+  const value = asRecord(group);
+  if (!value || !Array.isArray(value.nodes)) return;
+  for (const raw of value.nodes) {
+    const node = asRecord(raw);
+    if (!node) continue;
+    visit(node);
+    if (node.kind === "sequence" || node.kind === "parallel") visitPlanNodes(node, visit);
+    else if (node.kind === "workflow" && node.plan) visitPlanNodes(node.plan, visit);
+  }
+};
 
 const fence = (kind: "workflow-proposal" | "workflow-acceptance", value: unknown): string =>
   `\`\`\`${kind}\n${JSON.stringify(value)}\n\`\`\``;
@@ -126,6 +174,90 @@ test("an exact null-plan provisional echo is a proposal but never a formal agree
 
   assert.ok(parseWorkflowProposalRecord(echoed, "task-a", context));
   assert.equal(parseWorkflowAgreementRecord(echoed, "task-a", context), null);
+});
+
+test("workflow diagnostics explain captured strict-record failures without normalizing them", () => {
+  const snapshot = deliveryDefinitions();
+  const {context, record: canonical} = deliveryProposal(snapshot);
+  assert.ok(parseWorkflowProposalRecord(canonical, "task-a", context));
+  assert.ok(parseWorkflowAgreementRecord(canonical, "task-a", context));
+  assert.equal(workflowRecordDiagnostic(canonical.workflow, context), null);
+  assert.equal(diagnoseWorkflowProposalRecord(canonical, "task-a", context), null);
+  assert.equal(diagnoseWorkflowProposalRecord(canonical, "task-a", context, true), null);
+
+  const missingIds = cloneRecord(canonical);
+  const missingIdsWorkflow = asRecord(missingIds.workflow);
+  assert.ok(missingIdsWorkflow);
+  visitPlanNodes(missingIdsWorkflow.plan, node => {
+    if (node.kind === "step" || node.kind === "workflow") delete node.nodeId;
+  });
+  assert.equal(workflowRecordDiagnostic(missingIdsWorkflow, context), "invalid_or_duplicate_node_id");
+  assert.equal(parseWorkflowProposalRecord(missingIds, "task-a", context), null);
+
+  const correctedIdsButIncomplete = cloneRecord(canonical);
+  const correctedWorkflow = asRecord(correctedIdsButIncomplete.workflow);
+  assert.ok(correctedWorkflow);
+  let nextNodeId = 1;
+  visitPlanNodes(correctedWorkflow.plan, node => {
+    if (node.kind !== "step" && node.kind !== "workflow") return;
+    node.nodeId = `00000000-0000-4000-8000-${String(nextNodeId++).padStart(12, "0")}`;
+    if (node.kind === "workflow" && node.definitionId === "delivery") node.templatePath = null;
+    delete node.source;
+    delete node.contributorThreadIds;
+    if (node.kind === "workflow") delete node.omissions;
+  });
+  assert.equal(workflowRecordDiagnostic(correctedWorkflow, context), "noncanonical_step_node");
+  assert.equal(parseWorkflowProposalRecord(correctedIdsButIncomplete, "task-a", context), null);
+
+  const badWrapperPath = cloneRecord(canonical);
+  const badWrapperWorkflow = asRecord(badWrapperPath.workflow);
+  assert.ok(badWrapperWorkflow);
+  visitPlanNodes(badWrapperWorkflow.plan, node => {
+    if (node.kind === "workflow" && node.definitionId === "delivery") node.templatePath = "workflow:delivery/root";
+  });
+  assert.equal(workflowRecordDiagnostic(badWrapperWorkflow, context), "unknown_template_path");
+});
+
+test("proposal diagnostics separate malformed envelopes, task/source mismatches, and nonformal plans", () => {
+  const readySnapshot = definitions();
+  const readyContext = contextFor(readySnapshot);
+  const valid = proposal(readySnapshot);
+  assert.equal(diagnoseWorkflowProposalRecord({...valid, accepted: true}, "task-a", readyContext, true), "record_fields");
+  assert.equal(diagnoseWorkflowProposalRecord({taskId: "task-a", mainThreadId: "thread-a", proposalId: "proposal-a", accepted: true},
+    "task-a", readyContext, true), "record_fields");
+  assert.equal(diagnoseWorkflowProposalRecord(valid, "another-task", readyContext), "task_mismatch");
+  assert.equal(diagnoseWorkflowProposalRecord({...valid, revision: "stale-revision"}, "task-a", readyContext), "source_pin_mismatch");
+
+  const invalidSnapshot = definitions({status: "invalid", revision: "observed-invalid-revision", projectConfig: null,
+    issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "Repair local configuration."}]});
+  const context = contextFor(invalidSnapshot);
+  const provisional = parseWorkflowInterpretation(JSON.stringify({
+    objective: "Check this task.",
+    reason: "The latest message describes a concrete task.",
+    sourceMessageIds: ["message-a"],
+    workflow: null,
+  }), "message-a", context).workflow;
+  const provisionalValue: WorkflowPlanValue = {
+    definitionsStatus: provisional.definitionsStatus,
+    definitionsComplete: provisional.definitionsComplete,
+    requirementsKnown: provisional.requirementsKnown,
+    requirements: provisional.requirements,
+    issues: provisional.issues,
+    plan: provisional.plan,
+  };
+  const provisionalRecord = proposal(invalidSnapshot, provisionalValue);
+  assert.equal(diagnoseWorkflowProposalRecord(provisionalRecord, "task-a", context), null);
+  assert.equal(diagnoseWorkflowProposalRecord(provisionalRecord, "task-a", context, true), "plan_not_formal");
+});
+
+test("workflow protocol diagnostic metadata has bounded strings and finite time", () => {
+  assert.ok(workflowProtocolDiagnosticCodes.includes("record_json_invalid"));
+  const diagnostic = {role: "operative", proposalId: "proposal-a", messageId: "message-a", code: "record_fields", observedAt: 1};
+  assert.deepEqual(Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)(diagnostic), diagnostic);
+  assert.throws(() => Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)({...diagnostic, proposalId: "x".repeat(201)}));
+  assert.throws(() => Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)({...diagnostic, messageId: "x".repeat(513)}));
+  assert.throws(() => Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)({...diagnostic, code: "x".repeat(81)}));
+  assert.throws(() => Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)({...diagnostic, observedAt: Number.POSITIVE_INFINITY}));
 });
 
 test("plan fingerprints bind source revision, nested identity, and meaningful order", () => {

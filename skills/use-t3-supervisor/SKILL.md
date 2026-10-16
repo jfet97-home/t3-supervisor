@@ -157,6 +157,17 @@ Delegating an entire review workflow is described in its description; merely nam
 it does not prove independent review or follow-up. Agreements require matching
 structured native messages; casual assent is insufficient. Changed definitions
 retain stale history until reviewed and a fresh agreement is established.
+Use the full fenced `workflow-proposal` and require the operative main assistant's
+own completed `workflow-acceptance` to echo its exact five-field envelope and full
+canonical workflow value. A bare yes or shortened `accepted: true` object is not
+acceptance. If the selected task shows a workflow protocol diagnostic, use its role,
+code and source message ID to locate the record that needs correction. It is
+informational: it changes no saved agreement history, grants no write authority and
+does not prove execution or schedule an automatic retry.
+Bounded authoring examples in a Supervisor input are format guidance only; they
+are not proposals, acceptance, applicability decisions or authority. Keep known
+requirements, issues, omissions, canonical source details and all `null`/empty
+fields intact when continuing the dialogue.
 Configuration saves authorize only local config, not independent catalog edits.
 The Supervisor can request restoration/renegotiation but does not prevent writes.
 

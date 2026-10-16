@@ -6,12 +6,14 @@ import type { WorkflowPlanNodeInfo, WorkflowPlanStepInfo, WorkflowProposalInfo }
 import {
   parseWorkflowInterpretation,
   prepareWorkflowRequest,
+  canonicalAuthoringMaterial,
   proposalContextFromDefinitions,
   proposalContextMatches,
   redact,
   validateWorkflowApplyAgainstPinnedContext,
   validateWorkflowPlan,
   validateWorkflowRecord,
+  workflowRecordDiagnostic,
 } from "../src/supervisor-workflow.js";
 import { makeDefinitionFixture, stepSource, workflowSource } from "./project-definitions-fixture.js";
 
@@ -64,6 +66,70 @@ test("redaction is stable while source identities and paths remain exact", () =>
   assert.equal(redact(once), once);
   assert.equal(once.includes("hidden"), false);
   assert.equal(once.includes("12345678901234567890"), false);
+});
+
+test("canonical authoring material expands the default, avoids recursive duplicates, and retains required refs", async () => {
+  const {snapshot} = await load({
+    ...commonSteps,
+    "steps/publish.md": stepSource("publish", "Prepare the requested handoff."),
+    "project.yaml": "default_workflow: delivery\nrequired:\n  - workflow: delivery\n  - step: e2e\n  - step: publish\n",
+    "workflows/reviewer.yaml": reviewer(),
+    "workflows/delivery.yaml": delivery(),
+  });
+  const context = prepareWorkflowRequest(threadId, sourceMessageId, "Ship export support", snapshot).context;
+  assert.ok(context);
+
+  const material = canonicalAuthoringMaterial(context);
+  assert.equal(material.complete, true);
+  assert.deepEqual(material.requiredReferences, ["workflow:delivery", "step:e2e", "step:publish"]);
+  assert.deepEqual(material.omittedReferences, []);
+  assert.ok(material.workflow?.plan);
+  const refs: string[] = [];
+  const collect = (nodes: readonly WorkflowPlanNodeInfo[]) => {
+    for (const node of nodes) {
+      if (node.kind === "step" && node.definitionId) refs.push(`step:${node.definitionId}`);
+      else if (node.kind === "workflow") refs.push(`workflow:${node.definitionId}`);
+      if (node.kind === "sequence" || node.kind === "parallel") collect(node.nodes);
+      else if (node.kind === "workflow" && node.plan) collect(node.plan.nodes);
+    }
+  };
+  collect(material.workflow.plan.nodes);
+  assert.equal(refs.filter(reference => reference === "workflow:delivery").length, 1);
+  assert.equal(refs.filter(reference => reference === "step:e2e").length, 1);
+  assert.equal(refs.filter(reference => reference === "step:publish").length, 1);
+  assert.equal(material.localStepExample.kind, "step");
+  assert.equal(material.localStepExample.definitionId, null);
+  assert.equal(material.localStepExample.source, null);
+  assert.equal(material.localStepExample.templatePath, null);
+  assert.match(material.localStepExample.nodeId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu);
+  assert.deepEqual(validateWorkflowRecord(material.workflow, context), material.workflow);
+
+  const bounded = canonicalAuthoringMaterial(context, 0);
+  assert.equal(bounded.workflow, null);
+  assert.equal(bounded.complete, false);
+  assert.deepEqual(bounded.omittedReferences, ["workflow:delivery", "step:e2e", "step:publish"]);
+  assert.deepEqual(bounded.requiredReferences, material.requiredReferences);
+  assert.deepEqual(bounded.issues, material.issues);
+});
+
+test("canonical authoring material keeps missing and cyclic required sources explicit", async () => {
+  const {snapshot} = await load({
+    "project.yaml": "required:\n  - step: missing-check\n  - workflow: cycle\n",
+    "workflows/cycle.yaml": workflowSource("Cycle", "  - workflow: cycle\n"),
+  });
+  const context = prepareWorkflowRequest(threadId, sourceMessageId, "Ship export support", snapshot).context;
+  assert.ok(context);
+
+  const material = canonicalAuthoringMaterial(context);
+  assert.equal(material.complete, false);
+  assert.deepEqual(material.requiredReferences, ["step:missing-check", "workflow:cycle"]);
+  assert.deepEqual(material.omittedReferences, []);
+  assert.ok(material.workflow);
+  assert.ok(material.workflow.requirements.some(item => item.state === "unknown" || item.state === "unresolved"));
+  assert.ok(material.workflow.plan?.nodes.some(node => node.kind === "step" && node.resolution === "unresolved" ||
+    node.kind === "workflow" && node.resolution !== "resolved"));
+  assert.ok(material.issues.some(item => item.code === "unresolved_step_reference"));
+  assert.ok(material.issues.some(item => item.code === "workflow_cycle_in_plan" || item.code === "workflow_cycle_in_definition"));
 });
 
 test("the bounded request includes exact nested template paths for fixed-workflow insertions", async () => {
@@ -124,6 +190,55 @@ test("nested reusable paths stay stable across normalization and strict record v
   const revalidated = validateWorkflowPlan({requirements: [], plan}, prepared.context!);
   assert.ok(revalidated);
   assert.deepEqual(revalidated.plan, plan);
+});
+
+test("strict workflow records ignore object key order while preserving values and array order", async () => {
+  const {snapshot} = await load({...commonSteps, "project.yaml": "required:\n  - step: e2e\n  - step: inspect\n"});
+  const prepared = prepareWorkflowRequest(threadId, sourceMessageId, "Ship export support", snapshot);
+  assert.ok(prepared.context);
+  const workflow = validateWorkflowPlan({
+    requirements: [
+      {kind: "step", id: "e2e", applies: true, reason: "The user flow changes."},
+      {kind: "step", id: "inspect", applies: true, reason: "Inspect the changed behavior."},
+    ],
+    plan: {kind: "sequence", nodes: [
+      {kind: "step", definitionId: "e2e", reason: "Verify the user flow."},
+      {kind: "step", definitionId: "inspect", reason: "Inspect the changed behavior."},
+    ]},
+  }, prepared.context);
+  assert.ok(workflow);
+  const canonical = {
+    definitionsStatus: workflow.definitionsStatus,
+    definitionsComplete: workflow.definitionsComplete,
+    requirementsKnown: workflow.requirementsKnown,
+    requirements: workflow.requirements,
+    issues: workflow.issues,
+    plan: workflow.plan,
+  };
+  const reverseObjectKeyOrder = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(reverseObjectKeyOrder);
+    if (typeof value !== "object" || value === null) return value;
+    return Object.fromEntries(Object.entries(value).reverse().map(([key, child]) => [key, reverseObjectKeyOrder(child)]));
+  };
+  const keyReordered = reverseObjectKeyOrder(canonical);
+  assert.deepEqual(validateWorkflowRecord(keyReordered, prepared.context), canonical);
+
+  const changedSource = structuredClone(canonical);
+  const sourceStep = changedSource.plan?.nodes[0];
+  assert.ok(sourceStep && sourceStep.kind === "step" && sourceStep.source);
+  sourceStep.source.path = ".t3-supervisor/steps/changed.md";
+  assert.equal(validateWorkflowRecord(changedSource, prepared.context), null);
+  assert.equal(workflowRecordDiagnostic(changedSource, prepared.context), "noncanonical_step_node");
+
+  const changedWhitespace = structuredClone(canonical);
+  const reasonStep = changedWhitespace.plan?.nodes[0];
+  assert.ok(reasonStep && reasonStep.kind === "step");
+  reasonStep.reason += " ";
+  assert.equal(validateWorkflowRecord(changedWhitespace, prepared.context), null);
+
+  const reversedRequirements = {...canonical, requirements: [...canonical.requirements].reverse()};
+  assert.equal(validateWorkflowRecord(reversedRequirements, prepared.context), null);
+  assert.equal(workflowRecordDiagnostic(reversedRequirements, prepared.context), "noncanonical_workflow_requirements");
 });
 
 test("repeated workflow templates create distinct occurrences without merging their source paths", async () => {

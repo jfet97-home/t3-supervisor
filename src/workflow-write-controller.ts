@@ -29,7 +29,7 @@ import {
 } from "./workflow-write-evidence.js";
 import {proposalContextFromDefinitions, proposalContextMatches, validateWorkflowApplyAgainstPinnedContext} from "./supervisor-workflow.js";
 import type {ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
-import type {WorkflowPlanGroupInfo, WorkflowPlanStepInfo, WorkflowPlanWorkflowInfo, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
+import type {WorkflowPlanGroupInfo, WorkflowPlanStepInfo, WorkflowPlanWorkflowInfo, WorkflowProtocolDiagnostic, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
 
 export type WorkflowNativeAccess = {
   listThreads(signal: AbortSignal): Promise<readonly ThreadInfo[]>;
@@ -92,6 +92,7 @@ export type WorkflowReadResult = {
   coverage?: Array<{threadId: string; actorThreadId: string; actorTitle: string | null; state: "root" | "assigned" | "transferring" | "unavailable";
     memberEpoch: number | null; assignmentRootThreadId: string | null; assignmentEpoch: number | null}>;
   mainTaskAgreementStatus: "agreed" | "stale" | null;
+  workflowProtocolDiagnostic: WorkflowProtocolDiagnostic | null;
   agreementValidityNote: string;
   incompatibleWorkflows: Array<{workflowId: string; formatVersion: number | null}>;
   workflows: Array<{
@@ -608,6 +609,7 @@ export class WorkflowWriteController {
         return {threadId: thread.threadId, ...coverage, actorTitle: member?.title ?? (coverage.actorThreadId === binding.threadId ? binding.title : null)};
       })} : {}),
       mainTaskAgreementStatus: task?.agreement?.status ?? null,
+      workflowProtocolDiagnostic: task?.workflowProtocolDiagnostic ?? null,
       agreementValidityNote: "Agreement status is current task metadata. currentAgreementKey only marks content matching a retained accepted snapshot; neither field proves execution or current definition validity.",
       incompatibleWorkflows: rows.incompatible,
       workflows: withReferences,
