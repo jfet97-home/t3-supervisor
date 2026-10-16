@@ -28,7 +28,7 @@ export interface BotInfo {
 
 export type SendResult =
   | { readonly kind: "sent"; readonly messageId: number }
-  | { readonly kind: "rejected"; readonly reason: "telegram_rejected"; readonly telegramCode: number | null }
+  | { readonly kind: "rejected"; readonly reason: "telegram_rejected" | "telegram_not_sent"; readonly telegramCode: number | null }
   | { readonly kind: "unknown"; readonly reason: string };
 
 export type DeliveryStatus =
@@ -216,10 +216,18 @@ const messageIdFrom = (value: unknown): number | null =>
     ? Number(value.message_id)
     : null;
 
+export const isConfirmedNotSent = (body: Record<string, unknown>): boolean =>
+  body.ok === false && body.error === "telegram_not_sent" && body.delivery_state === "rejected" &&
+  body.confirmed_not_delivered === true && body.delivery_may_have_completed === false &&
+  body.failure_stage === "connect";
+
 const parseSendResult = (result: unknown): SendResult => {
   const envelope = parseToolEnvelope(result);
   const body = envelope.value;
   if (!body) return { kind: "unknown", reason: envelope.failure ?? "invalid_response" };
+  if (isConfirmedNotSent(body)) {
+    return { kind: "rejected", reason: "telegram_not_sent", telegramCode: null };
+  }
   if (body.ok === false && body.error === "telegram_rejected") {
     const telegramCode = Number.isSafeInteger(body.telegram_code) ? Number(body.telegram_code) : null;
     return { kind: "rejected", reason: "telegram_rejected", telegramCode };

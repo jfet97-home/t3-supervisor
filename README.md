@@ -126,6 +126,13 @@ recaps and Telegram-originated answers. Set `INPUT_ENABLED=true` as well to enab
 Telegram input relay. The Telegram master setting overrides the input setting.
 Apply configuration changes by restarting the service.
 
+A bridge `telegram_not_sent` response permits a retry only with explicit proof
+that the connection failed before an HTTP request was sent: rejected delivery,
+confirmed non-delivery, no possible completion and failure stage `connect`.
+Completion messages and questionnaire operations retain the original key and
+payload for the retry. Timeouts without that proof, lost responses and journal
+failures remain uncertain and are reconciled rather than automatically replayed.
+
 The base Compose template does not require MCPX or its Docker network. To enable
 Telegram with the bundled MCPX network settings, use the Telegram override:
 

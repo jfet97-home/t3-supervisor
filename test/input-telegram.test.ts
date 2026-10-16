@@ -406,3 +406,25 @@ test("input message bounds and credential-bearing MCP URLs fail before network c
   assert.throws(() => makeInputTelegramClient("http://user:secret@mcpx:9000/mcp/lazy"), InputTelegramError);
   assert.equal(calls.length, 0);
 });
+
+test("native sends and edits accept only complete pre-send non-delivery proof", async () => {
+  const proof = {
+    ok: false, error: "telegram_not_sent", delivery_state: "rejected",
+    confirmed_not_delivered: true, delivery_may_have_completed: false,
+    failure_stage: "connect", failure_kind: "connection_refused", transport_attempts: 3,
+  };
+  const bodies = [proof, proof, { ...proof, confirmed_not_delivered: false },
+    { ...proof, delivery_may_have_completed: true }, { ...proof, failure_stage: "response" }];
+  const calls: ToolCall[] = [];
+  const client = makeClient(bodies.map((body) => ({ result: { isError: true, structuredContent: body } })), calls);
+  const message = { questionId: null, fragment: 0, text: "Question", buttons: [] };
+  assert.deepEqual(await client.sendInputMessage("input", "revision", 0, message, "original-send"), {
+    kind: "rejected", reason: "telegram_not_sent",
+  });
+  assert.deepEqual(await client.editInputMessage("input", "revision", 0, 42, message, "original-edit"), {
+    kind: "rejected", reason: "telegram_not_sent",
+  });
+  for (let index = 2; index < bodies.length; index++) {
+    assert.equal((await client.sendInputMessage("input", "revision", 0, message, "original-send")).kind, "unknown");
+  }
+});

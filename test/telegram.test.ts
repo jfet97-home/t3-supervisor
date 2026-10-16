@@ -210,3 +210,29 @@ test("closes the MCP session on effect cancellation", async () => {
 test("rejects MCP URLs with embedded credentials", () => {
   assert.throws(() => makeTelegramClient("http://user:secret@mcpx:9000/mcp/lazy"));
 });
+
+test("pre-send connection proof permits retry without treating uncertainty as rejection", async () => {
+  const proof = {
+    ok: false, error: "telegram_not_sent", delivery_state: "rejected",
+    confirmed_not_delivered: true, delivery_may_have_completed: false,
+    failure_stage: "connect", failure_kind: "dns_failure", transport_attempts: 3,
+  };
+  const bodies = [
+    proof,
+    { ...proof, confirmed_not_delivered: undefined },
+    { ...proof, delivery_may_have_completed: true },
+    { ...proof, failure_stage: "request_or_response" },
+    { ...proof, error: "journal_completion_failed" },
+  ];
+  const calls: ToolCall[] = [];
+  const client = makeTelegramClient(mcpxUrl, createDependencies(bodies.map((body) => ({
+    result: { isError: true, structuredContent: body },
+  })), calls));
+  assert.deepEqual(await Effect.runPromise(client.sendMessage("stable-connect-key", "original")), {
+    kind: "rejected", reason: "telegram_not_sent", telegramCode: null,
+  });
+  for (let index = 1; index < bodies.length; index++) {
+    assert.equal((await Effect.runPromise(client.sendMessage("stable-connect-key", "original"))).kind, "unknown");
+  }
+  assert.ok(calls.every((call) => JSON.stringify(call.args).includes("stable-connect-key")));
+});

@@ -457,6 +457,7 @@ const safeErrorCodes = new Set([
   "mutation_uncertain",
   "delivery_unknown",
   "telegram_rejected",
+  "telegram_not_sent",
   "stale_presentation",
   "text_focus_not_registered",
 ]);

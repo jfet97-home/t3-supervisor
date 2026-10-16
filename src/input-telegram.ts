@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { McpSession } from "./telegram.js";
+import { isConfirmedNotSent, type McpSession } from "./telegram.js";
 import type { InputEvent, RenderedInputMessage } from "./input-domain.js";
 
 const TOOL_PREFIX = "raspfet-telegram-t3__";
@@ -217,6 +217,7 @@ const mutationResult = (value: unknown, expectedResult?: unknown): InputMutation
 
 const isKnownNonExecution = (body: Record<string, unknown>): boolean => {
   if (body.delivery_may_have_completed === true || body.error === "journal_completion_failed") return false;
+  if (isConfirmedNotSent(body)) return true;
   if (body.error === "text_focus_not_registered") {
     return body.delivery_state === "rejected" && body.confirmed_not_delivered === true &&
       body.delivery_may_have_completed === false;
