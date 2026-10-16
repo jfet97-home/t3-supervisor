@@ -208,7 +208,7 @@ test("a 3190-style duplicated parent lifecycle record resolves to one exact dete
   const parentRunId = "parent-run-ordinal-10";
   const startedAt = new Date(now - 4_000).toISOString();
   const completedAt = new Date(now - 1_000).toISOString();
-  const subagentUpdatedAt = new Date(now - 950).toISOString();
+  const subagentUpdatedAt = new Date(now + 5_000).toISOString();
   const turnItemUpdatedAt = new Date(now - 900).toISOString();
   const parent: Projection = {
     ...parentProjection,
@@ -238,6 +238,10 @@ test("a 3190-style duplicated parent lifecycle record resolves to one exact dete
     updatedAt: lifecycle!.updatedAt,
   }).filter(item => item.type === "native_child_lifecycle");
   assert.equal(lifecycleActivity.length, 1);
+  const metadataBumped: Projection = {...parent, subagents: parent.subagents!.map(record => ({...record,
+    updatedAt: new Date(now + 10_000).toISOString()}))};
+  assert.deepEqual(directParentChildLifecycle(metadataBumped, childThreadId), lifecycle,
+    "metadata timestamp changes cannot switch the canonical duplicate source");
   const ambiguous = {...parent, turnItems: parent.turnItems!.map(item => ({...item, status: "running"}))};
   assert.equal(directParentChildLifecycle(ambiguous, childThreadId), null);
 });

@@ -19,7 +19,7 @@ import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo,
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { parseWorkflowInterpretation, proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
 import { WebSocketServer } from "ws";
-import { makeSupervisorRpc } from "../src/supervisor-native.js";
+import { makeSupervisorRpc, SupervisorRpcError } from "../src/supervisor-native.js";
 
 type Fixture = {
   directory: string;
@@ -2058,6 +2058,112 @@ test("helper guidance defers on target owner input without routing to an eligibl
       assert.equal(result.status, "accepted", `${status} current request status must clear stale shell and turn-item hints`);
       assert.equal(sent[index]?.threadId, targets[index + 1]!.id);
     }
+  } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
+});
+
+test("deferred owner guidance raises one stable attention after grace and routes only after resolution", async () => {
+  const f = await makeFixture();
+  try {
+    const team = new SupervisorTeamStore(f.supervisors);
+    const member = team.registerMember(f.binding, {threadId: "guide-deferred-helper", taskId: "guide-deferred-task", bootstrapRunId: "guide-deferred-bootstrap"});
+    const ready = team.markReady(f.binding, member.threadId, member.epoch);
+    const parent = thread("guide-deferred-parent", f.projectId, f.mainThreadId, "subagent");
+    const target = thread("guide-deferred-target", f.projectId, parent.id, "subagent");
+    const helper = thread(member.threadId, f.projectId, f.supervisorThreadId, "subagent");
+    for (const item of [parent, target]) Object.assign(item, {creationSource: "mcp", runtimeMode: "full-access", interactionMode: "default"});
+    f.threads.push(parent, target, helper);
+    const parents = new Map(f.threads.map(item => [item.id, item.lineage.parentThreadId]));
+    const assignment = team.assign(f.binding, parent.id, member.threadId, parents);
+    for (const notification of team.snapshot(f.binding).notifications) {
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "sending");
+      team.updateNotificationDelivery(f.binding, f.supervisorThreadId, notification.id, "delivered");
+      team.acknowledgeNotification(f.binding, member.threadId, notification.id, ready.epoch);
+    }
+    team.completeTransfer(f.binding, parent.id, assignment.epoch);
+
+    const projectionForRun = (value: ThreadInfo, runId: string): Projection => {
+      const rootNodeId = `${runId}-root`;
+      const result = makeProjection(value.id, f.projectId);
+      result.thread = value;
+      result.runtimeRequests = [];
+      result.runs = [{id: runId, threadId: value.id, status: "running", ordinal: 1,
+        requestedAt: "2026-10-16T10:00:00Z", startedAt: null, completedAt: null, rootNodeId, activeAttemptId: `${runId}-attempt`}];
+      result.nodes = [{id: rootNodeId, threadId: value.id, runId, kind: "root_turn", rootNodeId, parentNodeId: null}];
+      result.providerTurns = [{id: `${runId}-turn`, nodeId: rootNodeId, runAttemptId: `${runId}-attempt`, status: "running"}];
+      return result;
+    };
+    parent.activeRunId = "guide-deferred-parent-run";
+    target.activeRunId = "guide-deferred-target-run";
+    const parentProjection = projectionForRun(parent, parent.activeRunId);
+    const targetProjection = projectionForRun(target, target.activeRunId);
+    f.projections.set(parent.id, parentProjection);
+    f.projections.set(target.id, targetProjection);
+    f.projections.set(f.mainThreadId, makeProjection(f.mainThreadId, f.projectId));
+    const own = makeProjection(member.threadId, f.projectId);
+    Object.assign(own.thread, {runtimeMode: "full-access", interactionMode: "default"});
+    f.projections.set(member.threadId, own);
+    const actorFixture = {...f, supervisorThreadId: member.threadId, projection: own};
+    const reader = new WorkflowWriteController({...f.controller.options, team});
+    const sent: Record<string, unknown>[] = [];
+    const controller = new SupervisorTeamController(reader, team, async (_tag, command) => {
+      sent.push(command);
+      if (command.threadId === target.id) {
+        const rootNodeId = `${target.activeRunId}-root`;
+        const ownerRequest = {id: `${target.id}-owner-question`, nodeId: rootNodeId, kind: "user_input", status: "pending"};
+        targetProjection.runtimeRequests = [ownerRequest];
+        targetProjection.turnItems = [{id: `${target.id}-owner-question-item`, threadId: target.id, runId: target.activeRunId,
+          nodeId: rootNodeId, type: "user_input_request", requestId: ownerRequest.id, status: "pending"}];
+        Object.assign(target, {pendingRuntimeRequest: ownerRequest});
+        throw new SupervisorRpcError("rejected", true);
+      }
+      return {sequence: sent.length};
+    });
+    const args = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: ready.epoch,
+      assignmentRootThreadId: parent.id, assignmentEpoch: assignment.epoch, operationId: "guide-deferred-owner-input",
+      targetThreadId: target.id, text: "Recheck the target after its owner request is resolved."};
+    installEvidence(actorFixture, args, {toolName: workflowToolNames.guide.direct[0]});
+
+    const deferred = await controller.guide(args, AbortSignal.timeout(1000)) as {
+      status: string; reason?: string; requestId: string; attempts: Array<{commandId: string; status: string}>;
+    };
+    assert.equal(deferred.status, "needs_fallback");
+    assert.equal(deferred.reason, "target_pending_owner_input");
+    assert.equal(deferred.attempts[0]?.status, "rejected");
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.threadId, target.id);
+    const guideRequest = team.unresolvedRequests(f.binding).find(request => request.requestId === deferred.requestId);
+    assert.ok(guideRequest);
+    assert.equal(team.hasBlockingWork(f.binding), true);
+
+    const conversationRequests = new SupervisorConversationStore(f.guidance);
+    const deferredView = supervisorTeamView(team, f.binding, f.threads, conversationRequests);
+    assert.match(deferredView.members[0]?.currentState ?? "", /deferred for an owner decision/u);
+    assert.doesNotMatch(deferredView.members[0]?.currentState ?? "", /awaiting native-history confirmation/u);
+
+    await controller.reconcile(f.binding, AbortSignal.timeout(1000), guideRequest.updatedAt);
+    const attentionId = `guide-deferred:${deferred.requestId}`;
+    assert.equal(team.snapshot(f.binding).events.some(event => event.id === attentionId), false);
+    assert.equal(sent.length, 1, "reconciliation does not route around a pending owner decision");
+    await controller.reconcile(f.binding, AbortSignal.timeout(1000), guideRequest.updatedAt + 60_001);
+    let attention = team.snapshot(f.binding).events.filter(event => event.id === attentionId);
+    assert.equal(attention.length, 1);
+    assert.equal(attention[0]?.kind, "service_attention");
+    assert.match(attention[0]?.summary ?? "", /pending native owner decision/u);
+    assert.equal(sent.length, 1);
+    await controller.reconcile(f.binding, AbortSignal.timeout(1000), guideRequest.updatedAt + 120_001);
+    attention = team.snapshot(f.binding).events.filter(event => event.id === attentionId);
+    assert.equal(attention.length, 1, "repeated checks reuse the stable attention event");
+    assert.equal(sent.length, 1);
+
+    (targetProjection.runtimeRequests as Array<Record<string, unknown>>)[0]!.status = "resolved";
+    await controller.reconcile(f.binding, AbortSignal.timeout(1000), guideRequest.updatedAt + 120_002);
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1]?.threadId, parent.id, "the same operation routes through the eligible ancestor after fresh resolution");
+    assert.notEqual(sent[1]?.commandId, sent[0]?.commandId);
+    assert.equal(team.unresolvedRequests(f.binding).some(request => request.requestId === deferred.requestId), true);
+    assert.equal(supervisorTeamView(team, f.binding, f.threads, conversationRequests).members[0]?.currentState?.includes("deferred for an owner decision"), false);
+    await controller.reconcile(f.binding, AbortSignal.timeout(1000), guideRequest.updatedAt + 120_003);
+    assert.equal(sent.length, 2, "accepted ancestor guidance is never retransmitted with another identity");
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
 });
 

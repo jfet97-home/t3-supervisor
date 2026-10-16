@@ -196,7 +196,13 @@ export class SupervisorTeamController {
       try {
         const payload = this.guidePayload(value);
         if (value.status === "needs_fallback") {
-          await this.continueAfterDefiniteRejection(payload, binding, String(row.evidence_item_id), value, signal);
+          const result = await this.continueAfterDefiniteRejection(payload, binding, String(row.evidence_item_id), value, signal);
+          if (result.status === "needs_fallback" && result.reason === "target_pending_owner_input") {
+            const request = this.team.unresolvedRequests(binding).find(item => item.requestId === value.requestId);
+            if (!signal.aborted && request && now - request.updatedAt >= unresolvedGuideAttentionGraceMs) this.team.serviceAttention(binding, {
+              eventId: `guide-deferred:${value.requestId}`, memberThreadId: String(row.actor_thread_id), targetThreadId: value.targetThreadId,
+              summary: `Guidance for ${value.targetThreadId} is deferred for a pending native owner decision. The question has not been answered and no ancestor route has been sent.`}, now);
+          }
           continue;
         }
         if (value.status === "needs_escalation") {

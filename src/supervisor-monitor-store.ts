@@ -228,6 +228,7 @@ export class ProjectSupervisorMonitorStore {
     excludedIds?: ReadonlySet<string>;
     includeDetachedChildItems?: boolean;
     nativeChildLifecycle?: SupervisorNativeChildLifecycleEvidence;
+    preserveNativeChildLifecycle?: boolean;
   }): SupervisorMonitorObservation {
     if (
       !input.projectId.trim() ||
@@ -291,6 +292,11 @@ export class ProjectSupervisorMonitorStore {
       const activateItem = this.store.db.prepare(`UPDATE supervisor_monitor_items SET active=1
         WHERE project_id=? AND thread_id=? AND item_id=?`);
       for (const item of activity) activateItem.run(input.projectId, input.threadId, item.id);
+      if (input.preserveNativeChildLifecycle === true)
+        this.store.db
+          .prepare(`UPDATE supervisor_monitor_items SET active=1
+            WHERE project_id=? AND thread_id=? AND type='native_child_lifecycle'`)
+          .run(input.projectId, input.threadId);
       this.store.db
         .prepare("DELETE FROM supervisor_monitor_items WHERE project_id=? AND thread_id=? AND active=0")
         .run(input.projectId, input.threadId);
@@ -310,6 +316,7 @@ export class ProjectSupervisorMonitorStore {
       this.store.db
         .prepare(`DELETE FROM supervisor_monitor_items
           WHERE project_id=? AND thread_id=? AND ordinal<?
+          AND type<>'native_child_lifecycle'
           AND (reviewed_version=version OR active=0)`)
         .run(input.projectId, input.threadId, sourceOrdinal);
       const currentActivity = activity.filter((item) => item.ordinal >= sourceOrdinal);
@@ -327,11 +334,12 @@ export class ProjectSupervisorMonitorStore {
         const current = this.itemRow(input.projectId, input.threadId, item.id);
         if (current) {
           if (String(current.version) === item.version) {
-            if (current.active !== 1 || (current.read_item_id === null && item.readItemId !== null))
+            if (current.active !== 1 || (current.read_item_id === null && item.readItemId !== null) ||
+              item.type === "native_child_lifecycle" && Number(current.ordinal) !== item.ordinal)
               this.store.db
-                .prepare(`UPDATE supervisor_monitor_items SET read_item_id=COALESCE(?,read_item_id),active=1
+                .prepare(`UPDATE supervisor_monitor_items SET read_item_id=COALESCE(?,read_item_id),ordinal=?,active=1
                   WHERE project_id=? AND thread_id=? AND item_id=? AND version=?`)
-                .run(item.readItemId, input.projectId, input.threadId, item.id, item.version);
+                .run(item.readItemId, item.ordinal, input.projectId, input.threadId, item.id, item.version);
             continue;
           }
           const eligible = Number(current.eligible) === 1 || item.ordinal >= sourceOrdinal;
@@ -475,7 +483,7 @@ export class ProjectSupervisorMonitorStore {
       .filter((run) => run.threadId === threadId && run.ordinal >= currentFloor)
       .sort((left, right) => left.ordinal - right.ordinal);
     if (includeDetachedChildItems && projection.thread.lineage.relationshipToParent === "subagent" && runs.length === 0) {
-      const detached = activity.filter((item) => item.ordinal >= currentFloor);
+      const detached = activity.filter((item) => item.type !== "native_child_lifecycle" && item.ordinal >= currentFloor);
       if (!detached.length) return currentFloor;
       const maxOrdinal = Math.max(...detached.map(item => item.ordinal));
       for (const item of detached) {

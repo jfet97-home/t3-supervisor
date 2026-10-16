@@ -90,7 +90,10 @@ questions, active provider turns and contactability.
 A pending owner question or approval on the target defers intervention; it does not
 cause guidance to be sent to an ancestor around that pending decision. Fresh
 resolved/expired/cancelled request state takes precedence over a matching stale
-waiting hint, while unavailable or mismatched evidence remains conservative. Direct guidance to a delegated
+waiting hint, while unavailable or mismatched evidence remains conservative.
+An unresolved fallback held by owner input is shown as deferred for an owner
+decision. After the existing bounded grace it raises one root-attention event;
+fresh resolution resumes the same operation's guarded route checks. Direct guidance to a delegated
 child uses targeted active-only steer. If T3 returns the specific dispatch command
 failure, the service replays that exact command once with the same command ID,
 message ID, target and run ID to read T3's durable result. It changes route only

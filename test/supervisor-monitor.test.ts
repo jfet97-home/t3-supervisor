@@ -488,6 +488,107 @@ test("native child terminal monitor checkpoints survive restart and ACK only the
   }
 });
 
+test("native child ACKs stay out of detached source-floor advancement across repeats, resume and a new completion", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "supervisor-native-floor-test-"));
+  let store = new GuidanceStore(directory);
+  try {
+    let monitor = new ProjectSupervisorMonitorStore(store);
+    const childId = "native-child-floor";
+    const child = makeProjection({threadId: childId});
+    child.runs = [];
+    child.thread.lineage = {parentThreadId: "operative-parent", relationshipToParent: "subagent", rootThreadId: "operative-parent"};
+    const settings = {...defaultMonitoringSettings, intervalMinutes: 30, activityThreshold: 1};
+    const eligibleThreadIds = new Set([childId]);
+    const evidence: SupervisorNativeChildLifecycleEvidence = {parentThreadId: "operative-parent", parentRunId: "parent-run-1",
+      recordId: "native-item-floor", status: "completed", completedAt: new Date(now - 1_000).toISOString(), updatedAt: new Date(now - 900).toISOString()};
+    const observe = (lifecycle: SupervisorNativeChildLifecycleEvidence | undefined, at: number): void => {
+      monitor.observe({projectId, threadId: childId, sourceOrdinal: 1, projection: child, now: at,
+        includeDetachedChildItems: true, ...(lifecycle ? {nativeChildLifecycle: lifecycle} : {})});
+    };
+    const takeSingle = (at: number, type: string): SupervisorMonitorActivity => {
+      const batch = monitor.select(projectId, settings, at, null, {eligibleThreadIds});
+      assert.ok(batch);
+      const items = batch.threads.flatMap(thread => thread.items);
+      assert.equal(items.length, 1);
+      assert.equal(items[0]?.type, type);
+      assert.equal(monitor.acknowledge(batch, at + 1).acknowledged, 1);
+      return items[0]!;
+    };
+
+    let nativeWakes = 0;
+    for (let cycle = 0; cycle < 6; cycle++) {
+      const at = now + cycle * 1_000;
+      observe(evidence, at);
+      const batch = monitor.select(projectId, settings, at, null, {eligibleThreadIds});
+      if (batch) {
+        nativeWakes++;
+        assert.deepEqual(batch.threads.flatMap(thread => thread.items.map(item => item.type)), ["native_child_lifecycle"]);
+        assert.equal(monitor.acknowledge(batch, at + 1).acknowledged, 1);
+      }
+      assert.equal(monitor.state(projectId, childId).sourceOrdinal, 1);
+    }
+    assert.equal(nativeWakes, 1, "six identical observations create one terminal wake");
+
+    store.close();
+    store = new GuidanceStore(directory);
+    monitor = new ProjectSupervisorMonitorStore(store);
+    observe(evidence, now + 6_000);
+    assert.equal(monitor.select(projectId, settings, now + 6_000, null, {eligibleThreadIds}), null,
+      "a restart retains the acknowledged terminal version");
+    assert.equal(monitor.state(projectId, childId).sourceOrdinal, 1);
+
+    const interrupted: SupervisorNativeChildLifecycleEvidence = {...evidence, status: "interrupted",
+      completedAt: new Date(now + 7_000).toISOString(), updatedAt: new Date(now + 7_100).toISOString()};
+    observe(interrupted, now + 7_000);
+    takeSingle(now + 7_000, "native_child_lifecycle");
+    nativeWakes++;
+    observe(interrupted, now + 8_000);
+    assert.equal(monitor.select(projectId, settings, now + 8_000, null, {eligibleThreadIds}), null,
+      "a changed terminal status produces one new version");
+    assert.equal(monitor.state(projectId, childId).sourceOrdinal, 1);
+
+    const priorDetachedItem = {id: "turn-item-prior-native-work", threadId: childId, runId: null, ordinal: 2,
+      nodeId: "node-prior-native-work", type: "command_execution", status: "completed",
+      startedAt: new Date(now + 8_500).toISOString(), completedAt: new Date(now + 8_500).toISOString(),
+      updatedAt: new Date(now + 8_500).toISOString()};
+    child.turnItems = [priorDetachedItem];
+    observe(interrupted, now + 8_500);
+    takeSingle(now + 8_500, "command_execution");
+    observe(interrupted, now + 8_600);
+    assert.equal(monitor.state(projectId, childId).sourceOrdinal, 3,
+      "only the real detached item advances the source floor");
+    observe(interrupted, now + 8_700);
+    assert.equal(monitor.select(projectId, settings, now + 8_700, null, {eligibleThreadIds}), null,
+      "changing the synthetic item's ordinal does not invalidate its ACK");
+
+    const resumedItem = {...priorDetachedItem, id: "turn-item-resumed-native-work", ordinal: 3,
+      nodeId: "node-resumed-native-work", startedAt: new Date(now + 9_000).toISOString(),
+      completedAt: new Date(now + 9_000).toISOString(), updatedAt: new Date(now + 9_000).toISOString()};
+    child.turnItems = [priorDetachedItem, resumedItem];
+    observe(undefined, now + 9_000);
+    assert.deepEqual(monitor.pending(projectId, childId).map(item => item.id), [resumedItem.id],
+      "resumption removes the synthetic terminal row and leaves the next real ordinal reviewable");
+    takeSingle(now + 9_000, "command_execution");
+    observe(undefined, now + 9_100);
+    assert.equal(monitor.state(projectId, childId).sourceOrdinal, 4);
+    assert.deepEqual(monitor.pending(projectId, childId), []);
+
+    const laterCompletion: SupervisorNativeChildLifecycleEvidence = {...evidence, completedAt: new Date(now + 10_000).toISOString(),
+      updatedAt: new Date(now + 10_100).toISOString()};
+    observe(laterCompletion, now + 10_000);
+    takeSingle(now + 10_000, "native_child_lifecycle");
+    nativeWakes++;
+    observe(laterCompletion, now + 11_000);
+    assert.equal(monitor.select(projectId, settings, now + 11_000, null, {eligibleThreadIds}), null,
+      "a later completion timestamp creates one new wake, then remains acknowledged");
+    assert.equal(monitor.state(projectId, childId).sourceOrdinal, 4);
+    assert.equal(nativeWakes, 3);
+  } finally {
+    store.close();
+    await rm(directory, {recursive: true, force: true});
+  }
+});
+
 test("direct peer tool sends are excluded from the activity count", () => {
   const activity = collect([
     { id: "peer-send", type: "dynamic_tool", status: "completed", toolName: "mcp__t3__thread_send" },

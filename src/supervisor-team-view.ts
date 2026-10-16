@@ -11,10 +11,21 @@ export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRe
   const byId = new Map(threads.map(thread => [thread.id, thread]));
   const guideCountsByMember = new Map<string, number>();
   const uncertainGuidanceMembers = new Set<string>();
-  for (const request of team.unresolvedRequests(binding)) {
-    if (!request.requestId.startsWith("guide:")) continue;
+  const guideRequests = team.unresolvedRequests(binding).filter(request => request.requestId.startsWith("guide:"));
+  const guideRequestIds = new Set(guideRequests.map(request => request.requestId));
+  for (const request of guideRequests) {
     guideCountsByMember.set(request.memberThreadId, (guideCountsByMember.get(request.memberThreadId) ?? 0) + 1);
     if (request.state === "uncertain") uncertainGuidanceMembers.add(request.memberThreadId);
+  }
+  const deferredGuidanceMembers = new Set<string>();
+  if (guideRequestIds.size > 0) {
+    const rows = team.supervisors.store.db.prepare(`SELECT actor_thread_id,json_extract(document,'$.requestId') AS request_id
+      FROM supervisor_team_tool_receipts WHERE owner_thread_id=? AND binding_generation=?
+      AND json_extract(document,'$.status')='needs_fallback' AND json_extract(document,'$.reason')='target_pending_owner_input'`)
+      .all(binding.threadId, binding.generation);
+    for (const row of rows) {
+      if (typeof row.request_id === "string" && guideRequestIds.has(row.request_id)) deferredGuidanceMembers.add(String(row.actor_thread_id));
+    }
   }
   const issues = snapshot.events.filter(event => event.acknowledgedAt === null && event.severity === "attention").slice(-100)
     .map(event => ({id: event.id, severity: "warning" as const, summary: event.summary, observedAt: event.createdAt}));
@@ -34,6 +45,7 @@ export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRe
         currentState: member.state === "quarantined" ? "Quarantined: the root owns its former operational coverage; unresolved writes and notices remain fenced, and the native conversation may still exist or run." :
           member.state === "registering" ? "Awaiting the native readiness handshake; the root retains responsibility." :
           uncertainGuidanceMembers.has(member.threadId) ? "An operational-child guidance delivery is uncertain; its original target and native command remain pending reconciliation." :
+            deferredGuidanceMembers.has(member.threadId) ? "Guidance is deferred for an owner decision on its original target; no answer or alternate route has been sent." :
             (guideCountsByMember.get(member.threadId) ?? 0) > 0 ? "An operational-child steer is still awaiting native-history confirmation on its original target; no alternate route has been sent." :
           pending?.state === "uncertain" ? "Check-in delivery is uncertain; its original identity is retained." :
             pending ? "A bounded monitoring turn is in progress." : "Available for the next check-in or reassignment.",

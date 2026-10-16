@@ -1,5 +1,4 @@
 import { Schema } from "effect";
-import { timestampMs } from "./timestamp.js";
 import type { SupervisorMonitorActivity } from "./supervisor-monitor.js";
 import type { Projection, ThreadInfo } from "./types.js";
 
@@ -87,14 +86,15 @@ export const directParentChildLifecycle = (parent: Projection, childThreadId: st
   const statuses = [...new Set(matches.map(match => match.status))];
   if (statuses.length !== 1) return null;
   return matches.sort((left, right) => {
-    const leftAt = Math.max(timestampMs(left.completedAt) ?? 0, timestampMs(left.updatedAt) ?? 0);
-    const rightAt = Math.max(timestampMs(right.completedAt) ?? 0, timestampMs(right.updatedAt) ?? 0);
     const leftSourceRank = left.source === "parent_turn_item" ? 0 : 1;
     const rightSourceRank = right.source === "parent_turn_item" ? 0 : 1;
-    return rightAt - leftAt || leftSourceRank - rightSourceRank ||
-      (left.recordId ?? "").localeCompare(right.recordId ?? "");
+    return leftSourceRank - rightSourceRank || (left.recordId ?? "").localeCompare(right.recordId ?? "");
   })[0]!;
 };
+
+export const hasDirectParentChildLifecycleEvidence = (parent: Projection, childThreadId: string): boolean =>
+  (parent.subagents ?? []).some(value => value.childThreadId === childThreadId) ||
+  (parent.turnItems ?? []).some(value => value.type === "subagent" && value.childThreadId === childThreadId);
 
 export const monitorActivityReference = (
   threadId: string,

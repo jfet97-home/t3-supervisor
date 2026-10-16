@@ -140,6 +140,8 @@ completed.
 Direct guidance is limited to verified active delegated children and active-only
 steering after fresh scope and contact checks.
 A pending owner request on that target defers guidance, including an ancestor route.
+An unresolved fallback appears as deferred for an owner decision and raises bounded
+root attention while it remains held; the Supervisor does not answer that request.
 Resolved/expired/cancelled native request state clears matching stale waiting hints;
 missing or mismatched records remain uncertain. Terminal child changes are priority
 observations under the existing cooldown and current assignee, not proof of success. Native read-only children receive

@@ -13,7 +13,7 @@ import { fingerprint } from "./guidance-store.js";
 import { T3TransportError } from "./t3.js";
 import type { Projection, ThreadInfo } from "./types.js";
 import { resolveSupervisorScope } from "./supervisor-scope.js";
-import { childOrigin, directParentChildLifecycle, observeScopeThread, monitorActivityReference } from "./supervisor-observation.js";
+import { childOrigin, directParentChildLifecycle, hasDirectParentChildLifecycleEvidence, normalizeLifecycle, observeScopeThread, monitorActivityReference } from "./supervisor-observation.js";
 import { randomUUID } from "node:crypto";
 import type { WorkflowStateStore } from "./workflow-state-store.js";
 import { SupervisorTeamStore } from "./supervisor-team-store.js";
@@ -372,6 +372,11 @@ export class SupervisorConversation {
                   run.status === lifecycle?.status && completedAt === lifecycleTerminalAt
                 ));
               });
+              const lifecycleKind = lifecycle ? normalizeLifecycle(lifecycle.status).lifecycle : "unknown";
+              const unresolvedLifecycleSnapshot = !parentVerified || Boolean(parentVerified && parentProjection &&
+                hasDirectParentChildLifecycleEvidence(parentProjection, child.id) &&
+                (!lifecycle || lifecycleKind === "unknown" ||
+                  (lifecycleKind !== "running" && lifecycleTerminalAt === null)));
               const nativeChildLifecycle: SupervisorNativeChildLifecycleEvidence | undefined =
                 lifecycle && lifecycleIsCurrent && nativeOrigin && !equivalentTerminalRun && parentId
                   ? {parentThreadId: parentId, parentRunId: lifecycle.parentRunId, recordId: lifecycle.recordId,
@@ -379,6 +384,7 @@ export class SupervisorConversation {
                   : undefined;
               this.monitor.observe({projectId: task.projectId, threadId: child.id, sourceOrdinal,
                 projection: childProjection, now, includeDetachedChildItems: true,
+                ...(unresolvedLifecycleSnapshot && !equivalentTerminalRun ? {preserveNativeChildLifecycle: true} : {}),
                 ...(nativeChildLifecycle ? {nativeChildLifecycle} : {})});
               observed++;
             } catch {
@@ -984,7 +990,7 @@ export class SupervisorConversation {
       const readWarning = cachedRead
         ? "A fresh definition read is unavailable. The source material below is a cached incomplete or invalid observation, not confirmed current policy. Keep requirements unknown and do not claim formal acceptance."
         : "";
-      const prompt = `${this.roleFor(binding)}\nThis initializes supervision for the following task. The service will deliver the exact initial proposal record below after you acknowledge this context. Do not contact the operative chat in this initialization turn. Publish exactly this complete fenced workflow-proposal record in your final response, alongside the completion marker. Do not change the plan or identifiers. ${provisional ? "This is provisional because definitions or requirements are invalid or incomplete. Continue bounded dialogue without claiming approval or recording acceptance." : "This is a complete source-bound draft, still awaiting the operative main assistant's exact acceptance."} ${readWarning}\n\n\`\`\`workflow-proposal\n${JSON.stringify(initialProposal)}\n\`\`\`\n\nReply briefly that you are ready to supervise. End your final response with this exact marker: ${completionMarker}. Later agent replies are ordinary dialogue; read the identified operative chat and respond using the permitted tools.\nUNTRUSTED_CONTEXT_ENVELOPE\n${JSON.stringify({threadId: binding.threadId, requestId: task.id, operativeThreadId: task.threadId, proposalId: task.workflowProposalId ?? task.id, objective: redact(task.objective ?? ""), draft: task.workflow,
+      const prompt = `${this.roleFor(binding)}\nThis initializes supervision for the following task. The service will deliver the exact initial proposal record below after you acknowledge this context. Do not contact the operative chat in this initialization turn. Publish exactly this complete fenced workflow-proposal record in your final response, alongside the completion marker. Do not change the plan or identifiers. ${provisional ? "This is provisional because the initial plan, definitions or requirements are invalid or incomplete. Continue bounded dialogue without claiming approval or recording acceptance." : "This is a complete source-bound draft, still awaiting the operative main assistant's exact acceptance."} ${readWarning}\n\n\`\`\`workflow-proposal\n${JSON.stringify(initialProposal)}\n\`\`\`\n\nReply briefly that you are ready to supervise. End your final response with this exact marker: ${completionMarker}. Later agent replies are ordinary dialogue; read the identified operative chat and respond using the permitted tools.\nUNTRUSTED_CONTEXT_ENVELOPE\n${JSON.stringify({threadId: binding.threadId, requestId: task.id, operativeThreadId: task.threadId, proposalId: task.workflowProposalId ?? task.id, objective: redact(task.objective ?? ""), draft: task.workflow,
         workflowProposalId: task.workflowProposalId ?? task.id, agreement: task.agreement ?? null,
         initialProposal, definitionReadStatus: cachedRead ? "unavailable" : "current", definitions: safeDefinitions, introduction: text})}\nEND_UNTRUSTED_CONTEXT_ENVELOPE`;
       if (prompt.length > 120_000 || text.length > 24_000) {this.requests.saveIntroduction({...introduction, state: "blocked", error: "Complete supervision context exceeds its limit; no definition sources were truncated."});continue;}

@@ -1820,6 +1820,89 @@ test("a fresh native child terminal record wakes the owning Supervisor without a
   assert.deepEqual(fixture.conversation.monitor.pending(projectId, current.thread.id), []);
 });
 
+test("an unavailable native parent retains ACKed lifecycle evidence while child activity continues", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock, {operativeActive: false, settings: {intervalMinutes: 60, activityThreshold: 10}});
+  t.after(fixture.cleanup);
+  fixture.projectStore.saveTask({...fixture.task, sourceOrdinal: 2});
+  fixture.conversation.requests.saveIntroduction({taskId: fixture.task.id, projectId, threadId: operativeThreadId,
+    supervisorThreadId: fixture.binding.threadId, state: "sent", text: "Existing workflow context.", messageId: "workflow-context",
+    targetRunId: null, error: null});
+
+  const parent = makeProjection(makeThread({id: "native-intermediate-parent", title: "Native intermediate parent"}));
+  parent.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  parent.thread.creationSource = "provider";
+  parent.thread.createdAt = iso(clock.now - 10_000);
+  const child = makeProjection(makeThread({id: "native-terminal-grandchild", title: "Native terminal grandchild"}));
+  child.thread.lineage = {parentThreadId: parent.thread.id, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+  child.thread.creationSource = "provider";
+  child.thread.createdAt = iso(clock.now - 10_000);
+  const childRecord: {id: string; childThreadId: string; runId: string; status: string; startedAt: string;
+    completedAt: string | null; updatedAt: string} = {id: "grandchild-record", childThreadId: child.thread.id, runId: "grandchild-parent-run",
+    status: "completed", startedAt: iso(clock.now - 5_000), completedAt: iso(clock.now - 1_000), updatedAt: iso(clock.now - 900)};
+  parent.subagents = [childRecord];
+  fixture.operative.subagents = [{id: "intermediate-parent-record", childThreadId: parent.thread.id,
+    runId: "main-parent-run", status: "running", startedAt: iso(clock.now - 6_000), completedAt: null, updatedAt: iso(clock.now - 5_000)}];
+  fixture.addChildProjection(parent);
+  fixture.addChildProjection(child);
+
+  await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
+  assert.equal(fixture.conversation.monitor.pending(projectId, child.thread.id).filter(item => item.type === "native_child_lifecycle").length, 1);
+  await fixture.run();
+  const firstRequest = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.ok(firstRequest?.kind === "review" && firstRequest.batch);
+  assert.deepEqual(firstRequest.batch.threads.map(item => item.threadId), [child.thread.id]);
+  const firstRun = fixture.supervisor.runs.find(candidate => candidate.userMessageId === firstRequest.messageId);
+  assert.ok(firstRun);
+  completeRun(fixture.supervisor, firstRun, `Terminal grandchild reviewed. ${firstRequest.completionMarker}`, clock.now + 1);
+  clock.now++;
+  await fixture.run();
+  assert.deepEqual(fixture.conversation.monitor.pending(projectId, child.thread.id), []);
+
+  child.turnItems!.push({id: "grandchild-runless-command", threadId: child.thread.id, runId: null, ordinal: 0,
+    type: "command_execution", status: "completed", completedAt: iso(clock.now + 1), updatedAt: iso(clock.now + 1)});
+  clock.now += 6_000;
+  fixture.setProjectionFailure(parent.thread.id, new Error("parent projection is temporarily unavailable"));
+  await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
+  assert.equal(fixture.conversation.monitor.pending(projectId, child.thread.id).some(item => item.id === "grandchild-runless-command"), true,
+    "real child activity continues to be collected while parent lifecycle evidence is unavailable");
+  assert.equal(fixture.conversation.monitor.pending(projectId, child.thread.id).some(item => item.type === "native_child_lifecycle"), false);
+
+  clock.now += 6_000;
+  fixture.setProjectionFailure(parent.thread.id, null);
+  await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
+  assert.equal(fixture.conversation.monitor.pending(projectId, child.thread.id).some(item => item.type === "native_child_lifecycle"), false,
+    "the same terminal record returning after an unknown snapshot must retain its ACK");
+  await fixture.run();
+  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId), null,
+    "the replayed terminal record must not create a duplicate Supervisor wake");
+
+  clock.now += 6_000;
+  childRecord.status = "running";
+  childRecord.completedAt = null;
+  childRecord.updatedAt = iso(clock.now);
+  await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
+  assert.equal(fixture.conversation.monitor.pending(projectId, child.thread.id).some(item => item.type === "native_child_lifecycle"), false,
+    "a fresh verified running record clears the previous synthetic terminal item");
+  const nativeLifecycleId = `native-child-lifecycle:${parent.thread.id}:${child.thread.id}:${childRecord.id}`;
+  assert.equal(fixture.projectStore.store.db.prepare(`SELECT COUNT(*) AS count FROM supervisor_monitor_items
+    WHERE project_id=? AND thread_id=? AND item_id=?`).get(projectId, child.thread.id, nativeLifecycleId)?.count, 0,
+  "verified resume removes the acknowledged synthetic row from the real monitor store");
+
+  clock.now += 6_000;
+  childRecord.status = "completed";
+  childRecord.completedAt = iso(clock.now - 500);
+  childRecord.updatedAt = iso(clock.now - 400);
+  await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
+  assert.equal(fixture.conversation.monitor.pending(projectId, child.thread.id).filter(item => item.type === "native_child_lifecycle").length, 1,
+    "a later terminal transition after verified resume creates one fresh event");
+  const resumedBatch = fixture.conversation.monitor.select(projectId, fixture.projectStore.settings(projectId).monitoring,
+    clock.now, null, {eligibleThreadIds: new Set([child.thread.id])});
+  assert.ok(resumedBatch);
+  assert.equal(resumedBatch.threads.flatMap(thread => thread.items).filter(item => item.type === "native_child_lifecycle").length, 1);
+});
+
 test("terminal child AppRuns are not duplicated when their parent completion arrives later", async t => {
   const clock = {now: baseTime};
   t.mock.method(Date, "now", () => clock.now);
