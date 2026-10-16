@@ -749,13 +749,18 @@ export class SupervisorConversation {
   }
   private protocolRecordBelongsToCurrentTask(task: TaskRecord, role: WorkflowProtocolDiagnostic["role"], value: unknown,
     message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number], introduction: WorkflowIntroduction,
-    agent: Projection): boolean {
+    agent: Projection, supervisor: Projection): boolean {
     if (!record(value) || value.taskId !== task.id) return false;
-    const proposalId = safeProtocolProposalId(value.proposalId);
-    const currentProposalId = task.workflowProposalId ?? task.id;
-    if (role === "operative") return (proposalId === currentProposalId || proposalId === null) && this.afterIntroduction(agent, introduction, message.messageId);
-    if (proposalId === currentProposalId) return true;
-    return this.supervisorMessageBoundToCurrentTask(task, message);
+    if (role === "operative") return this.afterIntroduction(agent, introduction, message.messageId);
+    const latestContextRequest = this.requests.requests(task.projectId, task.supervisorThreadId)
+      .filter(request => request.kind === "context" && request.taskId === task.id).at(-1);
+    const contextRun = latestContextRequest
+      ? supervisor.runs.find(run => run.threadId === task.supervisorThreadId &&
+        (run.id === latestContextRequest.runId || run.userMessageId === latestContextRequest.messageId))
+      : undefined;
+    const currentRun = supervisor.runs.find(run => run.threadId === task.supervisorThreadId && run.id === message.runId);
+    return Boolean(contextRun && currentRun && Number.isSafeInteger(contextRun.ordinal) && Number.isSafeInteger(currentRun.ordinal) &&
+      currentRun.ordinal >= contextRun.ordinal);
   }
   private supervisorMessageBoundToCurrentTask(task: TaskRecord,
     message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number]): boolean {
@@ -797,7 +802,7 @@ export class SupervisorConversation {
       !this.protocolRecordNotOlderThanDiagnostic(current, role, message, supervisorMessages, operativeMessages)) return;
     this.store.saveTask({...current, workflowProtocolDiagnostic: null, updatedAt: now});
   }
-  private reconcileWorkflowProtocolDiagnostics(task: TaskRecord, introduction: WorkflowIntroduction, agent: Projection,
+  private reconcileWorkflowProtocolDiagnostics(task: TaskRecord, introduction: WorkflowIntroduction, agent: Projection, supervisor: Projection,
     context: ProposalContext, supervisorMessages: ReturnType<SupervisorConversation["completedAssistantMessages"]>,
     operativeMessages: ReturnType<SupervisorConversation["completedAssistantMessages"]>, now: number): void {
     const events: Array<{role: WorkflowProtocolDiagnostic["role"]; kind: WorkflowAgreementRecordKind;
@@ -825,7 +830,7 @@ export class SupervisorConversation {
         this.saveWorkflowProtocolDiagnostic(current, {role: event.role, proposalId: null, messageId, code: "record_json_invalid", observedAt: now});
         continue;
       }
-      if (!this.protocolRecordBelongsToCurrentTask(current, event.role, event.value, event.message, introduction, agent)) continue;
+      if (!this.protocolRecordBelongsToCurrentTask(current, event.role, event.value, event.message, introduction, agent, supervisor)) continue;
       const code = diagnoseWorkflowProposalRecord(event.value, current.id, context, event.role === "operative");
       if (code) {
         if (!this.protocolRecordNotOlderThanDiagnostic(current, event.role, event.message, supervisorMessages, operativeMessages)) continue;
@@ -936,7 +941,7 @@ export class SupervisorConversation {
     if (context.status !== "ready" || !context.complete || !context.revision) return;
     const supervisorMessages = this.completedAssistantMessages(supervisor, binding.threadId);
     const agentMessages = this.completedAssistantMessages(agent, task.threadId);
-    this.reconcileWorkflowProtocolDiagnostics(task, introduction, agent, context, supervisorMessages, agentMessages, now);
+    this.reconcileWorkflowProtocolDiagnostics(task, introduction, agent, supervisor, context, supervisorMessages, agentMessages, now);
     let currentProposalId = task.workflowProposalId ?? null;
     for (const message of supervisorMessages) {
       for (const value of extractWorkflowAgreementRecords(message.text, "workflow-proposal")) {

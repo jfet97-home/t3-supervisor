@@ -2505,47 +2505,67 @@ test("bare, self-reported, streaming and child records cannot create agreement",
   assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "agreed");
 });
 
-test("an invalid proposal leaves one bounded diagnostic until a later formal proposal is recognized", async t => {
+test("R114-D diagnoses an invalid fresh proposal in a current task root turn", async t => {
   const clock = {now: baseTime};
   const fixture = await makeFixture(clock);
   t.after(fixture.cleanup);
   appendNoticeToOperative(fixture);
-  await observeAgreement(fixture, clock.now);
+  const canonical = workflowPlan(fixture.task);
+  assert.ok(canonical.plan);
+  const invalidPlan: WorkflowPlanValue = {...canonical, plan: {...canonical.plan, nodes: canonical.plan.nodes.map(node =>
+    node.kind === "step" ? {...node, nodeId: "not-a-uuid"} : node)}};
+  const preEpochMessage = appendAssistantTurn(fixture.supervisor, "pre-epoch-invalid-workflow-proposal",
+    workflowFence("workflow-proposal", workflowRecord(fixture.task, "pre-epoch-proposal", invalidPlan)), clock.now);
+  await observeAgreement(fixture, clock.now + 1);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.workflowProtocolDiagnostic, undefined,
+    "a current task ID cannot attribute a root record from before its latest context request");
+
+  const contextRequest = fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId,
+    kind: "context", taskId: fixture.task.id, text: "Current task source epoch.", batch: null,
+    completionMarker: "Current task context completed"}, clock.now + 2);
+  const contextRun = appendRun({projection: fixture.supervisor, id: "current-task-context-epoch", ordinal: 2, status: "completed",
+    messageId: contextRequest.messageId, text: contextRequest.text, now: clock.now + 2});
+  completeRun(fixture.supervisor, contextRun, contextRequest.completionMarker, clock.now + 3);
+  fixture.conversation.requests.saveRequest({...contextRequest, state: "completed", runId: contextRun.id, sentAt: clock.now + 2, error: null});
+  const foreignMessage = appendAssistantTurn(fixture.supervisor, "foreign-task-invalid-workflow-proposal",
+    workflowFence("workflow-proposal", {...workflowRecord(fixture.task, "foreign-proposal", invalidPlan), taskId: "another-task"}), clock.now + 4);
+  await observeAgreement(fixture, clock.now + 5);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.workflowProtocolDiagnostic, undefined,
+    "a current root turn cannot attribute a record carrying another task ID");
+
   const provisional = parseWorkflowInterpretation(JSON.stringify({objective: fixture.task.objective,
     reason: fixture.task.reason, sourceMessageIds: [fixture.task.sourceMessageId], workflow: null}),
   fixture.task.sourceMessageId, fixture.task.definitionContext!).workflow;
   const provisionalValue: WorkflowPlanValue = {definitionsStatus: provisional.definitionsStatus,
     definitionsComplete: provisional.definitionsComplete, requirementsKnown: provisional.requirementsKnown,
     requirements: provisional.requirements, issues: provisional.issues, plan: provisional.plan};
-  appendSupervisorProposal(fixture, fixture.task.id, provisionalValue, clock.now);
-
-  const canonical = workflowPlan(fixture.task);
-  assert.ok(canonical.plan);
-  const invalidPlan: WorkflowPlanValue = {...canonical, plan: {...canonical.plan, nodes: canonical.plan.nodes.map(node =>
-    node.kind === "step" ? {...node, nodeId: "not-a-uuid"} : node)}};
-  const invalidRecord = workflowRecord(fixture.task, fixture.task.id, invalidPlan);
+  appendSupervisorProposal(fixture, fixture.task.id, provisionalValue, clock.now + 6);
+  const freshProposalId = "fresh-formal-proposal-after-diagnostic";
+  const invalidRecord = workflowRecord(fixture.task, freshProposalId, invalidPlan);
   const invalidMessage = appendAssistantTurn(fixture.supervisor, "invalid-root-workflow-proposal",
-    workflowFence("workflow-proposal", invalidRecord), clock.now + 1);
+    workflowFence("workflow-proposal", invalidRecord), clock.now + 7);
   const pendingBefore = fixture.conversation.monitor.pending(projectId, fixture.task.threadId).map(item => item.id);
 
   await observeAgreement(fixture, clock.now + 30_000);
   let current = fixture.projectStore.task(fixture.task.threadId)!;
-  assert.equal(fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id), null);
+  assert.equal(fixture.conversation.requests.agreementCandidate(fixture.task.id, freshProposalId), null);
   assert.equal(current.agreement, undefined);
-  assert.deepEqual(current.workflowProtocolDiagnostic, {role: "supervisor", proposalId: fixture.task.id,
+  assert.deepEqual(current.workflowProtocolDiagnostic, {role: "supervisor", proposalId: freshProposalId,
     messageId: invalidMessage.message.id, code: "invalid_or_duplicate_node_id", observedAt: clock.now + 30_000});
 
   await observeAgreement(fixture, clock.now + 60_000);
   current = fixture.projectStore.task(fixture.task.threadId)!;
   assert.equal(current.workflowProtocolDiagnostic?.messageId, invalidMessage.message.id,
     "an older provisional echo cannot clear a later malformed root proposal");
+  assert.notEqual(current.workflowProtocolDiagnostic?.messageId, preEpochMessage.message.id);
+  assert.notEqual(current.workflowProtocolDiagnostic?.messageId, foreignMessage.message.id);
   assert.deepEqual(fixture.conversation.monitor.pending(projectId, fixture.task.threadId).map(item => item.id), pendingBefore,
     "recording or reconciling a protocol diagnostic creates no monitor activity");
   assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId), null,
     "a protocol diagnostic does not create a new wake or request");
 
-  const freshProposalId = "fresh-formal-proposal-after-diagnostic";
-  appendSupervisorProposal(fixture, freshProposalId, canonical, clock.now + 2);
+  const laterFormalProposal = appendSupervisorProposal(fixture, freshProposalId, canonical, clock.now + 8);
+  assert.ok(laterFormalProposal.message);
   await observeAgreement(fixture, clock.now + 90_000);
   current = fixture.projectStore.task(fixture.task.threadId)!;
   assert.equal(current.workflowProposalId, freshProposalId);
@@ -2554,7 +2574,7 @@ test("an invalid proposal leaves one bounded diagnostic until a later formal pro
     "a later formal canonical proposal recognized by the existing candidate path clears the diagnostic");
 });
 
-test("compact operative acknowledgements diagnose the canonical contract and a matching full acceptance clears it", async t => {
+test("R114-O diagnoses a compact operative acknowledgement with a fresh proposal ID", async t => {
   const clock = {now: baseTime};
   const fixture = await makeFixture(clock);
   t.after(fixture.cleanup);
@@ -2564,13 +2584,14 @@ test("compact operative acknowledgements diagnose the canonical contract and a m
   await observeAgreement(fixture, clock.now + 1);
   assert.ok(fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id));
 
-  const compact = appendOperativeAcceptance(fixture, {taskId: fixture.task.id, proposalId: fixture.task.id,
+  const compactProposalId = "fresh-proposal-from-compact-main-reply";
+  const compact = appendOperativeAcceptance(fixture, {taskId: fixture.task.id, proposalId: compactProposalId,
     mainThreadId: fixture.task.threadId, accepted: true}, clock.now + 2);
   const pendingBefore = fixture.conversation.monitor.pending(projectId, fixture.task.threadId).map(item => item.id);
   await observeAgreement(fixture, clock.now + 30_000);
   let current = fixture.projectStore.task(fixture.task.threadId)!;
   assert.equal(current.agreement, undefined);
-  assert.deepEqual(current.workflowProtocolDiagnostic, {role: "operative", proposalId: fixture.task.id,
+  assert.deepEqual(current.workflowProtocolDiagnostic, {role: "operative", proposalId: compactProposalId,
     messageId: compact.id, code: "record_fields", observedAt: clock.now + 30_000});
   const afterCompactIds = fixture.conversation.monitor.pending(projectId, fixture.task.threadId).map(item => item.id);
   assert.deepEqual(afterCompactIds.filter(id => !pendingBefore.includes(id)), [`message:${compact.id}`],
@@ -2583,7 +2604,7 @@ test("compact operative acknowledgements diagnose the canonical contract and a m
   assert.equal(current.agreement?.proposalId, fixture.task.id);
   assert.equal(current.workflowProtocolDiagnostic, null);
 
-  const laterCompact = appendOperativeAcceptance(fixture, {taskId: fixture.task.id, proposalId: fixture.task.id,
+  const laterCompact = appendOperativeAcceptance(fixture, {taskId: fixture.task.id, proposalId: "another-fresh-proposal-from-compact-main-reply",
     mainThreadId: fixture.task.threadId, accepted: true}, clock.now + 4);
   await observeAgreement(fixture, clock.now + 90_000);
   current = fixture.projectStore.task(fixture.task.threadId)!;
