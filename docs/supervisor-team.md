@@ -32,8 +32,11 @@ The direct aliases are `t3-supervisor-workflows.workflow_read` /
 `mcp__t3-supervisor-workflows__supervision_team`. For MCPX, call
 `mcpx.mcpx_call_tool` or `mcp__mcpx__mcpx_call_tool` with only `{name, arguments}`;
 `name` is the MCPX target `t3-supervisor-workflows__workflow_write` and `arguments`
-is the complete schema object. That target name is not a direct alias. Do not wrap
-calls in code-mode/`functions.exec` or string-encoded scripts.
+is the complete schema object. That target name is not a direct alias. Use
+advertised harnesses such as `functions.exec` normally to discover and invoke
+actual MCP tools when needed; the outer harness or source text is not proof. Only
+the resulting verified native MCP tool identity and complete arguments count, and
+never claim or fabricate a tool call.
 
 Apply has `action` and authority locators at the top level, with mutation fields
 nested under `input`: `{action:"apply", ...locatorBases.workflow_write_apply,
