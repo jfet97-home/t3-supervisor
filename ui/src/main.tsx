@@ -1,4 +1,4 @@
-import { clearAccess, getSessionToken, restoreTabSession, setSessionToken, watchSession } from "./access.js";
+import { clearAccess, getSessionToken, setSessionToken, watchSession } from "./access.js";
 import { useEffect, useState, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -258,8 +258,7 @@ function App() {
       const check = accessCheck.current + 1;
       void connect().catch(() => { if (active && check === accessCheck.current) { setReady(false); setError("Could not reach Supervisor. Try again."); } });
     };
-    try { restoreTabSession(); refresh(); }
-    catch (error) { setReady(false); setError(error instanceof Error ? error.message : "Could not restore sign-in."); }
+    refresh();
     const stopWatching = watchSession(refresh);
     const expired = () => { ++accessCheck.current; setReady(false); };
     window.addEventListener("supervisor-auth-required", expired);
@@ -280,7 +279,7 @@ function App() {
       {ready === null ? <p role="status">Opening Supervisor…</p> : <form className="stack" onSubmit={async event => {
         event.preventDefault(); setBusy(true); setError("");
         try {
-          const response = await fetch("/auth/login", {method: "POST", credentials: "omit", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token})});
+          const response = await fetch("/auth/login", {method: "POST", credentials: "omit", headers: {"Content-Type": "application/json", "x-supervisor-session": getSessionToken()}, body: JSON.stringify({token})});
           if (!response.ok) { setError(response.status === 401 ? "The sign-in token is invalid, expired or already used." : "Could not sign in. Try again."); return; }
           const payload: unknown = await response.json();
           if (typeof payload !== "object" || payload === null || !("session" in payload) || typeof payload.session !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(payload.session)) throw new Error("Invalid sign-in response.");

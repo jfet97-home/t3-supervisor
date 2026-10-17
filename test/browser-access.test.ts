@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clearAccess, getCsrfToken, getSessionToken, loadAccess, restoreTabSession, setSessionToken, watchSession } from "../ui/src/access.js";
+import { clearAccess, getCsrfToken, getSessionToken, loadAccess, setSessionToken, watchSession } from "../ui/src/access.js";
 
 const storage = () => {
   const values = new Map<string, string>();
@@ -16,13 +16,9 @@ test("browser access keeps a shared session, synchronizes sign-out and ignores s
   install("localStorage", local); install("sessionStorage", tab); install("window", window);
   let stopWatching = () => {};
   try {
-    tab.setItem("supervisor-session", "retained");
-    restoreTabSession();
-    assert.equal(getSessionToken(), "retained");
-    assert.equal(tab.getItem("supervisor-session"), null);
-    setSessionToken("new-browser-session");
     tab.setItem("supervisor-session", "older-tab-session");
-    restoreTabSession();
+    assert.equal(getSessionToken(), "", "old tab storage cannot sign the browser back in");
+    setSessionToken("new-browser-session");
     assert.equal(getSessionToken(), "new-browser-session");
     install("sessionStorage", storage());
     assert.equal(getSessionToken(), "new-browser-session", "new tabs do not need the original tab's storage");

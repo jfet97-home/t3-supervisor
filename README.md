@@ -19,7 +19,7 @@ Open [http://127.0.0.1:9008](http://127.0.0.1:9008). Create a one-use sign-in to
 t3-supervisor auth forge
 ```
 
-For Docker or a VM, run the command inside that environment. Tokens expire after five minutes and can be used once. The browser keeps an eight-hour session scoped to that address and port. Sessions survive restarts and deployments until their original expiry; signing out revokes the session.
+For Docker or a VM, run the command inside that environment. Tokens expire after five minutes and can be used once. The browser keeps a 30-day browser session scoped to that address and port. Sessions survive restarts and deployments until their original expiry; signing out revokes the session.
 
 The dashboard has **Projects**, **Guide**, **Activity**, and **Settings**. Project file editing needs a separate native T3 filesystem read/write credential configured through deployment setup.
 

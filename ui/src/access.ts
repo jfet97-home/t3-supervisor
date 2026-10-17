@@ -8,11 +8,6 @@ export const setSessionToken = (session: string) => {
   try { localStorage.setItem(sessionKey, session); }
   catch { throw new Error("Your browser blocked saved sign-in. Allow site storage for Supervisor and try again."); }
 };
-export const restoreTabSession = () => {
-  const previous = sessionStorage.getItem(sessionKey);
-  if (!getSessionToken() && previous) setSessionToken(previous);
-  sessionStorage.removeItem(sessionKey);
-};
 export const watchSession = (changed: () => void) => {
   const listener = (event: StorageEvent) => {
     if (event.storageArea === localStorage && (event.key === sessionKey || event.key === null)) {
