@@ -10,7 +10,7 @@ import type { SupervisorConfig } from "./types.js";
 import type { InputStoreCapacity } from "./input-store.js";
 import { runGuidanceApplication } from "./guidance-application.js";
 import { isSupervisorThread } from "./project-supervisor-store.js";
-import { collectRecentCompletions } from "./completion-scan.js";
+import { collectRecentCompletions, collectFullCompletions, readCompletionHistory, CompletionWindowReadError } from "./completion-scan.js";
 
 export interface SupervisorStatus {
   startedAt: string;
@@ -191,6 +191,7 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
   );
 
   const nextCompletionRead = new Map<string, number>();
+  const oversizedCompletionThreads = new Set<string>();
   const scan = Effect.gen(function* () {
     status.scanHeartbeat = Date.now();
     const hints = yield* store.dueHints(Date.now(), 20);
@@ -205,23 +206,25 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
           yield* store.deferHint(hint.threadId, hint.revision, Date.now(), Math.max(1, dueAt - Date.now()), "settling");
           return;
         }
-        if (!t3.boundedCompletionProjection) return yield* Effect.fail(new T3TransportError("T3 recent completion reader is unavailable"));
-        const snapshot = yield* t3.boundedCompletionProjection(hint.threadId);
-        if (snapshot.payloadBudgetExceeded) nextCompletionRead.set(hint.threadId, Date.now() + 60_000);
+        const history = yield* readCompletionHistory(t3, hint.threadId, oversizedCompletionThreads);
+        const snapshot = history.snapshot;
+        if (history.kind === "recent" && history.snapshot.payloadBudgetExceeded) nextCompletionRead.set(hint.threadId, Date.now() + 60_000);
         else nextCompletionRead.delete(hint.threadId);
         if (nextCompletionRead.size > 50_000) nextCompletionRead.delete(nextCompletionRead.keys().next().value!);
         const projection = snapshot.projection;
         if (!isMainThread(projection.thread) || currentThreadPolicy(config).excludedThreadIds.includes(hint.threadId) || isSupervisorThread(config, projection.thread)) {yield* store.doneHint(hint.threadId, hint.revision);return;}
-        const result = yield* collectRecentCompletions(store, snapshot, descriptor.environmentId, notificationsAfter, Date.now());
+        const result = history.kind === "recent"
+          ? yield* collectRecentCompletions(store, history.snapshot, descriptor.environmentId, notificationsAfter, Date.now())
+          : yield* collectFullCompletions(store, history.snapshot, descriptor.environmentId, notificationsAfter, Date.now());
         if (result.queued > 0) yield* log("recent_completions_queued", {threadId: hint.threadId, count: result.queued});
-        if (result.coverage.olderHistory === "limited" || result.coverage.incompleteRuns.length > 0)
+        if (result.coverage && (result.coverage.olderHistory === "limited" || result.coverage.incompleteRuns.length > 0))
           yield* log("completion_coverage_limited", {threadId: hint.threadId, incompleteRuns: result.coverage.incompleteRuns.length});
         if (result.settling) yield* store.deferHint(hint.threadId, hint.revision, Date.now(), Math.max(5_000, (nextCompletionRead.get(hint.threadId) ?? 0) - Date.now()), "settling");
         else yield* store.doneHint(hint.threadId, hint.revision);
       }).pipe(Effect.catch((error) => Effect.gen(function* () {
         status.lastErrorPhase = "thread_scan";
         if (error instanceof StoreError) status.storeState = "degraded";
-        if (error instanceof T3TransportError && error.httpStatus === 404) {
+        if (error instanceof T3TransportError && !(error instanceof CompletionWindowReadError) && error.httpStatus === 404) {
           yield* store.doneHint(hint.threadId, hint.revision);
           yield* log("thread_not_found", { threadId: hint.threadId });
         } else {

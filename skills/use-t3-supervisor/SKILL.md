@@ -183,7 +183,18 @@ correct the indicated field; it changes no saved state or authority. Helper moni
 activityRefs provide exact item-only or message-only navigation pairs. Copy those
 pairs unchanged and omit optional run IDs; never normalize encoded identifiers.
 
-Activity and Recaps and Telegram retain read-only history. Settings stores chat
+Activity and Recaps and Telegram retain history. Under Recaps & Telegram,
+Recent completion coverage lists oversized chats whose recent window cannot
+establish older completions. Ordinary chats keep their complete reader. A coverage
+gap does not mean the current connection is broken or prove a notification was lost.
+Ask chat for recovery update is an explicit optional action: it asks for a fresh,
+short recap of work already requested in that chat. Pending owner decisions and
+ambiguous activity defer it. Accepted delivery does not recover old notifications
+or resolve the historical gap. One request is retained per chat; uncertain results
+can only be checked, never resent. A fresh response follows the normal notification
+policy and is not a promise of Telegram delivery.
+
+Settings stores chat
 exclusions and optional interactive Telegram selection per instance. Preserve
 uncertain sends/receipts; questionnaires use their native answer path, not ordinary
 messages. Idle scopes may settle and later reuse the same Supervisor; deletion,

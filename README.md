@@ -125,8 +125,10 @@ A successful ledger lookup does not replace the bot identity check.
 
 ### Optional Telegram integration
 
-Completion collection reads a recent native chat window, independently of the strict
-full-history readers used for workflow authority. It only processes a completed turn
+Completion collection keeps its full reader for chats that fit the response limit.
+For oversized chats it switches to a recent native window and remembers that choice
+until restart, independently of the strict readers used for workflow authority.
+The recent reader only processes a completed turn
 when its original request and final answer are present with their native ownership.
 Older unseen history or incomplete turns are reported under **Recaps & Telegram →
 Recent completion coverage** and in the health body's `completionCoverageGaps` count.

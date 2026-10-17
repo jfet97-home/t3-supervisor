@@ -5,9 +5,9 @@ import { join } from "node:path";
 import test from "node:test";
 import { Effect } from "effect";
 import { Store, makeStore } from "../src/store.js";
-import { collectRecentCompletions } from "../src/completion-scan.js";
+import { collectRecentCompletions, collectFullCompletions, readCompletionHistory, CompletionWindowReadError } from "../src/completion-scan.js";
 import { buildContext, eligibleRuns, formatReplyParts, telegramRouteUpdateId } from "../src/domain.js";
-import type { T3BoundedCompletionSnapshot } from "../src/t3.js";
+import { T3TransportError, type T3ClientShape, type T3BoundedCompletionSnapshot } from "../src/t3.js";
 import type { CompletionRecoveryOperation } from "../src/completion-recovery.js";
 
 const snapshot = (): T3BoundedCompletionSnapshot => ({snapshotSequence: 2, historyCursor: "older", hasMoreHistory: true,
@@ -102,4 +102,47 @@ test("durable recovery reservation and positive outcomes survive concurrent upda
       assert.equal((yield* store.stats()).identities, 0);
     }).pipe(Effect.provide(makeStore(directory)), Effect.scoped));
   } finally {await rm(directory, {recursive: true, force: true});}
+});
+
+test("a long agent or Telegram turn still uses the full reader without a false coverage gap", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "completion-full-path-"));
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* Store;
+      yield* store.activate("environment", 1);
+      const full = snapshot();
+      const requestId = "message:mcp:90d829bb-aada-40db-b243-797c00ac8f36:thread-send:telegram-route-42";
+      full.projection.runs[0]!.userMessageId = requestId;full.projection.messages[0]!.id = requestId;
+      full.projection.turnItems = Array.from({length: 100}, (_, ordinal) => ({type: "dynamic_tool", status: "completed", ordinal}));
+      let boundedReads = 0;
+      const t3 = {projection: () => Effect.succeed({snapshotSequence: 2, projection: full.projection}),
+        boundedCompletionProjection: () => {boundedReads++;return Effect.succeed({...full, projection: {...full.projection, messages: full.projection.messages.slice(1)}});}} as unknown as T3ClientShape;
+      const history = yield* readCompletionHistory(t3, "chat", new Set());
+      assert.equal(history.kind, "full");
+      const result = yield* collectFullCompletions(store, history.snapshot, "environment", 1, 100);
+      assert.equal(result.queued, 1);assert.equal(boundedReads, 0);
+      const stats = yield* store.stats();assert.equal(stats.completionCoverageGaps, 0);assert.equal(stats.jobs.ready, 1);
+      const job = (yield* store.dueJobs(100))[0]!;assert.ok(job.text?.endsWith(full.projection.messages[1]!.text));
+    }).pipe(Effect.provide(makeStore(directory)), Effect.scoped));
+  } finally {await rm(directory, {recursive: true, force: true});}
+});
+
+test("only a typed full-read size failure enters and remembers the recent path", async () => {
+  let fullReads = 0;let boundedReads = 0;
+  const t3 = {projection: () => {fullReads++;return Effect.fail(new T3TransportError("size", undefined, "response_too_large"));},
+    boundedCompletionProjection: () => {boundedReads++;return Effect.succeed(snapshot());}} as unknown as T3ClientShape;
+  const oversized = new Set<string>();
+  assert.equal((await Effect.runPromise(readCompletionHistory(t3, "chat", oversized))).kind, "recent");
+  assert.equal((await Effect.runPromise(readCompletionHistory(t3, "chat", oversized))).kind, "recent");
+  assert.equal(fullReads, 1);assert.equal(boundedReads, 2);
+  await Effect.runPromise(readCompletionHistory(t3, "chat", new Set()));
+  assert.equal(fullReads, 2);
+});
+
+test("a bounded endpoint 404 remains a window failure rather than proving a missing chat", async () => {
+  const t3 = {projection: () => Effect.fail(new T3TransportError("size", undefined, "response_too_large")),
+    boundedCompletionProjection: () => Effect.fail(new T3TransportError("bounded endpoint unavailable", 404))} as unknown as T3ClientShape;
+  const result = await Effect.runPromise(readCompletionHistory(t3, "chat", new Set()).pipe(Effect.result));
+  assert.equal(result._tag, "Failure");
+  if (result._tag === "Failure") {assert.ok(result.failure instanceof CompletionWindowReadError);assert.equal(result.failure.httpStatus, 404);}
 });

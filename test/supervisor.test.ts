@@ -7,7 +7,7 @@ import { Effect, Layer } from "effect";
 import { Recapper } from "../src/recap.js";
 import { Store, makeStore } from "../src/store.js";
 import { createStatus, readiness, refreshTelegramStatus, runSupervisor } from "../src/supervisor.js";
-import { T3Client, T3TransportError, type T3ClientShape } from "../src/t3.js";
+import { T3Client, type T3ClientShape } from "../src/t3.js";
 import { TelegramClient, type DeliveryStatus } from "../src/telegram.js";
 import type { Projection, SupervisorConfig, ThreadInfo } from "../src/types.js";
 
@@ -36,7 +36,7 @@ for (const mode of ["normal", "settling", "rejected", "skipped", "continued", "t
       if (mode === "resumed") yield* Effect.sleep("200 millis");
       return { environmentId: "environment-test", orchestrationProtocolVersion: 2, serverVersion: "test" };
     }),
-    projection: () => Effect.fail(new T3TransportError("full history must not be read for completion")),
+    projection: threadId => source.boundedCompletionProjection!(threadId),
     boundedCompletionProjection: (threadId) => Effect.sync(() => {
       fetched.push(threadId);
       projectionReads += 1;

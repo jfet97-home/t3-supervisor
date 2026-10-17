@@ -50,7 +50,7 @@ export function CompletionCoverage() {
     <div className="row between"><h2>Recent completion coverage</h2>
       <button type="button" onClick={() => {setError("");void refresh().catch(() => setError("Completion coverage could not be loaded."));}}>Refresh coverage</button>
     </div>
-    <p>Completion notifications use recent chat history. Older work outside that history may not have been checked. You can ask a chat to check its current results and report again.</p>
+    <p>For oversized chats, completion notifications use recent history. Older work outside that history may not have been checked. You can ask a chat to check its current results and report again.</p>
     <p className="muted">Recovery starts a fresh assessment and may start a new turn in an idle chat. It does not mark old work as completed or resend an old notification.</p>
     <p role="status">{message}</p>
     {error && <p role="alert">{error}</p>}

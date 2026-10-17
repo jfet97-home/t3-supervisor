@@ -81,7 +81,7 @@ export interface CompletionRecoveryRequest {
 }
 
 export const COMPLETION_RECOVERY_PROMPT =
-  "Supervisor recovery follow-up: recent completion coverage for this chat was incomplete. Please check the current results and evidence available now, then report what has finished, which checks or tests have actually completed, and what remains or is unresolved. Treat unavailable past run details as unknown: do not reconstruct or invent historical run IDs, timestamps, metadata, or completion evidence. This is a fresh recovery update, not proof of the earlier completion. Do not repeat actions only to prove they happened; continue useful current work only when it remains part of the task, and report that work through the ordinary current-run response.";
+  "Supervisor recovery follow-up: recent completion coverage for this chat was incomplete. Scope this follow-up only to work already requested in this chat; do not inspect or troubleshoot Supervisor, its dashboard, or other services. Please check the current results and evidence available now, then report what has finished, which checks or tests have actually completed, and what remains or is unresolved. Treat unavailable past run details as unknown: do not reconstruct or invent historical run IDs, timestamps, metadata, or completion evidence. This is a fresh recovery update, not proof of the earlier completion. Do not repeat actions only to prove they happened; continue useful current work only when it remains part of the task, and report that work through the ordinary current-run response.";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
