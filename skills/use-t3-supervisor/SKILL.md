@@ -1,203 +1,87 @@
 ---
 name: use-t3-supervisor
-description: Use an existing T3 Supervisor dashboard to inspect Supervisor teams, steps and workflows, edit project configuration, configure Supervisor defaults and monitoring, inspect agreements and history, or adjust chat settings. For product usage, not source development, deployment or credential provisioning.
+description: Use an existing T3 Supervisor dashboard to inspect project definitions, workflow plans, agreements, progress and teams, edit project configuration or adjust supervision controls and exclusions. For product usage, not source maintenance, deployment or credential provisioning.
 ---
 
 # Use T3 Supervisor
 
-Each ordinary main conversation has one Supervisor shared by native descendants.
-Projects reads the operative checkout's `.t3-supervisor/project.yaml`, `steps/`
-and `workflows/`; enabled global definitions are additive and visibly namespaced.
-The Guide explains definitions, syntax and FAQ without requiring a configured project.
+Supervisor observes native project conversations and their descendants, discusses
+workflow plans and records progress. Telegram communication is a separate service.
+For detailed controls and edge cases, read [dashboard workflows](references/dashboard.md)
+when using that part of the product.
 
-## Connect
+## Connect and sign in
 
-Use the supplied dashboard URL: Mac default http://127.0.0.1:9008, Lima lab
-http://127.0.0.1:19008 through its existing forwarder. Sign in with an owner-generated
-single-use token entered privately in the page. The page shows
-`t3-supervisor auth forge`; run it as the actual service account in its environment,
-with matching DATA_DIRECTORY or --data-dir if customized. Ordinary usage does not
-authorize extracting/provisioning tokens or changing network exposure/deployment.
-Sessions belong to the exact origin and expire after eight hours. Supervisor
-restarts and deployments preserve valid sessions; Sign out revokes them durably. Expired authentication keeps drafts; sign-in never
-replays a rejected mutation automatically.
+Use the supplied instance URL; the default is http://127.0.0.1:9008. Localhost refers
+to the browser's machine. Enter an operator-provided one-use token privately on the
+page. The displayed `t3-supervisor auth forge` command runs in the actual service
+environment with matching state. Ordinary dashboard usage does not provision
+credentials, expose ports or change deployment.
 
-## Definitions and project configuration
+Five-minute grants produce an eight-hour origin-scoped session. Restart preserves
+its original expiry; Sign out revokes it. Expiry retains drafts and sign-in never
+replays a rejected mutation. Inspect uncertain outcomes before another write.
 
-Select a registered project, optionally a matching conversation's worktree. Check
-the actual source path, load time and diagnostics. Refresh after repository edits;
-an unavailable conversation must not silently fall back to root. Complete-invalid
-and partial reads differ: neither means no requirements. Definition problems stay
-visible while the Supervisor can discuss a finite provisional plan.
+## Projects and definitions
 
-Steps contain only id, name and description. Workflow contents use sequence or
-parallel groups, step references/local step objects, and named workflow references.
-There is no inline keyword or inline workflow definition. All guidance, results,
-applicability and delegation belong in description. Required references belong to
-the current main task; fixed protects original commitments and relationships while
-allowing support work between original members. Repeated references are distinct
-occurrences. Read the in-app Guide for examples and failure cases.
+Projects reads the selected operative checkout's `.t3-supervisor/project.yaml`,
+`steps/` and `workflows/`. Check source path, workspace, freshness, diagnostics and
+completeness; unavailable reads never mean no requirements. Guide explains the
+format without requiring a configured project. Global definitions, when enabled,
+are separately marked and read-only in the project editor.
 
-Within the requested scope, edit project configuration and confirm the exact
-working-tree target. The editor writes only the existing regular project.yaml:
-local required step/workflow references and optional default_workflow. Global
-requirements are read-only, separate from editable projectConfig. Steps/workflows
-are authored in the repository. Empty local requirements are required: []. Saving
-does not commit files, execute work or prove compliance. Missing paths, incomplete
-reads or unsupported source content require repository repair/trusted setup.
+Steps have id/name/description. Workflows compose sequence/parallel groups, step
+references/local steps and named workflow references. Instructions, applicability
+and delegation belong in description. Required references apply to the current main
+task; fixed protects original nested commitments and relationships while permitting
+support work. Repeated references have distinct occurrences.
 
-Conflict or uncertainty keeps the draft and requires inspection/reload before
-another write. Native writes are non-atomic; external changes can race preflight.
-A definite authentication rejection is not saved and requires a new explicit Save.
-Read [dashboard workflows](references/dashboard.md) for these distinctions.
+Edit only the requested project configuration and confirm the working-tree target.
+Save writes local project.yaml requirements/default workflow, leaves files
+uncommitted and does not edit the step/workflow catalog. Empty requirements use
+`required: []`. Refresh/reconcile conflicting or uncertain writes; Discard removes
+an unsaved draft. A definite authentication rejection requires a new explicit Save.
 
-## Controls and setup
+First setup selects the exact checkout/branch. Create leaves files uncommitted;
+Create + commit requires a safe clean target and already provisioned access, honoring
+hooks/signing. Enable existing definitions writes nothing. Neither action switches
+branches. Missing native permissions require operator setup, not credential work
+hidden inside a dashboard task.
 
-Global supervision is the master override; project switches remember manual
-choices. Initial project defaults follow observed folder presence, not unreadable
-material. Disabling preserves history/identity while a native running turn may finish.
-Separate global definitions are opt-in under the T3 server user's home, not the
-Supervisor container's. Scratch requires that global input.
+## Controls, plans and progress
 
-First setup selects an exact checkout/branch. Create leaves project.yaml and
-steps/.gitkeep/workflows/.gitkeep uncommitted. Create + commit requires a safe clean
-Git target and separately provisioned commit/probe grants. Hooks/signing apply;
-after uncertainty inspect actual files/index/history rather than repeat creation.
-Enable existing definitions writes nothing. Neither action switches branches.
-Usage does not authorize provisioning missing filesystem, commit or probe grants.
+The global supervision master switch overrides remembered project choices. Global
+definitions are separately opt-in in the T3 server user's home; scratch needs that
+input. Model/reasoning choices are defaults for new roots; edit existing chats in T3.
+Settings chat exclusions are per-instance, persistent and independent of Telegram.
 
-## Supervisor, plans and history
+Select the actual main to inspect its binding, objective, proposal, agreement,
+current workflow and native descendants. Plans preserve nested structure, stable
+occurrence IDs and provenance. Child contributions may overlap; child completion
+does not complete a parent step automatically. Required inclusion can be recursive.
+Matching complete native proposal/acceptance records establish agreement, not actual
+execution. Keep incomplete requirements and source issues visible.
 
-Project model/reasoning choices come from the native catalog and are defaults for
-new Supervisor chats. Edit existing chats in T3; no silent model substitution.
-Select a main to inspect actual binding/model, objective, proposal, agreement and
-recovery. Native mode mismatches need an explicit T3 change before scoped retry.
-Project-root view shows shared defaults only.
+Progress and Activity are observational. Read timestamps, stale/incomplete warnings,
+assessments and source links. Refresh does not wake chats or write workflow state.
+Idle/no-AppRun mirrors do not prove completion. Quiet scopes may park while unresolved
+work stays unresolved; relevant activity reuses the same Supervisor identity.
 
-The Supervisor team section shows the root and direct helpers separately from
-operational child conversations. Review T3 links, reported model, readiness and
-lifecycle, each helper's assigned subtree roots, current state, last assessment,
-pending handovers and significant issues. Child rows show the effective assignee;
-unknown coverage is explicit and does not imply root ownership. Assignments cover
-verified operational descendants, including future children, and do not change
-workflow ownership or contributor links.
+## Teams and native actions
 
-The project setting `maximum helpers per root` defaults to 5 and accepts 0–20.
-Zero disables new recruitment; it does not remove existing helpers. Root and helper
-model choices come from T3's current catalog; helpers inherit the root model unless
-the root selects another configured T3 model for that helper. Team membership and
-assignments are managed through the owning root's Supervisor team operations, not
-by messaging a helper. A human message sent to a helper in T3 follows T3's native
-follow-up behavior. The root sends routine notes/check-ins through its Supervisor
-team route, not raw `t3_thread_send`.
+The team view distinguishes the root, direct helpers and operational children.
+Inspect readiness, assignments, handovers, unknown delivery and issues. Helper limits
+are0–20, default5; lowering a limit preserves existing helpers. Membership and scoped
+assignments are managed by the owning root, not by messaging a helper. Uncertain
+handover does not prove coverage; quarantine revokes service authority, not the
+native conversation. Read the reference before any requested team change.
 
-During a handover, inspect the notification state and assignment status. Pending or
-uncertain delivery remains unresolved; the root retains responsibility until new
-coverage is confirmed. The view is observational: read its timestamp and any
-incomplete/unavailable warning before relying on the data. If the root must revoke
-a helper's service authority while effects remain unresolved, its native-proof
-`supervision_team` action `quarantine` restores root coverage but leaves affected
-work observe-only until unknown effects are reconciled. It does not stop or cancel
-the helper's native T3 conversation. Root `retry` starts a new attempt only for a
-definite notice failure when its recipient remains ready; unrelated unknown guides
-stay fenced. Failed check-in acknowledgements wait for unresolved member requests.
-Observe-only rows join otherwise due root work/events without repeatedly waking it. See the
-[Supervisor team dashboard guidance](references/dashboard.md#supervisor-team) for
-the complete team-view and handover details.
+Pending owner input defers guidance; Supervisor does not answer it. Late steering
+can start a new native turn. Unknown delivery is reconciled before retry or reroute;
+do not wake another chat to bypass uncertainty. There is no pre-first-tool barrier.
 
-Monitoring observes the main and its native/delegated descendants under shared
-observation/read budgets and the project's age/count thresholds. Root and helper
-check-ins have separate cooldowns. Forks are
-independent. Native child lifecycle comes from its direct parent; idle/no-AppRun
-mirrors do not prove completion.
-Verified terminal changes receive priority without waiting for age/count thresholds,
-while retaining cooldown and current assignment checks. The same observed terminal
-version does not repeatedly wake its Supervisor. Fresh resolved/expired/cancelled
-owner requests clear matching stale waiting hints; missing evidence remains unknown. Saved changes apply on the next check. There is no
-pause-monitoring mode. All Project Supervisor conversations run through T3.
-
-An initial proposal waits in the existing Supervisor ready state while the main is
-preparing, starting or otherwise not ready for steering; `running` alone does not
-prove readiness. An idle main receives a normal new turn. Pending native
-owner questions or approvals defer potentially interrupting guidance, and the
-Supervisor never answers or resolves them.
-For helper guidance this also prevents routing to an ancestor around the target's
-pending owner decision. Ordinary model guidance to the main uses
-T3's automatic delivery after fresh reads. Unknown outcomes are reconciled with the
-same request identity; confirmed failures need a fresh read before later
-reconsideration. No pre-first-tool barrier is guaranteed.
-
-The live progress section shows current main/child workflows separately from
-proposals and accepted plans. Read the Supervisor's short assessment and supporting
-activity links; missing workflow, unknown lifecycle and incomplete/unavailable reads
-remain explicit. Viewing progress does not wake chats or write state. Agents have
-no continual reporting obligation. A linked result alone does not prove a step's
-description has been satisfied.
-
-Guidance to native children goes through verified ancestors. Direct delegated guidance
-is limited to verified active children and uses fresh scope/contact checks with
-active-only steering. After T3 returns the specific dispatch failure, the service
-replays the exact command once with the same identity, target and run ID; only a
-confirmed definite rejection permits a fresh check of the nearest contactable
-ancestor in that same assignment. A cross-assignment route raises root attention.
-Generic server errors, timeouts and lost responses keep their original route and
-must be reconciled before changing routes. Terminal and unknown children are not contacted
-directly. T3 can
-convert a late steer into a started child delivery; if that happens, stop messaging
-the child and notify its parent when relevant. No automatic cancellation occurs.
-A quiet unknown child may permit guarded standby while its work remains unresolved
-and background monitoring continues. New relevant activity reuses the same Supervisor.
-
-Inspect nested plans, requirement accounting, source revision and diagnostics
-separately from native acceptance evidence and actual execution. Required inclusion
-can be recursive. Children can contribute to multiple parent steps with overlapping
-personal workflows; child completion never completes the parent automatically.
-Delegating an entire review workflow is described in its description; merely naming
-it does not prove independent review or follow-up. Agreements require matching
-structured native messages; casual assent is insufficient. Changed definitions
-retain stale history until reviewed and a fresh agreement is established.
-Use the full fenced `workflow-proposal` and require the operative main assistant's
-own completed `workflow-acceptance` to echo its exact five-field envelope and full
-canonical workflow value. A bare yes or shortened `accepted: true` object is not
-acceptance. If the selected task shows a workflow protocol diagnostic, use its role,
-code and source message ID to locate the record that needs correction. It is
-informational: it changes no saved agreement history, grants no write authority and
-does not prove execution or schedule an automatic retry.
-Bounded authoring examples in a Supervisor input are format guidance only; they
-are not proposals, acceptance, applicability decisions or authority. Keep known
-requirements, issues, omissions, canonical source details and all `null`/empty
-fields intact when continuing the dialogue.
-Configuration saves authorize only local config, not independent catalog edits.
-The Supervisor can request restoration/renegotiation but does not prevent writes.
-
-The workflow MCP is a separate installed capability. It has no dashboard write
-button. Only the current owning Supervisor's exact native tool evidence can
-authorize edits to its main/descendant scope; transport credentials alone cannot.
-Check actual installed availability, not source checkout features. Role instructions
-are not a sandbox. No proxies or T3 modifications are authorized by ordinary usage.
-
-An authorized workflow apply may return a bounded code/path/expected diagnostic
-alongside pinned_definition_context_mismatch for a malformed local step. Use it to
-correct the indicated field; it changes no saved state or authority. Helper monitor
-activityRefs provide exact item-only or message-only navigation pairs. Copy those
-pairs unchanged and omit optional run IDs; never normalize encoded identifiers.
-
-Activity retains native project-supervision records. Inspect an item and open its
-originating conversation when you need the underlying context. Expired details are
-unavailable evidence and are not reconstructed.
-
-Settings → Chat settings controls excluded chats per instance. Changes apply live
-and persist across restarts; the Mac and Lima settings are independent. Project
-Supervisors skip excluded chats while preserving their existing bindings and
-history. Idle scopes may settle and later reuse the same Supervisor; deletion,
-archive, failed reads and settlement are distinct. Retry native access reconciles
-original identities, never resets state. Report actual saved/live evidence and any
-unverified limit; acceptance, plan status and execution remain separate facts.
-
-
-Grant and session hashes share one private access/login.sqlite3 database. The
-service and forge command use its current schema; old experimental schemas are
-not supported automatically. Login commits grant consumption and session creation
-together. Existing session expiry and durable sign-out are unchanged. Maintenance
-preserves real credentials and sessions without requiring product compatibility
-layers for obsolete prototypes.
+Workflow MCP is separate from the dashboard. Only the current owning root/helper's
+exact native tool evidence and scope authorize writes; a transport credential or
+supplied thread ID does not. Preserve exact returned IDs and inspect bounded protocol
+diagnostics in their source chat. Product use does not authorize proxies, T3
+modifications or manufactured agreement/activity evidence.

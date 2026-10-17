@@ -1,3 +1,13 @@
+## Skill ownership
+
+Keep `skills/` focused on portable product usage. Personal installation policies,
+source maintenance and deployment procedures belong in the global `t3-supervisor`
+skill outside this repository. The Git-backed `use-t3-supervisor` skill is exposed
+globally through Skillshare; it must not depend on personal maintenance files.
+
+Skill/documentation-only batches use Git and Skillshare propagation; they do not
+require rebuilding or restarting the application.
+
 ## Knowledge Base
 
 This project has an LLM-maintained knowledge base in `knowledge/` (git-ignored). Invoke `$knowledge` or `/knowledge` with the same subcommands and arguments.

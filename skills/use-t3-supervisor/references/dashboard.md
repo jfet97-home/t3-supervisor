@@ -206,13 +206,6 @@ activity/attention/input remains; unknown work stays unresolved. Monitoring cont
 and relevant activity reuses the same companion identity and binding.
 
 
-Grant and session hashes share one private access/login.sqlite3 database. The
-service and forge command use its current schema; old experimental schemas are
-not supported automatically. Login commits grant consumption and session creation
-together. Existing session expiry and durable sign-out are unchanged. Maintenance
-preserves real credentials and sessions without requiring product compatibility
-layers for obsolete prototypes.
-
 Helper check-ins use a genuine event-triggered T3 webhook task bound to the child,
 without a timer or T3 Connect. The native job appears in T3's scheduler. Pausing or
 retargeting it stops delivery; the service does not silently undo that choice.
