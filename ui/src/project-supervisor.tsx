@@ -451,9 +451,10 @@ function ProjectSupervisorTeamPanel({team, settings, mainThreadId}: {team: Proje
       <h3 id="supervisor-team-title">Supervisor team</h3>
       <span className="pill">Saved maximum helpers per root: {settings.maxHelpersPerRoot}</span>
     </div>
-    <p className="muted">The Supervisor team is separate from the operational workflow tree. The root owns unassigned work; each helper covers its assigned subtree and future operational descendants.</p>
+    <details><summary>How the Supervisor team works</summary><div className="stack"><p className="muted">The Supervisor team is separate from the operational workflow tree. The root owns unassigned work; each helper covers its assigned subtree and future operational descendants.</p>
     <p className="small muted">A person who messages a helper in T3 follows T3’s native follow-up behavior. Root-to-helper notes and routine check-ins use Supervisor team operations, not raw <code>t3_thread_send</code>.</p>
     <p className="small muted">Quarantine revokes a helper’s Supervisor authority and returns coverage to the root. Unresolved effects stay fenced, and the helper’s native T3 conversation or a turn already running there may continue.</p>
+    </div></details>
     {!mainThreadId
       ? <p className="muted">Select a main conversation to inspect its Supervisor team.</p>
       : !team
@@ -552,6 +553,7 @@ function WorkflowProgressDetails({workflow, scopeThread}: {workflow: WorkflowPro
     </div>
     <p>{workflow.objective ?? "No workflow objective was recorded."}</p>
     <p className="small muted"><a href={threadHref(workflow.threadId)}>Open conversation {workflow.threadId}</a> · Revision {workflow.revision} · Updated {formatProgressTime(workflow.updatedAt)}</p>
+    <details><summary>Step details and observations</summary><div className="stack">
     {scopeThread && <div className="small muted">
       <p><strong>Native lifecycle:</strong> {lifecycle!.label}</p>
       {scopeThread.lifecycleDetail && <p>T3 lifecycle detail: {scopeThread.lifecycleDetail}</p>}
@@ -584,6 +586,7 @@ function WorkflowProgressDetails({workflow, scopeThread}: {workflow: WorkflowPro
           </p>}
         </li>)}</ol>}
     </div>
+    </div></details>
   </article>;
 }
 
@@ -623,7 +626,7 @@ export function WorkflowProgressPanel({mainThreadId, connected, progress, onRefr
     {!mainThreadId
       ? <p className="muted">Select a main conversation to inspect its current workflow and connected children.</p>
       : <>
-        <p className="muted">Current Supervisor workflow state, kept separate from proposals and saved agreements. Statuses and explanations are Supervisor assessments; they are not independent proof of execution. Parent steps do not complete automatically when a child finishes.</p>
+        <details><summary>How progress is assessed</summary><p className="muted">Current Supervisor workflow state, kept separate from proposals and saved agreements. Statuses and explanations are Supervisor assessments; they are not independent proof of execution. Parent steps do not complete automatically when a child finishes.</p></details>
         {progress.loading && pages.length === 0 && <p role="status">Loading the selected main conversation’s live progress…</p>}
         {progress.error && hasSuccessfulPage && <p role="status">Showing the last successful progress snapshot. {progress.error}</p>}
         {progress.error && !hasSuccessfulPage && <p role="alert">{progress.error}</p>}
@@ -645,9 +648,13 @@ export function WorkflowProgressPanel({mainThreadId, connected, progress, onRefr
                   {lifecycle.label}
                 </span>
               </div>
+              <div className="conversation-meta">
+              <WorkflowAssignee coverage={coverageByThreadId.get(thread.threadId)}/>
+              {!thread.deletedAt && <a href={threadHref(thread.threadId)}>Open in T3 →</a>}
+              </div>
+              <details><summary>Conversation details</summary><div className="stack">
               <p>Lifecycle: {lifecycle.label}</p>
               {thread.lifecycleDetail && <p className="small muted">T3 lifecycle detail: {thread.lifecycleDetail}</p>}
-              <WorkflowAssignee coverage={coverageByThreadId.get(thread.threadId)}/>
               {thread.parentThreadId && <p className="small">Parent: <a href={threadHref(thread.parentThreadId)}>Open conversation {thread.parentThreadId}</a></p>}
               {!thread.deletedAt && <p className="small"><a href={threadHref(thread.threadId)}>Open conversation {thread.threadId}</a></p>}
               {lifecycle.label === "Unknown" && <p className="small muted">T3 has not established this conversation’s current lifecycle. An idle thread mirror alone does not establish that its work is finished.</p>}
@@ -667,6 +674,7 @@ export function WorkflowProgressPanel({mainThreadId, connected, progress, onRefr
               {!workflowByThreadId.has(thread.threadId) && <p className="small muted">
                 {allWorkflowPagesLoaded ? "No workflow document is recorded for this conversation." : "Workflow state for this conversation may be on a later page."}
               </p>}
+              </div></details>
             </li>;
             })}</ul>
           </div>}
@@ -689,6 +697,7 @@ export function WorkflowProgressPanel({mainThreadId, connected, progress, onRefr
 }
 
 export function ProjectSupervisorView({
+  section = "all",
   snapshot,
   selection,
   monitoring,
@@ -713,6 +722,7 @@ export function ProjectSupervisorView({
   onRetry,
   onSubmit,
 }: {
+  section?: "all" | "progress" | "plan" | "definitions" | "settings";
   snapshot: ProjectSupervisorInfo;
   selection: SupervisorModelSelection;
   monitoring: MonitoringDraft;
@@ -753,7 +763,7 @@ export function ProjectSupervisorView({
   const reasoningCanChange = !fieldsDisabled && Boolean(selected?.available && reasoning?.choices.length);
 
   return <div className="stack">
-    <div className="panel stack">
+    <div hidden={section !== "all" && section !== "progress"} className="panel stack">
       <div className="row between">
         <h3>Supervisor conversation</h3>
         {snapshot.binding && <span className={`pill ${snapshot.binding.state === "ready" ? "green" : "amber"}`}>{snapshot.binding.state}</span>}
@@ -763,21 +773,23 @@ export function ProjectSupervisorView({
         : snapshot.binding
           ? <p>Bound conversation: <a href={`t3-thread://v1/${snapshot.binding.threadId}`}>Open in T3</a> <code>{snapshot.binding.threadId}</code></p>
         : <p>{snapshot.mainThreadId ? "No Supervisor is bound to this main conversation yet." : "Select a main conversation to inspect its Supervisor."}</p>}
-      <p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses it when that main conversation resumes. Independent main conversations have separate Supervisors.</p>
+      <details><summary>Conversation and model details</summary><div className="stack"><p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses it when that main conversation resumes. Independent main conversations have separate Supervisors.</p>
       {snapshot.binding?.settlementState && <p>Automatic settlement: {snapshot.binding.settlementState}. Resumed work uses this same conversation.</p>}
       {snapshot.binding?.keptActive && <p>Automatic settlement is held by a user keep-active choice.</p>}
       <p className="muted">Supervisor work runs in the project root. Role instructions limit it to reading and messaging through T3, but those instructions do not enforce tool restrictions.</p>
-      <p>{snapshot.message}</p>
       <p><strong>Project default for new Supervisors:</strong> {formatModel(snapshot, snapshot.settings.modelSelection)}</p>
       {snapshot.mainThreadId && <p><strong>Selected Supervisor model in T3:</strong> {formatModel(snapshot, snapshot.modelSelection)}. Edit this conversation’s model using T3 controls.</p>}
       {snapshot.modelApplication?.pending && snapshot.binding?.state === "ready" && <p role="status">T3 is waiting to apply the saved model selection while the Supervisor is idle.</p>}
       {snapshot.settings.pending && !snapshot.binding && <p role="status">The saved model selection will apply when T3 creates the Supervisor conversation for the first needed task.</p>}
+      </div></details>
+      <p>{snapshot.message}</p>
+      {snapshot.modelApplication?.pending && <p role="status">A model change is pending in T3.</p>}
       {!snapshot.available && <p role="status">Supervisor settings are currently unavailable.</p>}
     </div>
 
-    <ProjectSupervisorTeamPanel team={snapshot.team} settings={readTeamSettings(snapshot)} mainThreadId={snapshot.mainThreadId}/>
 
-    <form className="panel stack" onSubmit={onSubmit} aria-label="Supervisor settings">
+
+    <form hidden={section !== "all" && section !== "settings"} className="panel stack" onSubmit={onSubmit} aria-label="Supervisor settings">
       <fieldset disabled={fieldsDisabled} className="stack">
         <legend>Project model defaults</legend>
         <label htmlFor="supervisor-model">Model</label>
@@ -847,11 +859,11 @@ export function ProjectSupervisorView({
         <span id="supervisor-team-max-helpers-help" className="small muted">Enter a whole number from 0 to 20. The default is 5; 0 disables new recruitment.</span>
         <span id="supervisor-team-max-helpers-error" className="small" aria-live="polite">{teamSettingsError}</span>
       </fieldset>
-      <button type="submit" disabled={!canSave || saving || blocked}>{saving ? "Saving…" : "Save Supervisor settings"}</button>
-      {dirty && <button type="button" disabled={saving || blocked} onClick={onDiscard}>Discard draft</button>}
+      <div className="save-bar">{dirty && <span>Unsaved Supervisor settings</span>}<button className="primary" type="submit" disabled={!canSave || saving || blocked}>{saving ? "Saving…" : "Save Supervisor settings"}</button>
+      {dirty && <button type="button" disabled={saving || blocked} onClick={onDiscard}>Discard draft</button>}</div>
     </form>
 
-    {shouldOfferRetry && <div className="panel stack">
+    {shouldOfferRetry && <div hidden={section !== "all" && section !== "progress"} className="panel stack">
       <h3>{snapshot.binding?.state === "missing" ? "Deleted Supervisor conversation" : "Native Supervisor access"}</h3>
       <p className="muted">{snapshot.binding?.state === "missing"
         ? "T3 confirmed that the bound conversation was deleted. This explicit action replaces it with a new Supervisor conversation."
@@ -861,7 +873,7 @@ export function ProjectSupervisorView({
       <button type="button" disabled={!canRetry || saving || blocked} onClick={onRetry}>{retryButtonLabel}</button>
     </div>}
 
-    {selectedTask && <section className="panel stack" aria-labelledby="supervisor-task-title">
+    {selectedTask && <section hidden={section !== "all" && section !== "plan"} className="panel stack" aria-labelledby="supervisor-task-title">
       <h3 id="supervisor-task-title">Task interpretation for the selected conversation</h3>
       <p><strong>Status:</strong> {selectedTask.status}</p>
       {selectedTask.objective && <p><strong>Interpreted task:</strong> {selectedTask.objective}</p>}
@@ -869,14 +881,17 @@ export function ProjectSupervisorView({
       <WorkflowProtocolDiagnosticView diagnostic={selectedTask.workflowProtocolDiagnostic} />
       <WorkflowProposalView workflow={selectedTask.workflow} proposalId={selectedTask.workflowProposalId} agreement={selectedTask.agreement} definitionReview={selectedTask.definitionReview} />
     </section>}
-    {workflowProgress && <WorkflowProgressPanel mainThreadId={snapshot.mainThreadId} connected={connected} progress={workflowProgress}
-      onRefresh={onWorkflowProgressRefresh ?? (() => {})} onLoadMore={onWorkflowProgressLoadMore ?? (() => {})}/>}
+    {!selectedTask && section === "plan" && <p className="panel muted">No task interpretation or plan has been recorded for this conversation.</p>}
+    <div hidden={section !== "all" && section !== "progress"}>{workflowProgress && <WorkflowProgressPanel mainThreadId={snapshot.mainThreadId} connected={connected} progress={workflowProgress}
+      onRefresh={onWorkflowProgressRefresh ?? (() => {})} onLoadMore={onWorkflowProgressLoadMore ?? (() => {})}/>}</div>
+    <div hidden={section !== "all" && section !== "progress"}><ProjectSupervisorTeamPanel team={snapshot.team} settings={readTeamSettings(snapshot)} mainThreadId={snapshot.mainThreadId}/></div>
   </div>;
 }
 
-export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToken = "", onDirtyChange, onSavingChange}: {
+export function ProjectSupervisorPanel({projectId, threadId, section = "all", connected, csrfToken = "", onDirtyChange, onSavingChange}: {
   projectId: string;
   threadId?: string;
+  section?: "all" | "progress" | "plan" | "definitions" | "settings";
   connected: boolean;
   csrfToken?: string;
   onDirtyChange?: (dirty: boolean) => void;
@@ -1282,13 +1297,14 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
   const loadKey = requestKey;
 
   return <section className="stack project-supervisor" aria-labelledby="project-supervisor-title">
-    <div><h2 id="project-supervisor-title">Project Supervisor settings</h2><p className="muted">Set defaults for new Supervisors and select a main conversation to inspect its own Supervisor.</p></div>
-    {projectId && <SupervisionControlPanel key={projectId} projectId={projectId} />}
+    <h2 id="project-supervisor-title" className="sr-only">Project Supervisor</h2>
+    <div hidden={section !== "all" && section !== "settings"}>{projectId && <SupervisionControlPanel key={projectId} projectId={projectId} />}</div>
     {!projectId && <p className="panel muted">Select a project to manage its Supervisor settings.</p>}
     {projectId && !connected && <p className="panel" role="status">T3 is disconnected. Any unsaved Supervisor settings draft is kept.</p>}
     {projectId && connected && !activeSnapshot && isLoading && <p className="panel" role="status">Loading Supervisor settings…</p>}
     {projectId && connected && loadError && <p className="panel" role="alert">Could not refresh Supervisor settings. The previous snapshot remains visible; refresh to try again or check the T3 connection.</p>}
     {projectId && activeSnapshot && activeDraft && <ProjectSupervisorView
+      section={section}
       snapshot={activeSnapshot}
       selection={activeDraft.modelValue}
       monitoring={activeDraft.monitoringValue}
@@ -1318,7 +1334,7 @@ export function ProjectSupervisorPanel({projectId, threadId, connected, csrfToke
     {projectId && connected && activeSnapshot && !activeDraft && isLoading && <p className="panel" role="status">Loading the selected project’s settings…</p>}
     {projectId && connected && !activeSnapshot && !isLoading && !loadError && <p className="panel muted">Supervisor settings are not loaded yet.</p>}
     {visibleMessage && <p role={visibleMessage.alert ? "alert" : "status"}>{visibleMessage.text}</p>}
-    {projectId && <button type="button" disabled={!connected || saving || isLoading} onClick={refresh}>Refresh Supervisor settings</button>}
+    {projectId && <div><button type="button" disabled={!connected || saving || isLoading} onClick={refresh}>Refresh Supervisor settings</button></div>}
     {loadState.key === loadKey && loadState.status === "loading" && activeSnapshot && <p className="small muted" role="status">Refreshing saved settings…</p>}
   </section>;
 }

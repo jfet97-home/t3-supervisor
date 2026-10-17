@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { GuidanceSnapshot } from "../../src/guidance-contract.js";
 import type { DefinitionNode, DefinitionStepInfo, DefinitionWorkflowInfo, ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import { loadProjectDefinitions } from "./project-definitions-api.js";
 import { ProjectConfigurationEditor } from "./project-configuration-editor.js";
 import { ProjectSupervisorPanel } from "./project-supervisor.js";
+import { directoryRoute, openProject, projectSections, RouteLink, type NavigationGuard, type Route } from "./navigation.js";
 
 const statusText: Record<ProjectDefinitionSnapshot["status"], string> = {
   ready: "Definitions valid",
@@ -134,19 +135,25 @@ export function DefinitionsContent({definitions}: {definitions: ProjectDefinitio
       </details>)}
     </section>
 
-    <section className="stack" aria-labelledby="project-source-title">
-      <div><h3 id="project-source-title">Definition source files</h3><p className="muted">Raw bounded content is shown as text to help diagnose invalid files.</p></div>
+    <details className="panel stack" aria-labelledby="project-source-title">
+      <summary id="project-source-title">Definition source files</summary><p className="muted">Raw bounded content is shown as text to help diagnose invalid files.</p>
       {definitions.sources.length === 0 && <p className="panel muted">No source contents were readable.</p>}
       {definitions.sources.map((source, index) => <details className="panel definition-block" key={`${source.origin ?? ""}:${source.path}:${index}`}>
         <summary><code>{source.path}</code> <span className="muted small">{source.origin ?? "unknown source"}</span></summary>
         <pre className="definition-copy">{source.content}</pre>
       </details>)}
-    </section>
+    </details>
   </div>;
 }
 
-export function ProjectDefinitionsPanel({data, csrfToken = "", onDirtyChange}: {data: GuidanceSnapshot; csrfToken?: string; onDirtyChange?: (dirty: boolean) => void}) {
-  const [selection, setSelection] = useState({projectId: "", threadId: ""});
+export function ProjectDefinitionsPanel({data, route, navigate, guard, csrfToken = "", onDirtyChange}: {
+  data: GuidanceSnapshot; route: Route; navigate: (route: Route) => void; guard: React.RefObject<NavigationGuard>;
+  csrfToken?: string; onDirtyChange?: (dirty: boolean) => void;
+}) {
+  const retained = useRef({projectId: "", threadId: ""});
+  const inWorkspace = route.page === "projects" && Boolean(route.projectId);
+  const selection = inWorkspace ? {projectId: route.projectId, threadId: route.main ?? ""} : retained.current;
+  retained.current = selection;
   const [revision, setRevision] = useState(0);
   const [configurationDirty, setConfigurationDirty] = useState(false);
   const [configurationSaving, setConfigurationSaving] = useState(false);
@@ -184,34 +191,73 @@ export function ProjectDefinitionsPanel({data, csrfToken = "", onDirtyChange}: {
     if (includeSupervisor) setSupervisorDirty(false);
     reportDirty(false);setSavedMessage("");setState({key: "", result: null, error: false, loadedAt: null});return true;
   };
-  return <section className="stack project-definitions" aria-labelledby="definition-title">
-    <div><h2 id="definition-title">Steps and workflows</h2><p className="muted">Inspect reusable definitions and effective requirements. Edit only this checkout's project configuration.</p></div>
-    <div className="panel definition-controls">
-      <label htmlFor="definition-project">Project<select id="definition-project" value={projectId} disabled={saving} onChange={event => {if (discard(true)) setSelection({projectId: event.target.value, threadId: ""});}}>
-        <option value="">Select a project</option>{projects.map(project => <option key={project.id} value={project.id}>{project.title}</option>)}
-      </select></label>
-      <label htmlFor="definition-thread">Main conversation / working directory<select id="definition-thread" value={threadId} disabled={!projectId || saving} onChange={event => {if (discard()) setSelection(previous => ({...previous, threadId: event.target.value}));}}>
-        {threadUnavailable && <option value={threadId} disabled>Conversation unavailable</option>}
-        <option value="">Project root / defaults only</option>{threads.map(thread => <option key={thread.id} value={thread.id}>{thread.title}</option>)}
-      </select></label>
-      <button type="button" disabled={!canLoad || busy || saving} onClick={() => {if (discard()) setRevision(value => value + 1);}}>Refresh definitions</button>
+  useEffect(() => {
+    guard.current = next => {
+      if (next.page !== "projects" || !next.projectId) return true;
+      const projectChanges = next.projectId !== selection.projectId;
+      const scopeChanges = projectChanges || (next.main ?? "") !== selection.threadId;
+      return !scopeChanges || discard(projectChanges);
+    };
+    return () => { guard.current = () => true; };
+  });
+  const changeContext = (main: string, section = route.section) => navigate({...route, page: "projects", projectId: selection.projectId, main, section});
+  const workspaceRoute = {...route, page: "projects" as const, projectId: selection.projectId};
+  const showDefinitions = inWorkspace && route.section === "definitions";
+  const showSupervisor = inWorkspace && route.section !== "definitions";
+  const selectedProject = data.projects.find(project => project.id === selection.projectId);
+  return <section className="stack project-definitions" aria-label="Projects">
+    <div hidden={inWorkspace} className="stack">
+      <div className="page-heading"><p className="kicker">Workspace</p><h1>Projects</h1><p className="muted">Choose a project, then a conversation to follow its work.</p></div>
+      <div className="project-list">
+        {data.projects.map(project => <RouteLink key={project.id} to={openProject(project.id)} navigate={navigate} className="project-card">
+          <span className="project-avatar" aria-hidden="true">{project.classification === "scratch" ? "◇" : project.title.slice(0, 1).toUpperCase()}</span>
+          <span className="project-card-copy"><strong>{project.title}</strong><span className="muted small">{project.classification === "scratch" ? "Scratch workspace" : "Project workspace"} · {data.threads.filter(thread => thread.available && thread.projectId === project.id).length} conversations</span></span>
+          <span className={`pill ${project.available ? "" : "amber"}`}>{project.available ? "Available" : "Unavailable"}</span><span aria-hidden="true">→</span>
+        </RouteLink>)}
+      </div>
+      {projects.length === 0 && <p className="panel muted">No available T3 projects. Add a project in T3 to inspect its definitions here.</p>}
     </div>
-    {selection.projectId && <div inert={configurationSaving}><ProjectSupervisorPanel key={selection.projectId} projectId={selection.projectId} threadId={threadId}
-      connected={data.connected && Boolean(projectId)} csrfToken={csrfToken}
+    <div hidden={!inWorkspace} className="stack">
+      <div className="page-heading"><RouteLink to={directoryRoute} navigate={navigate} className="back-link">← All projects</RouteLink><h1>{selectedProject?.title ?? "Unavailable project"}</h1></div>
+      <div className="context-bar panel stack">
+        <div className="definition-controls">
+          <label className="context-project" htmlFor="definition-project">Project<select id="definition-project" value={selection.projectId} disabled={saving} onChange={event => navigate(openProject(event.target.value))}>
+            {!projectId && <option value={selection.projectId}>Project unavailable</option>}{projects.map(project => <option key={project.id} value={project.id}>{project.title}</option>)}
+          </select></label>
+          <label htmlFor="definition-thread">Main conversation<select id="definition-thread" value={route.main === null ? "__choose__" : threadId} disabled={!projectId || saving} onChange={event => changeContext(event.target.value, event.target.value ? "progress" : "definitions")}>
+            <option value="__choose__" disabled>Choose a conversation</option>
+            {threadUnavailable && <option value={threadId} disabled>Conversation unavailable</option>}
+            <option value="">Project root / defaults only</option>{threads.map(thread => <option key={thread.id} value={thread.id}>{thread.title}</option>)}
+          </select></label>
+          <button hidden={route.section !== "definitions"} type="button" disabled={!canLoad || busy || saving} onClick={() => {if (discard()) setRevision(value => value + 1);}}>Refresh definitions</button>
+        </div>
+        {current?.result?.workspaceRoot && <p className="small muted definition-path">Working folder <code>{current.result.workspaceRoot}</code></p>}
+      </div>
+      {!projectId && <p className="panel" role="status">The selected project is unavailable. Its context is kept; choose an available project to continue.</p>}
+      {threadUnavailable && <p className="panel" role="status">The selected conversation is no longer available in this project. Choose another working directory.</p>}
+      {!data.connected && <p className="panel" role="status">T3 is disconnected. Any unsaved project configuration draft is kept.</p>}
+      {dirty && <p className="draft-notice" role="status">Unsaved changes · <RouteLink to={{...workspaceRoute, section: configurationDirty ? "definitions" : "settings"}} navigate={navigate}>Return to your draft</RouteLink>. Switching views keeps your changes.</p>}
+      <nav className="section-nav" aria-label="Project sections">{projectSections.map(section => <RouteLink key={section} to={{...workspaceRoute, section}} navigate={navigate} aria-current={route.section === section ? "page" : undefined}>{section === "settings" ? "Project settings" : section[0]!.toUpperCase() + section.slice(1)}</RouteLink>)}</nav>
+      {inWorkspace && <div className="section-heading"><h2>{route.section === "settings" ? "Project settings" : route.section[0]!.toUpperCase() + route.section.slice(1)}</h2><p className="muted">{({progress: "Follow the selected conversation and its connected work.", plan: "Review task interpretation, proposals and the saved agreement.", definitions: "Inspect reusable steps, workflows and checkout requirements.", settings: "Control supervision and defaults for this project."})[route.section]}</p></div>}
+      {route.main === null && (route.section === "progress" || route.section === "plan") && <div className="panel stack">
+        <h3>Choose a main conversation</h3><p className="muted">Open a conversation to inspect its Supervisor, plan and progress.</p>
+        <div className="conversation-list">{threads.map(thread => <RouteLink key={thread.id} to={{...workspaceRoute, main: thread.id}} navigate={navigate}><span>{thread.title}</span><span aria-hidden="true">→</span></RouteLink>)}</div>
+        {threads.length === 0 && <p>No available main conversations in this project.</p>}
+        <RouteLink to={{...workspaceRoute, main: "", section: "definitions"}} navigate={navigate}>Inspect project root and defaults →</RouteLink>
+      </div>}
+    </div>
+    {selection.projectId && <div hidden={!showSupervisor || (route.main === null && route.section !== "settings")} inert={configurationSaving}><ProjectSupervisorPanel key={selection.projectId} projectId={selection.projectId} threadId={threadId}
+      section={route.section} connected={data.connected && Boolean(projectId)} csrfToken={csrfToken}
       onDirtyChange={setSupervisorDirty} onSavingChange={setSupervisorSaving}/></div>}
-    {!projectId && <p className="panel muted">{projects.length ? "Select a project to inspect its definitions." : "No available T3 projects. Add a project in T3 to inspect its definitions here."}</p>}
-    {threadUnavailable && <p className="panel" role="status">The selected conversation is no longer available in this project. Choose another working directory.</p>}
-    {!data.connected && <p className="panel" role="status">T3 is disconnected. Any unsaved project configuration draft is kept.</p>}
-    {busy && <p className="panel" role="status">Reading project definitions…</p>}
-    {canLoad && current?.error && <p className="panel" role="alert">Could not load definitions. Refresh to try again or check the Supervisor connection.</p>}
-    {savedMessage && <p role="status">{savedMessage}</p>}
-    {state.result && <div hidden={!canLoad || state.key !== key} inert={supervisorSaving || configurationSaving}>
-      <ProjectConfigurationEditor key={JSON.stringify([state.result.projectId, state.result.threadId, state.result.revision, revision])} definitions={state.result} csrfToken={csrfToken} onDirtyChange={reportDirty} onSavingChange={setConfigurationSaving}
-        onSaved={result => {setState({key, result, error: false, loadedAt: Date.now()});setSavedMessage("Saved project configuration to .t3-supervisor/project.yaml.");}}/>
-    </div>}
-    {canLoad && current?.result && <>
-      <p className="muted small" role="status">Loaded {new Date(current.loadedAt!).toLocaleTimeString()}. Refresh after repository changes.</p>
-      <DefinitionsContent key={key} definitions={current.result}/>
-    </>}
+    <div hidden={!showDefinitions} className="stack">
+      {busy && <p className="panel" role="status">Reading project definitions…</p>}
+      {canLoad && current?.error && <p className="panel" role="alert">Could not load definitions. Refresh to try again or check the Supervisor connection.</p>}
+      {savedMessage && <p role="status">{savedMessage}</p>}
+      {canLoad && current?.result && <div className="stack"><p className="muted small" role="status">Loaded {new Date(current.loadedAt!).toLocaleTimeString()}. Refresh after repository changes.</p><DefinitionsContent key={key} definitions={current.result}/></div>}
+      {state.result && <div hidden={!canLoad || state.key !== key} inert={supervisorSaving || configurationSaving}>
+        <ProjectConfigurationEditor key={JSON.stringify([state.result.projectId, state.result.threadId, state.result.revision, revision])} definitions={state.result} csrfToken={csrfToken} onDirtyChange={reportDirty} onSavingChange={setConfigurationSaving}
+          onSaved={result => {setState({key, result, error: false, loadedAt: Date.now()});setSavedMessage("Saved project configuration to .t3-supervisor/project.yaml.");}}/>
+      </div>}
+    </div>
   </section>;
 }

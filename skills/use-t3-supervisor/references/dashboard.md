@@ -1,7 +1,26 @@
 # Dashboard workflows
 
-The current views are Projects, Guide, Activity, and Settings.
-Projects is the default. Older Guidance rules screenshots describe retired UI.
+The main navigation is Projects, Activity, Settings and Guide. Projects starts with
+an instance-local project list. Open a project, then choose its main conversation;
+Project root / defaults only is an explicit alternative for checkout configuration.
+A project remembers its last context in this browser tab. Hash addresses preserve
+project, conversation and view, and an explicit address wins over remembered state.
+Unavailable selections stay unavailable rather than silently changing checkout.
+
+Each project has four views:
+
+- Progress shows its Supervisor binding, connected conversations and workflow
+  assessments, with a separate Supervisor team section. Expand conversation and
+  step details for provenance. Retry or replace native access remains explicit.
+- Plan shows task interpretation, proposals, agreement and definition-change review.
+- Definitions shows read validity, effective requirements, reusable steps/workflows,
+  collapsible raw sources and the local project.yaml editor.
+- Project settings contains the supervision switch, first setup, model defaults,
+  monitoring and helper limit.
+
+Instance Settings contains the master switch, global definitions, exclusions and
+connection information. Advanced setup help is collapsed. Guide explains the file
+format independently of any selected project.
 
 ## Sign in
 
@@ -34,7 +53,7 @@ uncommitted and does not execute or accept a workflow.
 
 ## Drafts and conflicts
 
-Drafts persist across dashboard sections and temporary connection failures.
+Project configuration, Supervisor settings and chat-exclusion drafts persist across dashboard views, the project directory, sign-in expiry and temporary connection failures. The draft notice links back to the appropriate form; Sign out and leave-page warnings cover unsaved changes.
 Switching project/workspace, refreshing or cancelling asks before discarding an
 unsaved draft. Browser navigation also warns about unsaved or in-flight changes.
 During a save the editor and selection controls are disabled.

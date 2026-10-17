@@ -24,6 +24,12 @@ replays a rejected mutation. Inspect uncertain outcomes before another write.
 
 ## Projects and definitions
 
+Open a project from Projects, then choose a main conversation. The project views
+are Progress, Plan, Definitions and Project settings. Project root / defaults only
+is explicit. Context is remembered per project in the current tab; hash links take
+precedence. An unavailable conversation never falls back to another checkout.
+Drafts survive switching views, including instance Settings exclusions.
+
 Projects reads the selected operative checkout's `.t3-supervisor/project.yaml`,
 `steps/` and `workflows/`. Check source path, workspace, freshness, diagnostics and
 completeness; unavailable reads never mean no requirements. Guide explains the

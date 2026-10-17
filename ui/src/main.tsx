@@ -18,6 +18,7 @@ import {
   snapshotAtom,
 } from "./api.js";
 import "./style.css";
+import { directoryRoute, RouteLink, useNavigation } from "./navigation.js";
 import { ProjectDefinitionsPanel } from "./project-definitions.js";
 import { StepsAndWorkflowsGuide } from "./steps-and-workflows-guide.js";
 import { SupervisionControlPanel, GlobalDefinitionsControlPanel } from "./supervisor-control.js";
@@ -116,12 +117,13 @@ function History({
     </section>
   );
 }
-function ChatSettings({ data }: { data: GuidanceSnapshot }) {
+function ChatSettings({ data, onDirtyChange }: { data: GuidanceSnapshot; onDirtyChange: (dirty: boolean) => void }) {
   const [form, setForm] = useState(data.threadPolicy);
   const [dirty, setDirty] = useState(false);
   const [query, setQuery] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  useEffect(() => onDirtyChange(dirty || saving), [dirty, saving, onDirtyChange]);
   const save = useAtomSet(threadPolicyAtom, { mode: "promise" });
   const refresh = useAtomRefresh(snapshotAtom);
   useEffect(() => { if (!dirty) setForm(data.threadPolicy); }, [data.threadPolicy, dirty]);
@@ -144,22 +146,27 @@ function ChatSettings({ data }: { data: GuidanceSnapshot }) {
       </label>)}</div>
       <small>{form.excludedThreadIds.length} chats excluded.</small>
     </fieldset>
-    <button className="primary" disabled={saving} type="submit">{saving ? "Saving…" : "Save chat settings"}</button><p role="status">{message}</p>
+    <div className="save-bar">{dirty && <span>Unsaved chat exclusions</span>}<button className="primary" disabled={saving || !dirty} type="submit">{saving ? "Saving…" : "Save chat settings"}</button>{dirty && <button type="button" disabled={saving} onClick={() => {setForm(data.threadPolicy);setDirty(false);setMessage("");}}>Discard draft</button>}</div><p role="status">{message}</p>
   </form>;
 }
-function Settings({data}: {data: GuidanceSnapshot}) {
+function Settings({data, onDirtyChange}: {data: GuidanceSnapshot; onDirtyChange: (dirty: boolean) => void}) {
   const [controlRevision, setControlRevision] = useState(0);
-  return <section className="stack"><h2>Supervisor settings</h2><SupervisionControlPanel onChanged={() => setControlRevision(value => value + 1)} /><GlobalDefinitionsControlPanel refreshKey={controlRevision} /><ChatSettings data={data}/>
+  return <section className="stack"><div className="page-heading"><p className="kicker">Instance</p><h1>Settings</h1><p className="muted">Shared controls for this Supervisor installation.</p></div><SupervisionControlPanel onChanged={() => setControlRevision(value => value + 1)} /><GlobalDefinitionsControlPanel refreshKey={controlRevision} /><ChatSettings data={data} onDirtyChange={onDirtyChange}/>
     <div className="panel stack"><h3>T3 connection</h3><p>{data.connected ? "Connected" : "Disconnected"} · Build: {data.serverVersion ?? "Unavailable"}</p><p>{data.coverage}</p>
-      <h3>Project configuration editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .t3-supervisor/project.yaml in the selected working directory. Step and workflow definitions are read-only in the dashboard.</p>
-      <p>Native dialogue can record plan proposals and agreement; those records do not prove step execution.</p>
+      <details><summary>Advanced connection and editing details</summary><div className="stack"><h3>Project configuration editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .t3-supervisor/project.yaml in the selected working directory. Step and workflow definitions are read-only in the dashboard.</p>
+      <p>Native dialogue can record plan proposals and agreement; those records do not prove step execution.</p></div></details>
     </div></section>;
 }
 function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
   const [signOutError, setSignOutError] = useState("");
   const snapshot = useAtomValue(snapshotAtom);
   const refresh = useAtomRefresh(snapshotAtom);
-  const [view, setView] = useState("projects");
+  const {route, navigate, guard} = useNavigation();
+  const view = route.page;
+  useEffect(() => { document.title = `${route.projectId ? "Project" : route.page[0]!.toUpperCase() + route.page.slice(1)} · Supervisor`; document.getElementById("workspace")?.focus({preventScroll: true}); }, [route]);
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [settingsOpened, setSettingsOpened] = useState(view === "settings");
+  useEffect(() => { if (view === "settings") setSettingsOpened(true); }, [view]);
   const [projectDirty, setProjectDirty] = useState(false);
   const lastData = useRef<GuidanceSnapshot | null>(null);
   const previousConnection = useRef<boolean | null>(null);
@@ -178,11 +185,11 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
   }, [refresh]);
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
-      if (projectDirty) event.preventDefault();
+      if (projectDirty || settingsDirty) event.preventDefault();
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [projectDirty]);
+  }, [projectDirty, settingsDirty]);
   if (snapshot._tag !== "Success" && !lastData.current)
     return (
       <main className="panel">
@@ -198,44 +205,30 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
       </main>
     );
   const data = snapshot._tag === "Success" ? snapshot.value : {...lastData.current!, connected: false};
-  const navigate = (next: string) => setView(next);
+  const dirty = projectDirty || settingsDirty;
   return (
-    <main>
-      <header className="head row between">
-        <div className="row"><span className="brand">S</span><div><h1>Supervisor</h1><p className="muted">Project steps, workflows and task plans.</p></div></div>
-        <button disabled={projectDirty} title={projectDirty ? "Save or discard your draft before signing out." : undefined} onClick={() => { void onSignOut().catch(() => setSignOutError("Could not sign out. Try again.")); }}>Sign out</button>
+    <div className="app-shell">
+      <a className="skip-link" href="#workspace" onClick={event => {event.preventDefault();document.getElementById("workspace")?.focus();}}>Skip to content</a>
+      <header className="app-header">
+        <RouteLink to={directoryRoute} navigate={navigate} className="app-name">Supervisor<span className="app-name-detail"> / Work console</span></RouteLink>
+        <div className="row"><span className="connection"><span className={`dot ${data.connected ? "online" : ""}`} />{data.connected ? "T3 connected" : "Connection gap"}</span><button disabled={dirty} title={dirty ? "Save or discard your draft before signing out." : undefined} onClick={() => { void onSignOut().catch(() => setSignOutError("Could not sign out. Try again.")); }}>Sign out</button></div>
       </header>
-      {signOutError && <p role="alert">{signOutError}</p>}
-      {snapshot._tag === "Failure" && <p role="alert">Supervisor connection unavailable. Your project configuration draft is kept.</p>}
-      <div className="connection">
-        <span className={`dot ${data.connected ? "online" : ""}`} />
-        {data.connected ? "T3 connected" : "Connection gap"} ·{" "}
-        {data.projects.filter((p) => p.available).length} projects
-      </div>
-      <nav aria-label="Supervisor sections">
-        {["projects", "guide", "activity", "settings"].map((name) => (
-          <button
-            key={name}
-            aria-current={view === name ? "page" : undefined}
-            onClick={() => navigate(name)}
-          >
-            {name === "guide" ? "Guide" : name[0]!.toUpperCase() + name.slice(1)}
-          </button>
-        ))}
+      <nav className="app-nav" aria-label="Supervisor sections">
+        {(["projects", "activity", "settings", "guide"] as const).map(name => <RouteLink key={name} to={{...directoryRoute, page: name}} navigate={navigate} aria-current={view === name ? "page" : undefined}>{name[0]!.toUpperCase() + name.slice(1)}{name === "settings" && settingsDirty && <span className="draft-dot" aria-label="Unsaved changes" />}</RouteLink>)}
       </nav>
-      <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} csrfToken={getCsrfToken()} onDirtyChange={setProjectDirty}/></div>
-      {view === "guide" && <StepsAndWorkflowsGuide />}
-      {view === "activity" && (
-        <History items={data.activity} title="Supervision activity" />
-      )}
-      {view === "settings" && <Settings data={data} />}
-      <footer>
-        Project files define reusable steps, workflows and requirements. Plans are negotiated through native conversations; agreement does not prove execution.
-        Projects and chats sync automatically.
-      </footer>
-    </main>
+      <main id="workspace" tabIndex={-1}>
+        {signOutError && <p className="notice" role="alert">{signOutError}</p>}
+        {snapshot._tag === "Failure" && <p className="notice" role="alert">Supervisor connection unavailable. Your drafts are kept.</p>}
+        <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} route={route} navigate={navigate} guard={guard} csrfToken={getCsrfToken()} onDirtyChange={setProjectDirty}/></div>
+        {view === "guide" && <StepsAndWorkflowsGuide />}
+        {view === "activity" && <History items={data.activity} title="Supervision activity" />}
+        {settingsOpened && <div hidden={view !== "settings"}><Settings data={data} onDirtyChange={setSettingsDirty}/></div>}
+      </main>
+      <footer>Plans are records. Agreement is not execution.</footer>
+    </div>
   );
 }
+
 function App() {
   const [ready, setReady] = useState<boolean | null>(null);
   const [opened, setOpened] = useState(false);
@@ -281,9 +274,9 @@ function App() {
       }}>
         <h2>{opened ? "Sign in again" : "Sign in"}</h2>
         {opened && <p>Your open draft is kept in this tab.</p>}
-        <p>Generate a sign-in token on the machine running T3 Supervisor:</p>
+        <p className="muted">Use a one-time token from the machine running Supervisor.</p><details><summary>How to get a sign-in token</summary><div className="stack"><p>Generate a sign-in token on the machine running T3 Supervisor:</p>
         <pre><code>t3-supervisor auth forge</code></pre>
-        <p className="muted">Run it in your terminal as the account running Supervisor. For Docker or a VM, run it inside that environment. Tokens expire after five minutes and can be used once.</p>
+        <p className="muted">Run it in your terminal as the account running Supervisor. For Docker or a VM, run it inside that environment. Tokens expire after five minutes and can be used once.</p></div></details>
         <label htmlFor="access-token">Sign-in token</label>
         <input id="access-token" name="token" type="password" autoComplete="one-time-code" autoCapitalize="none" spellCheck={false} required maxLength={128} value={token} onChange={event => setToken(event.target.value)} />
         <button className="primary" type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
