@@ -149,13 +149,13 @@ function ChatSettings({ data, onDirtyChange }: { data: GuidanceSnapshot; onDirty
     <div className="save-bar">{dirty && <span>Unsaved chat exclusions</span>}<button className="primary" disabled={saving || !dirty} type="submit">{saving ? "Saving…" : "Save chat settings"}</button>{dirty && <button type="button" disabled={saving} onClick={() => {setForm(data.threadPolicy);setDirty(false);setMessage("");}}>Discard draft</button>}</div><p role="status">{message}</p>
   </form>;
 }
-function Settings({data, onDirtyChange}: {data: GuidanceSnapshot; onDirtyChange: (dirty: boolean) => void}) {
+function Settings({data, active, onDirtyChange}: {data: GuidanceSnapshot; active: boolean; onDirtyChange: (dirty: boolean) => void}) {
   const [controlRevision, setControlRevision] = useState(0);
   const [chatDirty, setChatDirty] = useState(false);
   const [masterActivity, setMasterActivity] = useState(idleControlActivity);
   const [definitionsActivity, setDefinitionsActivity] = useState(idleControlActivity);
   useEffect(() => onDirtyChange(chatDirty || masterActivity.busy || masterActivity.uncertain || definitionsActivity.busy || definitionsActivity.uncertain), [chatDirty, masterActivity, definitionsActivity, onDirtyChange]);
-  return <section className="stack"><div className="page-heading"><p className="kicker">Instance</p><h1>Settings</h1><p className="muted">Shared controls for this Supervisor installation.</p></div><SupervisionControlPanel onStateChange={setMasterActivity} onChanged={() => setControlRevision(value => value + 1)} /><GlobalDefinitionsControlPanel refreshKey={controlRevision} onStateChange={setDefinitionsActivity}/><ChatSettings data={data} onDirtyChange={setChatDirty}/>
+  return <section className="stack"><div className="page-heading"><p className="kicker">Instance</p><h1>Settings</h1><p className="muted">Shared controls for this Supervisor installation.</p></div><SupervisionControlPanel active={active} onStateChange={setMasterActivity} onChanged={() => setControlRevision(value => value + 1)} /><GlobalDefinitionsControlPanel active={active} refreshKey={controlRevision} onStateChange={setDefinitionsActivity}/><ChatSettings data={data} onDirtyChange={setChatDirty}/>
     <div className="panel stack"><h2>T3 connection</h2><p>{data.connected ? "Connected" : "Disconnected"} · Build: {data.serverVersion ?? "Unavailable"}</p><p>{data.coverage}</p>
       <details><summary>Advanced connection and editing details</summary><div className="stack"><h3>Project configuration editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .t3-supervisor/project.yaml in the selected working directory. Step and workflow definitions are read-only in the dashboard.</p>
       <p>Native dialogue can record plan proposals and agreement; those records do not prove step execution.</p></div></details>
@@ -167,7 +167,7 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
   const refresh = useAtomRefresh(snapshotAtom);
   const {route, navigate, guard} = useNavigation();
   const view = route.page;
-  useEffect(() => { document.title = `${route.projectId ? "Project" : route.page[0]!.toUpperCase() + route.page.slice(1)} · Supervisor`; document.getElementById("workspace")?.focus({preventScroll: true}); }, [route]);
+  useEffect(() => { document.title = `${route.projectId ? "Project" : route.page[0]!.toUpperCase() + route.page.slice(1)} · Supervisor`; }, [route]);
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsOpened, setSettingsOpened] = useState(view === "settings");
   useEffect(() => { if (view === "settings") setSettingsOpened(true); }, [view]);
@@ -228,7 +228,7 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
         <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} route={route} navigate={navigate} guard={guard} csrfToken={getCsrfToken()} onDirtyChange={setProjectDirty} onDraftTargetChange={setProjectDraftTarget}/></div>
         {view === "guide" && <StepsAndWorkflowsGuide />}
         {view === "activity" && <History items={data.activity} title="Supervision activity" />}
-        {settingsOpened && <div hidden={view !== "settings"}><Settings data={data} onDirtyChange={setSettingsDirty}/></div>}
+        {settingsOpened && <div hidden={view !== "settings"}><Settings data={data} active={view === "settings"} onDirtyChange={setSettingsDirty}/></div>}
       </main>
       <footer>Plans are records. Agreement is not execution.</footer>
     </div>

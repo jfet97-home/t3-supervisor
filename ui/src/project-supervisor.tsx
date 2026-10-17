@@ -784,7 +784,6 @@ export function ProjectSupervisorView({
       {snapshot.settings.pending && !snapshot.binding && <p role="status">The saved model selection will apply when T3 creates the Supervisor conversation for the first needed task.</p>}
       </div></details>
       <p>{snapshot.message}</p>
-      {snapshot.modelApplication?.pending && <p role="status">A model change is pending in T3.</p>}
       {!snapshot.available && <p role="status">Supervisor settings are currently unavailable.</p>}
     </div>
 
@@ -882,7 +881,7 @@ export function ProjectSupervisorView({
       <WorkflowProtocolDiagnosticView diagnostic={selectedTask.workflowProtocolDiagnostic} />
       <WorkflowProposalView workflow={selectedTask.workflow} proposalId={selectedTask.workflowProposalId} agreement={selectedTask.agreement} definitionReview={selectedTask.definitionReview} />
     </section>}
-    {!selectedTask && section === "plan" && <p className="panel muted">{snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>}
+    {!selectedTask && section === "plan" && <p className="panel muted">{!threadId ? "Select a main conversation to inspect its task and plan." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>}
     <div hidden={section !== "all" && section !== "progress"}>{workflowProgress && <WorkflowProgressPanel mainThreadId={snapshot.mainThreadId} connected={connected} progress={workflowProgress}
       onRefresh={onWorkflowProgressRefresh ?? (() => {})} onLoadMore={onWorkflowProgressLoadMore ?? (() => {})}/>}</div>
     <div hidden={section !== "all" && section !== "progress"}><ProjectSupervisorTeamPanel team={snapshot.team} settings={readTeamSettings(snapshot)} mainThreadId={snapshot.mainThreadId}/></div>
@@ -1300,7 +1299,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
 
   return <section className="stack project-supervisor" aria-labelledby="project-supervisor-title">
     <h2 id="project-supervisor-title" className="sr-only">Project Supervisor</h2>
-    <div hidden={section !== "all" && section !== "settings"}>{projectId && <SupervisionControlPanel key={projectId} projectId={projectId} onStateChange={setControlActivity} />}</div>
+    <div hidden={section !== "all" && section !== "settings"}>{projectId && <SupervisionControlPanel key={projectId} projectId={projectId} active={section === "settings" || section === "all"} onStateChange={setControlActivity} />}</div>
     {!projectId && <p className="panel muted">Select a project to manage its Supervisor settings.</p>}
     {projectId && !connected && <p className="panel" role="status">T3 is disconnected. Any unsaved Supervisor settings draft is kept.</p>}
     {projectId && connected && !activeSnapshot && isLoading && <p className="panel" role="status">Loading Supervisor settings…</p>}

@@ -112,6 +112,16 @@ export function RouteLink({to, navigate, children, ...props}: Omit<React.AnchorH
   return <a {...props} href={routeHref(to)} onClick={event => {
     props.onClick?.(event);
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    event.preventDefault(); navigate(to);
+    event.preventDefault();
+    const previous = parseRoute(window.location.hash);
+    navigate(to);
+    if (routeHref(parseRoute(window.location.hash)) !== routeHref(to)) return;
+    requestAnimationFrame(() => {
+      const pageChanged = previous.page !== to.page || previous.projectId !== to.projectId || !to.projectId;
+      const heading = pageChanged
+        ? [...document.querySelectorAll<HTMLElement>("#workspace h1")].find(element => !element.closest("[hidden]"))
+        : document.getElementById("project-section-heading");
+      if (heading) { heading.tabIndex = -1; heading.focus(); }
+    });
   }}>{children}</a>;
 }

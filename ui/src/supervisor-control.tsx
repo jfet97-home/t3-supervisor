@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Schema } from "effect";
 import { SupervisionControl, SupervisionControlResult, SupervisionSetupOptions, SupervisionSetupResult, GlobalDefinitionsControl, GlobalDefinitionsControlResult,
   type SupervisionControlInfo, type GlobalDefinitionsControlInfo, type SupervisionSetupInput } from "../../src/supervisor-control-contract.js";
@@ -31,7 +31,7 @@ export function SupervisionControlView({control, busy, blocked, message, onToggl
   </section>;
 }
 
-export function SupervisionControlPanel({projectId = null, onChanged, onStateChange}: {projectId?: string | null; onChanged?: () => void; onStateChange?: (activity: ControlActivity) => void}) {
+export function SupervisionControlPanel({projectId = null, onChanged, onStateChange, active = true}: {active?: boolean; projectId?: string | null; onChanged?: () => void; onStateChange?: (activity: ControlActivity) => void}) {
   const [control, setControl] = useState<SupervisionControlInfo | null>(null);
   const [readAt, setReadAt] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
@@ -42,6 +42,11 @@ export function SupervisionControlPanel({projectId = null, onChanged, onStateCha
   const [uncertain, setUncertain] = useState(false);
   const [setupActivity, setSetupActivity] = useState(idleControlActivity);
   useEffect(() => {onStateChange?.({busy: busy || setupActivity.busy, dirty: setupActivity.dirty, uncertain: uncertain || setupActivity.uncertain});}, [busy, uncertain, setupActivity, onStateChange]);
+  const wasActive = useRef(active);
+  useEffect(() => {
+    if (active && !wasActive.current && !busy && !uncertain && !setupRequested) setRevision(value => value + 1);
+    wasActive.current = active;
+  }, [active, busy, uncertain, setupRequested]);
   useEffect(() => {
     const abort = new AbortController();setControl(null);
     const query = projectId === null ? "" : `?${new URLSearchParams({projectId})}`;
@@ -176,7 +181,7 @@ export function GlobalDefinitionsControlView({control, busy, blocked, message, o
   </section>;
 }
 
-export function GlobalDefinitionsControlPanel({refreshKey = 0, onStateChange}: {refreshKey?: number; onStateChange?: (activity: ControlActivity) => void}) {
+export function GlobalDefinitionsControlPanel({refreshKey = 0, onStateChange, active = true}: {active?: boolean; refreshKey?: number; onStateChange?: (activity: ControlActivity) => void}) {
   const [control, setControl] = useState<GlobalDefinitionsControlInfo | null>(null);
   const [readAt, setReadAt] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
@@ -185,6 +190,11 @@ export function GlobalDefinitionsControlPanel({refreshKey = 0, onStateChange}: {
   const [revision, setRevision] = useState(0);
   const [uncertain, setUncertain] = useState(false);
   useEffect(() => {onStateChange?.({busy, dirty: false, uncertain});}, [busy, uncertain, onStateChange]);
+  const wasActive = useRef(active);
+  useEffect(() => {
+    if (active && !wasActive.current && !busy && !uncertain) setRevision(value => value + 1);
+    wasActive.current = active;
+  }, [active, busy, uncertain]);
   useEffect(() => {
     const abort = new AbortController();setControl(null);
     void fetch("/api/guidance/global-definitions-control", {credentials: "omit", headers: sessionHeaders(), signal: abort.signal})
