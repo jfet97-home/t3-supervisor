@@ -63,32 +63,6 @@ export interface Projection {
   [key: string]: unknown;
 }
 
-export interface RecapContext {
-  finalAnswer: string;
-  messages: Array<{role: string; text: string}>;
-  thread: ThreadInfo;
-  project: ProjectInfo | null;
-}
-
-export type JobState = "pending" | "ready" | "sending" | "sent" | "unknown";
-
-export interface Job {
-  id: string;
-  environmentId: string;
-  threadId: string;
-  runId: string;
-  deliveryKey: string;
-  state: JobState;
-  context: RecapContext | null;
-  text: string | null;
-  messageId: number | null;
-  attempts: number;
-  nextAttemptAt: number;
-  createdAt: number;
-  updatedAt: number;
-  error: string | null;
-}
-
 export interface SourceItem {
   stream: "active" | "archive";
   item: JsonRecord;
@@ -99,20 +73,10 @@ export interface SupervisorConfig {
   dataDirectory: string;
   t3Url: string;
   t3TokenFile: string;
-  mcpxUrl: string;
-  cxCommand: string;
-  cxHome: string;
-  cxSeedFile: string;
   excludedThreadIds: string[];
   threadPolicy?: import("./thread-policy.js").ThreadPolicyStore;
   healthPort: number;
-  modelTimeoutMs: number;
   helperProviderInstanceId?: string;
-  telegramEnabled?: boolean;
-  inputEnabled?: boolean;
-  inputTokenFile?: string;
-  inputPollMs?: number;
-  inputInteractiveThreadId?: string;
   uiPort?: number;
   uiHost?: string;
   workflowMcpHosts?: ReadonlyArray<string>;

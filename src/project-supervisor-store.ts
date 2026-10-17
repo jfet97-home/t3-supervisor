@@ -14,13 +14,14 @@ import type { ProposalContext } from "./supervisor-workflow.js";
 import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 
 export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "codex", model: "gpt-6-luna", options: [{id: "reasoningEffort", value: "high"}]};
+export const SUPERVISOR_ROOT_THREAD_PREFIX = "supervisor-root:";
 export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; teamSettings?: {maxHelpersPerRoot: number}; applyAttempts?: number; applicationMessage?: string | null};
 export type BindingRecord = SupervisorBinding & {mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string};
 export type SupervisorBaseline = {version?: 2; snapshotSequence: number; threads: Array<{id: string; latestRunId: string | null}>};
 export type SupervisionFolderPresence = {status: "present" | "missing" | "unavailable"; message?: string};
 export type TaskRecord = TaskInterpretationInfo & {id: string; sourceHash: string; agreementSourceHash?: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionSnapshot?: ProjectDefinitionSnapshot | null; definitionNoticeKey?: string; definitionReadAttempts?: number; revalidationAttempts?: number; workflowProtocolDiagnostic?: WorkflowProtocolDiagnostic | null};
 
-/** Loads permanent ownership before any notification or input worker starts. */
+/** Loads permanent root and helper ownership before supervision starts. */
 export const loadSupervisorOwnership = (directory: string): Set<string> => {
   const path = join(directory, "guidance.sqlite3");
   if (!existsSync(path)) return new Set();
@@ -32,11 +33,12 @@ export const loadSupervisorOwnership = (directory: string): Set<string> => {
 };
 export const isSupervisorThread = (config: SupervisorConfig, thread: {id: string; lineage: {parentThreadId: string | null; rootThreadId?: unknown}}): boolean => {
   const ids = config.supervisorOwnedThreadIds;
-  return Boolean(ids?.has(thread.id) || typeof thread.lineage.rootThreadId === "string" && ids?.has(thread.lineage.rootThreadId) ||
-    typeof thread.lineage.parentThreadId === "string" && ids?.has(thread.lineage.parentThreadId));
+  const supervisorId = (id: unknown): boolean => typeof id === "string" &&
+    (id.startsWith(SUPERVISOR_ROOT_THREAD_PREFIX) || ids?.has(id) === true);
+  return supervisorId(thread.id) || supervisorId(thread.lineage.rootThreadId) || supervisorId(thread.lineage.parentThreadId);
 };
 
-/** Adds supervision metadata to the existing private database without touching delivery ledgers. */
+/** Stores project supervision metadata alongside the existing service state. */
 export class ProjectSupervisorStore {
   readonly scopeCompatible: boolean;
   private readonly folderPresence = new Map<string, SupervisionFolderPresence>();
@@ -312,7 +314,7 @@ export class ProjectSupervisorStore {
     const value = this.store.transaction(() => {
       const old = this.binding(projectId, mainThreadId);if (old) return old;
       if (Number(this.store.db.prepare("SELECT count(*) AS n FROM supervisor_owned_threads").get()?.n) >= 1000) throw new Error("supervisor_capacity");
-      const binding: BindingRecord = {projectId, mainThreadId, threadId: randomUUID(), modelState: {...this.settings(projectId), modelSelection: selection, pending: false}, title: `Supervisor · ${title.slice(0,160)}`, generation: 1, enabledAt: now,
+      const binding: BindingRecord = {projectId, mainThreadId, threadId: `${SUPERVISOR_ROOT_THREAD_PREFIX}${randomUUID()}`, modelState: {...this.settings(projectId), modelSelection: selection, pending: false}, title: `Supervisor · ${title.slice(0,160)}`, generation: 1, enabledAt: now,
         enableAfterSequence: watermark, initialModel: selection, creationAttempts: 0, state: "creating"};
       this.store.db.prepare("INSERT INTO supervisor_owned_threads VALUES(?)").run(binding.threadId);
       this.store.db.prepare("INSERT INTO supervisor_main_bindings VALUES(?,?,?)").run(projectId, mainThreadId, JSON.stringify(binding));
@@ -325,7 +327,7 @@ export class ProjectSupervisorStore {
     if (binding.state !== "missing") throw new Error("supervisor_not_missing");
     const value = this.store.transaction(() => {
       if (Number(this.store.db.prepare("SELECT count(*) AS n FROM supervisor_owned_threads").get()?.n) >= 1000) throw new Error("supervisor_capacity");
-      const next: BindingRecord = {...binding, threadId: randomUUID(), generation: 1, initialModel: selection, modelState: {...this.settings(binding.projectId), modelSelection: selection, pending: false}, quietSince: null,  creationAttempts: 0, state: "creating"};
+      const next: BindingRecord = {...binding, threadId: `${SUPERVISOR_ROOT_THREAD_PREFIX}${randomUUID()}`, generation: 1, initialModel: selection, modelState: {...this.settings(binding.projectId), modelSelection: selection, pending: false}, quietSince: null,  creationAttempts: 0, state: "creating"};
       delete next.settlement;
       this.store.db.prepare("INSERT INTO supervisor_owned_threads VALUES(?)").run(next.threadId);this.setBinding(next);
       for (const task of this.tasks(binding.projectId)) {

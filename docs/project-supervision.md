@@ -254,14 +254,14 @@ budget and do not become confirmed success.
 
 Settings saves use generation checks. Drafts survive conflicts and connection or
 authentication failures; reauthentication never automatically repeats a rejected
-write. Existing private state, instance settings, ownership and unrelated Telegram
-history survive definition-format replacement. Old prototype plans are not valid
+write. Existing private state, instance settings, ownership and supervision history
+survive definition-format replacement. Old prototype plans are not valid
 new-format plans; no migration or broad state reset is required.
 
 Native frames, task inputs, prompt size, response size, queued/lifetime records,
 owned identities and workflow documents have explicit bounds. Overflow remains
 visible rather than truncating policy. Native chats use T3/provider context
-management; the separate optional recap worker is not the workflow Supervisor.
+management for project and workflow supervision.
 See [workflow MCP](workflow-mcp.md) for exact write authorization, size limits,
 receipts and mutable-plan history. Source tests, staged VM proof and actual service
 deployment are separate claims; current installed revisions belong in Lab tracking.

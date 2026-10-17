@@ -246,13 +246,8 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
     dataDirectory: directory,
     t3Url: "http://unused",
     t3TokenFile: "unused",
-    mcpxUrl: "http://unused",
-    cxCommand: "unused",
-    cxHome: directory,
-    cxSeedFile: "unused",
     excludedThreadIds: [],
     healthPort: 0,
-    modelTimeoutMs: 1000,
   };
   const source = {
     catalog: () => Effect.succeed({

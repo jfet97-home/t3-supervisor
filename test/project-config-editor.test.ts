@@ -136,8 +136,8 @@ test("project-configuration endpoint keeps session, origin and CSRF checks", asy
   seedProject(f);
   const editor = new ProjectConfigEditor(f.loader, f.writer);
   const config: SupervisorConfig = {
-    dataDirectory: directory, t3Url: "unused", t3TokenFile: "unused", mcpxUrl: "unused", cxCommand: "unused", cxHome: directory,
-    cxSeedFile: "unused", excludedThreadIds: [], healthPort: 0, modelTimeoutMs: 1000, uiPort: 0, uiHost: "127.0.0.1", uiAssetsDirectory: directory,
+    dataDirectory: directory, t3Url: "unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0,
+    uiPort: 0, uiHost: "127.0.0.1", uiAssetsDirectory: directory,
   };
   const ui = await startGuidanceUi(config, {} as GuidanceRuntime, f.loader, editor);
   try {

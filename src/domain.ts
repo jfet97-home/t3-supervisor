@@ -1,19 +1,13 @@
-import { createHash } from "node:crypto";
 import type {
   MessageInfo,
-  ProjectInfo,
   Projection,
-  RecapContext,
   RunInfo,
   ThreadInfo,
 } from "./types.js";
-import { timestampMs } from "./timestamp.js";
 export { timestampMs } from "./timestamp.js";
 
 const activeRunStates = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 const activeTaskStates = new Set(["pending", "running", "waiting"]);
-const maxContextChars = 60_000;
-const truncationMarker = "\n[content truncated]\n";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -123,9 +117,6 @@ const isMainRootNode = (
   return true;
 };
 
-const isMainRootAssistantMessage = (projection: Projection, run: RunInfo, message: MessageInfo, nodes: Map<string, Record<string, unknown>>): boolean =>
-  typeof message.nodeId === "string" && isMainRootNode(projection,run,message.nodeId,nodes,true);
-
 export const mainRunNodeReader = (projection: Projection, run: RunInfo) => {
   const nodes=nodeIndex(projection);
   return (nodeId:string): Record<string,unknown>|undefined =>
@@ -140,20 +131,6 @@ export const nativeUserMessageVisible = (projection: Projection, run: RunInfo, m
   return isRecord(root) && root.kind === "root_turn" && root.id === root.rootNodeId && root.threadId === projection.thread.id &&
     root.runId === run.id && (root.parentNodeId === null || root.parentNodeId === undefined) && root.status !== "rolled_back";
 };
-
-const hasFinalMessage = (
-  projection: Projection,
-  run: RunInfo,
-  nodes: Map<string, Record<string, unknown>>,
-): boolean => projection.messages.some((message) =>
-  message.runId === run.id &&
-  message.threadId === projection.thread.id &&
-  message.role === "assistant" &&
-  message.streaming !== true &&
-  typeof message.text === "string" &&
-  message.text.trim() !== "" &&
-  isMainRootAssistantMessage(projection, run, message, nodes)
-);
 
 const runIsBusy = (projection: Projection, run: RunInfo, shell?: Record<string, unknown>): boolean => {
   const nodes = nodeIndex(projection);
@@ -172,7 +149,7 @@ const runIsBusy = (projection: Projection, run: RunInfo, shell?: Record<string, 
       const owner = nodes.get(value[key]);
       if (typeof owner?.runId === "string") return owner.runId === run.id;
     }
-    // unscoped current thread state must not hold historical completions
+    // unscoped thread state only applies to the latest run
     return isLatest;
   };
   const thread = projection.thread;
@@ -225,7 +202,7 @@ const runIsBusy = (projection: Projection, run: RunInfo, shell?: Record<string, 
   return false;
 };
 
-/** Reuses completion's ongoing-work signals for an entire native conversation. */
+/** Checks native activity that can keep a conversation from being considered idle. */
 export const projectionHasOngoingWork = (projection: Projection, shell?: ThreadInfo): boolean => {
   if (projection.runs.some(run => activeRunStates.has(run.status))) return true;
   if (Array.isArray(projection.runtimeRequests) && projection.runtimeRequests.some(request => runtimeRequestMayBePending(projection, request))) return true;
@@ -238,296 +215,4 @@ export const projectionHasOngoingWork = (projection: Projection, shell?: ThreadI
     const delivery = isRecord(task.completionDelivery) ? task.completionDelivery : {};
     return activeTaskStates.has(String(task.status)) || delivery.state === "pending" || delivery.state === "claimed";
   });
-};
-
-const latestRootAnswer = (
-  projection: Projection,
-  run: RunInfo,
-  nodes: Map<string, Record<string, unknown>>,
-): MessageInfo | null => {
-  const answers = projection.messages.filter((message) =>
-    message.runId === run.id &&
-    message.threadId === projection.thread.id &&
-    message.role === "assistant" &&
-    message.streaming !== true &&
-    typeof message.text === "string" &&
-    message.text.trim() !== "" &&
-    isMainRootAssistantMessage(projection, run, message, nodes)
-  );
-  answers.sort((left, right) => {
-    const leftTime = timestampMs(left.updatedAt) ?? timestampMs(left.createdAt) ?? -Infinity;
-    const rightTime = timestampMs(right.updatedAt) ?? timestampMs(right.createdAt) ?? -Infinity;
-    return leftTime - rightTime;
-  });
-  return answers.at(-1) ?? null;
-};
-
-export const isMainThread = (thread: ThreadInfo): boolean =>
-  typeof thread.id === "string" &&
-  thread.id.length > 0 &&
-  !thread.deletedAt &&
-  thread.lineage?.relationshipToParent !== "subagent";
-
-export const eligibleRuns = (
-  projection: Projection,
-  activatedAt: number | string,
-  shell?: Record<string, unknown>,
-): RunInfo[] => {
-  if (!isMainThread(projection.thread)) return [];
-  const activation = timestampMs(activatedAt);
-  if (activation === null) return [];
-  const nodes = nodeIndex(projection);
-
-  return projection.runs
-    .filter((run) => {
-      if (run.threadId !== projection.thread.id || run.status !== "completed" || runIsBusy(projection, run, shell)) return false;
-      const completedAt = timestampMs(run.completedAt);
-      return completedAt !== null && completedAt > activation && hasFinalMessage(projection, run, nodes);
-    })
-    .sort((left, right) => {
-      const ordinalOrder = left.ordinal - right.ordinal;
-      if (ordinalOrder !== 0) return ordinalOrder;
-      return (timestampMs(left.completedAt) ?? 0) - (timestampMs(right.completedAt) ?? 0);
-    });
-};
-
-const takePrefix = (text: string, maxUnits: number): string => {
-  let units = 0;
-  let result = "";
-  for (const character of text) {
-    if (units + character.length > maxUnits) break;
-    result += character;
-    units += character.length;
-  }
-  return result;
-};
-
-const takeSuffix = (text: string, maxUnits: number): string => {
-  let units = 0;
-  let result = "";
-  for (const character of Array.from(text).reverse()) {
-    if (units + character.length > maxUnits) break;
-    result = character + result;
-    units += character.length;
-  }
-  return result;
-};
-
-export const boundedText = (text: string, maxUnits: number): string => {
-  if (text.length <= maxUnits) return text;
-  if (maxUnits <= truncationMarker.length + 1) return takePrefix(text, maxUnits);
-  const contentUnits = maxUnits - truncationMarker.length;
-  const headUnits = Math.floor(contentUnits / 3);
-  return takePrefix(text, headUnits) + truncationMarker + takeSuffix(text, contentUnits - headUnits);
-};
-
-const compactThread = (thread: ThreadInfo): ThreadInfo => ({
-  id: thread.id,
-  title: boundedText(typeof thread.title === "string" ? thread.title : "Untitled", 512),
-  projectId: typeof thread.projectId === "string" ? boundedText(thread.projectId, 256) : null,
-  lineage: {
-    parentThreadId: typeof thread.lineage?.parentThreadId === "string"
-      ? boundedText(thread.lineage.parentThreadId, 256)
-      : null,
-    relationshipToParent: typeof thread.lineage?.relationshipToParent === "string"
-      ? boundedText(thread.lineage.relationshipToParent, 128)
-      : null,
-    ...(typeof thread.lineage?.rootThreadId === "string"
-      ? { rootThreadId: boundedText(thread.lineage.rootThreadId, 256) }
-      : {}),
-  },
-});
-
-const compactProject = (project: ProjectInfo | null): ProjectInfo | null => project === null
-  ? null
-  : {
-      id: boundedText(project.id, 256),
-      title: boundedText(typeof project.title === "string" ? project.title : "Untitled", 512),
-      workspaceRoot: boundedText(typeof project.workspaceRoot === "string" ? project.workspaceRoot : "", 2_048),
-    };
-
-const currentTurnMessages = (
-  projection: Projection,
-  targetRun: RunInfo,
-  targetFinal: MessageInfo,
-): Array<{ role: string; text: string }> => {
-  const targetCompletedAt = timestampMs(targetRun.completedAt);
-  if (targetCompletedAt === null) return [];
-  const nodes = nodeIndex(projection);
-  const messages = projection.messages.flatMap((message, index) => {
-    if (
-      message === targetFinal ||
-      (message.runId !== targetRun.id && message.id !== targetRun.userMessageId) ||
-      message.threadId !== projection.thread.id ||
-      (message.role !== "user" && message.role !== "assistant") ||
-      message.streaming === true ||
-      typeof message.text !== "string" ||
-      message.text.trim() === ""
-    ) return [];
-
-    const createdAt = timestampMs(message.createdAt);
-    if (createdAt === null || createdAt > targetCompletedAt) return [];
-    if (message.role === "assistant" &&
-      !isMainRootAssistantMessage(projection, targetRun, message, nodes)) return [];
-    return [{
-      index,
-      createdAt,
-      value: { role: message.id.startsWith("supervisor-notice:") ? "supervisor_guidance" : message.role, text: message.text },
-    }];
-  });
-  return messages
-    .sort((left, right) => left.createdAt - right.createdAt || left.index - right.index)
-    .map(({ value }) => value);
-};
-
-export const buildContext = (
-  projection: Projection,
-  runId: string,
-  project: ProjectInfo | null,
-  maxChars = maxContextChars,
-): RecapContext => {
-  if (!Number.isInteger(maxChars) || maxChars < 512) throw new RangeError("context bound must be at least 512 characters");
-  const bound = Math.min(maxContextChars, maxChars);
-  if (typeof projection.thread.id !== "string" || projection.thread.id.length === 0 || projection.thread.id.length > 512) {
-    throw new Error("thread id is invalid");
-  }
-  const targetRun = projection.runs.find((run) =>
-    run.id === runId && run.threadId === projection.thread.id && run.status === "completed"
-  );
-  if (!targetRun) throw new Error("target run is not completed");
-  const final = latestRootAnswer(projection, targetRun, nodeIndex(projection));
-  if (!final) throw new Error("completed target has no final root assistant answer");
-
-  const earlier = currentTurnMessages(projection, targetRun, final);
-  const request = earlier.find((message) => message.role === "user");
-  const context: RecapContext = {
-    finalAnswer: "",
-    messages: [],
-    thread: compactThread(projection.thread),
-    project: compactProject(project),
-  };
-  const encode = (): string => JSON.stringify(context);
-  const metadataSize = encode().length;
-  if (metadataSize + 64 > bound) throw new RangeError("thread metadata exceeds context bound");
-  const requestBudget = Math.floor((bound - metadataSize - 64) / 3);
-  if (request) {
-    let text = boundedText(request.text, Math.min(12_000, requestBudget));
-    context.messages = [{ role: request.role, text }];
-    while (encode().length > metadataSize + requestBudget + 64 && text.length > 0) {
-      text = boundedText(text, Math.floor(text.length * 0.75));
-      context.messages = [{ role: request.role, text }];
-    }
-  }
-  context.finalAnswer = final.text;
-  if (encode().length > bound) {
-    const metadataSize = encode().length - context.finalAnswer.length;
-    const finalBudget = Math.max(0, bound - metadataSize - 32);
-    context.finalAnswer = boundedText(context.finalAnswer, finalBudget);
-  }
-  while (encode().length > bound && context.finalAnswer.length > 64) {
-    context.finalAnswer = boundedText(context.finalAnswer, Math.max(64, Math.floor(context.finalAnswer.length * 0.75)));
-  }
-  if (encode().length > bound) throw new RangeError("thread metadata exceeds context bound");
-
-  const retained = context.messages.map((message) => ({ index: earlier.indexOf(request!), ...message }));
-  const prioritized = [...earlier].reverse().filter((message) => message !== request);
-  for (const message of prioritized) {
-    const available = bound - encode().length - 160;
-    if (available < 64) break;
-    const text = boundedText(message.text, Math.min(12_000, available));
-    retained.push({ index: earlier.indexOf(message), role: message.role, text });
-    context.messages = [...retained].sort((left, right) => left.index - right.index).map(({ role, text }) => ({ role, text }));
-    if (encode().length > bound) {
-      retained.pop();
-      context.messages = [...retained].sort((left, right) => left.index - right.index).map(({ role, text }) => ({ role, text }));
-      break;
-    }
-  }
-  return context;
-};
-
-const safeName = (value: unknown): string => {
-  if (typeof value !== "string") return "Untitled";
-  const sanitized = value.replace(/[\p{C}]/gu, " ").replace(/\s+/gu, " ").trim();
-  if (sanitized === "") return "Untitled";
-  return boundedText(sanitized, 180);
-};
-
-export const utf16Length = (text: string): number => text.length;
-
-const formatHeader = (thread: ThreadInfo, project: ProjectInfo | null): string => {
-  const threadId = thread.id;
-  if (
-    typeof threadId !== "string" ||
-    threadId.length === 0 ||
-    threadId.length > 512 ||
-    /[\s\p{C}]/u.test(threadId)
-  ) throw new Error("thread id is invalid");
-
-  const header = [`Chat: ${safeName(thread.title)}`];
-  const projectTitle = project === null ? "" : safeName(project.title);
-  const workspaceRoot = typeof project?.workspaceRoot === "string" ? `${project.workspaceRoot}/` : "";
-  const scratchProject = workspaceRoot.includes("/.t3/scratch/");
-  if (projectTitle !== "" && projectTitle.toLowerCase() !== "no project" && !scratchProject) {
-    header.push(`Project: ${projectTitle}`);
-  }
-  header.push(`Thread: ${threadId}`);
-  return `${header.join("\n")}\n\n`;
-};
-
-export const telegramRouteUpdateId = (projection: Projection, run: RunInfo): number | null => {
-  const request = projection.messages.find((message) =>
-    message.id === run.userMessageId && message.role === "user" &&
-    message.threadId === projection.thread.id && message.nodeId === run.rootNodeId &&
-    (message.runId === run.id || message.runId === null)
-  );
-  if (!request || run.rootNodeId === null) return null;
-  const match = /^message:mcp:[a-f0-9-]+:thread-send:telegram-route-(0|[1-9][0-9]*)$/u.exec(request.id);
-  const updateId = match ? Number(match[1]) : NaN;
-  return Number.isSafeInteger(updateId) ? updateId : null;
-};
-
-export const formatReplyParts = (
-  projection: Projection, run: RunInfo, project: ProjectInfo | null,
-): string[] => {
-  const final = latestRootAnswer(projection, run, nodeIndex(projection));
-  if (!final || !final.text.trim() || final.text.length > 1_000_000) throw new Error("reply answer is missing or outside its storage bound");
-  const prefix = formatHeader(compactThread(projection.thread), compactProject(project));
-  const budget = 4_000 - prefix.length;
-  const parts: string[] = [];
-  let part = "";
-  for (const character of final.text) {
-    if (/^[\uD800-\uDFFF]$/u.test(character)) throw new Error("reply contains invalid Unicode");
-    if (part.length + character.length > budget) {
-      parts.push(prefix + part);
-      part = "";
-    }
-    part += character;
-  }
-  if (part) parts.push(prefix + part);
-  return parts;
-};
-
-export const formatMessage = (
-  thread: ThreadInfo,
-  project: ProjectInfo | null,
-  recap: string,
-): string => {
-  const words = recap.trim().split(/\s+/u).filter(Boolean).slice(0, 30);
-  if (words.length === 0) throw new Error("recap is empty");
-  const prefix = formatHeader(thread, project);
-  const budget = 4_000 - utf16Length(prefix);
-  const selected: string[] = [];
-  for (const word of words) {
-    const candidate = [...selected, word].join(" ");
-    if (utf16Length(candidate) > budget) break;
-    selected.push(word);
-  }
-  if (selected.length === 0) throw new Error("recap contains no word that fits the message limit");
-  return `${prefix}${selected.join(" ")}`;
-};
-
-export const deliveryKey = (environmentId: string, threadId: string, runId: string): string => {
-  const identity = JSON.stringify([environmentId, threadId, runId]);
-  return `t3-completion-${createHash("sha256").update(identity).digest("hex")}`;
 };

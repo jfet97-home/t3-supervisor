@@ -35,7 +35,7 @@ const meaningful = (value: string, max: number) =>
 export const fingerprint = (value: unknown): string =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-/** Owns guidance state; never mutates the existing Telegram ledgers. */
+/** Owns the retained dashboard activity and settings state. */
 export class GuidanceStore {
   readonly db: DatabaseSync;
   constructor(directory: string) {

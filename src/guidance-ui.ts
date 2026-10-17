@@ -14,7 +14,6 @@ import type { ProjectSupervisor } from "./project-supervisor.js";
 import type { WorkflowWriteController } from "./workflow-write-controller.js";
 import { parseWorkflowProgressPageQuery, readWorkflowProgressPage } from "./workflow-progress.js";
 import { createServiceAuth } from "./service-auth.js";
-import type { CompletionRecovery } from "./completion-recovery.js";
 
 export type WorkflowMcpEndpoint = {
   handle: (request: IncomingMessage, response: ServerResponse) => Promise<void>;
@@ -47,14 +46,11 @@ export const startGuidanceUi = async (
   supervision?: ProjectSupervisor,
   workflows?: WorkflowMcpEndpoint,
   workflowReader?: WorkflowWriteController,
-  completionRecovery?: CompletionRecovery,
 ) => {
   const mcpHosts = config.workflowMcpHosts ?? [];
   if (mcpHosts.some(host => !/^(?:[a-z0-9.-]+|\[[a-f0-9:]+\]):[0-9]{1,5}$/u.test(host)))
     throw new Error("Workflow MCP hosts must be exact host:port values.");
   await rm(join(config.dataDirectory, "ui-login-code"), { force: true });
-  const requireLegacy = () => {if (runtime.retired !== false) throw new Error("Legacy guidance rules are retired. Edit project definitions in Projects.");};
-  const legacyMessage = (fallback: string) => runtime.retired !== false ? "Legacy guidance rules are retired. Edit project definitions in Projects." : fallback;
   const handlers = HttpApiBuilder.group(SupervisorApi, "guidance", (h) =>
     h.handleAll({
       snapshot: () => Effect.promise(() => runtime.snapshot()),
@@ -116,143 +112,14 @@ export const startGuidanceUi = async (
         try: signal => editor ? editor.save(payload, signal) : Promise.resolve({status: "permission_required" as const, message: "Project editing needs a dedicated filesystem:read/filesystem:write credential through deployment setup.", definitions: null}),
         catch: () => new UiError({message: "The save outcome could not be confirmed. Refresh and inspect project.yaml before retrying."}),
       }),
-      saveRule: ({ payload }) =>
-        Effect.try({
-          try: () => {requireLegacy();return runtime.store.saveRule(payload);},
-          catch: () =>
-            new UiError({
-              message:
-                "Legacy guidance rules are retired, or the request changed. Use the project configuration editor in Projects.",
-            }),
-        }),
-      settings: ({ payload }) =>
-        Effect.try({
-          try: () => {
-            requireLegacy();
-            const previous=runtime.store.settings();
-            if (
-              payload.allowFollowupRace &&
-              (!previous.allowFollowupRace || payload.verifiedServerVersion!==previous.verifiedServerVersion) &&
-              (!runtime.descriptor ||
-                payload.verifiedServerVersion !==
-                  runtime.descriptor.serverVersion)
-            )
-              throw new Error("version_changed");
-            return runtime.store.saveSettings(payload);
-          },
-          catch: () =>
-            new UiError({
-              message:
-                legacyMessage("Settings invalid, T3 version changed or another tab saved first. Reload first."),
-            }),
-        }),
-      threadPolicy: ({ payload }) => Effect.tryPromise({
-        try: async () => {
+      threadPolicy: ({ payload }) => Effect.try({
+        try: () => {
           const policy = runtime.config.threadPolicy;
           if (!policy) throw new Error("Chat settings unavailable.");
-          if (payload.interactiveThreadId !== null && payload.interactiveThreadId !== policy.get().interactiveThreadId) {
-            const snapshot = await runtime.snapshot();
-            if (!snapshot.threads.some(t => t.id === payload.interactiveThreadId && t.available)) throw new Error("Choose an available ordinary chat.");
-          }
           return policy.save(payload);
         },
         catch: (cause) => new UiError({ message: cause instanceof Error ? cause.message : "Chat settings invalid. Reload first." }),
       }),
-      mute: ({ payload }) =>
-        Effect.try({
-          try: () =>
-            (requireLegacy(), runtime.store.mute(
-              payload.ruleId,
-              payload.scopeId,
-              payload.muted,
-              payload.expectedGeneration,
-            )),
-          catch: () =>
-            new UiError({
-              message: legacyMessage("Cannot change mute: reload the global rule first."),
-            }),
-        }),
-      classify: ({ payload }) =>
-        Effect.tryPromise({
-          try: async () => {
-            requireLegacy();
-            const snapshot = await runtime.snapshot();
-            if (
-              !snapshot.projects.some(
-                (p) => p.id === payload.projectId && p.available,
-              )
-            )
-              throw new Error("project_missing");
-            runtime.store.classify(
-              payload.projectId,
-              payload.classification,
-              payload.expectedGeneration,
-            );
-          },
-          catch: () =>
-            new UiError({
-              message: legacyMessage("Project unavailable or settings changed. Reload first."),
-            }),
-        }),
-      action: ({ payload }) =>
-        Effect.try({
-          try: () => {
-            requireLegacy();
-            const activity = runtime.store
-              .activities()
-              .find((a) => a.id === payload.id);
-            if (!activity?.threadId || !activity.ruleId)
-              throw new Error("activity_missing");
-            if (payload.action !== "feedback_wrong") {
-              if(activity.episodeEpoch===undefined || payload.expectedEpoch!==activity.episodeEpoch || payload.noticeId!==(activity.noticeId??null))throw new Error("activity_identity_changed");
-              runtime.store.reset(
-                activity.threadId,
-                activity.ruleId,
-                payload.action === "accept_uncertainty",
-                payload.expectedEpoch,
-                payload.noticeId,
-              );
-            }
-            runtime.store.record({
-              kind: "owner_action",
-              threadId: activity.threadId,
-              ruleId: activity.ruleId,
-              runId: activity.runId,
-              state: payload.action,
-              reason: "owner_requested",
-              detail: null,
-            });
-          },
-          catch: () =>
-            new UiError({
-              message:
-                legacyMessage("Cannot reset: the operation is unavailable, still in flight or requires accepting uncertainty."),
-            }),
-        }),
-      preview: ({ payload }) =>
-        Effect.tryPromise({
-          try: (signal) => {
-            requireLegacy();
-            if (
-              !payload.condition.trim() ||
-              !payload.evidence.trim() ||
-              payload.condition.length > 8000 ||
-              payload.evidence.length > 20_000
-            )
-              throw new Error("preview_invalid");
-            return runtime.model.decide(
-              payload.condition,
-              payload.evidence,
-              ["preview"],
-              AbortSignal.any([signal,AbortSignal.timeout(120_000)]),
-            );
-          },
-          catch: () =>
-            new UiError({
-              message:
-                legacyMessage("Preview unavailable. Check the evidence, model connection and monitoring budget."),
-            }),
-        }),
     }),
   );
   const routes = HttpApiBuilder.layer(SupervisorApi).pipe(
@@ -363,28 +230,6 @@ export const startGuidanceUi = async (
             "Content-Type": "application/json",
           });
           response.end(JSON.stringify({ csrf }));
-          return;
-        }
-        if (url.pathname === "/api/completion-gaps" && request.method === "GET") {
-          const gaps = runtime.source.completionGaps ? await Effect.runPromise(runtime.source.completionGaps()) : [];
-          const visible = [];
-          for (const gap of gaps) {
-            const thread = await Effect.runPromise(runtime.source.thread(gap.threadId));
-            visible.push({...gap, title: thread?.title ?? gap.threadId});
-          }
-          response.writeHead(200, {...headers, "Content-Type": "application/json"});
-          response.end(JSON.stringify({gaps: visible, recoveryAvailable: Boolean(completionRecovery)}));
-          return;
-        }
-        if (url.pathname === "/api/completion-recovery" && request.method === "POST") {
-          if (!completionRecovery) return reject(409, "Completion recovery is unavailable.");
-          let payload: unknown;
-          try {payload = JSON.parse(await body(request, 2048));} catch {return reject(400, "Invalid recovery request.");}
-          if (typeof payload !== "object" || payload === null || !("gapId" in payload) || !("threadId" in payload) ||
-            typeof payload.gapId !== "string" || typeof payload.threadId !== "string") return reject(400, "Choose a recorded history gap.");
-          const result = await completionRecovery.request({gapId: payload.gapId, threadId: payload.threadId}, AbortSignal.timeout(20_000));
-          response.writeHead(200, {...headers, "Content-Type": "application/json"});
-          response.end(JSON.stringify(result));
           return;
         }
         const input =

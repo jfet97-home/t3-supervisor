@@ -528,13 +528,8 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     dataDirectory: directory,
     t3Url: "http://localhost",
     t3TokenFile: "",
-    mcpxUrl: "http://localhost",
-    cxCommand: "",
-    cxHome: "",
-    cxSeedFile: "",
     excludedThreadIds: [],
     healthPort: 0,
-    modelTimeoutMs: 1,
     ...(options.helperProviderInstanceId ? {helperProviderInstanceId: options.helperProviderInstanceId} : {}),
   } satisfies SupervisorConfig;
   const modelConfig = {

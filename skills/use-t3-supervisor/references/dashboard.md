@@ -1,6 +1,6 @@
 # Dashboard workflows
 
-The current views are Projects, Guide, Activity, Recaps and Telegram, and Settings.
+The current views are Projects, Guide, Activity, and Settings.
 Projects is the default. Older Guidance rules screenshots describe retired UI.
 
 ## Sign in
@@ -158,18 +158,16 @@ route is chosen. T3 can turn a late child steer into a
 started delivery; if that happens, the Supervisor stops sending to the child,
 notifies the parent when relevant, and does not cancel the turn automatically.
 
-## History and chat settings
+## Activity and chat settings
 
-Activity displays retained earlier supervision records; Recaps and Telegram shows
-notification and questionnaire/cleanup records. Inspect an item and open its exact
-originating chat. Expired details are unavailable evidence, not reconstructed facts.
-Legacy reminders no longer evaluate, preview or send; old uncertain outcomes remain
-retained and read-only without reset or reconciliation controls.
+Activity displays retained native project-supervision records. Inspect an item and
+open its originating conversation. Expired details are unavailable evidence, not
+reconstructed facts.
 
-Settings → Chat settings controls excluded chats and the interactive Telegram chat.
-Changes apply live and persist in the instance state volume. Mac and Lima policies
-are independent. The interactive chat can answer questionnaires even when excluded
-from other notifications. The Telegram integration is completely optional.
+Settings → Chat settings controls excluded chats per instance. Changes apply live
+and persist in the instance state volume. Mac and Lima policies are independent.
+Project Supervisors skip excluded chats while preserving existing bindings and
+history.
 
 Select an operational conversation to inspect its workflow proposal. The nested
 plan preserves sequence/parallel structure, occurrence identity and provenance;

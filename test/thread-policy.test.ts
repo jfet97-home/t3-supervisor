@@ -5,17 +5,17 @@ import { join } from "node:path";
 import test from "node:test";
 import { ThreadPolicyStore } from "../src/thread-policy.js";
 
-test("chat policy persists and legacy deployment values never override a saved choice", async () => {
+test("excluded-thread policy persists and uses compare-and-swap generations", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-policy-"));
-  let store = new ThreadPolicyStore(directory, { excludedThreadIds: ["teams"], interactiveThreadId: "router" });
+  let store = new ThreadPolicyStore(directory, {excludedThreadIds: ["excluded"]});
   try {
     const previous = store.get();
-    const saved = store.save({ ...previous, excludedThreadIds: [], interactiveThreadId: null });
-    assert.throws(() => store.save(previous), /another tab/);
-    assert.throws(() => store.save({ ...saved, excludedThreadIds: ["invalid id"] }), /valid/);
-    assert.throws(() => store.save({ ...saved, excludedThreadIds: ["teams", "teams"] }), /unique/);
+    const saved = store.save({...previous, excludedThreadIds: []});
+    assert.throws(() => store.save(previous), /another tab/u);
+    assert.throws(() => store.save({...saved, excludedThreadIds: ["invalid id"]}), /valid/u);
+    assert.throws(() => store.save({...saved, excludedThreadIds: ["excluded", "excluded"]}), /unique/u);
     store.close();
-    store = new ThreadPolicyStore(directory, { excludedThreadIds: ["legacy"], interactiveThreadId: "legacy-router" });
+    store = new ThreadPolicyStore(directory, {excludedThreadIds: ["new-default"]});
     assert.deepEqual(store.get(), saved);
-  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally {store.close(); await rm(directory, {recursive: true, force: true});}
 });

@@ -21,7 +21,6 @@ import "./style.css";
 import { ProjectDefinitionsPanel } from "./project-definitions.js";
 import { StepsAndWorkflowsGuide } from "./steps-and-workflows-guide.js";
 import { SupervisionControlPanel, GlobalDefinitionsControlPanel } from "./supervisor-control.js";
-import { CompletionCoverage } from "./completion-coverage.js";
 
 const labels: Record<string, string> = {
   observe: "Observe only",
@@ -31,16 +30,12 @@ const labels: Record<string, string> = {
   no_match: "No match",
   needs_context: "Needs context",
   uncertain: "Delivery uncertain",
-  cleanup_uncertain: "Cleanup uncertain",
-  cleanup_expired: "Cleanup expired (not confirmed)",
-  deletion_unconfirmed_expired: "Deletion unconfirmed; 24-hour cleanup TTL expired",
   sent: "Confirmed sent",
   visible: "Visible in chat",
   accepted: "Accepted by T3",
   rejected: "Rejected",
   not_deliverable: "Not deliverable",
   delivered_later_run: "Delivered to a later run",
-  model_did_not_qualify_turn: "Luna did not qualify this turn for a recap",
 };
 const label = (value: string) => labels[value] ?? value.replaceAll("_", " ");
 function History({
@@ -59,9 +54,7 @@ function History({
       <div className="toolbar">
         <div>
           <h2>{title}</h2>
-          <p className="muted">
-            Decisions, delivery and cleanup are separate facts.
-          </p>
+          <p className="muted">Recorded activity is retained as evidence.</p>
         </div>
         <label className="search">
           Filter activity
@@ -95,10 +88,7 @@ function History({
             </article>
           ))}
         {items.length === 0 && (
-          <p className="muted">
-            No retained activity yet. Older skipped recap reasons are
-            unavailable.
-          </p>
+          <p className="muted">No retained activity yet.</p>
         )}
       </div>
       <dialog ref={dialog} aria-labelledby="detail-title">
@@ -136,7 +126,6 @@ function ChatSettings({ data }: { data: GuidanceSnapshot }) {
   const refresh = useAtomRefresh(snapshotAtom);
   useEffect(() => { if (!dirty) setForm(data.threadPolicy); }, [data.threadPolicy, dirty]);
   const chats = [...data.threads, ...form.excludedThreadIds.filter(id => !data.threads.some(t => t.id === id)).map(id => ({ id, title: "Unavailable chat", available: false }))];
-  if (form.interactiveThreadId && !chats.some(t => t.id === form.interactiveThreadId)) chats.push({ id: form.interactiveThreadId, title: "Unavailable chat", available: false });
   const change = (patch: Partial<typeof form>) => { setForm({ ...form, ...patch }); setDirty(true); setMessage(""); };
   return <form className="panel stack" method="post" onSubmit={async event => {
     event.preventDefault(); setSaving(true);
@@ -146,15 +135,8 @@ function ChatSettings({ data }: { data: GuidanceSnapshot }) {
   }}>
     <h3>Chat settings</h3>
     <p>Saved for this Supervisor instance. Changes apply without restarting.</p>
-    <div className="field"><label htmlFor="interactive-chat">Interactive Telegram chat</label>
-      <select id="interactive-chat" name="interactiveThreadId" value={form.interactiveThreadId ?? ""} onChange={e => change({ interactiveThreadId: e.target.value || null })}>
-        <option value="">None</option>
-        {chats.map(t => <option key={t.id} value={t.id} disabled={!t.available && t.id !== form.interactiveThreadId}>{t.title} — {t.id}</option>)}
-      </select>
-      <small>The selected chat can answer questionnaires through Telegram even when excluded below. Other eligible chats receive plain input-needed notices.</small>
-    </div>
     <fieldset><legend>Excluded chats</legend>
-      <p>Suppress new completion recaps, forwarded answers, guidance and input-needed notices. Existing delivery records are preserved.</p>
+      <p>Project Supervisors skip excluded chats. Existing project, workflow and conversation state is retained.</p>
       <label htmlFor="chat-search">Find a chat</label><input id="chat-search" name="chatSearch" type="search" value={query} onChange={e => setQuery(e.target.value)} />
       <div className="chat-options">{chats.filter(t => `${t.title} ${t.id}`.toLowerCase().includes(query.toLowerCase())).sort((a,b) => a.title.localeCompare(b.title)).map(t => <label className="toggle" key={t.id}>
         <input type="checkbox" name="excludedThreadIds" value={t.id} checked={form.excludedThreadIds.includes(t.id)} onChange={e => change({ excludedThreadIds: e.target.checked ? [...form.excludedThreadIds, t.id] : form.excludedThreadIds.filter(id => id !== t.id) })} />
@@ -170,7 +152,7 @@ function Settings({data}: {data: GuidanceSnapshot}) {
   return <section className="stack"><h2>Supervisor settings</h2><SupervisionControlPanel onChanged={() => setControlRevision(value => value + 1)} /><GlobalDefinitionsControlPanel refreshKey={controlRevision} /><ChatSettings data={data}/>
     <div className="panel stack"><h3>T3 connection</h3><p>{data.connected ? "Connected" : "Disconnected"} · Build: {data.serverVersion ?? "Unavailable"}</p><p>{data.coverage}</p>
       <h3>Project configuration editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .t3-supervisor/project.yaml in the selected working directory. Step and workflow definitions are read-only in the dashboard.</p>
-      <p>Legacy reminders are retired. Their history is retained; uncertain deliveries are not retried or resolved automatically. Native dialogue can record plan proposals and agreement; those records do not prove step execution.</p>
+      <p>Native dialogue can record plan proposals and agreement; those records do not prove step execution.</p>
     </div></section>;
 }
 function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
@@ -231,13 +213,13 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
         {data.projects.filter((p) => p.available).length} projects
       </div>
       <nav aria-label="Supervisor sections">
-        {["projects", "guide", "activity", "telegram", "settings"].map((name) => (
+        {["projects", "guide", "activity", "settings"].map((name) => (
           <button
             key={name}
             aria-current={view === name ? "page" : undefined}
             onClick={() => navigate(name)}
           >
-            {name === "telegram" ? "Recaps & Telegram" : name === "guide" ? "Guide" : name[0]!.toUpperCase() + name.slice(1)}
+            {name === "guide" ? "Guide" : name[0]!.toUpperCase() + name.slice(1)}
           </button>
         ))}
       </nav>
@@ -245,9 +227,6 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
       {view === "guide" && <StepsAndWorkflowsGuide />}
       {view === "activity" && (
         <History items={data.activity} title="Supervision activity" />
-      )}
-      {view === "telegram" && (
-        <><CompletionCoverage /><History items={data.history} title="Recaps & Telegram" /></>
       )}
       {view === "settings" && <Settings data={data} />}
       <footer>

@@ -23,24 +23,6 @@ export interface T3ProjectionSnapshot extends JsonRecord {
   projection: Projection;
 }
 
-export interface T3BoundedCompletionProjection extends Projection {
-  nodes: JsonRecord[];
-  runtimeRequests: JsonRecord[];
-  turnItems: JsonRecord[];
-  subagents: JsonRecord[];
-  providerThreads: NonNullable<Projection["providerThreads"]>;
-}
-
-export interface T3BoundedCompletionSnapshot extends JsonRecord {
-  snapshotSequence: number;
-  schemaVersion?: 2;
-  projection: T3BoundedCompletionProjection;
-  historyCursor: string | null;
-  hasMoreHistory: boolean;
-  latestLocalTurnOrdinal: number | null;
-  payloadBudgetExceeded: boolean;
-}
-
 export type T3TransportErrorCode = "response_too_large";
 
 export class T3TransportError extends Error {
@@ -59,7 +41,6 @@ export class T3TransportError extends Error {
 export interface T3ClientShape {
   descriptor(): Effect.Effect<T3EnvironmentDescriptor, T3TransportError>;
   projection(threadId: string): Effect.Effect<T3ProjectionSnapshot, T3TransportError>;
-  boundedCompletionProjection?(threadId: string): Effect.Effect<T3BoundedCompletionSnapshot, T3TransportError>;
   watch<E = never, R = never>(
     cursor: number | undefined,
     onItem: (item: SourceItem) => Effect.Effect<void, E, R>
@@ -88,9 +69,6 @@ type ResumeFrame = (effect: Effect.Effect<WebSocketFrame, T3TransportError>) => 
 
 const isRecord = (value: unknown): value is JsonRecord =>
   typeof value === "object" && value !== null && !Array.isArray(value);
-
-const isRecordArray = (value: unknown): value is JsonRecord[] =>
-  Array.isArray(value) && value.every(isRecord);
 
 const isString = (value: unknown): value is string => typeof value === "string";
 
@@ -525,41 +503,6 @@ const makeProjectionSnapshot = (value: unknown, threadId: string): T3ProjectionS
   return value as T3ProjectionSnapshot;
 };
 
-const makeBoundedCompletionSnapshot = (
-  value: unknown,
-  threadId: string
-): T3BoundedCompletionSnapshot | undefined => {
-  if (!isRecord(value) ||
-    !isSequence(value.snapshotSequence) ||
-    (value.schemaVersion !== undefined && value.schemaVersion !== ORCHESTRATION_PROTOCOL) ||
-    !isProjection(value.projection, threadId) ||
-    typeof value.hasMoreHistory !== "boolean" ||
-    !isStringOrNull(value.historyCursor) ||
-    (value.hasMoreHistory ? !isNonEmptyString(value.historyCursor) : value.historyCursor !== null) ||
-    !(value.latestLocalTurnOrdinal === null || isSequence(value.latestLocalTurnOrdinal)) ||
-    typeof value.payloadBudgetExceeded !== "boolean" ||
-    (value.turnItemsOmitLocalVisible !== undefined && value.turnItemsOmitLocalVisible !== false)) return undefined;
-
-  const projection = value.projection as Projection;
-  for (const field of ["nodes", "runtimeRequests", "turnItems", "subagents", "providerThreads"] as const) {
-    if (!isRecordArray(projection[field])) return undefined;
-  }
-
-  const turnItems = projection.turnItems;
-  if (!isRecordArray(turnItems)) return undefined;
-  let latestIncludedOrdinal: number | null = null;
-  for (const item of turnItems) {
-    if (!isSequence(item.ordinal)) return undefined;
-    latestIncludedOrdinal = latestIncludedOrdinal === null
-      ? item.ordinal
-      : Math.max(latestIncludedOrdinal, item.ordinal);
-  }
-  if (latestIncludedOrdinal !== null &&
-    (value.latestLocalTurnOrdinal === null || value.latestLocalTurnOrdinal < latestIncludedOrdinal)) return undefined;
-
-  return value as T3BoundedCompletionSnapshot;
-};
-
 const makeService = (options: T3ClientOptions): T3ClientShape => {
   const baseUrl = new URL(options.baseUrl);
   if (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") {
@@ -651,18 +594,6 @@ const makeService = (options: T3ClientOptions): T3ClientShape => {
         })
       );
     },
-    boundedCompletionProjection: (threadId) => {
-      if (!isNonEmptyString(threadId)) return Effect.fail(new T3TransportError("T3 thread id must not be empty"));
-      const path = `/api/orchestration/threads/${encodeURIComponent(threadId)}/bounded`;
-      return getJson(path, "bounded completion projection", true).pipe(
-        Effect.flatMap((value) => {
-          const snapshot = makeBoundedCompletionSnapshot(value, threadId);
-          return snapshot === undefined
-            ? Effect.fail(new T3TransportError("T3 bounded completion projection has an unsupported schema or shape"))
-            : Effect.succeed(snapshot);
-        })
-      );
-    },
     watch<E = never, R = never>(
       cursor: number | undefined,
       onItem: (item: SourceItem) => Effect.Effect<void, E, R>
@@ -683,7 +614,6 @@ const makeService = (options: T3ClientOptions): T3ClientShape => {
 
         const activePayload: JsonRecord = {
           ...(cursor === undefined ? {} : { afterSequence: cursor }),
-          requestCompletionMarker: true
         };
         yield* sendWebSocketFrame(socket, {
           _tag: "Request",

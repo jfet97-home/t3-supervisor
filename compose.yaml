@@ -15,17 +15,8 @@ services:
     environment:
       T3_URL: http://host.docker.internal:3773
       T3_TOKEN_FILE: /run/secrets/t3-read-token
-      TELEGRAM_ENABLED: "${TELEGRAM_ENABLED:-false}"
-      INPUT_ENABLED: "${INPUT_ENABLED:-false}"
-      T3_INPUT_TOKEN_FILE: /run/secrets/t3-input-token
-      INPUT_POLL_MS: "1000"
-      MCPX_URL: http://mcpx:9000/mcp/lazy
       DATA_DIRECTORY: /data
-      CX_COMMAND: /usr/local/bin/cx
-      CX_HOME: /data/runtime-auth
-      CX_SEED_FILE: /run/secrets/codex-auth.json
       HEALTH_PORT: "9007"
-      MODEL_TIMEOUT_MS: "360000"
       UI_PORT: "9008"
       UI_HOST: "0.0.0.0"
       WORKFLOW_MCP_HOSTS: "${WORKFLOW_MCP_HOSTS:-t3-supervisor:9008}"

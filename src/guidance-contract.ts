@@ -82,41 +82,10 @@ export const Snapshot = Schema.Struct({
   rules: Schema.Array(Rule),
   mutes: Schema.Array(Schema.Struct({ ruleId: Text, scopeId: Text })),
   activity: Schema.Array(Activity),
-  history: Schema.Array(Activity),
   coverage: Text,
   tokensUsed: Schema.Number,
 });
 export type GuidanceSnapshot = typeof Snapshot.Type;
-export const Decision = Schema.Struct({
-  verdict: Schema.Literals(["match", "no_match", "needs_context"]),
-  evidenceIds: Schema.Array(Text),
-  reason: Text,
-  phase: Schema.Literals(["same", "resolved", "new"]),
-  objectId: NullableText,
-});
-export type GuidanceDecision = typeof Decision.Type;
-export const PreviewInput = Schema.Struct({
-  condition: Text,
-  message: Text,
-  evidence: Text,
-});
-export const ActionInput = Schema.Struct({
-  id: Text,
-  noticeId: NullableText,
-  expectedEpoch: Schema.Number,
-  action: Schema.Literals(["reset", "accept_uncertainty", "feedback_wrong"]),
-});
-export const ClassificationInput = Schema.Struct({
-  projectId: Text,
-  classification: Schema.Literals(["project", "scratch"]),
-  expectedGeneration: Schema.Number,
-});
-export const MuteInput = Schema.Struct({
-  ruleId: Text,
-  scopeId: Text,
-  muted: Schema.Boolean,
-  expectedGeneration: Schema.Number,
-});
 export class UiError extends Schema.TaggedError<UiError>()(
   "UiError",
   { message: Text },
@@ -174,37 +143,7 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
         success: ProjectConfigSaveResult,
         error: UiError,
       }),
-      HttpApiEndpoint.post("saveRule", "/rules", {
-        payload: RuleInput,
-        success: Rule,
-        error: UiError,
-      }),
-      HttpApiEndpoint.post("settings", "/settings", {
-        payload: Settings,
-        success: Settings,
-        error: UiError,
-      }),
       HttpApiEndpoint.post("threadPolicy", "/thread-policy", { payload: ThreadPolicy, success: ThreadPolicy, error: UiError }),
-      HttpApiEndpoint.post("mute", "/mute", {
-        payload: MuteInput,
-        success: Schema.Void,
-        error: UiError,
-      }),
-      HttpApiEndpoint.post("classify", "/classify", {
-        payload: ClassificationInput,
-        success: Schema.Void,
-        error: UiError,
-      }),
-      HttpApiEndpoint.post("action", "/action", {
-        payload: ActionInput,
-        success: Schema.Void,
-        error: UiError,
-      }),
-      HttpApiEndpoint.post("preview", "/preview", {
-        payload: PreviewInput,
-        success: Decision,
-        error: UiError,
-      }),
     )
     .prefix("/api/guidance"),
 );

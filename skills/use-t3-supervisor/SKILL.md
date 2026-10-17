@@ -114,8 +114,7 @@ Verified terminal changes receive priority without waiting for age/count thresho
 while retaining cooldown and current assignment checks. The same observed terminal
 version does not repeatedly wake its Supervisor. Fresh resolved/expired/cancelled
 owner requests clear matching stale waiting hints; missing evidence remains unknown. Saved changes apply on the next check. There is no
-pause-monitoring mode. Supervisors run through T3; optional Telegram recaps use a
-separate worker/authentication scope.
+pause-monitoring mode. All Project Supervisor conversations run through T3.
 
 An initial proposal waits in the existing Supervisor ready state while the main is
 preparing, starting or otherwise not ready for steering; `running` alone does not
@@ -183,21 +182,14 @@ correct the indicated field; it changes no saved state or authority. Helper moni
 activityRefs provide exact item-only or message-only navigation pairs. Copy those
 pairs unchanged and omit optional run IDs; never normalize encoded identifiers.
 
-Activity and Recaps and Telegram retain history. Under Recaps & Telegram,
-Recent completion coverage lists oversized chats whose recent window cannot
-establish older completions. Ordinary chats keep their complete reader. A coverage
-gap does not mean the current connection is broken or prove a notification was lost.
-Ask chat for recovery update is an explicit optional action: it asks for a fresh,
-short recap of work already requested in that chat. Pending owner decisions and
-ambiguous activity defer it. Accepted delivery does not recover old notifications
-or resolve the historical gap. One request is retained per chat; uncertain results
-can only be checked, never resent. A fresh response follows the normal notification
-policy and is not a promise of Telegram delivery.
+Activity retains native project-supervision records. Inspect an item and open its
+originating conversation when you need the underlying context. Expired details are
+unavailable evidence and are not reconstructed.
 
-Settings stores chat
-exclusions and optional interactive Telegram selection per instance. Preserve
-uncertain sends/receipts; questionnaires use their native answer path, not ordinary
-messages. Idle scopes may settle and later reuse the same Supervisor; deletion,
+Settings → Chat settings controls excluded chats per instance. Changes apply live
+and persist across restarts; the Mac and Lima settings are independent. Project
+Supervisors skip excluded chats while preserving their existing bindings and
+history. Idle scopes may settle and later reuse the same Supervisor; deletion,
 archive, failed reads and settlement are distinct. Retry native access reconciles
 original identities, never resets state. Report actual saved/live evidence and any
 unverified limit; acceptance, plan status and execution remain separate facts.

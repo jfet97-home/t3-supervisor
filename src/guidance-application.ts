@@ -1,7 +1,7 @@
 import {SupervisorTeamController} from "./supervisor-team-controller.js";
 import { Effect } from "effect";
 import { GuidanceStore } from "./guidance-store.js";
-import { GuidanceRuntime, makeGuidanceModel } from "./guidance.js";
+import { GuidanceRuntime } from "./guidance.js";
 import { startGuidanceUi } from "./guidance-ui.js";
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
@@ -18,9 +18,6 @@ import { makeSupervisorRpc, readSupervisorBaseline, readSupervisorThreads, recor
 import { makeGitProbe } from "./git-probe.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
 import { createWorkflowMcpEndpoint } from "./workflow-mcp.js";
-import { CompletionRecovery } from "./completion-recovery.js";
-import { currentThreadPolicy } from "./thread-policy.js";
-import { isSupervisorThread } from "./project-supervisor-store.js";
 
 export const runGuidanceApplication = (
   config: SupervisorConfig,
@@ -37,8 +34,6 @@ export const runGuidanceApplication = (
       config,
       store,
       source,
-      t3,
-      makeGuidanceModel(config, store),
     );
     runtime.descriptor = yield* t3.descriptor();
     store.bind(runtime.descriptor.environmentId);
@@ -77,22 +72,6 @@ export const runGuidanceApplication = (
     });
     const editor = projectWriter ? new ProjectConfigEditor(definitions, projectWriter, (snapshot, expectedRevision) => supervisionStore.recordDefinitionUserSave(snapshot, expectedRevision)) : undefined;
     const operateToken = config.guidanceTokenFile && existsSync(config.guidanceTokenFile) ? yield* Effect.tryPromise(() => readFile(config.guidanceTokenFile!, "utf8")) : "";
-    const completionRecovery = operateToken.trim() && t3.boundedCompletionProjection && source.completionGap &&
-      source.reserveCompletionRecovery && source.finishCompletionRecovery ? new CompletionRecovery({
-        readProjection: async (threadId, signal) => (await Effect.runPromise(t3.boundedCompletionProjection!(threadId), {signal})).projection,
-        nativeRpc: makeSupervisorRpc(config.t3Url, operateToken.trim()),
-        operations: {
-          findByGapId: async gapId => (await Effect.runPromise(source.completionGap!(gapId)))?.recovery ?? null,
-          reserveOnce: operation => Effect.runPromise(source.reserveCompletionRecovery!(operation)),
-          finish: (gapId, commandId, outcome) => Effect.runPromise(source.finishCompletionRecovery!(gapId, commandId, outcome)),
-        },
-        isGapActionable: async (gapId, threadId) => (await Effect.runPromise(source.completionGap!(gapId)))?.threadId === threadId,
-        isThreadAllowed: async threadId => {
-          if (!config.telegramEnabled || currentThreadPolicy(config).excludedThreadIds.includes(threadId)) return false;
-          const thread = await Effect.runPromise(source.thread(threadId));
-          return thread !== null && !isSupervisorThread(config, thread);
-        },
-      }) : undefined;
     const readRpc = makeSupervisorRpc(config.t3Url, readToken.trim());
     const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, readRpc,
       operateToken.trim() ? makeSupervisorRpc(config.t3Url, operateToken.trim()) : null, readSupervisorBaseline(config.t3Url, readToken.trim()), definitions);
@@ -116,9 +95,8 @@ export const runGuidanceApplication = (
     const teamController = new SupervisorTeamController(workflowReader, supervision.team, supervision.operateRpc, supervision.conversation.requests);
     supervision.teamEffects = teamController;
     const workflows = createWorkflowMcpEndpoint(workflowReader, teamController);
-    runtime.retired = true;
     yield* Effect.acquireRelease(
-      Effect.promise(() => startGuidanceUi(config, runtime, definitions, editor, supervision, workflows, workflowReader, completionRecovery)),
+      Effect.promise(() => startGuidanceUi(config, runtime, definitions, editor, supervision, workflows, workflowReader)),
       (ui) => Effect.promise(() => ui.close()),
     );
     yield* Effect.sync(onReady);
@@ -134,15 +112,14 @@ export const runGuidanceApplication = (
         store.prune();
         runtime.connected = true;
         runtime.lastCycleAt = Date.now();
-        runtime.coverage = runtime.sendingReason();
+        runtime.coverage = "Native project and workflow supervision is active.";
       },
       catch: () => new Error("monitor_cycle_failed"),
     }).pipe(
       Effect.catch(() =>
         Effect.sync(() => {
           runtime.connected = false;
-          runtime.coverage =
-            "T3 connection unavailable. Project editing needs a working T3 connection.";
+          runtime.coverage = "T3 connection unavailable. Project editing needs a working T3 connection.";
         }),
       ),
       Effect.andThen(Effect.sleep("5 seconds")),

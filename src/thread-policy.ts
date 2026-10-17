@@ -7,7 +7,7 @@ import type { SupervisorConfig } from "./types.js";
 import { ThreadPolicy, type ThreadPolicySettings } from "./thread-policy-contract.js";
 const validId = (id: string) => id.length > 0 && id.length <= 512 && !/[\s\x00-\x1f\x7f]/u.test(id);
 
-/** Persists instance-specific chat policy independently of delivery ledgers. */
+/** Persists instance-specific excluded-thread policy. */
 export class ThreadPolicyStore {
   private readonly db: DatabaseSync;
   constructor(directory: string, seed: Omit<ThreadPolicySettings, "generation">) {
@@ -24,8 +24,8 @@ export class ThreadPolicyStore {
   }
   save(input: ThreadPolicySettings): ThreadPolicySettings {
     if (!Number.isSafeInteger(input.generation) || input.excludedThreadIds.length > 500 ||
-      !input.excludedThreadIds.every(validId) || new Set(input.excludedThreadIds).size !== input.excludedThreadIds.length ||
-      (input.interactiveThreadId !== null && !validId(input.interactiveThreadId))) throw new Error("Choose valid, unique chat IDs.");
+      !input.excludedThreadIds.every(validId) || new Set(input.excludedThreadIds).size !== input.excludedThreadIds.length)
+      throw new Error("Choose valid, unique chat IDs.");
     const next = { ...input, generation: input.generation + 1 };
     const updated = this.db.prepare("UPDATE settings SET document=? WHERE id=1 AND json_extract(document,'$.generation')=?").run(JSON.stringify(next), input.generation);
     if (!updated.changes) throw new Error("Chat settings changed in another tab. Reload first.");
@@ -33,5 +33,5 @@ export class ThreadPolicyStore {
   }
 }
 export const currentThreadPolicy = (config: SupervisorConfig): ThreadPolicySettings => config.threadPolicy?.get() ?? {
-  generation: 0, excludedThreadIds: config.excludedThreadIds, interactiveThreadId: config.inputInteractiveThreadId ?? null,
+  generation: 0, excludedThreadIds: config.excludedThreadIds,
 };

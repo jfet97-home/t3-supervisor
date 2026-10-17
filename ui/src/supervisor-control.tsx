@@ -18,7 +18,7 @@ export function SupervisionControlView({control, busy, blocked, message, onToggl
     <p><strong>{control.enabled ? "Enabled" : "Disabled"}</strong>{!global && control.enabled && !control.globallyEnabled ? " — global supervision is off" : ""}</p>
     <p>{global ? "The master switch controls semantic supervision across every project and starts enabled." : "This project is supervised only when both its switch and the master switch are enabled. An existing .t3-supervisor folder enables a project initially; your manual choice is remembered."}</p>
     {!global && <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>}
-    <p>Disabling stops new supervisory work. An already-running model turn may finish. Chats, settings and history are retained. Telegram settings are separate.</p>
+    <p>Disabling stops new supervisory work. An already-running model turn may finish. Chats, settings and recorded history are retained.</p>
     <div className="row">
       <button type="button" disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable supervision" : "Enable supervision"}</button>
       <button type="button" disabled={busy} onClick={onReload}>Reload status</button>
