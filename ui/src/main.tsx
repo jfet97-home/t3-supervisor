@@ -1,4 +1,4 @@
-import { clearAccess, setSessionToken, sessionHeaders } from "./access.js";
+import { clearAccess, getSessionToken, restoreTabSession, setSessionToken, watchSession } from "./access.js";
 import { useEffect, useState, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -241,25 +241,35 @@ function App() {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const accessCheck = useRef(0);
   const connect = async () => {
+    const check = ++accessCheck.current;
     const authenticated = await loadAccess();
-    setReady(authenticated);
-    if (authenticated) setOpened(true);
+    if (check === accessCheck.current) {
+      setReady(authenticated);
+      if (authenticated) setOpened(true);
+    }
     return authenticated;
   };
   useEffect(() => {
     let active = true;
-    void loadAccess()
-      .then(value => { if (active) { setReady(value); setOpened(value); } })
-      .catch(() => { if (active) { setReady(false); setError("Could not reach Supervisor. Try again."); } });
-    const expired = () => { setReady(false); };
+    const refresh = () => {
+      if (!getSessionToken()) { ++accessCheck.current; setReady(false); return; }
+      void connect().catch(() => { if (active) { setReady(false); setError("Could not reach Supervisor. Try again."); } });
+    };
+    try { restoreTabSession(); refresh(); }
+    catch (error) { setReady(false); setError(error instanceof Error ? error.message : "Could not restore sign-in."); }
+    const stopWatching = watchSession(refresh);
+    const expired = () => { ++accessCheck.current; setReady(false); };
     window.addEventListener("supervisor-auth-required", expired);
-    return () => { active = false; window.removeEventListener("supervisor-auth-required", expired); };
+    return () => { active = false; ++accessCheck.current; stopWatching(); window.removeEventListener("supervisor-auth-required", expired); };
   }, []);
   const signOut = async () => {
-    const response = await fetch("/auth/logout", {method: "POST", credentials: "omit", headers: {"Content-Type": "application/json", ...sessionHeaders()}, body: "{}"});
+    const session = getSessionToken();
+    const response = await fetch("/auth/logout", {method: "POST", credentials: "omit", headers: {"Content-Type": "application/json", "x-supervisor-session": session}, body: "{}"});
     if (!response.ok) throw new Error("Sign out unavailable.");
-    clearAccess(); setOpened(false); setReady(false); setToken(""); setError("");
+    ++accessCheck.current;
+    clearAccess(session); setOpened(false); setReady(false); setToken(""); setError("");
   };
   return <>
     {opened && <div hidden={!ready}><Dashboard onSignOut={signOut} /></div>}
@@ -275,11 +285,12 @@ function App() {
           setSessionToken(payload.session);
           setToken("");
           if (!(await connect())) setError("Sign-in could not be confirmed. Try again.");
-        } catch { setError("Could not reach Supervisor. Try again."); }
+        } catch (error) { setError(error instanceof Error && error.message.startsWith("Your browser blocked") ? error.message : "Could not reach Supervisor. Try again."); }
         finally { setBusy(false); }
       }}>
         <h2>{opened ? "Sign in again" : "Sign in"}</h2>
         {opened && <p>Your open draft is kept in this tab.</p>}
+        <p>Stay signed in for 30 days on this browser, until you sign out.</p>
         <p className="muted">Use a one-time token from the machine running Supervisor.</p><details><summary>How to get a sign-in token</summary><div className="stack"><p>Generate a sign-in token on the machine running T3 Supervisor:</p>
         <pre><code>t3-supervisor auth forge</code></pre>
         <p className="muted">Run it in your terminal as the account running Supervisor. For Docker or a VM, run it inside that environment. Tokens expire after five minutes and can be used once.</p></div></details>

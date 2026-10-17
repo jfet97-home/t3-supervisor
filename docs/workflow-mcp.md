@@ -274,9 +274,13 @@ The service and forge command require its current two-table schema. Login consum
 the grant and saves the session in one transaction; a failed session write rolls
 back grant consumption too. A successful grant cannot be reused.
 
-Sessions retain their original eight-hour deadline across service restarts and
-deployments. Only hashes and issue/expiry times are stored; the browser keeps the
-raw session in origin-scoped sessionStorage. Sign out durably revokes the session
+New sessions last 30 days and retain their original deadline across service restarts
+and deployments. Existing shorter sessions keep their original deadline. Only hashes
+and issue/expiry times are stored; the browser keeps the
+raw session in origin-scoped localStorage, shared across tabs and browser restarts.
+Mac and forwarded VM ports remain separate origins. Storage changes synchronize
+sign-in and sign-out across tabs without replaying writes; open drafts stay in their
+tab. Sign out durably revokes the session
 across service instances and restarts. Only the service initializes a missing
 auth database, with both tables together. Existing malformed or obsolete schemas
 fail closed and are never overwritten, migrated or recreated automatically.

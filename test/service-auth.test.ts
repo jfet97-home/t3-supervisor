@@ -201,7 +201,7 @@ test("service auth persists a private workflow token and stores only hashed one-
       assert.equal(storedSession?.token_hash === createHash("sha256").update(session).digest("hex"), true);
       assert.equal(storedSession?.token_hash === session, false);
       assert.equal(storedSession?.issued_at, now);
-      assert.equal(storedSession?.expires_at, now + 8 * 60 * 60 * 1_000);
+      assert.equal(storedSession?.expires_at, now + 30 * 24 * 60 * 60 * 1_000);
       auth.close();
       assert.equal(auth.authenticated(session), false);
       assert.equal(auth.mcpAuthorized(`Bearer ${workflowToken}`), false);
@@ -236,7 +236,7 @@ test("grants and sessions persist across reopen without renewing their original 
       assert.equal(auth.authenticated(session), false);
       currentTime = 1_000 - 60_000;
       assert.equal(auth.authenticated(session), true);
-      currentTime = 1_000 + 8 * 60 * 60 * 1_000 - 1;
+      currentTime = 1_000 + 30 * 24 * 60 * 60 * 1_000 - 1;
       assert.equal(auth.authenticated(session), true);
       currentTime += 1;
       assert.equal(auth.authenticated(session), false);
@@ -267,6 +267,28 @@ test("a committed session survives an abrupt child-process exit and a grant cann
   });
 });
 
+test("retained shorter sessions keep their original deadline after the login lifetime changes", async () => {
+  await withTemporaryDirectory(async directory => {
+    let currentTime = 1_000;
+    let auth = await createServiceAuth(directory, {now: () => currentTime});
+    const grant = await forgeDashboardToken(directory, {now: () => currentTime});
+    const session = auth.login(grant.token);
+    assert.ok(session);
+    auth.close();
+    const database = new DatabaseSync(databasePath(directory));
+    database.prepare("UPDATE dashboard_login_sessions SET expires_at=?").run(currentTime + 8 * 60 * 60 * 1_000);
+    database.close();
+    const before = sessionRows(directory);
+    auth = await createServiceAuth(directory, {now: () => currentTime});
+    try {
+      assert.equal(auth.authenticated(session), true);
+      assert.deepEqual(sessionRows(directory), before);
+      currentTime += 8 * 60 * 60 * 1_000;
+      assert.equal(auth.authenticated(session), false);
+    } finally { auth.close(); }
+  });
+});
+
 test("SQLite recovers a hot session journal after SIGKILL without losing committed sessions", async () => {
   await withTemporaryDirectory(async (directory) => {
     let currentTime = 3_000;
@@ -288,7 +310,7 @@ test("SQLite recovers a hot session journal after SIGKILL without losing committ
       database.prepare("INSERT INTO dashboard_login_sessions(token_hash,issued_at,expires_at) VALUES(?,?,?)").run(
         payload.hash,
         payload.issuedAt,
-        payload.issuedAt + 8 * 60 * 60 * 1_000,
+        payload.issuedAt + 30 * 24 * 60 * 60 * 1_000,
       );
       process.stdout.write("ready\\n");
       setInterval(() => {}, 1_000);
@@ -370,7 +392,7 @@ test("grant and session tables share one database", async () => {
 
 test("failed login rolls back grant consumption, expiry pruning and session eviction", async () => {
   await withTemporaryDirectory(async (directory) => {
-    const sessionTtl = 8 * 60 * 60 * 1_000;
+    const sessionTtl = 30 * 24 * 60 * 60 * 1_000;
     const currentTime = 50_000_000;
     const auth = await createServiceAuth(directory, {now: () => currentTime});
     const expiredHash = createHash("sha256").update("expired-session-fixture").digest("hex");
@@ -454,7 +476,7 @@ test("logout revokes across open instances and durable sessions keep a global st
       assert.equal(typeof revoked, "string");
       if (expires === null || revoked === null) throw new Error("valid dashboard grant was rejected");
 
-      currentTime += 8 * 60 * 60 * 1_000 - 1;
+      currentTime += 30 * 24 * 60 * 60 * 1_000 - 1;
       assert.equal(auth.authenticated(expires), true);
       currentTime += 1;
       assert.equal(auth.authenticated(expires), false);
@@ -740,7 +762,7 @@ test("unexpected session table schemas and row caps fail closed", async (t) => {
       const insert = database.prepare("INSERT INTO dashboard_login_sessions(token_hash,issued_at,expires_at) VALUES(?,?,?)");
       for (let index = 0; index < 33; index += 1) {
         const hash = createHash("sha256").update(`fixture-${index}`).digest("hex");
-        insert.run(hash, 1_000 + index, 1_000 + index + 8 * 60 * 60 * 1_000);
+        insert.run(hash, 1_000 + index, 1_000 + index + 30 * 24 * 60 * 60 * 1_000);
       }
       database.close();
       await assert.rejects(createServiceAuth(directory));
@@ -748,7 +770,7 @@ test("unexpected session table schemas and row caps fail closed", async (t) => {
     });
   });
 
-  await t.test("SQLite rejects sessions without the exact eight-hour lifetime", async () => {
+  await t.test("SQLite rejects nonpositive sessions and lifetimes beyond 30 days", async () => {
     await withTemporaryDirectory(async (directory) => {
       const auth = await createServiceAuth(directory);
       auth.close();
@@ -756,7 +778,10 @@ test("unexpected session table schemas and row caps fail closed", async (t) => {
       const hash = createHash("sha256").update("short-lived-session").digest("hex");
       assert.throws(() => database.prepare(
         "INSERT INTO dashboard_login_sessions(token_hash,issued_at,expires_at) VALUES(?,?,?)",
-      ).run(hash, 1_000, 1_000 + 8 * 60 * 60 * 1_000 - 1));
+      ).run(hash, 1_000, 1_000 + 30 * 24 * 60 * 60 * 1_000 + 1));
+      assert.throws(() => database.prepare(
+        "INSERT INTO dashboard_login_sessions(token_hash,issued_at,expires_at) VALUES(?,?,?)",
+      ).run(hash, 1_000, 1_000));
       database.close();
       assert.equal(sessionRows(directory).length, 0);
     });

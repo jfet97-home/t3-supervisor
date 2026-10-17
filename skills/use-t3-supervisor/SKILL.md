@@ -18,7 +18,7 @@ page. The displayed `t3-supervisor auth forge` command runs in the actual servic
 environment with matching state. Ordinary dashboard usage does not provision
 credentials, expose ports or change deployment.
 
-Five-minute grants produce an eight-hour origin-scoped session. Restart preserves
+Five-minute grants produce a 30-day origin-scoped browser session. Restart preserves
 its original expiry; Sign out revokes it. Expiry retains drafts and sign-in never
 replays a rejected mutation. Inspect uncertain outcomes before another write.
 

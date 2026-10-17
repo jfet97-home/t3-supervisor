@@ -11,7 +11,7 @@ const HASH_PATTERN = /^[a-f0-9]{64}$/;
 const ACCESS_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const GRANT_TTL_MS = 5 * 60 * 1_000;
-const SESSION_TTL_MS = 8 * 60 * 60 * 1_000;
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const CLOCK_ROLLBACK_TOLERANCE_MS = 60_000;
 const MAX_PENDING_GRANTS = 32;
 const MAX_SESSIONS = 32;
@@ -31,7 +31,7 @@ const SESSION_TABLE_SCHEMA =
   "CREATE TABLE dashboard_login_sessions (\n" +
   "        token_hash TEXT PRIMARY KEY NOT NULL CHECK(length(token_hash)=64),\n" +
   "        issued_at INTEGER NOT NULL,\n" +
-  "        expires_at INTEGER NOT NULL CHECK(expires_at - issued_at = " + SESSION_TTL_MS + ")\n" +
+  "        expires_at INTEGER NOT NULL CHECK(expires_at > issued_at AND expires_at - issued_at <= " + SESSION_TTL_MS + ")\n" +
   "      ) STRICT";
 
 export interface ServiceAuthOptions {
@@ -238,7 +238,7 @@ const validateTableSchema = (database: DatabaseSync, tableName: string, schema: 
   })) throw authError(tableName + " table");
 };
 
-const validateRows = (database: DatabaseSync, tableName: string, maxRows: number, fixedTtl?: number): void => {
+const validateRows = (database: DatabaseSync, tableName: string, maxRows: number, maxTtl?: number): void => {
   const countRow = database.prepare("SELECT COUNT(*) AS count FROM " + tableName).get() as Record<string, unknown> | undefined;
   const count = countRow?.count;
   if (typeof count !== "number" || !Number.isSafeInteger(count) || count > maxRows) {
@@ -250,7 +250,7 @@ const validateRows = (database: DatabaseSync, tableName: string, maxRows: number
     typeof row.issued_at !== "number" || !Number.isSafeInteger(row.issued_at) ||
     typeof row.expires_at !== "number" || !Number.isSafeInteger(row.expires_at) ||
     row.expires_at <= row.issued_at ||
-    (fixedTtl !== undefined && row.expires_at - row.issued_at !== fixedTtl)
+    (maxTtl !== undefined && row.expires_at - row.issued_at > maxTtl)
   )) throw authError(tableName + " rows");
 };
 

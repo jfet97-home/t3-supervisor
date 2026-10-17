@@ -1,15 +1,40 @@
 let csrf = "";
 export const getCsrfToken = () => csrf;
 const sessionKey = "supervisor-session";
-export const getSessionToken = () => typeof sessionStorage === "undefined" ? "" : sessionStorage.getItem(sessionKey) ?? "";
-export const setSessionToken = (session: string) => { sessionStorage.setItem(sessionKey, session); };
+export const getSessionToken = () => {
+  try { return localStorage.getItem(sessionKey) ?? ""; } catch { return ""; }
+};
+export const setSessionToken = (session: string) => {
+  try { localStorage.setItem(sessionKey, session); }
+  catch { throw new Error("Your browser blocked saved sign-in. Allow site storage for Supervisor and try again."); }
+};
+export const restoreTabSession = () => {
+  const previous = sessionStorage.getItem(sessionKey);
+  if (!getSessionToken() && previous) setSessionToken(previous);
+  sessionStorage.removeItem(sessionKey);
+};
+export const watchSession = (changed: () => void) => {
+  const listener = (event: StorageEvent) => {
+    if (event.storageArea === localStorage && (event.key === sessionKey || event.key === null)) {
+      csrf = "";
+      changed();
+    }
+  };
+  window.addEventListener("storage", listener);
+  return () => window.removeEventListener("storage", listener);
+};
 export const sessionHeaders = () => ({"x-supervisor-session": getSessionToken()});
 
 export const loadAccess = async (): Promise<boolean> => {
-  const response = await fetch("/api/csrf", {credentials: "omit", headers: sessionHeaders()});
+  const session = getSessionToken();
+  const response = await fetch("/api/csrf", {credentials: "omit", headers: {"x-supervisor-session": session}});
+  if (session !== getSessionToken()) return false;
   if (!response.ok) {
     csrf = "";
-    if (response.status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event("supervisor-auth-required"));
+    if (response.status === 401 && typeof window !== "undefined") {
+      clearAccess(session);
+      window.dispatchEvent(new Event("supervisor-auth-required"));
+    }
     return false;
   }
   const value: unknown = await response.json();
@@ -18,4 +43,9 @@ export const loadAccess = async (): Promise<boolean> => {
   return true;
 };
 
-export const clearAccess = () => { csrf = ""; if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(sessionKey); };
+export const clearAccess = (expectedSession = getSessionToken()) => {
+  csrf = "";
+  if (getSessionToken() === expectedSession) {
+    try { localStorage.removeItem(sessionKey); } catch { /* storage can be blocked */ }
+  }
+};
