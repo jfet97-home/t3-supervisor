@@ -43,6 +43,7 @@ nested under `input`: `{action:"apply", ...locatorBases.workflow_write_apply,
 input:{operationId, workflowId, expectedRevision, note, plan}}`. The `workflowId`
 and `expectedRevision` come from a fresh child read, and `note` is required. Omit
 `sourceBinding`, `requirements` and `issues` so the service supplies trusted context.
+For a new local step, use this structural shape inside the plan and choose task-specific content: `{kind:'sequence',nodes:[{kind:'step',definitionId:null,localId:'local-check',name:'Check child result',description:'...',reason:'...',status:'planned'}]}`. Omit `nodeId` so the service allocates it, and preserve actual returned `nodeId` values in later edits. For new local steps, omit `templatePath` and never copy a parent's `templatePath` into another child plan; this does not apply to genuine named-workflow expansion.
 Guide and report need fresh action-specific content, so their locator bases are not
 callable payloads. Each new mutation gets a unique operation ID; reuse one only to
 retry the exact same arguments after an uncertain result.

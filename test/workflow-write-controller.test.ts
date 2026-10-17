@@ -1889,12 +1889,28 @@ test("a ready helper links and plans a completed unarchived assigned child using
     assert.deepEqual(await controller.write(archivedLink), {status: "denied", operationId: "archived-helper-link",
       reason: "child_not_current_native_descendant"});
 
+    const childStep = {kind: "step" as const, definitionId: null, localId: "check-child-output", name: "Check the child output",
+      description: "Review the completed operational result.", reason: "Review the completed operational result.", status: "planned" as const};
+    const missingDefinitionIdPlan = {...authority, action: "apply", input: {
+      operationId: "helper-child-plan-missing-definition-id", workflowId: doc.workflowId, expectedRevision: doc.revision,
+      status: "planned", objective: "Complete the assigned child contribution.",
+      plan: sequencePlan([{kind: "step" as const, localId: childStep.localId, name: childStep.name, description: childStep.description,
+        reason: childStep.reason, status: childStep.status}]),
+      note: "Keep this personal plan in the assigned child document.",
+    }};
+    installEvidence(actorFixture, missingDefinitionIdPlan);
+    const missingDefinitionIdResult = await controller.write(missingDefinitionIdPlan);
+    assert.equal(missingDefinitionIdResult.status, "invalid");
+    if (!("reason" in missingDefinitionIdResult)) throw new Error("missing_definition_id_reason_missing");
+    assert.equal(missingDefinitionIdResult.reason, "pinned_definition_context_mismatch");
+    assert.equal(f.workflows.get(f.projectId, f.mainThreadId, child.id)?.revision, doc.revision,
+      "a local step without explicit definitionId: null cannot mutate the child document");
+
     const childPlan = {...authority, action: "apply", input: {
       operationId: "helper-child-plan", workflowId: doc.workflowId, expectedRevision: doc.revision,
       status: "planned", objective: "Complete the assigned child contribution.",
-      plan: sequencePlan([localStep("Check the child output", "Review the completed operational result.")]),
-      note: "Keep this personal plan in the assigned child document.", sourceBinding: f.sourceBinding,
-      requirements: [], issues: f.proposal.issues,
+      plan: sequencePlan([childStep]),
+      note: "Keep this personal plan in the assigned child document.",
     }};
     installEvidence(actorFixture, childPlan);
     const applied = await controller.write(childPlan);
