@@ -14,6 +14,7 @@ import type { ProjectSupervisor } from "./project-supervisor.js";
 import type { WorkflowWriteController } from "./workflow-write-controller.js";
 import { parseWorkflowProgressPageQuery, readWorkflowProgressPage } from "./workflow-progress.js";
 import { createServiceAuth } from "./service-auth.js";
+import type { CompletionRecovery } from "./completion-recovery.js";
 
 export type WorkflowMcpEndpoint = {
   handle: (request: IncomingMessage, response: ServerResponse) => Promise<void>;
@@ -46,6 +47,7 @@ export const startGuidanceUi = async (
   supervision?: ProjectSupervisor,
   workflows?: WorkflowMcpEndpoint,
   workflowReader?: WorkflowWriteController,
+  completionRecovery?: CompletionRecovery,
 ) => {
   const mcpHosts = config.workflowMcpHosts ?? [];
   if (mcpHosts.some(host => !/^(?:[a-z0-9.-]+|\[[a-f0-9:]+\]):[0-9]{1,5}$/u.test(host)))
@@ -361,6 +363,28 @@ export const startGuidanceUi = async (
             "Content-Type": "application/json",
           });
           response.end(JSON.stringify({ csrf }));
+          return;
+        }
+        if (url.pathname === "/api/completion-gaps" && request.method === "GET") {
+          const gaps = runtime.source.completionGaps ? await Effect.runPromise(runtime.source.completionGaps()) : [];
+          const visible = [];
+          for (const gap of gaps) {
+            const thread = await Effect.runPromise(runtime.source.thread(gap.threadId));
+            visible.push({...gap, title: thread?.title ?? gap.threadId});
+          }
+          response.writeHead(200, {...headers, "Content-Type": "application/json"});
+          response.end(JSON.stringify({gaps: visible, recoveryAvailable: Boolean(completionRecovery)}));
+          return;
+        }
+        if (url.pathname === "/api/completion-recovery" && request.method === "POST") {
+          if (!completionRecovery) return reject(409, "Completion recovery is unavailable.");
+          let payload: unknown;
+          try {payload = JSON.parse(await body(request, 2048));} catch {return reject(400, "Invalid recovery request.");}
+          if (typeof payload !== "object" || payload === null || !("gapId" in payload) || !("threadId" in payload) ||
+            typeof payload.gapId !== "string" || typeof payload.threadId !== "string") return reject(400, "Choose a recorded history gap.");
+          const result = await completionRecovery.request({gapId: payload.gapId, threadId: payload.threadId}, AbortSignal.timeout(20_000));
+          response.writeHead(200, {...headers, "Content-Type": "application/json"});
+          response.end(JSON.stringify(result));
           return;
         }
         const input =

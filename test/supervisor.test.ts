@@ -7,7 +7,7 @@ import { Effect, Layer } from "effect";
 import { Recapper } from "../src/recap.js";
 import { Store, makeStore } from "../src/store.js";
 import { createStatus, readiness, refreshTelegramStatus, runSupervisor } from "../src/supervisor.js";
-import { T3Client, type T3ClientShape } from "../src/t3.js";
+import { T3Client, T3TransportError, type T3ClientShape } from "../src/t3.js";
 import { TelegramClient, type DeliveryStatus } from "../src/telegram.js";
 import type { Projection, SupervisorConfig, ThreadInfo } from "../src/types.js";
 
@@ -36,12 +36,15 @@ for (const mode of ["normal", "settling", "rejected", "skipped", "continued", "t
       if (mode === "resumed") yield* Effect.sleep("200 millis");
       return { environmentId: "environment-test", orchestrationProtocolVersion: 2, serverVersion: "test" };
     }),
-    projection: (threadId) => Effect.sync(() => {
+    projection: () => Effect.fail(new T3TransportError("full history must not be read for completion")),
+    boundedCompletionProjection: (threadId) => Effect.sync(() => {
       fetched.push(threadId);
       projectionReads += 1;
-      return { snapshotSequence: 1, projection: mode === "settling" && projectionReads === 1
-        ? { ...projection, subagents: [{ status: "completed", completionDelivery: { state: "claimed" } }] }
-        : projection };
+      const completeProjection = {...projection, nodes: projection.nodes as Array<Record<string, unknown>>,
+        runtimeRequests: [], turnItems: projection.turnItems ?? [], subagents: [], providerThreads: []};
+      return { snapshotSequence: 1, historyCursor: null, hasMoreHistory: false, latestLocalTurnOrdinal: null, payloadBudgetExceeded: false, projection: mode === "settling" && projectionReads === 1
+        ? { ...completeProjection, subagents: [{ status: "completed", completionDelivery: { state: "claimed" } }] }
+        : completeProjection };
     }),
     watch: (_cursor, onItem) => Effect.gen(function* () {
       const completedAt = new Date(Date.now() + 100).toISOString();
@@ -57,16 +60,16 @@ for (const mode of ["normal", "settling", "rejected", "skipped", "continued", "t
           { id: "root", kind: "root_turn", threadId: thread.id, runId: "run", rootNodeId: "root", parentNodeId: null, providerThreadId: "provider", status: "completed" },
           { id: "answer-node", kind: "assistant_message", threadId: thread.id, runId: "run", rootNodeId: "root", parentNodeId: "root", providerThreadId: "provider", status: "completed" },
         ],
-        runs: [{ id: "run", threadId: thread.id, providerThreadId: "provider", ordinal: 1, status: "completed", requestedAt: completedAt, startedAt: completedAt, completedAt, rootNodeId: "root" }],
-        messages: [{ id: "answer", threadId: thread.id, runId: "run", nodeId: "answer-node", role: "assistant", text: "Configured restart unless stopped; the service works.", streaming: false, createdAt: completedAt, updatedAt: completedAt }],
+        runs: [{ id: "run", threadId: thread.id, providerThreadId: "provider", ordinal: 1, status: "completed", requestedAt: completedAt, startedAt: completedAt, completedAt, rootNodeId: "root", userMessageId: "request" }],
+        messages: [{ id: "request", threadId: thread.id, runId: "run", nodeId: "root", role: "user", text: "Configure restart behavior and verify the service.", streaming: false, createdAt: completedAt, updatedAt: completedAt }, { id: "answer", threadId: thread.id, runId: "run", nodeId: "answer-node", role: "assistant", text: "Configured restart unless stopped; the service works.", streaming: false, createdAt: completedAt, updatedAt: completedAt }],
       };
       if (mode === "telegram") {
         const requestId = "message:mcp:90d829bb-aada-40db-b243-797c00ac8f36:thread-send:telegram-route-135456335";
         projection.runs[0]!.userMessageId = requestId;
-        projection.messages.unshift({
+        projection.messages[0] = {
           id: requestId, threadId: thread.id, runId: "run", nodeId: "root", role: "user", text: "Just confirm?",
           streaming: false, createdAt: completedAt, updatedAt: completedAt,
-        });
+        };
         projection.messages[1]!.text = "Yes, exactly. " + "Every word stays in the original answer. ".repeat(10);
       }
       if (mode === "continued") {

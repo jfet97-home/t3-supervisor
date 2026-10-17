@@ -12,6 +12,9 @@ import type {
   ThreadInfo,
 } from "./types.js";
 import type { GuidanceActivity } from "./guidance-contract.js";
+import { createHash } from "node:crypto";
+import type { CompletionGap, CompletionGapReason } from "./completion-gap.js";
+import type { CompletionRecoveryOperation } from "./completion-recovery.js";
 
 const maxDatabasePages = 16_384;
 const maxHints = 20_000;
@@ -48,6 +51,7 @@ export interface ThreadHint {
 }
 
 export interface StoreStats {
+  completionCoverageGaps?: number;
   projects: number;
   threads: number;
   dirtyHints: number;
@@ -62,6 +66,11 @@ export type SafeDueState = Extract<JobState, "pending" | "ready" | "unknown">;
 export type HintDeferKind = "failure" | "settling";
 
 export interface StoreShape {
+  recordCompletionGap?(threadId: string, reason: CompletionGapReason, runId: string | null, now: number): Effect.Effect<CompletionGap, StoreError>;
+  completionGaps?(): Effect.Effect<CompletionGap[], StoreError>;
+  completionGap?(id: string): Effect.Effect<CompletionGap | null, StoreError>;
+  reserveCompletionRecovery?(operation: CompletionRecoveryOperation): Effect.Effect<{operation: CompletionRecoveryOperation; created: boolean}, StoreError>;
+  finishCompletionRecovery?(gapId: string, commandId: string, outcome: Pick<CompletionRecoveryOperation, "state" | "sequence" | "updatedAt">): Effect.Effect<void, StoreError>;
   catalog(): Effect.Effect<{ projects: Array<{ project: ProjectInfo; available: boolean }>; threads: ThreadInfo[] }, StoreError>;
   history(): Effect.Effect<GuidanceActivity[], StoreError>;
   activate(environmentId: string, now: number): Effect.Effect<number, StoreError>;
@@ -239,6 +248,11 @@ const secureFiles = (databasePath: string): void => {
 };
 
 const schema = `
+  CREATE TABLE IF NOT EXISTS completion_gaps (
+    id TEXT PRIMARY KEY, thread_id TEXT NOT NULL UNIQUE, run_id TEXT,
+    reason TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+    recovery TEXT
+  );
   CREATE TABLE IF NOT EXISTS recap_audit (
     id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,run_id TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL
   );
@@ -346,6 +360,64 @@ class SqliteStore implements StoreShape {
     secureFiles(this.databasePath);
     this.db.close();
   };
+
+  private readCompletionGap(row: Record<string, unknown>): CompletionGap {
+    return {id: String(row.id), threadId: String(row.thread_id), runId: rowString(row, "run_id"),
+      reason: String(row.reason) as CompletionGapReason, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
+      recovery: row.recovery === null ? null : JSON.parse(String(row.recovery)) as CompletionRecoveryOperation};
+  }
+
+  recordCompletionGap = (threadId: string, reason: CompletionGapReason, runId: string | null, now: number) => runStoreOperation(() => {
+    const thread = readString(threadId, "thread id");
+    const at = readNow(now);
+    if (thread.length > 512 || (reason !== "older_history_not_read" && reason !== "incomplete_turn") ||
+      (runId !== null && (typeof runId !== "string" || runId.length > 2048))) throw new StoreError("invalid completion coverage gap");
+    const id = `completion-gap:${createHash("sha256").update(thread).digest("hex")}`;
+    return this.transaction(() => {
+      const previous = getRow(this.db, "SELECT * FROM completion_gaps WHERE id=?", id);
+      if (!previous && count(this.db, "SELECT COUNT(*) AS count FROM completion_gaps") >= maxKnownThreads)
+        throw new StoreError("completion coverage gap capacity reached");
+      this.db.prepare(`INSERT INTO completion_gaps VALUES(?,?,?,?,?,?,NULL)
+        ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at,
+          reason=CASE WHEN reason='incomplete_turn' THEN reason ELSE excluded.reason END,
+          run_id=CASE WHEN excluded.reason='incomplete_turn' THEN excluded.run_id ELSE run_id END
+      `).run(id, thread, runId, reason, at, at);
+      return this.readCompletionGap(getRow(this.db, "SELECT * FROM completion_gaps WHERE id=?", id)!);
+    });
+  });
+
+  completionGaps = () => runStoreOperation(() => this.db.prepare(
+    "SELECT * FROM completion_gaps ORDER BY updated_at DESC,id LIMIT 100",
+  ).all().map(row => this.readCompletionGap(row)));
+
+  completionGap = (id: string) => runStoreOperation(() => {
+    const row = getRow(this.db, "SELECT * FROM completion_gaps WHERE id=?", readString(id, "gap id"));
+    return row ? this.readCompletionGap(row) : null;
+  });
+
+  reserveCompletionRecovery = (operation: CompletionRecoveryOperation) => runStoreOperation(() => this.transaction(() => {
+    const row = getRow(this.db, "SELECT * FROM completion_gaps WHERE id=?", readString(operation.gapId, "gap id"));
+    if (!row || row.thread_id !== operation.threadId) throw new StoreError("completion coverage gap changed");
+    const current = this.readCompletionGap(row);
+    if (current.recovery) return {operation: current.recovery, created: false};
+    if (operation.state !== "dispatching" || operation.text.length > 8000 || operation.commandId.length > 512 || operation.messageId.length > 512)
+      throw new StoreError("invalid completion recovery operation");
+    this.db.prepare("UPDATE completion_gaps SET recovery=? WHERE id=? AND recovery IS NULL")
+      .run(serialize(operation, 16_000, "completion recovery"), operation.gapId);
+    return {operation, created: true};
+  }));
+
+  finishCompletionRecovery = (gapId: string, commandId: string, outcome: Pick<CompletionRecoveryOperation, "state" | "sequence" | "updatedAt">) => runStoreOperation(() => this.transaction(() => {
+    const row = getRow(this.db, "SELECT * FROM completion_gaps WHERE id=?", readString(gapId, "gap id"));
+    const operation = row ? this.readCompletionGap(row).recovery : null;
+    if (!operation || operation.commandId !== commandId) throw new StoreError("completion recovery operation changed");
+    if (!["dispatching", "accepted", "reconciled", "uncertain", "rejected"].includes(outcome.state)) throw new StoreError("invalid completion recovery outcome");
+    if ((operation.state === "accepted" || operation.state === "reconciled") &&
+      outcome.state !== "accepted" && outcome.state !== "reconciled") return;
+    if (operation.state === "rejected" && (outcome.state === "uncertain" || outcome.state === "dispatching")) return;
+    this.db.prepare("UPDATE completion_gaps SET recovery=? WHERE id=?")
+      .run(serialize({...operation, ...outcome}, 16_000, "completion recovery"), gapId);
+  }));
 
   catalog = () => runStoreOperation(() => ({
     projects: this.db.prepare("SELECT document,deleted FROM projects ORDER BY id").all().map(row => ({
@@ -743,6 +815,7 @@ class SqliteStore implements StoreShape {
       .filter(existsSync)
       .reduce((total, path) => total + statSync(path).size, 0);
     return {
+      completionCoverageGaps: count(this.db, "SELECT COUNT(*) AS count FROM completion_gaps"),
       projects: count(this.db, "SELECT COUNT(*) AS count FROM projects"),
       threads: count(this.db, "SELECT COUNT(*) AS count FROM threads"),
       dirtyHints: count(this.db, "SELECT COUNT(*) AS count FROM hints"),

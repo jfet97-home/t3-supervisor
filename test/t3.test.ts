@@ -55,6 +55,27 @@ const makeProjection = (threadId: string): JsonRecord => ({
   messages: []
 });
 
+const makeBoundedProjection = (threadId: string, overrides: JsonRecord = {}): JsonRecord => ({
+  ...makeProjection(threadId),
+  nodes: [],
+  runtimeRequests: [],
+  turnItems: [],
+  subagents: [],
+  providerThreads: [],
+  ...overrides
+});
+
+const makeBoundedCompletionSnapshot = (threadId: string, overrides: JsonRecord = {}): JsonRecord => ({
+  snapshotSequence: 19,
+  schemaVersion: 2,
+  projection: makeBoundedProjection(threadId),
+  historyCursor: "history-cursor-1",
+  hasMoreHistory: true,
+  latestLocalTurnOrdinal: 2,
+  payloadBudgetExceeded: false,
+  ...overrides
+});
+
 const sendJson = (response: ServerResponse, status: number, value: unknown): void => {
   const body = JSON.stringify(value);
   response.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
@@ -205,6 +226,152 @@ test("descriptor and full projection use read-only authenticated protocol 2 requ
   }
 });
 
+test("bounded completion projection uses the encoded bounded route and accepts its window metadata", async () => {
+  const requests: Array<{ path: string; authorization: string | undefined; protocol: string | undefined }> = [];
+  const threadId = "thread/with space";
+  const server = await startMockServer((request, response) => {
+    requests.push({
+      path: request.url ?? "",
+      authorization: request.headers.authorization,
+      protocol: request.headers["x-t3-orchestration-protocol"] as string | undefined
+    });
+    sendJson(response, 200, makeBoundedCompletionSnapshot(threadId, {
+      payloadBudgetExceeded: true,
+      additionalField: "preserved"
+    }));
+  });
+
+  try {
+    const client = await getClient(server.baseUrl);
+    assert.ok(client.boundedCompletionProjection);
+    const snapshot = await Effect.runPromise(client.boundedCompletionProjection(threadId));
+    assert.equal(snapshot.snapshotSequence, 19);
+    assert.equal(snapshot.schemaVersion, 2);
+    assert.equal(snapshot.projection.thread.id, threadId);
+    assert.equal(snapshot.historyCursor, "history-cursor-1");
+    assert.equal(snapshot.hasMoreHistory, true);
+    assert.equal(snapshot.latestLocalTurnOrdinal, 2);
+    assert.equal(snapshot.payloadBudgetExceeded, true);
+    assert.equal(snapshot.additionalField, "preserved");
+    assert.deepEqual(requests, [{
+      path: `/api/orchestration/threads/${encodeURIComponent(threadId)}/bounded`,
+      authorization: `Bearer ${token}`,
+      protocol: "2"
+    }]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("bounded completion projection rejects mismatched thread, schema, and window fields", async () => {
+  const threadId = "thread-1";
+  let responseBody: JsonRecord = makeBoundedCompletionSnapshot(threadId);
+  const server = await startMockServer((_request, response) => sendJson(response, 200, responseBody));
+  const turnItem = { id: "turn-1", ordinal: 3 };
+  const invalidSnapshots: Array<{ name: string; value: JsonRecord }> = [
+    {
+      name: "thread mismatch",
+      value: makeBoundedCompletionSnapshot(threadId, {
+        projection: makeBoundedProjection("other-thread")
+      })
+    },
+    {
+      name: "snapshot schema mismatch",
+      value: makeBoundedCompletionSnapshot(threadId, { schemaVersion: 3 })
+    },
+    {
+      name: "projection schema mismatch",
+      value: makeBoundedCompletionSnapshot(threadId, {
+        projection: makeBoundedProjection(threadId, { schemaVersion: 3 })
+      })
+    },
+    {
+      name: "invalid hasMoreHistory flag",
+      value: makeBoundedCompletionSnapshot(threadId, { hasMoreHistory: "true" })
+    },
+    {
+      name: "history cursor missing while history remains",
+      value: makeBoundedCompletionSnapshot(threadId, { historyCursor: null })
+    },
+    {
+      name: "history cursor present without more history",
+      value: makeBoundedCompletionSnapshot(threadId, { hasMoreHistory: false })
+    },
+    {
+      name: "invalid latest local ordinal",
+      value: makeBoundedCompletionSnapshot(threadId, { latestLocalTurnOrdinal: -1 })
+    },
+    {
+      name: "latest local ordinal below the included window",
+      value: makeBoundedCompletionSnapshot(threadId, {
+        projection: makeBoundedProjection(threadId, { turnItems: [turnItem] }),
+        latestLocalTurnOrdinal: 2
+      })
+    },
+    {
+      name: "invalid payload budget flag",
+      value: makeBoundedCompletionSnapshot(threadId, { payloadBudgetExceeded: "true" })
+    },
+    {
+      name: "compact turn item marker",
+      value: makeBoundedCompletionSnapshot(threadId, { turnItemsOmitLocalVisible: true })
+    }
+  ];
+
+  for (const field of ["nodes", "runtimeRequests", "turnItems", "subagents", "providerThreads"] as const) {
+    const missingProjectionField = makeBoundedProjection(threadId);
+    delete missingProjectionField[field];
+    invalidSnapshots.push({
+      name: `missing projection ${field}`,
+      value: makeBoundedCompletionSnapshot(threadId, { projection: missingProjectionField })
+    });
+    invalidSnapshots.push({
+      name: `invalid records in projection ${field}`,
+      value: makeBoundedCompletionSnapshot(threadId, {
+        projection: makeBoundedProjection(threadId, { [field]: [null] })
+      })
+    });
+  }
+
+  try {
+    const client = await getClient(server.baseUrl);
+    assert.ok(client.boundedCompletionProjection);
+    for (const invalid of invalidSnapshots) {
+      responseBody = invalid.value;
+      await assert.rejects(
+        Effect.runPromise(client.boundedCompletionProjection(threadId)),
+        T3TransportError,
+        invalid.name
+      );
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("full projection reader continues rejecting bounded history windows", async () => {
+  const threadId = "thread-1";
+  let responseBody: JsonRecord = {
+    snapshotSequence: 19,
+    projection: makeProjection(threadId),
+    hasMoreHistory: true
+  };
+  const server = await startMockServer((_request, response) => sendJson(response, 200, responseBody));
+
+  try {
+    const client = await getClient(server.baseUrl);
+    await assert.rejects(Effect.runPromise(client.projection(threadId)), T3TransportError);
+    responseBody = {
+      snapshotSequence: 19,
+      projection: makeProjection(threadId),
+      historyCursor: "history-cursor-1"
+    };
+    await assert.rejects(Effect.runPromise(client.projection(threadId)), T3TransportError);
+  } finally {
+    await server.close();
+  }
+});
+
 test("descriptor rejects an unknown orchestration protocol", async () => {
   const server = await startMockServer((_request, response) => {
     sendJson(response, 200, {
@@ -251,7 +418,49 @@ test("HTTP response budget and failures do not disclose bearer credentials or re
     }
     assert.ok(budgetFailure instanceof T3TransportError);
     assert.match(budgetFailure.message, /byte limit/);
+    assert.equal(budgetFailure.code, "response_too_large");
     assert.equal(budgetFailure.message.includes(token), false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("HTTP streamed response limit has a typed response_too_large code", async () => {
+  const server = await startMockServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.write('{"payload":"');
+    response.end(`${"x".repeat(512)}"}`);
+  });
+
+  try {
+    const client = await getClient(server.baseUrl, { maxResponseBytes: 64 });
+    assert.ok(client.boundedCompletionProjection);
+    await assert.rejects(
+      Effect.runPromise(client.boundedCompletionProjection("thread-1")),
+      (error: unknown) => error instanceof T3TransportError && error.code === "response_too_large"
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("bounded completion response above the one MiB advisory budget stays below the HTTP cap", async () => {
+  const threadId = "thread-large";
+  const targetBytes = 8_879_187;
+  const snapshot = makeBoundedCompletionSnapshot(threadId, { payloadBudgetExceeded: true });
+  snapshot.padding = "";
+  const baseBytes = Buffer.byteLength(JSON.stringify(snapshot));
+  snapshot.padding = "x".repeat(targetBytes - baseBytes);
+  assert.equal(Buffer.byteLength(JSON.stringify(snapshot)), targetBytes);
+
+  const server = await startMockServer((_request, response) => sendJson(response, 200, snapshot));
+
+  try {
+    const client = await getClient(server.baseUrl);
+    assert.ok(client.boundedCompletionProjection);
+    const received = await Effect.runPromise(client.boundedCompletionProjection(threadId));
+    assert.equal(received.payloadBudgetExceeded, true);
+    assert.equal(received.padding, "x".repeat(targetBytes - baseBytes));
   } finally {
     await server.close();
   }

@@ -1,7 +1,7 @@
 import { currentThreadPolicy } from "./thread-policy.js";
 import { Cause, Effect, Option, Schedule } from "effect";
 import { createServer } from "node:http";
-import { buildContext, formatReplyParts, telegramRouteUpdateId, eligibleRuns, formatMessage, isMainThread, timestampMs } from "./domain.js";
+import { formatMessage, isMainThread } from "./domain.js";
 import { RecapError, Recapper } from "./recap.js";
 import { Store, StoreError, type StoreShape, type StoreStats } from "./store.js";
 import { T3Client, T3TransportError } from "./t3.js";
@@ -10,6 +10,7 @@ import type { SupervisorConfig } from "./types.js";
 import type { InputStoreCapacity } from "./input-store.js";
 import { runGuidanceApplication } from "./guidance-application.js";
 import { isSupervisorThread } from "./project-supervisor-store.js";
+import { collectRecentCompletions } from "./completion-scan.js";
 
 export interface SupervisorStatus {
   startedAt: string;
@@ -189,6 +190,7 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
     Effect.forever,
   );
 
+  const nextCompletionRead = new Map<string, number>();
   const scan = Effect.gen(function* () {
     status.scanHeartbeat = Date.now();
     const hints = yield* store.dueHints(Date.now(), 20);
@@ -198,33 +200,23 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
           yield* store.doneHint(hint.threadId, hint.revision);
           return;
         }
-        const snapshot = yield* t3.projection(hint.threadId);
+        const dueAt = nextCompletionRead.get(hint.threadId) ?? 0;
+        if (dueAt > Date.now()) {
+          yield* store.deferHint(hint.threadId, hint.revision, Date.now(), Math.max(1, dueAt - Date.now()), "settling");
+          return;
+        }
+        if (!t3.boundedCompletionProjection) return yield* Effect.fail(new T3TransportError("T3 recent completion reader is unavailable"));
+        const snapshot = yield* t3.boundedCompletionProjection(hint.threadId);
+        if (snapshot.payloadBudgetExceeded) nextCompletionRead.set(hint.threadId, Date.now() + 60_000);
+        else nextCompletionRead.delete(hint.threadId);
+        if (nextCompletionRead.size > 50_000) nextCompletionRead.delete(nextCompletionRead.keys().next().value!);
         const projection = snapshot.projection;
-        if (isSupervisorThread(config, projection.thread)) {yield* store.doneHint(hint.threadId, hint.revision);return;}
-        const project = yield* store.project(hint.threadId);
-        for (const run of eligibleRuns(projection, notificationsAfter)) {
-          if (yield* store.hasIdentity(descriptor.environmentId, hint.threadId, run.id)) continue;
-          const updateId = telegramRouteUpdateId(projection, run);
-          if (updateId !== null) {
-            const parts = yield* Effect.try(() => formatReplyParts(projection, run, project));
-            const jobId = yield* store.enqueueReply(descriptor.environmentId, hint.threadId, run.id, parts, Date.now());
-            if (jobId) yield* log("telegram_reply_queued", { jobId, threadId: hint.threadId, runId: run.id, updateId, parts: parts.length });
-          } else {
-            const context = yield* Effect.try(() => buildContext(projection, run.id, project));
-            const jobId = yield* store.enqueue(descriptor.environmentId, hint.threadId, run.id, context, Date.now());
-            if (jobId) yield* log("completion_queued", { jobId, threadId: hint.threadId, runId: run.id });
-          }
-        }
-        let waitingForCompletion = false;
-        for (const run of projection.runs) {
-          const completedAt = timestampMs(run.completedAt);
-          if (run.status === "completed" && completedAt !== null && completedAt > notificationsAfter &&
-            !(yield* store.hasIdentity(descriptor.environmentId, hint.threadId, run.id))) {
-            waitingForCompletion = true;
-            break;
-          }
-        }
-        if (waitingForCompletion) yield* store.deferHint(hint.threadId, hint.revision, Date.now(), 5_000, "settling");
+        if (!isMainThread(projection.thread) || currentThreadPolicy(config).excludedThreadIds.includes(hint.threadId) || isSupervisorThread(config, projection.thread)) {yield* store.doneHint(hint.threadId, hint.revision);return;}
+        const result = yield* collectRecentCompletions(store, snapshot, descriptor.environmentId, notificationsAfter, Date.now());
+        if (result.queued > 0) yield* log("recent_completions_queued", {threadId: hint.threadId, count: result.queued});
+        if (result.coverage.olderHistory === "limited" || result.coverage.incompleteRuns.length > 0)
+          yield* log("completion_coverage_limited", {threadId: hint.threadId, incompleteRuns: result.coverage.incompleteRuns.length});
+        if (result.settling) yield* store.deferHint(hint.threadId, hint.revision, Date.now(), Math.max(5_000, (nextCompletionRead.get(hint.threadId) ?? 0) - Date.now()), "settling");
         else yield* store.doneHint(hint.threadId, hint.revision);
       }).pipe(Effect.catch((error) => Effect.gen(function* () {
         status.lastErrorPhase = "thread_scan";
@@ -234,7 +226,7 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
           yield* log("thread_not_found", { threadId: hint.threadId });
         } else {
           yield* store.deferHint(hint.threadId, hint.revision, Date.now(), 60_000);
-          yield* log("thread_scan_deferred", { threadId: hint.threadId });
+          yield* log("thread_scan_deferred", { threadId: hint.threadId, responseTooLarge: error instanceof T3TransportError && error.code === "response_too_large" });
         }
       })));
       status.scanHeartbeat = Date.now();

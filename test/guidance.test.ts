@@ -14,6 +14,7 @@ import { readStructuredModelOutput } from "../src/recap.js";
 import { dispatchGuidance } from "../src/guidance-native.js";
 import { startGuidanceUi } from "../src/guidance-ui.js";
 import { forgeDashboardToken } from "../src/service-auth.js";
+import type { CompletionRecovery } from "../src/completion-recovery.js";
 import type { ProjectSupervisor } from "../src/project-supervisor.js";
 import type { ProjectSupervisorScopeSnapshot } from "../src/supervisor-observation.js";
 import type { WorkflowReadResult, WorkflowWriteController } from "../src/workflow-write-controller.js";
@@ -21,7 +22,7 @@ import type { WorkflowReadResult, WorkflowWriteController } from "../src/workflo
 class GuidanceRuntime extends RetiredGuidanceRuntime {
   constructor(...args: ConstructorParameters<typeof RetiredGuidanceRuntime>) {super(...args);this.retired = false;}
 }
-import { makeStore, Store } from "../src/store.js";
+import { makeStore, Store, type StoreShape } from "../src/store.js";
 import type {
   GuidanceRuleInput,
   GuidanceSnapshot,
@@ -1072,6 +1073,41 @@ test("retired reminders cannot evaluate, send or claim sending readiness", async
       const large = await fetch(origin + "/api/guidance/project-configuration", {method: "POST", headers, body: JSON.stringify({projectId: "project", threadId: null,
         expectedRevision: "a".repeat(64), config: {required: []}, padding: "x".repeat(256 * 1024)})});
       assert.equal(large.status, 413);
+    } finally {await ui.close();}
+  } finally {store.close();await rm(directory, {recursive: true, force: true});}
+});
+
+test("completion recovery endpoints require dashboard authentication, origin and CSRF before any native request", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "completion-recovery-ui-"));
+  const store = new GuidanceStore(directory);
+  let requests = 0;
+  const source = {
+    completionGaps: () => Effect.succeed([{id: "gap", threadId: "chat", runId: null, reason: "older_history_not_read", createdAt: 1, updatedAt: 1, recovery: null}]),
+    thread: () => Effect.succeed({title: "Invoice fix"}),
+  } as unknown as StoreShape;
+  const recovery = {request: async (payload: unknown) => {requests++;assert.deepEqual(payload, {gapId: "gap", threadId: "chat"});return {status: "requested", reason: "native_request_accepted", operation: null};}} as unknown as CompletionRecovery;
+  const runtime = new GuidanceRuntime(config(directory), store, source, t3, {decide: async () => {throw new Error("unused");}});
+  try {
+    const ui = await startGuidanceUi(config(directory), runtime, undefined, undefined, undefined, undefined, undefined, recovery);
+    try {
+      const address = ui.server.address();assert.ok(address && typeof address !== "string");
+      const origin = `http://127.0.0.1:${address.port}`;
+      const payload = JSON.stringify({gapId: "gap", threadId: "chat"});
+      assert.equal((await fetch(origin + "/api/completion-gaps")).status, 401);
+      assert.equal((await fetch(origin + "/api/completion-recovery", {method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: payload})).status, 401);
+      const dashboard = await signIn(origin, directory);
+      const sessionHeaders = {"x-supervisor-session": dashboard.session};
+      const csrf = (await (await fetch(origin + "/api/csrf", {headers: sessionHeaders})).json()).csrf;
+      assert.equal((await fetch(origin + "/api/completion-gaps", {headers: sessionHeaders})).status, 200);
+      assert.equal(requests, 0);
+      assert.equal((await fetch(origin + "/api/completion-recovery", {method: "POST", headers: {...sessionHeaders, Origin: origin, "Content-Type": "application/json"}, body: payload})).status, 403);
+      const headers = {...sessionHeaders, Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf};
+      assert.equal((await fetch(origin + "/api/completion-recovery", {method: "POST", headers: {...headers, Origin: "https://foreign.invalid"}, body: payload})).status, 403);
+      assert.equal(requests, 0);
+      const response = await fetch(origin + "/api/completion-recovery", {method: "POST", headers, body: payload});
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).status, "requested");
+      assert.equal(requests, 1);
     } finally {await ui.close();}
   } finally {store.close();await rm(directory, {recursive: true, force: true});}
 });

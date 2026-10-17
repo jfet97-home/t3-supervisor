@@ -21,6 +21,7 @@ import "./style.css";
 import { ProjectDefinitionsPanel } from "./project-definitions.js";
 import { StepsAndWorkflowsGuide } from "./steps-and-workflows-guide.js";
 import { SupervisionControlPanel, GlobalDefinitionsControlPanel } from "./supervisor-control.js";
+import { CompletionCoverage } from "./completion-coverage.js";
 
 const labels: Record<string, string> = {
   observe: "Observe only",
@@ -246,7 +247,7 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
         <History items={data.activity} title="Supervision activity" />
       )}
       {view === "telegram" && (
-        <History items={data.history} title="Recaps & Telegram" />
+        <><CompletionCoverage /><History items={data.history} title="Recaps & Telegram" /></>
       )}
       {view === "settings" && <Settings data={data} />}
       <footer>

@@ -125,6 +125,22 @@ A successful ledger lookup does not replace the bot identity check.
 
 ### Optional Telegram integration
 
+Completion collection reads a recent native chat window, independently of the strict
+full-history readers used for workflow authority. It only processes a completed turn
+when its original request and final answer are present with their native ownership.
+Older unseen history or incomplete turns are reported under **Recaps & Telegram →
+Recent completion coverage** and in the health body's `completionCoverageGaps` count.
+These historical coverage records do not prevent current notifications; a failed
+current-window read still degrades readiness. The 32 MiB transport limit remains.
+
+**Ask chat for recovery update** optionally asks one eligible chat to check its current
+results, actual checks and outstanding work. It can steer a verified active turn or
+start a fresh turn in an idle chat, and waits while owner input or startup makes that
+unsafe. Archived, deleted, child and excluded chats are not contacted. Recovery is
+never automatic. Requests are durable and deduplicated; an uncertain outcome can only
+be checked, never resent. A fresh response follows ordinary recap eligibility and
+does not recreate old run metadata, mark old work handled or guarantee a Telegram send.
+
 Telegram is disabled by default. Set `TELEGRAM_ENABLED=true` to enable completion
 recaps and Telegram-originated answers. Set `INPUT_ENABLED=true` as well to enable
 Telegram input relay. The Telegram master setting overrides the input setting.
