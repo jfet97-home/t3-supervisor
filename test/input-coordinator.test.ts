@@ -1308,19 +1308,21 @@ test("a same-card refresh preserves the saved draft", async () => {
   });
 });
 
-test("known Telegram send and delete rejections retry with their original keys", async () => {
+for (const reason of ["telegram_rejected", "telegram_not_sent"] as const) test(`${reason} sends and deletes retry with their original keys`, async () => {
   await withHarness(async ({ native, telegram, advance, runOnce, store }) => {
     let rejectSend = true;
     telegram.sendBehavior = (message) => {
       if (rejectSend && message.message.questionId === "single") {
         rejectSend = false;
-        return { kind: "rejected", reason: "telegram_rejected", telegramCode: 429, retryAfterMs: 30_000 };
+        return { kind: "rejected", reason, ...(reason === "telegram_rejected" ? { telegramCode: 429 } : {}), retryAfterMs: 30_000 };
       }
       return { kind: "sent", messageId: message.messageId };
     };
     await runOnce();
     const rejectedSend = telegram.sends[0]!;
     assert.equal(rejectedSend.result.kind, "rejected");
+    assert.equal(store.messagesForRequest(rejectedSend.inputId, rejectedSend.requestRevision)
+      .find((message) => message.deliveryKey === rejectedSend.deliveryKey)?.error, reason);
     advance(29_999);
     await runOnce();
     assert.equal(telegram.sends.filter((message) => message.deliveryKey === rejectedSend.deliveryKey).length, 1);
@@ -1332,7 +1334,7 @@ test("known Telegram send and delete rejections retry with their original keys",
     telegram.deleteBehavior = (_messageId, _deliveryKey) => {
       if (rejectDelete) {
         rejectDelete = false;
-        return { kind: "rejected", reason: "telegram_rejected", telegramCode: 403 };
+        return { kind: "rejected", reason, ...(reason === "telegram_rejected" ? { telegramCode: 403 } : {}) };
       }
       return { kind: "done" };
     };
