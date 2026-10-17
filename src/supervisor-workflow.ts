@@ -169,6 +169,9 @@ type PromptTemplateGroup = {kind: "sequence" | "parallel"; templatePath: string;
 type PromptTemplateCatalog = {workflowTemplates: unknown[]; complete: boolean; issues: WorkflowIssueInfo[]};
 
 const workflowTemplatePath = (workflowId: string): string => `workflow:${encodeURIComponent(workflowId)}/root`;
+const workflowPlanTemplatePath = (referenceTemplatePath: string | null, workflowId: string): string => referenceTemplatePath
+  ? `${referenceTemplatePath}/workflow:${encodeURIComponent(workflowId)}/root`
+  : workflowTemplatePath(workflowId);
 
 const buildPromptTemplateCatalog = (context: ProposalContext, taskText = ""): PromptTemplateCatalog => {
   const byId = workflowById(context);
@@ -567,7 +570,7 @@ const canonicalSourceNode = (value: unknown, context: ProposalContext, options: 
       !Array.isArray(value.omissions) || value.omissions.length !== 0 || value.plan !== null)) throw new Error("noncanonical_cyclic_workflow");
     return unresolved;
   }
-  const nestedRoot = templatePath ? `${templatePath}/workflow:${encodeURIComponent(definitionId)}/root` : workflowTemplatePath(definitionId);
+  const nestedRoot = workflowPlanTemplatePath(templatePath, definitionId);
   const base = sourceExpected?.kind === "workflow" && sourceExpected.plan
     ? sourceExpected
     : expandWorkflow(definition, context, id, new Set([...stack, definitionId]), options, depth, nestedRoot);
@@ -918,11 +921,19 @@ const assessRequirements = (assessments: unknown, context: ProposalContext, plan
       result.push({kind, id, name, source, state: "unresolved", reason: "The required definition is missing, ambiguous, cyclic, or unreadable; it remains an unresolved commitment."});
       continue;
     }
+    const matches = nodes.filter(node => node.kind === "step"
+      ? kind === "step" && node.definitionId === id && node.resolution === "resolved"
+      : node.kind === "workflow" && kind === "workflow" && node.definitionId === id && node.resolution === "resolved" && Boolean(node.plan?.nodes.length));
+    const workflow = matches.find((node): node is WorkflowPlanWorkflowInfo => node.kind === "workflow");
     let sourceWorkflowPlan: WorkflowPlanGroupInfo | null = null;
     if (kind === "workflow") {
       const templateOptions: CanonicalOptions = {strict: false, assignMissingNodeIds: true, preserveExecutionState: false,
         budget: {count: 0, templateCount: 0}, usedNodeIds: new Set(), issues: []};
-      const template = expandWorkflow(exactDefinition as DefinitionWorkflowInfo, context, randomUUID(), new Set([id]), templateOptions, 0);
+      const rootTemplatePath = workflow
+        ? workflowPlanTemplatePath(workflow.templatePath, workflow.definitionId)
+        : workflowTemplatePath(id);
+      const template = expandWorkflow(exactDefinition as DefinitionWorkflowInfo, context, randomUUID(), new Set([id]), templateOptions, 0,
+        rootTemplatePath);
       sourceWorkflowPlan = template.plan;
       if (template.resolution !== "resolved" || !sourceWorkflowPlan?.nodes.length) {
         options.issues.push(...templateOptions.issues);
@@ -938,15 +949,11 @@ const assessRequirements = (assessments: unknown, context: ProposalContext, plan
       result.push({kind, id, name, source, state: "not_applicable", reason: assessment.reason});
       continue;
     }
-    const matches = nodes.filter(node => node.kind === "step"
-      ? kind === "step" && node.definitionId === id && node.resolution === "resolved"
-      : node.kind === "workflow" && kind === "workflow" && node.definitionId === id && node.resolution === "resolved" && Boolean(node.plan?.nodes.length));
     if (!matches.length) {
       result.push({kind, id, name, source, state: "unresolved", reason: `${assessment?.reason ?? "This requirement applies."} ${missingRequirementExplanation}`});
       continue;
     }
     if (kind === "workflow") {
-      const workflow = matches.find((node): node is WorkflowPlanWorkflowInfo => node.kind === "workflow");
       if (workflow && workflow.fixed && workflow.plan && sourceWorkflowPlan && !fixedWorkflowPreserved(sourceWorkflowPlan, workflow.plan)) {
         result.push({kind, id, name, source, state: "unresolved", reason: "The fixed required workflow does not preserve its original nested members and relationships."});
         continue;

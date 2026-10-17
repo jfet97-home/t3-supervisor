@@ -272,6 +272,109 @@ test("a required workflow is satisfied by its exact recursive reference", async 
   assert.equal(result.workflow.requirements[0]?.state, "included");
 });
 
+test("a required fixed workflow nested in a named delivery uses its contextual template paths", async () => {
+  const requirements = [{kind: "workflow" as const, id: "protected-check", applies: true as const,
+    reason: "This task requires the original inspection and recording sequence."}];
+  const {snapshot} = await load({
+    ...commonSteps,
+    "project.yaml": "default_workflow: delivery\nrequired:\n  - workflow: protected-check\n",
+    "workflows/protected-check.yaml": workflowSource("Protected result check", "  - step:\n      id: inspect-results\n      name: Inspect implementation results\n      description: Inspect implementation outputs before recording.\n  - step:\n      id: record-results\n      name: Record implementation results\n      description: Record evidence after inspection.\n", {fixed: true}),
+    "workflows/delivery.yaml": workflowSource("Delivery", "  - workflow: protected-check\n  - step: deliver\n"),
+  });
+  const {prepared, result} = interpret(snapshot, {requirements, plan: {kind: "sequence", nodes: [
+    {kind: "workflow", definitionId: "delivery", reason: "Use the configured delivery workflow unchanged."},
+  ]}});
+
+  assert.equal(result.workflow.status, "proposed");
+  assert.equal(result.workflow.requirements[0]?.state, "included");
+  assert.ok(result.workflow.plan);
+  const deliveryNode = result.workflow.plan.nodes[0];
+  assert.ok(deliveryNode && deliveryNode.kind === "workflow" && deliveryNode.plan);
+  const protectedCheck = deliveryNode.plan.nodes[0];
+  assert.ok(protectedCheck && protectedCheck.kind === "workflow" && protectedCheck.plan);
+  assert.equal(protectedCheck.templatePath, "workflow:delivery/root/0");
+  assert.equal(protectedCheck.plan.templatePath, "workflow:delivery/root/0/workflow:protected-check/root");
+  assert.deepEqual(protectedCheck.plan.nodes.map(node => node.templatePath), [
+    "workflow:delivery/root/0/workflow:protected-check/root/0",
+    "workflow:delivery/root/0/workflow:protected-check/root/1",
+  ]);
+  assert.deepEqual(validateWorkflowRecord(proposalRecord(result.workflow), prepared.context!), proposalRecord(result.workflow));
+
+  const context = prepared.context!;
+  const sourceHash = "e".repeat(64);
+  const applied = validateWorkflowApplyAgainstPinnedContext({
+    sourceBinding: {
+      workspaceRoot: context.workspaceRoot,
+      revision: context.revision,
+      globalRevision: context.globalRevision ?? null,
+      definitionsStatus: context.status,
+      definitionsComplete: true,
+      requirementsKnown: true,
+      taskId: "nested-required-task",
+      proposalId: "nested-required-proposal",
+      sourceHash,
+    },
+    requirements: result.workflow.requirements,
+    issues: result.workflow.issues,
+    plan: result.workflow.plan,
+  }, context, result.workflow, "nested-required-task", "nested-required-proposal", sourceHash,
+  {targetThreadId: threadId, mainThreadId: threadId}, [], null);
+  assert.ok(applied);
+
+  const reordered = validateWorkflowPlan({
+    requirements,
+    plan: {kind: "sequence", nodes: [{kind: "workflow", definitionId: "delivery", nodeId: deliveryNode.nodeId,
+      templatePath: deliveryNode.templatePath, reason: deliveryNode.reason,
+      plan: {...deliveryNode.plan, nodes: [{...protectedCheck, plan: {...protectedCheck.plan,
+        nodes: [...protectedCheck.plan.nodes].reverse()}}, ...deliveryNode.plan.nodes.slice(1)]}}]},
+  }, context);
+  assert.ok(reordered);
+  assert.equal(reordered.requirements[0]?.state, "unresolved");
+  assert.ok(reordered.issues.some(item => item.code === "fixed_workflow_changed"));
+
+  const wrongNamespace = validateWorkflowPlan({
+    requirements,
+    plan: {kind: "sequence", nodes: [{kind: "workflow", definitionId: "delivery", reason: deliveryNode.reason,
+      plan: {...deliveryNode.plan, nodes: [{...protectedCheck,
+        plan: {...protectedCheck.plan, templatePath: "workflow:protected-check/root"}}, ...deliveryNode.plan.nodes.slice(1)]}}]},
+  }, context);
+  assert.equal(wrongNamespace, null);
+});
+
+test("a required flexible workflow nested in a named delivery uses contextual paths and still requires accounting", async () => {
+  const requirements = [{kind: "workflow" as const, id: "reviewer", applies: true as const,
+    reason: "This task requires the reviewer workflow."}];
+  const {snapshot} = await load({
+    ...commonSteps,
+    "project.yaml": "default_workflow: delivery\nrequired:\n  - workflow: reviewer\n",
+    "workflows/reviewer.yaml": reviewer(),
+    "workflows/delivery.yaml": delivery(),
+  });
+  const {prepared, result} = interpret(snapshot, {requirements, plan: {kind: "sequence", nodes: [
+    {kind: "workflow", definitionId: "delivery", reason: "Use the configured delivery workflow."},
+  ]}});
+
+  assert.equal(result.workflow.status, "proposed");
+  assert.equal(result.workflow.requirements[0]?.state, "included");
+  assert.ok(result.workflow.plan);
+  const deliveryNode = result.workflow.plan.nodes[0];
+  assert.ok(deliveryNode && deliveryNode.kind === "workflow" && deliveryNode.plan);
+  const reviewerNode = deliveryNode.plan.nodes[0];
+  assert.ok(reviewerNode && reviewerNode.kind === "workflow" && reviewerNode.plan);
+  assert.equal(reviewerNode.plan.templatePath, "workflow:delivery/root/0/workflow:reviewer/root");
+
+  const incomplete = validateWorkflowPlan({
+    requirements,
+    plan: {kind: "sequence", nodes: [{kind: "workflow", definitionId: "delivery", nodeId: deliveryNode.nodeId,
+      templatePath: deliveryNode.templatePath, reason: deliveryNode.reason,
+      plan: {...deliveryNode.plan, nodes: [{...reviewerNode,
+        plan: {...reviewerNode.plan, nodes: reviewerNode.plan.nodes.slice(0, -1)}}, ...deliveryNode.plan.nodes.slice(1)]}}]},
+  }, prepared.context!);
+  assert.ok(incomplete);
+  assert.equal(incomplete.requirements[0]?.state, "unresolved");
+  assert.match(incomplete.requirements[0]?.reason ?? "", /unaccounted or empty declared members/u);
+});
+
 test("a required reusable step inside a referenced workflow counts once for the main task", async () => {
   const {snapshot} = await load({
     ...commonSteps,
