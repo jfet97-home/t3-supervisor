@@ -15,7 +15,7 @@ import type {
 import type { WorkflowProgressCoverage, WorkflowProgressSnapshot, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
 import { defaultMonitoringSettings, defaultSupervisorTeamSettings } from "../../src/project-supervisor-contract.js";
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "./project-supervisor-api.js";
-import { SupervisionControlPanel } from "./supervisor-control.js";
+import { idleControlActivity, SupervisionControlPanel } from "./supervisor-control.js";
 
 type MonitoringDraft = {
   intervalMinutes: string;
@@ -763,10 +763,11 @@ export function ProjectSupervisorView({
   const reasoningCanChange = !fieldsDisabled && Boolean(selected?.available && reasoning?.choices.length);
 
   return <div className="stack">
+    {!snapshot.available && <p className="panel" role="alert">Supervisor state is unavailable. {snapshot.message}</p>}
     <div hidden={section !== "all" && section !== "progress"} className="panel stack">
       <div className="row between">
         <h3>Supervisor conversation</h3>
-        {snapshot.binding && <span className={`pill ${snapshot.binding.state === "ready" ? "green" : "amber"}`}>{snapshot.binding.state}</span>}
+        {snapshot.binding && <span className={`pill ${snapshot.binding.state === "ready" ? "green" : "amber"}`}>{{creating: "Creating conversation", ready: "Ready", uncertain: "Outcome uncertain", rejected: "Access rejected", missing: "Conversation deleted"}[snapshot.binding.state]}</span>}
       </div>
       {snapshot.binding?.state === "missing"
         ? <p>Deleted Supervisor conversation: <code>{snapshot.binding.threadId}</code></p>
@@ -881,7 +882,7 @@ export function ProjectSupervisorView({
       <WorkflowProtocolDiagnosticView diagnostic={selectedTask.workflowProtocolDiagnostic} />
       <WorkflowProposalView workflow={selectedTask.workflow} proposalId={selectedTask.workflowProposalId} agreement={selectedTask.agreement} definitionReview={selectedTask.definitionReview} />
     </section>}
-    {!selectedTask && section === "plan" && <p className="panel muted">No task interpretation or plan has been recorded for this conversation.</p>}
+    {!selectedTask && section === "plan" && <p className="panel muted">{snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>}
     <div hidden={section !== "all" && section !== "progress"}>{workflowProgress && <WorkflowProgressPanel mainThreadId={snapshot.mainThreadId} connected={connected} progress={workflowProgress}
       onRefresh={onWorkflowProgressRefresh ?? (() => {})} onLoadMore={onWorkflowProgressLoadMore ?? (() => {})}/>}</div>
     <div hidden={section !== "all" && section !== "progress"}><ProjectSupervisorTeamPanel team={snapshot.team} settings={readTeamSettings(snapshot)} mainThreadId={snapshot.mainThreadId}/></div>
@@ -905,6 +906,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
   const [forceRefresh, setForceRefresh] = useState(false);
   const [saving, setSaving] = useState(false);
   const [blocked, setBlocked] = useState(false);
+  const [controlActivity, setControlActivity] = useState(idleControlActivity);
   const [workflowProgressState, setWorkflowProgressState] = useState<WorkflowProgressPanelState>({key: "", pages: [], loading: false, error: null});
   const [workflowProgressRevision, setWorkflowProgressRevision] = useState(0);
   const activeProject = useRef(projectId);
@@ -944,8 +946,8 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
   const canRetry = Boolean(needsRetry && activeSnapshot?.available && activeSnapshot.binding && activeDraft && !dirty && connected && !fieldsBusy && !blocked);
 
   useEffect(() => {setPanelMessage(null);}, [projectId, threadId]);
-  useEffect(() => {onDirtyChange?.(dirty);}, [dirty, onDirtyChange]);
-  useEffect(() => {onSavingChange?.(saving);}, [saving, onSavingChange]);
+  useEffect(() => {onDirtyChange?.(dirty || controlActivity.dirty);}, [dirty, controlActivity.dirty, onDirtyChange]);
+  useEffect(() => {onSavingChange?.(saving || controlActivity.busy || controlActivity.uncertain);}, [saving, controlActivity.busy, controlActivity.uncertain, onSavingChange]);
 
   useEffect(() => {
     const mainThreadId = activeSnapshot?.mainThreadId ?? null;
@@ -1298,11 +1300,11 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
 
   return <section className="stack project-supervisor" aria-labelledby="project-supervisor-title">
     <h2 id="project-supervisor-title" className="sr-only">Project Supervisor</h2>
-    <div hidden={section !== "all" && section !== "settings"}>{projectId && <SupervisionControlPanel key={projectId} projectId={projectId} />}</div>
+    <div hidden={section !== "all" && section !== "settings"}>{projectId && <SupervisionControlPanel key={projectId} projectId={projectId} onStateChange={setControlActivity} />}</div>
     {!projectId && <p className="panel muted">Select a project to manage its Supervisor settings.</p>}
     {projectId && !connected && <p className="panel" role="status">T3 is disconnected. Any unsaved Supervisor settings draft is kept.</p>}
     {projectId && connected && !activeSnapshot && isLoading && <p className="panel" role="status">Loading Supervisor settings…</p>}
-    {projectId && connected && loadError && <p className="panel" role="alert">Could not refresh Supervisor settings. The previous snapshot remains visible; refresh to try again or check the T3 connection.</p>}
+    {projectId && connected && loadError && <p className="panel" role="alert">Could not refresh Supervisor state. The previous snapshot remains visible; refresh to try again or check the T3 connection.</p>}
     {projectId && activeSnapshot && activeDraft && <ProjectSupervisorView
       section={section}
       snapshot={activeSnapshot}
@@ -1334,7 +1336,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
     {projectId && connected && activeSnapshot && !activeDraft && isLoading && <p className="panel" role="status">Loading the selected project’s settings…</p>}
     {projectId && connected && !activeSnapshot && !isLoading && !loadError && <p className="panel muted">Supervisor settings are not loaded yet.</p>}
     {visibleMessage && <p role={visibleMessage.alert ? "alert" : "status"}>{visibleMessage.text}</p>}
-    {projectId && <div><button type="button" disabled={!connected || saving || isLoading} onClick={refresh}>Refresh Supervisor settings</button></div>}
-    {loadState.key === loadKey && loadState.status === "loading" && activeSnapshot && <p className="small muted" role="status">Refreshing saved settings…</p>}
+    {projectId && <div><button type="button" disabled={!connected || saving || isLoading} onClick={refresh}>{section === "progress" || section === "plan" ? "Refresh Supervisor status" : "Refresh Supervisor settings"}</button></div>}
+    {loadState.key === loadKey && loadState.status === "loading" && activeSnapshot && <p className="small muted" role="status">Refreshing Supervisor state…</p>}
   </section>;
 }

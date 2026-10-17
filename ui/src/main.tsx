@@ -18,10 +18,10 @@ import {
   snapshotAtom,
 } from "./api.js";
 import "./style.css";
-import { directoryRoute, RouteLink, useNavigation } from "./navigation.js";
+import { directoryRoute, RouteLink, useNavigation, type Route } from "./navigation.js";
 import { ProjectDefinitionsPanel } from "./project-definitions.js";
 import { StepsAndWorkflowsGuide } from "./steps-and-workflows-guide.js";
-import { SupervisionControlPanel, GlobalDefinitionsControlPanel } from "./supervisor-control.js";
+import { idleControlActivity, SupervisionControlPanel, GlobalDefinitionsControlPanel } from "./supervisor-control.js";
 
 const labels: Record<string, string> = {
   observe: "Observe only",
@@ -54,7 +54,7 @@ function History({
     <section>
       <div className="toolbar">
         <div>
-          <h2>{title}</h2>
+          <h1>{title}</h1>
           <p className="muted">Recorded activity is retained as evidence.</p>
         </div>
         <label className="search">
@@ -135,7 +135,7 @@ function ChatSettings({ data, onDirtyChange }: { data: GuidanceSnapshot; onDirty
     catch { setMessage("Chat settings invalid or changed in another tab. Reload first."); }
     finally { setSaving(false); }
   }}>
-    <h3>Chat settings</h3>
+    <h2>Chat settings</h2>
     <p>Saved for this Supervisor instance. Changes apply without restarting.</p>
     <fieldset><legend>Excluded chats</legend>
       <p>Project Supervisors skip excluded chats. Existing project, workflow and conversation state is retained.</p>
@@ -151,8 +151,12 @@ function ChatSettings({ data, onDirtyChange }: { data: GuidanceSnapshot; onDirty
 }
 function Settings({data, onDirtyChange}: {data: GuidanceSnapshot; onDirtyChange: (dirty: boolean) => void}) {
   const [controlRevision, setControlRevision] = useState(0);
-  return <section className="stack"><div className="page-heading"><p className="kicker">Instance</p><h1>Settings</h1><p className="muted">Shared controls for this Supervisor installation.</p></div><SupervisionControlPanel onChanged={() => setControlRevision(value => value + 1)} /><GlobalDefinitionsControlPanel refreshKey={controlRevision} /><ChatSettings data={data} onDirtyChange={onDirtyChange}/>
-    <div className="panel stack"><h3>T3 connection</h3><p>{data.connected ? "Connected" : "Disconnected"} · Build: {data.serverVersion ?? "Unavailable"}</p><p>{data.coverage}</p>
+  const [chatDirty, setChatDirty] = useState(false);
+  const [masterActivity, setMasterActivity] = useState(idleControlActivity);
+  const [definitionsActivity, setDefinitionsActivity] = useState(idleControlActivity);
+  useEffect(() => onDirtyChange(chatDirty || masterActivity.busy || masterActivity.uncertain || definitionsActivity.busy || definitionsActivity.uncertain), [chatDirty, masterActivity, definitionsActivity, onDirtyChange]);
+  return <section className="stack"><div className="page-heading"><p className="kicker">Instance</p><h1>Settings</h1><p className="muted">Shared controls for this Supervisor installation.</p></div><SupervisionControlPanel onStateChange={setMasterActivity} onChanged={() => setControlRevision(value => value + 1)} /><GlobalDefinitionsControlPanel refreshKey={controlRevision} onStateChange={setDefinitionsActivity}/><ChatSettings data={data} onDirtyChange={setChatDirty}/>
+    <div className="panel stack"><h2>T3 connection</h2><p>{data.connected ? "Connected" : "Disconnected"} · Build: {data.serverVersion ?? "Unavailable"}</p><p>{data.coverage}</p>
       <details><summary>Advanced connection and editing details</summary><div className="stack"><h3>Project configuration editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .t3-supervisor/project.yaml in the selected working directory. Step and workflow definitions are read-only in the dashboard.</p>
       <p>Native dialogue can record plan proposals and agreement; those records do not prove step execution.</p></div></details>
     </div></section>;
@@ -168,6 +172,7 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
   const [settingsOpened, setSettingsOpened] = useState(view === "settings");
   useEffect(() => { if (view === "settings") setSettingsOpened(true); }, [view]);
   const [projectDirty, setProjectDirty] = useState(false);
+  const [projectDraftTarget, setProjectDraftTarget] = useState<Route | null>(null);
   const lastData = useRef<GuidanceSnapshot | null>(null);
   const previousConnection = useRef<boolean | null>(null);
   if (snapshot._tag === "Success") lastData.current = snapshot.value;
@@ -211,15 +216,16 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
       <a className="skip-link" href="#workspace" onClick={event => {event.preventDefault();document.getElementById("workspace")?.focus();}}>Skip to content</a>
       <header className="app-header">
         <RouteLink to={directoryRoute} navigate={navigate} className="app-name">Supervisor<span className="app-name-detail"> / Work console</span></RouteLink>
-        <div className="row"><span className="connection"><span className={`dot ${data.connected ? "online" : ""}`} />{data.connected ? "T3 connected" : "Connection gap"}</span><button disabled={dirty} title={dirty ? "Save or discard your draft before signing out." : undefined} onClick={() => { void onSignOut().catch(() => setSignOutError("Could not sign out. Try again.")); }}>Sign out</button></div>
+        <div className="row"><span className="connection"><span className={`dot ${data.connected ? "online" : ""}`} />{data.connected ? "T3 connected" : "Disconnected"}</span><button disabled={dirty} aria-describedby={dirty ? "pending-changes" : undefined} title={dirty ? "Save drafts and resolve pending changes before signing out." : undefined} onClick={() => { void onSignOut().catch(() => setSignOutError("Could not sign out. Try again.")); }}>Sign out</button></div>
       </header>
       <nav className="app-nav" aria-label="Supervisor sections">
         {(["projects", "activity", "settings", "guide"] as const).map(name => <RouteLink key={name} to={{...directoryRoute, page: name}} navigate={navigate} aria-current={view === name ? "page" : undefined}>{name[0]!.toUpperCase() + name.slice(1)}{name === "settings" && settingsDirty && <span className="draft-dot" aria-label="Unsaved changes" />}</RouteLink>)}
       </nav>
       <main id="workspace" tabIndex={-1}>
+        {dirty && <p id="pending-changes" className="notice" role="status">Save drafts and resolve pending changes before signing out. {projectDirty && projectDraftTarget && <RouteLink to={projectDraftTarget} navigate={navigate}>Review project changes</RouteLink>}{projectDirty && settingsDirty && " · "}{settingsDirty && <RouteLink to={{...directoryRoute, page: "settings"}} navigate={navigate}>Review instance settings</RouteLink>}</p>}
         {signOutError && <p className="notice" role="alert">{signOutError}</p>}
         {snapshot._tag === "Failure" && <p className="notice" role="alert">Supervisor connection unavailable. Your drafts are kept.</p>}
-        <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} route={route} navigate={navigate} guard={guard} csrfToken={getCsrfToken()} onDirtyChange={setProjectDirty}/></div>
+        <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} route={route} navigate={navigate} guard={guard} csrfToken={getCsrfToken()} onDirtyChange={setProjectDirty} onDraftTargetChange={setProjectDraftTarget}/></div>
         {view === "guide" && <StepsAndWorkflowsGuide />}
         {view === "activity" && <History items={data.activity} title="Supervision activity" />}
         {settingsOpened && <div hidden={view !== "settings"}><Settings data={data} onDirtyChange={setSettingsDirty}/></div>}

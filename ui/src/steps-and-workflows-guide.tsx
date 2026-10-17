@@ -76,7 +76,7 @@ function Example({label, value}: {label: string; value: string}) {
 
 function Topic({id, title, children}: {id: string; title: string; children: React.ReactNode}) {
   return <div className="stack guide-topic">
-    <h3 id={id}>{title}</h3>
+    <h2 id={id}>{title}</h2>
     {children}
   </div>;
 }
@@ -155,7 +155,7 @@ const questions = [
 export function StepsAndWorkflowsGuide() {
   return <section className="stack steps-guide" aria-labelledby="steps-guide-title">
     <div>
-      <h2 id="steps-guide-title">Steps and workflows</h2>
+      <h1 id="steps-guide-title">Steps and workflows</h1>
       <p className="muted">A reference for repository definitions, workflow planning and recovery when definitions need attention.</p>
     </div>
 
@@ -205,7 +205,7 @@ export function StepsAndWorkflowsGuide() {
       <p>Requirements apply once to the current main task, not once for every child and not for the lifetime of the conversation. Children may contribute to parent steps, including overlapping contributions or expanding several parent steps into a child plan. Delegation does not remove the parent's requirements or automatically complete its work.</p>
     </Topic>
 
-    <Topic id="supervisor-team-title" title="Supervisor team and operational assignments">
+    <Topic id="guide-team-title" title="Supervisor team and operational assignments">
       <p>The Supervisor team has one root and up to five helpers by default. Its project setting can be changed from 0 to 20; zero prevents new recruitment while preserving existing members. Each helper may cover several operational subtree roots, including verified descendants added later. The team stays flat even when the operational workflow is nested.</p>
       <p>The root coordinates the main and unassigned work. Helpers assess and guide their assigned children. The Projects page displays this team separately from connected operational conversations and marks each row with its effective assignee. An unknown or transferring owner stays explicit. Team membership and assignments do not change step ownership, contributor links or parent completion.</p>
       <p>Use a T3 link to open a helper conversation. A person writing there follows T3's native follow-up behavior. Root context notes and routine helper check-ins go through Supervisor team operations, not raw <code>t3_thread_send</code>. Pending handovers and significant issues remain visible until their state is resolved.</p>

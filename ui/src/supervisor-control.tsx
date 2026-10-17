@@ -4,6 +4,9 @@ import { SupervisionControl, SupervisionControlResult, SupervisionSetupOptions, 
   type SupervisionControlInfo, type GlobalDefinitionsControlInfo, type SupervisionSetupInput } from "../../src/supervisor-control-contract.js";
 import { getCsrfToken, loadAccess, sessionHeaders } from "./access.js";
 
+export type ControlActivity = {busy: boolean; dirty: boolean; uncertain: boolean};
+export const idleControlActivity: ControlActivity = {busy: false, dirty: false, uncertain: false};
+
 export function SupervisionControlView({control, busy, blocked, message, onToggle, onReload}: {
   control: SupervisionControlInfo;
   busy: boolean;
@@ -13,8 +16,9 @@ export function SupervisionControlView({control, busy, blocked, message, onToggl
   onReload: () => void;
 }) {
   const global = control.projectId === null;
+  const Heading = global ? "h2" : "h3";
   return <section className="panel stack" aria-label={global ? "Global supervision" : "Project supervision"}>
-    <h3>{global ? "Global supervision" : "Project supervision"}</h3>
+    <Heading>{global ? "Global supervision" : "Project supervision"}</Heading>
     <p><strong>{control.enabled ? "Enabled" : "Disabled"}</strong>{!global && control.enabled && !control.globallyEnabled ? " — global supervision is off" : ""}</p>
     <p>{global ? "The master switch controls semantic supervision across every project and starts enabled." : "This project is supervised only when both its switch and the master switch are enabled. An existing .t3-supervisor folder enables a project initially; your manual choice is remembered."}</p>
     {!global && <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>}
@@ -27,13 +31,17 @@ export function SupervisionControlView({control, busy, blocked, message, onToggl
   </section>;
 }
 
-export function SupervisionControlPanel({projectId = null, onChanged}: {projectId?: string | null; onChanged?: () => void}) {
+export function SupervisionControlPanel({projectId = null, onChanged, onStateChange}: {projectId?: string | null; onChanged?: () => void; onStateChange?: (activity: ControlActivity) => void}) {
   const [control, setControl] = useState<SupervisionControlInfo | null>(null);
+  const [readAt, setReadAt] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState(false);
   const [message, setMessage] = useState("");
   const [revision, setRevision] = useState(0);
   const [setupRequested, setSetupRequested] = useState(false);
+  const [uncertain, setUncertain] = useState(false);
+  const [setupActivity, setSetupActivity] = useState(idleControlActivity);
+  useEffect(() => {onStateChange?.({busy: busy || setupActivity.busy, dirty: setupActivity.dirty, uncertain: uncertain || setupActivity.uncertain});}, [busy, uncertain, setupActivity, onStateChange]);
   useEffect(() => {
     const abort = new AbortController();setControl(null);
     const query = projectId === null ? "" : `?${new URLSearchParams({projectId})}`;
@@ -42,7 +50,7 @@ export function SupervisionControlPanel({projectId = null, onChanged}: {projectI
         if (!response.ok) throw new Error("unavailable");
         const next = Schema.decodeUnknownSync(SupervisionControl)(await response.json());
         if (next.projectId !== projectId) throw new Error("scope_mismatch");
-        if (!abort.signal.aborted) {setControl(next);setBlocked(false);setMessage("");}
+        if (!abort.signal.aborted) {setControl(next);setReadAt(Date.now());setBlocked(false);setUncertain(false);setMessage("");}
       }).catch(() => {if (!abort.signal.aborted) {setBlocked(true);setMessage("Supervision status unavailable. Reload before changing it.");}});
     return () => abort.abort();
   }, [projectId, revision]);
@@ -59,14 +67,15 @@ export function SupervisionControlPanel({projectId = null, onChanged}: {projectI
           if (!response.ok) throw new Error("unknown");
           const result = Schema.decodeUnknownSync(SupervisionControlResult)(await response.json());
           if (result.control.projectId !== projectId) throw new Error("scope_mismatch");
-          setControl(result.control);setMessage(result.message);setBlocked(result.status !== "saved" && result.status !== "setup_required");
-          setSetupRequested(result.status === "setup_required");
+          setControl(result.control);setReadAt(Date.now());setMessage(result.message);setBlocked(result.status !== "saved" && result.status !== "setup_required");
+          setSetupRequested(result.status === "setup_required");setUncertain(result.status !== "saved" && result.status !== "setup_required");
           if (result.status === "saved") onChanged?.();
-        }).catch(() => {setBlocked(true);setMessage("The change could not be confirmed. Reload status before trying again.");})
+        }).catch(() => {setBlocked(true);setUncertain(true);setMessage("The change could not be confirmed. Reload status before trying again.");})
         .finally(() => setBusy(false));
     }} />
-    {setupRequested && projectId && <SupervisionSetupPanel projectId={projectId} onComplete={(next, text) => {
-      setControl(next);setMessage(text);setSetupRequested(false);setBlocked(false);
+    {readAt && <p className="small muted">Status read at {new Date(readAt).toLocaleTimeString()}. Reload status after changes in another tab.</p>}
+    {setupRequested && projectId && <SupervisionSetupPanel projectId={projectId} onStateChange={setSetupActivity} onComplete={(next, text) => {
+      setControl(next);setMessage(text);setSetupRequested(false);setSetupActivity(idleControlActivity);setUncertain(false);setBlocked(false);
     }} />}</div>;
 }
 
@@ -107,13 +116,15 @@ export function SupervisionSetupView({options, selected, busy, blocked, message,
   </section>;
 }
 
-function SupervisionSetupPanel({projectId, onComplete}: {projectId: string; onComplete: (control: SupervisionControlInfo, message: string) => void}) {
+function SupervisionSetupPanel({projectId, onComplete, onStateChange}: {projectId: string; onComplete: (control: SupervisionControlInfo, message: string) => void; onStateChange: (activity: ControlActivity) => void}) {
   const [options, setOptions] = useState<SetupOptions | null>(null);
   const [selected, setSelected] = useState("");
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState(false);
   const [message, setMessage] = useState("");
   const [revision, setRevision] = useState(0);
+  const [uncertain, setUncertain] = useState(false);
+  useEffect(() => {onStateChange({busy, dirty: Boolean(selected), uncertain});}, [busy, selected, uncertain, onStateChange]);
   useEffect(() => {
     const abort = new AbortController();setOptions(null);
     void fetch(`/api/guidance/supervision-setup?${new URLSearchParams({projectId})}`, {credentials: "omit", headers: sessionHeaders(), signal: abort.signal})
@@ -121,7 +132,7 @@ function SupervisionSetupPanel({projectId, onComplete}: {projectId: string; onCo
         if (!response.ok) throw new Error("unavailable");
         const next = Schema.decodeUnknownSync(SupervisionSetupOptions)(await response.json());
         if (next.projectId !== projectId) throw new Error("scope_mismatch");
-        if (!abort.signal.aborted) {setOptions(next);setSelected("");setBlocked(false);setMessage("");}
+        if (!abort.signal.aborted) {setOptions(next);setSelected("");setUncertain(false);setBlocked(false);setMessage("");}
       }).catch(() => {if (!abort.signal.aborted) {setBlocked(true);setMessage("Setup targets unavailable. Reload before creating files.");}});
     return () => abort.abort();
   }, [projectId, revision]);
@@ -140,8 +151,8 @@ function SupervisionSetupPanel({projectId, onComplete}: {projectId: string; onCo
         const result = Schema.decodeUnknownSync(SupervisionSetupResult)(await response.json());
         if (result.control.projectId !== projectId || result.workspaceRoot !== checkout.workspaceRoot || result.branch !== checkout.branch) throw new Error("scope_mismatch");
         if (result.status === "saved") onComplete(result.control, result.message);
-        else {setBlocked(true);setMessage(result.message);}
-      }).catch(() => {setBlocked(true);setMessage("The setup outcome could not be confirmed. Reload and inspect the selected checkout before trying again.");})
+        else {setBlocked(true);setUncertain(true);setMessage(result.message);}
+      }).catch(() => {setBlocked(true);setUncertain(true);setMessage("The setup outcome could not be confirmed. Reload and inspect the selected checkout before trying again.");})
       .finally(() => setBusy(false));
   };
   return <SupervisionSetupView options={options} selected={selected} busy={busy} blocked={blocked} message={message}
@@ -152,7 +163,7 @@ export function GlobalDefinitionsControlView({control, busy, blocked, message, o
   control: GlobalDefinitionsControlInfo; busy: boolean; blocked: boolean; message: string; onToggle: () => void; onReload: () => void;
 }) {
   return <section className="panel stack" aria-label="Use global steps and workflows">
-    <h3>Use global steps and workflows</h3>
+    <h2>Use global steps and workflows</h2>
     <p><strong>{control.enabled ? "Enabled" : "Disabled"}</strong>{control.enabled && !control.effectiveEnabled ? " — the master supervision switch is off" : ""}</p>
     <p>Shared definitions: <code>~/.t3-supervisor/project.yaml</code>, <code>steps/</code>, and <code>workflows/</code> in the T3 server user's home.</p>
     <p>This starts disabled. First enabling creates the shared project.yaml and empty steps/ and workflows/ directories if needed. Existing definitions are preserved, and the files are left uncommitted.</p>
@@ -165,24 +176,27 @@ export function GlobalDefinitionsControlView({control, busy, blocked, message, o
   </section>;
 }
 
-export function GlobalDefinitionsControlPanel({refreshKey = 0}: {refreshKey?: number}) {
+export function GlobalDefinitionsControlPanel({refreshKey = 0, onStateChange}: {refreshKey?: number; onStateChange?: (activity: ControlActivity) => void}) {
   const [control, setControl] = useState<GlobalDefinitionsControlInfo | null>(null);
+  const [readAt, setReadAt] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState(false);
   const [message, setMessage] = useState("");
   const [revision, setRevision] = useState(0);
+  const [uncertain, setUncertain] = useState(false);
+  useEffect(() => {onStateChange?.({busy, dirty: false, uncertain});}, [busy, uncertain, onStateChange]);
   useEffect(() => {
     const abort = new AbortController();setControl(null);
     void fetch("/api/guidance/global-definitions-control", {credentials: "omit", headers: sessionHeaders(), signal: abort.signal})
       .then(async response => {
         if (!response.ok) throw new Error("unavailable");
         const next = Schema.decodeUnknownSync(GlobalDefinitionsControl)(await response.json());
-        if (!abort.signal.aborted) {setControl(next);setBlocked(false);setMessage("");}
+        if (!abort.signal.aborted) {setControl(next);setReadAt(Date.now());setUncertain(false);setBlocked(false);setMessage("");}
       }).catch(() => {if (!abort.signal.aborted) {setBlocked(true);setMessage("Global definitions status unavailable. Reload before changing it.");}});
     return () => abort.abort();
   }, [revision, refreshKey]);
   if (!control) return <section className="panel"><p role="status">{message || "Loading global definitions status…"}</p><button type="button" onClick={() => setRevision(value => value + 1)}>Reload status</button></section>;
-  return <GlobalDefinitionsControlView control={control} busy={busy} blocked={blocked} message={message} onReload={() => setRevision(value => value + 1)}
+  return <div className="stack"><GlobalDefinitionsControlView control={control} busy={busy} blocked={blocked} message={message} onReload={() => setRevision(value => value + 1)}
     onToggle={() => {
       if (busy || blocked) return;
       setBusy(true);setMessage("");
@@ -192,8 +206,8 @@ export function GlobalDefinitionsControlPanel({refreshKey = 0}: {refreshKey?: nu
           if (response.status === 401 || response.status === 403) {await loadAccess().catch(() => false);throw new Error("session");}
           if (!response.ok) throw new Error("unknown");
           const result = Schema.decodeUnknownSync(GlobalDefinitionsControlResult)(await response.json());
-          setControl(result.control);setMessage(result.message);setBlocked(result.status !== "saved");
-        }).catch(() => {setBlocked(true);setMessage("The global definitions change could not be confirmed. Reload status before trying again.");})
+          setControl(result.control);setReadAt(Date.now());setMessage(result.message);setBlocked(result.status !== "saved");setUncertain(result.status !== "saved");
+        }).catch(() => {setBlocked(true);setUncertain(true);setMessage("The global definitions change could not be confirmed. Reload status before trying again.");})
         .finally(() => setBusy(false));
-    }} />;
+    }} />{readAt && <p className="small muted">Status read at {new Date(readAt).toLocaleTimeString()}. Reload global definitions status after changes in another tab.</p>}</div>;
 }

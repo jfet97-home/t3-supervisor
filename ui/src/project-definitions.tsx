@@ -146,13 +146,13 @@ export function DefinitionsContent({definitions}: {definitions: ProjectDefinitio
   </div>;
 }
 
-export function ProjectDefinitionsPanel({data, route, navigate, guard, csrfToken = "", onDirtyChange}: {
+export function ProjectDefinitionsPanel({data, route, navigate, guard, csrfToken = "", onDirtyChange, onDraftTargetChange}: {
   data: GuidanceSnapshot; route: Route; navigate: (route: Route) => void; guard: React.RefObject<NavigationGuard>;
-  csrfToken?: string; onDirtyChange?: (dirty: boolean) => void;
+  csrfToken?: string; onDirtyChange?: (dirty: boolean) => void; onDraftTargetChange?: (route: Route | null) => void;
 }) {
-  const retained = useRef({projectId: "", threadId: ""});
+  const retained = useRef({projectId: "", threadId: "", contextSelected: false});
   const inWorkspace = route.page === "projects" && Boolean(route.projectId);
-  const selection = inWorkspace ? {projectId: route.projectId, threadId: route.main ?? ""} : retained.current;
+  const selection = inWorkspace ? {projectId: route.projectId, threadId: route.main ?? "", contextSelected: route.main !== null} : retained.current;
   retained.current = selection;
   const [revision, setRevision] = useState(0);
   const [configurationDirty, setConfigurationDirty] = useState(false);
@@ -164,12 +164,13 @@ export function ProjectDefinitionsPanel({data, route, navigate, guard, csrfToken
   const [savedMessage, setSavedMessage] = useState("");
   const reportDirty = useCallback((value: boolean) => setConfigurationDirty(value), []);
   useEffect(() => {onDirtyChange?.(dirty || saving);}, [dirty, saving, onDirtyChange]);
+  useEffect(() => {onDraftTargetChange?.(dirty || saving ? {page: "projects", projectId: selection.projectId, main: selection.contextSelected ? selection.threadId : null, section: configurationDirty ? "definitions" : "settings"} : null);}, [dirty, saving, selection.projectId, selection.threadId, selection.contextSelected, configurationDirty, onDraftTargetChange]);
   const projects = data.projects.filter(project => project.available);
   const projectId = projects.some(project => project.id === selection.projectId) ? selection.projectId : "";
   const threads = data.threads.filter(thread => thread.available && thread.projectId === projectId);
   const threadUnavailable = Boolean(projectId && selection.threadId && !threads.some(thread => thread.id === selection.threadId));
   const threadId = selection.threadId;
-  const canLoad = Boolean(projectId && !threadUnavailable && data.connected);
+  const canLoad = Boolean(projectId && selection.contextSelected && !threadUnavailable && data.connected);
   const key = JSON.stringify([projectId, threadId, revision, canLoad]);
   const [state, setState] = useState<{key: string; result: ProjectDefinitionSnapshot | null; error: boolean; loadedAt: number | null}>({key: "", result: null, error: false, loadedAt: null});
   useEffect(() => {
@@ -234,16 +235,17 @@ export function ProjectDefinitionsPanel({data, route, navigate, guard, csrfToken
         {current?.result?.workspaceRoot && <p className="small muted definition-path">Working folder <code>{current.result.workspaceRoot}</code></p>}
       </div>
       {!projectId && <p className="panel" role="status">The selected project is unavailable. Its context is kept; choose an available project to continue.</p>}
-      {threadUnavailable && <p className="panel" role="status">The selected conversation is no longer available in this project. Choose another working directory.</p>}
+      {threadUnavailable && <p className="panel" role="status">The selected conversation is no longer available in this project. Choose another conversation.</p>}
       {!data.connected && <p className="panel" role="status">T3 is disconnected. Any unsaved project configuration draft is kept.</p>}
-      {dirty && <p className="draft-notice" role="status">Unsaved changes · <RouteLink to={{...workspaceRoute, section: configurationDirty ? "definitions" : "settings"}} navigate={navigate}>Return to your draft</RouteLink>. Switching views keeps your changes.</p>}
+      {saving && <p className="notice" role="status">A save or supervision setup outcome is pending. Inspect Project settings and reload an uncertain outcome before changing scope.</p>}
+      {dirty && !onDraftTargetChange && <p className="draft-notice" role="status">Unsaved changes · <RouteLink to={{...workspaceRoute, section: configurationDirty ? "definitions" : "settings"}} navigate={navigate}>Return to your draft</RouteLink>. Switching views keeps your changes.</p>}
       <nav className="section-nav" aria-label="Project sections">{projectSections.map(section => <RouteLink key={section} to={{...workspaceRoute, section}} navigate={navigate} aria-current={route.section === section ? "page" : undefined}>{section === "settings" ? "Project settings" : section[0]!.toUpperCase() + section.slice(1)}</RouteLink>)}</nav>
       {inWorkspace && <div className="section-heading"><h2>{route.section === "settings" ? "Project settings" : route.section[0]!.toUpperCase() + route.section.slice(1)}</h2><p className="muted">{({progress: "Follow the selected conversation and its connected work.", plan: "Review task interpretation, proposals and the saved agreement.", definitions: "Inspect reusable steps, workflows and checkout requirements.", settings: "Control supervision and defaults for this project."})[route.section]}</p></div>}
-      {route.main === null && (route.section === "progress" || route.section === "plan") && <div className="panel stack">
+      {route.main === null && route.section !== "settings" && <div className="panel stack">
         <h3>Choose a main conversation</h3><p className="muted">Open a conversation to inspect its Supervisor, plan and progress.</p>
         <div className="conversation-list">{threads.map(thread => <RouteLink key={thread.id} to={{...workspaceRoute, main: thread.id}} navigate={navigate}><span>{thread.title}</span><span aria-hidden="true">→</span></RouteLink>)}</div>
         {threads.length === 0 && <p>No available main conversations in this project.</p>}
-        <RouteLink to={{...workspaceRoute, main: "", section: "definitions"}} navigate={navigate}>Inspect project root and defaults →</RouteLink>
+        <RouteLink className="context-root-link" to={{...workspaceRoute, main: "", section: "definitions"}} navigate={navigate}>Inspect project root and defaults →</RouteLink>
       </div>}
     </div>
     {selection.projectId && <div hidden={!showSupervisor || (route.main === null && route.section !== "settings")} inert={configurationSaving}><ProjectSupervisorPanel key={selection.projectId} projectId={selection.projectId} threadId={threadId}

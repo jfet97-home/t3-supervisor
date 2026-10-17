@@ -984,3 +984,17 @@ test("workflow progress refresh keeps every loaded page and fetches them sequent
     assert.deepEqual(pages.map(page => [page.workflowOffset, page.lineageOffset]), [[0, 0], [20, 20], [40, 40]]);
   } finally {globalThis.fetch = original;}
 });
+
+
+test("Plan retains unavailable diagnostics without claiming unreadable records are absent", () => {
+  const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+    ...viewDefaults, section: "plan", snapshot: {...snapshot, available: false, tasks: [], message: "Unsupported retained scope state."}, selection, monitoring,
+    threadId: "task-thread", connected: true, saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false,
+    shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false,
+    onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+  }));
+  assert.match(html, /Supervisor state is unavailable/);
+  assert.match(html, /Unsupported retained scope state/);
+  assert.match(html, /Their absence has not been established/);
+  assert.doesNotMatch(html, /No task interpretation or plan has been recorded/);
+});
