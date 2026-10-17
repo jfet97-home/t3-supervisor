@@ -1653,7 +1653,7 @@ test("completed activity first observed on new and reused children is batched by
   const child = makeProjection(makeThread({id: "operative-native-child", title: "Native child"}));
   child.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
   child.thread.creationSource = "provider";
-  for (let index = 1; index <= 3; index++) turnItemsOf(child).push({id: `child-command-${index}`, threadId: child.thread.id,
+  for (let index = 1; index <= 3; index++) turnItemsOf(child).push({id: index === 1 ? "child-command%253Aopaque%3A1" : `child-command-${index}`, threadId: child.thread.id,
     runId: null, type: "command_execution", status: "completed", ordinal: index, completedAt: iso(clock.now - 30_000 + index),
     updatedAt: iso(clock.now - 30_000 + index), input: `PRIVATE_CHILD_BODY_${index}`, output: "ok"});
   fixture.addChildProjection(child);
@@ -1739,7 +1739,9 @@ test("completed activity first observed on new and reused children is batched by
   assert.equal(nativeEnvelope?.parentThreadId, operativeThreadId);
   assert.deepEqual(nativeEnvelope?.fallbackAncestors, [{threadId: operativeThreadId, main: true, eligible: true, contactable: true}]);
   assert.equal(nativeEnvelope?.activityRefs[0]?.sourceThreadId, child.thread.id);
-  assert.ok(nativeEnvelope?.activityRefs[0]?.sourceItemId);
+  assert.equal(nativeEnvelope?.activityRefs[0]?.sourceItemId, "child-command%253Aopaque%3A1");
+  assert.ok(request.text.includes("Omit sourceRunId and never decode, re-encode, normalize or reconstruct opaque IDs"),
+    "root guidance copies only the exact item or message pair");
   assert.equal(envelope.threads.find(item => item.threadId === delegated.thread.id)?.origin, "delegated_child");
   assert.equal(envelope.threads.find(item => item.threadId === reused.thread.id)?.origin, "delegated_child");
   const nestedEnvelope = envelope.threads.find(item => item.threadId === nested.thread.id);

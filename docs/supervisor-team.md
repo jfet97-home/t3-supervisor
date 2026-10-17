@@ -48,6 +48,14 @@ Guide and report need fresh action-specific content, so their locator bases are 
 callable payloads. Each new mutation gets a unique operation ID; reuse one only to
 retry the exact same arguments after an uncertain result.
 
+Each target's `activityRefs` provides ready-to-use item-only or message-only
+references for eligible activity in that target's preview. Copy the supplied pair
+verbatim when adding an evidence kind and note; omit `sourceRunId` and never
+normalize encoded IDs. Synthetic keys and absent or oversized IDs do not gain an
+invented reference. Read additional records with bounded native pagination and
+use their exact returned IDs. References remain optional navigation evidence;
+they do not establish completion or authorize a workflow write.
+
 Each helper review is sized against the serialized prompt. It may include only a
 subset of assigned targets; its counts and trigger cover that subset, and completion
 acknowledges only the included monitor versions and notifications. Fitting targets

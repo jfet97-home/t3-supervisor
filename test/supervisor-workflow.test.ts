@@ -11,6 +11,7 @@ import {
   proposalContextMatches,
   redact,
   validateWorkflowApplyAgainstPinnedContext,
+  type WorkflowApplyDiagnostic,
   validateWorkflowPlan,
   validateWorkflowRecord,
   workflowRecordDiagnostic,
@@ -807,6 +808,79 @@ test("apply validation rejects a missing ID when it would regenerate an existing
 
   assert.equal(validateWorkflowApplyAgainstPinnedContext(candidate, context, original, "task-a", "proposal-a",
     sourceHash, {targetThreadId: threadId, mainThreadId: threadId}, [], original.plan), null);
+});
+
+test("apply validation reports bounded field diagnostics only for known local-step shape failures", async () => {
+  const {snapshot} = await load({...commonSteps, ...emptyConfig});
+  const {prepared, result} = interpret(snapshot, {requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "step", definitionId: null, localId: "baseline", name: "Baseline", description: "Baseline work.", reason: "Keep it."},
+  ]}});
+  const context = prepared.context!;
+  const original = result.workflow;
+  const sourceHash = "d".repeat(64);
+  assert.ok(original.plan);
+  const sourceBinding = {
+    workspaceRoot: context.workspaceRoot,
+    revision: context.revision,
+    globalRevision: context.globalRevision ?? null,
+    definitionsStatus: context.status,
+    definitionsComplete: true,
+    requirementsKnown: true,
+    taskId: "task-a",
+    proposalId: "proposal-a",
+    sourceHash,
+  };
+  const target = {targetThreadId: threadId, mainThreadId: threadId};
+  const nestedPlan = (node: unknown) => ({kind: "sequence", nodes: [{kind: "parallel", nodes: [{kind: "sequence", nodes: [node]}]}]});
+  const cases: Array<{name: string; node: Record<string, unknown>; expected: WorkflowApplyDiagnostic}> = [
+    {
+      name: "missing definitionId",
+      node: {kind: "step", localId: "secret-local-id", name: "secret-name", description: "secret-description", reason: "Add local work."},
+      expected: {code: "local_step_definition_id_required", path: "/input/plan/nodes/0/nodes/0/nodes/0/definitionId", expected: "definitionId: null"},
+    },
+    {
+      name: "missing localId",
+      node: {kind: "step", definitionId: null, name: "secret-name", description: "secret-description", reason: "Add local work."},
+      expected: {code: "local_step_local_id_required", path: "/input/plan/nodes/0/nodes/0/nodes/0/localId",
+        expected: "non-empty string up to 200 characters"},
+    },
+    {
+      name: "missing name",
+      node: {kind: "step", definitionId: null, localId: "secret-local-id", description: "secret-description", reason: "Add local work."},
+      expected: {code: "local_step_name_required", path: "/input/plan/nodes/0/nodes/0/nodes/0/name",
+        expected: "non-empty string within the plan text limit"},
+    },
+    {
+      name: "missing description",
+      node: {kind: "step", definitionId: null, localId: "secret-local-id", name: "secret-name", reason: "Add local work."},
+      expected: {code: "local_step_description_required", path: "/input/plan/nodes/0/nodes/0/nodes/0/description",
+        expected: "non-empty string within the plan text limit"},
+    },
+    {
+      name: "copied templatePath",
+      node: {kind: "step", definitionId: null, localId: "secret-local-id", name: "secret-name", description: "secret-description",
+        reason: "Add local work.", templatePath: "workflow:secret-parent/template-secret"},
+      expected: {code: "local_step_template_path_not_allowed", path: "/input/plan/nodes/0/nodes/0/nodes/0/templatePath",
+        expected: "omit templatePath or set it to null for a new local step"},
+    },
+  ];
+
+  for (const item of cases) {
+    const diagnostic: {value: WorkflowApplyDiagnostic | null} = {value: null};
+    const candidate = {sourceBinding, requirements: original.requirements, issues: original.issues, plan: nestedPlan(item.node)};
+    assert.equal(validateWorkflowApplyAgainstPinnedContext(candidate, context, original, "task-a", "proposal-a",
+      sourceHash, target, [], original.plan, diagnostic), null, item.name);
+    assert.deepEqual(diagnostic.value, item.expected, item.name);
+    assert.doesNotMatch(JSON.stringify(diagnostic.value), /secret-local-id|secret-name|secret-description|secret-parent|template-secret/u);
+  }
+
+  const genericDiagnostic: {value: WorkflowApplyDiagnostic | null} = {value: null};
+  const staleBinding = {...sourceBinding, revision: "stale-revision"};
+  assert.equal(validateWorkflowApplyAgainstPinnedContext({sourceBinding: staleBinding, requirements: original.requirements,
+    issues: original.issues, plan: nestedPlan({kind: "step", definitionId: null, localId: "secret-local-id", name: "secret-name",
+      description: "secret-description", reason: "Add local work."})}, context, original, "task-a", "proposal-a", sourceHash,
+  target, [], original.plan, genericDiagnostic), null);
+  assert.equal(genericDiagnostic.value, null, "source-pin failures keep the generic result");
 });
 
 test("only accepted or current fixed occurrences constrain the first workflow apply", async () => {

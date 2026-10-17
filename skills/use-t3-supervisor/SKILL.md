@@ -177,6 +177,12 @@ authorize edits to its main/descendant scope; transport credentials alone cannot
 Check actual installed availability, not source checkout features. Role instructions
 are not a sandbox. No proxies or T3 modifications are authorized by ordinary usage.
 
+An authorized workflow apply may return a bounded code/path/expected diagnostic
+alongside pinned_definition_context_mismatch for a malformed local step. Use it to
+correct the indicated field; it changes no saved state or authority. Helper monitor
+activityRefs provide exact item-only or message-only navigation pairs. Copy those
+pairs unchanged and omit optional run IDs; never normalize encoded identifiers.
+
 Activity and Recaps and Telegram retain read-only history. Settings stores chat
 exclusions and optional interactive Telegram selection per instance. Preserve
 uncertain sends/receipts; questionnaires use their native answer path, not ordinary

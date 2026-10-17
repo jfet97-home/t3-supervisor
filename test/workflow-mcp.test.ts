@@ -20,9 +20,12 @@ const postJson = async (url: string, body: unknown): Promise<Response> => fetch(
 });
 
 test("workflow MCP exposes only read/write tools and serves stateless JSON calls", async () => {
+  const invalidWrite = {status: "invalid", reason: "pinned_definition_context_mismatch", diagnostic: {
+    code: "local_step_definition_id_required", path: "/input/plan/nodes/0/definitionId", expected: "definitionId: null",
+  }};
   const controller = {
     read: async (args: unknown) => ({status: "ok", received: args}),
-    write: async (args: unknown) => ({status: "created", received: args}),
+    write: async () => invalidWrite,
   } as unknown as WorkflowWriteController;
   const endpoint = createWorkflowMcpEndpoint(controller);
   const server = createServer((request, response) => {void endpoint.handle(request, response);});
@@ -72,6 +75,14 @@ test("workflow MCP exposes only read/write tools and serves stateless JSON calls
     assert.equal(called.status, 200);
     const callBody = await called.json() as {result?: {content?: Array<{text?: string}>}};
     assert.deepEqual(JSON.parse(callBody.result?.content?.[0]?.text ?? "null"), {status: "ok", received: args});
+
+    const invalid = await postJson(url, {
+      jsonrpc: "2.0", id: 4, method: "tools/call", params: {name: "workflow_write", arguments: args},
+    });
+    assert.equal(invalid.status, 200);
+    const invalidBody = await invalid.json() as {result?: {isError?: boolean; content?: Array<{text?: string}>}};
+    assert.equal(invalidBody.result?.isError, true);
+    assert.deepEqual(JSON.parse(invalidBody.result?.content?.[0]?.text ?? "null"), invalidWrite);
   } finally {
     await endpoint.close();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

@@ -131,6 +131,15 @@ status or objective change without resending an entire plan. A supplied plan rep
 A supplied requirement list replaces its accounting; reusable provenance, fixed
 commitments and current-task policy are revalidated. Status changes still require explicit status-change evidence.
 
+After authorization, a malformed local step may return the existing
+`pinned_definition_context_mismatch` reason with an additional `diagnostic`:
+`{code, path, expected}`. The path identifies the field using fixed names and
+numeric indexes, such as `/input/plan/nodes/0/definitionId`; expected guidance is
+static and never echoes submitted names, descriptions, paths or IDs. Correct the
+indicated shape and retry with fresh workflow state. Invalid shape attempts do not
+reserve the operation ID. Unverified callers, raw request-shape failures and
+unrecognized policy or pin failures retain their existing results.
+
 An evidence entry may include optional `sourceThreadId`, `sourceRunId`,
 `sourceMessageId` and `sourceItemId` references. If a reference is supplied without
 `sourceThreadId`, the controller uses the target workflow's thread. That thread must
@@ -144,6 +153,13 @@ only when their run identities agree. A native child command can have no run ID,
 temporarily unavailable leave the write pending; malformed or out-of-scope
 references are rejected. These references help the user navigate to observed
 activity; they are optional and do not prove that a status is semantically complete.
+
+Copy supplied activity references verbatim. For an item, use only
+`{sourceThreadId, sourceItemId}`; for a message without an item reference, use
+`{sourceThreadId, sourceMessageId}`. Add the evidence kind and note without copying
+an optional run ID. Opaque IDs must never be decoded, re-encoded, normalized or
+reconstructed. Helper envelopes supply ready references for eligible records in
+their bounded preview; omitted records require fresh bounded native reads.
 
 Each write includes `supervisorThreadId`, `bindingGeneration`, a stable unique
 `operationId`, and the complete action arguments. The first two fields locate the

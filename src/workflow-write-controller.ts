@@ -27,7 +27,7 @@ import {
   type WorkflowEvidenceMatch,
   type WorkflowEvidenceCheck,
 } from "./workflow-write-evidence.js";
-import {proposalContextFromDefinitions, proposalContextMatches, validateWorkflowApplyAgainstPinnedContext} from "./supervisor-workflow.js";
+import {proposalContextFromDefinitions, proposalContextMatches, validateWorkflowApplyAgainstPinnedContext, type WorkflowApplyDiagnostic} from "./supervisor-workflow.js";
 import type {ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
 import type {WorkflowPlanGroupInfo, WorkflowPlanStepInfo, WorkflowPlanWorkflowInfo, WorkflowProtocolDiagnostic, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
 
@@ -83,6 +83,7 @@ export type WorkflowWriteResult = WorkflowEnsureResult | WorkflowMutationResult 
   status: "pending" | "denied" | "invalid" | "unavailable" | "too_large";
   operationId?: string;
   reason: string;
+  diagnostic?: WorkflowApplyDiagnostic;
   observedToolName?: string;
   retryable?: boolean;
 };
@@ -1049,9 +1050,11 @@ export class WorkflowWriteController {
       const acceptedTaskPlan = current.threadId === owner.mainThreadId ? acceptedTaskPlanForBinding(validation.acceptedTaskAgreement,
         validation.acceptedTaskAgreementSourceHash, validation.expectedSourceHash, sourceBinding) : null;
       const acceptedPlans = [...acceptedWorkflowPlansForBinding(current, sourceBinding), ...(acceptedTaskPlan ? [acceptedTaskPlan] : [])];
+      const canonicalDiagnostic: {value: WorkflowApplyDiagnostic | null} = {value: null};
       const canonical = validateWorkflowApplyAgainstPinnedContext(candidate, validation.pinnedContext, validation.originalProposal,
-        validation.expectedTaskId, validation.expectedProposalId, validation.expectedSourceHash, target, acceptedPlans, currentPlan);
-      if (!canonical) return {status: "invalid", operationId: applyInput.operationId, reason: "pinned_definition_context_mismatch"};
+        validation.expectedTaskId, validation.expectedProposalId, validation.expectedSourceHash, target, acceptedPlans, currentPlan, canonicalDiagnostic);
+      if (!canonical) return {status: "invalid", operationId: applyInput.operationId, reason: "pinned_definition_context_mismatch",
+        ...(canonicalDiagnostic.value ? {diagnostic: canonicalDiagnostic.value} : {})};
       const normalizedInput: WorkflowApplyInput = {...applyInput, plan: canonical.plan, requirements: [...canonical.requirements], issues: [...canonical.issues]};
       const previousNodes = new Map<string, Set<string>>();
       const indexPrevious = (group: WorkflowPlanGroupInfo | null): void => {

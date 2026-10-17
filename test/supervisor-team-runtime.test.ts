@@ -664,10 +664,23 @@ test("a stale completed helper check-in settles its request without acknowledgin
   op.nodes = [
     {id: "root-node", kind: "root_turn", status: "completed", threadId: opThread.id, runId, rootNodeId: "root-node", providerThreadId},
     {id: "tool-node", kind: "tool_call", status: "completed", threadId: opThread.id, runId, rootNodeId: "root-node", providerThreadId, parentNodeId: "root-node"},
+    {id: "assistant-node", kind: "assistant_message", status: "completed", threadId: opThread.id, runId, rootNodeId: "root-node",
+      providerThreadId, parentNodeId: "root-node"},
   ];
-  op.turnItems?.push({id: "tool-activity", threadId: opThread.id, runId, nodeId: "tool-node", type: "command_execution", status: "completed",
-    ordinal: 1, completedAt: iso(time + 1), updatedAt: iso(time + 1)});
-  f.monitor.observe({projectId, threadId: opThread.id, sourceOrdinal: 0, projection: op, now: time + 2});
+  const exactItemId = "turn-item:command%253Aopaque%3A1";
+  const exactMessageId = "assistant%253Amessage%3A2";
+  const oversizedItemId = "x".repeat(201);
+  op.turnItems = [
+    {id: exactItemId, threadId: opThread.id, runId: null, type: "command_execution", status: "completed",
+      ordinal: 1, completedAt: iso(time + 1), updatedAt: iso(time + 1)},
+    {id: oversizedItemId, threadId: opThread.id, runId: null, type: "command_execution", status: "completed",
+      ordinal: 2, completedAt: iso(time + 2), updatedAt: iso(time + 2)},
+  ];
+  op.messages.push({id: exactMessageId, threadId: opThread.id, runId, nodeId: "assistant-node", role: "assistant",
+    text: "The result was inspected.", streaming: false, createdAt: iso(time + 1), updatedAt: iso(time + 1)});
+  op.runtimeRequests = [{id: "request%253Aopaque", nodeId: "tool-node", kind: "user_input", status: "pending",
+    createdAt: iso(time + 1), resolvedAt: null}];
+  f.monitor.observe({projectId, threadId: opThread.id, sourceOrdinal: 0, projection: op, now: time + 2, includeDetachedChildItems: true});
   const selected = f.monitor.select(projectId, {intervalMinutes: 5, activityThreshold: 1}, time + 3, null, {eligibleThreadIds: new Set([opThread.id])});
   assert.ok(selected);
   const archivedTarget = f.threadList.find(thread => thread.id === "leaf")!;
@@ -696,6 +709,15 @@ test("a stale completed helper check-in settles its request without acknowledgin
   assert.equal(envelopeTargets.length, 2);
   const targetEnvelope = envelopeTargets.find(item => item.targetThreadId === "branch")!;
   const archivedEnvelope = envelopeTargets.find(item => item.targetThreadId === archivedTarget.id)!;
+  const activityRefs = targetEnvelope.activityRefs as Array<Record<string, string>>;
+  assert.deepEqual(activityRefs.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))), [
+    {sourceThreadId: "branch", sourceItemId: exactItemId},
+    {sourceThreadId: "branch", sourceMessageId: exactMessageId},
+  ].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))));
+  assert.deepEqual(archivedEnvelope.activityRefs, [], "run-only synthetic activity has no ready reference");
+  assert.ok(activityRefs.every(reference => !Object.hasOwn(reference, "sourceRunId")));
+  assert.equal(request.text.includes("Omit sourceRunId"), true);
+  assert.equal(request.text.includes("Never decode, re-encode, normalize or reconstruct opaque IDs"), true);
   assert.deepEqual({targetThreadId: targetEnvelope.targetThreadId, assignmentRootThreadId: targetEnvelope.assignmentRootThreadId,
     assignmentEpoch: targetEnvelope.assignmentEpoch}, {targetThreadId: "branch", assignmentRootThreadId: "branch",
     assignmentEpoch: f.teamStore.coverage(f.binding, "branch", parents).assignmentEpoch});
@@ -771,10 +793,11 @@ test("an oversized helper batch is split without acknowledging activity reserved
   activate(f.teamStore, f.binding, member, assignmentRootId, time, parentById);
   f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
 
+  const exactItemIds = new Map<string, string>();
   for (const [targetIndex, operationalThread] of operationalThreads.entries()) {
     const projection = emptyProjection(operationalThread);
     assert.ok(Array.isArray(projection.nodes));
-    for (let runIndex = 0; runIndex < 4; runIndex++) {
+    for (let runIndex = 0; runIndex < 3; runIndex++) {
       const taskSuffix = `invoice-delivery-receipt-target-${String(targetIndex).padStart(2, "0")}-run-${runIndex}`;
       const runId = `run:command%3Amcp%3Afd38e33d-d163-4deb-8fd2-490fdb5e01e3%3Adelegate-task%3A${taskSuffix}-508b27d1-3107-47bf-97cd-f1b522adb9ba`;
       const rootNodeId = `root:${taskSuffix}`;
@@ -784,6 +807,17 @@ test("an oversized helper batch is split without acknowledging activity reserved
         providerThreadId: `provider:${taskSuffix}`});
       projection.nodes.push({id: rootNodeId, kind: "root_turn", status: "completed", threadId: operationalThread.id,
         runId, rootNodeId, providerThreadId: `provider:${taskSuffix}`});
+      if (runIndex === 0) {
+        const toolNodeId = `tool:${taskSuffix}`;
+        const itemIdPrefix = `turn-item:command%253A${taskSuffix}`;
+        const itemId = itemIdPrefix.padEnd(200, "x");
+        assert.equal(itemId.length, 200);
+        exactItemIds.set(operationalThread.id, itemId);
+        projection.nodes.push({id: toolNodeId, kind: "tool_call", status: "completed", threadId: operationalThread.id,
+          runId, rootNodeId, providerThreadId: `provider:${taskSuffix}`, parentNodeId: rootNodeId});
+        projection.turnItems = [...(projection.turnItems ?? []), {id: itemId, threadId: operationalThread.id, runId, nodeId: toolNodeId,
+          type: "command_execution", status: "completed", ordinal: runIndex + 1, completedAt, updatedAt: completedAt}];
+      }
     }
     f.projections.set(operationalThread.id, projection);
     f.monitor.observe({projectId, threadId: operationalThread.id, sourceOrdinal: 0, projection, now: time + 10});
@@ -831,6 +865,13 @@ test("an oversized helper batch is split without acknowledging activity reserved
   assert.deepEqual(firstEnvelopeBatch.threads.map(thread => thread.threadId), firstTargetIds);
   assert.equal(firstEnvelopeBatch.pendingItemCount, firstExpectedPending);
   assert.equal(firstEnvelopeBatch.finalizedActivityCount, firstExpectedFinalized);
+  for (const target of firstTargets) {
+    const threadId = String(target.targetThreadId);
+    const sourceItemId = exactItemIds.get(threadId)!;
+    assert.deepEqual(target.activityRefs, [{sourceThreadId: threadId, sourceItemId}]);
+    const batchThread = firstRequest.batch.threads.find(thread => thread.threadId === threadId)!;
+    assert.ok(batchThread.previewItems.some(item => item.readItemId === sourceItemId), "references come only from the transmitted preview");
+  }
   const remainingTargetIds = completeTargetIds.slice(firstTargetIds.length);
   assert.ok(remainingTargetIds.length > 0);
 
@@ -871,7 +912,12 @@ test("an oversized helper batch is split without acknowledging activity reserved
   if (!secondRequest?.batch) throw new Error("remaining_bounded_helper_checkin_missing");
   assert.ok(secondRequest.text.length <= 120_000);
   const secondEnvelope = parseEnvelope(secondRequest.text, "UNTRUSTED_TEAM_MONITOR_ENVELOPE", "END_UNTRUSTED_TEAM_MONITOR_ENVELOPE");
-  assert.deepEqual((secondEnvelope.targets as Array<Record<string, unknown>>).map(target => target.targetThreadId), remainingTargetIds);
+  const secondTargets = secondEnvelope.targets as Array<Record<string, unknown>>;
+  assert.deepEqual(secondTargets.map(target => target.targetThreadId), remainingTargetIds);
+  for (const target of secondTargets) {
+    const threadId = String(target.targetThreadId);
+    assert.deepEqual(target.activityRefs, [{sourceThreadId: threadId, sourceItemId: exactItemIds.get(threadId)!}]);
+  }
   assert.deepEqual(secondRequest.batch.threads.map(thread => thread.threadId), remainingTargetIds);
   assert.equal(secondRequest.batch.pendingItemCount, remainingBatch.pendingItemCount);
   assert.equal(secondRequest.batch.finalizedActivityCount, remainingBatch.finalizedActivityCount);

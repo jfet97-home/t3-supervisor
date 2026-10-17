@@ -1892,24 +1892,72 @@ test("a ready helper links and plans a completed unarchived assigned child using
     const childStep = {kind: "step" as const, definitionId: null, localId: "check-child-output", name: "Check the child output",
       description: "Review the completed operational result.", reason: "Review the completed operational result.", status: "planned" as const};
     const missingDefinitionIdPlan = {...authority, action: "apply", input: {
-      operationId: "helper-child-plan-missing-definition-id", workflowId: doc.workflowId, expectedRevision: doc.revision,
+      operationId: "helper-child-plan-repair", workflowId: doc.workflowId, expectedRevision: doc.revision,
       status: "planned", objective: "Complete the assigned child contribution.",
-      plan: sequencePlan([{kind: "step" as const, localId: childStep.localId, name: childStep.name, description: childStep.description,
-        reason: childStep.reason, status: childStep.status}]),
+      plan: sequencePlan([{kind: "parallel", nodes: [{kind: "sequence", nodes: [{kind: "step" as const,
+        localId: "secret-local-id", name: "secret-local-name", description: "secret-local-description", reason: childStep.reason,
+        status: childStep.status}]}]}]),
       note: "Keep this personal plan in the assigned child document.",
     }};
+    const unverifiedResult = await controller.write(missingDefinitionIdPlan);
+    assert.equal(unverifiedResult.status, "pending");
+    assert.equal("diagnostic" in unverifiedResult, false, "an unverified call receives no authoring diagnostic");
+    const foreignResult = await controller.write({...missingDefinitionIdPlan, supervisorThreadId: "foreign-supervisor"});
+    assert.equal(foreignResult.status, "denied");
+    assert.equal("diagnostic" in foreignResult, false, "a foreign caller receives no authoring diagnostic");
+
+    const beforeInvalid = f.workflows.get(f.projectId, f.mainThreadId, child.id)!;
     installEvidence(actorFixture, missingDefinitionIdPlan);
     const missingDefinitionIdResult = await controller.write(missingDefinitionIdPlan);
     assert.equal(missingDefinitionIdResult.status, "invalid");
     if (!("reason" in missingDefinitionIdResult)) throw new Error("missing_definition_id_reason_missing");
     assert.equal(missingDefinitionIdResult.reason, "pinned_definition_context_mismatch");
-    assert.equal(f.workflows.get(f.projectId, f.mainThreadId, child.id)?.revision, doc.revision,
-      "a local step without explicit definitionId: null cannot mutate the child document");
+    assert.deepEqual("diagnostic" in missingDefinitionIdResult ? missingDefinitionIdResult.diagnostic : undefined, {
+      code: "local_step_definition_id_required",
+      path: "/input/plan/nodes/0/nodes/0/nodes/0/definitionId",
+      expected: "definitionId: null",
+    });
+    assert.doesNotMatch(JSON.stringify(missingDefinitionIdResult), /secret-local-id|secret-local-name|secret-local-description/u);
+
+    const copiedTemplatePathPlan = {...authority, action: "apply", input: {
+      ...missingDefinitionIdPlan.input,
+      plan: sequencePlan([{kind: "parallel", nodes: [{kind: "sequence", nodes: [{...childStep,
+        localId: "secret-copied-local-id", name: "secret-copied-name", description: "secret-copied-description",
+        templatePath: "workflow:secret-parent/template-secret"}]}]}]),
+    }};
+    installEvidence(actorFixture, copiedTemplatePathPlan);
+    const copiedTemplatePathResult = await controller.write(copiedTemplatePathPlan);
+    assert.equal(copiedTemplatePathResult.status, "invalid");
+    assert.equal("reason" in copiedTemplatePathResult ? copiedTemplatePathResult.reason : undefined, "pinned_definition_context_mismatch");
+    assert.deepEqual("diagnostic" in copiedTemplatePathResult ? copiedTemplatePathResult.diagnostic : undefined, {
+      code: "local_step_template_path_not_allowed",
+      path: "/input/plan/nodes/0/nodes/0/nodes/0/templatePath",
+      expected: "omit templatePath or set it to null for a new local step",
+    });
+    assert.doesNotMatch(JSON.stringify(copiedTemplatePathResult), /secret-copied-local-id|secret-copied-name|secret-copied-description|secret-parent|template-secret/u);
+
+    const stalePinPlan = {...authority, action: "apply", input: {
+      ...missingDefinitionIdPlan.input,
+      operationId: "helper-child-plan-stale-pin",
+      sourceBinding: {...f.sourceBinding, revision: "stale-revision"},
+    }};
+    installEvidence(actorFixture, stalePinPlan);
+    const stalePinResult = await controller.write(stalePinPlan);
+    assert.equal(stalePinResult.status, "invalid");
+    assert.equal("reason" in stalePinResult ? stalePinResult.reason : undefined, "pinned_definition_context_mismatch");
+    assert.equal("diagnostic" in stalePinResult, false, "source-pin failures stay generic");
+
+    const afterInvalid = f.workflows.get(f.projectId, f.mainThreadId, child.id)!;
+    assert.equal(afterInvalid.revision, beforeInvalid.revision);
+    assert.deepEqual(afterInvalid.evidence, beforeInvalid.evidence);
+    assert.deepEqual(afterInvalid.acceptedAgreements, beforeInvalid.acceptedAgreements);
+    assert.equal(Number(f.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_write_receipts WHERE operation_id=?")
+      .get("helper-child-plan-repair")?.n), 0, "invalid attempts do not reserve the operation ID");
 
     const childPlan = {...authority, action: "apply", input: {
-      operationId: "helper-child-plan", workflowId: doc.workflowId, expectedRevision: doc.revision,
+      operationId: "helper-child-plan-repair", workflowId: doc.workflowId, expectedRevision: doc.revision,
       status: "planned", objective: "Complete the assigned child contribution.",
-      plan: sequencePlan([childStep]),
+      plan: sequencePlan([{kind: "parallel", nodes: [{kind: "sequence", nodes: [childStep]}]}]),
       note: "Keep this personal plan in the assigned child document.",
     }};
     installEvidence(actorFixture, childPlan);
@@ -1917,6 +1965,20 @@ test("a ready helper links and plans a completed unarchived assigned child using
     assert.equal(applied.status, "applied", JSON.stringify(applied));
     const childAfter = f.workflows.get(f.projectId, f.mainThreadId, child.id)!;
     assert.equal(mainStep(childAfter.plan)?.name, "Check the child output");
+    const childParallel = childAfter.plan?.nodes[0];
+    assert.ok(childParallel && childParallel.kind === "parallel");
+    const childSequence = childParallel.nodes[0];
+    assert.ok(childSequence && childSequence.kind === "sequence");
+    const followUp = {kind: "step" as const, definitionId: null, localId: "check-child-follow-up", name: "Check the follow-up",
+      description: "Review the additional child output.", reason: "Add a follow-up check.", status: "planned" as const};
+    const followUpPlan = {...authority, action: "apply", input: {
+      operationId: "helper-child-plan-follow-up", workflowId: doc.workflowId, expectedRevision: childAfter.revision,
+      status: "planned", objective: "Complete the assigned child contribution.",
+      plan: sequencePlan([{...childParallel, nodes: [{...childSequence, nodes: [...childSequence.nodes, followUp]}]}]),
+      note: "Add a follow-up check to the personal child plan.",
+    }};
+    installEvidence(actorFixture, followUpPlan);
+    assert.equal((await controller.write(followUpPlan)).status, "applied", "a fresh operation ID also succeeds");
     assert.deepEqual(f.workflows.get(f.projectId, f.mainThreadId), mainBefore, "helper child writes preserve the root-owned main document");
     assert.deepEqual(team.coverage(f.binding, child.id, parents), assignedCoverage, "writes preserve the member and assignment epochs");
     assert.equal((await controller.read({...authority})).status, "ok");
