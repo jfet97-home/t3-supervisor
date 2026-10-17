@@ -42,7 +42,7 @@ export function openProject(projectId: string): Route {
   return fallback;
 }
 
-type HistoryState = {hash: string; state: unknown};
+type HistoryState = {hash: string; state: unknown; index?: number | null};
 export type NavigationHistory = {
   read: () => HistoryState;
   push: (href: string, state: object) => void;
@@ -53,8 +53,9 @@ const positionOf = (state: unknown): number | null => typeof state === "object" 
 
 export function createNavigator(initial: Route, host: NavigationHistory, allow: NavigationGuard, changed: (route: Route) => void) {
   let route = initial;
-  let position = positionOf(host.read().state) ?? 0;
+  let position = host.read().index ?? positionOf(host.read().state) ?? 0;
   let restoring = false;
+  let rejectedPosition: number | null = null;
   const stateAt = (index: number) => { const previous = host.read().state; return {...(typeof previous === "object" && previous !== null ? previous : {}), supervisorPosition: index}; };
   const accept = (next: Route) => { route = next; changed(next); };
   return {
@@ -62,22 +63,29 @@ export function createNavigator(initial: Route, host: NavigationHistory, allow: 
     navigate(next: Route) {
       if (restoring || routeHref(next) === routeHref(route) || !allow(next)) return;
       host.push(routeHref(next), stateAt(++position));
+      position = host.read().index ?? position;
       accept(next);
     },
     historyChanged() {
       const observed = host.read();
-      const targetPosition = positionOf(observed.state);
+      const targetPosition = observed.index ?? positionOf(observed.state);
       const next = parseRoute(observed.hash);
       if (restoring) {
-        if (targetPosition === position && routeHref(next) === routeHref(route)) restoring = false;
+        if (targetPosition === position && routeHref(next) === routeHref(route)) {restoring = false;return;}
+        if (targetPosition === rejectedPosition) return;
+        restoring = false;
+      }
+      if (routeHref(next) === routeHref(route)) {
+        position = targetPosition ?? position + 1;
+        if (targetPosition === null) host.replace(routeHref(route), stateAt(position));
         return;
       }
-      if (routeHref(next) === routeHref(route)) return;
       if (!allow(next)) {
         if (targetPosition !== null && targetPosition !== position) {
           restoring = true;
+          rejectedPosition = targetPosition;
           host.go(position - targetPosition);
-        } else host.replace(routeHref(route), stateAt(position));
+        } else host.replace(routeHref(route), stateAt(++position));
         return;
       }
       position = targetPosition ?? position + 1;
@@ -91,7 +99,7 @@ export function useNavigation() {
   const [route, setRoute] = useState(() => parseRoute(window.location.hash));
   const guard = useRef<NavigationGuard>(() => true);
   const [controller] = useState(() => createNavigator(route, {
-    read: () => ({hash: window.location.hash, state: history.state}),
+    read: () => ({hash: window.location.hash, state: history.state, index: window.navigation?.currentEntry?.index ?? null}),
     push: (href, state) => history.pushState(state, "", href),
     replace: (href, state) => history.replaceState(state, "", href),
     go: delta => history.go(delta),

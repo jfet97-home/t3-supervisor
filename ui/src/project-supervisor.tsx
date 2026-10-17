@@ -784,7 +784,7 @@ export function ProjectSupervisorView({
       {snapshot.settings.pending && !snapshot.binding && <p role="status">The saved model selection will apply when T3 creates the Supervisor conversation for the first needed task.</p>}
       </div></details>
       <p>{snapshot.message}</p>
-      {!snapshot.available && <p role="status">Supervisor settings are currently unavailable.</p>}
+      {!snapshot.available && <p role="status">Supervisor status is currently unavailable.</p>}
     </div>
 
 
@@ -1036,8 +1036,8 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
         text: (priorModelWasDirty && selectionKey(modelValue) !== selectionKey(modelBaseline)) ||
           (priorMonitoringWasDirty && !sameMonitoring(monitoringValue, monitoringBaseline)) ||
           (priorTeamSettingsWereDirty && !sameTeamSettings(teamSettingsValue, teamSettingsBaseline))
-          ? "Supervisor settings refreshed. Your unsaved draft was kept against the latest saved generation."
-          : "Supervisor settings refreshed from T3.",
+          ? "Supervisor status refreshed. Your unsaved draft was kept against the latest saved generation."
+          : "Supervisor status refreshed from T3.",
         alert: false,
       });
       setForceRefresh(false);
@@ -1185,7 +1185,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
             }} : current;
           });
           setBlocked(true);
-          setPanelMessage({projectId: targetProject, text: `${result.message} Refresh Supervisor settings before making another change.`, alert: false});
+          setPanelMessage({projectId: targetProject, text: `${result.message} Refresh Supervisor status before making another change.`, alert: false});
         }
       } else if (result.status === "uncertain") {
         setBlocked(true);
@@ -1209,7 +1209,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
         setPanelMessage({projectId: targetProject, text: result.message, alert: result.status === "invalid"});
       } else {
         setBlocked(result.status === "conflict");
-        setPanelMessage({projectId: targetProject, text: result.status === "conflict" ? `${result.message} Refresh Supervisor settings before trying again.` : result.message, alert: result.status === "invalid"});
+        setPanelMessage({projectId: targetProject, text: result.status === "conflict" ? `${result.message} Refresh Supervisor status before trying again.` : result.message, alert: result.status === "invalid"});
       }
     } catch (error) {
       if (activeProject.current !== targetProject || activeScope.current !== targetScope) return;
@@ -1219,7 +1219,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
         projectId: targetProject,
         text: error instanceof ProjectSupervisorRequestError
           ? error.message
-          : "The save outcome could not be confirmed. Refresh Supervisor settings before trying again.",
+          : "The save outcome could not be confirmed. Refresh Supervisor status before trying again.",
         alert: !definitelyNotSaved,
       });
     } finally {
@@ -1273,7 +1273,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
         setBlocked(mustRefresh);
         setPanelMessage({
           projectId: targetProject,
-          text: mustRefresh ? `${result.message} Refresh Supervisor settings before trying again.` : result.message,
+          text: mustRefresh ? `${result.message} Refresh Supervisor status before trying again.` : result.message,
           alert: result.status === "invalid",
         });
       }
@@ -1285,7 +1285,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
         projectId: targetProject,
         text: error instanceof ProjectSupervisorRequestError
           ? error.message
-          : "The native access retry outcome could not be confirmed. Refresh Supervisor settings before trying again.",
+          : "The native access retry outcome could not be confirmed. Refresh Supervisor status before trying again.",
         alert: !definitelyNotSaved,
       });
     } finally {
@@ -1302,7 +1302,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
     <div hidden={section !== "all" && section !== "settings"}>{projectId && <SupervisionControlPanel key={projectId} projectId={projectId} active={section === "settings" || section === "all"} onStateChange={setControlActivity} />}</div>
     {!projectId && <p className="panel muted">Select a project to manage its Supervisor settings.</p>}
     {projectId && !connected && <p className="panel" role="status">T3 is disconnected. Any unsaved Supervisor settings draft is kept.</p>}
-    {projectId && connected && !activeSnapshot && isLoading && <p className="panel" role="status">Loading Supervisor settings…</p>}
+    {projectId && connected && !activeSnapshot && isLoading && <p className="panel" role="status">Loading Supervisor status…</p>}
     {projectId && connected && loadError && <p className="panel" role="alert">Could not refresh Supervisor state. The previous snapshot remains visible; refresh to try again or check the T3 connection.</p>}
     {projectId && activeSnapshot && activeDraft && <ProjectSupervisorView
       section={section}
@@ -1332,8 +1332,8 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
       onRetry={() => {void retryNativeAccess();}}
       onSubmit={save}
     />}
-    {projectId && connected && activeSnapshot && !activeDraft && isLoading && <p className="panel" role="status">Loading the selected project’s settings…</p>}
-    {projectId && connected && !activeSnapshot && !isLoading && !loadError && <p className="panel muted">Supervisor settings are not loaded yet.</p>}
+    {projectId && connected && activeSnapshot && !activeDraft && isLoading && <p className="panel" role="status">Loading the selected project’s Supervisor status…</p>}
+    {projectId && connected && !activeSnapshot && !isLoading && !loadError && <p className="panel muted">Supervisor status is not loaded yet.</p>}
     {visibleMessage && <p role={visibleMessage.alert ? "alert" : "status"}>{visibleMessage.text}</p>}
     {projectId && <div><button type="button" disabled={!connected || saving || isLoading} onClick={refresh}>{section === "progress" || section === "plan" ? "Refresh Supervisor status" : "Refresh Supervisor settings"}</button></div>}
     {loadState.key === loadKey && loadState.status === "loading" && activeSnapshot && <p className="small muted" role="status">Refreshing Supervisor state…</p>}

@@ -41,6 +41,7 @@ export function SupervisionControlPanel({projectId = null, onChanged, onStateCha
   const [setupRequested, setSetupRequested] = useState(false);
   const [uncertain, setUncertain] = useState(false);
   const [setupActivity, setSetupActivity] = useState(idleControlActivity);
+  useEffect(() => {if (!setupRequested) setSetupActivity(idleControlActivity);}, [setupRequested]);
   useEffect(() => {onStateChange?.({busy: busy || setupActivity.busy, dirty: setupActivity.dirty, uncertain: uncertain || setupActivity.uncertain});}, [busy, uncertain, setupActivity, onStateChange]);
   const wasActive = useRef(active);
   useEffect(() => {
@@ -60,9 +61,9 @@ export function SupervisionControlPanel({projectId = null, onChanged, onStateCha
     return () => abort.abort();
   }, [projectId, revision]);
   if (!control) return <section className="panel"><p role="status">{message || "Loading supervision status…"}</p><button type="button" onClick={() => setRevision(value => value + 1)}>Reload status</button></section>;
-  return <div className="stack"><SupervisionControlView control={control} busy={busy} blocked={blocked} message={message}
-    onReload={() => setRevision(value => value + 1)} onToggle={() => {
-      if (busy || blocked) return;
+  return <div className="stack"><SupervisionControlView control={control} busy={busy || setupActivity.busy} blocked={blocked || setupActivity.uncertain} message={message}
+    onReload={() => {if (setupActivity.uncertain) setUncertain(true);setRevision(value => value + 1);}} onToggle={() => {
+      if (busy || blocked || setupActivity.busy || setupActivity.uncertain) return;
       setBusy(true);setMessage("");
       void fetch("/api/guidance/supervision-control", {method: "POST", credentials: "omit",
         headers: {"Content-Type": "application/json", ...sessionHeaders(), "x-csrf-token": getCsrfToken()},
@@ -130,6 +131,7 @@ function SupervisionSetupPanel({projectId, onComplete, onStateChange}: {projectI
   const [revision, setRevision] = useState(0);
   const [uncertain, setUncertain] = useState(false);
   useEffect(() => {onStateChange({busy, dirty: Boolean(selected), uncertain});}, [busy, selected, uncertain, onStateChange]);
+  useEffect(() => () => onStateChange(idleControlActivity), [onStateChange]);
   useEffect(() => {
     const abort = new AbortController();setOptions(null);
     void fetch(`/api/guidance/supervision-setup?${new URLSearchParams({projectId})}`, {credentials: "omit", headers: sessionHeaders(), signal: abort.signal})
