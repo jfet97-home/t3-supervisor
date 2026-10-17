@@ -118,6 +118,10 @@ Before a fresh image build, run `node scripts/fetch-runtime.mjs` to fetch the pi
 runtime. The service connects to T3's orchestration API; Telegram uses MCPX only when enabled.
 Its private `t3-supervisor_state` volume retains settings and delivery evidence.
 Health: [http://127.0.0.1:9007/health](http://127.0.0.1:9007/health).
+With Telegram enabled, readiness requires the independent bot identity check and
+healthy dependencies/workers. Unresolved delivery ledger entries remain visible and
+are not replayed without proof, but do not by themselves make the service unready.
+A successful ledger lookup does not replace the bot identity check.
 
 ### Optional Telegram integration
 

@@ -8,7 +8,7 @@ import { Recapper } from "../src/recap.js";
 import { Store, makeStore } from "../src/store.js";
 import { createStatus, readiness, refreshTelegramStatus, runSupervisor } from "../src/supervisor.js";
 import { T3Client, type T3ClientShape } from "../src/t3.js";
-import { TelegramClient } from "../src/telegram.js";
+import { TelegramClient, type DeliveryStatus } from "../src/telegram.js";
 import type { Projection, SupervisorConfig, ThreadInfo } from "../src/types.js";
 
 const excluded = "af0e5160-07d2-46c9-b60b-a329d6951d83";
@@ -157,7 +157,7 @@ for (const mode of ["normal", "settling", "rejected", "skipped", "continued", "t
         yield* refreshTelegramStatus(status);
         assert.equal(status.telegramState, "ready");
         assert.equal(status.deliveryState, "degraded");
-        assert.equal(readiness(status, config).ready, false);
+        assert.equal(readiness(status, config).ready, true);
       }
     }).pipe(Effect.provide(layers), Effect.scoped));
     assert.equal(fetched.every((id) => id === "main-thread"), true);
@@ -204,11 +204,124 @@ test("readiness distinguishes process liveness from failed dependencies and stal
   status.storeState = "degraded";
   assert.equal(readiness(status, config).ready, false);
   status.storeState = "ready";
+  status.deliveryState = "degraded";
+  status.store = {
+    projects: 0, threads: 0, dirtyHints: 0, deferredHints: 0, waitingHints: 0, identities: 0,
+    jobs: { pending: 0, ready: 0, sending: 0, sent: 0, unknown: 1 }, databaseBytes: 0,
+  };
+  assert.equal(readiness(status, config).ready, true);
+  status.telegramState = "degraded";
+  assert.equal(readiness(status, config).ready, false);
+  status.telegramState = "ready";
+  status.deliveryState = "ready";
   status.scanHeartbeat = Date.now() - 130_000;
   assert.equal(readiness(status, config).ready, false);
   status.scanHeartbeat = Date.now();
   status.deliveryBusySince = Date.now() - 63_000;
   assert.equal(readiness(status, config).ready, false);
+});
+
+const runReconciliationReadinessCase = async (lookupResult: DeliveryStatus, expectedTelegramState: "ready" | "degraded", expectedReady: boolean) => {
+  const directory = await mkdtemp(join(tmpdir(), "supervisor-delivery-health-"));
+  const config: SupervisorConfig = {
+    dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "/unused",
+    mcpxUrl: "http://unused", cxCommand: "unused", cxHome: "/unused", cxSeedFile: "/unused",
+    excludedThreadIds: [], healthPort: 0, modelTimeoutMs: 100, telegramEnabled: true, inputEnabled: false,
+  };
+  const status = createStatus(config);
+  let releaseLookup!: (result: DeliveryStatus) => void;
+  let notifyLookupStarted!: () => void;
+  const lookupResultWait = new Promise<DeliveryStatus>((resolve) => { releaseLookup = resolve; });
+  const lookupStarted = new Promise<void>((resolve) => { notifyLookupStarted = resolve; });
+  let lookupCalls = 0;
+  let botInfoCalls = 0;
+  let sendCalls = 0;
+  const source: T3ClientShape = {
+    descriptor: () => Effect.succeed({ environmentId: "delivery-health-test", orchestrationProtocolVersion: 2, serverVersion: "test" }),
+    projection: () => Effect.die("No completion projection is expected"),
+    watch: (_cursor, onItem) => Effect.gen(function* () {
+      yield* onItem({ stream: "active", item: { kind: "snapshot", snapshot: {
+        schemaVersion: 2, snapshotSequence: 1, projects: [], threads: [], archivedThreads: [],
+      } } });
+      return yield* Effect.never;
+    }),
+  };
+  const layers = Layer.mergeAll(
+    makeStore(directory),
+    Layer.succeed(T3Client, source),
+    Layer.succeed(Recapper, { recap: () => Effect.die("Unknown jobs must not be recapped") }),
+    Layer.succeed(TelegramClient, {
+      getBotInfo: () => Effect.sync(() => {
+        botInfoCalls += 1;
+        return { id: 1, isBot: true, firstName: "Bot", username: null };
+      }),
+      getDeliveryStatus: () => Effect.promise(() => {
+        lookupCalls += 1;
+        notifyLookupStarted();
+        return lookupResultWait;
+      }),
+      sendMessage: () => Effect.sync(() => {
+        sendCalls += 1;
+        return { kind: "sent", messageId: 123 };
+      }),
+    }),
+  );
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* Store;
+      const seedTime = Date.now() - 120_000;
+      yield* store.activate("delivery-health-test", seedTime);
+      yield* store.configureTelegram("delivery-health-test", true, seedTime);
+      const replyId = yield* store.enqueueReply("delivery-health-test", "old-thread", "old-run", ["Unresolved answer"], seedTime);
+      assert.ok(replyId);
+      const jobId = `${replyId}-answer-1`;
+      yield* store.claimSend(jobId, seedTime);
+      yield* store.markUnknown(jobId, "initial_uncertainty", seedTime);
+      yield* Effect.forkScoped(runSupervisor(config, status));
+      yield* Effect.tryPromise(() => lookupStarted).pipe(Effect.timeout("3 seconds"));
+      yield* Effect.gen(function* () {
+        if (status.t3Connected && status.telegramState === "ready") return true;
+        yield* Effect.sleep("10 millis");
+        return false;
+      }).pipe(Effect.repeat({ until: Boolean }), Effect.timeout("3 seconds"));
+      releaseLookup(lookupResult);
+      yield* Effect.gen(function* () {
+        const job = yield* store.getJob(jobId);
+        if (job?.state === "unknown" && job.error === "delivery_unconfirmed" &&
+          status.deliveryState === "degraded" && status.telegramState === expectedTelegramState) return true;
+        yield* Effect.sleep("10 millis");
+        return false;
+      }).pipe(Effect.repeat({ until: Boolean }), Effect.timeout("3 seconds"));
+      const stats = yield* store.stats();
+      status.store = stats;
+      assert.equal(stats.jobs.unknown, 1);
+      assert.equal((yield* store.getJob(jobId))?.state, "unknown");
+      assert.equal(status.deliveryState, "degraded");
+      assert.equal(status.telegramState, expectedTelegramState);
+      assert.equal(readiness(status, config).ready, expectedReady);
+      assert.equal(lookupCalls, 1);
+      assert.equal(botInfoCalls, 1);
+      assert.equal(sendCalls, 0);
+    }).pipe(Effect.provide(layers), Effect.scoped));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+};
+
+test("an unresolved delivery ledger result stays visible without failing health when Telegram is reachable", async () => {
+  await runReconciliationReadinessCase({ state: "unknown", reason: "delivery_unknown" }, "ready", true);
+});
+
+test("a sent ledger row without a message receipt stays unresolved without degrading Telegram reachability", async () => {
+  await runReconciliationReadinessCase({ state: "sent", messageId: null }, "ready", true);
+});
+
+test("an invalid delivery lookup response keeps readiness degraded", async () => {
+  await runReconciliationReadinessCase({ state: "unknown", reason: "invalid_response" }, "degraded", false);
+});
+
+test("a timed out delivery lookup keeps readiness degraded", async () => {
+  await runReconciliationReadinessCase({ state: "unknown", reason: "timeout" }, "degraded", false);
 });
 
 test("disabled Telegram keeps observation healthy without notification services or changing queued deliveries", async () => {

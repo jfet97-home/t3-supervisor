@@ -89,7 +89,6 @@ export const readiness = (status: SupervisorStatus, config: SupervisorConfig, no
     : now - status.deliveryBusySince < config.modelTimeoutMs * 2 + 60_000);
   const notificationsReady = !config.telegramEnabled || (
     status.telegramState === "ready" && status.modelState !== "degraded" &&
-    status.deliveryState !== "degraded" && (status.store?.jobs.unknown ?? 0) === 0 &&
     (status.store?.deferredHints ?? 0) === 0
   );
   const supervisionProgress = config.uiPort === undefined || status.supervisionState === "ready";
@@ -276,7 +275,9 @@ export const runSupervisor = (config: SupervisorConfig, status: SupervisorStatus
             status.lastDeliveryAt = new Date().toISOString();
             yield* log("delivery_reconciled", { jobId: job.id, messageId: delivery.messageId });
           } else {
-            status.telegramState = "degraded";
+            const lookupSucceeded = delivery.state === "sent" || delivery.state === "sending" || delivery.state === "not_found" ||
+              (delivery.state === "unknown" && delivery.reason === "delivery_unknown");
+            if (!lookupSucceeded) status.telegramState = "degraded";
             status.deliveryState = "degraded";
             yield* store.markUnknown(job.id, "delivery_unconfirmed", Date.now());
           }
