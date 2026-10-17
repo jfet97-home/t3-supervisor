@@ -52,6 +52,22 @@ test("browser access keeps a shared session, synchronizes sign-out and ignores s
     clearAccess("new-browser-session");
     assert.equal(getSessionToken(), "newer-session", "an older logout cannot erase a newer login");
 
+    let finishBody = () => {};
+    const body = new ReadableStream<Uint8Array>({start(controller) {
+      finishBody = () => { controller.enqueue(new TextEncoder().encode('{"csrf":"obsolete-csrf"}')); controller.close(); };
+    }});
+    install("fetch", async () => new Response(body));
+    const staleBody = loadAccess();
+    await new Promise(resolve => setImmediate(resolve));
+    setSessionToken("replacement-session");
+    install("fetch", async () => new Response('{"csrf":"replacement-csrf"}'));
+    assert.equal(await loadAccess(), true);
+    finishBody();
+    assert.equal(await staleBody, false);
+    assert.equal(getCsrfToken(), "replacement-csrf", "a delayed body cannot overwrite newer access state");
+    clearAccess("newer-session");
+    assert.equal(getCsrfToken(), "replacement-csrf", "a delayed logout cannot clear newer access state");
+
     install("fetch", async () => new Response('{"csrf":"fresh-csrf"}'));
     assert.equal(await loadAccess(), true);
     assert.equal(getCsrfToken(), "fresh-csrf");

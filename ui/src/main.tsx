@@ -255,7 +255,8 @@ function App() {
     let active = true;
     const refresh = () => {
       if (!getSessionToken()) { ++accessCheck.current; setReady(false); return; }
-      void connect().catch(() => { if (active) { setReady(false); setError("Could not reach Supervisor. Try again."); } });
+      const check = accessCheck.current + 1;
+      void connect().catch(() => { if (active && check === accessCheck.current) { setReady(false); setError("Could not reach Supervisor. Try again."); } });
     };
     try { restoreTabSession(); refresh(); }
     catch (error) { setReady(false); setError(error instanceof Error ? error.message : "Could not restore sign-in."); }
@@ -268,6 +269,7 @@ function App() {
     const session = getSessionToken();
     const response = await fetch("/auth/logout", {method: "POST", credentials: "omit", headers: {"Content-Type": "application/json", "x-supervisor-session": session}, body: "{}"});
     if (!response.ok) throw new Error("Sign out unavailable.");
+    if (getSessionToken() !== session) { await connect(); return; }
     ++accessCheck.current;
     clearAccess(session); setOpened(false); setReady(false); setToken(""); setError("");
   };

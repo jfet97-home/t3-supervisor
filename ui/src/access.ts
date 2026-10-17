@@ -38,14 +38,15 @@ export const loadAccess = async (): Promise<boolean> => {
     return false;
   }
   const value: unknown = await response.json();
+  if (session !== getSessionToken()) return false;
   if (typeof value !== "object" || value === null || !("csrf" in value) || typeof value.csrf !== "string") return false;
   csrf = value.csrf;
   return true;
 };
 
 export const clearAccess = (expectedSession = getSessionToken()) => {
-  csrf = "";
   if (getSessionToken() === expectedSession) {
+    csrf = "";
     try { localStorage.removeItem(sessionKey); } catch { /* storage can be blocked */ }
   }
 };
