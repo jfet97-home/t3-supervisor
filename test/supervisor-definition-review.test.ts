@@ -132,6 +132,8 @@ test("approved snapshots retain reusable, workflow and inline file references an
   const malformed = structuredClone(approved);
   Object.assign(malformed.steps[0]!, {references: ["/absolute/path.md"]});
   assert.equal(extractApprovedProjectDefinitions(task({definitionSnapshot: malformed})), null);
+  Object.assign(malformed.steps[0]!, {references: ["docs/ghp_" + "A".repeat(32) + ".md"]});
+  assert.equal(extractApprovedProjectDefinitions(task({definitionSnapshot: malformed})), null);
 });
 
 test("decision fences are exact and bounded by message and record caps", () => {

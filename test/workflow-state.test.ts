@@ -133,6 +133,11 @@ test("file references survive agreement import, apply, restart and defensive sta
     const plan = {...current.plan!, nodes: [...current.plan!.nodes, support]};
     const result = fixture.workflows.apply(fixture.owner, applyInput(fixture, current, plan, "references-support"), validationFor(fixture));
     assert.equal(result.status, "applied");
+    const afterApply = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const invalidPlan = structuredClone(afterApply.plan!);
+    Object.assign(invalidPlan.nodes.at(-1)!, {references: ["docs/ghp_" + "A".repeat(32) + ".md"]});
+    assert.equal(fixture.workflows.apply(fixture.owner, applyInput(fixture, afterApply, invalidPlan, "sensitive-reference"), validationFor(fixture)).status, "invalid");
+    assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!.revision, afterApply.revision);
     fixture.guidance.close();
     fixture.guidance = new GuidanceStore(fixture.directory);
     fixture.supervisors = new ProjectSupervisorStore(fixture.guidance, new Set());

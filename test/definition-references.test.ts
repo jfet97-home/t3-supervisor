@@ -8,6 +8,7 @@ import {ProjectDefinitions} from "../src/project-definitions-contract.js";
 import {WorkflowPlanGroupSchema, type WorkflowPlanGroupInfo} from "../src/project-supervisor-contract.js";
 import {fixedOccurrencesPreserved, prepareWorkflowRequest, validateWorkflowPlan, validateWorkflowRecord} from "../src/supervisor-workflow.js";
 import {DefinitionsContent} from "../ui/src/project-definitions.js";
+import {redact} from "../src/credential-redaction.js";
 import {DefinitionReferences} from "../ui/src/definition-references.js";
 import {makeDefinitionFixture} from "./project-definitions-fixture.js";
 
@@ -28,7 +29,8 @@ test("steps, workflows and inline local steps support omitted, empty, single and
 
 test("file references reject malformed lists, absolute paths and URLs consistently", () => {
   for (const references of [null, "docs/review.md", {}, [1], [""], [" docs/a.md"], ["/tmp/a.md"], ["~/a.md"], ["C:/a.md"],
-    ["https://example.com/a.md"], ["docs\\a.md"], ["docs/a\n.md"], ["x".repeat(4097)], Array.from({length: 101}, () => "a.md")]) {
+    ["https://example.com/a.md"], ["docs\\a.md"], ["docs/a\n.md"], ["docs/a\u0085.md"], ["docs/a\u2028.md"], ["docs/a\u202e.md"],
+    ["notes/token=example.md"], ["docs/ghp_" + "A".repeat(32) + ".md"], ["x".repeat(4097)], Array.from({length: 101}, () => "a.md")]) {
     assert.throws(() => parseDefinitionStep("review", step(references)), /references/u);
     assert.throws(() => parseDefinitionWorkflow("delivery", workflow(references)), /references/u);
     assert.throws(() => parseDefinitionWorkflow("delivery", workflow(undefined, references)), /references/u);
@@ -91,6 +93,11 @@ test("reference lists survive model context, canonical plans and strict record s
   assert.deepEqual(validateWorkflowRecord(result, prepared.context), result);
   assert.equal(validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [
     {kind: "step", definitionId: "review", references: ["forged.md"], reason: "Changed the supporting files."},
+  ]}}, prepared.context), null);
+  const credentialPath = "notes/ghp_" + "A".repeat(32) + ".md";
+  assert.notEqual(redact(credentialPath), credentialPath);
+  assert.equal(validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [
+    {kind: "step", definitionId: null, localId: "unsafe", name: "Unsafe", description: "Review notes.", references: [credentialPath], reason: "Local support."},
   ]}}, prepared.context), null);
 
   for (const target of [wrapper, reusable, local]) {

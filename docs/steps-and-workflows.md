@@ -123,7 +123,9 @@ IDs used by `step:`, `workflow:` or project `required` entries.
 
 Paths are relative to the operative project checkout root, including when their
 definition comes from the shared catalog. `../shared/guide.md` is a relative path;
-absolute paths, home aliases and URLs are invalid. Each list is limited to 100 paths
+absolute paths, home aliases, URL-like strings, control/formatting characters and
+credential-like text are invalid. Use file paths only; `README.md:12` is not a
+supported line-number reference. Each list is limited to 100 paths
 of up to 4096 characters. The service records paths without opening or checking
 referenced files. Missing targets do not make the YAML invalid; a reference never
 grants file access or proves that an agent read the file.

@@ -690,6 +690,19 @@ test("write arguments above the inline-input bound are rejected before native re
   } finally {await closeFixture(fixture);}
 });
 
+test("credential-like file references are rejected at the MCP boundary before native reads", async () => {
+  const fixture = await makeFixture();
+  try {
+    const input = {operationId: "sensitive-reference", workflowId: "not-created", expectedRevision: 1,
+      plan: sequencePlan([{...localStep("Check notes", "Review supporting files."), references: ["docs/ghp_" + "A".repeat(32) + ".md"]}]),
+      note: "Reject unsafe supporting paths."};
+    const result = await fixture.controller.write(applyArgs(fixture, input));
+    assert.equal(result.status, "invalid");
+    assert.deepEqual(fixture.projectionCalls, []);
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
+  } finally {await closeFixture(fixture);}
+});
+
 test("disabled and replaced bindings deny old owner locators", async () => {
   const fixture = await makeFixture();
   try {
