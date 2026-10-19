@@ -150,6 +150,7 @@ export type WorkflowPlanStepInfo = {
   templatePath: string | null;
   name: string;
   description: string;
+  references?: readonly string[];
   source: WorkflowSourceInfo | null;
   resolution: "resolved" | "unresolved";
   reason: string;
@@ -171,6 +172,7 @@ export type WorkflowPlanWorkflowInfo = {
   templatePath: string | null;
   name: string;
   description: string;
+  references?: readonly string[];
   fixed: boolean | null;
   source: WorkflowSourceInfo | null;
   resolution: "resolved" | "partial" | "unresolved";
@@ -190,6 +192,7 @@ const WorkflowPlanStep = Schema.Struct({
   templatePath: Schema.NullOr(Schema.String),
   name: Schema.String,
   description: Schema.String,
+  references: Schema.optionalKey(Schema.Array(Schema.String)),
   source: Schema.NullOr(WorkflowSource),
   resolution: Schema.Literals(["resolved", "unresolved"]),
   reason: Schema.String,
@@ -221,6 +224,7 @@ const WorkflowPlanWorkflow = Schema.Struct({
   templatePath: Schema.NullOr(Schema.String),
   name: Schema.String,
   description: Schema.String,
+  references: Schema.optionalKey(Schema.Array(Schema.String)),
   fixed: Schema.NullOr(Schema.Boolean),
   source: Schema.NullOr(WorkflowSource),
   resolution: Schema.Literals(["resolved", "partial", "unresolved"]),

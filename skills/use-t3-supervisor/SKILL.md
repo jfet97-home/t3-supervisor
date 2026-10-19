@@ -24,6 +24,10 @@ replays a rejected mutation. Inspect uncertain outcomes before another write.
 
 ## Projects and definitions
 
+Steps, workflows and inline local steps may carry optional `references` lists of
+checkout-relative file paths. Definitions and Plan display them read-only; edit
+the source YAML/frontmatter and refresh. Referenced files are not opened automatically.
+
 Open a project from Projects, then choose a main conversation. The project views
 are Progress, Plan, Definitions and Project settings. Project root / defaults only
 is explicit. Context is remembered per project in the current tab; hash links take

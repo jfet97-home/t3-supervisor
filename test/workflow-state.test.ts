@@ -106,6 +106,42 @@ const closeFixture = async (fixture: Fixture) => {
   await rm(fixture.directory, {recursive: true, force: true});
 };
 
+test("file references survive agreement import, apply, restart and defensive state copies", async () => {
+  const fixture = await makeFixture();
+  try {
+    fixture.definitions = {...fixture.definitions,
+      steps: fixture.definitions.steps.map(step => ({...step, references: [`docs/${step.id}.md`]})),
+      workflows: fixture.definitions.workflows.map(workflow => ({...workflow, references: ["docs/release.md"]}))};
+    fixture.context = proposalContextFromDefinitions(fixture.definitions);
+    fixture.proposal = makeProposal(fixture.definitions, fixture.context!, proposalPlan(true), [
+      {kind: "workflow", id: "release", applies: true, reason: "Required for this task."},
+    ]);
+    const imported = fixture.guidance.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(fixture.owner, acceptedAgreement(fixture.proposal), 100));
+    assert.equal(imported.status, "applied");
+    const original = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const wrapper = original.plan!.nodes[0];
+    assert(wrapper?.kind === "workflow");
+    assert.deepEqual(wrapper.references, ["docs/release.md"]);
+    (wrapper.references as string[]).push("not-in-the-store.md");
+    const current = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const fresh = current.plan!.nodes[0];
+    assert(fresh?.kind === "workflow");
+    assert.deepEqual(fresh.references, ["docs/release.md"]);
+    const support = localPlanInput(["support"]).nodes[0]!;
+    assert(support.kind === "step");
+    support.references = ["src/support.ts"];
+    const plan = {...current.plan!, nodes: [...current.plan!.nodes, support]};
+    const result = fixture.workflows.apply(fixture.owner, applyInput(fixture, current, plan, "references-support"), validationFor(fixture));
+    assert.equal(result.status, "applied");
+    fixture.guidance.close();
+    fixture.guidance = new GuidanceStore(fixture.directory);
+    fixture.supervisors = new ProjectSupervisorStore(fixture.guidance, new Set());
+    fixture.workflows = new WorkflowStateStore(fixture.supervisors);
+    const restored = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    assert.deepEqual(restored.plan, plan);
+  } finally {await closeFixture(fixture);}
+});
+
 const sourceBinding = (proposal: WorkflowProposalInfo, taskId = "task-a", proposalId = "proposal-a"): WorkflowStateSourceBinding => ({
   workspaceRoot: proposal.workspaceRoot!,
   revision: proposal.revision,

@@ -99,3 +99,15 @@ The retired condition/message reminder evaluator remains inactive. Its history
 and uncertain notices are retained without replay. See
 [project supervision](project-supervision.md) for dialogue/definition-change review,
 and [workflow MCP](workflow-mcp.md) for connected mutable plans and authority.
+
+
+## Supporting file references
+
+Steps (YAML frontmatter), workflow YAML and inline local steps accept an optional
+`references` list of relative file paths; omission and `[]` mean none. Paths are
+relative to the operative checkout root, including for shared definitions. Any file
+type may be named, including documentation, local skills and code. Supervisor does
+not open the targets or check existence. Lists appear read-only in Definitions and
+Plan; edit the source files and refresh to change them. Source revisions, approved
+snapshots and fixed plan commitments include these lists. See
+[the definition syntax](steps-and-workflows.md#supporting-file-references).

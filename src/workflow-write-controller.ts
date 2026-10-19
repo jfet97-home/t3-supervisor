@@ -1,3 +1,4 @@
+import {definitionReferenceLimits, validDefinitionReferences} from "./definition-references.js";
 import type { SupervisorTeamStore } from "./supervisor-team-store.js";
 import type { ProjectSupervisorStore, BindingRecord } from "./project-supervisor-store.js";
 import {acceptedTaskPlanForBinding, acceptedWorkflowPlansForBinding, type WorkflowApplyValidationContext, type WorkflowStateStore} from "./workflow-state-store.js";
@@ -196,13 +197,14 @@ const validPlanRequest = (value: unknown): boolean => {
       !(group.templatePath === undefined || group.templatePath === null || isText(group.templatePath, 2000)) ||
       !Array.isArray(group.nodes) || group.nodes.length === 0 || group.nodes.length > workflowMutationLimits.maxPlanNodes) return false;
     return group.nodes.every(node => {
-      if (!isRecord(node) || typeof node.kind !== "string") return false;
+      if (!isRecord(node) || typeof node.kind !== "string" ||
+        Object.hasOwn(node, "references") && !validDefinitionReferences(node.references)) return false;
       if (node.kind === "sequence" || node.kind === "parallel") return visitGroup(node, depth + 1);
       if (++count > workflowMutationLimits.maxPlanNodes || !(node.nodeId === undefined || typeof node.nodeId === "string" && planNodeIdPattern.test(node.nodeId)) ||
         !(node.templatePath === undefined || node.templatePath === null || isText(node.templatePath, 2000)) ||
         !isText(node.reason, maxPlanReasonLength)) return false;
       if (node.kind === "step") {
-        if (!hasExactKeys(node, ["kind", "reason"], ["nodeId", "definitionId", "localId", "templatePath", "name", "description", "source", "resolution", "status", "contributorThreadIds"])) return false;
+        if (!hasExactKeys(node, ["kind", "reason"], ["nodeId", "definitionId", "localId", "templatePath", "name", "description", "references", "source", "resolution", "status", "contributorThreadIds"])) return false;
         return (node.definitionId === undefined || node.definitionId === null || isText(node.definitionId, 200)) &&
           (node.localId === undefined || node.localId === null || isText(node.localId, 200)) &&
           (node.name === undefined || isText(node.name, 160)) &&
@@ -215,7 +217,7 @@ const validPlanRequest = (value: unknown): boolean => {
             new Set(node.contributorThreadIds).size === node.contributorThreadIds.length);
       }
       if (node.kind !== "workflow" || !hasExactKeys(node, ["kind", "definitionId", "reason"],
-        ["nodeId", "templatePath", "name", "description", "fixed", "source", "resolution", "status", "contributorThreadIds", "omissions", "plan"]) ||
+        ["nodeId", "templatePath", "name", "description", "references", "fixed", "source", "resolution", "status", "contributorThreadIds", "omissions", "plan"]) ||
         !isText(node.definitionId, 200) || !(node.name === undefined || isText(node.name, 160)) ||
         !(node.description === undefined || isText(node.description, maxDefinitionTextLength, true)) ||
         !(node.fixed === undefined || node.fixed === null || typeof node.fixed === "boolean") ||
@@ -393,6 +395,7 @@ const workflowPlanDefinitions = {
     type: "object", additionalProperties: false, required: ["kind", "reason"], properties: {
       kind: {const: "step"}, nodeId: idSchema(64), definitionId: nullableTextSchema(200), localId: nullableTextSchema(200),
       templatePath: nullableTextSchema(2000), name: textSchema(160), description: {type: "string", maxLength: maxDefinitionTextLength},
+      references: {type: "array", maxItems: definitionReferenceLimits.maxPaths, items: textSchema(definitionReferenceLimits.maxPathLength)},
       source: {anyOf: [{$ref: "#/$defs/source"}, {type: "null"}]}, resolution: {type: "string", enum: ["resolved", "unresolved"]},
       reason: textSchema(maxPlanReasonLength), status: {type: "string", enum: workflowExecutionStatuses},
       contributorThreadIds: {type: "array", maxItems: workflowMutationLimits.maxContributorsPerNode, uniqueItems: true, items: idSchema()},
@@ -401,7 +404,9 @@ const workflowPlanDefinitions = {
   workflow: {
     type: "object", additionalProperties: false, required: ["kind", "definitionId", "reason"], properties: {
       kind: {const: "workflow"}, nodeId: idSchema(64), definitionId: idSchema(200), templatePath: nullableTextSchema(2000),
-      name: textSchema(160), description: {type: "string", maxLength: maxDefinitionTextLength}, fixed: {anyOf: [{type: "boolean"}, {type: "null"}]},
+      name: textSchema(160), description: {type: "string", maxLength: maxDefinitionTextLength},
+      references: {type: "array", maxItems: definitionReferenceLimits.maxPaths, items: textSchema(definitionReferenceLimits.maxPathLength)},
+      fixed: {anyOf: [{type: "boolean"}, {type: "null"}]},
       source: {anyOf: [{$ref: "#/$defs/source"}, {type: "null"}]}, resolution: {type: "string", enum: ["resolved", "partial", "unresolved"]},
       reason: textSchema(maxPlanReasonLength), status: {type: "string", enum: workflowExecutionStatuses},
       contributorThreadIds: {type: "array", maxItems: workflowMutationLimits.maxContributorsPerNode, uniqueItems: true, items: idSchema()},

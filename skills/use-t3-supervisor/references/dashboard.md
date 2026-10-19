@@ -231,3 +231,24 @@ retargeting it stops delivery; the service does not silently undo that choice.
 Webhook credentials remain private. Unknown POSTs are not repeated; native message
 and delivery evidence reconcile the original attempt. A definite failed check-in
 needs an explicit root retry or reassignment.
+
+
+## File references on steps and workflows
+
+Reusable step YAML frontmatter, workflow YAML and inline local steps may include
+an optional `references` list of zero, one or more relative file paths. For example:
+
+```yaml
+references:
+  - docs/testing.md
+  - skills/use-project/SKILL.md
+  - src/example.ts
+```
+
+Paths are relative to the operative project checkout root, even for shared
+catalog definitions. Omit the field or use `references: []` for none. Any file type
+is supported; absolute paths and URLs are invalid. Definitions and Plan show these
+lists read-only. Edit the original definition and refresh to change them. The
+service does not open referenced files or validate their existence, and a listed
+path grants no access or evidence of reading. Reference changes follow normal
+source review and remain part of saved/fixed workflow snapshots.

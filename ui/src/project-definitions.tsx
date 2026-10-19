@@ -4,6 +4,7 @@ import type { DefinitionNode, DefinitionStepInfo, DefinitionWorkflowInfo, Projec
 import { loadProjectDefinitions } from "./project-definitions-api.js";
 import { ProjectConfigurationEditor } from "./project-configuration-editor.js";
 import { ProjectSupervisorPanel } from "./project-supervisor.js";
+import { DefinitionReferences } from "./definition-references.js";
 import { directoryRoute, openProject, projectSections, RouteLink, type NavigationGuard, type Route } from "./navigation.js";
 
 const statusText: Record<ProjectDefinitionSnapshot["status"], string> = {
@@ -33,11 +34,13 @@ function NodeDescription({node, definitions}: {node: DefinitionNode; definitions
       return <div className="stack definition-node-content">
         <p><strong>Step:</strong> <DefinitionLink kind="step" id={node.step} steps={definitions.steps} workflows={definitions.workflows}/></p>
         {step && <p className="definition-copy">{step.description}</p>}
+        {step && <DefinitionReferences references={step.references}/>}
       </div>;
     }
     return <div className="stack definition-node-content">
       <p><strong>Local step:</strong> {node.step.name} <span className="muted small">({node.step.id})</span></p>
       <p className="definition-copy">{node.step.description}</p>
+      <DefinitionReferences references={node.step.references}/>
     </div>;
   }
   if ("workflow" in node) {
@@ -45,6 +48,7 @@ function NodeDescription({node, definitions}: {node: DefinitionNode; definitions
     return <div className="stack definition-node-content">
       <p><strong>Workflow:</strong> <DefinitionLink kind="workflow" id={node.workflow} steps={definitions.steps} workflows={definitions.workflows}/></p>
       {workflow && <><p className="definition-copy">{workflow.description}</p><p className="muted small">Open “{workflow.name}” below to inspect its contents.</p></>}
+      {workflow && <DefinitionReferences references={workflow.references}/>}
     </div>;
   }
   const kind = "sequence" in node ? "sequence" : "parallel";
@@ -67,6 +71,7 @@ function WorkflowContents({workflow, definitions}: {workflow: DefinitionWorkflow
     <DefinitionSource definition={workflow}/>
     {workflow.fixed && <p className="pill blue">Fixed fragment: original members and relationships are preserved; support work may be inserted around or between them.</p>}
     <p className="definition-copy">{workflow.description}</p>
+    <DefinitionReferences references={workflow.references}/>
     <div><h4>{kind === "sequence" ? "Sequence" : "Parallel group"}</h4>
       <p className="muted small">{kind === "sequence" ? "The sequence states intended semantic order; it is not an execution scheduler." : "Members have no declared order and may overlap; the group does not launch agents."}</p>
       <DefinitionNodes kind={kind} nodes={nodes} definitions={definitions}/>
@@ -117,12 +122,13 @@ export function DefinitionsContent({definitions}: {definitions: ProjectDefinitio
     <EffectiveConfiguration definitions={definitions}/>
 
     <section className="stack" aria-labelledby="project-step-title">
-      <div><h3 id="project-step-title">Reusable steps <span className="muted">({definitions.steps.length})</span></h3><p className="muted">Each step has an ID, name and complete description.</p></div>
+      <div><h3 id="project-step-title">Reusable steps <span className="muted">({definitions.steps.length})</span></h3><p className="muted">Each step has an ID, name, complete description and optional file references.</p></div>
       {definitions.steps.length === 0 && <p className="panel muted">{readableAndValid ? "No reusable steps are defined in the effective scope." : "No readable reusable steps are available. See the status and issues above."}</p>}
       {definitions.steps.map(step => <details className="panel definition-block" key={`${step.origin ?? ""}:${step.id}`}>
         <summary>{step.name} <span className="muted small">{step.sourceId ?? step.id}.md</span></summary>
         <DefinitionSource definition={step}/>
         <p className="definition-copy">{step.description}</p>
+        <DefinitionReferences references={step.references}/>
       </details>)}
     </section>
 

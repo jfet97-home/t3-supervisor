@@ -13,10 +13,15 @@ name: End-to-end testing
 description: |
   Test the changed behavior in the real application.
   Report what was verified, failures and any limitations.
+references:
+  - docs/testing.md
+  - skills/use-project/SKILL.md
 ---`;
 
 const compositionExample = `name: Delivery
 description: Implement, review and deliver the agreed change.
+references:
+  - docs/delivery.md
 sequence:
   - step:
       id: implementation
@@ -44,7 +49,10 @@ const localStepExample = `sequence:
       name: Check migration notes
       description: |
         Compare upgrade notes with the implementation and correct omissions.
-        Users must be able to complete the upgrade using those notes.`;
+        Users must be able to complete the upgrade using those notes.
+      references:
+        - docs/upgrade.md
+        - src/migration.ts`;
 
 const configurationExample = `required:
   - step: e2e-testing
@@ -166,7 +174,7 @@ export function StepsAndWorkflowsGuide() {
     </Topic>
 
     <Topic id="guide-step-title" title="A step describes one piece of work">
-      <p>A reusable step is a Markdown file with YAML frontmatter. Its complete definition is <code>id</code>, <code>name</code> and <code>description</code>. The ID matches the filename. The Markdown body after the frontmatter must be empty; put all guidance in <code>description</code>. A step has no structural children.</p>
+      <p>A reusable step is a Markdown file with YAML frontmatter. Its required fields are <code>id</code>, <code>name</code> and <code>description</code>, with an optional <code>references</code> list. The ID matches the filename. The Markdown body after the frontmatter must be empty; put all guidance in <code>description</code>. A step has no structural children.</p>
       <Example label="steps/e2e-testing.md" value={stepExample}/>
       <p>Put applicability, instructions, expected results, delegation details and iteration guidance in <code>description</code>. There are no separate instruction or outcome fields.</p>
       <p>A workflow can refer to a reusable step by ID or define a task-local step object under <code>step:</code>. Give local steps an ID to distinguish them. Promote one to <code>steps/</code> when it should be reusable across workflows.</p>
@@ -174,11 +182,17 @@ export function StepsAndWorkflowsGuide() {
     </Topic>
 
     <Topic id="guide-workflow-title" title="A workflow composes steps and other workflows">
-      <p>A reusable workflow file has a filename ID, <code>name</code>, <code>description</code>, optional <code>fixed: true</code>, and one root group: <code>sequence:</code> or <code>parallel:</code>. Ordered contents always use <code>sequence:</code>. Groups may contain step references, local step objects, workflow references or nested groups.</p>
+      <p>A reusable workflow file has a filename ID, <code>name</code>, <code>description</code>, optional <code>references</code> and <code>fixed: true</code>, and one root group: <code>sequence:</code> or <code>parallel:</code>. Ordered contents always use <code>sequence:</code>. Groups may contain step references, local step objects, workflow references or nested groups.</p>
       <p><code>workflow:</code> accepts only a reusable workflow ID. Workflow definitions cannot be declared inline. A reference includes its contents in the plan; it does not start an agent or require delegation by itself.</p>
       <Example label="A delivery workflow with a reusable reviewer" value={compositionExample}/>
       <Example label="Nested parallel lanes inside a sequence" value={reviewerExample}/>
       <p>A sequence communicates intended semantic order. Members of a parallel group may overlap and have no declared order; parallel does not require simultaneous execution or create child agents.</p>
+    </Topic>
+
+    <Topic id="guide-references-title" title="Supporting file references">
+      <p>Reusable steps, workflow files and local step objects may have a <code>references</code> list containing zero, one or more relative file paths. Omit it or use <code>references: []</code> for none.</p>
+      <p>Paths are relative to the operative project checkout root, including for shared definitions. Examples include <code>docs/testing.md</code>, <code>skills/use-project/SKILL.md</code> and <code>src/migration.ts</code>. Any file type is allowed; absolute paths and URLs are not supported.</p>
+      <p>References are shown read-only in Definitions and Plan views. Edit the source definition file to change them, then refresh. Supervisor records the paths without opening files or checking whether they exist. A listed path is supporting material, not a command, file permission or evidence that the file was read.</p>
     </Topic>
 
     <Topic id="guide-config-title" title="Project requirements and the default workflow">
@@ -189,7 +203,7 @@ export function StepsAndWorkflowsGuide() {
     </Topic>
 
     <Topic id="guide-fixed-title" title="What fixed protects">
-      <p><code>fixed: true</code> preserves the workflow's original members, descriptions and requirements, their relative order, and its declared parallel relationships, including nested commitments. Supporting work can be added around that fragment or between its original members.</p>
+      <p><code>fixed: true</code> preserves the workflow's original members, descriptions, file references and requirements, their relative order, and its declared parallel relationships, including nested commitments. Supporting work can be added around that fragment or between its original members.</p>
       <p>For example, the original <code>implementation → deployment</code> sequence may become <code>implementation → e2e-testing → deployment</code>.</p>
       <Example label="Required support work can be inserted between fixed members" value={fixedInsertionExample}/>
       <p>A genuinely not-applicable original member remains visible with its reason in the plan. An applicable commitment cannot be silently removed or weakened. Fixed does not make the workflow a project-wide requirement; <code>required</code> controls inclusion.</p>

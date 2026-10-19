@@ -22,7 +22,8 @@ uses the same format. Scope selection, permissions and source paths remain visib
 ## A step
 
 A step is a semantic piece of work, not a scheduled task or a command. Its complete
-definition is `id`, `name` and `description`. All applicability, instructions,
+required definition fields are `id`, `name` and `description`, with an optional
+`references` list of supporting file paths. All applicability, instructions,
 expected results, delegation details and iteration guidance belong in description.
 There are no separate instructions or outcome fields.
 
@@ -35,6 +36,9 @@ name: End-to-end testing
 description: |
   Test the changed behavior in the real application.
   Report what was verified, failures and any limitations.
+references:
+  - docs/testing.md
+  - skills/use-project/SKILL.md
 ---
 ```
 
@@ -52,6 +56,9 @@ sequence:
       description: |
         Compare upgrade notes with the implementation and correct omissions.
         Users must be able to complete the upgrade using those notes.
+      references:
+        - docs/upgrade.md
+        - src/migration.ts
 ```
 
 Local IDs distinguish local steps; promote a local definition to a reusable file
@@ -59,7 +66,8 @@ when it needs to be referenced project-wide. There is no `inline:` keyword.
 
 ## A workflow
 
-A reusable workflow has a filename ID, name, description, optional `fixed: true`,
+A reusable workflow has a filename ID, name, description, optional `references`
+and `fixed: true`,
 and a root `sequence:` or `parallel:` group. Ordered contents consistently use
 `sequence:`, never `steps:`. Groups may nest to express parallel lanes with ordered
 work inside them. A group contains step references, local step definitions,
@@ -72,6 +80,8 @@ launch an agent or require delegation.
 ```yaml
 name: Delivery
 description: Implement, review and deliver the agreed change.
+references:
+  - docs/delivery.md
 sequence:
   - step:
       id: implementation
@@ -102,9 +112,31 @@ Parallel means members may overlap, with no declared order between them. It does
 not demand simultaneous wall-clock execution or automatically create subagents.
 Sequence expresses the intended semantic order, not an execution scheduler.
 
+## Supporting file references
+
+Reusable step frontmatter, reusable workflow YAML and local step objects can each
+include `references`: a list of zero, one or more relative file paths. Omit the field
+or write `references: []` when no supporting files are needed. Paths may point to
+documentation, project-local skills such as `skills/use-project/SKILL.md`, source
+code or any other file type. These are file paths, separate from reusable definition
+IDs used by `step:`, `workflow:` or project `required` entries.
+
+Paths are relative to the operative project checkout root, including when their
+definition comes from the shared catalog. `../shared/guide.md` is a relative path;
+absolute paths, home aliases and URLs are invalid. Each list is limited to 100 paths
+of up to 4096 characters. The service records paths without opening or checking
+referenced files. Missing targets do not make the YAML invalid; a reference never
+grants file access or proves that an agent read the file.
+
+Definitions and Plan views display the lists read-only. Edit the original definition
+file and refresh to change them. Negotiated plans, stored workflow records and
+source-bound comparisons preserve reference lists alongside description snapshots;
+fixed commitments preserve their supporting paths as well. A changed reference
+list is a definition change and follows the existing source-review procedure.
+
 ## Fixed workflows
 
-`fixed: true` protects the original members, their descriptions and requirements,
+`fixed: true` protects the original members, their descriptions, file references and requirements,
 their relative order and the declared parallel relationships. It permits added
 support work between original members and around the fragment. A flexible outer
 plan cannot remove or weaken an inner fixed fragment.

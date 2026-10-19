@@ -3,13 +3,13 @@ import { Schema } from "effect";
 export const workflowDefinitionExpansionLimits = {maxNodes: 500, maxDepth: 32} as const;
 
 export const DefinitionNode = Schema.suspend((): Schema.Codec<DefinitionNode> => Schema.Union([
-  Schema.Struct({step: Schema.Union([Schema.String, Schema.Struct({id: Schema.String, name: Schema.String, description: Schema.String})])}),
+  Schema.Struct({step: Schema.Union([Schema.String, Schema.Struct({id: Schema.String, name: Schema.String, description: Schema.String, references: Schema.optionalKey(Schema.Array(Schema.String))})])}),
   Schema.Struct({workflow: Schema.String}),
   Schema.Struct({sequence: Schema.Array(DefinitionNode)}),
   Schema.Struct({parallel: Schema.Array(DefinitionNode)}),
 ]));
 export type DefinitionNode =
-  | {readonly step: string | {readonly id: string; readonly name: string; readonly description: string}}
+  | {readonly step: string | {readonly id: string; readonly name: string; readonly description: string; readonly references?: readonly string[]}}
   | {readonly workflow: string}
   | {readonly sequence: readonly DefinitionNode[]}
   | {readonly parallel: readonly DefinitionNode[]};
@@ -24,6 +24,7 @@ export const DefinitionStepInfo = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
   description: Schema.String,
+  references: Schema.optionalKey(Schema.Array(Schema.String)),
   origin: Schema.optional(Schema.Literals(["global", "project"])),
   path: Schema.optional(Schema.String),
   sourceId: Schema.optional(Schema.String),
@@ -34,6 +35,7 @@ export const DefinitionWorkflowInfo = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
   description: Schema.String,
+  references: Schema.optionalKey(Schema.Array(Schema.String)),
   fixed: Schema.Boolean,
   sequence: Schema.optional(Schema.Array(DefinitionNode)),
   parallel: Schema.optional(Schema.Array(DefinitionNode)),

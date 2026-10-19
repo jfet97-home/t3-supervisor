@@ -124,6 +124,16 @@ test("approved definitions require the stored complete snapshot and do not use a
   assert.equal(extractApprovedProjectDefinitions(task({definitionSnapshot: null, workflow: {...current.workflow!, revision: newRevision}})), null);
 });
 
+test("approved snapshots retain reusable, workflow and inline file references and reject malformed lists", () => {
+  const approved = definitions({steps: definitions().steps.map(step => ({...step, references: ["docs/verify.md"]})),
+    workflows: [{id: "delivery", name: "Delivery", description: "Deliver the change.", fixed: false, references: ["docs/delivery.md"],
+      sequence: [{step: {id: "local", name: "Local", description: "Check local behavior.", references: ["src/local.ts"]}}]}]});
+  assert.deepEqual(extractApprovedProjectDefinitions(task({definitionSnapshot: approved})), approved);
+  const malformed = structuredClone(approved);
+  Object.assign(malformed.steps[0]!, {references: ["/absolute/path.md"]});
+  assert.equal(extractApprovedProjectDefinitions(task({definitionSnapshot: malformed})), null);
+});
+
 test("decision fences are exact and bounded by message and record caps", () => {
   const content = ["```project-definition-decision", JSON.stringify(decisionRecord()), "```", "```workflow-acceptance", "{}", "```"].join("\n");
   assert.deepEqual(extractProjectDefinitionDecisionRecords(content), [decisionRecord()]);

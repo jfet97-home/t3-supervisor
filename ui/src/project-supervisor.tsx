@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, type FormEvent } from "react";
+import { DefinitionReferences } from "./definition-references.js";
 import type {
   ProjectSupervisorInfo,
   ProjectSupervisorTeamInfo,
@@ -202,6 +203,7 @@ function WorkflowPlanNode({node, liveAssessment = false}: {node: WorkflowPlanNod
     {node.localId && <p className="small">Task-local step ID: <code>{node.localId}</code></p>}
     <WorkflowSource source={node.source} templatePath={node.templatePath}/>
     <p>{node.description}</p>
+    <DefinitionReferences references={node.references}/>
     <p><strong>Plan status:</strong> {liveAssessment ? node.status === "underway" ? "Underway" : node.status === "completed" ? "Completed" : planStatusText[node.status] : planStatusText[node.status]} · <strong>Definition:</strong> {node.resolution === "resolved" ? "Resolved" : "Unresolved"}</p>
     <p>{node.reason}</p>
     {node.contributorThreadIds.length > 0 && <div><strong>Contributors</strong><ul>{node.contributorThreadIds.map(threadId => <li key={threadId}><a href={`t3-thread://v1/${threadId}`}>Child conversation <code>{threadId}</code></a></li>)}</ul></div>}
@@ -211,6 +213,7 @@ function WorkflowPlanNode({node, liveAssessment = false}: {node: WorkflowPlanNod
     <p><strong>Workflow: {node.name}</strong> <span className="muted">({node.definitionId})</span></p>
     <WorkflowSource source={node.source} templatePath={node.templatePath}/>
     <p>{node.description}</p>
+    <DefinitionReferences references={node.references}/>
     <p><strong>Resolution:</strong> {node.resolution} · <strong>Plan status:</strong> {liveAssessment ? node.status === "underway" ? "Underway" : node.status === "completed" ? "Completed" : planStatusText[node.status] : planStatusText[node.status]} · <strong>Fixed:</strong> {node.fixed === null ? "Unknown" : node.fixed ? "Yes" : "No"}</p>
     <p>{node.reason}</p>
     {node.omissions.length > 0 && <div className="stack">

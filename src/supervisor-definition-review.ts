@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { definitionReferenceFields, validDefinitionReferences } from "./definition-references.js";
 import { fingerprint } from "./guidance-store.js";
 import { nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { record } from "./supervisor-native.js";
@@ -65,7 +66,7 @@ const validDefinitionNode = (value: unknown, depth: number, budget: {count: numb
   if (depth > 64 || ++budget.count > 1000 || !record(value) || Object.keys(value).length !== 1) return false;
   if (Object.hasOwn(value, "step")) {
     if (typeof value.step === "string") return definitionIdPattern.test(value.step);
-    return record(value.step) && exactFields(value.step, ["id", "name", "description"]) &&
+    return record(value.step) && optionalFields(value.step, ["id", "name", "description"], ["references"]) && (!Object.hasOwn(value.step, "references") || validDefinitionReferences(value.step.references)) &&
       typeof value.step.id === "string" && definitionIdPattern.test(value.step.id) && boundedText(value.step.name, 160) &&
       boundedText(value.step.description, 8000);
   }
@@ -104,22 +105,24 @@ const snapshot = (value: unknown, task: TaskRecord, statuses: readonly string[])
   }
 
   for (const item of value.steps) {
-    if (!record(item) || !optionalFields(item, ["id", "name", "description"], ["origin", "path", "sourceId"]) || !validMetadata(item) ||
+    if (!record(item) || !optionalFields(item, ["id", "name", "description"], ["origin", "path", "sourceId", "references"]) || !validMetadata(item) ||
+      Object.hasOwn(item, "references") && !validDefinitionReferences(item.references) ||
       !boundedText(item.id, 64) || !definitionIdPattern.test(item.id) || !boundedText(item.name, 160) || !boundedText(item.description, 8000)) return null;
     summaryBytes += Buffer.byteLength(JSON.stringify(item), "utf8");
-    steps.push({id: item.id, name: item.name, description: item.description, ...metadata(item)});
+    steps.push({id: item.id, name: item.name, description: item.description, ...definitionReferenceFields(item.references as readonly string[] | undefined), ...metadata(item)});
   }
 
   const nodeBudget = {count: 0};
   for (const item of value.workflows) {
-    if (!record(item) || !optionalFields(item, ["id", "name", "description", "fixed"], ["sequence", "parallel", "origin", "path", "sourceId"]) || !validMetadata(item) ||
+    if (!record(item) || !optionalFields(item, ["id", "name", "description", "fixed"], ["sequence", "parallel", "origin", "path", "sourceId", "references"]) || !validMetadata(item) ||
+      Object.hasOwn(item, "references") && !validDefinitionReferences(item.references) ||
       !boundedText(item.id, 64) || !definitionIdPattern.test(item.id) || !boundedText(item.name, 160) || !boundedText(item.description, 8000) ||
       typeof item.fixed !== "boolean" || Object.hasOwn(item, "sequence") === Object.hasOwn(item, "parallel")) return null;
     const key = Object.hasOwn(item, "sequence") ? "sequence" : "parallel";
     if (!Array.isArray(item[key]) || item[key].length === 0 || item[key].length > 1000 ||
       !item[key].every(node => validDefinitionNode(node, 0, nodeBudget))) return null;
     summaryBytes += Buffer.byteLength(JSON.stringify(item), "utf8");
-    workflows.push({id: item.id, name: item.name, description: item.description, fixed: item.fixed,
+    workflows.push({id: item.id, name: item.name, description: item.description, fixed: item.fixed, ...definitionReferenceFields(item.references as readonly string[] | undefined),
       ...(key === "sequence" ? {sequence: item.sequence as ProjectDefinitionSnapshot["workflows"][number]["sequence"]} :
         {parallel: item.parallel as ProjectDefinitionSnapshot["workflows"][number]["parallel"]}), ...metadata(item)});
   }

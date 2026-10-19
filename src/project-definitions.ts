@@ -2,6 +2,7 @@ import { Effect } from "effect";
 import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import { parseDocument } from "yaml";
+import { definitionReferenceFields, validDefinitionReferences } from "./definition-references.js";
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import { ProjectFileError, type FreshGitProbe, type ProjectCommitter, type ProjectFiles } from "./project-files.js";
@@ -41,6 +42,9 @@ const definitionId = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const record = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const text = (v: unknown, max = 8000): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= max;
 const exact = (v: Record<string, unknown>, fields: string[]) => Object.keys(v).length === fields.length && fields.every(f => Object.hasOwn(v, f));
+const withOptionalReferences = (value: Record<string, unknown>, fields: string[]) =>
+  exact(value, [...fields, ...(Object.hasOwn(value, "references") ? ["references"] : [])]) &&
+  (!Object.hasOwn(value, "references") || validDefinitionReferences(value.references));
 
 const yaml = (contents: string): unknown => {
   const doc = parseDocument(contents, {schema: "core", uniqueKeys: true});
@@ -77,10 +81,10 @@ export const parseDefinitionStep = (id: string, contents: string): DefinitionSte
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(contents);
   if (!frontmatter) throw new Error("Step needs YAML frontmatter containing id, name and description.");
   const metadata = yaml(frontmatter[1]!);
-  if (!record(metadata) || !exact(metadata, ["id", "name", "description"]) || metadata.id !== id || !definitionName(metadata.name) || !text(metadata.description))
-    throw new Error("Step frontmatter needs only a matching id, name and nonempty description.");
+  if (!record(metadata) || !withOptionalReferences(metadata, ["id", "name", "description"]) || metadata.id !== id || !definitionName(metadata.name) || !text(metadata.description))
+    throw new Error("Step frontmatter needs a matching id, name, nonempty description and optional references: a list of relative file paths.");
   if (contents.slice(frontmatter[0].length).trim() !== "") throw new Error("Step body must be empty; keep all guidance in description.");
-  return {id, name: metadata.name.trim(), description: metadata.description.trim()};
+  return {id, name: metadata.name.trim(), description: metadata.description.trim(), ...definitionReferenceFields(metadata.references as readonly string[] | undefined)};
 };
 
 const parseNode = (value: unknown, depth: number, budget: {count: number}): DefinitionNode => {
@@ -89,10 +93,10 @@ const parseNode = (value: unknown, depth: number, budget: {count: number}): Defi
   if (!record(value) || Object.keys(value).length !== 1) throw new Error("Each workflow node must contain exactly one step, workflow, sequence or parallel key.");
   if (Object.hasOwn(value, "step")) {
     if (typeof value.step === "string" && definitionId.test(value.step)) return {step: value.step};
-    if (record(value.step) && exact(value.step, ["id", "name", "description"]) && typeof value.step.id === "string" &&
+    if (record(value.step) && withOptionalReferences(value.step, ["id", "name", "description"]) && typeof value.step.id === "string" &&
       definitionId.test(value.step.id) && definitionName(value.step.name) && text(value.step.description))
-      return {step: {id: value.step.id, name: value.step.name.trim(), description: value.step.description.trim()}};
-    throw new Error("step must name a reusable step or define a local step with id, name and description.");
+      return {step: {id: value.step.id, name: value.step.name.trim(), description: value.step.description.trim(), ...definitionReferenceFields(value.step.references as readonly string[] | undefined)}};
+    throw new Error("step must name a reusable step or define a local step with id, name, description and optional references: a list of relative file paths.");
   }
   if (Object.hasOwn(value, "workflow")) {
     if (typeof value.workflow === "string" && definitionId.test(value.workflow)) return {workflow: value.workflow};
@@ -121,14 +125,15 @@ export const parseDefinitionWorkflow = (id: string, contents: string): Definitio
   const hasSequence = record(metadata) && Object.hasOwn(metadata, "sequence");
   const hasParallel = record(metadata) && Object.hasOwn(metadata, "parallel");
   const fields = ["name", "description", ...(record(metadata) && Object.hasOwn(metadata, "fixed") ? ["fixed"] : []), ...(hasSequence ? ["sequence"] : []), ...(hasParallel ? ["parallel"] : [])];
-  if (!record(metadata) || !exact(metadata, fields) || hasSequence === hasParallel || !definitionName(metadata.name) || !text(metadata.description) ||
+  if (!record(metadata) || !withOptionalReferences(metadata, fields) || hasSequence === hasParallel || !definitionName(metadata.name) || !text(metadata.description) ||
     metadata.fixed !== undefined && typeof metadata.fixed !== "boolean")
-    throw new Error("A workflow needs name, description, optional fixed and exactly one root sequence or parallel group.");
+    throw new Error("A workflow needs name, description, optional fixed and references (relative file paths), and exactly one root sequence or parallel group.");
   const root = hasSequence ? parseNode({sequence: metadata.sequence}, 0, {count: 0}) : parseNode({parallel: metadata.parallel}, 0, {count: 0});
   const nodes = hasSequence ? (root as {sequence: readonly DefinitionNode[]}).sequence : (root as {parallel: readonly DefinitionNode[]}).parallel;
   const localIds = collectLocalStepIds(nodes);
   if (new Set(localIds).size !== localIds.length) throw new Error("Local step identifiers must be unique within a workflow.");
   return {id, name: metadata.name.trim(), description: metadata.description.trim(), fixed: metadata.fixed === true,
+    ...definitionReferenceFields(metadata.references as readonly string[] | undefined),
     ...(hasSequence ? {sequence: (root as {sequence: readonly DefinitionNode[]}).sequence} : {parallel: (root as {parallel: readonly DefinitionNode[]}).parallel})};
 };
 
