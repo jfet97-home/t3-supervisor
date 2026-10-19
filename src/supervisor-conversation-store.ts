@@ -22,6 +22,8 @@ export type ConversationRequest = {
   teamNotificationIds?: string[];
   teamEventIds?: string[];
   teamMemberEpoch?: number;
+  // the task source revision a context request introduced
+  sourceHash?: string;
 };
 export type WorkflowIntroduction = {
   taskId: string;
@@ -78,7 +80,7 @@ export class SupervisorConversationStore {
       .run(request.id, request.projectId, JSON.stringify(request), request.createdAt);
   }
   prepare(input: Pick<ConversationRequest, "projectId" | "supervisorThreadId" | "kind" | "taskId" | "text" | "batch" | "completionMarker"> &
-    Partial<Pick<ConversationRequest, "id" | "teamNotificationIds" | "teamEventIds" | "teamMemberEpoch">>, now: number): ConversationRequest {
+    Partial<Pick<ConversationRequest, "id" | "teamNotificationIds" | "teamEventIds" | "teamMemberEpoch" | "sourceHash">>, now: number): ConversationRequest {
     if (this.pending(input.projectId, input.supervisorThreadId)) throw new Error("supervisor_request_inflight");
     this.prune(now);
     const id = input.id ?? randomUUID();

@@ -755,6 +755,7 @@ export class SupervisorConversation {
       requestText: "", messageId: `supervisor-task-revision:${randomUUID()}`, replayCount: 0, dispatchedAt: null, supervisorRunId: null,
       workflowProposalId: `${task.id}:source:${sourceHash.slice(0, 12)}`, updatedAt: now};
     delete refreshed.definitionContext;delete refreshed.definitionReadAttempts;delete refreshed.revalidationAttempts;delete refreshed.definitionNoticeKey;
+    delete refreshed.protocolContextAnchor;
     this.store.saveTask(refreshed);return true;
   }
   private proposalContext(task: TaskRecord, definitions: ProjectDefinitionSnapshot): ProposalContext | null {
@@ -782,17 +783,20 @@ export class SupervisorConversation {
     if (role === "operative") return this.afterIntroduction(agent, introduction, message.messageId);
     return this.afterTaskContext(task, message, supervisor);
   }
-  // the latest task context request anchors root records; its message identity is kept on the task so pruned requests still attribute later records
+  // the latest task context request anchors root records; its identity and source revision are kept on the task so pruned requests still attribute later records
   private taskContextRun(task: TaskRecord, supervisor: Projection): Projection["runs"][number] | undefined {
     const latest = this.requests.requests(task.projectId, task.supervisorThreadId)
       .filter(request => request.kind === "context" && request.taskId === task.id).at(-1);
-    let anchor = task.protocolContextAnchor?.supervisorThreadId === task.supervisorThreadId ? task.protocolContextAnchor : undefined;
-    if (latest && anchor?.messageId !== latest.messageId) {
-      anchor = {supervisorThreadId: task.supervisorThreadId, messageId: latest.messageId};
+    if (latest?.sourceHash !== undefined && latest.sourceHash !== task.sourceHash) return undefined;
+    const stored = task.protocolContextAnchor;
+    let anchor = stored?.supervisorThreadId === task.supervisorThreadId && stored.sourceHash === task.sourceHash ? stored : undefined;
+    if (latest?.sourceHash !== undefined && anchor?.messageId !== latest.messageId) {
+      anchor = {supervisorThreadId: task.supervisorThreadId, messageId: latest.messageId, sourceHash: latest.sourceHash};
       const current = this.store.task(task.threadId);
-      if (current?.id === task.id && current.supervisorThreadId === task.supervisorThreadId) this.store.saveTask({...current, protocolContextAnchor: anchor});
+      if (current?.id === task.id && current.supervisorThreadId === task.supervisorThreadId && current.sourceHash === task.sourceHash)
+        this.store.saveTask({...current, protocolContextAnchor: anchor});
     }
-    const messageId = anchor?.messageId;
+    const messageId = latest?.messageId ?? anchor?.messageId;
     return messageId ? supervisor.runs.find(run => run.threadId === task.supervisorThreadId &&
       (Boolean(latest?.runId) && run.id === latest!.runId || run.userMessageId === messageId)) : undefined;
   }
@@ -1241,9 +1245,11 @@ export class SupervisorConversation {
       if (!this.enabled(binding.projectId)) return;
       this.store.store.transaction(() => {
         this.requests.saveIntroduction(introduction);
-        const context = this.requests.prepare({projectId: task.projectId, supervisorThreadId: binding.threadId, kind: "context", taskId: task.id, text: prompt, batch: null, completionMarker}, Date.now());
+        const context = this.requests.prepare({projectId: task.projectId, supervisorThreadId: binding.threadId, kind: "context", taskId: task.id, text: prompt, batch: null,
+          completionMarker, sourceHash: task.sourceHash}, Date.now());
         const current = this.store.task(task.threadId);
-        if (current?.id === task.id) this.store.saveTask({...current, protocolContextAnchor: {supervisorThreadId: binding.threadId, messageId: context.messageId}});
+        if (current?.id === task.id && current.sourceHash === task.sourceHash)
+          this.store.saveTask({...current, protocolContextAnchor: {supervisorThreadId: binding.threadId, messageId: context.messageId, sourceHash: task.sourceHash}});
       });
       await this.dispatch(this.requests.pending(binding.projectId, binding.threadId)!, signal);return;
     }
