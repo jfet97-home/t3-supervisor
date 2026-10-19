@@ -1233,6 +1233,26 @@ test("native late original completion supersedes an unsent review before deliver
   assert.equal(f.teamStore.unresolvedRequests(f.binding).length, 1);
 });
 
+test("the team view states review progress and completion in words without the root note", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  f.teamStore.settleRequest(f.binding, "guide:recovery-effect");
+  const review = f.review("view-review");
+  await f.cycles();
+  const handovers = () => supervisorTeamView(f.teamStore, f.binding, f.threadList, f.requests).members.find(item => item.threadId === f.member.threadId)!;
+  const during = handovers();
+  assert.deepEqual(during.pendingHandovers.map(item => [item.review, item.direction, item.state]),
+    [["in_progress", "outgoing", "delivered"], ["requested", "outgoing", "uncertain"]]);
+  assert.match(during.currentState ?? "", /root-requested review of an interrupted handover is in progress/u);
+  assert.equal(JSON.stringify(during).includes(review.reviewNote!), false, "the untrusted root note is not displayed");
+  f.teamStore.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, "delivered", Date.now(), 0);
+  f.teamStore.acknowledgeNotificationRun(f.binding, f.binding.threadId, review.id, 0, "native-review-run");
+  const after = handovers();
+  assert.deepEqual(after.pendingHandovers.map(item => [item.review, item.runStatus]), [["completed", "interrupted"]]);
+  assert.doesNotMatch(after.currentState ?? "", /awaiting confirmation|ended before confirming/u);
+  f.teamStore.completeTransfer(f.binding, "branch", f.assignment.epoch);
+  assert.deepEqual(handovers().pendingHandovers, [], "reviewed history leaves the pending list once its transfer ends");
+});
+
 test("a notice closed by a completed review is not re-presented in later helper check-ins", async t => {
   const f = await recoveryFixture();t.after(f.cleanup);
   const review = f.review("closing-review");

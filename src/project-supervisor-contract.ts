@@ -24,6 +24,9 @@ const SupervisorTeamHandover = Schema.Struct({
   summary: Schema.String,
   updatedAt: Schema.Number,
   runStatus: Schema.optionalKey(Schema.String),
+  // requested: this entry is a root-requested effect review; in_progress: an open review covers it;
+  // completed: a review's own native run completed and closed it, which does not prove its effects absent
+  review: Schema.optionalKey(Schema.Literals(["requested", "in_progress", "completed"])),
 });
 const SupervisorTeamIssue = Schema.Struct({
   id: Schema.String,

@@ -1,6 +1,6 @@
 import type {ProjectSupervisorTeamInfo} from "./project-supervisor-contract.js";
 import type {BindingRecord} from "./project-supervisor-store.js";
-import type {SupervisorTeamStore} from "./supervisor-team-store.js";
+import {notificationClosed, type SupervisorTeamStore, type TeamNotification} from "./supervisor-team-store.js";
 import type {ThreadInfo} from "./types.js";
 import type {SupervisorConversationStore} from "./supervisor-conversation-store.js";
 
@@ -27,9 +27,16 @@ export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRe
       if (typeof row.request_id === "string" && guideRequestIds.has(row.request_id)) deferredGuidanceMembers.add(String(row.actor_thread_id));
     }
   }
-  const unresolvedNotices = snapshot.notifications.filter(value => value.assignmentRootThreadId !== null && ["pending", "sending", "uncertain", "delivered"].includes(value.state));
+  const unresolvedNotices = snapshot.notifications.filter(value => value.assignmentRootThreadId !== null && ["pending", "sending", "uncertain", "delivered"].includes(value.state) &&
+    !notificationClosed(value));
   const unconfirmedNotices = new Set(unresolvedNotices.map(value => value.recipientThreadId));
+  const openReviews = unresolvedNotices.filter(value => value.kind === "handover_review" && !value.observedRun);
+  const reviewingMembers = new Set(openReviews.map(value => value.recipientThreadId));
   const interruptedNotices = new Set(unresolvedNotices.filter(value => value.observedRun).map(value => value.recipientThreadId));
+  const transferring = new Set(snapshot.assignments.filter(value => value.state === "transferring").map(value => `${value.subtreeRootThreadId}:${value.epoch}`));
+  const reviewStatus = (value: TeamNotification): "requested" | "in_progress" | "completed" | undefined =>
+    value.resolvedByReview ? "completed" : openReviews.some(review => review.reviewChain?.some(entry => entry.notificationId === value.id && entry.deliveryAttempt === value.deliveryAttempt))
+      ? "in_progress" : value.kind === "handover_review" ? "requested" : undefined;
   const issues = snapshot.events.filter(event => event.acknowledgedAt === null && event.severity === "attention").slice(-100)
     .map(event => ({id: event.id, severity: "warning" as const, summary: event.summary, observedAt: event.createdAt}));
   return {status: "ok", message: "Assignments are monitoring responsibility; operational child workflows remain connected to their parent.", observedAt: now,
@@ -52,6 +59,7 @@ export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRe
             (guideCountsByMember.get(member.threadId) ?? 0) > 0 ? "An operational-child steer is still awaiting native-history confirmation on its original target; no alternate route has been sent." :
           pending?.state === "uncertain" ? "Check-in delivery is uncertain; its original identity is retained." :
             pending ? "A bounded monitoring turn is in progress." :
+            reviewingMembers.has(member.threadId) ? "A root-requested review of an interrupted handover is in progress; the root keeps responsibility until its own native run completes." :
             interruptedNotices.has(member.threadId) ? "A delivered handover notice ended before confirming; the root keeps responsibility and nothing was resent." :
             unconfirmedNotices.has(member.threadId) ? "A handover notice is awaiting confirmation; the root keeps responsibility until it is confirmed." :
             "Available for the next check-in or reassignment.",
@@ -61,9 +69,15 @@ export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRe
             state: value.state === "transferring" ? "transfer" : value.memberThreadId === member.threadId ? "active" : "released"})),
         pendingHandovers: snapshot.notifications.flatMap(value => {
           if (value.recipientThreadId !== member.threadId || value.state === "acknowledged" || value.assignmentRootThreadId === null) return [];
+          // a reviewed notice is history once its transfer epoch has ended
+          if (value.resolvedByReview && !transferring.has(`${value.assignmentRootThreadId}:${value.assignmentEpoch}`)) return [];
+          const original = value.reviewOf ? snapshot.notifications.find(notice => notice.id === value.reviewOf!.notificationId) : value;
+          const review = reviewStatus(value);
           return [{targetThreadId: value.assignmentRootThreadId, targetTitle: byId.get(value.assignmentRootThreadId)?.title ?? null,
-            direction: value.kind === "handover_receive" ? "incoming" as const : "outgoing" as const, state: value.state,
-            summary: value.message, updatedAt: value.updatedAt, ...(value.observedRun ? {runStatus: value.observedRun.status} : {})}];
+            direction: original?.kind === "handover_receive" ? "incoming" as const : "outgoing" as const, state: value.state,
+            // a review's message is fixed tool guidance and its root note is untrusted; neither is repeated here
+            summary: value.kind === "handover_review" ? "" : value.message, updatedAt: value.updatedAt,
+            ...(value.observedRun ? {runStatus: value.observedRun.status} : {}), ...(review ? {review} : {})}];
         }).slice(-100),
         issues: issues.filter(issue => snapshot.events.find(event => event.id === issue.id)?.memberThreadId === member.threadId),
       };

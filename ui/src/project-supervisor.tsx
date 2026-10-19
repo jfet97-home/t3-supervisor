@@ -438,6 +438,10 @@ const handoverStateLabels = {
   failed: "Delivery definitely failed; root recovery required",
   superseded: "Superseded; acknowledgment still pending",
 } as const;
+const handoverReviewLabels = {
+  in_progress: "Root-requested review in progress; the root keeps responsibility",
+  completed: "Root-requested review completed by the helper’s native run; this does not prove its effects were absent, and request fences remain separate",
+} as const;
 const readinessTone = (value: ProjectSupervisorTeamInfo["root"]["readiness"]) => value === "ready" ? "green" : value === "pending" ? "blue" : "amber";
 const lifecycleTone = (value: ProjectSupervisorTeamInfo["root"]["lifecycle"] | ProjectSupervisorTeamInfo["members"][number]["lifecycle"]) => value === "active" ? "blue" : value === "idle" ? "green" : "amber";
 const issueTone = (severity: ProjectSupervisorTeamInfo["issues"][number]["severity"]) => severity === "critical" ? "critical" : severity === "info" ? "blue" : "amber";
@@ -508,8 +512,10 @@ function ProjectSupervisorTeamPanel({team, settings, mainThreadId}: {team: Proje
               {member.pendingHandovers.length > 0 && <div>
                 <strong>Pending handovers</strong>
                 <ul className="small">{member.pendingHandovers.map((handover, index) => <li key={`${handover.targetThreadId}:${handover.direction}:${index}`}>
-                  {handover.direction === "incoming" ? "Incoming" : "Outgoing"} · <a href={threadHref(handover.targetThreadId)}>{handover.targetTitle ?? `Operational subtree ${handover.targetThreadId}`}</a> · {handoverStateLabels[handover.state]}
+                  {handover.direction === "incoming" ? "Incoming" : "Outgoing"} · <a href={threadHref(handover.targetThreadId)}>{handover.targetTitle ?? `Operational subtree ${handover.targetThreadId}`}</a>
+                  {handover.review === "requested" && <> · Root-requested effect review</>} · {handover.review === "completed" ? handoverReviewLabels.completed : handoverStateLabels[handover.state]}
                   {handover.runStatus && <> · Native run ended {handover.runStatus.replace("_", " ")} before confirming; nothing was resent</>}
+                  {handover.review === "in_progress" && <> · {handoverReviewLabels.in_progress}</>}
                   {handover.summary && <> — {handover.summary}</>}
                 </li>)}</ul>
               </div>}

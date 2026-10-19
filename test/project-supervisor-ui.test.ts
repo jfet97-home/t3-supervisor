@@ -238,6 +238,11 @@ test("Supervisor team stays distinct from operational workflows and shows member
       pendingHandovers: [
         {targetThreadId: "child-three", targetTitle: "Release subtree", direction: "incoming", state: "delivered", summary: "Notice delivered, awaiting acknowledgment.", updatedAt: 1_800_000_000_198, runStatus: "interrupted"},
         {targetThreadId: "child-four", targetTitle: "Build subtree", direction: "outgoing", state: "failed", summary: "Native delivery was definitely rejected.", updatedAt: 1_800_000_000_199},
+        {targetThreadId: "child-five", targetTitle: "Reviewed subtree", direction: "incoming", state: "delivered", summary: "Accept responsibility for the subtree.",
+          updatedAt: 1_800_000_000_200, runStatus: "interrupted", review: "completed"},
+        {targetThreadId: "child-six", targetTitle: "Reviewing subtree", direction: "incoming", state: "delivered", summary: "Accept responsibility for the subtree.",
+          updatedAt: 1_800_000_000_201, runStatus: "cancelled", review: "in_progress"},
+        {targetThreadId: "child-six", targetTitle: "Reviewing subtree", direction: "incoming", state: "sending", summary: "", updatedAt: 1_800_000_000_202, review: "requested"},
       ],
       issues: [],
     }],
@@ -275,6 +280,10 @@ test("Supervisor team stays distinct from operational workflows and shows member
   assert.match(html, /Maximum helpers per root/);
   assert.match(html, /0 disables new recruitment/);
   assert.doesNotMatch(html, /memberEpoch|assignmentEpoch/);
+  assert.match(html, /Reviewed subtree<\/a> · Root-requested review completed by the helper’s native run; this does not prove its effects were absent, and request fences remain separate · Native run ended interrupted/);
+  assert.match(html, /Reviewing subtree<\/a> · Delivered; acknowledgment pending · Native run ended cancelled before confirming; nothing was resent · Root-requested review in progress; the root keeps responsibility/);
+  assert.match(html, /Reviewing subtree<\/a> · Root-requested effect review · Delivery in progress<\/li>/);
+  assert.doesNotMatch(html, /reviewed by (the )?root/iu);
 });
 
 test("invalid team settings expose an associated accessible error", () => {
