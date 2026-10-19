@@ -95,7 +95,9 @@ actor-authenticated to a particular T3 conversation and grant no edit authority.
 - `link_child` creates a live child's workflow under its verified native parent.
 - `apply` revises the editable plan with an expected revision and retains
   explicit notes for status changes and removed steps. Existing occurrence IDs are stable and separate from definition IDs;
-  repeated reusable references remain distinct, and new nodes begin planned. Read the current document before refining it.
+  repeated reusable references remain distinct. New live steps start "planned";
+  mark them underway or completed in a separate later apply with status_changed
+  evidence. On rejection, read the reason, code, and path. Read the current document before refining it.
 
 A valid unaccepted draft can be edited: formal agreement is not a write gate.
 During initialization the root publishes the supplied initial record unchanged and
@@ -130,6 +132,14 @@ from the current document inside the revision-checked transaction. This permits 
 status or objective change without resending an entire plan. A supplied plan replaces the nested plan, retaining stable occurrence identities.
 A supplied requirement list replaces its accounting; reusable provenance, fixed
 commitments and current-task policy are revalidated. Status changes still require explicit status-change evidence.
+A new live node whose status is not "planned" is rejected with reason and diagnostic
+code `new_node_must_start_planned`. Its path is a JSON pointer to that node's status
+in the checked plan, such as `/plan/nodes/0/status` or `/plan/nodes/1/nodes/0/status`,
+using only structural indexes. A status change without `status_changed` evidence is
+rejected with `missing_status_changed_evidence` and a pointer to the changed field:
+`/status` for the workflow document, or the same node status pointer. Other plan
+rejections keep `invalid_plan_or_missing_status_evidence`. The diagnostic `expected`
+text is a fixed instruction and does not echo submitted names, descriptions, or IDs.
 
 After authorization, a malformed local step may return the existing
 `pinned_definition_context_mismatch` reason with an additional `diagnostic`:

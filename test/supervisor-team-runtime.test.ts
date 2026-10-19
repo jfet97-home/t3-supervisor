@@ -719,6 +719,8 @@ test("a stale completed helper check-in settles its request without acknowledgin
   assert.ok(activityRefs.every(reference => !Object.hasOwn(reference, "sourceRunId")));
   assert.equal(request.text.includes("Omit sourceRunId"), true);
   assert.equal(request.text.includes("Never decode, re-encode, normalize or reconstruct opaque IDs"), true);
+  assert.match(request.text, /mark them underway or completed in a separate later apply with status_changed evidence/u);
+  assert.match(request.text, /On rejection, read the reason, code, and path/u);
   assert.deepEqual({targetThreadId: targetEnvelope.targetThreadId, assignmentRootThreadId: targetEnvelope.assignmentRootThreadId,
     assignmentEpoch: targetEnvelope.assignmentEpoch}, {targetThreadId: "branch", assignmentRootThreadId: "branch",
     assignmentEpoch: f.teamStore.coverage(f.binding, "branch", parents).assignmentEpoch});

@@ -536,6 +536,8 @@ test("Claude-shaped and future native tool records pass the shared exact proof",
   }
   assert.match(workflowReadToolDefinition.description, /strong native item references/u);
   assert.match(workflowWriteToolDefinition.description, /sourceItemId/u);
+  assert.match(workflowWriteToolDefinition.description, /New live steps start "planned"; mark them underway or completed in a separate later apply with status_changed evidence\./u);
+  assert.match(workflowWriteToolDefinition.description, /On rejection, read the reason, code, and path\./u);
 });
 
 test("provider-neutral records retain strong native identity and main-run quality gates", async () => {
@@ -2654,4 +2656,67 @@ test("root team retry restarts a definitely rejected note without changing an un
     assert.equal(retained?.state, "uncertain");
     assert.equal(retained?.deliveryAttempt, uncertain.deliveryAttempt);
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
+});
+
+test("workflow_write tool output reports new_node_must_start_planned with the structural path and no submitted text", async () => {
+  const fixture = await makeFixture();
+  try {
+    const sentinel = "zzsentinelplannedfirst9f3c";
+    const ensure = ensureArgs(fixture, "planned-first-create", "Create a draft before the rejected insert.");
+    installEvidence(fixture, ensure);
+    const created = await fixture.controller.write(ensure);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+    const before = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    const step = {...localStep(sentinel, sentinel), localId: sentinel, reason: sentinel, status: "underway" as const};
+    const args = applyArgs(fixture, {
+      operationId: "planned-first-reject",
+      workflowId: created.workflowId,
+      expectedRevision: created.revision,
+      plan: sequencePlan([step]),
+      note: "Reject a new step that is already underway.",
+    });
+    installEvidence(fixture, args);
+    const result = await fixture.controller.write(args);
+    assert.equal(result.status, "invalid");
+    assert.equal(JSON.stringify(result).includes(sentinel), false);
+    if (result.status !== "invalid") return;
+    assert.equal(result.reason, "new_node_must_start_planned");
+    assert.equal("diagnostic" in result, true);
+    if (!("diagnostic" in result)) return;
+    assert.deepEqual(result.diagnostic, {
+      code: "new_node_must_start_planned",
+      path: "/plan/nodes/0/status",
+      expected: "insert with status \"planned\" in this apply, then change status in a separate apply with status_changed evidence.",
+    });
+    const after = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    assert.equal(after.revision, before.revision);
+    assert.equal(after.plan, null);
+    const planned = applyArgs(fixture, {
+      operationId: "planned-first-insert",
+      workflowId: created.workflowId,
+      expectedRevision: created.revision,
+      plan: sequencePlan([{...step, status: "planned" as const}]),
+      note: "Insert the same step as planned.",
+    });
+    installEvidence(fixture, planned);
+    const inserted = await fixture.controller.write(planned);
+    assert.equal(inserted.status, "applied", JSON.stringify(inserted));
+    const stored = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    const node = mainStep(stored.plan);
+    assert.equal(node?.status, "planned");
+    assert.equal(node?.name, sentinel);
+    const running = applyArgs(fixture, {
+      operationId: "planned-first-start",
+      workflowId: stored.workflowId,
+      expectedRevision: stored.revision,
+      plan: sequencePlan([{...node!, status: "underway"}]),
+      evidence: [{kind: "status_changed", targetNodeId: node?.nodeId, note: "The inserted step started."}],
+      note: "Record the later status change.",
+    });
+    installEvidence(fixture, running);
+    const started = await fixture.controller.write(running);
+    assert.equal(started.status, "applied", JSON.stringify(started));
+    assert.equal(mainStep(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.plan ?? null)?.status, "underway");
+  } finally {await closeFixture(fixture);}
 });

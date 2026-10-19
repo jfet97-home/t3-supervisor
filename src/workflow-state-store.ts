@@ -26,7 +26,7 @@ import {
   type WorkflowStateSourceBinding,
 } from "./workflow-state-contract.js";
 import type {WorkflowAgreementInfo, WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
-import type {ProposalContext} from "./supervisor-workflow.js";
+import type {ProposalContext, WorkflowApplyDiagnostic} from "./supervisor-workflow.js";
 
 export type WorkflowApplyValidationContext = {
   pinnedContext: ProposalContext;
@@ -74,6 +74,12 @@ type WorkflowRow = {
   document: string;
 };
 type PlanEntity = Exclude<WorkflowPlanNodeInfo, WorkflowPlanGroupInfo>;
+type WorkflowApplyResult = Exclude<WorkflowMutationResult, {status: "invalid"}> | {
+  status: "invalid";
+  operationId: string;
+  reason: string;
+  diagnostic?: WorkflowApplyDiagnostic;
+};
 type WorkflowStateDecode = {status: "found"; document: WorkflowStateDocument} | WorkflowStateLookupResult & {status: "incompatible"};
 type PlanBudget = {nodes: number; nodeIds: Set<string>};
 
@@ -136,6 +142,30 @@ const validContributorIds = (value: unknown): value is readonly string[] => Arra
 const validOmissions = (value: unknown): boolean => Array.isArray(value) && value.length <= workflowMutationLimits.maxPlanNodes &&
   value.every(item => isRecord(item) && validPlanText(item.templatePath) && (item.kind === "step" || item.kind === "workflow") &&
     validId(item.id) && validPlanText(item.name) && validWorkflowSource(item.source) && validPlanReason(item.reason));
+
+const newNodeMustStartPlannedExpected = "insert with status \"planned\" in this apply, then change status in a separate apply with status_changed evidence.";
+const missingStatusChangedEvidenceExpected = "include status_changed evidence for this status change in the same apply.";
+
+const planStatusPointer = (plan: WorkflowStatePlan, target: PlanEntity): string | null => {
+  const visit = (group: WorkflowPlanGroupInfo | null, path: string): string | null => {
+    if (!group) return null;
+    for (const [index, node] of group.nodes.entries()) {
+      const nodePath = `${path}/nodes/${index}`;
+      if (isPlanGroup(node)) {
+        const found = visit(node, nodePath);
+        if (found) return found;
+        continue;
+      }
+      if (node === target) return `${nodePath}/status`;
+      if (node.kind === "workflow") {
+        const found = visit(node.plan, `${nodePath}/plan`);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  return visit(plan, "/plan");
+};
 
 const collectPlanEntities = (plan: WorkflowStatePlan): PlanEntity[] => {
   const entities: PlanEntity[] = [];
@@ -405,12 +435,12 @@ export class WorkflowStateStore {
     return {status: "complete", needsAttention: false, inspected};
   }
 
-  apply(owner: WorkflowOwner, input: WorkflowApplyInput, validation: WorkflowApplyValidationContext | undefined, now = Date.now()): WorkflowMutationResult {
+  apply(owner: WorkflowOwner, input: WorkflowApplyInput, validation: WorkflowApplyValidationContext | undefined, now = Date.now()): WorkflowApplyResult {
     return this.supervisors.store.transaction(() => this.applyInTransaction(owner, input, now, validation));
   }
 
   /** Applies a full editable document inside a controller-owned transaction. */
-  applyInTransaction(owner: WorkflowOwner, input: WorkflowApplyInput, now = Date.now(), validation?: WorkflowApplyValidationContext): WorkflowMutationResult {
+  applyInTransaction(owner: WorkflowOwner, input: WorkflowApplyInput, now = Date.now(), validation?: WorkflowApplyValidationContext): WorkflowApplyResult {
     if (!validApplyInput(input)) return {status: "invalid", operationId: input.operationId, reason: "invalid_workflow_document"};
     const submittedNodeIds = collectSubmittedNodeIds(input.plan);
     if (!this.currentOwner(owner)) return {status: "owner_mismatch", operationId: input.operationId};
@@ -452,9 +482,15 @@ export class WorkflowStateStore {
     if (!canonical) return {status: "invalid", operationId: input.operationId, reason: "pinned_definition_context_mismatch"};
     const validatedInput: WorkflowApplyInput = {...input, plan: canonical.plan, requirements: canonical.requirements, issues: canonical.issues};
 
-    const nextPlan = this.normalizePlan(validatedInput.plan, current.plan, submittedNodeIds);
-    if (!nextPlan || !this.statusEvidenceValid(current, validatedInput, nextPlan))
-      return {status: "invalid", operationId: input.operationId, reason: "invalid_plan_or_missing_status_evidence"};
+    const normalized = this.normalizePlan(validatedInput.plan, current.plan, submittedNodeIds);
+    if (!normalized.ok) return {status: "invalid", operationId: input.operationId,
+      reason: normalized.diagnostic?.code ?? "invalid_plan_or_missing_status_evidence",
+      ...(normalized.diagnostic ? {diagnostic: normalized.diagnostic} : {})};
+    const evidenceProblem = this.statusEvidenceProblem(current, validatedInput, normalized.plan);
+    if (evidenceProblem) return {status: "invalid", operationId: input.operationId,
+      reason: evidenceProblem === "generic" ? "invalid_plan_or_missing_status_evidence" : evidenceProblem.code,
+      ...(evidenceProblem === "generic" ? {} : {diagnostic: evidenceProblem})};
+    const nextPlan = normalized.plan;
     const evidenceInputs = validatedInput.evidence ?? [];
     const previousNodes = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node]));
     const nextNodes = new Map(collectPlanEntities(nextPlan).map(node => [node.nodeId, node]));
@@ -705,8 +741,9 @@ export class WorkflowStateStore {
     return {status: "found", document: value as unknown as WorkflowStateDocument};
   }
 
-  private normalizePlan(input: WorkflowStatePlan, existing: WorkflowStatePlan, submittedNodeIds: ReadonlySet<string>): WorkflowStatePlan | null {
-    if (!validPlan(input)) return null;
+  private normalizePlan(input: WorkflowStatePlan, existing: WorkflowStatePlan, submittedNodeIds: ReadonlySet<string>):
+    {ok: true; plan: WorkflowStatePlan} | {ok: false; diagnostic: WorkflowApplyDiagnostic | null} {
+    if (!validPlan(input)) return {ok: false, diagnostic: null};
     const existingEntities = collectPlanEntities(existing);
     const existingById = new Map(existingEntities.map(node => [node.nodeId, node]));
     const nextEntities = collectPlanEntities(input);
@@ -717,26 +754,34 @@ export class WorkflowStateStore {
     for (const [key, previous] of existingByIdentity) {
       const missingPreviousIds = previous.filter(node => !submittedNodeIds.has(node.nodeId));
       const generatedSameIdentity = (nextByIdentity.get(key) ?? []).some(node => !submittedNodeIds.has(node.nodeId));
-      if (missingPreviousIds.length && generatedSameIdentity) return null;
+      if (missingPreviousIds.length && generatedSameIdentity) return {ok: false, diagnostic: null};
     }
     for (const node of nextEntities) {
       const previous = existingById.get(node.nodeId);
-      if (!previous && node.status !== "planned") return null;
+      if (!previous && node.status !== "planned") {
+        const path = planStatusPointer(input, node);
+        return {ok: false, diagnostic: path ? {code: "new_node_must_start_planned", path, expected: newNodeMustStartPlannedExpected} : null};
+      }
     }
-    return copyPlan(input);
+    return {ok: true, plan: copyPlan(input)};
   }
 
-  private statusEvidenceValid(current: WorkflowStateDocument, input: WorkflowApplyInput, nextPlan: WorkflowStatePlan): boolean {
+  private statusEvidenceProblem(current: WorkflowStateDocument, input: WorkflowApplyInput, nextPlan: WorkflowStatePlan): WorkflowApplyDiagnostic | "generic" | null {
     const evidence = input.evidence ?? [];
     const previousNodes = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node]));
     const nextNodes = new Map(collectPlanEntities(nextPlan).map(node => [node.nodeId, node]));
     for (const node of nextNodes.values()) {
       const previous = previousNodes.get(node.nodeId);
       if (!previous) continue;
-      if (previous.status !== node.status && !evidence.some(item => item.kind === "status_changed" && item.targetNodeId === node.nodeId)) return false;
+      if (previous.status !== node.status && !evidence.some(item => item.kind === "status_changed" && item.targetNodeId === node.nodeId)) {
+        const path = planStatusPointer(nextPlan, node);
+        return path ? {code: "missing_status_changed_evidence", path, expected: missingStatusChangedEvidenceExpected} : "generic";
+      }
     }
-    if (current.status !== input.status && !evidence.some(item => item.kind === "status_changed" && (item.targetNodeId === null || item.targetNodeId === undefined))) return false;
-    return evidence.every(item => item.targetNodeId === null || item.targetNodeId === undefined || nextNodes.has(item.targetNodeId));
+    if (current.status !== input.status && !evidence.some(item => item.kind === "status_changed" && (item.targetNodeId === null || item.targetNodeId === undefined)))
+      return {code: "missing_status_changed_evidence", path: "/status", expected: missingStatusChangedEvidenceExpected};
+    if (!evidence.every(item => item.targetNodeId === null || item.targetNodeId === undefined || nextNodes.has(item.targetNodeId))) return "generic";
+    return null;
   }
 
   private validAgreementImport(source: WorkflowAgreementImport): boolean {

@@ -50,7 +50,8 @@ export type WorkflowPlanValue = Pick<WorkflowProposalInfo,
 export type WorkflowRequest = {requestText: string; context: ProposalContext | null; workflow: WorkflowProposalInfo};
 export type WorkflowApplyDiagnostic = {
   code: "local_step_definition_id_required" | "local_step_local_id_required" | "local_step_name_required" |
-    "local_step_description_required" | "local_step_template_path_not_allowed" | DefinitionReferenceProblemCode;
+    "local_step_description_required" | "local_step_template_path_not_allowed" | "new_node_must_start_planned" |
+    "missing_status_changed_evidence" | DefinitionReferenceProblemCode;
   path: string;
   expected: string;
 };

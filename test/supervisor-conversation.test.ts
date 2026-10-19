@@ -809,6 +809,14 @@ test("helper provider isolation is opt-in in root roles and uses the current nat
   assert.match(isolatedRole, /do not fall back to a shared session or another provider instance/u);
 });
 
+test("workflow editing guidance tells authors to start live steps planned and read rejection diagnostics", async t => {
+  const fixture = await makeFixture({now: baseTime});
+  t.after(fixture.cleanup);
+  const role = (fixture.makeProjectSupervisor().conversation as unknown as {roleFor(binding: BindingRecord): string}).roleFor(fixture.binding);
+  assert.match(role, /New live steps start "planned"; mark them underway or completed in a separate later apply with status_changed evidence\./u);
+  assert.match(role, /On rejection, read the reason, code, and path\./u);
+});
+
 test("first descendant observation seeds past quiet history but includes active native or delegated work", () => {
   const projection = makeProjection(makeThread({id: "child", title: "Child"}));
   projection.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};

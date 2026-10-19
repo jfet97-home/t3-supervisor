@@ -512,3 +512,146 @@ test("missing pinned context and incompatible supervisor scope fail closed witho
     await rm(fixture.directory, {recursive: true, force: true});
   }
 });
+
+const plannedFirstExpected = "insert with status \"planned\" in this apply, then change status in a separate apply with status_changed evidence.";
+const missingEvidenceExpected = "include status_changed evidence for this status change in the same apply.";
+const plannedFirstSentinel = "zzsentinelplannedfirst9f3c";
+
+const liveStep = (localId: string, status: "planned" | "underway" | "completed" | "needs_attention", text = `Local ${localId}`) => ({
+  kind: "step" as const, definitionId: null, localId, templatePath: null, name: text, description: text, source: null,
+  resolution: "resolved" as const, reason: `This task adds ${localId}.`, status, contributorThreadIds: [] as string[],
+});
+
+const appendNodes = (plan: WorkflowPlanGroupInfo, nodes: readonly unknown[]): WorkflowPlanGroupInfo => ({
+  ...plan, nodes: [...plan.nodes, ...nodes as WorkflowPlanNodeInfo[]],
+});
+
+const seedLocalWorkflow = async () => {
+  const fixture = await makeFixture([], false);
+  const created = fixture.supervisors.store.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(
+    fixture.owner, acceptedAgreement(fixture.proposal), 100));
+  assert.equal(created.status, "applied");
+  const current = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+  assert.equal(current.plan?.nodes.length, 2);
+  return {fixture, current};
+};
+
+test("a new live node inserted underway, completed, or needs_attention is rejected with new_node_must_start_planned and a structural status pointer", async () => {
+  const {fixture, current} = await seedLocalWorkflow();
+  try {
+    const index = current.plan!.nodes.length;
+    for (const status of ["underway", "completed", "needs_attention"] as const) {
+      const result = fixture.workflows.apply(fixture.owner, applyInput(fixture, current, appendNodes(current.plan!, [liveStep(`new-${status}`, status)]), `insert-${status}`), validationFor(fixture));
+      assert.equal(result.status, "invalid", status);
+      if (result.status !== "invalid") continue;
+      assert.equal(result.reason, "new_node_must_start_planned", status);
+      assert.deepEqual(result.diagnostic, {code: "new_node_must_start_planned", path: `/plan/nodes/${index}/status`, expected: plannedFirstExpected}, status);
+      assert.deepEqual(Object.keys(result).sort(), ["diagnostic", "operationId", "reason", "status"]);
+    }
+    const later = fixture.workflows.apply(fixture.owner, applyInput(fixture, current, appendNodes(current.plan!, [
+      liveStep("new-planned", "planned"), liveStep("new-completed", "completed")]), "insert-planned-then-completed"), validationFor(fixture));
+    assert.equal(later.status, "invalid");
+    if (later.status === "invalid") assert.deepEqual(later.diagnostic, {
+      code: "new_node_must_start_planned", path: `/plan/nodes/${index + 1}/status`, expected: plannedFirstExpected,
+    }, "the pointer identifies the first non-planned insert, skipping a new planned node");
+    const first = fixture.workflows.apply(fixture.owner, applyInput(fixture, current, {
+      ...current.plan!, nodes: [liveStep("early-underway", "underway") as unknown as WorkflowPlanNodeInfo, ...current.plan!.nodes,
+        liveStep("late-completed", "completed") as unknown as WorkflowPlanNodeInfo],
+    }, "insert-underway-first"), validationFor(fixture));
+    assert.equal(first.status, "invalid");
+    if (first.status === "invalid") assert.equal(first.diagnostic?.path, "/plan/nodes/0/status", "walk order reports the first offending node");
+    const nestedIndex = current.plan!.nodes.length;
+    const nested = fixture.workflows.apply(fixture.owner, applyInput(fixture, current, appendNodes(current.plan!, [{
+      kind: "parallel", templatePath: null, nodes: [liveStep("nested-completed", "completed") as unknown as WorkflowPlanNodeInfo],
+    }]), "insert-nested-completed"), validationFor(fixture));
+    assert.equal(nested.status, "invalid");
+    if (nested.status === "invalid") assert.equal(nested.diagnostic?.path, `/plan/nodes/${nestedIndex}/nodes/0/status`);
+    assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, current.revision);
+  } finally {await closeFixture(fixture);}
+});
+
+test("planned-first rejection does not echo the submitted node name, description, or id", async () => {
+  const {fixture, current} = await seedLocalWorkflow();
+  try {
+    const plan = appendNodes(current.plan!, [liveStep(plannedFirstSentinel, "completed", plannedFirstSentinel)]);
+    const offending = plan.nodes.at(-1);
+    assert.equal(offending && "name" in offending ? offending.name : "", plannedFirstSentinel);
+    assert.equal(offending && "description" in offending ? offending.description : "", plannedFirstSentinel);
+    assert.equal(offending && "localId" in offending ? offending.localId : "", plannedFirstSentinel);
+    const result = fixture.workflows.apply(fixture.owner, applyInput(fixture, current, plan, "reject-sentinel-node"), validationFor(fixture));
+    assert.equal(result.status, "invalid");
+    assert.equal(JSON.stringify(result).includes(plannedFirstSentinel), false);
+    if (result.status === "invalid") {
+      assert.equal(result.reason, "new_node_must_start_planned");
+      assert.equal(result.diagnostic?.path, `/plan/nodes/${current.plan!.nodes.length}/status`);
+      assert.equal(result.diagnostic?.expected, plannedFirstExpected);
+    }
+  } finally {await closeFixture(fixture);}
+});
+
+test("a new planned node becomes underway or completed only in a separate apply with status_changed evidence", async () => {
+  const {fixture, current} = await seedLocalWorkflow();
+  try {
+    const inserted = fixture.workflows.apply(fixture.owner, applyInput(fixture, current, appendNodes(current.plan!, [liveStep("third", "planned")]), "insert-planned"), validationFor(fixture));
+    assert.equal(inserted.status, "applied");
+    const afterInsert = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const third = planEntities(afterInsert.plan).find(node => node.kind === "step" && node.localId === "third");
+    assert.equal(third?.status, "planned");
+    assert.ok(third?.nodeId);
+    const withoutEvidence = {...afterInsert.plan!, nodes: afterInsert.plan!.nodes.map(node => node.kind === "step" && node.nodeId === third?.nodeId ? {...node, status: "underway" as const} : node)};
+    const missing = fixture.workflows.apply(fixture.owner, applyInput(fixture, afterInsert, withoutEvidence, "start-without-evidence"), validationFor(fixture));
+    assert.equal(missing.status, "invalid");
+    if (missing.status === "invalid") assert.deepEqual(missing.diagnostic, {
+      code: "missing_status_changed_evidence", path: `/plan/nodes/${afterInsert.plan!.nodes.length - 1}/status`, expected: missingEvidenceExpected,
+    });
+    assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, afterInsert.revision);
+    const started = fixture.workflows.apply(fixture.owner, applyInput(fixture, afterInsert, withoutEvidence, "start-with-evidence", {
+      evidence: [{kind: "status_changed", targetNodeId: third?.nodeId, note: "The new occurrence started."}],
+    }), validationFor(fixture));
+    assert.equal(started.status, "applied");
+    const afterStart = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    assert.equal(planEntities(afterStart.plan).find(node => node.nodeId === third?.nodeId)?.status, "underway");
+    const completedPlan = {...afterStart.plan!, nodes: afterStart.plan!.nodes.map(node => node.kind === "step" && node.nodeId === third?.nodeId ? {...node, status: "completed" as const} : node)};
+    const completed = fixture.workflows.apply(fixture.owner, applyInput(fixture, afterStart, completedPlan, "complete-with-evidence", {
+      evidence: [{kind: "status_changed", targetNodeId: third?.nodeId, note: "The new occurrence finished."}],
+    }), validationFor(fixture));
+    assert.equal(completed.status, "applied");
+    assert.equal(planEntities(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.plan ?? null).find(node => node.nodeId === third?.nodeId)?.status, "completed");
+  } finally {await closeFixture(fixture);}
+});
+
+test("document status changes still require untargeted status_changed evidence and unknown evidence targets stay generic", async () => {
+  const {fixture, current} = await seedLocalWorkflow();
+  try {
+    const first = current.plan!.nodes[0];
+    assert.equal(first?.kind, "step");
+    if (first?.kind !== "step") return;
+    const nodeOnly = fixture.workflows.apply(fixture.owner, {...applyInput(fixture, current, current.plan, "document-node-evidence", {
+      evidence: [{kind: "status_changed", targetNodeId: first.nodeId, note: "This evidence names a step."}],
+    }), status: "underway"}, validationFor(fixture));
+    assert.equal(nodeOnly.status, "invalid");
+    if (nodeOnly.status === "invalid") assert.deepEqual(nodeOnly.diagnostic, {
+      code: "missing_status_changed_evidence", path: "/status", expected: missingEvidenceExpected,
+    });
+    const missing = fixture.workflows.apply(fixture.owner, {...applyInput(fixture, current, current.plan, "document-without-evidence"), status: "underway"}, validationFor(fixture));
+    assert.equal(missing.status, "invalid");
+    if (missing.status === "invalid") assert.equal(missing.diagnostic?.path, "/status");
+    assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.status, "planned");
+    const accepted = fixture.workflows.apply(fixture.owner, {...applyInput(fixture, current, current.plan, "document-with-evidence", {
+      evidence: [{kind: "status_changed", targetNodeId: null, note: "The workflow itself started."}],
+    }), status: "underway"}, validationFor(fixture));
+    assert.equal(accepted.status, "applied");
+    const started = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    assert.equal(started.status, "underway");
+    assert.equal(planEntities(started.plan).every(node => node.status === "planned"), true);
+    const dangling = fixture.workflows.apply(fixture.owner, applyInput(fixture, started, started.plan, "dangling-evidence-target", {
+      evidence: [{kind: "status_changed", targetNodeId: randomUUID(), note: "This target is not in the plan."}],
+    }), validationFor(fixture));
+    assert.equal(dangling.status, "invalid");
+    if (dangling.status === "invalid") {
+      assert.equal(dangling.reason, "invalid_plan_or_missing_status_evidence");
+      assert.equal(dangling.diagnostic, undefined);
+    }
+    assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, started.revision);
+  } finally {await closeFixture(fixture);}
+});
