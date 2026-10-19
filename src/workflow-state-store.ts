@@ -146,6 +146,7 @@ const validOmissions = (value: unknown): boolean => Array.isArray(value) && valu
 const newNodeMustStartPlannedExpected = "insert with status \"planned\" in this apply, then change status in a separate apply with status_changed evidence.";
 const missingStatusChangedEvidenceExpected = "include status_changed evidence for this status change in the same apply.";
 
+// points into the canonical plan; workflow_write maps it onto the submitted arguments
 const planStatusPointer = (plan: WorkflowStatePlan, target: PlanEntity): string | null => {
   const visit = (group: WorkflowPlanGroupInfo | null, path: string): string | null => {
     if (!group) return null;

@@ -720,6 +720,7 @@ test("a stale completed helper check-in settles its request without acknowledgin
   assert.equal(request.text.includes("Omit sourceRunId"), true);
   assert.equal(request.text.includes("Never decode, re-encode, normalize or reconstruct opaque IDs"), true);
   assert.match(request.text, /mark them underway or completed in a separate later apply with status_changed evidence/u);
+  assert.doesNotMatch(request.text, /record completion in a separate apply/u, "role and check-in text state one planned-first rule");
   assert.match(request.text, /On rejection, read the reason, code, and path/u);
   assert.deepEqual({targetThreadId: targetEnvelope.targetThreadId, assignmentRootThreadId: targetEnvelope.assignmentRootThreadId,
     assignmentEpoch: targetEnvelope.assignmentEpoch}, {targetThreadId: "branch", assignmentRootThreadId: "branch",

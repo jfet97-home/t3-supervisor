@@ -13,7 +13,7 @@ import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, typ
 import type { Projection, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import type { WorkflowAgreementImport, WorkflowOwner } from "../src/workflow-state-contract.js";
-import { WorkflowWriteController, workflowReadToolDefinition, workflowWriteToolDefinition, type WorkflowApplyPatch, type WorkflowNativeAccess } from "../src/workflow-write-controller.js";
+import { submittedApplyPointer, WorkflowWriteController, workflowReadToolDefinition, workflowWriteToolDefinition, type WorkflowApplyPatch, type WorkflowNativeAccess } from "../src/workflow-write-controller.js";
 import { workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, workflowTurnItemDetailMaxBytes } from "../src/workflow-write-evidence.js";
 import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo } from "../src/project-supervisor-contract.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
@@ -2686,7 +2686,7 @@ test("workflow_write tool output reports new_node_must_start_planned with the st
     if (!("diagnostic" in result)) return;
     assert.deepEqual(result.diagnostic, {
       code: "new_node_must_start_planned",
-      path: "/plan/nodes/0/status",
+      path: "/input/plan/nodes/0/status",
       expected: "insert with status \"planned\" in this apply, then change status in a separate apply with status_changed evidence.",
     });
     const after = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
@@ -2719,4 +2719,48 @@ test("workflow_write tool output reports new_node_must_start_planned with the st
     assert.equal(started.status, "applied", JSON.stringify(started));
     assert.equal(mainStep(fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.plan ?? null)?.status, "underway");
   } finally {await closeFixture(fixture);}
+});
+
+test("planned-first and status-evidence pointers address the submitted arguments, including nested groups", async () => {
+  const fixture = await makeFixture();
+  try {
+    const ensure = ensureArgs(fixture, "nested-pointer-create", "Create a draft before nested inserts.");
+    installEvidence(fixture, ensure);
+    const created = await fixture.controller.write(ensure);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+    const nested = (status: "planned" | "completed") => sequencePlan([localStep("First check", "Check the first area."),
+      {kind: "parallel", nodes: [localStep("Parallel check", "Check alongside."),
+        {kind: "sequence", nodes: [{...localStep("Nested check", "Check inside the nested group."), status}]}]}]);
+    const rejected = applyArgs(fixture, {operationId: "nested-pointer-reject", workflowId: created.workflowId,
+      expectedRevision: created.revision, plan: nested("completed"), note: "Insert a nested step that is already completed."});
+    installEvidence(fixture, rejected);
+    const result = await fixture.controller.write(rejected);
+    assert.equal(result.status, "invalid");
+    const path = "diagnostic" in result ? result.diagnostic?.path : undefined;
+    assert.equal(path, "/input/plan/nodes/1/nodes/1/nodes/0/status");
+    const resolved = path!.split("/").slice(1).reduce<unknown>((value, key) => (value as Record<string, unknown>)[key], rejected);
+    assert.equal(resolved, "completed", "the pointer resolves to the offending field of the submitted arguments");
+    const planned = applyArgs(fixture, {operationId: "nested-pointer-insert", workflowId: created.workflowId,
+      expectedRevision: created.revision, plan: nested("planned"), note: "Insert the nested step as planned."});
+    installEvidence(fixture, planned);
+    assert.equal((await fixture.controller.write(planned)).status, "applied");
+    const stored = fixture.workflows.get(fixture.projectId, fixture.mainThreadId)!;
+    const statusOnly = applyArgs(fixture, {operationId: "nested-pointer-document-status", workflowId: stored.workflowId,
+      expectedRevision: stored.revision, status: "underway", note: "Change only the document status without evidence."});
+    installEvidence(fixture, statusOnly);
+    const statusResult = await fixture.controller.write(statusOnly);
+    assert.equal("diagnostic" in statusResult && statusResult.diagnostic?.path, "/input/status");
+  } finally {await closeFixture(fixture);}
+});
+
+test("a pointer inside a service-expanded workflow maps to the nearest submitted node", () => {
+  const submitted = {kind: "sequence", nodes: [{kind: "step", status: "planned"},
+    {kind: "workflow", definitionId: "review", status: "planned"},
+    {kind: "workflow", definitionId: "review", plan: {kind: "sequence", nodes: [{kind: "step", status: "completed"}]}}]};
+  assert.equal(submittedApplyPointer(submitted, "/plan/nodes/2/plan/nodes/0/status"), "/input/plan/nodes/2/plan/nodes/0/status");
+  assert.equal(submittedApplyPointer(submitted, "/plan/nodes/1/plan/nodes/0/status"), "/input/plan/nodes/1");
+  assert.equal(submittedApplyPointer(submitted, "/plan/nodes/9/status"), "/input/plan");
+  assert.equal(submittedApplyPointer(undefined, "/plan/nodes/0/status"), "/input");
+  assert.equal(submittedApplyPointer(submitted, "/status"), "/input/status");
 });

@@ -287,6 +287,25 @@ const referenceDiagnostic = (plan: unknown): WorkflowApplyDiagnostic | null => {
   return visit(plan, "/input/plan", 0);
 };
 
+// The store points into the canonical plan, which keeps submitted groups index-for-index. A workflow
+// node submitted without its own plan is expanded by the service, so a pointer inside that expansion
+// maps to the nearest submitted ancestor. Paths use the same /input base as the other apply diagnostics.
+export const submittedApplyPointer = (submittedPlan: unknown, path: string): string => {
+  if (path === "/status") return "/input/status";
+  const segments = path.split("/").slice(1);
+  if (segments[0] !== "plan" || segments.at(-1) !== "status" || !isRecord(submittedPlan)) return "/input";
+  let node: Record<string, unknown> = submittedPlan;
+  let pointer = "/input/plan";
+  for (let index = 1; index < segments.length - 1; index++) {
+    const next = segments[index] === "nodes" ? Array.isArray(node.nodes) ? node.nodes[Number(segments[++index])] : undefined
+      : segments[index] === "plan" ? node.plan : undefined;
+    if (!isRecord(next)) return pointer;
+    pointer += segments[index] === "plan" ? "/plan" : `/nodes/${segments[index]}`;
+    node = next;
+  }
+  return `${pointer}/status`;
+};
+
 const parseApplyInput = (value: unknown): WorkflowApplyPatch | null => {
   if (!isRecord(value) || !hasExactKeys(value,
     ["operationId", "workflowId", "expectedRevision", "note"], ["status", "objective", "sourceBinding", "requirements", "issues", "plan", "evidence"])) return null;
@@ -1116,7 +1135,10 @@ export class WorkflowWriteController {
             return {status: "denied", operationId: applyInput.operationId, reason: "new_contributor_not_live"};
         }
       }
-      return {...this.options.workflows.applyInTransaction(owner, normalizedInput, this.now(), validation), operationId: payload.input.operationId};
+      const result = this.options.workflows.applyInTransaction(owner, normalizedInput, this.now(), validation);
+      if (result.status === "invalid" && result.diagnostic)
+        return {...result, diagnostic: {...result.diagnostic, path: submittedApplyPointer(payload.input.plan, result.diagnostic.path)}, operationId: payload.input.operationId};
+      return {...result, operationId: payload.input.operationId};
     });
   }
 
