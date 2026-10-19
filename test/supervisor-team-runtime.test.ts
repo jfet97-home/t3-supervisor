@@ -1230,6 +1230,26 @@ test("native late original completion supersedes an unsent review before deliver
   assert.equal(f.teamStore.unresolvedRequests(f.binding).length, 1);
 });
 
+test("a notice closed by a completed review is not re-presented in later helper check-ins", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  const review = f.review("closing-review");
+  await f.cycles();f.expose(review, "completed");await f.cycles();
+  assert.equal(f.current(f.original).resolvedByReview?.reviewNotificationId, review.id);
+  f.teamStore.settleRequest(f.binding, "guide:recovery-effect");
+  f.teamStore.completeTransfer(f.binding, "branch", f.assignment.epoch);
+  activate(f.teamStore, f.binding, f.member, "branch");
+  f.requests.noticeSent(f.member.threadId, 0);
+  const runtime = f.runtime(f.transport.transport);
+  const partition = runtime.partition(f.binding, f.threadList, batchOf(["branch"]));
+  runtime.startCycle(f.binding);
+  await runtime.runHelperBatch(f.binding, f.threadList, partition.helperBatches, AbortSignal.timeout(5000));
+  const request = f.requests.pending(projectId, f.member.threadId)!;
+  assert.ok(request, "the helper still receives its normal check-in");
+  assert.equal(request.teamNotificationIds?.includes(f.original.id), false);
+  assert.equal(request.text.includes(f.original.id), false, "closed handover history is not replayed as a current instruction");
+  assert.equal(f.current(f.original).state, "delivered");
+});
+
 test("a normal helper check-in cannot acknowledge handover IDs included in its request", async t => {
   const f = await recoveryFixture();t.after(f.cleanup);
   const review = f.review("not-a-monitor-ack");

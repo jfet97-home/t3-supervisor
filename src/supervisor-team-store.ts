@@ -75,6 +75,8 @@ export function parseHandoverReview(input: Record<string, unknown>): HandoverRev
 }
 const attemptOf = (notification: TeamNotification): HandoverAttempt => ({notificationId: notification.id,
   deliveryAttempt: notification.deliveryAttempt, runId: notification.observedRun!.runId});
+// pending was never posted and failed was definitively rejected: neither can have native effects
+const unsentNotification = (notification: TeamNotification): boolean => notification.state === "pending" || notification.state === "failed";
 export const notificationClosed = (notification: TeamNotification): boolean =>
   notification.state === "acknowledged" || notification.state === "superseded" || notification.resolvedByReview !== undefined;
 export type TeamNotificationState = "pending" | "sending" | "uncertain" | "delivered" | "failed" | "acknowledged" | "superseded";
@@ -581,9 +583,12 @@ export class SupervisorTeamStore {
     });
   }
 
-  private supersedePendingReviews(binding: TeamBinding, original: TeamNotification, now: number): void {
+  // Any closure in a chain makes every unsent review's frozen chain stale. A never-sent
+  // (pending) or definitively rejected (failed) review cannot have native effects; it is
+  // superseded with its attempt and failure reason kept. Sent or uncertain reviews keep their fence.
+  private supersedeUnsentReviews(binding: TeamBinding, original: TeamNotification, now: number): void {
     for (const review of this.notificationsFor(binding).filter(value => value.reviewOf?.notificationId === original.id &&
-      value.reviewOf.deliveryAttempt === original.deliveryAttempt && value.state === "pending"))
+      value.reviewOf.deliveryAttempt === original.deliveryAttempt && unsentNotification(value)))
       this.saveNotification(binding, {...review, state: "superseded", updatedAt: now});
   }
 
@@ -598,7 +603,7 @@ export class SupervisorTeamStore {
         if (assignment.memberThreadId !== memberThreadId && assignment.fromMemberThreadId !== memberThreadId && assignment.toMemberThreadId !== memberThreadId) continue;
         if (assignment.state === "transferring") {
           for (const notification of this.notificationsFor(binding).filter(value => value.assignmentRootThreadId === assignment.subtreeRootThreadId &&
-            value.assignmentEpoch === assignment.epoch && value.state === "pending"))
+            value.assignmentEpoch === assignment.epoch && unsentNotification(value)))
             this.saveNotification(binding, {...notification, state: "superseded", updatedAt: now});
         }
         this.saveAssignment(binding, { id: assignment.id, subtreeRootThreadId: assignment.subtreeRootThreadId, memberThreadId: null,
@@ -624,7 +629,7 @@ export class SupervisorTeamStore {
         if (!involved) continue;
         if (assignment.state === "transferring") {
           for (const notification of this.notificationsFor(binding).filter(value => value.assignmentRootThreadId === assignment.subtreeRootThreadId &&
-            value.assignmentEpoch === assignment.epoch && ["handover_release", "handover_receive", "handover_review"].includes(value.kind) && value.state === "pending"))
+            value.assignmentEpoch === assignment.epoch && ["handover_release", "handover_receive", "handover_review"].includes(value.kind) && unsentNotification(value)))
             this.saveNotification(binding, { ...notification, state: "superseded", updatedAt: now });
         }
         this.saveAssignment(binding, { id: assignment.id, subtreeRootThreadId: assignment.subtreeRootThreadId, memberThreadId: null,
@@ -844,7 +849,7 @@ export class SupervisorTeamStore {
       // Preserve it rather than forcing completion to equal a stale observed run.
       if (notification.state === "acknowledged") return notification;
       const next = this.finishNotification(binding, {...notification, completedRunId}, now);
-      if (!notification.reviewOf) this.supersedePendingReviews(binding, notification, now);
+      if (!notification.reviewOf) this.supersedeUnsentReviews(binding, notification, now);
       else {
         const assignment = notification.assignmentRootThreadId ? this.assignment(binding, notification.assignmentRootThreadId) : null;
         const member = this.member(binding, notification.recipientThreadId);
@@ -859,7 +864,7 @@ export class SupervisorTeamStore {
               current.assignmentEpoch !== notification.assignmentEpoch) continue;
             // Closure changes only notice bookkeeping. Never settle a TeamRequest here.
             this.saveNotification(binding, {...current, resolvedByReview: {reviewNotificationId: notification.id, reviewRunId: completedRunId, resolvedAt: now}, updatedAt: now});
-            this.supersedePendingReviews(binding, current, now);
+            this.supersedeUnsentReviews(binding, current, now);
           }
         }
         this.addEvent(binding, {id: `handover-review-completed:${notification.id}:${notification.deliveryAttempt}`, kind: "handover_review_completed",

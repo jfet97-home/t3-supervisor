@@ -219,11 +219,16 @@ resolvedAt}`. Those members remain `delivered`, retaining IDs, message bytes and
 bookkeeping, not proof that external effects did not happen.
 
 A late native completion of the original can still acknowledge its actual proven
-run, preserving historical interruption evidence. It supersedes only pending
-reviews. Sending, uncertain or delivered reviews remain independent fences until
-their own completion or a later review closes them, without double resolution.
-Epoch changes supersede only pending reviews; a sent review completing after an
-epoch change acknowledges itself but cannot close the stale original. Reassignment
+run, preserving historical interruption evidence. Any closure in a chain makes
+the frozen chain of an unsent review stale, so it supersedes reviews that were
+never posted (pending) or were definitively rejected (failed), keeping their
+attempt and failure reason; the root can then review the remaining open set.
+Sending, uncertain or delivered reviews remain independent fences until their own
+completion or a later review closes them, without double resolution. Ending a
+transfer epoch through missing or quarantine handling likewise supersedes that
+epoch's pending and definitively failed notices, never sent or uncertain ones; a
+sent review completing after an epoch change acknowledges itself but cannot close
+the stale original. Reassignment
 or release cannot bypass an ongoing transfer; revoking a helper through missing or
 quarantine handling advances the epoch before a new assignment can be made.
 
@@ -233,9 +238,7 @@ request (including older or inherited assignments), every request of the exact
 transfer assignment epoch, and every handover/review notice of that epoch to be
 acknowledged, superseded or closed. Unrelated inherited sibling requests are not
 swept into that transfer. Concrete request and guidance-effect reconciliation
-remains independent and may require manual inspection. A definitively rejected
-review whose chain subsequently closes is not eligible for retry; its failed
-notice stays visible and fences that transfer, requiring root lifecycle recovery.
+remains independent and may require manual inspection.
 
 ## Helper guidance
 

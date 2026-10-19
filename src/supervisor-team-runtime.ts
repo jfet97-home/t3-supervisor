@@ -636,8 +636,9 @@ export class SupervisorTeamRuntime {
     })) return;
     const requestId = `team-review:${randomUUID()}`;
     const completionMarker = `Supervisor team check-in ${requestId} completed`;
+    // a notice closed by a completed review is history; re-presenting it would replay its instruction
     const deliveredNotifications = this.options.teamStore.snapshot(binding).notifications.filter(value => value.recipientThreadId === member.threadId &&
-      value.memberEpoch === member.epoch && value.state === "delivered");
+      value.memberEpoch === member.epoch && value.state === "delivered" && !notificationClosed(value));
     const threadsById = new Map(threads.map(thread => [thread.id, thread]));
     const monitorThreadsById = new Map(batch.batch.threads.map(thread => [thread.threadId, thread]));
     const buildReview = (targets: TeamRequestTarget[]) => {
