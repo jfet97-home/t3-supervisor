@@ -2963,6 +2963,48 @@ test("ambiguous or mismatched native order attributes nothing", async t => {
   } finally {await f.cleanup();restore.mock.restore();}
 });
 
+test("a kept prompt run anchors records only while the current projection shows it as the prompt's only run", async t => {
+  const clock = {now: baseTime};
+  const restore = t.mock.method(Date, "now", () => clock.now);
+  const f = await makeFixture(clock);
+  try {
+    appendNoticeToOperative(f);
+    const request = prepareTaskContext(f, {text: "The current task context.", completionMarker: "kept context completed"}, clock.now);
+    const prompt = appendRun({projection: f.supervisor, id: "kept-prompt-run", ordinal: 5, status: "completed", messageId: request.messageId, text: request.text, now: clock.now});
+    completeRun(f.supervisor, prompt, "```workflow-proposal\n{broken}\n```\nkept context completed", clock.now + 1);
+    f.conversation.requests.saveRequest({...request, state: "completed", runId: prompt.id, sentAt: clock.now, error: null});
+    await observeAgreement(f, clock.now + 2);
+    assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic?.messageId, `assistant-${prompt.id}`);
+    assert.deepEqual(f.projectStore.task(f.task.threadId)?.protocolAnchor?.promptRun, {id: prompt.id, ordinal: 5});
+    const record = (id: string, ordinal: number, now: number) => {
+      const run = appendRun({projection: f.supervisor, id, ordinal, status: "completed", messageId: `${id}-input`, text: "Another request.", now});
+      return appendMessageToRun(f.supervisor, run, {id: `${id}-answer`, role: "assistant", text: "```workflow-proposal\n{broken}\n```", now: now + 1});
+    };
+    const observeAt = async (offset: number) => observeAgreement(f, baseTime + offset);
+
+    const duplicate = appendRun({projection: f.supervisor, id: "duplicate-prompt-run", ordinal: 7, status: "completed", messageId: request.messageId, text: request.text, now: clock.now + 3});
+    record("while-duplicated", 8, clock.now + 4);
+    await observeAt(10_000);
+    assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic?.messageId, `assistant-${prompt.id}`, "a second run for the prompt anchors nothing");
+
+    f.supervisor.runs.splice(f.supervisor.runs.indexOf(duplicate), 1);
+    const restored = record("after-duplicate", 9, clock.now + 5);
+    await observeAt(20_000);
+    assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic?.messageId, restored.id, "the kept run anchors again once it is the only one");
+
+    f.supervisor.runs.splice(f.supervisor.runs.indexOf(prompt), 1);
+    record("while-missing", 10, clock.now + 6);
+    await observeAt(30_000);
+    assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic?.messageId, restored.id, "a kept run missing from the projection anchors nothing");
+
+    appendRun({projection: f.supervisor, id: "replacement-prompt-run", ordinal: 11, status: "completed", messageId: request.messageId, text: request.text, now: clock.now + 7});
+    record("after-replacement", 12, clock.now + 8);
+    await observeAt(40_000);
+    assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic?.messageId, restored.id, "a different run for the prompt anchors nothing");
+    assert.deepEqual(f.projectStore.task(f.task.threadId)?.protocolAnchor?.promptRun, {id: prompt.id, ordinal: 5}, "the kept identity is not rewritten");
+  } finally {await f.cleanup();restore.mock.restore();}
+});
+
 test("an unanchored task still forms its agreement while protocol diagnostics fail closed", async t => {
   const clock = {now: baseTime};
   const fixture = await makeFixture(clock);

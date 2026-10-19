@@ -797,14 +797,15 @@ export class SupervisorConversation {
     const anchor = task.protocolAnchor;
     return anchor?.supervisorThreadId === task.supervisorThreadId && anchor.sourceHash === task.sourceHash ? anchor : null;
   }
-  // the native run started by the prompt that gave the Supervisor this source revision; it is kept once observed
+  // the native run started by the prompt that gave the Supervisor this source revision; the current projection must show exactly
+  // one such run on the own root thread, and a kept run only confirms that identity
   private protocolPromptRun(task: TaskRecord, supervisor: Projection): {id: string; ordinal: number} | null {
     const anchor = this.currentProtocolAnchor(task);
     if (!anchor || supervisor.thread.id !== task.supervisorThreadId) return null;
-    if (anchor.promptRun) return anchor.promptRun;
     const runs = supervisor.runs.filter(item => item.threadId === task.supervisorThreadId && item.userMessageId === anchor.promptMessageId);
     const run = runs.length === 1 ? runs[0]! : null;
     if (!run || !Number.isSafeInteger(run.ordinal) || run.ordinal < 0) return null;
+    if (anchor.promptRun) return anchor.promptRun.id === run.id && anchor.promptRun.ordinal === run.ordinal ? anchor.promptRun : null;
     const promptRun = {id: run.id, ordinal: run.ordinal};
     const current = this.store.task(task.threadId);
     if (current?.id === task.id && current.protocolAnchor && this.currentProtocolAnchor(current)?.promptMessageId === anchor.promptMessageId)
