@@ -2571,7 +2571,7 @@ test("R114-D diagnoses an invalid fresh proposal in a current task root turn", a
 
   const contextRequest = fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId,
     kind: "context", taskId: fixture.task.id, text: "Current task source epoch.", batch: null,
-    completionMarker: "Current task context completed"}, clock.now + 2);
+    completionMarker: "Current task context completed", sourceHash: fixture.task.sourceHash}, clock.now + 2);
   const contextRun = appendRun({projection: fixture.supervisor, id: "current-task-context-epoch", ordinal: 2, status: "completed",
     messageId: contextRequest.messageId, text: contextRequest.text, now: clock.now + 2});
   completeRun(fixture.supervisor, contextRun, contextRequest.completionMarker, clock.now + 3);
@@ -2760,6 +2760,45 @@ test("an edited task source does not inherit protocol diagnostics anchored to it
   } finally {await f.cleanup();}
 });
 
+test("retained context requests from an earlier or unrecorded source revision attribute no diagnostics", async t => {
+  for (const recorded of [true, false]) {
+    const clock = {now: baseTime};
+    const restore = t.mock.method(Date, "now", () => clock.now);
+    const f = await makeFixture(clock);
+    try {
+      appendNoticeToOperative(f);
+      const request = f.conversation.requests.prepare({projectId, supervisorThreadId: f.binding.threadId, kind: "context", taskId: f.task.id,
+        text: "old context", batch: null, completionMarker: "old done", ...(recorded ? {sourceHash: f.task.sourceHash} : {})}, baseTime);
+      const run = appendRun({projection: f.supervisor, id: "old-context", ordinal: 5, status: "completed", messageId: request.messageId, text: request.text, now: baseTime});
+      f.conversation.requests.saveRequest({...request, state: "completed", runId: run.id, sentAt: baseTime, error: null});
+      completeRun(f.supervisor, run, "```workflow-proposal\n{broken}\n```", baseTime + 2);
+      appendAssistantTurn(f.supervisor, "later-malformed", "```workflow-proposal\n{also-broken}\n```", baseTime + 3);
+      await observeAgreement(f, baseTime + 4);
+      assert.equal(Boolean(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic), recorded,
+        recorded ? "the current source context attributes its own records" : "a request without a recorded source revision fails closed");
+      if (recorded) f.projectStore.saveTask({...f.projectStore.task(f.task.threadId)!, workflowProtocolDiagnostic: null});
+      clock.now = baseTime + 10_000;
+      f.operative.messages.find(message => message.id === f.task.sourceMessageId)!.text = "Implement a separate import flow with a revised goal.";
+      await observeAgreement(f, clock.now + 1);
+      const revised = f.projectStore.task(f.task.threadId)!;
+      assert.equal(revised.status, "queued");
+      const control = f.projectStore.control(projectId);
+      f.projectStore.saveControl(projectId, control.generation, true, {snapshotSequence: 1, threads: [{id: operativeThreadId, latestRunId: revised.sourceRunId}]});
+      const supervisor = f.makeProjectSupervisor();
+      await supervisor.runOnce(AbortSignal.timeout(10_000));
+      const waiting = f.projectStore.task(f.task.threadId)!;
+      const interpretation = f.supervisor.runs.find(item => item.userMessageId === waiting.messageId);
+      assert.ok(interpretation);
+      completeRun(f.supervisor, interpretation, JSON.stringify({objective: "Implement separate import flow.", reason: "Source edited.", sourceMessageIds: [f.task.sourceMessageId],
+        workflow: {requirements: [{kind: "step", id: "test-plan", applies: true, reason: "Verification required."}], plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "test-plan", reason: "Verify import."}]}}}), clock.now + 2);
+      await supervisor.runOnce(AbortSignal.timeout(10_000));
+      assert.equal(f.projectStore.task(f.task.threadId)?.status, "inferred");
+      await observeAgreement(f, clock.now + 3);
+      assert.ok(!f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic, "records from the earlier source stay unattributed");
+    } finally {await f.cleanup();restore.mock.restore();}
+  }
+});
+
 test("malformed protocol JSON is diagnosed only when the current task request identifies its root run", async t => {
   const clock = {now: baseTime};
   const fixture = await makeFixture(clock);
@@ -2773,7 +2812,7 @@ test("malformed protocol JSON is diagnosed only when the current task request id
 
   const request = fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId,
     kind: "context", taskId: fixture.task.id, text: "The current task context.", batch: null,
-    completionMarker: "current malformed protocol response"}, clock.now + 2);
+    completionMarker: "current malformed protocol response", sourceHash: fixture.task.sourceHash}, clock.now + 2);
   const run = appendRun({projection: fixture.supervisor, id: "current-task-malformed-run", ordinal: 5, status: "completed",
     messageId: request.messageId, text: request.text, now: clock.now + 2});
   const malformed = "```workflow-proposal\n{not-json}\n```";

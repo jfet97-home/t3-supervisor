@@ -15,7 +15,7 @@ export function createSetupFence(changed: (state: {fenced: boolean; pending: boo
   const emit = () => changed({fenced, pending: active > 0});
   return {
     epoch: () => epoch,
-    latch: () => { if (!fenced) { fenced = true; emit(); } },
+    latch: () => { epoch++; if (!fenced) { fenced = true; emit(); } },
     request(started: boolean) {
       active = Math.max(0, active + (started ? 1 : -1));
       epoch++;

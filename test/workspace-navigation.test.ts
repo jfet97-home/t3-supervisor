@@ -243,3 +243,94 @@ test("without the Navigation API, indistinguishable unindexed entries end in a b
   browser.go(-1);
   assert.deepEqual([browser.at(), browser.app()], ["b", "b"]);
 });
+
+test("without the Navigation API, a marker lineage adopted from the initial entry restores consistent entries and never rewrites inconsistent ones", async () => {
+  const {createNavigator} = await import("../ui/src/navigation.js");
+  const route = (id: string) => ({...directoryRoute, projectId: id, main: ""});
+  const run = (earlierPosition: number) => {
+    const earlier = {supervisorHistory: "earlier", supervisorPosition: earlierPosition};
+    const entries: Array<{hash: string; state: unknown}> = [{hash: routeHref(route("a")), state: earlier},
+      {hash: routeHref(route("b")), state: {supervisorHistory: "earlier", supervisorPosition: 1}}];
+    let cursor = 1;
+    const traversals: number[] = [];
+    const timers: Array<() => void> = [];
+    const state = {dirty: true, prompts: 0, current: route("b")};
+    const controller = createNavigator(route("b"), {
+      read: () => ({...entries[cursor]!, length: entries.length}),
+      push: (hash, value) => {entries.splice(++cursor);entries.push({hash, state: value});},
+      replace: (hash, value) => {entries[cursor] = {hash, state: value};},
+      go: delta => {assert.notEqual(delta, 0);traversals.push(delta);},
+      later: callback => {timers.push(callback);},
+    }, () => {state.prompts++;return !state.dirty;}, next => {state.current = {...next, main: next.main ?? ""};});
+    controller.start();
+    cursor = 0;controller.historyChanged();controller.historyChanged();
+    for (const delta of traversals.splice(0)) if (cursor + delta >= 0 && cursor + delta < entries.length) {cursor += delta;controller.historyChanged();}
+    timers.splice(0).forEach(callback => callback());
+    assert.equal(state.prompts, 1);
+    assert.equal(entries[0]!.hash, routeHref(route("a")));
+    assert.equal(entries[0]!.state, earlier, "the destination entry is never rewritten");
+    assert.equal(parseRoute(entries[cursor]!.hash).projectId, "b");
+    assert.equal(state.current.projectId, "b");
+    state.dirty = false;
+    controller.navigate(route("c"));
+    assert.equal(state.current.projectId, "c");
+    assert.deepEqual(entries.map(entry => parseRoute(entry.hash).projectId), ["a", "b", "c"]);
+    return (entries[1]!.state as {supervisorHistory: string}).supervisorHistory;
+  };
+  assert.equal(run(0), "earlier", "a consistent adopted marker restores the original entry");
+  assert.notEqual(run(7), "earlier", "an inconsistent adopted marker recovers on a new entry instead of overwriting one");
+});
+
+test("without the Navigation API, markers written without a lineage never steer a canceled Forward", async () => {
+  const {createNavigator} = await import("../ui/src/navigation.js");
+  const route = (id: string) => ({...directoryRoute, projectId: id, main: ""});
+  const scenario = (stack: Array<[string, number | null]>, initial: number, back: number, reinitialize: boolean) => {
+    const entries: Array<{hash: string; state: unknown}> = stack.map(([id, marker]) => ({hash: routeHref(route(id)), state: marker === null ? null : {supervisorPosition: marker}}));
+    const original = entries.map(entry => ({...entry}));
+    let cursor = initial;
+    const traversals: number[] = [];
+    const timers: Array<() => void> = [];
+    const state = {dirty: false, prompts: 0, current: route(stack[initial]![0])};
+    const make = () => createNavigator(parseRoute(entries[cursor]!.hash), {
+      read: () => ({...entries[cursor]!, length: entries.length}),
+      push: (hash, value) => {entries.splice(++cursor);entries.push({hash, state: value});},
+      replace: (hash, value) => {entries[cursor] = {hash, state: value};},
+      go: delta => {assert.notEqual(delta, 0);traversals.push(delta);},
+      later: callback => {timers.push(callback);},
+    }, () => {state.prompts++;return !state.dirty;}, next => {state.current = {...next, main: next.main ?? ""};});
+    let controller = make();
+    controller.start();
+    if (reinitialize) {controller = make();controller.start();}
+    const settle = () => {
+      for (let step = 0; traversals.length > 0 && step < 20; step++) {
+        const target = cursor + traversals.shift()!;
+        if (target < 0 || target >= entries.length) continue;
+        const previous = entries[cursor]!.hash;
+        cursor = target;controller.historyChanged();
+        if (entries[cursor]!.hash !== previous) controller.historyChanged();
+      }
+    };
+    const go = (delta: number) => {traversals.push(delta);settle();};
+    go(-back);
+    const landed = cursor;
+    state.dirty = true;state.prompts = 0;
+    go(1);
+    timers.splice(0).forEach(callback => callback());settle();
+    assert.equal(state.prompts, 1);
+    assert.equal(cursor, landed, "the canceled Forward returns to the entry the page shows");
+    assert.equal(state.current.projectId, stack[landed]![0]);
+    entries.forEach((entry, index) => {
+      if (index !== initial) assert.deepEqual(entry, original[index], `entry ${index} is unchanged`);
+    });
+    state.dirty = false;
+    controller.navigate(route("next"));
+    assert.equal(state.current.projectId, "next");
+  };
+  for (const reinitialize of [false, true]) {
+    scenario([["a", 0], ["b", 1]], 1, 1, reinitialize);
+    scenario([["a", 0], ["b", 1], ["c", 2]], 1, 1, reinitialize);
+    scenario([["a", 0], ["b", 1], ["c", 2]], 2, 2, reinitialize);
+    scenario([["pre", null], ["a", 0], ["b", 1]], 2, 1, reinitialize);
+    scenario([["pre", null], ["a", 0], ["b", 1]], 2, 2, reinitialize);
+  }
+});

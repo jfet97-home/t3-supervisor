@@ -60,8 +60,10 @@ const newHistory = () => Math.random().toString(36).slice(2);
 export function createNavigator(initial: Route, host: NavigationHistory, allow: NavigationGuard, changed: (route: Route) => void) {
   let route = initial;
   const first = host.read();
-  let lineage = historyOf(first.state) ?? newHistory();
-  let position: number | null = first.index ?? markerOf(first.state) ?? 0;
+  const adopted = historyOf(first.state);
+  let lineage = adopted ?? newHistory();
+  // a new lineage always starts at 0, so markers written without a lineage are never reused as positions
+  let position: number | null = first.index ?? (adopted ? markerOf(first.state) : null) ?? 0;
   let unknownHash: string | null = null;
   let length = first.length;
   let restore: {token: number; mode: "exact" | "forward" | "back"; rejected: number | null; from: string | null; steps: number} | null = null;
@@ -84,8 +86,8 @@ export function createNavigator(initial: Route, host: NavigationHistory, allow: 
     const observed = host.read();
     const target = positionAt(observed);
     if (target === null) { if (position !== null || observed.hash !== unknownHash) restart(); return; }
+    if (routeHref(parseRoute(observed.hash)) !== routeHref(route)) { restart(); return; }
     indexed(target);
-    if (routeHref(parseRoute(observed.hash)) !== routeHref(route)) host.replace(routeHref(route), stateAt(target));
     synced();
   };
   const traverse = (delta: number, mode: "exact" | "forward" | "back", rejected: number | null, from: string | null, steps: number) => {
@@ -104,9 +106,9 @@ export function createNavigator(initial: Route, host: NavigationHistory, allow: 
   const continueRestore = (observed: HistoryState, target: number | null, next: Route): boolean => {
     const pending = restore!;
     if (target !== null && target === position) {
+      // an entry claiming the current position with another route has an inconsistent marker; keep it and continue from a new entry
       restore = null;
-      if (routeHref(next) !== routeHref(route)) host.replace(routeHref(route), stateAt(target));
-      synced();
+      if (routeHref(next) !== routeHref(route)) restart(); else synced();
       return true;
     }
     if (target !== null && target === pending.rejected) return true;

@@ -787,7 +787,8 @@ export class SupervisorConversation {
   private taskContextRun(task: TaskRecord, supervisor: Projection): Projection["runs"][number] | undefined {
     const latest = this.requests.requests(task.projectId, task.supervisorThreadId)
       .filter(request => request.kind === "context" && request.taskId === task.id).at(-1);
-    if (latest?.sourceHash !== undefined && latest.sourceHash !== task.sourceHash) return undefined;
+    // a context request without the current source revision cannot attribute records, including requests from before revisions were recorded
+    if (latest && latest.sourceHash !== task.sourceHash) return undefined;
     const stored = task.protocolContextAnchor;
     let anchor = stored?.supervisorThreadId === task.supervisorThreadId && stored.sourceHash === task.sourceHash ? stored : undefined;
     if (latest?.sourceHash !== undefined && anchor?.messageId !== latest.messageId) {
@@ -809,8 +810,8 @@ export class SupervisorConversation {
   private supervisorMessageBoundToCurrentTask(task: TaskRecord,
     message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number], supervisor: Projection): boolean {
     const requests = this.requests.requests(task.projectId, task.supervisorThreadId).filter(request => request.runId === message.runId);
-    if (requests.length) return requests.some(request => request.taskId === task.id || request.batch?.threads.some(thread => thread.threadId === task.threadId));
-    // a pruned request no longer identifies its run; the durable task context anchor still orders it within the current task
+    if (requests.length && !requests.some(request => request.taskId === task.id || request.batch?.threads.some(thread => thread.threadId === task.threadId))) return false;
+    // every root record must also follow the context of the current task source; a pruned request is ordered by the durable anchor
     return this.afterTaskContext(task, message, supervisor);
   }
   private protocolRecordNotOlderThanDiagnostic(task: TaskRecord, role: WorkflowProtocolDiagnostic["role"],
