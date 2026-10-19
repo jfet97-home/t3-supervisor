@@ -6,5 +6,5 @@ knowledge
 .qmd
 test
 *.sqlite3*
-*.env
+*.env*
 secrets

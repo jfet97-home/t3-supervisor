@@ -6,7 +6,7 @@ import { record, SupervisorRpcError, type SupervisorRpc } from "./supervisor-nat
 import { canonicalAuthoringMaterial, fixedOccurrencesPreserved, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
 import { diagnoseWorkflowProposalRecord, extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, parseWorkflowProposalRecord, workflowAgreementPlanHash, workflowProtocolDiagnosticCodes, type WorkflowAgreementRecordKind } from "./supervisor-workflow-agreement.js";
 import { extractApprovedProjectDefinitions, extractProjectDefinitionDecisionRecords, parseProjectDefinitionDecisionRecord, buildProjectDefinitionReviewRequest } from "./supervisor-definition-review.js";
-import type { BindingRecord, ProjectSupervisorStore, TaskRecord } from "./project-supervisor-store.js";
+import type { BindingRecord, ProjectSupervisorStore, ProtocolAnchor, TaskRecord } from "./project-supervisor-store.js";
 import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 import type { SupervisorMonitoringStatus, WorkflowAgreementInfo, WorkflowProposalInfo, WorkflowProtocolDiagnostic } from "./project-supervisor-contract.js";
 import { fingerprint } from "./guidance-store.js";
@@ -85,6 +85,9 @@ const safeProtocolProposalId = (value: unknown): string | null => typeof value =
   /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(value) && !workflowProtocolCredentialPattern.test(value) ? value : null;
 const safeProtocolMessageId = (value: string): string | null => value.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(value) &&
   !workflowProtocolCredentialPattern.test(value) ? value : null;
+
+// a thread projection's own turn items; an item naming another thread is never counted
+const ownTurnItem = (item: Record<string, unknown>, threadId: string): boolean => item.threadId === undefined || item.threadId === threadId;
 
 export const firstObservedOrdinal = (projection: Projection, relevantSince: number | null = null): number => {
   const runs = projection.runs.filter(run => run.threadId === projection.thread.id && Number.isSafeInteger(run.ordinal) && run.ordinal >= 0)
@@ -755,7 +758,14 @@ export class SupervisorConversation {
       requestText: "", messageId: `supervisor-task-revision:${randomUUID()}`, replayCount: 0, dispatchedAt: null, supervisorRunId: null,
       workflowProposalId: `${task.id}:source:${sourceHash.slice(0, 12)}`, updatedAt: now};
     delete refreshed.definitionContext;delete refreshed.definitionReadAttempts;delete refreshed.revalidationAttempts;delete refreshed.definitionNoticeKey;
-    refreshed.protocolBoundary = {supervisorThreadId: current.supervisorThreadId, sourceHash, notBefore: now};
+    // a diagnostic about the earlier revision no longer describes the current one
+    delete refreshed.workflowProtocolDiagnostic;
+    // the reinterpretation prompt anchors root records; main records must follow everything native already shown with the edit
+    const runOrdinals = agent.runs.filter(item => item.threadId === task.threadId && Number.isSafeInteger(item.ordinal) && item.ordinal >= 0).map(item => item.ordinal);
+    const itemOrdinals = (agent.turnItems ?? []).filter(item => ownTurnItem(item, task.threadId) && Number.isSafeInteger(item.ordinal) && Number(item.ordinal) >= 0)
+      .map(item => Number(item.ordinal));
+    refreshed.protocolAnchor = {supervisorThreadId: current.supervisorThreadId, sourceHash, promptMessageId: refreshed.messageId,
+      editedAfter: runOrdinals.length ? {runOrdinal: Math.max(...runOrdinals), itemOrdinal: itemOrdinals.length ? Math.max(...itemOrdinals) : null} : null};
     this.store.saveTask(refreshed);return true;
   }
   private proposalContext(task: TaskRecord, definitions: ProjectDefinitionSnapshot): ProposalContext | null {
@@ -778,33 +788,50 @@ export class SupervisorConversation {
   }
   private protocolRecordBelongsToCurrentTask(task: TaskRecord, role: WorkflowProtocolDiagnostic["role"], value: unknown,
     message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number], introduction: WorkflowIntroduction,
-    agent: Projection): boolean {
-    if (!record(value) || value.taskId !== task.id || !this.afterSourceBoundary(task, message)) return false;
-    return role !== "operative" || this.afterIntroduction(agent, introduction, message.messageId);
+    agent: Projection, supervisor: Projection): boolean {
+    if (!record(value) || value.taskId !== task.id) return false;
+    if (role === "supervisor") return this.afterPromptRun(task, supervisor, message);
+    return this.afterIntroduction(agent, introduction, message.messageId) && this.afterSourceEdit(task, agent, message);
   }
-  // records count for the current task only from its source boundary: the latest context request for this source revision,
-  // or the moment the source was revised; the boundary is kept on the task so request pruning cannot erase it
-  private sourceBoundary(task: TaskRecord): number | null {
-    const latest = this.requests.requests(task.projectId, task.supervisorThreadId)
-      .filter(request => request.kind === "context" && request.taskId === task.id).at(-1);
-    const stored = task.protocolBoundary;
-    const kept = stored?.supervisorThreadId === task.supervisorThreadId && stored.sourceHash === task.sourceHash ? stored.notBefore : null;
-    const requested = latest?.sourceHash === task.sourceHash ? latest.createdAt : null;
-    if (requested === null || kept !== null && kept >= requested) return kept;
+  private currentProtocolAnchor(task: TaskRecord): ProtocolAnchor | null {
+    const anchor = task.protocolAnchor;
+    return anchor?.supervisorThreadId === task.supervisorThreadId && anchor.sourceHash === task.sourceHash ? anchor : null;
+  }
+  // the native run started by the prompt that gave the Supervisor this source revision; it is kept once observed
+  private protocolPromptRun(task: TaskRecord, supervisor: Projection): {id: string; ordinal: number} | null {
+    const anchor = this.currentProtocolAnchor(task);
+    if (!anchor || supervisor.thread.id !== task.supervisorThreadId) return null;
+    if (anchor.promptRun) return anchor.promptRun;
+    const runs = supervisor.runs.filter(item => item.threadId === task.supervisorThreadId && item.userMessageId === anchor.promptMessageId);
+    const run = runs.length === 1 ? runs[0]! : null;
+    if (!run || !Number.isSafeInteger(run.ordinal) || run.ordinal < 0) return null;
+    const promptRun = {id: run.id, ordinal: run.ordinal};
     const current = this.store.task(task.threadId);
-    if (current?.id === task.id && current.supervisorThreadId === task.supervisorThreadId && current.sourceHash === task.sourceHash)
-      this.store.saveTask({...current, protocolBoundary: {supervisorThreadId: task.supervisorThreadId, sourceHash: task.sourceHash, notBefore: requested}});
-    return requested;
+    if (current?.id === task.id && current.protocolAnchor && this.currentProtocolAnchor(current)?.promptMessageId === anchor.promptMessageId)
+      this.store.saveTask({...current, protocolAnchor: {...current.protocolAnchor, promptRun}});
+    return promptRun;
   }
-  private afterSourceBoundary(task: TaskRecord, message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number]): boolean {
-    const boundary = this.sourceBoundary(task);
-    return boundary !== null && message.createdAt !== null && message.createdAt >= boundary;
+  private afterPromptRun(task: TaskRecord, supervisor: Projection, message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number]): boolean {
+    const promptRun = this.protocolPromptRun(task, supervisor);
+    return promptRun !== null && message.ordinal >= promptRun.ordinal;
   }
-  private supervisorMessageBoundToCurrentTask(task: TaskRecord,
+  // after a source edit, a main record must come from a later main run or a later main turn item than any shown with the edit
+  private afterSourceEdit(task: TaskRecord, agent: Projection, message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number]): boolean {
+    const anchor = this.currentProtocolAnchor(task);
+    if (!anchor) return false;
+    const edited = anchor.editedAfter;
+    if (edited === undefined) return true;
+    if (edited === null) return false;
+    if (message.ordinal > edited.runOrdinal) return true;
+    const items = (agent.turnItems ?? []).filter(value => ownTurnItem(value, task.threadId) && value.type === "assistant_message" && value.messageId === message.messageId);
+    const item = items.length === 1 && items[0]!.runId === message.runId ? items[0]! : null;
+    return edited.itemOrdinal !== null && item !== null && Number.isSafeInteger(item.ordinal) && Number(item.ordinal) > edited.itemOrdinal;
+  }
+  private supervisorMessageBoundToCurrentTask(task: TaskRecord, supervisor: Projection,
     message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number]): boolean {
     const requests = this.requests.requests(task.projectId, task.supervisorThreadId).filter(request => request.runId === message.runId);
     if (requests.length && !requests.some(request => request.taskId === task.id || request.batch?.threads.some(thread => thread.threadId === task.threadId))) return false;
-    return this.afterSourceBoundary(task, message);
+    return this.afterPromptRun(task, supervisor, message);
   }
   private protocolRecordNotOlderThanDiagnostic(task: TaskRecord, role: WorkflowProtocolDiagnostic["role"],
     message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number],
@@ -844,7 +871,7 @@ export class SupervisorConversation {
   private reconcileWorkflowProtocolDiagnostics(task: TaskRecord, introduction: WorkflowIntroduction, agent: Projection, supervisor: Projection,
     context: ProposalContext, supervisorMessages: ReturnType<SupervisorConversation["completedAssistantMessages"]>,
     operativeMessages: ReturnType<SupervisorConversation["completedAssistantMessages"]>, now: number): void {
-    this.sourceBoundary(task);
+    this.protocolPromptRun(task, supervisor);
     const events: Array<{role: WorkflowProtocolDiagnostic["role"]; kind: WorkflowAgreementRecordKind;
       message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number]; value: unknown | null; malformedJson: boolean; order: number}> = [];
     for (const message of supervisorMessages.slice(-20)) {
@@ -862,15 +889,15 @@ export class SupervisorConversation {
       if (!messageId) continue;
       if (event.malformedJson) {
         const attributed = event.role === "supervisor"
-          ? this.supervisorMessageBoundToCurrentTask(current, event.message)
-          : this.afterSourceBoundary(current, event.message) && this.afterIntroduction(agent, introduction, event.message.messageId) &&
+          ? this.supervisorMessageBoundToCurrentTask(current, supervisor, event.message)
+          : this.afterIntroduction(agent, introduction, event.message.messageId) && this.afterSourceEdit(current, agent, event.message) &&
             Boolean(this.requests.agreementCandidate(current.id, current.workflowProposalId ?? current.id));
         if (!attributed || !this.protocolRecordNotOlderThanDiagnostic(current, event.role, event.message, supervisorMessages, operativeMessages) ||
           !protocolDiagnosticCodeSet.has("record_json_invalid")) continue;
         this.saveWorkflowProtocolDiagnostic(current, {role: event.role, proposalId: null, messageId, code: "record_json_invalid", observedAt: now});
         continue;
       }
-      if (!this.protocolRecordBelongsToCurrentTask(current, event.role, event.value, event.message, introduction, agent)) continue;
+      if (!this.protocolRecordBelongsToCurrentTask(current, event.role, event.value, event.message, introduction, agent, supervisor)) continue;
       const code = diagnoseWorkflowProposalRecord(event.value, current.id, context, event.role === "operative");
       if (code) {
         if (!this.protocolRecordNotOlderThanDiagnostic(current, event.role, event.message, supervisorMessages, operativeMessages)) continue;
@@ -1239,10 +1266,14 @@ export class SupervisorConversation {
       this.store.store.transaction(() => {
         this.requests.saveIntroduction(introduction);
         const context = this.requests.prepare({projectId: task.projectId, supervisorThreadId: binding.threadId, kind: "context", taskId: task.id, text: prompt, batch: null,
-          completionMarker, sourceHash: task.sourceHash}, Date.now());
+          completionMarker}, Date.now());
+        // this context prompt anchors Supervisor records for the current source revision; an earlier edit position is kept
         const current = this.store.task(task.threadId);
-        if (current?.id === task.id && current.sourceHash === task.sourceHash)
-          this.store.saveTask({...current, protocolBoundary: {supervisorThreadId: binding.threadId, sourceHash: task.sourceHash, notBefore: context.createdAt}});
+        if (current?.id === task.id && current.sourceHash === task.sourceHash && current.supervisorThreadId === binding.threadId) {
+          const edited = this.currentProtocolAnchor(current)?.editedAfter;
+          this.store.saveTask({...current, protocolAnchor: {supervisorThreadId: binding.threadId, sourceHash: task.sourceHash, promptMessageId: context.messageId,
+            ...(edited === undefined ? {} : {editedAfter: edited})}});
+        }
       });
       await this.dispatch(this.requests.pending(binding.projectId, binding.threadId)!, signal);return;
     }

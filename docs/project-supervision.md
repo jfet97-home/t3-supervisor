@@ -141,6 +141,16 @@ correction. This diagnostic does not create or remove agreement history, authori
 workflow edits or prove execution; it also does not trigger an automatic retry or
 wake a chat.
 
+Diagnostics follow native T3 order, not clock time. A Supervisor record counts
+for the current task source only from the native run of the prompt that gave the
+Supervisor that source: the context prompt, or the reinterpretation prompt after
+the user edits the task request. A main record must follow the introduction and,
+after an edit, belong to a later main run or a later main turn item than any
+already shown with the edit. Editing the task request clears the current
+diagnostic. Missing or ambiguous native order produces no diagnostic, as does a
+task whose context was prepared before this rule existed; agreements are
+unaffected.
+
 Interpretation turns have a no-tools role. Dialogue/check-ins permit native
 reading/messaging and scoped workflow MCP edits where available. New Supervisor
 chats use full-access/default for native message permissions. These instructions

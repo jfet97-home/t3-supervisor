@@ -451,7 +451,8 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
       const run = appendRun({
         projection: supervisor,
         id: `supervisor-run-${nextSupervisorRun}`,
-        ordinal: nextSupervisorRun + supervisor.runs.length,
+        // native run ordinals only grow within a thread
+        ordinal: Math.max(nextSupervisorRun + supervisor.runs.length, ...supervisor.runs.map(item => item.ordinal + 1)),
         status,
         messageId: String(payload.messageId),
         text: String(payload.text),
@@ -671,6 +672,28 @@ const appendNoticeForTask = (
 
 const appendNoticeToOperative = (fixture: Awaited<ReturnType<typeof makeFixture>>): WorkflowIntroduction =>
   appendNoticeForTask(fixture, fixture.task, fixture.operative);
+
+// prepares a task context request and anchors the task to its prompt in one step, as the introduction path does
+const prepareTaskContext = (fixture: Awaited<ReturnType<typeof makeFixture>>, input: {text: string; completionMarker: string}, now: number,
+  anchored = true): ConversationRequest => {
+  const request = fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "context",
+    taskId: fixture.task.id, batch: null, ...input}, now);
+  const task = fixture.projectStore.task(fixture.task.threadId)!;
+  if (anchored) fixture.projectStore.saveTask({...task, protocolAnchor: {supervisorThreadId: fixture.binding.threadId, sourceHash: task.sourceHash,
+    promptMessageId: request.messageId}});
+  return request;
+};
+
+// records the native turn item T3 assigns to a message: ordinals continue within the run's own ordinal range
+const recordTurnItem = (projection: Projection, message: MessageInfo): number => {
+  const run = projection.runs.find(item => item.id === message.runId);
+  assert.ok(run);
+  const ordinal = turnItemsOf(projection).filter(item => item.runId === run.id)
+    .reduce((value, item) => Math.max(value, Number(item.ordinal)), run.ordinal * 1_000_000) + 1;
+  turnItemsOf(projection).push({id: `item-${message.id}`, threadId: projection.thread.id, runId: run.id, nodeId: message.nodeId, parentItemId: null,
+    type: message.role === "assistant" ? "assistant_message" : "user_message", messageId: message.id, ordinal, status: "completed"});
+  return ordinal;
+};
 
 const supervisorRequestCall = (fixture: Awaited<ReturnType<typeof makeFixture>>, kind?: "context" | "review") =>
   fixture.calls.find(call => call.payload.threadId === fixture.binding.threadId &&
@@ -2569,9 +2592,7 @@ test("R114-D diagnoses an invalid fresh proposal in a current task root turn", a
   assert.equal(fixture.projectStore.task(fixture.task.threadId)?.workflowProtocolDiagnostic, undefined,
     "a current task ID cannot attribute a root record from before its latest context request");
 
-  const contextRequest = fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId,
-    kind: "context", taskId: fixture.task.id, text: "Current task source epoch.", batch: null,
-    completionMarker: "Current task context completed", sourceHash: fixture.task.sourceHash}, clock.now + 2);
+  const contextRequest = prepareTaskContext(fixture, {text: "Current task source epoch.", completionMarker: "Current task context completed"}, clock.now + 2);
   const contextRun = appendRun({projection: fixture.supervisor, id: "current-task-context-epoch", ordinal: 2, status: "completed",
     messageId: contextRequest.messageId, text: contextRequest.text, now: clock.now + 2});
   completeRun(fixture.supervisor, contextRun, contextRequest.completionMarker, clock.now + 3);
@@ -2627,8 +2648,7 @@ test("R114-O diagnoses a compact operative acknowledgement with a fresh proposal
   const clock = {now: baseTime};
   const fixture = await makeFixture(clock);
   t.after(fixture.cleanup);
-  const context = fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "context", taskId: fixture.task.id,
-    text: "The current task context.", batch: null, completionMarker: "current context completed", sourceHash: fixture.task.sourceHash}, clock.now - 1);
+  const context = prepareTaskContext(fixture, {text: "The current task context.", completionMarker: "current context completed"}, clock.now - 1);
   fixture.conversation.requests.saveRequest({...context, state: "completed", sentAt: clock.now - 1, error: null});
   appendNoticeToOperative(fixture);
   const proposal = workflowRecord(fixture.task, fixture.task.id);
@@ -2691,16 +2711,14 @@ test("protocol diagnostics keep their current-task attribution after the context
     const fixture = await makeFixture(clock);
     try {
       appendNoticeToOperative(fixture);
-      const request = fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId,
-        kind: "context", taskId: fixture.task.id, text: "The current task context.", batch: null, completionMarker: "pruned context completed",
-        sourceHash: fixture.task.sourceHash}, clock.now);
+      const request = prepareTaskContext(fixture, {text: "The current task context.", completionMarker: "pruned context completed"}, clock.now);
       const run = appendRun({projection: fixture.supervisor, id: "pruned-context-run", ordinal: 5, status: "completed",
         messageId: request.messageId, text: request.text, now: clock.now});
       completeRun(fixture.supervisor, run, request.completionMarker, clock.now + 1);
       fixture.conversation.requests.saveRequest({...request, state: "completed", runId: run.id, sentAt: clock.now, error: null});
       await observeAgreement(fixture, clock.now + 2);
-      assert.deepEqual(fixture.projectStore.task(fixture.task.threadId)?.protocolBoundary,
-        {supervisorThreadId: fixture.binding.threadId, sourceHash: fixture.task.sourceHash, notBefore: request.createdAt});
+      assert.deepEqual(fixture.projectStore.task(fixture.task.threadId)?.protocolAnchor, {supervisorThreadId: fixture.binding.threadId,
+        sourceHash: fixture.task.sourceHash, promptMessageId: request.messageId, promptRun: {id: run.id, ordinal: 5}});
       let later = clock.now + 3;
       if (pruning === "age") later += 31 * 86400_000;
       else for (let index = 0; index < 100; index++) {
@@ -2726,56 +2744,244 @@ test("protocol diagnostics keep their current-task attribution after the context
   }
 });
 
-test("protocol diagnostics follow the current task source boundary for root and main records across edits and pruning", async t => {
-  for (const recorded of [true, false]) for (const pruned of [false, true]) {
-    const variant = `${recorded ? "recorded" : "unrecorded"} ${pruned ? "pruned" : "retained"} context`;
+const reinterpretEditedSource = async (f: Awaited<ReturnType<typeof makeFixture>>, now: number): Promise<RunInfo> => {
+  const control = f.projectStore.control(projectId);
+  f.projectStore.saveControl(projectId, control.generation, true, {snapshotSequence: 1, threads: [{id: operativeThreadId, latestRunId: f.task.sourceRunId}]});
+  const supervisor = f.makeProjectSupervisor();
+  await supervisor.runOnce(AbortSignal.timeout(10_000));
+  const interpretation = f.supervisor.runs.find(item => item.userMessageId === f.projectStore.task(f.task.threadId)!.messageId);
+  assert.ok(interpretation);
+  completeRun(f.supervisor, interpretation, JSON.stringify({objective: "Implement separate import flow.", reason: "Source edited.", sourceMessageIds: [f.task.sourceMessageId],
+    workflow: {requirements: [{kind: "step", id: "test-plan", applies: true, reason: "Verification required."}], plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "test-plan", reason: "Verify import."}]}}}), now);
+  await supervisor.runOnce(AbortSignal.timeout(10_000));
+  assert.equal(f.projectStore.task(f.task.threadId)?.status, "inferred");
+  return interpretation;
+};
+const editedSourceText = "Implement a separate import flow with a revised goal.";
+
+test("a source edit clears the current diagnostic and native order alone attributes root and main records across clocks and pruning", async t => {
+  // every T3 timestamp is the service time plus one skew: ahead, old records look newer than the edit; behind, fresh records look older
+  for (const existing of ["supervisor", "operative"] as const) for (const pruned of [false, true]) for (const skew of [0, 2, 10_003, -20_001, -60_000]) {
+    const variant = `${existing} diagnostic, ${pruned ? "pruned" : "retained"} context, T3 skew ${skew}`;
+    const clock = {now: baseTime};
+    const restore = t.mock.method(Date, "now", () => clock.now);
+    const f = await makeFixture(clock);
+    try {
+      const introduction = appendNoticeToOperative(f);
+      f.operative.messages.find(message => message.id === introduction.messageId)!.createdAt = iso(baseTime + skew);
+      for (const message of [...f.operative.messages]) recordTurnItem(f.operative, message);
+      const request = prepareTaskContext(f, {text: "old context", completionMarker: "old done"}, baseTime);
+      const run = appendRun({projection: f.supervisor, id: "old-context", ordinal: 5, status: "completed", messageId: request.messageId, text: request.text, now: baseTime + skew});
+      completeRun(f.supervisor, run, existing === "supervisor" ? "```workflow-proposal\n{broken}\n```\nold done" : "old done", baseTime + 2 + skew);
+      f.conversation.requests.saveRequest({...request, state: "completed", runId: run.id, sentAt: baseTime, error: null});
+      if (existing === "operative") recordTurnItem(f.operative,
+        appendOperativeAcceptance(f, {taskId: f.task.id, proposalId: "old-proposal", mainThreadId: f.task.threadId, accepted: true}, baseTime + 3 + skew));
+      await observeAgreement(f, baseTime + 4);
+      assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic?.role, existing, `${variant}: the earlier revision has a diagnostic`);
+
+      const edited = baseTime + (pruned ? 31 * 86400_000 : 10_000);
+      clock.now = edited;
+      if (pruned) {
+        f.conversation.requests.prune(clock.now);
+        assert.equal(f.conversation.requests.requests(projectId, f.binding.threadId).some(item => item.id === request.id), false);
+      }
+      // both roles write for the earlier revision just before the edit becomes visible
+      appendAssistantTurn(f.supervisor, "old-source-root", workflowFence("workflow-proposal", {taskId: f.task.id, proposalId: "old-source-plan", bad: true}), edited - 1 + skew);
+      const oldMain = appendOperativeAcceptance(f, {taskId: f.task.id, proposalId: "old-source-acceptance", mainThreadId: f.task.threadId, accepted: true}, edited - 1 + skew);
+      const lastItem = recordTurnItem(f.operative, oldMain);
+      f.operative.messages.find(message => message.id === f.task.sourceMessageId)!.text = editedSourceText;
+      await observeAgreement(f, edited + 1);
+      const revised = f.projectStore.task(f.task.threadId)!;
+      assert.equal(revised.status, "queued");
+      assert.equal(revised.workflowProtocolDiagnostic, undefined, `${variant}: the edit invalidates the earlier revision's diagnostic`);
+      assert.deepEqual(revised.protocolAnchor, {supervisorThreadId: f.binding.threadId, sourceHash: fingerprint(editedSourceText),
+        promptMessageId: revised.messageId, editedAfter: {runOrdinal: 2, itemOrdinal: lastItem}});
+
+      const interpretation = await reinterpretEditedSource(f, edited + 2 + skew);
+      await observeAgreement(f, edited + 10_000);
+      const reinterpreted = f.projectStore.task(f.task.threadId)!;
+      assert.equal(reinterpreted.workflowProtocolDiagnostic, undefined, `${variant}: records from the earlier revision stay unattributed`);
+      assert.deepEqual(reinterpreted.protocolAnchor?.promptRun, {id: interpretation.id, ordinal: interpretation.ordinal});
+
+      clock.now = edited + 20_000;
+      const rootRecord = appendAssistantTurn(f.supervisor, "new-source-root", workflowFence("workflow-proposal", {taskId: f.task.id, proposalId: "fresh-source-plan", bad: true}),
+        clock.now + skew);
+      await observeAgreement(f, edited + 30_000);
+      const rootDiagnostic = f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic;
+      assert.deepEqual([rootDiagnostic?.role, rootDiagnostic?.messageId], ["supervisor", rootRecord.message.id], `${variant}: a fresh root record is attributed`);
+      const mainRecord = appendOperativeAcceptance(f, {taskId: f.task.id, proposalId: "fresh-acceptance", mainThreadId: f.task.threadId, accepted: true}, clock.now + 10 + skew);
+      recordTurnItem(f.operative, mainRecord);
+      await observeAgreement(f, edited + 40_000);
+      const mainDiagnostic = f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic;
+      assert.deepEqual([mainDiagnostic?.role, mainDiagnostic?.messageId], ["operative", mainRecord.id], `${variant}: a fresh main record in the running main turn is attributed`);
+    } finally {await f.cleanup();restore.mock.restore();}
+  }
+});
+
+test("records written while the projection that shows a source edit is read stay with the earlier revision", async t => {
+  for (const role of ["supervisor", "operative"] as const) {
     const clock = {now: baseTime};
     const restore = t.mock.method(Date, "now", () => clock.now);
     const f = await makeFixture(clock);
     try {
       appendNoticeToOperative(f);
-      const request = f.conversation.requests.prepare({projectId, supervisorThreadId: f.binding.threadId, kind: "context", taskId: f.task.id,
-        text: "old context", batch: null, completionMarker: "old done", ...(recorded ? {sourceHash: f.task.sourceHash} : {})}, baseTime);
+      for (const message of [...f.operative.messages]) recordTurnItem(f.operative, message);
+      const request = prepareTaskContext(f, {text: "old context", completionMarker: "old done"}, baseTime);
       const run = appendRun({projection: f.supervisor, id: "old-context", ordinal: 5, status: "completed", messageId: request.messageId, text: request.text, now: baseTime});
+      completeRun(f.supervisor, run, "old done", baseTime + 1);
       f.conversation.requests.saveRequest({...request, state: "completed", runId: run.id, sentAt: baseTime, error: null});
-      completeRun(f.supervisor, run, "```workflow-proposal\n{broken}\n```", baseTime + 2);
-      appendOperativeAcceptance(f, {taskId: f.task.id, proposalId: "old-proposal", mainThreadId: f.task.threadId, accepted: true}, baseTime + 3);
-      await observeAgreement(f, baseTime + 4);
-      assert.equal(Boolean(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic), recorded,
-        `${variant}: only a context with the current source revision attributes records`);
-      f.projectStore.saveTask({...f.projectStore.task(f.task.threadId)!, workflowProtocolDiagnostic: null});
-
-      clock.now = baseTime + (pruned ? 31 * 86400_000 : 10_000);
-      if (pruned) f.conversation.requests.prune(clock.now);
-      f.operative.messages.find(message => message.id === f.task.sourceMessageId)!.text = "Implement a separate import flow with a revised goal.";
-      await observeAgreement(f, clock.now + 1);
-      const revised = f.projectStore.task(f.task.threadId)!;
-      assert.equal(revised.status, "queued");
-      assert.equal(revised.protocolBoundary?.sourceHash, revised.sourceHash);
-      const control = f.projectStore.control(projectId);
-      f.projectStore.saveControl(projectId, control.generation, true, {snapshotSequence: 1, threads: [{id: operativeThreadId, latestRunId: revised.sourceRunId}]});
-      const supervisor = f.makeProjectSupervisor();
-      await supervisor.runOnce(AbortSignal.timeout(10_000));
-      const interpretation = f.supervisor.runs.find(item => item.userMessageId === f.projectStore.task(f.task.threadId)!.messageId);
-      assert.ok(interpretation);
-      completeRun(f.supervisor, interpretation, JSON.stringify({objective: "Implement separate import flow.", reason: "Source edited.", sourceMessageIds: [f.task.sourceMessageId],
-        workflow: {requirements: [{kind: "step", id: "test-plan", applies: true, reason: "Verification required."}], plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "test-plan", reason: "Verify import."}]}}}), clock.now + 2);
-      await supervisor.runOnce(AbortSignal.timeout(10_000));
-      assert.equal(f.projectStore.task(f.task.threadId)?.status, "inferred");
-      await observeAgreement(f, clock.now + 3);
-      assert.ok(!f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic, `${variant}: records from the earlier source stay unattributed`);
-
-      const current = f.projectStore.task(f.task.threadId)!;
-      const rootRecord = appendAssistantTurn(f.supervisor, "new-source-malformed", workflowFence("workflow-proposal", {taskId: current.id, proposalId: "fresh-source-plan", bad: true}), clock.now + 4);
-      await observeAgreement(f, clock.now + 10_000);
-      assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic?.messageId, rootRecord.message.id, `${variant}: a fresh root record is attributed`);
-      f.projectStore.saveTask({...f.projectStore.task(f.task.threadId)!, workflowProtocolDiagnostic: null});
-      const mainRecord = appendOperativeAcceptance(f, {taskId: current.id, proposalId: "fresh-acceptance", mainThreadId: current.threadId, accepted: true}, clock.now + 20_000);
+      await observeAgreement(f, baseTime + 2);
+      const started = baseTime + 10_000;
+      clock.now = started;
+      const conversation = f.conversation as unknown as {projection: (threadId: string, signal: AbortSignal) => Promise<Projection>};
+      const read = conversation.projection.bind(conversation);
+      let injected = false;
+      const reads = t.mock.method(conversation, "projection", async (threadId: string, signal: AbortSignal) => {
+        if (threadId === f.task.threadId && !injected) {
+          injected = true;
+          clock.now = started + 1;
+          if (role === "supervisor") appendAssistantTurn(f.supervisor, "old-root", "```workflow-proposal\n{broken}\n```", clock.now);
+          else recordTurnItem(f.operative, appendOperativeAcceptance(f, {taskId: f.task.id, proposalId: "old-proposal", accepted: true}, clock.now));
+          clock.now = started + 2;
+          f.operative.messages.find(message => message.id === f.task.sourceMessageId)!.text = editedSourceText;
+        }
+        return read(threadId, signal);
+      });
+      await observeAgreement(f, started);
+      reads.mock.restore();
+      assert.equal(f.projectStore.task(f.task.threadId)?.status, "queued");
+      await reinterpretEditedSource(f, clock.now + 2);
       await observeAgreement(f, clock.now + 30_000);
-      const diagnostic = f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic;
-      assert.deepEqual([diagnostic?.role, diagnostic?.messageId], ["operative", mainRecord.id], `${variant}: a fresh main record is attributed`);
+      assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic, undefined, `${role}: the record before the edit is not attributed`);
     } finally {await f.cleanup();restore.mock.restore();}
   }
+});
+
+test("a prepared context anchors root records only from its own native run, not from its preparation time", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  appendNoticeToOperative(fixture);
+  const running = appendRun({projection: fixture.supervisor, id: "earlier-root-turn", ordinal: 3, status: "running", messageId: "earlier-root-input",
+    text: "An earlier request.", now: clock.now});
+  const request = prepareTaskContext(fixture, {text: "The current task context.", completionMarker: "prepared context completed"}, clock.now);
+  // the earlier turn answers after the context was prepared but without having received it
+  const early = appendMessageToRun(fixture.supervisor, running, {id: "earlier-root-answer", role: "assistant",
+    text: workflowFence("workflow-proposal", {taskId: fixture.task.id, proposalId: "unseen-context", bad: true}), now: clock.now + 5_000});
+  await observeAgreement(fixture, clock.now + 6_000);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.workflowProtocolDiagnostic, undefined);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.protocolAnchor?.promptRun, undefined, "an unrun prompt anchors nothing yet");
+  const contextRun = appendRun({projection: fixture.supervisor, id: "prepared-context-run", ordinal: 4, status: "queued", messageId: request.messageId,
+    text: request.text, createdBy: "system", creationSource: "server", now: clock.now + 5_500});
+  fixture.conversation.requests.saveRequest({...request, state: "waiting", runId: contextRun.id, sentAt: clock.now + 5_500, error: null});
+  completeRun(fixture.supervisor, running, early.text, clock.now + 7_000);
+  completeRun(fixture.supervisor, contextRun, "```workflow-proposal\n{broken}\n```\nprepared context completed", clock.now - 60_000);
+  await observeAgreement(fixture, clock.now + 30_000);
+  const diagnostic = fixture.projectStore.task(fixture.task.threadId)?.workflowProtocolDiagnostic;
+  assert.equal(diagnostic?.messageId, `assistant-${contextRun.id}`, "the context run's own record is attributed whatever its timestamp");
+  assert.deepEqual(fixture.projectStore.task(fixture.task.threadId)?.protocolAnchor?.promptRun, {id: contextRun.id, ordinal: contextRun.ordinal});
+});
+
+test("main records after a source edit need a later main run or turn item, and absent or foreign anchors fail closed", async t => {
+  const clock = {now: baseTime};
+  const restore = t.mock.method(Date, "now", () => clock.now);
+  const f = await makeFixture(clock);
+  try {
+    appendNoticeToOperative(f);
+    for (const message of [...f.operative.messages]) recordTurnItem(f.operative, message);
+    const request = prepareTaskContext(f, {text: "old context", completionMarker: "old done"}, baseTime);
+    const run = appendRun({projection: f.supervisor, id: "old-context", ordinal: 5, status: "completed", messageId: request.messageId, text: request.text, now: baseTime});
+    completeRun(f.supervisor, run, "old done", baseTime + 1);
+    f.conversation.requests.saveRequest({...request, state: "completed", runId: run.id, sentAt: baseTime, error: null});
+    clock.now = baseTime + 10_000;
+    f.operative.messages.find(message => message.id === f.task.sourceMessageId)!.text = editedSourceText;
+    await observeAgreement(f, clock.now);
+    await reinterpretEditedSource(f, clock.now + 1);
+    await observeAgreement(f, clock.now + 10_000);
+    const active = f.operative.runs.find(item => item.id === f.operative.thread.activeRunId)!;
+
+    appendOperativeAcceptance(f, {taskId: f.task.id, proposalId: "unordered-acceptance", accepted: true}, clock.now + 3, {run: active});
+    await observeAgreement(f, clock.now + 20_000);
+    assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic, undefined, "a same-run record without a native item position is not attributed");
+
+    completeRun(f.operative, active, "Done.", clock.now + 5);
+    const later = appendRun({projection: f.operative, id: "operative-later-run", ordinal: 3, status: "running", messageId: "operative-later-input",
+      text: "Continue with the revised goal.", now: clock.now + 6});
+    f.operative.thread.activeRunId = later.id;
+    const laterRecord = appendOperativeAcceptance(f, {taskId: f.task.id, proposalId: "later-run-acceptance", accepted: true}, clock.now - 60_000, {run: later});
+    await observeAgreement(f, clock.now + 30_000);
+    assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic?.messageId, laterRecord.id, "a later main run is natively after the edit");
+
+    const current = f.projectStore.task(f.task.threadId)!;
+    f.projectStore.saveTask({...current, protocolAnchor: {...current.protocolAnchor!, supervisorThreadId: "replaced-root"}});
+    appendAssistantTurn(f.supervisor, "foreign-anchor-root", workflowFence("workflow-proposal", {taskId: f.task.id, proposalId: "foreign-anchor", bad: true}), clock.now + 8);
+    appendOperativeAcceptance(f, {taskId: f.task.id, proposalId: "foreign-anchor-acceptance", accepted: true}, clock.now + 9, {run: later});
+    await observeAgreement(f, clock.now + 40_000);
+    assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic?.messageId, laterRecord.id, "an anchor for another Supervisor attributes nothing");
+    const withoutAnchor = f.projectStore.task(f.task.threadId)!;
+    delete withoutAnchor.protocolAnchor;
+    f.projectStore.saveTask(withoutAnchor);
+    appendAssistantTurn(f.supervisor, "unanchored-root", workflowFence("workflow-proposal", {taskId: f.task.id, proposalId: "unanchored", bad: true}), clock.now + 11);
+    await observeAgreement(f, clock.now + 50_000);
+    assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic?.messageId, laterRecord.id, "a task without an anchor attributes nothing");
+  } finally {await f.cleanup();restore.mock.restore();}
+});
+
+test("ambiguous or mismatched native order attributes nothing", async t => {
+  const clock = {now: baseTime};
+  const restore = t.mock.method(Date, "now", () => clock.now);
+  const f = await makeFixture(clock);
+  try {
+    appendNoticeToOperative(f);
+    for (const message of [...f.operative.messages]) recordTurnItem(f.operative, message);
+    const request = prepareTaskContext(f, {text: "The current task context.", completionMarker: "ambiguous context completed"}, clock.now);
+    for (const [id, ordinal] of [["first-prompt-run", 5], ["second-prompt-run", 7]] as const)
+      completeRun(f.supervisor, appendRun({projection: f.supervisor, id, ordinal, status: "completed", messageId: request.messageId, text: request.text, now: clock.now}),
+        "ambiguous context completed", clock.now + 1);
+    f.conversation.requests.saveRequest({...request, state: "completed", runId: "second-prompt-run", sentAt: clock.now, error: null});
+    appendRun({projection: f.supervisor, id: "between-prompt-runs", ordinal: 6, status: "completed", messageId: "between-input", text: "Another request.", now: clock.now + 2});
+    appendMessageToRun(f.supervisor, f.supervisor.runs.find(run => run.id === "between-prompt-runs")!, {id: "between-answer", role: "assistant",
+      text: workflowFence("workflow-proposal", {taskId: f.task.id, proposalId: "between-runs", bad: true}), now: clock.now + 3});
+    await observeAgreement(f, clock.now + 4);
+    assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic, undefined, "two runs claiming one prompt anchor nothing");
+    assert.equal(f.projectStore.task(f.task.threadId)?.protocolAnchor?.promptRun, undefined);
+
+    clock.now = baseTime + 10_000;
+    f.operative.messages.find(message => message.id === f.task.sourceMessageId)!.text = editedSourceText;
+    await observeAgreement(f, clock.now);
+    await reinterpretEditedSource(f, clock.now + 1);
+    await observeAgreement(f, clock.now + 10_000);
+    const active = f.operative.runs.find(item => item.id === f.operative.thread.activeRunId)!;
+    const duplicated = appendOperativeAcceptance(f, {taskId: f.task.id, proposalId: "duplicated-item", accepted: true}, clock.now + 11_000, {run: active});
+    recordTurnItem(f.operative, duplicated);
+    recordTurnItem(f.operative, duplicated);
+    const foreign = appendOperativeAcceptance(f, {taskId: f.task.id, proposalId: "foreign-run-item", accepted: true}, clock.now + 12_000, {run: active});
+    recordTurnItem(f.operative, foreign);
+    turnItemsOf(f.operative).find(item => item.messageId === foreign.id)!.runId = "operative-source-run";
+    await observeAgreement(f, clock.now + 20_000);
+    assert.equal(f.projectStore.task(f.task.threadId)?.workflowProtocolDiagnostic, undefined, "duplicated or mis-joined turn items attribute nothing");
+  } finally {await f.cleanup();restore.mock.restore();}
+});
+
+test("an unanchored task still forms its agreement while protocol diagnostics fail closed", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  appendNoticeToOperative(fixture);
+  const request = prepareTaskContext(fixture, {text: "legacy context", completionMarker: "legacy done"}, clock.now, false);
+  const run = appendRun({projection: fixture.supervisor, id: "legacy-context", ordinal: 5, status: "completed", messageId: request.messageId, text: request.text, now: clock.now});
+  completeRun(fixture.supervisor, run, "```workflow-proposal\n{broken}\n```\nlegacy done", clock.now + 1);
+  fixture.conversation.requests.saveRequest({...request, state: "completed", runId: run.id, sentAt: clock.now, error: null});
+  appendOperativeAcceptance(fixture, {taskId: fixture.task.id, proposalId: "legacy-unknown", accepted: true}, clock.now + 2);
+  await observeAgreement(fixture, clock.now + 3);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.workflowProtocolDiagnostic, undefined);
+  const original = workflowRecord(fixture.task, fixture.task.id);
+  appendSupervisorProposal(fixture, fixture.task.id, original.workflow, clock.now + 4);
+  appendOperativeAcceptance(fixture, original, clock.now + 5);
+  await observeAgreement(fixture, clock.now + 30_000);
+  const task = fixture.projectStore.task(fixture.task.threadId)!;
+  assert.equal(task.agreement?.status, "agreed");
+  assert.equal(task.workflowProtocolDiagnostic, undefined);
 });
 
 test("malformed protocol JSON is diagnosed only when the current task request identifies its root run", async t => {
@@ -2789,9 +2995,7 @@ test("malformed protocol JSON is diagnosed only when the current task request id
   assert.equal(fixture.projectStore.task(fixture.task.threadId)?.workflowProtocolDiagnostic, undefined,
     "a malformed fence with no current task request has no attributable identity");
 
-  const request = fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId,
-    kind: "context", taskId: fixture.task.id, text: "The current task context.", batch: null,
-    completionMarker: "current malformed protocol response", sourceHash: fixture.task.sourceHash}, clock.now + 2);
+  const request = prepareTaskContext(fixture, {text: "The current task context.", completionMarker: "current malformed protocol response"}, clock.now + 2);
   const run = appendRun({projection: fixture.supervisor, id: "current-task-malformed-run", ordinal: 5, status: "completed",
     messageId: request.messageId, text: request.text, now: clock.now + 2});
   const malformed = "```workflow-proposal\n{not-json}\n```";
