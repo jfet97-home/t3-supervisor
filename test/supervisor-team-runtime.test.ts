@@ -9,8 +9,8 @@ import { SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorBatch, type Super
 import { SupervisorConversationStore } from "../src/supervisor-conversation-store.js";
 import { SupervisorConversation } from "../src/supervisor-conversation.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
-import { SupervisorTeamStore, type TeamBinding, type TeamMember } from "../src/supervisor-team-store.js";
-import { SupervisorTeamRuntime } from "../src/supervisor-team-runtime.js";
+import { SupervisorTeamStore, type TeamBinding, type TeamMember, type TeamNotification } from "../src/supervisor-team-store.js";
+import { SupervisorTeamRuntime, teamNotificationText } from "../src/supervisor-team-runtime.js";
 import { supervisorTeamView } from "../src/supervisor-team-view.js";
 import { supervisionGuideToolDefinition, supervisionTeamToolDefinition } from "../src/supervisor-team-controller.js";
 import { workflowReadToolDefinition, workflowWriteToolDefinition } from "../src/workflow-write-controller.js";
@@ -1061,4 +1061,200 @@ test("a delivered handover notice whose native run was interrupted stays fenced,
   assert.doesNotMatch(row?.currentState ?? "", /Available for the next check-in/u);
   assert.match(row?.currentState ?? "", /handover/u);
   assert.equal(row?.pendingHandovers[0]?.runStatus, "interrupted");
+});
+
+const noticeAttempt = (notice: TeamNotification) => ({notificationId: notice.id, deliveryAttempt: notice.deliveryAttempt, runId: notice.observedRun!.runId});
+const recoveryFixture = async () => {
+  const f = await fixture();
+  const member = readyMember(f.teamStore, f.binding, "recovery-helper");
+  activate(f.teamStore, f.binding, member, "branch");
+  const coverage = f.teamStore.coverage(f.binding, "branch", parents);
+  f.teamStore.recordRequest(f.binding, {requestId: "guide:recovery-effect", memberThreadId: member.threadId, memberEpoch: member.epoch,
+    targets: [{targetThreadId: "branch", assignmentRootThreadId: "branch", assignmentEpoch: coverage.assignmentEpoch!}], parentById: parents});
+  const assignment = f.teamStore.release(f.binding, "branch", parents);
+  const original = f.teamStore.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === assignment.epoch)!;
+  const projection = helperProjection(member, f.binding.threadId);
+  f.projections.set(member.threadId, projection);
+  const transport = webhookTransport("uncertain");
+  let runtime = f.runtime(transport.transport);
+  const cycles = async (count = 6) => {
+    for (let i = 0; i < count; i++) {
+      runtime.startCycle(f.binding);
+      await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+    }
+  };
+  const current = (notice: TeamNotification) => f.teamStore.snapshot(f.binding).notifications.find(value => value.id === notice.id)!;
+  const expose = (notice: TeamNotification, status: string) => {
+    const messageId = `native-message:${notice.id}:${notice.deliveryAttempt}`;
+    const runId = `native-run:${notice.id}:${notice.deliveryAttempt}`;
+    const delivery = transport.sent.get(`supervisor-team-notice:${notice.id}:attempt:${notice.deliveryAttempt}`)!;
+    assert.ok(delivery, "the notice must actually have been sent through the existing transport");
+    if (!projection.messages.some(value => value.id === messageId)) projection.messages.push({id: messageId, threadId: member.threadId, runId,
+      nodeId: null, role: "user", text: delivery.text, streaming: false, createdAt: iso(time), updatedAt: iso(time),
+      scheduledTaskId: delivery.taskId, creationSource: "server"});
+    let run = projection.runs.find(value => value.id === runId);
+    if (!run) {
+      run = {id: runId, threadId: member.threadId, ordinal: projection.runs.length + 1, status, requestedAt: iso(time),
+        startedAt: iso(time), completedAt: iso(time + 1), rootNodeId: null, userMessageId: messageId};
+      projection.runs.push(run);
+    }
+    run.status = status;
+    if (status === "completed") projection.messages.push({id: `final:${runId}`, threadId: member.threadId, runId, nodeId: null, role: "assistant",
+      text: `Inspected native effects; unresolved effects remain separately tracked. ${teamNotificationText(f.binding, notice).marker}`,
+      streaming: false, ordinal: 10, createdAt: iso(time + 1), updatedAt: iso(time + 1)});
+    return run;
+  };
+  const review = (operationId: string, chain: TeamNotification[] = [current(original)]) => f.teamStore.reviewHandover(f.binding, f.binding.threadId, {
+    operationId, notificationId: original.id, expectedDeliveryAttempt: original.deliveryAttempt, expectedRunId: current(original).observedRun!.runId,
+    expectedChain: chain.map(noticeAttempt), note: "Untrusted root context: inspect, never repeat uncertain effects."});
+  await cycles(1);expose(original, "interrupted");await cycles(1);
+  return {...f, member, assignment, original: current(original), projection, transport, current, expose, review, cycles,
+    restart: () => {runtime = f.runtime(transport.transport);}, blocking: () => runtime.hasBlockingWork(f.binding)};
+};
+
+test("native review2 completion closes interrupted review1 and original across restart but preserves request fences", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  const first = f.review("native-review-one");
+  await f.cycles();f.expose(first, "failed");await f.cycles();
+  const firstInterrupted = f.current(first);
+  const second = f.review("native-review-two", [f.original, firstInterrupted]);
+  await f.cycles();
+  const sent = f.transport.sent.get(`supervisor-team-notice:${second.id}:attempt:0`)!;
+  const envelope = parseEnvelope(sent.text, "UNTRUSTED_TEAM_NOTIFICATION", "END_UNTRUSTED_TEAM_NOTIFICATION");
+  assert.deepEqual((envelope.notification as Record<string, unknown>).reviewChain, [f.original, firstInterrupted].map(noticeAttempt));
+  assert.match(sent.text, /EVERY attempt/u);
+  assert.match(sent.text, /Never replay an operational instruction/u);
+  assert.ok(sent.text.includes(second.reviewNote!));
+  assert.ok(sent.text.length < 120_000);
+  f.restart();f.expose(second, "completed");await f.cycles();
+  for (const previous of [f.original, firstInterrupted]) {
+    const closed = f.current(previous);
+    assert.equal(closed.state, "delivered");
+    assert.equal(closed.id, previous.id);
+    assert.equal(closed.message, previous.message);
+    assert.deepEqual(closed.observedRun, previous.observedRun);
+    assert.equal(closed.resolvedByReview?.reviewNotificationId, second.id);
+    assert.equal(closed.resolvedByReview?.reviewRunId, f.current(second).completedRunId);
+  }
+  assert.equal(f.current(second).state, "acknowledged");
+  assert.equal(f.teamStore.unresolvedRequests(f.binding).length, 1);
+  assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "transferring");
+  for (const event of f.teamStore.snapshot(f.binding).events) f.teamStore.acknowledgeEvent(f.binding, f.binding.threadId, event.id);
+  assert.equal(f.blocking(), true);
+  f.teamStore.settleRequest(f.binding, "guide:recovery-effect");await f.cycles();
+  assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "root");
+  assert.equal(f.blocking(), false);
+  assert.equal(f.transport.attempts.filter(value => value.includes("handover-review:")).length, 2, "each review was sent once");
+  const event = f.teamStore.snapshot(f.binding).events.find(value => value.kind === "handover_review_requested")!;
+  assert.ok(event.summary.includes(f.original.id));
+  assert.ok(!event.summary.includes(first.reviewNote!));
+});
+
+test("an uncertain review POST is never repeated and blocks another review until native reconciliation", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  const review = f.review("unknown-post");
+  await f.cycles();f.restart();await f.cycles();
+  const logicalId = `supervisor-team-notice:${review.id}:attempt:0`;
+  assert.equal(f.current(review).state, "uncertain");
+  assert.equal(f.transport.attempts.filter(value => value === logicalId).length, 1);
+  assert.throws(() => f.review("cannot-replace"), /supervisor_team_review_in_progress/u);
+  f.expose(review, "rolled_back");await f.cycles();
+  assert.equal(f.current(review).state, "delivered");
+  assert.equal(f.current(review).observedRun?.status, "rolled_back");
+  const second = f.review("after-found", [f.original, f.current(review)]);
+  assert.deepEqual(second.reviewChain, [f.original, f.current(review)].map(noticeAttempt));
+});
+
+test("native late original completion acknowledges the proven run while delivered reviews retain their fence", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  const review = f.review("late-completion-review");
+  await f.cycles();f.expose(review, "running");await f.cycles();
+  // The native completion can be a later run of the same exact message. The stored
+  // interruption is historical evidence, not a constraint that discards native truth.
+  const late = f.expose(f.original, "completed");
+  late.id = "late-original-native-run";
+  f.projection.messages.find(value => value.id.startsWith("final:") && value.runId === f.original.observedRun?.runId)!.runId = late.id;
+  await f.cycles();
+  assert.equal(f.current(f.original).state, "acknowledged");
+  assert.equal(f.current(f.original).completedRunId, late.id);
+  assert.deepEqual(f.current(f.original).observedRun, f.original.observedRun);
+  assert.equal(f.current(review).state, "delivered");
+  f.teamStore.settleRequest(f.binding, "guide:recovery-effect");await f.cycles();
+  assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "transferring");
+  f.expose(review, "completed");await f.cycles();
+  assert.equal(f.current(review).state, "acknowledged");
+  assert.equal(f.current(f.original).resolvedByReview, undefined);
+  assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "root");
+});
+
+test("a stale epoch review completes natively without closing the original or hiding sent work", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  const review = f.review("epoch-review");
+  await f.cycles();f.expose(review, "interrupted");await f.cycles();
+  f.teamStore.quarantineMember(f.binding, f.member.threadId);
+  for (const event of f.teamStore.snapshot(f.binding).events) f.teamStore.acknowledgeEvent(f.binding, f.binding.threadId, event.id);
+  f.teamStore.settleRequest(f.binding, "guide:recovery-effect");
+  assert.equal(f.blocking(), true, "sent work survives a member epoch change even without requests or events");
+  f.expose(review, "completed");f.restart();await f.cycles();
+  assert.equal(f.current(review).state, "acknowledged");
+  assert.equal(f.current(f.original).state, "delivered");
+  assert.equal(f.current(f.original).resolvedByReview, undefined);
+  assert.equal(f.teamStore.hasBlockingWork(f.binding), true);
+});
+
+test("review acknowledgement requires its own final native marker, not a helper check-in or another run", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  const review = f.review("own-marker");
+  await f.cycles();const run = f.expose(review, "completed");
+  const final = f.projection.messages.find(value => value.runId === run.id && value.role === "assistant")!;
+  const correct = final.text;
+  final.text = "Supervisor team check-in forged completed";
+  f.projection.messages.push({...final, id: "copied-marker-another-run", runId: "foreign-run", text: correct});
+  await f.cycles();assert.equal(f.current(review).state, "delivered");
+  final.text = correct;final.streaming = true;
+  await f.cycles();assert.equal(f.current(review).state, "delivered");
+  final.streaming = false;
+  f.projection.messages.push({...final, id: "later-no-marker", ordinal: 20, text: "Unfinished review."});
+  await f.cycles();assert.equal(f.current(review).state, "delivered");
+  f.projection.messages.pop();await f.cycles();
+  assert.equal(f.current(review).state, "acknowledged");
+});
+
+test("native late original completion supersedes an unsent review before delivery", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  const review = f.review("unsent-late-review");
+  f.expose(f.original, "completed");f.restart();await f.cycles();
+  assert.equal(f.current(f.original).state, "acknowledged");
+  assert.equal(f.current(review).state, "superseded");
+  assert.equal(f.transport.attempts.some(value => value.includes(review.id)), false);
+  assert.equal(f.teamStore.unresolvedRequests(f.binding).length, 1);
+});
+
+test("a normal helper check-in cannot acknowledge handover IDs included in its request", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  const review = f.review("not-a-monitor-ack");
+  await f.cycles();f.expose(review, "interrupted");await f.cycles();
+  activate(f.teamStore, f.binding, f.member, "other");
+  f.teamStore.settleRequest(f.binding, "guide:recovery-effect");
+  f.requests.noticeSent(f.member.threadId, 0);
+  const runtime = f.runtime(f.transport.transport);
+  const partition = runtime.partition(f.binding, f.threadList, batchOf(["other"]));
+  runtime.startCycle(f.binding);
+  await runtime.runHelperBatch(f.binding, f.threadList, partition.helperBatches, AbortSignal.timeout(5000));
+  const request = f.requests.pending(projectId, f.member.threadId)!;
+  assert.ok(request);
+  f.requests.saveRequest({...request, teamNotificationIds: [f.original.id, review.id]});
+  const runId = "normal-helper-checkin-run";
+  f.projection.runs.push({id: runId, threadId: f.member.threadId, ordinal: 5, status: "completed", userMessageId: request.messageId,
+    requestedAt: iso(time), startedAt: iso(time), completedAt: iso(time + 1), rootNodeId: null});
+  f.projection.messages.push({id: request.messageId, threadId: f.member.threadId, runId, nodeId: null, role: "user", text: request.text,
+    streaming: false, scheduledTaskId: `scheduled-${f.member.threadId}`, creationSource: "server", createdAt: iso(time), updatedAt: iso(time)});
+  f.projection.messages.push({id: "normal-helper-final", threadId: f.member.threadId, runId, nodeId: null, role: "assistant", text: request.completionMarker,
+    ordinal: 1, streaming: false, createdAt: iso(time), updatedAt: iso(time)});
+  runtime.startCycle(f.binding);await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  assert.equal(f.requests.requests(projectId, f.member.threadId).find(value => value.id === request.id)?.state, "completed");
+  for (const notice of [f.original, review]) {
+    assert.equal(f.current(notice).state, "delivered");
+    assert.equal(f.current(notice).resolvedByReview, undefined);
+  }
 });

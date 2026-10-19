@@ -318,3 +318,174 @@ test("members, assignments, and uncertain handover notifications survive databas
     await rm(directory, {recursive: true, force: true});
   }
 });
+
+const attempt = (notice: import("../src/supervisor-team-store.js").TeamNotification) => ({notificationId: notice.id,
+  deliveryAttempt: notice.deliveryAttempt, runId: notice.observedRun!.runId});
+const reviewInput = (original: import("../src/supervisor-team-store.js").TeamNotification, operationId: string,
+  chain = [original]) => ({operationId, notificationId: original.id, expectedDeliveryAttempt: original.deliveryAttempt,
+  expectedRunId: original.observedRun!.runId, expectedChain: chain.map(attempt)});
+const interruptNotice = (team: SupervisorTeamStore, binding: TeamBinding, notice: import("../src/supervisor-team-store.js").TeamNotification) => {
+  team.updateNotificationDelivery(binding, binding.threadId, notice.id, "sending", 100, notice.deliveryAttempt);
+  team.updateNotificationDelivery(binding, binding.threadId, notice.id, "delivered", 101, notice.deliveryAttempt);
+  return team.recordNotificationRun(binding, binding.threadId, notice.id, notice.deliveryAttempt, {runId: `run:${notice.id}`, status: "interrupted"}, 102);
+};
+
+const interruptedHandover = async () => {
+  const f = await fixture();
+  const helper = member(f.team, f.binding, "review-helper", 1);
+  activate(f.team, f.binding, "branch-a", helper.threadId, 10);
+  const coverage = f.team.coverage(f.binding, "leaf-a", parents);
+  f.team.recordRequest(f.binding, {requestId: "guide:unresolved", memberThreadId: helper.threadId, memberEpoch: helper.epoch,
+    targets: [{targetThreadId: "leaf-a", assignmentRootThreadId: "branch-a", assignmentEpoch: coverage.assignmentEpoch!}], parentById: parents, now: 20});
+  const transfer = f.team.release(f.binding, "branch-a", parents, 30);
+  const original = interruptNotice(f.team, f.binding, f.team.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch)!);
+  return {...f, helper, transfer, original};
+};
+
+test("interrupted review chains close durably without acknowledging history or settling request effects", async t => {
+  const f = await interruptedHandover();
+  let guidance = f.guidance;
+  t.after(async () => {guidance.close();await rm(f.directory, {recursive: true, force: true});});
+  const first = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "review-one"), 110));
+  assert.throws(() => f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "incomplete-chain")), /supervisor_team_review_chain_conflict/u);
+  const input = {...reviewInput(f.original, "review-two", [f.original, first]), note: "Inspect native effects; do not assume they failed."};
+  const second = f.team.reviewHandover(f.binding, f.binding.threadId, input, 120);
+  assert.deepEqual(second.reviewOf, attempt(f.original));
+  assert.deepEqual(second.reviewChain, [f.original, first].map(attempt));
+  assert.deepEqual(f.team.reviewHandover(f.binding, f.binding.threadId, input, 121), second);
+  guidance.close();
+  guidance = new GuidanceStore(f.directory);
+  const restarted = new SupervisorTeamStore(new ProjectSupervisorStore(guidance, new Set()));
+  assert.deepEqual(restarted.snapshot(f.binding).notifications.find(value => value.id === second.id), second);
+  interruptNotice(restarted, f.binding, second);
+  restarted.acknowledgeNotificationRun(f.binding, f.binding.threadId, second.id, second.deliveryAttempt, `run:${second.id}`, 130);
+  const snapshot = restarted.snapshot(f.binding);
+  for (const previous of [f.original, first]) {
+    const closed = snapshot.notifications.find(value => value.id === previous.id)!;
+    assert.deepEqual(closed, {...previous, updatedAt: 130,
+      resolvedByReview: {reviewNotificationId: second.id, reviewRunId: `run:${second.id}`, resolvedAt: 130}});
+    assert.equal(closed.state, "delivered");
+  }
+  assert.equal(snapshot.notifications.find(value => value.id === second.id)?.state, "acknowledged");
+  for (const event of snapshot.events) restarted.acknowledgeEvent(f.binding, f.binding.threadId, event.id, 131);
+  assert.equal(restarted.hasBlockingWork(f.binding), true);
+  assert.equal(restarted.unresolvedRequests(f.binding).length, 1);
+  assert.throws(() => restarted.completeTransfer(f.binding, "branch-a", f.transfer.epoch), /supervisor_team_handover_pending_effects/u);
+  restarted.settleRequest(f.binding, "guide:unresolved", 132);
+  restarted.completeTransfer(f.binding, "branch-a", f.transfer.epoch, 133);
+  for (const event of restarted.snapshot(f.binding).events) restarted.acknowledgeEvent(f.binding, f.binding.threadId, event.id, 134);
+  assert.equal(restarted.hasBlockingWork(f.binding), false, "closed notice history is no longer work");
+});
+
+test("late original completion supersedes only pending reviews and sent reviews keep their own fence", async t => {
+  for (const state of ["pending", "sending", "uncertain", "delivered"] as const) {
+    const f = await interruptedHandover();t.after(f.cleanup);
+    const review = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "late-review"));
+    if (state !== "pending") f.team.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, "sending");
+    if (state === "uncertain" || state === "delivered") f.team.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, state);
+    f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, f.original.id, 0, "late-native-completion");
+    assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === review.id)?.state, state === "pending" ? "superseded" : state);
+    f.team.settleRequest(f.binding, "guide:unresolved");
+    if (state !== "pending") {
+      assert.throws(() => f.team.completeTransfer(f.binding, "branch-a", f.transfer.epoch), /supervisor_team_handover_unacknowledged/u);
+      if (state !== "delivered") f.team.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, "delivered");
+      f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, review.id, 0, "own-review-completion");
+    }
+    assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === f.original.id)?.resolvedByReview, undefined);
+    f.team.completeTransfer(f.binding, "branch-a", f.transfer.epoch);
+  }
+});
+
+test("epoch changes supersede pending reviews while sent reviews acknowledge only themselves", async t => {
+  for (const lifecycle of ["missing", "quarantine"] as const) for (const sent of [false, true]) {
+    const f = await interruptedHandover();t.after(f.cleanup);
+    const review = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "epoch-review"));
+    if (sent) interruptNotice(f.team, f.binding, review);
+    if (lifecycle === "missing") f.team.markMissing(f.binding, f.helper.threadId);
+    else f.team.quarantineMember(f.binding, f.helper.threadId);
+    assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === review.id)?.state, sent ? "delivered" : "superseded");
+    const next = member(f.team, f.binding, "next-helper", 200);
+    const reassigned = f.team.assign(f.binding, "branch-a", next.threadId, parents, 201);
+    assert.ok(reassigned.epoch > f.transfer.epoch);
+    assert.throws(() => f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "stale-review")), /supervisor_team_member_epoch_conflict/u);
+    if (sent) {
+      f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, review.id, 0, "review-completed-after-epoch");
+      assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === review.id)?.state, "acknowledged");
+      assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === f.original.id)?.resolvedByReview, undefined);
+    }
+    assert.equal(f.team.unresolvedRequests(f.binding).length, 1);
+    for (const event of f.team.snapshot(f.binding).events) f.team.acknowledgeEvent(f.binding, f.binding.threadId, event.id);
+    assert.equal(f.team.hasBlockingWork(f.binding), true);
+  }
+});
+
+test("review CAS and operation identities reject forged helper acknowledgements and reflect no input", async t => {
+  const f = await interruptedHandover();t.after(f.cleanup);
+  const input = {...reviewInput(f.original, "sentinel-operation"), note: "sentinel-note"};
+  const before = f.team.snapshot(f.binding);
+  const denies = (call: () => unknown) => assert.throws(call, error => error instanceof Error &&
+    /^supervisor_team_[a-z_]+$/u.test(error.message) && !error.message.includes("sentinel"));
+  denies(() => f.team.reviewHandover(f.binding, f.helper.threadId, input));
+  denies(() => f.team.reviewHandover(f.binding, f.binding.threadId, {...input, expectedRunId: "sentinel-run"}));
+  denies(() => f.team.reviewHandover(f.binding, f.binding.threadId, {...input, expectedDeliveryAttempt: 12}));
+  denies(() => f.team.reviewHandover(f.binding, f.binding.threadId, {...input, note: "sentinel".repeat(150)}));
+  denies(() => f.team.reviewHandover(f.binding, f.binding.threadId, {...input, note: "sentinel\u0000"}));
+  denies(() => f.team.acknowledgeNotification(f.binding, f.helper.threadId, f.original.id, f.helper.epoch));
+  denies(() => f.team.acknowledgeNotificationRun(f.binding, f.helper.threadId, f.original.id, 0, "sentinel-run"));
+  assert.deepEqual(f.team.snapshot(f.binding), before);
+  const review = f.team.reviewHandover(f.binding, f.binding.threadId, input);
+  assert.deepEqual(f.team.reviewHandover(f.binding, f.binding.threadId, input), review);
+  denies(() => f.team.reviewHandover(f.binding, f.binding.threadId, {...input, note: "sentinel-changed"}));
+  denies(() => f.team.reviewHandover(f.binding, f.binding.threadId, {...input, operationId: "sentinel-concurrent"}));
+  interruptNotice(f.team, f.binding, review);
+  denies(() => f.team.acknowledgeNotification(f.binding, f.helper.threadId, review.id, f.helper.epoch));
+  denies(() => f.team.acknowledgeNotificationRun(f.binding, f.helper.threadId, review.id, 0, "sentinel-forged"));
+});
+
+test("failed reviews retry only their still-open exact chain", async t => {
+  const f = await interruptedHandover();t.after(f.cleanup);
+  const review = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "failed-review"));
+  f.team.markNotificationRejected(f.binding, f.binding.threadId, review.id, "Definite rejection", 0);
+  assert.equal(f.team.retryFailedNotifications(f.binding, f.helper.threadId), 1);
+  const retry = f.team.snapshot(f.binding).notifications.find(value => value.id === review.id)!;
+  assert.equal(retry.deliveryAttempt, 1);
+  assert.deepEqual(retry.reviewChain, review.reviewChain);
+  f.team.markNotificationRejected(f.binding, f.binding.threadId, review.id, "Definite rejection", 1);
+  f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, f.original.id, 0, "late-completed");
+  assert.equal(f.team.retryFailedNotifications(f.binding, f.helper.threadId), 0);
+});
+
+test("an interrupted sent review remains reviewable after the original late acknowledgement", async t => {
+  const f = await interruptedHandover();t.after(f.cleanup);
+  const first = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "sent-before-original-completed")));
+  f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, f.original.id, 0, "original-now-completed");
+  const second = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "review-only-unresolved-effects", [first]));
+  assert.deepEqual(second.reviewChain, [attempt(first)]);
+  interruptNotice(f.team, f.binding, second);
+  f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, second.id, 0, "second-review-completed");
+  assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === first.id)?.resolvedByReview?.reviewNotificationId, second.id);
+  assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === f.original.id)?.resolvedByReview, undefined);
+});
+
+test("reassignment and release cannot reuse an old review even when its recipient is still ready", async t => {
+  for (const sent of [false, true]) {
+    const f = await fixture();t.after(f.cleanup);
+    const first = member(f.team, f.binding, "old-owner", 1);
+    const second = member(f.team, f.binding, "lost-recipient", 2);
+    activate(f.team, f.binding, "branch-a", first.threadId, 10);
+    const transfer = f.team.assign(f.binding, "branch-a", second.threadId, parents, 20);
+    const original = interruptNotice(f.team, f.binding, f.team.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch && value.kind === "handover_release")!);
+    const review = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(original, "old-epoch-review"));
+    if (sent) interruptNotice(f.team, f.binding, review);
+    f.team.markMissing(f.binding, second.threadId);
+    assert.equal(f.team.resolveActor(f.binding, first.threadId, first.epoch)?.role, "helper");
+    assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === review.id)?.state, sent ? "delivered" : "superseded");
+    activate(f.team, f.binding, "branch-a", first.threadId, 200);
+    f.team.release(f.binding, "branch-a", parents, 210);
+    assert.throws(() => f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(original, "cannot-review-stale-assignment")), /supervisor_team_assignment_epoch_conflict/u);
+    if (sent) {
+      f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, review.id, 0, "stale-review-completed");
+      assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === original.id)?.resolvedByReview, undefined);
+    }
+  }
+});

@@ -165,12 +165,77 @@ A definite failed check-in or handover notification requires the root's explicit
 known definite notification failures for a current ready helper without clearing
 unrelated unknown effects. Failed check-in acknowledgements wait for unresolved
 member requests. An uncertain notice or request keeps its original identity and
-remains fenced. A delivered notice whose native run ended interrupted, failed or
-cancelled before its completion marker stays delivered and fenced: the team view
-shows that run status, a single attention item explains that nothing was resent, and
-the root keeps responsibility. An interrupted run proves neither rejection nor
-non-execution, so there is no automatic replacement delivery; deciding how to
-continue needs a reviewed conversation, reassignment or quarantine.
+remains fenced. A delivered notice whose native run ended interrupted, failed,
+cancelled or rolled_back without its completion marker stays delivered and fenced.
+The team view shows that run status, a bounded attention item points to
+`review_handover`, reassignment or quarantine, and the root keeps responsibility.
+
+The root-only `supervision_team` action `review_handover` creates a finite effect
+review through the existing notice transport. It requires the same exact native
+root caller proof as other root mutations, `operationId` (at most 128 characters),
+`notificationId`, `expectedDeliveryAttempt`, `expectedRunId`, and `expectedChain`.
+The notification identity always names the original `handover_release` or
+`handover_receive`, never a review. The optional `note` is nonempty plain text of
+at most 1000 characters (no control characters except tab/newline/CR), included as
+untrusted root context. Errors are fixed codes and do not echo inputs. Replaying an
+operation ID with identical input returns its stored response; different input
+conflicts.
+
+The chain root is the original notification at its exact delivery attempt.
+`expectedChain` is an ordered list of `{notificationId, deliveryAttempt, runId}`:
+the original if still delivered and unresolved, then every prior delivered,
+unclosed review of that original whose run ended without completion, in creation
+order. It must contain the entire open set, with no duplicates (at most 64
+entries). Each review durably records immutable `reviewOf` (the original ID,
+attempt and observed run ID) and `reviewChain` (that exact open set). An interrupted
+review therefore participates in the next review, rather than being abandoned or
+silently retried. An already acknowledged original is omitted from the open set;
+its interrupted, sent reviews can still require another review.
+
+Before creating anything, the action reads the helper's current native projection.
+Every chain member's exact transport message must be visible, its recorded run
+must exist with the same terminal interrupted/failed/cancelled/rolled_back status,
+and no run of that message may be running, completed or have a completed final
+assistant marker. Native completion refuses the action so normal reconciliation
+can acknowledge it. Missing or changed evidence refuses without a review mutation.
+The store then atomically rechecks the entire chain, original attempt/run, ready
+member epoch and transferring assignment epoch. Pending, sending, uncertain or
+still-running reviews block another review. A definite failed review requires
+`retry`, which only retries while its exact chain remains open. An uncertain
+review POST is never repeated and blocks later reviews until native reconciliation
+finds the original message. All chain state and receipts survive restart.
+
+The review asks the helper to inspect actual native effects of **every** listed
+attempt, including earlier reviews, perform only genuinely missing duties within
+current authority, and state which effects remain unresolved. It must never
+replay an operational instruction or infer non-execution from interruption. Its
+own exact native completed run and final marker acknowledge only that review.
+Generic monitor check-in markers and helper/tool acknowledgement claims cannot
+acknowledge a handover or review.
+For each still-unresolved chain member in the same current assignment and member
+epoch, the service adds `resolvedByReview: {reviewNotificationId, reviewRunId,
+resolvedAt}`. Those members remain `delivered`, retaining IDs, message bytes and
+`observedRun`; none is relabelled acknowledged or resent. Closure is notice
+bookkeeping, not proof that external effects did not happen.
+
+A late native completion of the original can still acknowledge its actual proven
+run, preserving historical interruption evidence. It supersedes only pending
+reviews. Sending, uncertain or delivered reviews remain independent fences until
+their own completion or a later review closes them, without double resolution.
+Epoch changes supersede only pending reviews; a sent review completing after an
+epoch change acknowledges itself but cannot close the stale original. Reassignment
+or release cannot bypass an ongoing transfer; revoking a helper through missing or
+quarantine handling advances the epoch before a new assignment can be made.
+
+Neither a handover/review acknowledgement nor review closure settles any
+`TeamRequest`. Transfer completion still waits for every captured affected-subtree
+request (including older or inherited assignments), every request of the exact
+transfer assignment epoch, and every handover/review notice of that epoch to be
+acknowledged, superseded or closed. Unrelated inherited sibling requests are not
+swept into that transfer. Concrete request and guidance-effect reconciliation
+remains independent and may require manual inspection. A definitively rejected
+review whose chain subsequently closes is not eligible for retry; its failed
+notice stays visible and fences that transfer, requiring root lifecycle recovery.
 
 ## Helper guidance
 

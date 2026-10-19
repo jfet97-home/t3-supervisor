@@ -6,7 +6,8 @@ import {modelSelection, SupervisorRpcError, type SupervisorRpc} from "./supervis
 import {canSupervisorContact, hasPendingOwnerInput, resolveSteerableRun} from "./supervisor-conversation.js";
 import {childOrigin} from "./supervisor-observation.js";
 import type {BindingRecord} from "./project-supervisor-store.js";
-import type {SupervisorTeamStore} from "./supervisor-team-store.js";
+import {endedWithoutCompletion, maxHandoverReviewChain, parseHandoverReview, type HandoverReviewInput, type SupervisorTeamStore} from "./supervisor-team-store.js";
+import {teamNotificationEvidence, teamNotificationText} from "./supervisor-team-runtime.js";
 import type {Projection, ThreadInfo} from "./types.js";
 
 const locator = {
@@ -18,12 +19,25 @@ const locator = {
 };
 const text = (maxLength: number) => ({type: "string", minLength: 1, maxLength});
 const unresolvedGuideAttentionGraceMs = 60_000;
+// Native/provider errors can contain input or message bodies. Only these fixed codes
+// may escape the review action; do not forward arbitrary Error.message strings.
+const handoverReviewErrors = new Set([
+  "supervisor_team_notification_missing", "supervisor_team_review_requires_handover", "supervisor_team_notification_attempt_conflict",
+  "supervisor_team_notification_run_conflict", "supervisor_team_member_epoch_conflict", "supervisor_team_assignment_epoch_conflict",
+  "supervisor_team_notification_identity_conflict", "supervisor_team_review_in_progress", "supervisor_team_review_requires_retry",
+  "supervisor_team_review_chain_closed", "supervisor_team_review_chain_conflict", "supervisor_team_invalid_handover_review",
+  "supervisor_team_review_operation_conflict", "supervisor_team_notification_capacity", "supervisor_team_event_capacity",
+  "supervisor_team_review_native_unavailable", "supervisor_team_review_native_completed", "supervisor_team_review_native_changed",
+]);
 export const supervisionTeamToolDefinition = {
   name: "supervision_team",
-  description: "Read this root's flat Supervisor team. Root registers actual completed native delegate_task children, assigns or releases operational subtrees, retires or quarantines helpers, sends notes, and retries only definite failed deliveries. Helpers acknowledge readiness and report significant assessments/escalations. All mutations require exact native caller proof; IDs and transport credentials alone grant no authority. Later helper check-ins are service-managed, not raw t3_thread_send.",
+  description: "Read this root's flat Supervisor team. Root registers actual completed native delegate_task children, assigns or releases operational subtrees, retires or quarantines helpers, sends notes, reviews interrupted handovers with review_handover, and retries only definite failed deliveries. review_handover requires notificationId, expectedDeliveryAttempt, expectedRunId and the exact ordered expectedChain of open attempts; optional note is bounded untrusted plain text. Helpers acknowledge readiness and report significant assessments/escalations. All mutations require exact native caller proof; IDs and transport credentials alone grant no authority. Later helper check-ins are service-managed, not raw t3_thread_send.",
   inputSchema: {type: "object", additionalProperties: false, required: ["supervisorThreadId", "bindingGeneration", "action"], properties: {
-    ...locator, action: {type: "string", enum: ["read", "register", "assign", "release", "retire", "quarantine", "note", "retry", "ready", "report"]},
+    ...locator, action: {type: "string", enum: ["read", "register", "assign", "release", "retire", "quarantine", "note", "retry", "ready", "report", "review_handover"]},
     operationId: text(128), memberThreadId: text(512), taskId: text(512), bootstrapRunId: text(512),
+    notificationId: text(512), expectedDeliveryAttempt: {type: "integer", minimum: 0}, expectedRunId: text(512), note: text(1000),
+    expectedChain: {type: "array", minItems: 1, maxItems: maxHandoverReviewChain, items: {type: "object", additionalProperties: false,
+      required: ["notificationId", "deliveryAttempt", "runId"], properties: {notificationId: text(512), deliveryAttempt: {type: "integer", minimum: 0}, runId: text(512)}}},
     targetThreadId: text(512), summary: text(4000), reportKind: {type: "string", enum: ["assessment", "escalation", "group_result"]},
   }},
 } as const;
@@ -107,9 +121,12 @@ export class SupervisorTeamController {
     return latest?.threadId === binding.threadId && latest.generation === binding.generation;
   }
   async call(input: unknown, signal: AbortSignal): Promise<unknown> {
-    const payload = this.parse(input, ["action", "operationId", "memberThreadId", "taskId", "bootstrapRunId", "targetThreadId", "summary", "reportKind"]);
+    const payload = this.parse(input, ["action", "operationId", "memberThreadId", "taskId", "bootstrapRunId", "targetThreadId", "summary", "reportKind",
+      "notificationId", "expectedDeliveryAttempt", "expectedRunId", "expectedChain", "note"]);
     if (!payload || typeof payload.action !== "string") return {status: "invalid", reason: "invalid_team_arguments"};
     if (payload.action !== "read" && !bounded(payload.operationId, 128)) return {status: "invalid", reason: "operation_id_required"};
+    const reviewInput = payload.action === "review_handover" ? parseHandoverReview(payload) : null;
+    if (payload.action === "review_handover" && !reviewInput) return fail("supervisor_team_invalid_handover_review");
     const binding = this.workflows.resolveBinding(payload, payload.action === "ready");
     if (!binding && payload.action === "ready" && typeof payload.memberEpoch === "number") {
       const current = this.workflows.resolveBinding({...payload, memberEpoch: payload.memberEpoch + 1});
@@ -122,7 +139,7 @@ export class SupervisorTeamController {
     if (!binding) return fail("actor_not_current_ready_enabled");
     if (payload.action === "read") return {status: "ok", team: this.team.snapshot(binding)};
     const proof = await this.workflows.authorizeNative(payload, "team", signal, payload.action === "ready");
-    if (proof.status !== "verified") return proof;
+    if (proof.status !== "verified") return payload.action === "review_handover" ? fail("native_root_proof_required") : proof;
     const prior = this.receipt(payload, binding);
     if (prior) return prior.hash === workflowRequestHash(payload) ? prior.value : fail("operation_id_conflict");
     const root = payload.supervisorThreadId === binding.threadId;
@@ -132,13 +149,18 @@ export class SupervisorTeamController {
       const scope = resolveSupervisorScope(threads, binding.projectId, binding.mainThreadId, this.workflows.options.supervisors.ownedIds);
       if (!scope.complete || !scope.main || !scope.liveIds.has(binding.mainThreadId)) return fail("native_scope_unavailable");
       if (payload.action === "register") await this.verifyMember(binding, payload, signal);
+      if (reviewInput) await this.verifyHandoverReview(binding, reviewInput, signal);
       if (["assign", "release", "report"].includes(payload.action) &&
         (!id(payload.targetThreadId) || payload.targetThreadId === binding.mainThreadId || !scope.liveIds.has(payload.targetThreadId)))
         return fail("target_not_live_operational_descendant");
       return this.atomic(() => {
         if (!this.current(payload, binding, payload.action === "ready")) return fail("actor_changed");
+        const concurrent = this.receipt(payload, binding);
+        if (concurrent) return concurrent.hash === workflowRequestHash(payload) ? concurrent.value : fail("operation_id_conflict");
         let result: unknown;
-        if (payload.action === "register") {
+        if (reviewInput) {
+          result = this.team.reviewHandover(binding, payload.supervisorThreadId, reviewInput);
+        } else if (payload.action === "register") {
           if (!id(payload.memberThreadId) || !id(payload.taskId) || !id(payload.bootstrapRunId)) return fail("invalid_registration");
           result = this.team.registerMember(binding, {threadId: payload.memberThreadId, taskId: payload.taskId, bootstrapRunId: payload.bootstrapRunId});
         } else if (payload.action === "ready") {
@@ -181,8 +203,37 @@ export class SupervisorTeamController {
         this.save(payload, binding, proof.evidence.itemId, response);
         return response;
       });
-    } catch (cause) {return fail(cause instanceof Error && /^[a-z_]+$/u.test(cause.message) ? cause.message : "team_operation_unavailable");}
+    } catch (cause) {
+      if (payload.action === "review_handover") return fail(cause instanceof Error && handoverReviewErrors.has(cause.message)
+        ? cause.message : "supervisor_team_review_native_unavailable");
+      return fail(cause instanceof Error && /^[a-z_]+$/u.test(cause.message) ? cause.message : "team_operation_unavailable");
+    }
   }
+  private async verifyHandoverReview(binding: BindingRecord, input: HandoverReviewInput, signal: AbortSignal): Promise<void> {
+    const {original, chain} = this.team.handoverReviewContext(binding, input);
+    const projection = await this.workflows.options.native.projection(original.recipientThreadId, signal);
+    if (signal.aborted || projection.thread.id !== original.recipientThreadId || projection.thread.projectId !== binding.projectId ||
+      projection.thread.lineage.parentThreadId !== binding.threadId || projection.thread.lineage.relationshipToParent !== "subagent" ||
+      projection.thread.archivedAt != null || projection.thread.deletedAt != null) throw new Error("supervisor_team_review_native_unavailable");
+    for (const notification of chain) {
+      const {text, marker} = teamNotificationText(binding, notification);
+      // Read only the existing transport receipt. No channel creation, POST or native
+      // mutation is permitted here. Text + owned scheduled task identify the delivery.
+      const row = this.workflows.options.supervisors.store.db.prepare(
+        "SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
+        .get(binding.threadId, binding.generation, `supervisor-team-notice:${notification.id}:attempt:${notification.deliveryAttempt}`);
+      const delivery: unknown = row && JSON.parse(String(row.document));
+      if (!isRecord(delivery) || delivery.state === "rejected" || delivery.text !== text || delivery.threadId !== notification.recipientThreadId ||
+        !id(delivery.taskId)) throw new Error("supervisor_team_review_native_unavailable");
+      const evidence = teamNotificationEvidence(projection, notification, marker, message => message.text === text &&
+        message.scheduledTaskId === delivery.taskId && message.creationSource === "server");
+      if (evidence.completedRun) throw new Error("supervisor_team_review_native_completed");
+      const run = evidence.runs.find(value => value.id === notification.observedRun?.runId);
+      if (!evidence.message || !run || run.status !== notification.observedRun?.status || !endedWithoutCompletion.has(run.status) ||
+        evidence.runs.some(value => !endedWithoutCompletion.has(value.status))) throw new Error("supervisor_team_review_native_changed");
+    }
+  }
+
   async reconcile(binding: BindingRecord, signal: AbortSignal, now = Date.now()): Promise<void> {
     const members = this.team.snapshot(binding).members;
     const actors = new Set(members.map(member => member.threadId));
