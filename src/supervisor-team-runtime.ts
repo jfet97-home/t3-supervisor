@@ -12,6 +12,8 @@ import type { Projection, ThreadInfo } from "./types.js";
 import { resolveSupervisorScope } from "./supervisor-scope.js";
 import { workflowMutationLimits } from "./workflow-state-contract.js";
 
+const endedWithoutCompletion = new Set(["failed", "interrupted", "cancelled", "rolled_back"]);
+
 export type SupervisorTeamHelperBatch = {
   actorThreadId: string;
   memberEpoch: number;
@@ -502,6 +504,24 @@ export class SupervisorTeamRuntime {
     return hasCompletionMarker(finalText, marker);
   }
 
+  // a delivered attempt whose native run ended without its marker is recorded and surfaced once; it is never resent or relabelled
+  private notificationRunEnded(binding: BindingRecord, projection: Projection, notification: TeamNotification, member: TeamMember): boolean {
+    const {text} = this.notificationText(binding, member, notification);
+    const messageId = `supervisor-team-notice:${notification.id}:attempt:${notification.deliveryAttempt ?? 0}`;
+    const message = projection.messages.find(item => item.threadId === member.threadId && this.options.helperTransport?.matchesMessage(binding, messageId, text, item));
+    const run = message && projection.runs.find(item => item.threadId === member.threadId && item.userMessageId === message.id && (item.id === message.runId || message.runId === undefined || message.runId === null));
+    if (!run || !endedWithoutCompletion.has(run.status)) return false;
+    try {
+      this.options.teamStore.recordNotificationRun(binding, binding.threadId, notification.id, notification.deliveryAttempt ?? 0, {runId: run.id, status: run.status});
+    } catch { return false; }
+    const attempt = notification.deliveryAttempt ?? 0;
+    this.emitServiceAttention(binding,
+      `helper-notification-interrupted:${fingerprint([binding.threadId, binding.generation, notification.id, attempt, run.id]).slice(0, 32)}`,
+      notification.recipientThreadId, notification.assignmentRootThreadId ?? undefined,
+      `Helper notification ${notification.id} attempt ${attempt} was delivered, but its native run ${run.id} ended ${run.status} before confirming. Its effects are unknown: the handover stays fenced, the root keeps responsibility, and nothing was resent. Review the helper conversation before deciding how to continue.`);
+    return true;
+  }
+
   private async reconcileNotifications(binding: BindingRecord, snapshot: SupervisorTeamSnapshot, signal: AbortSignal): Promise<void> {
     if (!this.options.helperTransport) return;
     const candidates = snapshot.notifications.filter(notification => notification.state !== "acknowledged" && notification.state !== "superseded" && notification.state !== "failed" &&
@@ -526,6 +546,7 @@ export class SupervisorTeamRuntime {
           this.options.teamStore.acknowledgeNotification(binding, member.threadId, notification.id, member.epoch, Date.now(), notification.deliveryAttempt ?? 0);
         } catch { /* a retried or reassigned notification keeps its current attempt */ }
       }
+      else if (this.notificationRunEnded(binding, projection, notification, member)) return;
       else if (this.notificationNeedsAttention(notification)) this.serviceNotificationAttention(binding, notification);
       return;
     }

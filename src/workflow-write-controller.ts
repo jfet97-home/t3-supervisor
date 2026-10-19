@@ -1,4 +1,4 @@
-import {definitionReferenceLimits, validDefinitionReferences} from "./definition-references.js";
+import {definitionReferenceLimits, definitionReferenceProblem, describeDefinitionReferenceProblem, validDefinitionReferences} from "./definition-references.js";
 import type { SupervisorTeamStore } from "./supervisor-team-store.js";
 import type { ProjectSupervisorStore, BindingRecord } from "./project-supervisor-store.js";
 import {acceptedTaskPlanForBinding, acceptedWorkflowPlansForBinding, type WorkflowApplyValidationContext, type WorkflowStateStore} from "./workflow-state-store.js";
@@ -130,7 +130,7 @@ export type WorkflowReadResult = {
 
 type ParsedInput =
   | {ok: true; value: WorkflowWritePayload}
-  | {ok: false; reason: string; operationId?: string};
+  | {ok: false; reason: string; operationId?: string; diagnostic?: WorkflowApplyDiagnostic};
 
 type ParsedReadInput =
   | {ok: true; value: WorkflowReadPayload}
@@ -269,6 +269,24 @@ const parseLocator = (value: Record<string, unknown>): WorkflowLocator | null =>
     ...(typeof value.assignmentRootThreadId === "string" ? {assignmentRootThreadId: value.assignmentRootThreadId} : {})};
 };
 
+// locates the first rejected reference list in submitted plan input using only numeric positions
+const referenceDiagnostic = (plan: unknown): WorkflowApplyDiagnostic | null => {
+  let visited = 0;
+  const visit = (node: unknown, path: string, depth: number): WorkflowApplyDiagnostic | null => {
+    if (!isRecord(node) || depth > workflowMutationLimits.maxPlanDepth * 2 || ++visited > workflowMutationLimits.maxPlanNodes * 2) return null;
+    const problem = Object.hasOwn(node, "references") ? definitionReferenceProblem(node.references) : null;
+    if (problem) return {code: problem.code, path: `${path}/references${problem.index === null ? "" : `/${problem.index}`}`, expected: describeDefinitionReferenceProblem(problem)};
+    if (Array.isArray(node.nodes)) {
+      for (const [index, child] of node.nodes.entries()) {
+        const found = visit(child, `${path}/nodes/${index}`, depth + 1);
+        if (found) return found;
+      }
+    }
+    return isRecord(node.plan) ? visit(node.plan, `${path}/plan`, depth + 1) : null;
+  };
+  return visit(plan, "/input/plan", 0);
+};
+
 const parseApplyInput = (value: unknown): WorkflowApplyPatch | null => {
   if (!isRecord(value) || !hasExactKeys(value,
     ["operationId", "workflowId", "expectedRevision", "note"], ["status", "objective", "sourceBinding", "requirements", "issues", "plan", "evidence"])) return null;
@@ -314,8 +332,10 @@ const parseWritePayload = (value: unknown): ParsedInput => {
     if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "input"], authorityKeys))
       return {ok: false, reason: "invalid_apply"};
     const input = parseApplyInput(value.input);
+    const diagnostic = !input && isRecord(value.input) ? referenceDiagnostic(value.input.plan) : null;
     return input ? {ok: true, value: {...locator, action: "apply", input}} : {ok: false,
-      reason: "invalid_apply_input", ...(isRecord(value.input) && isId(value.input.operationId) ? {operationId: value.input.operationId} : {})};
+      reason: "invalid_apply_input", ...(isRecord(value.input) && isId(value.input.operationId) ? {operationId: value.input.operationId} : {}),
+      ...(diagnostic ? {diagnostic} : {})};
   }
   return {ok: false, reason: "unknown_action"};
 };
@@ -641,7 +661,8 @@ export class WorkflowWriteController {
     try {inputBytes = workflowToolInputSize(input);} catch {return {status: "invalid", reason: "arguments_not_json"};}
     if (inputBytes > workflowToolInputMaxBytes) return {status: "invalid", reason: "arguments_too_large"};
     const parsed = parseWritePayload(input);
-    if (!parsed.ok) return {status: "invalid", ...(parsed.operationId ? {operationId: parsed.operationId} : {}), reason: parsed.reason};
+    if (!parsed.ok) return {status: "invalid", ...(parsed.operationId ? {operationId: parsed.operationId} : {}), reason: parsed.reason,
+      ...(parsed.diagnostic ? {diagnostic: parsed.diagnostic} : {})};
     const payload = parsed.value;
     const binding = this.resolveBinding(payload);
     if (!binding) return {status: "denied", operationId: operationIdOf(payload), reason: "owner_not_current_ready_enabled"};

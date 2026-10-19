@@ -11,6 +11,7 @@ import { SupervisorConversation } from "../src/supervisor-conversation.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { SupervisorTeamStore, type TeamBinding, type TeamMember } from "../src/supervisor-team-store.js";
 import { SupervisorTeamRuntime } from "../src/supervisor-team-runtime.js";
+import { supervisorTeamView } from "../src/supervisor-team-view.js";
 import { supervisionGuideToolDefinition, supervisionTeamToolDefinition } from "../src/supervisor-team-controller.js";
 import { workflowReadToolDefinition, workflowWriteToolDefinition } from "../src/workflow-write-controller.js";
 import { directParentChildLifecycle } from "../src/supervisor-observation.js";
@@ -1019,4 +1020,45 @@ test("a successful helper result creates an event-only root wake and is acknowle
   assert.equal(conversation.requests.requests(projectId, f.binding.threadId).find(item => item.id === request.id)?.state, "completed");
   assert.ok(f.teamStore.snapshot(f.binding).events.find(item => item.id === event.id)?.acknowledgedAt);
   assert.equal(conversation.teamRuntime?.hasBlockingWork(f.binding), false);
+});
+
+test("a delivered handover notice whose native run was interrupted stays fenced, visible and unsent", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const member = readyMember(f.teamStore, f.binding, "helper-interrupted-notice");
+  activate(f.teamStore, f.binding, member, "branch");
+  const transfer = f.teamStore.assign(f.binding, "branch", null, parents, time + 10);
+  const notification = f.teamStore.snapshot(f.binding).notifications.find(item =>
+    item.assignmentRootThreadId === "branch" && item.assignmentEpoch === transfer.epoch && item.kind === "handover_release");
+  assert.ok(notification);
+  const projection = helperProjection(member, f.binding.threadId);
+  f.projections.set(member.threadId, projection);
+  const delivery = webhookTransport("waiting");
+  const send = delivery.transport.send;
+  delivery.transport.send = async (binding, message, signal) => {
+    const result = await send(binding, message, signal);
+    projection.runs.push({id: "interrupted-notice-run", threadId: member.threadId, ordinal: 1, status: "interrupted", requestedAt: iso(time + 11),
+      startedAt: iso(time + 11), completedAt: iso(time + 12), rootNodeId: null, userMessageId: "native-interrupted-notice"});
+    projection.messages.push({id: "native-interrupted-notice", threadId: member.threadId, runId: "interrupted-notice-run", nodeId: null, role: "user",
+      text: message.text, streaming: false, createdAt: iso(time + 11), updatedAt: iso(time + 11), scheduledTaskId: `scheduled-${member.threadId}`, creationSource: "server"});
+    return result;
+  };
+  const runtime = f.runtime(delivery.transport);
+  for (let cycle = 0; cycle < 4; cycle++) {
+    runtime.startCycle(f.binding);
+    await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  }
+  const current = f.teamStore.snapshot(f.binding).notifications.find(item => item.id === notification!.id);
+  assert.equal(current?.state, "delivered", "an interrupted run does not prove rejection or non-execution");
+  assert.deepEqual(current?.observedRun && {runId: current.observedRun.runId, status: current.observedRun.status}, {runId: "interrupted-notice-run", status: "interrupted"});
+  assert.equal(delivery.attempts.length, 1, "nothing is resent automatically");
+  assert.equal(f.teamStore.retryFailedNotifications(f.binding, member.threadId, time + 20), 0);
+  assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "transferring");
+  const attention = f.teamStore.snapshot(f.binding).events.filter(item => item.id.startsWith("helper-notification-interrupted:"));
+  assert.equal(attention.length, 1);
+  assert.match(attention[0]!.summary, /interrupted/u);
+  const view = supervisorTeamView(f.teamStore, f.binding, f.threadList, f.requests, time + 30);
+  const row = view.members.find(item => item.threadId === member.threadId);
+  assert.doesNotMatch(row?.currentState ?? "", /Available for the next check-in/u);
+  assert.match(row?.currentState ?? "", /handover/u);
+  assert.equal(row?.pendingHandovers[0]?.runStatus, "interrupted");
 });

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { definitionReferenceFields, sameDefinitionReferences, validDefinitionReferences } from "./definition-references.js";
+import { definitionReferenceFields, definitionReferenceProblem, describeDefinitionReferenceProblem, sameDefinitionReferences, type DefinitionReferenceProblemCode } from "./definition-references.js";
 import {redact} from "./credential-redaction.js";
 export {redact} from "./credential-redaction.js";
 import type {
@@ -50,7 +50,7 @@ export type WorkflowPlanValue = Pick<WorkflowProposalInfo,
 export type WorkflowRequest = {requestText: string; context: ProposalContext | null; workflow: WorkflowProposalInfo};
 export type WorkflowApplyDiagnostic = {
   code: "local_step_definition_id_required" | "local_step_local_id_required" | "local_step_name_required" |
-    "local_step_description_required" | "local_step_template_path_not_allowed";
+    "local_step_description_required" | "local_step_template_path_not_allowed" | DefinitionReferenceProblemCode;
   path: string;
   expected: string;
 };
@@ -457,7 +457,12 @@ const canonicalSourceNode = (value: unknown, context: ProposalContext, options: 
   templateNodes: ReadonlyMap<string, WorkflowPlanNodeInfo> = options.templateNodes ?? new Map(), nodePath = "/plan"): WorkflowPlanNodeInfo => {
   if (depth > maxExpansionDepth) throw new Error("workflow_expansion_depth");
   if (!record(value) || typeof value.kind !== "string") throw new Error("invalid_workflow_node");
-  if (Object.hasOwn(value, "references") && !validDefinitionReferences(value.references)) throw new Error("invalid_definition_references");
+  const referenceProblem = Object.hasOwn(value, "references") ? definitionReferenceProblem(value.references) : null;
+  if (referenceProblem) {
+    reportWorkflowApplyDiagnostic(options, {code: referenceProblem.code,
+      path: `${nodePath}/references${referenceProblem.index === null ? "" : `/${referenceProblem.index}`}`, expected: describeDefinitionReferenceProblem(referenceProblem)});
+    throw new Error("invalid_definition_references");
+  }
   const path = typeof value.templatePath === "string" ? value.templatePath : null;
   const sourceExpected = expected ?? (path ? templateNodes.get(path) : undefined);
   if (value.kind === "sequence" || value.kind === "parallel") {

@@ -2,7 +2,7 @@ import { Effect } from "effect";
 import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import { parseDocument } from "yaml";
-import { definitionReferenceFields, validDefinitionReferences } from "./definition-references.js";
+import { definitionReferenceFields, definitionReferenceProblem, describeDefinitionReferenceProblem } from "./definition-references.js";
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import { ProjectFileError, type FreshGitProbe, type ProjectCommitter, type ProjectFiles } from "./project-files.js";
@@ -43,8 +43,13 @@ const record = (v: unknown): v is Record<string, unknown> => typeof v === "objec
 const text = (v: unknown, max = 8000): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= max;
 const exact = (v: Record<string, unknown>, fields: string[]) => Object.keys(v).length === fields.length && fields.every(f => Object.hasOwn(v, f));
 const withOptionalReferences = (value: Record<string, unknown>, fields: string[]) =>
-  exact(value, [...fields, ...(Object.hasOwn(value, "references") ? ["references"] : [])]) &&
-  (!Object.hasOwn(value, "references") || validDefinitionReferences(value.references));
+  exact(value, [...fields, ...(Object.hasOwn(value, "references") ? ["references"] : [])]);
+// rejected reference lists report a fixed reason and position without repeating the path
+const checkReferences = (value: Record<string, unknown>, owner: string): void => {
+  if (!Object.hasOwn(value, "references")) return;
+  const problem = definitionReferenceProblem(value.references);
+  if (problem) throw new Error(`${owner} ${describeDefinitionReferenceProblem(problem)}`);
+};
 
 const yaml = (contents: string): unknown => {
   const doc = parseDocument(contents, {schema: "core", uniqueKeys: true});
@@ -83,6 +88,7 @@ export const parseDefinitionStep = (id: string, contents: string): DefinitionSte
   const metadata = yaml(frontmatter[1]!);
   if (!record(metadata) || !withOptionalReferences(metadata, ["id", "name", "description"]) || metadata.id !== id || !definitionName(metadata.name) || !text(metadata.description))
     throw new Error("Step frontmatter needs a matching id, name, nonempty description and optional references: a list of relative file paths.");
+  checkReferences(metadata, "Step");
   if (contents.slice(frontmatter[0].length).trim() !== "") throw new Error("Step body must be empty; keep all guidance in description.");
   return {id, name: metadata.name.trim(), description: metadata.description.trim(), ...definitionReferenceFields(metadata.references as readonly string[] | undefined)};
 };
@@ -94,8 +100,10 @@ const parseNode = (value: unknown, depth: number, budget: {count: number}): Defi
   if (Object.hasOwn(value, "step")) {
     if (typeof value.step === "string" && definitionId.test(value.step)) return {step: value.step};
     if (record(value.step) && withOptionalReferences(value.step, ["id", "name", "description"]) && typeof value.step.id === "string" &&
-      definitionId.test(value.step.id) && definitionName(value.step.name) && text(value.step.description))
+      definitionId.test(value.step.id) && definitionName(value.step.name) && text(value.step.description)) {
+      checkReferences(value.step, `Local step ${value.step.id}`);
       return {step: {id: value.step.id, name: value.step.name.trim(), description: value.step.description.trim(), ...definitionReferenceFields(value.step.references as readonly string[] | undefined)}};
+    }
     throw new Error("step must name a reusable step or define a local step with id, name, description and optional references: a list of relative file paths.");
   }
   if (Object.hasOwn(value, "workflow")) {
@@ -128,6 +136,7 @@ export const parseDefinitionWorkflow = (id: string, contents: string): Definitio
   if (!record(metadata) || !withOptionalReferences(metadata, fields) || hasSequence === hasParallel || !definitionName(metadata.name) || !text(metadata.description) ||
     metadata.fixed !== undefined && typeof metadata.fixed !== "boolean")
     throw new Error("A workflow needs name, description, optional fixed and references (relative file paths), and exactly one root sequence or parallel group.");
+  checkReferences(metadata, "Workflow");
   const root = hasSequence ? parseNode({sequence: metadata.sequence}, 0, {count: 0}) : parseNode({parallel: metadata.parallel}, 0, {count: 0});
   const nodes = hasSequence ? (root as {sequence: readonly DefinitionNode[]}).sequence : (root as {parallel: readonly DefinitionNode[]}).parallel;
   const localIds = collectLocalStepIds(nodes);

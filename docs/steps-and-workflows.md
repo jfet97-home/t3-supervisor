@@ -126,7 +126,9 @@ definition comes from the shared catalog. `../shared/guide.md` is a relative pat
 absolute paths, home aliases, URL-like strings, control/formatting characters and
 credential-like text are invalid. Use file paths only; `README.md:12` is not a
 supported line-number reference. Each list is limited to 100 paths
-of up to 4096 characters. The service records paths without opening or checking
+of up to 4096 characters. A rejected list reports a fixed reason and the entry's
+zero-based position, such as `references[1]`, without repeating the rejected text.
+The service records paths without opening or checking
 referenced files. Missing targets do not make the YAML invalid; a reference never
 grants file access or proves that an agent read the file.
 

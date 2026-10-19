@@ -104,3 +104,142 @@ test("browser entry indices restore a canceled Back into history predating initi
   const controller=createNavigator(initial,{read:()=>({...entries[cursor]!,index:cursor}),push:(hash,state)=>{entries.splice(++cursor);entries.push({hash,state});},replace:(hash,state)=>{entries[cursor]={hash,state};},go:delta=>{pending=delta;}},()=>false,()=>assert.fail("the canceled destination must not become current"));
   controller.start();cursor=0;controller.historyChanged();assert.equal(pending,1);assert.equal(entries[0]!.hash,routeHref(before));assert.equal(entries[0]!.state,null);cursor+=pending;controller.historyChanged();assert.equal(entries[cursor]!.hash,routeHref(initial));
 });
+
+// models a browser without the Navigation API: traversals are asynchronous, fire popstate and then hashchange, and ignore out-of-range offsets
+const markerBrowser = async (preInitialized: Array<string | {id: string; state: unknown}>, initial: string) => {
+  const {createNavigator} = await import("../ui/src/navigation.js");
+  const route = (id: string) => ({...directoryRoute, projectId: id, main: ""});
+  const entries: Array<{hash: string; state: unknown}> = [...preInitialized, initial].map(item => typeof item === "string" ? {hash: routeHref(route(item)), state: null} : {hash: routeHref(route(item.id)), state: item.state});
+  let cursor = entries.length - 1;
+  const traversals: number[] = [];
+  const timers: Array<() => void> = [];
+  const state = {dirty: false, prompts: 0, current: route(initial)};
+  const controller = createNavigator(route(initial), {
+    read: () => ({...entries[cursor]!, length: entries.length}),
+    push: (hash, value) => {entries.splice(++cursor);entries.push({hash, state: value});},
+    replace: (hash, value) => {entries[cursor] = {hash, state: value};},
+    go: delta => {assert.notEqual(delta, 0, "go(0) would reload the page");traversals.push(delta);},
+    later: callback => {timers.push(callback);},
+  }, () => {state.prompts++;return !state.dirty;}, next => {state.current = {...next, main: next.main ?? ""};});
+  const settle = () => {
+    for (let step = 0; traversals.length > 0 && step < 50; step++) {
+      const target = cursor + traversals.shift()!;
+      if (target < 0 || target >= entries.length) continue;
+      const previous = entries[cursor]!.hash;
+      cursor = target;
+      controller.historyChanged();
+      if (entries[cursor]!.hash !== previous) controller.historyChanged();
+    }
+  };
+  controller.start();
+  return {
+    route, entries, state, controller,
+    at: () => parseRoute(entries[cursor]!.hash).projectId,
+    app: () => state.current.projectId,
+    hashes: () => entries.map(entry => parseRoute(entry.hash).projectId),
+    go: (delta: number) => {traversals.push(delta);settle();},
+    type: (id: string) => {entries.splice(cursor + 1);entries.push({hash: routeHref(route(id)), state: null});cursor++;controller.historyChanged();controller.historyChanged();settle();},
+    expire: () => {timers.splice(0).forEach(callback => callback());settle();},
+    link: (id: string) => controller.navigate(route(id)),
+  };
+};
+
+test("without the Navigation API, canceled traversal into pre-initialization history keeps every entry and navigation usable", async () => {
+  const browser = await markerBrowser(["a"], "b");
+  browser.link("c");
+  browser.state.dirty = true;
+  browser.go(-2);
+  assert.equal(browser.at(), "c");
+  assert.equal(browser.app(), "c");
+  assert.deepEqual(browser.hashes(), ["a", "b", "c"]);
+  assert.equal(browser.entries[0]!.state, null, "the pre-initialization destination is not rewritten");
+  browser.go(-1);
+  assert.equal(browser.at(), "c");
+  browser.go(-2);browser.go(1);
+  assert.deepEqual([browser.at(), browser.app()], ["c", "c"]);
+  browser.state.dirty = false;
+  browser.link("d");
+  assert.deepEqual([browser.at(), browser.app()], ["d", "d"]);
+  browser.go(-2);
+  assert.deepEqual([browser.at(), browser.app()], ["b", "b"]);
+  browser.go(1);
+  assert.deepEqual([browser.at(), browser.app()], ["c", "c"]);
+});
+
+test("without the Navigation API, an accepted pre-initialization entry stays unindexed and later cancellations return to it", async () => {
+  const browser = await markerBrowser(["a", "z"], "b");
+  browser.go(-1);
+  assert.deepEqual([browser.at(), browser.app()], ["z", "z"]);
+  assert.equal(browser.entries[1]!.state, null);
+  browser.state.dirty = true;
+  browser.go(1);
+  assert.deepEqual([browser.at(), browser.app()], ["z", "z"]);
+  browser.go(-1);
+  assert.deepEqual([browser.at(), browser.app()], ["z", "z"]);
+  assert.deepEqual(browser.hashes(), ["a", "z", "b"]);
+  assert.deepEqual([browser.entries[0]!.state, browser.entries[1]!.state], [null, null]);
+  browser.state.dirty = false;
+  browser.go(1);
+  assert.deepEqual([browser.at(), browser.app()], ["b", "b"]);
+  browser.go(-1);
+  browser.link("c");
+  assert.deepEqual([browser.at(), browser.app()], ["c", "c"]);
+  browser.go(-1);
+  assert.deepEqual([browser.at(), browser.app()], ["z", "z"]);
+});
+
+test("without the Navigation API, a canceled manual hash that replaced a forward entry recovers instead of waiting forever", async () => {
+  const browser = await markerBrowser([], "a");
+  browser.link("b");
+  browser.go(-1);
+  browser.state.dirty = true;
+  browser.type("x");
+  assert.equal(browser.app(), "a");
+  browser.link("c");
+  assert.equal(browser.app(), "a", "navigation waits only while the bounded restoration is pending");
+  browser.expire();
+  assert.deepEqual([browser.at(), browser.app()], ["a", "a"]);
+  assert.ok(browser.hashes().includes("x"), "the typed entry is kept rather than overwritten");
+  browser.state.dirty = false;
+  browser.link("c");
+  assert.deepEqual([browser.at(), browser.app()], ["c", "c"]);
+});
+
+test("without the Navigation API, a canceled manual hash at the end is replaced immediately", async () => {
+  const browser = await markerBrowser([], "a");
+  browser.state.dirty = true;
+  browser.type("x");
+  assert.deepEqual([browser.at(), browser.app()], ["a", "a"]);
+  assert.deepEqual(browser.hashes(), ["a", "a"]);
+  browser.go(-1);
+  assert.deepEqual([browser.at(), browser.app()], ["a", "a"]);
+  browser.state.dirty = false;
+  browser.link("b");
+  browser.go(-1);
+  assert.deepEqual([browser.at(), browser.app()], ["a", "a"]);
+});
+
+test("without the Navigation API, duplicate traversal events prompt once and markers from another page lifetime are not trusted", async () => {
+  const stale = {supervisorPosition: 5, owner: "other"};
+  const browser = await markerBrowser([{id: "a", state: stale}], "b");
+  browser.link("c");
+  browser.state.dirty = true;
+  browser.state.prompts = 0;
+  browser.go(-2);
+  assert.equal(browser.state.prompts, 1);
+  assert.deepEqual([browser.at(), browser.app()], ["c", "c"]);
+  assert.equal(browser.entries[0]!.state, stale);
+});
+
+test("without the Navigation API, indistinguishable unindexed entries end in a bounded recovery instead of a lock", async () => {
+  const browser = await markerBrowser(["a", "a"], "b");
+  browser.state.dirty = true;
+  browser.go(-2);
+  browser.expire();
+  assert.deepEqual([browser.at(), browser.app()], ["b", "b"]);
+  browser.state.dirty = false;
+  browser.link("c");
+  assert.deepEqual([browser.at(), browser.app()], ["c", "c"]);
+  browser.go(-1);
+  assert.deepEqual([browser.at(), browser.app()], ["b", "b"]);
+});

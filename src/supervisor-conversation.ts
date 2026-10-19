@@ -780,20 +780,34 @@ export class SupervisorConversation {
     agent: Projection, supervisor: Projection): boolean {
     if (!record(value) || value.taskId !== task.id) return false;
     if (role === "operative") return this.afterIntroduction(agent, introduction, message.messageId);
-    const latestContextRequest = this.requests.requests(task.projectId, task.supervisorThreadId)
+    return this.afterTaskContext(task, message, supervisor);
+  }
+  // the latest task context request anchors root records; its message identity is kept on the task so pruned requests still attribute later records
+  private taskContextRun(task: TaskRecord, supervisor: Projection): Projection["runs"][number] | undefined {
+    const latest = this.requests.requests(task.projectId, task.supervisorThreadId)
       .filter(request => request.kind === "context" && request.taskId === task.id).at(-1);
-    const contextRun = latestContextRequest
-      ? supervisor.runs.find(run => run.threadId === task.supervisorThreadId &&
-        (run.id === latestContextRequest.runId || run.userMessageId === latestContextRequest.messageId))
-      : undefined;
+    let anchor = task.protocolContextAnchor?.supervisorThreadId === task.supervisorThreadId ? task.protocolContextAnchor : undefined;
+    if (latest && anchor?.messageId !== latest.messageId) {
+      anchor = {supervisorThreadId: task.supervisorThreadId, messageId: latest.messageId};
+      const current = this.store.task(task.threadId);
+      if (current?.id === task.id && current.supervisorThreadId === task.supervisorThreadId) this.store.saveTask({...current, protocolContextAnchor: anchor});
+    }
+    const messageId = anchor?.messageId;
+    return messageId ? supervisor.runs.find(run => run.threadId === task.supervisorThreadId &&
+      (Boolean(latest?.runId) && run.id === latest!.runId || run.userMessageId === messageId)) : undefined;
+  }
+  private afterTaskContext(task: TaskRecord, message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number], supervisor: Projection): boolean {
+    const contextRun = this.taskContextRun(task, supervisor);
     const currentRun = supervisor.runs.find(run => run.threadId === task.supervisorThreadId && run.id === message.runId);
     return Boolean(contextRun && currentRun && Number.isSafeInteger(contextRun.ordinal) && Number.isSafeInteger(currentRun.ordinal) &&
       currentRun.ordinal >= contextRun.ordinal);
   }
   private supervisorMessageBoundToCurrentTask(task: TaskRecord,
-    message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number]): boolean {
-    return this.requests.requests(task.projectId, task.supervisorThreadId).some(request => request.runId === message.runId &&
-      (request.taskId === task.id || request.batch?.threads.some(thread => thread.threadId === task.threadId)));
+    message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number], supervisor: Projection): boolean {
+    const requests = this.requests.requests(task.projectId, task.supervisorThreadId).filter(request => request.runId === message.runId);
+    if (requests.length) return requests.some(request => request.taskId === task.id || request.batch?.threads.some(thread => thread.threadId === task.threadId));
+    // a pruned request no longer identifies its run; the durable task context anchor still orders it within the current task
+    return this.afterTaskContext(task, message, supervisor);
   }
   private protocolRecordNotOlderThanDiagnostic(task: TaskRecord, role: WorkflowProtocolDiagnostic["role"],
     message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number],
@@ -833,6 +847,7 @@ export class SupervisorConversation {
   private reconcileWorkflowProtocolDiagnostics(task: TaskRecord, introduction: WorkflowIntroduction, agent: Projection, supervisor: Projection,
     context: ProposalContext, supervisorMessages: ReturnType<SupervisorConversation["completedAssistantMessages"]>,
     operativeMessages: ReturnType<SupervisorConversation["completedAssistantMessages"]>, now: number): void {
+    this.taskContextRun(task, supervisor);
     const events: Array<{role: WorkflowProtocolDiagnostic["role"]; kind: WorkflowAgreementRecordKind;
       message: ReturnType<SupervisorConversation["completedAssistantMessages"]>[number]; value: unknown | null; malformedJson: boolean; order: number}> = [];
     for (const message of supervisorMessages.slice(-20)) {
@@ -850,7 +865,7 @@ export class SupervisorConversation {
       if (!messageId) continue;
       if (event.malformedJson) {
         const attributed = event.role === "supervisor"
-          ? this.supervisorMessageBoundToCurrentTask(current, event.message)
+          ? this.supervisorMessageBoundToCurrentTask(current, event.message, supervisor)
           : this.afterIntroduction(agent, introduction, event.message.messageId) &&
             Boolean(this.requests.agreementCandidate(current.id, current.workflowProposalId ?? current.id));
         if (!attributed || !this.protocolRecordNotOlderThanDiagnostic(current, event.role, event.message, supervisorMessages, operativeMessages) ||
@@ -1226,7 +1241,9 @@ export class SupervisorConversation {
       if (!this.enabled(binding.projectId)) return;
       this.store.store.transaction(() => {
         this.requests.saveIntroduction(introduction);
-        this.requests.prepare({projectId: task.projectId, supervisorThreadId: binding.threadId, kind: "context", taskId: task.id, text: prompt, batch: null, completionMarker}, Date.now());
+        const context = this.requests.prepare({projectId: task.projectId, supervisorThreadId: binding.threadId, kind: "context", taskId: task.id, text: prompt, batch: null, completionMarker}, Date.now());
+        const current = this.store.task(task.threadId);
+        if (current?.id === task.id) this.store.saveTask({...current, protocolContextAnchor: {supervisorThreadId: binding.threadId, messageId: context.messageId}});
       });
       await this.dispatch(this.requests.pending(binding.projectId, binding.threadId)!, signal);return;
     }
@@ -1460,8 +1477,11 @@ export class SupervisorConversation {
           !hasRunningProviderTurn(agent, activeRun)) return;
         dispatchMode = {type: "steer_active", targetRunId: activeRun.id};
       } else {
-        if (activeRuns.length) return;
-        dispatchMode = {type: "queue_after_active"};
+        // an omitted active run ID is not evidence of idleness; one verified running provider turn can still be steered
+        const steerable = Object.prototype.hasOwnProperty.call(agent.thread, "activeRunId") ? null : resolveSteerableRun(agent);
+        if (steerable) dispatchMode = {type: "steer_active", targetRunId: steerable.id};
+        else if (activeRuns.length) return;
+        else dispatchMode = {type: "queue_after_active"};
       }
     }
     if (!this.enabled(task.projectId)) return;

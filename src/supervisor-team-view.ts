@@ -27,6 +27,9 @@ export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRe
       if (typeof row.request_id === "string" && guideRequestIds.has(row.request_id)) deferredGuidanceMembers.add(String(row.actor_thread_id));
     }
   }
+  const unresolvedNotices = snapshot.notifications.filter(value => value.assignmentRootThreadId !== null && ["pending", "sending", "uncertain", "delivered"].includes(value.state));
+  const unconfirmedNotices = new Set(unresolvedNotices.map(value => value.recipientThreadId));
+  const interruptedNotices = new Set(unresolvedNotices.filter(value => value.observedRun).map(value => value.recipientThreadId));
   const issues = snapshot.events.filter(event => event.acknowledgedAt === null && event.severity === "attention").slice(-100)
     .map(event => ({id: event.id, severity: "warning" as const, summary: event.summary, observedAt: event.createdAt}));
   return {status: "ok", message: "Assignments are monitoring responsibility; operational child workflows remain connected to their parent.", observedAt: now,
@@ -48,7 +51,10 @@ export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRe
             deferredGuidanceMembers.has(member.threadId) ? "Guidance is deferred for an owner decision on its original target; no answer or alternate route has been sent." :
             (guideCountsByMember.get(member.threadId) ?? 0) > 0 ? "An operational-child steer is still awaiting native-history confirmation on its original target; no alternate route has been sent." :
           pending?.state === "uncertain" ? "Check-in delivery is uncertain; its original identity is retained." :
-            pending ? "A bounded monitoring turn is in progress." : "Available for the next check-in or reassignment.",
+            pending ? "A bounded monitoring turn is in progress." :
+            interruptedNotices.has(member.threadId) ? "A delivered handover notice ended before confirming; the root keeps responsibility and nothing was resent." :
+            unconfirmedNotices.has(member.threadId) ? "A handover notice is awaiting confirmation; the root keeps responsibility until it is confirmed." :
+            "Available for the next check-in or reassignment.",
         lastAssessment: member.lastAssessment ? {summary: member.lastAssessment, assessedAt: assessment?.createdAt ?? null} : null,
         assignments: snapshot.assignments.filter(value => value.memberThreadId === member.threadId || value.toMemberThreadId === member.threadId || value.fromMemberThreadId === member.threadId)
           .map(value => ({threadId: value.subtreeRootThreadId, title: byId.get(value.subtreeRootThreadId)?.title ?? null,
@@ -57,7 +63,7 @@ export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRe
           if (value.recipientThreadId !== member.threadId || value.state === "acknowledged" || value.assignmentRootThreadId === null) return [];
           return [{targetThreadId: value.assignmentRootThreadId, targetTitle: byId.get(value.assignmentRootThreadId)?.title ?? null,
             direction: value.kind === "handover_receive" ? "incoming" as const : "outgoing" as const, state: value.state,
-            summary: value.message, updatedAt: value.updatedAt}];
+            summary: value.message, updatedAt: value.updatedAt, ...(value.observedRun ? {runStatus: value.observedRun.status} : {})}];
         }).slice(-100),
         issues: issues.filter(issue => snapshot.events.find(event => event.id === issue.id)?.memberThreadId === member.threadId),
       };

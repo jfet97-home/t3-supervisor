@@ -60,6 +60,8 @@ export type TeamNotification = {
   state: TeamNotificationState;
   deliveryAttempt: number;
   failureReason?: string;
+  // the native run observed for the delivered attempt; an interrupted or failed run proves neither rejection nor non-execution
+  observedRun?: {runId: string; status: string; observedAt: number};
   createdAt: number;
   updatedAt: number;
 };
@@ -673,6 +675,25 @@ export class SupervisorTeamStore {
         value.state === "uncertain" && ["sending", "delivered"].includes(state);
       if (!allowed || value.state === "acknowledged" || value.state === "superseded") throw new Error("supervisor_team_notification_state_conflict");
       const next = { ...value, state, updatedAt: now };
+      this.saveNotification(binding, next);
+      return next;
+    });
+  }
+
+  recordNotificationRun(binding: TeamBinding, actorThreadId: string, notificationId: string, expectedDeliveryAttempt: number,
+    run: {runId: string; status: string}, now = Date.now()): TeamNotification {
+    this.currentBinding(binding);
+    if (!this.resolveActor(binding, actorThreadId)) throw new Error("supervisor_team_root_actor_required");
+    if (!run.runId || run.runId.length > 512 || !/^[a-z_]{1,40}$/u.test(run.status)) throw new Error("supervisor_team_notification_run_invalid");
+    return this.atomic(() => {
+      const row = this.supervisors.store.db.prepare("SELECT document FROM supervisor_team_notifications WHERE owner_thread_id=? AND owner_generation=? AND id=?")
+        .get(binding.threadId, binding.generation, notificationId);
+      if (!row) throw new Error("supervisor_team_notification_missing");
+      const value = this.normalizeNotification(parseDocument<TeamNotification>(row.document));
+      if (value.deliveryAttempt !== expectedDeliveryAttempt) throw new Error("supervisor_team_notification_attempt_conflict");
+      if (value.state !== "delivered") throw new Error("supervisor_team_notification_state_conflict");
+      if (value.observedRun?.runId === run.runId && value.observedRun.status === run.status) return value;
+      const next = {...value, observedRun: {runId: run.runId, status: run.status, observedAt: now}, updatedAt: now};
       this.saveNotification(binding, next);
       return next;
     });

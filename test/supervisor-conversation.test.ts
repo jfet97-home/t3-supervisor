@@ -1291,6 +1291,34 @@ test("a running main without matching provider-turn evidence waits, then targets
   assert.deepEqual(call.payload.dispatchMode, {type: "steer_active", targetRunId: activeRun.id});
 });
 
+test("an omitted active run ID still steers one verified running provider turn, while explicit null and ambiguous runs wait", async t => {
+  for (const variant of ["omitted", "null", "ambiguous"] as const) {
+    const clock = {now: baseTime};
+    const restore = t.mock.method(Date, "now", () => clock.now);
+    const fixture = await makeFixture(clock);
+    try {
+      const activeRun = fixture.operative.runs.find(run => run.id === fixture.operative.thread.activeRunId);
+      assert.ok(activeRun);
+      if (variant === "null") (fixture.operative.thread as {activeRunId: string | null}).activeRunId = null;
+      else Reflect.deleteProperty(fixture.operative.thread, "activeRunId");
+      if (variant === "ambiguous") {
+        const second = {...activeRun, id: "operative-second-run", activeAttemptId: "operative-second-attempt", rootNodeId: "operative-second-root"};
+        fixture.operative.runs.push(second);
+        fixture.operative.providerTurns = [...(fixture.operative.providerTurns as unknown[] ?? []), {id: "second-provider-turn", runAttemptId: second.activeAttemptId, nodeId: second.rootNodeId, status: "running"}];
+      }
+      fixture.conversation.requests.saveIntroduction({taskId: fixture.task.id, projectId, threadId: operativeThreadId, supervisorThreadId: fixture.binding.threadId,
+        state: "ready", text: workflowIntroductionText(fixture.task), messageId: `supervisor-notice:workflow:${fixture.task.id}`, targetRunId: null, error: null});
+      await fixture.run();
+      const call = fixture.calls.find(item => item.payload.threadId === operativeThreadId);
+      if (variant === "omitted") assert.deepEqual(call?.payload.dispatchMode, {type: "steer_active", targetRunId: activeRun.id});
+      else {
+        assert.equal(call, undefined, `${variant} active run evidence must not be guessed`);
+        assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "ready");
+      }
+    } finally {await fixture.cleanup();restore.mock.restore();}
+  }
+});
+
 test("a fresh pending owner runtime request holds the proposal until resolution", async t => {
   const clock = {now: baseTime};
   t.mock.method(Date, "now", () => clock.now);
@@ -2652,6 +2680,46 @@ test("quoted, foreign, tool, streaming, and unbound malformed fences do not beco
   await observeAgreement(fixture, clock.now + 30_000);
   assert.equal(fixture.projectStore.task(fixture.task.threadId)?.workflowProtocolDiagnostic, undefined);
   assert.equal(fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id), null);
+});
+
+test("protocol diagnostics keep their current-task attribution after the context request is pruned", async () => {
+  for (const pruning of ["age", "count"] as const) {
+    const clock = {now: baseTime};
+    const fixture = await makeFixture(clock);
+    try {
+      appendNoticeToOperative(fixture);
+      const request = fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId,
+        kind: "context", taskId: fixture.task.id, text: "The current task context.", batch: null, completionMarker: "pruned context completed"}, clock.now);
+      const run = appendRun({projection: fixture.supervisor, id: "pruned-context-run", ordinal: 5, status: "completed",
+        messageId: request.messageId, text: request.text, now: clock.now});
+      completeRun(fixture.supervisor, run, request.completionMarker, clock.now + 1);
+      fixture.conversation.requests.saveRequest({...request, state: "completed", runId: run.id, sentAt: clock.now, error: null});
+      await observeAgreement(fixture, clock.now + 2);
+      assert.deepEqual(fixture.projectStore.task(fixture.task.threadId)?.protocolContextAnchor,
+        {supervisorThreadId: fixture.binding.threadId, messageId: request.messageId});
+      let later = clock.now + 3;
+      if (pruning === "age") later += 31 * 86400_000;
+      else for (let index = 0; index < 100; index++) {
+        const filler = fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "review", taskId: null,
+          text: `later review ${index}`, batch: null, completionMarker: `later review ${index} completed`}, later + index);
+        fixture.conversation.requests.saveRequest({...filler, state: "completed", runId: `later-review-${index}`, sentAt: later + index, error: null});
+      }
+      fixture.conversation.requests.prune(later + 200);
+      assert.equal(fixture.conversation.requests.requests(projectId, fixture.binding.threadId).some(item => item.id === request.id), false);
+      const canonical = workflowPlan(fixture.task);
+      assert.ok(canonical.plan);
+      const invalidPlan: WorkflowPlanValue = {...canonical, plan: {...canonical.plan, nodes: canonical.plan.nodes.map(node =>
+        node.kind === "step" ? {...node, nodeId: "not-a-uuid"} : node)}};
+      const invalid = appendAssistantTurn(fixture.supervisor, `after-pruning-${pruning}`,
+        workflowFence("workflow-proposal", workflowRecord(fixture.task, `after-pruning-${pruning}`, invalidPlan)), later + 300);
+      await observeAgreement(fixture, later + 30_000);
+      assert.deepEqual(fixture.projectStore.task(fixture.task.threadId)?.workflowProtocolDiagnostic, {role: "supervisor", proposalId: `after-pruning-${pruning}`,
+        messageId: invalid.message.id, code: "invalid_or_duplicate_node_id", observedAt: later + 30_000});
+      const malformed = appendAssistantTurn(fixture.supervisor, `malformed-after-pruning-${pruning}`, "```workflow-proposal\n{not-json}\n```", later + 40_000);
+      await observeAgreement(fixture, later + 60_000);
+      assert.equal(fixture.projectStore.task(fixture.task.threadId)?.workflowProtocolDiagnostic?.messageId, malformed.message.id);
+    } finally {await fixture.cleanup();}
+  }
 });
 
 test("malformed protocol JSON is diagnosed only when the current task request identifies its root run", async t => {

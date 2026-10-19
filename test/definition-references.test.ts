@@ -128,3 +128,31 @@ test("read-only references escape text and appear on reusable, workflow and loca
   assert(escaped.includes("&lt;script&gt;"));
   assert.equal(renderToStaticMarkup(createElement(DefinitionReferences, {references: []})), "");
 });
+
+test("rejected references report a fixed reason and position without repeating the submitted path", async () => {
+  const {definitionReferenceProblem, describeDefinitionReferenceProblem} = await import("../src/definition-references.js");
+  const secret = "ghp_" + "B".repeat(32);
+  const cases: Array<[unknown, string, number | null]> = [
+    [["docs/ok.md", "/tmp/a.md"], "reference_absolute_path", 1], [[`notes/${secret}.md`], "reference_credential_like", 0],
+    [["password=hunter2"], "reference_credential_like", 0], [["https://user:pass@example.com/a.md"], "reference_url_like", 0],
+    [["~/notes.md"], "reference_home_path", 0], [["docs\\a.md"], "reference_backslash", 0], [["docs/a\u202e.md"], "reference_control_character", 0],
+    [["docs/a\u0000.md"], "reference_control_character", 0], [[" docs/a.md"], "reference_surrounding_whitespace", 0], [[""], "reference_empty", 0],
+    [["x".repeat(4097)], "reference_too_long", 0], [[1], "reference_not_text", 0], ["docs/a.md", "references_not_list", null],
+    [Array.from({length: 101}, () => "a.md"), "references_too_many", null],
+  ];
+  for (const [value, code, index] of cases) {
+    const problem = definitionReferenceProblem(value);
+    assert.deepEqual(problem, {code, index});
+    const message = describeDefinitionReferenceProblem(problem!);
+    assert.match(message, /^references(\[\d+\])? is invalid: [A-Za-z0-9 ,.-]+\.$/u);
+    for (const fragment of [secret, "hunter2", "user:pass", "/tmp", "\u202e", "\u0000"]) assert.equal(message.includes(fragment), false);
+  }
+  assert.equal(definitionReferenceProblem(["../shared/guide.md", "docs/日本語.txt"]), null);
+  const original = ["docs/ok.md", `docs/${secret}.md`];
+  assert.throws(() => parseDefinitionStep("review", step(original)), (error: Error) =>
+    error.message === "Step references[1] is invalid: a reference cannot contain credential-like text." && !error.message.includes(secret));
+  assert.throws(() => parseDefinitionWorkflow("delivery", workflow(undefined, original)), (error: Error) =>
+    error.message === "Local step local references[1] is invalid: a reference cannot contain credential-like text.");
+  assert.throws(() => parseDefinitionWorkflow("delivery", workflow(["/abs.md"])), /^Error: Workflow references\[0\] is invalid: a reference must be relative/u);
+  assert.deepEqual(original, ["docs/ok.md", `docs/${secret}.md`], "the submitted list is not rewritten");
+});

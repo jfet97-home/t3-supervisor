@@ -61,3 +61,31 @@ test("the existing-worktree enable request preserves the selected checkout in th
   assert.deepEqual(parsed, expected);
   assert.throws(() => Schema.decodeUnknownSync(SupervisionSetup)({...intent, action: "enable"}));
 });
+
+test("an unconfirmed setup outcome stays fenced until a setup read that started after every request ended", async () => {
+  const {createSetupFence} = await import("../ui/src/supervisor-control.js");
+  const states: Array<{fenced: boolean; pending: boolean}> = [];
+  const fence = createSetupFence(state => {states.push(state);});
+  const current = () => states.at(-1) ?? {fenced: false, pending: false};
+  fence.request(true);
+  assert.deepEqual(current(), {fenced: true, pending: true});
+  const readDuringRequest = fence.epoch();
+  fence.verified(readDuringRequest);
+  assert.equal(current().fenced, true, "a remounted panel cannot clear the fence while its request is still running");
+  fence.request(false);
+  assert.deepEqual(current(), {fenced: true, pending: false}, "an uncertain outcome remains fenced after the request ends");
+  fence.verified(readDuringRequest);
+  assert.equal(current().fenced, true, "a read that started before the request ended cannot verify it");
+  fence.verified(fence.epoch());
+  assert.equal(current().fenced, false);
+
+  fence.latch();
+  assert.equal(current().fenced, true);
+  fence.verified(fence.epoch());
+  assert.equal(current().fenced, false);
+
+  fence.request(true);
+  fence.confirmed();
+  fence.request(false);
+  assert.deepEqual(current(), {fenced: false, pending: false}, "a confirmed saved outcome releases the fence");
+});

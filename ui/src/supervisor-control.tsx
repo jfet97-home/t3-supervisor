@@ -7,6 +7,26 @@ import { getCsrfToken, loadAccess, sessionHeaders } from "./access.js";
 export type ControlActivity = {busy: boolean; dirty: boolean; uncertain: boolean};
 export const idleControlActivity: ControlActivity = {busy: false, dirty: false, uncertain: false};
 
+// an unconfirmed setup outcome stays fenced until a setup read that started after every setup request had ended
+export function createSetupFence(changed: (state: {fenced: boolean; pending: boolean}) => void) {
+  let active = 0;
+  let epoch = 0;
+  let fenced = false;
+  const emit = () => changed({fenced, pending: active > 0});
+  return {
+    epoch: () => epoch,
+    latch: () => { if (!fenced) { fenced = true; emit(); } },
+    request(started: boolean) {
+      active = Math.max(0, active + (started ? 1 : -1));
+      epoch++;
+      if (started) fenced = true;
+      emit();
+    },
+    verified(readEpoch: number) { if (fenced && active === 0 && readEpoch === epoch) { fenced = false; emit(); } },
+    confirmed() { if (fenced && active <= 1) { fenced = false; emit(); } },
+  };
+}
+
 export function SupervisionControlView({control, busy, blocked, message, onToggle, onReload}: {
   control: SupervisionControlInfo;
   busy: boolean;
@@ -41,8 +61,13 @@ export function SupervisionControlPanel({projectId = null, onChanged, onStateCha
   const [setupRequested, setSetupRequested] = useState(false);
   const [uncertain, setUncertain] = useState(false);
   const [setupActivity, setSetupActivity] = useState(idleControlActivity);
+  const [fenceState, setFenceState] = useState({fenced: false, pending: false});
+  const [fence] = useState(() => createSetupFence(setFenceState));
   useEffect(() => {if (!setupRequested) setSetupActivity(idleControlActivity);}, [setupRequested]);
-  useEffect(() => {onStateChange?.({busy: busy || setupActivity.busy, dirty: setupActivity.dirty, uncertain: uncertain || setupActivity.uncertain});}, [busy, uncertain, setupActivity, onStateChange]);
+  useEffect(() => {if (setupActivity.uncertain) fence.latch();}, [setupActivity.uncertain, fence]);
+  const setupBusy = setupActivity.busy || fenceState.pending;
+  const setupUncertain = setupActivity.uncertain || fenceState.fenced;
+  useEffect(() => {onStateChange?.({busy: busy || setupBusy, dirty: setupActivity.dirty, uncertain: uncertain || setupUncertain});}, [busy, uncertain, setupBusy, setupUncertain, setupActivity.dirty, onStateChange]);
   const wasActive = useRef(active);
   useEffect(() => {
     if (active && !wasActive.current && !busy && !uncertain && !setupRequested) setRevision(value => value + 1);
@@ -61,9 +86,9 @@ export function SupervisionControlPanel({projectId = null, onChanged, onStateCha
     return () => abort.abort();
   }, [projectId, revision]);
   if (!control) return <section className="panel"><p role="status">{message || "Loading supervision status…"}</p><button type="button" onClick={() => setRevision(value => value + 1)}>Reload status</button></section>;
-  return <div className="stack"><SupervisionControlView control={control} busy={busy || setupActivity.busy} blocked={blocked || setupActivity.uncertain} message={message}
-    onReload={() => {if (setupActivity.uncertain) setUncertain(true);setRevision(value => value + 1);}} onToggle={() => {
-      if (busy || blocked || setupActivity.busy || setupActivity.uncertain) return;
+  return <div className="stack"><SupervisionControlView control={control} busy={busy || setupBusy} blocked={blocked || setupUncertain} message={message}
+    onReload={() => setRevision(value => value + 1)} onToggle={() => {
+      if (busy || blocked || setupBusy || setupUncertain) return;
       setBusy(true);setMessage("");
       void fetch("/api/guidance/supervision-control", {method: "POST", credentials: "omit",
         headers: {"Content-Type": "application/json", ...sessionHeaders(), "x-csrf-token": getCsrfToken()},
@@ -80,9 +105,12 @@ export function SupervisionControlPanel({projectId = null, onChanged, onStateCha
         .finally(() => setBusy(false));
     }} />
     {readAt && <p className="small muted">Status read at {new Date(readAt).toLocaleTimeString()}. Reload status after changes in another tab.</p>}
-    {setupRequested && projectId && <SupervisionSetupPanel projectId={projectId} onStateChange={setSetupActivity} onComplete={(next, text) => {
-      setControl(next);setMessage(text);setSetupRequested(false);setSetupActivity(idleControlActivity);setUncertain(false);setBlocked(false);
-    }} />}</div>;
+    {setupUncertain && !setupActivity.uncertain && <p className="notice" role="status">The last setup outcome is not confirmed. Reload setup to check the selected checkout before other changes.</p>}
+    {setupRequested && projectId && <SupervisionSetupPanel projectId={projectId} locked={setupBusy && !setupActivity.busy || fenceState.fenced && !setupActivity.uncertain}
+      onStateChange={setSetupActivity} onRequest={fence.request} epoch={fence.epoch} onVerified={fence.verified}
+      onComplete={(next, text) => {
+        fence.confirmed();setControl(next);setMessage(text);setSetupRequested(false);setSetupActivity(idleControlActivity);setUncertain(false);setBlocked(false);
+      }} />}</div>;
 }
 
 type SetupOptions = typeof SupervisionSetupOptions.Type;
@@ -122,7 +150,10 @@ export function SupervisionSetupView({options, selected, busy, blocked, message,
   </section>;
 }
 
-function SupervisionSetupPanel({projectId, onComplete, onStateChange}: {projectId: string; onComplete: (control: SupervisionControlInfo, message: string) => void; onStateChange: (activity: ControlActivity) => void}) {
+function SupervisionSetupPanel({projectId, locked, onComplete, onStateChange, onRequest, epoch, onVerified}: {
+  projectId: string; locked: boolean; onComplete: (control: SupervisionControlInfo, message: string) => void; onStateChange: (activity: ControlActivity) => void;
+  onRequest: (started: boolean) => void; epoch: () => number; onVerified: (epoch: number) => void;
+}) {
   const [options, setOptions] = useState<SetupOptions | null>(null);
   const [selected, setSelected] = useState("");
   const [busy, setBusy] = useState(false);
@@ -131,24 +162,26 @@ function SupervisionSetupPanel({projectId, onComplete, onStateChange}: {projectI
   const [revision, setRevision] = useState(0);
   const [uncertain, setUncertain] = useState(false);
   useEffect(() => {onStateChange({busy, dirty: Boolean(selected), uncertain});}, [busy, selected, uncertain, onStateChange]);
-  useEffect(() => () => onStateChange(idleControlActivity), [onStateChange]);
+  const mounted = useRef(true);
+  useEffect(() => () => {mounted.current = false;onStateChange(idleControlActivity);}, [onStateChange]);
   useEffect(() => {
     const abort = new AbortController();setOptions(null);
+    const readEpoch = epoch();
     void fetch(`/api/guidance/supervision-setup?${new URLSearchParams({projectId})}`, {credentials: "omit", headers: sessionHeaders(), signal: abort.signal})
       .then(async response => {
         if (!response.ok) throw new Error("unavailable");
         const next = Schema.decodeUnknownSync(SupervisionSetupOptions)(await response.json());
         if (next.projectId !== projectId) throw new Error("scope_mismatch");
-        if (!abort.signal.aborted) {setOptions(next);setSelected("");setUncertain(false);setBlocked(false);setMessage("");}
+        if (!abort.signal.aborted) {setOptions(next);setSelected("");setUncertain(false);setBlocked(false);setMessage("");onVerified(readEpoch);}
       }).catch(() => {if (!abort.signal.aborted) {setBlocked(true);setMessage("Setup targets unavailable. Reload before creating files.");}});
     return () => abort.abort();
-  }, [projectId, revision]);
+  }, [projectId, revision, epoch, onVerified]);
   if (!options) return <section className="panel"><p role="status">{message || "Loading checkout choices…"}</p><button type="button" onClick={() => setRevision(value => value + 1)}>Reload setup</button></section>;
   const setup = (action: SupervisionSetupInput["action"]) => {
     const checkout = options.checkouts.find(value => checkoutKey(value) === selected);
     const expectedFolderStatus = action === "enable_existing" ? "present" : "missing";
-    if (!checkout || busy || blocked || !options.available || checkout.folderStatus !== expectedFolderStatus) return;
-    setBusy(true);setMessage("");
+    if (!checkout || busy || blocked || locked || !options.available || checkout.folderStatus !== expectedFolderStatus) return;
+    setBusy(true);setMessage("");onRequest(true);
     void fetch("/api/guidance/supervision-setup", {method: "POST", credentials: "omit",
       headers: {"Content-Type": "application/json", ...sessionHeaders(), "x-csrf-token": getCsrfToken()},
       body: JSON.stringify(buildSupervisionSetupIntent(projectId, options.generation, checkout, action))})
@@ -157,12 +190,15 @@ function SupervisionSetupPanel({projectId, onComplete, onStateChange}: {projectI
         if (!response.ok) throw new Error("unknown");
         const result = Schema.decodeUnknownSync(SupervisionSetupResult)(await response.json());
         if (result.control.projectId !== projectId || result.workspaceRoot !== checkout.workspaceRoot || result.branch !== checkout.branch) throw new Error("scope_mismatch");
+        // a result that arrives after this panel was replaced stays fenced until a fresh setup read
+        if (!mounted.current) return;
         if (result.status === "saved") onComplete(result.control, result.message);
         else {setBlocked(true);setUncertain(true);setMessage(result.message);}
-      }).catch(() => {setBlocked(true);setUncertain(true);setMessage("The setup outcome could not be confirmed. Reload and inspect the selected checkout before trying again.");})
-      .finally(() => setBusy(false));
+      }).catch(() => {if (mounted.current) {setBlocked(true);setUncertain(true);setMessage("The setup outcome could not be confirmed. Reload and inspect the selected checkout before trying again.");}})
+      .finally(() => {onRequest(false);if (mounted.current) setBusy(false);});
   };
-  return <SupervisionSetupView options={options} selected={selected} busy={busy} blocked={blocked} message={message}
+  return <SupervisionSetupView options={options} selected={selected} busy={busy} blocked={blocked || locked}
+    message={message || (locked ? "The previous setup outcome is not confirmed yet. Reload setup after it settles to check the checkout again." : "")}
     onSelect={setSelected} onSetup={setup} onReload={() => setRevision(value => value + 1)} />;
 }
 

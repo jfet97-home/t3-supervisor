@@ -236,7 +236,7 @@ test("Supervisor team stays distinct from operational workflows and shows member
       currentState: "Quarantined: the root owns its former operational coverage; unresolved writes and notices remain fenced, and the native conversation may still exist or run.",
       lastAssessment: null,
       pendingHandovers: [
-        {targetThreadId: "child-three", targetTitle: "Release subtree", direction: "incoming", state: "delivered", summary: "Notice delivered, awaiting acknowledgment.", updatedAt: 1_800_000_000_198},
+        {targetThreadId: "child-three", targetTitle: "Release subtree", direction: "incoming", state: "delivered", summary: "Notice delivered, awaiting acknowledgment.", updatedAt: 1_800_000_000_198, runStatus: "interrupted"},
         {targetThreadId: "child-four", targetTitle: "Build subtree", direction: "outgoing", state: "failed", summary: "Native delivery was definitely rejected.", updatedAt: 1_800_000_000_199},
       ],
       issues: [],
@@ -258,6 +258,7 @@ test("Supervisor team stays distinct from operational workflows and shows member
   assert.match(html, /Idle/);
   assert.match(html, /Current state:<\/strong> An operational-child guidance delivery is uncertain/);
   assert.doesNotMatch(html, /Available for the next check-in/);
+  assert.match(html, /Native run ended interrupted before confirming; nothing was resent/);
   assert.match(html, /Current assignments/);
   assert.match(html, /Test subtree/);
   assert.match(html, /Last assessment: The child tests found a missing case/);

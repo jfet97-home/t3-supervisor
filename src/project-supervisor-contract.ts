@@ -23,6 +23,7 @@ const SupervisorTeamHandover = Schema.Struct({
   state: Schema.Literals(["pending", "sending", "uncertain", "delivered", "failed", "superseded"]),
   summary: Schema.String,
   updatedAt: Schema.Number,
+  runStatus: Schema.optionalKey(Schema.String),
 });
 const SupervisorTeamIssue = Schema.Struct({
   id: Schema.String,

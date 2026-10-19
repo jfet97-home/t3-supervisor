@@ -509,6 +509,7 @@ function ProjectSupervisorTeamPanel({team, settings, mainThreadId}: {team: Proje
                 <strong>Pending handovers</strong>
                 <ul className="small">{member.pendingHandovers.map((handover, index) => <li key={`${handover.targetThreadId}:${handover.direction}:${index}`}>
                   {handover.direction === "incoming" ? "Incoming" : "Outgoing"} · <a href={threadHref(handover.targetThreadId)}>{handover.targetTitle ?? `Operational subtree ${handover.targetThreadId}`}</a> · {handoverStateLabels[handover.state]}
+                  {handover.runStatus && <> · Native run ended {handover.runStatus.replace("_", " ")} before confirming; nothing was resent</>}
                   {handover.summary && <> — {handover.summary}</>}
                 </li>)}</ul>
               </div>}

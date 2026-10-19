@@ -693,11 +693,15 @@ test("write arguments above the inline-input bound are rejected before native re
 test("credential-like file references are rejected at the MCP boundary before native reads", async () => {
   const fixture = await makeFixture();
   try {
+    const secret = "ghp_" + "A".repeat(32);
     const input = {operationId: "sensitive-reference", workflowId: "not-created", expectedRevision: 1,
-      plan: sequencePlan([{...localStep("Check notes", "Review supporting files."), references: ["docs/ghp_" + "A".repeat(32) + ".md"]}]),
+      plan: sequencePlan([localStep("Prepare", "Prepare the change."), {...localStep("Check notes", "Review supporting files."), references: ["docs/ok.md", `docs/${secret}.md`]}]),
       note: "Reject unsafe supporting paths."};
     const result = await fixture.controller.write(applyArgs(fixture, input));
     assert.equal(result.status, "invalid");
+    assert.deepEqual("diagnostic" in result ? result.diagnostic : null, {code: "reference_credential_like", path: "/input/plan/nodes/1/references/1",
+      expected: "references[1] is invalid: a reference cannot contain credential-like text."});
+    assert.equal(JSON.stringify(result).includes(secret), false, "the rejected path is never echoed");
     assert.deepEqual(fixture.projectionCalls, []);
     assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
   } finally {await closeFixture(fixture);}

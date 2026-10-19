@@ -165,7 +165,12 @@ A definite failed check-in or handover notification requires the root's explicit
 known definite notification failures for a current ready helper without clearing
 unrelated unknown effects. Failed check-in acknowledgements wait for unresolved
 member requests. An uncertain notice or request keeps its original identity and
-remains fenced.
+remains fenced. A delivered notice whose native run ended interrupted, failed or
+cancelled before its completion marker stays delivered and fenced: the team view
+shows that run status, a single attention item explains that nothing was resent, and
+the root keeps responsibility. An interrupted run proves neither rejection nor
+non-execution, so there is no automatic replacement delivery; deciding how to
+continue needs a reviewed conversation, reassignment or quarantine.
 
 ## Helper guidance
 
