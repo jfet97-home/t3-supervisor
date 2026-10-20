@@ -400,7 +400,8 @@ export class SupervisorHelperTransport {
         return contradicts ? "uncertain" : settle("rejected");
       }
       if (!response.ok) return "uncertain";
-      const result: unknown = await response.json();
+      // a 2xx is recorded acceptance even when its body cannot be read; only the delivery id is then unknown
+      const result: unknown = await response.json().catch(() => null);
       const nativeDeliveryId = record(result) && typeof result.deliveryId === "string" ? result.deliveryId : undefined;
       const posted: Delivery = {...posting, state: "posted", ...(nativeDeliveryId ? {nativeDeliveryId} : {})};
       this.save(binding, posted);

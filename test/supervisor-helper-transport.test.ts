@@ -1706,6 +1706,29 @@ test("an accepted POST later logged as a pre-render rejection is unresolved thro
   }
 });
 
+test("a 2xx whose body cannot be read is still recorded acceptance, so a later pre-render rejection stays unresolved", async () => {
+  const replies = {
+    "non-JSON body": () => new Response("accepted", {status: 202}),
+    "reset body": () => new Response(new ReadableStream({start: controller => controller.error(new Error("socket reset"))}), {status: 202}),
+  };
+  for (const [name, reply] of Object.entries(replies)) {
+    const f = await fixture();
+    try {
+      const transport = new SupervisorHelperTransport({...f.options, fetch: async () => {f.state.posts++;return reply();}});
+      const input = {threadId: "helper", commandId: `unread-${name}`, messageId: `unread-${name}-message`, text: `Unread ${name} body`};
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain", name);
+      assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {state?: string}).state, "posted", name);
+      addNativeWebhookDelivery(f, {id: "unread-delivery", body: helperDeliveryBody(input.messageId, input.text), renderedPrompt: null, outcome: "rejected_signature"});
+      const unreadable = new SupervisorHelperTransport({...f.options, projection: async () => {throw new Error("unreadable");}});
+      assert.equal(await unreadable.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain", name);
+      const receipt = JSON.parse(receiptDocument(f, input.messageId)) as {state?: string; contradicted?: true};
+      assert.equal(receipt.contradicted, true, name);
+      assert.equal(receipt.state, "rejected", name);
+      assert.equal(f.state.posts, 1, name);
+    } finally {await f.cleanup();}
+  }
+});
+
 test("a rejected receipt an earlier version left with a bound rendering stays unresolved, and one without stays rejected", async () => {
   for (const rendered of [true, false]) {
     const f = await fixture();
