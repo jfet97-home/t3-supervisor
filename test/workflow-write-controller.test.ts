@@ -2755,11 +2755,12 @@ test("planned-first and status-evidence pointers address the submitted arguments
 });
 
 test("a pointer inside a service-expanded workflow maps to the nearest submitted node", () => {
-  const submitted = {kind: "sequence", nodes: [{kind: "step", status: "planned"},
+  const submitted = {kind: "sequence", nodes: [{kind: "step"},
     {kind: "workflow", definitionId: "review", status: "planned"},
     {kind: "workflow", definitionId: "review", plan: {kind: "sequence", nodes: [{kind: "step", status: "completed"}]}}]};
   assert.equal(submittedApplyPointer(submitted, "/plan/nodes/2/plan/nodes/0/status"), "/input/plan/nodes/2/plan/nodes/0/status");
   assert.equal(submittedApplyPointer(submitted, "/plan/nodes/1/plan/nodes/0/status"), "/input/plan/nodes/1");
+  assert.equal(submittedApplyPointer(submitted, "/plan/nodes/0/status"), "/input/plan/nodes/0", "an omitted status is reported at its node");
   assert.equal(submittedApplyPointer(submitted, "/plan/nodes/9/status"), "/input/plan");
   assert.equal(submittedApplyPointer(undefined, "/plan/nodes/0/status"), "/input");
   assert.equal(submittedApplyPointer(submitted, "/status"), "/input/status");

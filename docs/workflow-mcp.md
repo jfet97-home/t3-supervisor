@@ -137,7 +137,8 @@ code `new_node_must_start_planned`. Its path is a JSON pointer into the submitte
 arguments, like the other apply diagnostics, such as `/input/plan/nodes/0/status` or
 `/input/plan/nodes/1/nodes/0/status`, using only structural indexes. A node inside a
 workflow that the service expanded (no submitted nested `plan`) is reported at its
-nearest submitted ancestor, such as `/input/plan/nodes/1`. A status change without
+nearest submitted ancestor, such as `/input/plan/nodes/1`; a node whose omitted status
+the service inherited is reported at that node. A status change without
 `status_changed` evidence is rejected with `missing_status_changed_evidence` and a
 pointer to the changed field: `/input/status` for the workflow document, or the same
 node status pointer. Other plan rejections keep `invalid_plan_or_missing_status_evidence`.
