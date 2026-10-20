@@ -176,8 +176,10 @@ wording change, applies only to an attempt that was never posted. T3 renders the
 posted body into the native user message, and published builds wrap it as untrusted
 webhook data. The service therefore binds, once, the rendered prompt that T3 reports
 in the native delivery detail for exactly that attempt. The detail must name the same
-delivery and task, a POST of JSON, the exact untruncated body and byte count, and no
-missing fields. The native message must then equal that rendering, in the owned
+delivery, task and delivery timestamp, a POST of JSON, the exact untruncated body and
+byte count, and no missing fields. A bound rendering is write-once: every later write
+of the same attempt keeps it, so an overlapping reconciliation or a late POST reply can
+neither replace nor erase it. The native message must then equal that rendering, in the owned
 helper thread, with the same scheduled task and a server origin. The sent text,
 hash and identities never change, nothing is reposted, and missing, truncated or
 mismatched detail leaves the attempt unmatched and fenced. A lost reply is recovered

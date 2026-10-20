@@ -206,6 +206,81 @@ test("hostile or incomplete native delivery detail never binds a rendering nor c
   }
 });
 
+const renderedReceipt = (f: Awaited<ReturnType<typeof fixture>>, messageId: string): unknown =>
+  (JSON.parse(receiptDocument(f, messageId)) as {renderedText?: unknown}).renderedText;
+const postedWrapped = async (f: Awaited<ReturnType<typeof fixture>>, options = f.options) => {
+  f.state.renderWrapper = publishedWrapper;
+  const input = {threadId: "helper", commandId: "write-once", messageId: "write-once-message", text: "Check-in write-once"};
+  const transport = new SupervisorHelperTransport(options);
+  assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "waiting");
+  addNativeWebhookDelivery(f, {id: "native-delivery", body: f.state.lastPostedBody!, renderedPrompt: publishedWrapper(input.text), outcome: "accepted"});
+  return {input, transport};
+};
+
+test("native detail without a delivery timestamp binds no rendering", async () => {
+  const f = await fixture();
+  try {
+    const {input, transport} = await postedWrapped(f);
+    delete f.state.webhookDeliveries[0]!.receivedAt;
+    delete (f.state.webhookDeliveryDetails.get("native-delivery")!.delivery as Record<string, unknown>).receivedAt;
+    await transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000));
+    assert.equal(renderedReceipt(f, input.messageId), undefined);
+  } finally {await f.cleanup();}
+});
+
+test("an overlapping reconciliation can neither replace nor erase a proven rendering", async () => {
+  for (const late of ["detail_failure", "different_rendering"] as const) {
+    const f = await fixture();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    try {
+      let detailCalls = 0;
+      const rpc = f.options.rpc;
+      const {input} = await postedWrapped(f);
+      const transport = new SupervisorHelperTransport({...f.options, rpc: async (tag, args) => {
+        if (tag === "scheduledTasks.getWebhookDelivery" && ++detailCalls === 1) {
+          entered.resolve();await release.promise;
+          if (late === "detail_failure") throw new Error("temporary_detail_failure");
+          const value = structuredClone(await rpc(tag, args)) as {delivery: Record<string, unknown>};
+          value.delivery.renderedPrompt = "earlier snapshot";
+          return value;
+        }
+        return rpc(tag, args);
+      }});
+      const slow = transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(5000));
+      await entered.promise;
+      await transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(5000));
+      assert.equal(renderedReceipt(f, input.messageId), publishedWrapper(input.text));
+      release.resolve();await slow;
+      assert.equal(renderedReceipt(f, input.messageId), publishedWrapper(input.text), `${late}: the first proven rendering stays`);
+      assert.equal(f.state.posts, 1);
+    } finally {release.resolve();await f.cleanup();}
+  }
+});
+
+test("a late POST reply keeps a rendering proven while the POST was in flight", async () => {
+  const f = await fixture();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  try {
+    f.state.renderWrapper = publishedWrapper;
+    const input = {threadId: "helper", commandId: "in-flight", messageId: "in-flight-message", text: "Check-in in flight"};
+    const fetch = f.options.fetch;
+    const transport = new SupervisorHelperTransport({...f.options, fetch: async (url, options) => {
+      const response = await fetch(url, options);
+      entered.resolve();await release.promise;return response;
+    }});
+    const sending = transport.send(f.binding, input, AbortSignal.timeout(5000));
+    await entered.promise;
+    addNativeWebhookDelivery(f, {id: "native-delivery", body: f.state.lastPostedBody!, renderedPrompt: publishedWrapper(input.text), outcome: "accepted"});
+    await transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(5000));
+    assert.equal(renderedReceipt(f, input.messageId), publishedWrapper(input.text));
+    release.resolve();await sending;
+    assert.equal(renderedReceipt(f, input.messageId), publishedWrapper(input.text));
+    assert.equal(f.state.posts, 1);
+  } finally {release.resolve();await f.cleanup();}
+});
+
 test("a lost-reply delivery is recovered by its exact body and binds its published rendering", async () => {
   for (const outcome of ["accepted", "dispatch_failed"] as const) {
     const f = await fixture();

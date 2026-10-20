@@ -44,9 +44,19 @@ export class SupervisorHelperTransport {
     this.options.store.store.db.prepare("INSERT INTO supervisor_helper_channels VALUES(?,?,?,?) ON CONFLICT(owner_thread_id,owner_generation,helper_thread_id) DO UPDATE SET document=excluded.document")
       .run(binding.threadId, binding.generation, channel.helperThreadId, JSON.stringify(channel));
   }
+  // a rendering bound to an attempt is write-once: every later write of the same attempt re-reads and keeps it,
+  // so an overlapping reconciliation or a late POST reply can neither replace nor erase it
   private save(binding: BindingRecord, value: Delivery): void {
-    this.options.store.store.db.prepare("INSERT INTO supervisor_helper_deliveries VALUES(?,?,?,?) ON CONFLICT(owner_thread_id,owner_generation,message_id) DO UPDATE SET document=excluded.document")
-      .run(binding.threadId, binding.generation, value.messageId, JSON.stringify(value));
+    const db = this.options.store.store.db;
+    const write = () => {
+      const row = db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
+        .get(binding.threadId, binding.generation, value.messageId);
+      const stored = row ? JSON.parse(String(row.document)) as Delivery : null;
+      const next = stored && stored.hash === value.hash && typeof stored.renderedText === "string" ? {...value, renderedText: stored.renderedText} : value;
+      db.prepare("INSERT INTO supervisor_helper_deliveries VALUES(?,?,?,?) ON CONFLICT(owner_thread_id,owner_generation,message_id) DO UPDATE SET document=excluded.document")
+        .run(binding.threadId, binding.generation, value.messageId, JSON.stringify(next));
+    };
+    if (db.isTransaction) write(); else this.options.store.store.transaction(write);
   }
   hasDelivery(binding: BindingRecord, input: SupervisorHelperMessage): boolean {
     const row = this.options.store.store.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
@@ -78,7 +88,8 @@ export class SupervisorHelperTransport {
   // delivery and task, POST JSON, the exact untruncated body and byte count, and no missing template fields.
   private exactDetail(delivery: Delivery, detail: unknown, deliveryId: string, summary: Record<string, unknown>): Record<string, unknown> | null {
     const expectedBody = JSON.stringify({batchId: delivery.messageId, text: delivery.text});
-    if (!record(detail) || detail.id !== deliveryId || detail.taskId !== delivery.taskId || detail.receivedAt !== summary.receivedAt ||
+    if (!record(detail) || detail.id !== deliveryId || detail.taskId !== delivery.taskId ||
+      typeof detail.receivedAt !== "string" || detail.receivedAt.length === 0 || detail.receivedAt !== summary.receivedAt ||
       detail.method !== "POST" || summary.method !== "POST" || detail.contentType !== "application/json" || summary.contentType !== "application/json" ||
       detail.bodyBytes !== new TextEncoder().encode(expectedBody).length || detail.bodyBytes !== summary.bodyBytes ||
       detail.outcome !== summary.outcome || typeof detail.outcome !== "string" || detail.bodyTruncated !== false || detail.body !== expectedBody ||
@@ -114,7 +125,8 @@ export class SupervisorHelperTransport {
       const value = await this.options.rpc!("scheduledTasks.getWebhookDelivery", {id: delivery.taskId, deliveryId: summary.id}, signal);
       if (!record(value) || !record(value.delivery)) return null;
       const detail = value.delivery;
-      if (detail.id !== summary.id || detail.taskId !== delivery.taskId || detail.receivedAt !== summary.receivedAt ||
+      if (detail.id !== summary.id || detail.taskId !== delivery.taskId || typeof detail.receivedAt !== "string" || detail.receivedAt.length === 0 ||
+        detail.receivedAt !== summary.receivedAt ||
         detail.method !== summary.method || detail.contentType !== summary.contentType || detail.bodyBytes !== summary.bodyBytes ||
         detail.outcome !== summary.outcome || typeof detail.body !== "string") return null;
       if (detail.bodyTruncated !== false) return null;
