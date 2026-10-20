@@ -36,8 +36,10 @@ const nodesOf = (projection: Projection): Array<Record<string, unknown>> => {
 };
 
 const webhookTransport = (result: "waiting" | "busy" | "uncertain" | "rejected" = "waiting"):
-  {transport: SupervisorHelperDeliveryTransport; sent: Map<string, {threadId: string; commandId: string; text: string; taskId: string}>; attempts: string[]; retired: string[]} => {
+  {transport: SupervisorHelperDeliveryTransport; sent: Map<string, {threadId: string; commandId: string; text: string; taskId: string}>; attempts: string[]; retired: string[];
+    rejectedReceipts: Set<string>} => {
   const sent = new Map<string, {threadId: string; commandId: string; text: string; taskId: string}>();
+  const rejectedReceipts = new Set<string>();
   const attempts: string[] = [];
   const retired: string[] = [];
   const transport: SupervisorHelperDeliveryTransport = {
@@ -47,6 +49,7 @@ const webhookTransport = (result: "waiting" | "busy" | "uncertain" | "rejected" 
       const delivery = sent.get(message.messageId);
       return Boolean(delivery && delivery.threadId === message.threadId && delivery.commandId === message.commandId && delivery.text === message.text);
     },
+    reconcileDelivery: async (_binding, message) => !sent.has(message.messageId) ? "absent" : rejectedReceipts.has(message.messageId) ? "rejected" : "uncertain",
     matchesMessage: (_binding, logicalId, text, native) => {
       const delivery = sent.get(logicalId);
       return Boolean(delivery && delivery.text === text && native.threadId === delivery.threadId && native.text === text &&
@@ -54,7 +57,7 @@ const webhookTransport = (result: "waiting" | "busy" | "uncertain" | "rejected" 
     },
     retire: async (_binding, threadId) => {retired.push(threadId);return true;},
   };
-  return {transport, sent, attempts, retired};
+  return {transport, sent, attempts, retired, rejectedReceipts};
 };
 
 const fixture = async () => {
@@ -1149,7 +1152,7 @@ test("native review2 completion closes interrupted review1 and original across r
   assert.equal(f.blocking(), false);
   assert.equal(f.transport.attempts.filter(value => value.includes("handover-review:")).length, 2, "each review was sent once");
   const event = f.teamStore.snapshot(f.binding).events.find(value => value.kind === "handover_review_requested")!;
-  assert.ok(event.summary.includes(f.original.id));
+  assert.ok(!event.summary.includes(f.original.id), "visible event text carries no raw notification ID");
   assert.ok(!event.summary.includes(first.reviewNote!));
 });
 
@@ -1231,6 +1234,21 @@ test("native late original completion supersedes an unsent review before deliver
   assert.equal(f.current(review).state, "superseded");
   assert.equal(f.transport.attempts.some(value => value.includes(review.id)), false);
   assert.equal(f.teamStore.unresolvedRequests(f.binding).length, 1);
+});
+
+test("a durably rejected review receipt fails the review after a crash without posting again", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  const review = f.review("crash-rejected-receipt");
+  await f.cycles();
+  const messageId = `supervisor-team-notice:${review.id}:attempt:0`;
+  assert.ok(f.transport.sent.has(messageId));
+  assert.ok(["sending", "uncertain"].includes(f.current(review).state));
+  const posts = f.transport.attempts.filter(value => value === messageId).length;
+  f.transport.rejectedReceipts.add(messageId);
+  f.restart();await f.cycles();
+  assert.equal(f.current(review).state, "failed", "persisted rejection evidence is reconciled read-only");
+  assert.equal(f.transport.attempts.filter(value => value === messageId).length, posts, "the review is never posted again");
+  assert.equal(f.teamStore.retryFailedNotifications(f.binding, f.member.threadId), 1, "its chain is still open, so the root can retry");
 });
 
 test("the team view states review progress and completion in words without the root note", async t => {

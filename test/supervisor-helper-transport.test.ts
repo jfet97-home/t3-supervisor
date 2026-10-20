@@ -148,13 +148,33 @@ test("uncertain webhook POST never repeats across restart, and native evidence c
     const restarted = new SupervisorHelperTransport(f.options);
     assert.equal(await restarted.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     assert.equal(f.state.posts, 1);
-    assert.equal(await restarted.send(f.binding, {...input, text: "changed"}, AbortSignal.timeout(1000)), "rejected");
+    assert.equal(await restarted.send(f.binding, {...input, text: "changed"}, AbortSignal.timeout(1000)), "uncertain",
+      "changed content is refused without claiming the earlier unknown POST was not delivered");
     f.helper.messages.push({id: "recovered-native-message", threadId: "helper", scheduledTaskId: f.tasks[0]!.id,
       runId: "run", nodeId: "root", role: "user", text: input.text, creationSource: "server", streaming: false,
       createdAt: "2026-10-16T10:00:00Z", updatedAt: "2026-10-16T10:00:00Z"});
     assert.equal(await restarted.send(f.binding, input, AbortSignal.timeout(1000)), "waiting");
     assert.equal(f.state.posts, 1);
   } finally {await f.cleanup();}
+});
+
+test("a refusal after an unknown POST never reports the original identity as rejected", async () => {
+  for (const refusal of ["helper_archived", "binding_replaced"] as const) {
+    const f = await fixture();
+    try {
+      f.state.loseReply = true;f.state.emitMessage = false;
+      const input = {threadId: "helper", commandId: "unknown", messageId: "unknown-message", text: "Unknown outcome marker"};
+      const transport = new SupervisorHelperTransport(f.options);
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+      if (refusal === "helper_archived") f.helper.thread.archivedAt = "2026-10-16T11:00:00Z";
+      else f.store.setBinding({...f.binding, state: "missing"});
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain", refusal);
+      assert.equal(f.state.posts, 1);
+      const fresh = {...input, commandId: "never-posted", messageId: "never-posted-message"};
+      assert.equal(await transport.send(f.binding, fresh, AbortSignal.timeout(1000)), "rejected", "nothing was posted for this identity");
+      assert.equal(f.state.posts, 1);
+    } finally {await f.cleanup();}
+  }
 });
 
 test("accepted webhook without a native delivery identity remains uncertain without reposting", async () => {

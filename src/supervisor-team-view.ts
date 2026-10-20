@@ -59,7 +59,7 @@ export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRe
             (guideCountsByMember.get(member.threadId) ?? 0) > 0 ? "An operational-child steer is still awaiting native-history confirmation on its original target; no alternate route has been sent." :
           pending?.state === "uncertain" ? "Check-in delivery is uncertain; its original identity is retained." :
             pending ? "A bounded monitoring turn is in progress." :
-            reviewingMembers.has(member.threadId) ? "A root-requested review of an interrupted handover is in progress; the root keeps responsibility until its own native run completes." :
+            reviewingMembers.has(member.threadId) ? "A root-requested review of an interrupted handover is in progress; the root keeps responsibility until the helper's review run completes with its marker, and request fences stay separate." :
             interruptedNotices.has(member.threadId) ? "A delivered handover notice ended before confirming; the root keeps responsibility and nothing was resent." :
             unconfirmedNotices.has(member.threadId) ? "A handover notice is awaiting confirmation; the root keeps responsibility until it is confirmed." :
             "Available for the next check-in or reassignment.",

@@ -160,7 +160,10 @@ follow-up task records or completion wakes to the root. Direct WebSocket or MCP
 helper messages have different T3 semantics. Webhook POSTs have no client idempotency
 key: an uncertain send is never posted again; the service reconciles its original
 scheduled-message identity and request text, retaining unresolved work meanwhile.
-A definite failed check-in or handover notification requires the root's explicit
+A notice or check-in is `failed` only when T3 definitively rejected that exact POST or
+nothing was ever posted for its identity. A later refusal (helper unavailable, binding
+replaced, changed content) of an identity whose earlier POST has an unknown outcome
+keeps it uncertain and fenced. A definite failed check-in or handover notification requires the root's explicit
 `retry` team action or reassignment. The retry action only starts a new attempt for
 known definite notification failures for a current ready helper without clearing
 unrelated unknown effects. Failed check-in acknowledgements wait for unresolved
@@ -219,16 +222,20 @@ resolvedAt}`. Those members remain `delivered`, retaining IDs, message bytes and
 bookkeeping, not proof that external effects did not happen.
 
 A late native completion of the original can still acknowledge its actual proven
-run, preserving historical interruption evidence. Any closure in a chain makes
-the frozen chain of an unsent review stale, so it supersedes reviews that were
-never posted (pending) or were definitively rejected (failed), keeping their
-attempt and failure reason; the root can then review the remaining open set.
+run, preserving historical interruption evidence. A review that was never posted
+(pending) or was definitively rejected (failed) cannot have native effects. It is
+superseded, keeping its attempt and failure reason, once an exact attempt in its own
+frozen chain closes or its transfer epoch ends, including when a definite rejection
+arrives after that closure. No review can be created while such a review exists, so
+its open set only shrinks; an attempt that was already closed gaining its own
+acknowledgement changes nothing. The root can then review the remaining open set.
 Sending, uncertain or delivered reviews remain independent fences until their own
-completion or a later review closes them, without double resolution. Ending a
-transfer epoch through missing or quarantine handling likewise supersedes that
-epoch's pending and definitively failed notices, never sent or uncertain ones; a
-sent review completing after an epoch change acknowledges itself but cannot close
-the stale original. Reassignment
+completion or a later review closes them, without double resolution. A posted review
+is never sent again: its receipt is reconciled read-only, so durable or native
+rejection evidence still fails it after a restart. Ending a transfer epoch through
+missing or quarantine handling likewise supersedes that epoch's pending and
+definitively failed notices, never sent or uncertain ones; a sent review completing
+after an epoch change acknowledges itself but cannot close the stale original. Reassignment
 or release cannot bypass an ongoing transfer; revoking a helper through missing or
 quarantine handling advances the epoch before a new assignment can be made.
 

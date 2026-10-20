@@ -436,7 +436,7 @@ const handoverStateLabels = {
   uncertain: "Delivery uncertain",
   delivered: "Delivered; acknowledgment pending",
   failed: "Delivery definitely failed; root recovery required",
-  superseded: "Superseded; acknowledgment still pending",
+  superseded: "Superseded before delivery; no acknowledgment is needed",
 } as const;
 const handoverReviewLabels = {
   in_progress: "Root-requested review in progress; the root keeps responsibility",

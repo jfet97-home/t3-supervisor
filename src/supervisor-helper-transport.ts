@@ -124,30 +124,48 @@ export class SupervisorHelperTransport {
     channel = {...channel, createdAt: task.createdAt, state: "ready"};this.saveChannel(binding, channel);
     return {channel, task};
   }
+  private async reconcileReceipt(binding: BindingRecord, delivery: Delivery, signal: AbortSignal): Promise<SupervisorHelperSendResult> {
+    const native = await this.resolveWebhookDelivery(delivery, signal);
+    if (native && rejectedWebhookOutcomes.has(native.outcome)) {
+      this.save(binding, {...delivery, nativeDeliveryId: native.id, state: "rejected"});return "rejected";
+    }
+    if (native) this.save(binding, {...delivery, nativeDeliveryId: native.id, state: "posted"});
+    return native?.outcome === "accepted" ? "waiting" :
+      delivery.state === "posted" && delivery.nativeDeliveryId ? "waiting" : "uncertain";
+  }
+  // Read-only reconciliation of an existing receipt; it never posts. A durable rejected receipt or a native
+  // rejected webhook outcome proves non-delivery; anything else leaves the identity unresolved.
+  async reconcileDelivery(binding: BindingRecord, input: SupervisorHelperMessage, signal: AbortSignal): Promise<"absent" | SupervisorHelperSendResult> {
+    const row = this.options.store.store.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
+      .get(binding.threadId, binding.generation, input.messageId);
+    if (!row) return "absent";
+    const delivery = JSON.parse(String(row.document)) as Delivery;
+    if (delivery.hash !== workflowRequestHash(input)) return "uncertain";
+    if (delivery.state === "rejected") return "rejected";
+    if (!this.options.rpc) return "uncertain";
+    try {return await this.reconcileReceipt(binding, delivery, signal);} catch {return "uncertain";}
+  }
   async send(binding: BindingRecord, input: SupervisorHelperMessage, signal: AbortSignal): Promise<SupervisorHelperSendResult> {
     if (!this.options.rpc || !this.options.store.enabled(binding.projectId)) return "busy";
-    const current = this.options.store.binding(binding.projectId, binding.mainThreadId);
-    if (current?.threadId !== binding.threadId || current.generation !== binding.generation || current.state !== "ready") return "rejected";
     const row = this.options.store.store.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
       .get(binding.threadId, binding.generation, input.messageId);
     const hash = workflowRequestHash(input);
     const delivery = row ? JSON.parse(String(row.document)) as Delivery : null;
-    if (delivery && delivery.hash !== hash) return "rejected";
+    // "rejected" promises this identity was never delivered: only native rejection evidence or the absence
+    // of any prior POST proves that. A later refusal of an earlier unknown POST keeps it uncertain.
+    const refused: SupervisorHelperSendResult = delivery && delivery.state !== "rejected" ? "uncertain" : "rejected";
+    const current = this.options.store.binding(binding.projectId, binding.mainThreadId);
+    if (current?.threadId !== binding.threadId || current.generation !== binding.generation || current.state !== "ready") return refused;
+    if (delivery && delivery.hash !== hash) return refused;
     if (delivery?.state === "rejected") return "rejected";
     try {
       const helper = await this.options.projection(input.threadId, signal);
       if (helper.thread.id !== input.threadId || helper.thread.lineage.parentThreadId !== binding.threadId ||
         helper.thread.lineage.relationshipToParent !== "subagent" || helper.thread.archivedAt != null || helper.thread.deletedAt != null ||
-        !this.options.store.ownedIds.has(input.threadId)) return "rejected";
+        !this.options.store.ownedIds.has(input.threadId)) return refused;
       if (delivery) {
         if (helper.messages.some(message => this.matchesMessage(binding, input.messageId, input.text, message))) return "waiting";
-        const native = await this.resolveWebhookDelivery(delivery, signal);
-        if (native && rejectedWebhookOutcomes.has(native.outcome)) {
-          this.save(binding, {...delivery, nativeDeliveryId: native.id, state: "rejected"});return "rejected";
-        }
-        if (native) this.save(binding, {...delivery, nativeDeliveryId: native.id, state: "posted"});
-        return native?.outcome === "accepted" ? "waiting" :
-          delivery.state === "posted" && delivery.nativeDeliveryId ? "waiting" : "uncertain";
+        return await this.reconcileReceipt(binding, delivery, signal);
       }
       if (!Array.isArray(helper.runtimeRequests) || helper.runtimeRequests.some(item => !record(item) || item.status === "pending")) return "busy";
       const channel = await this.readyChannel(binding, helper, signal);
@@ -180,4 +198,4 @@ export class SupervisorHelperTransport {
     } catch {return false;}
   }
 }
-export type SupervisorHelperDeliveryTransport = Pick<SupervisorHelperTransport, "send" | "hasDelivery" | "matchesMessage" | "retire">;
+export type SupervisorHelperDeliveryTransport = Pick<SupervisorHelperTransport, "send" | "hasDelivery" | "reconcileDelivery" | "matchesMessage" | "retire">;

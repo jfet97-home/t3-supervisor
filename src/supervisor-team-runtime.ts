@@ -567,13 +567,20 @@ export class SupervisorTeamRuntime {
       else if (this.notificationNeedsAttention(notification)) this.serviceNotificationAttention(binding, notification);
       return;
     }
-    // The transport durably records an attempt before POST. With a receipt, an
-    // uncertain review only waits for visibility; without one, a busy/pre-send
-    // crash has not posted anything and the ordinary transport may try delivery.
-    const postedReview = notification.kind === "handover_review" && ["sending", "uncertain"].includes(notification.state) &&
-      this.options.helperTransport.hasDelivery(binding, {threadId: member.threadId, commandId: messageId, messageId, text});
-    if (notification.state === "delivered" || postedReview) {
+    if (notification.state === "delivered") {
       if (this.notificationNeedsAttention(notification)) this.serviceNotificationAttention(binding, notification);
+      return;
+    }
+    // The transport durably records an attempt before POST. With a receipt, a review is never sent again:
+    // it only reconciles that receipt read-only, so durable or native rejection evidence still fails it
+    // after a crash. Without one, a busy/pre-send crash has not posted anything and ordinary delivery runs.
+    const message = {threadId: member.threadId, commandId: messageId, messageId, text};
+    if (notification.kind === "handover_review" && ["sending", "uncertain"].includes(notification.state) &&
+      this.options.helperTransport.hasDelivery(binding, message)) {
+      if (!this.consumeReadBudget(binding)) return;
+      const receipt = await this.options.helperTransport.reconcileDelivery(binding, message, signal);
+      if (receipt === "rejected") this.markNotificationRejected(binding, notification);
+      else if (this.notificationNeedsAttention(notification)) this.serviceNotificationAttention(binding, notification);
       return;
     }
     if (member.state !== "ready" || member.epoch !== notification.memberEpoch || !this.consumeReadBudget(binding)) return;

@@ -484,6 +484,64 @@ test("a rejected review never strands its chain, while an unknown review POST ke
   }
 });
 
+test("an unsent review retires when an exact attempt of its own chain closes, and only then", async t => {
+  for (const state of ["pending", "failed"] as const) {
+    const f = await interruptedHandover();t.after(f.cleanup);
+    const first = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, `first-${state}`)));
+    f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, f.original.id, 0, "late-original");
+    const second = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, `second-${state}`, [first]));
+    if (state === "failed") f.team.markNotificationRejected(f.binding, f.binding.threadId, second.id, "Definite rejection", 0);
+    assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === second.id)?.state, state, "its chain [first] is still open");
+    f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, first.id, 0, "late-first-review");
+    assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === second.id)?.state, "superseded");
+    assert.throws(() => f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, `third-${state}`, [first])), /supervisor_team_review_chain_closed/u);
+    f.team.settleRequest(f.binding, "guide:unresolved");
+    f.team.completeTransfer(f.binding, "branch-a", f.transfer.epoch);
+  }
+  const f = await interruptedHandover();t.after(f.cleanup);
+  const first = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "closure-first")));
+  const second = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "closure-second", [f.original, first])));
+  f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, first.id, 0, "late-first");
+  assert.ok(f.team.snapshot(f.binding).notifications.find(value => value.id === f.original.id)?.resolvedByReview);
+  const third = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "closure-third", [second]));
+  f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, f.original.id, 0, "late-original-after-review");
+  assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === third.id)?.state, "pending",
+    "an already-closed original gaining its own acknowledgement leaves a successor over the unchanged open set");
+});
+
+test("a definite rejection arriving after its chain or transfer epoch closed is retired immediately", async t => {
+  const f = await interruptedHandover();t.after(f.cleanup);
+  const review = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "in-flight-reject"));
+  f.team.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, "sending");
+  f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, f.original.id, 0, "late-original");
+  assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === review.id)?.state, "sending", "a possibly posted review keeps its fence");
+  const rejected = f.team.markNotificationRejected(f.binding, f.binding.threadId, review.id, "Definite rejection after closure", 0);
+  assert.deepEqual({state: rejected.state, failureReason: rejected.failureReason}, {state: "superseded", failureReason: "Definite rejection after closure"});
+  f.team.settleRequest(f.binding, "guide:unresolved");
+  f.team.completeTransfer(f.binding, "branch-a", f.transfer.epoch);
+
+  const g = await fixture();t.after(g.cleanup);
+  const from = member(g.team, g.binding, "late-from", 1), to = member(g.team, g.binding, "late-to", 2);
+  activate(g.team, g.binding, "branch-a", from.threadId, 10);
+  const transfer = g.team.assign(g.binding, "branch-a", to.threadId, parents, 20);
+  const receive = g.team.snapshot(g.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch && value.kind === "handover_receive")!;
+  g.team.updateNotificationDelivery(g.binding, g.binding.threadId, receive.id, "sending");
+  g.team.markMissing(g.binding, from.threadId);
+  assert.equal(g.team.snapshot(g.binding).notifications.find(value => value.id === receive.id)?.state, "sending");
+  assert.equal(g.team.markNotificationRejected(g.binding, g.binding.threadId, receive.id, "Late definite rejection", 0).state, "superseded");
+  for (const event of g.team.snapshot(g.binding).events) g.team.acknowledgeEvent(g.binding, g.binding.threadId, event.id);
+  assert.equal(g.team.hasBlockingWork(g.binding), false);
+});
+
+test("review events identify no raw notification IDs", async t => {
+  const f = await interruptedHandover();t.after(f.cleanup);
+  const review = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "event-text")));
+  f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, review.id, 0, "event-text-run");
+  const summaries = f.team.snapshot(f.binding).events.filter(event => event.kind.startsWith("handover_review_")).map(event => event.summary);
+  assert.equal(summaries.length, 2);
+  for (const summary of summaries) for (const id of [f.original.id, review.id, "event-text-run"]) assert.equal(summary.includes(id), false);
+});
+
 test("ending a transfer epoch retires definitely undelivered notices for a still-ready recipient", async t => {
   const f = await fixture();t.after(f.cleanup);
   const from = member(f.team, f.binding, "from-helper", 1);
