@@ -73,15 +73,23 @@ The fence holds one single-line JSON object with exactly these fields, all prese
   `source` or `text` and `value` has at most 500 characters; may be empty.
 - `externalRef`: an opaque display reference of at most 200 characters, or `null`.
 
-A message may hold up to 8 records, at most one per contribution. Missing or extra
-fields, wrong types, exceeded caps and malformed JSON make a record invalid.
+A message may hold up to 8 records, at most one revision per contribution: a
+further record for the same contribution in that message is not imported
+(`contribution_duplicate_in_message`), so the next revision belongs in a later reply.
+Missing or extra fields, wrong types, exceeded caps and malformed JSON make a
+record invalid.
 
 The service imports records only from the operative main's own completed,
 non-streaming assistant messages, under the same native-order rules as other main
 protocol records: after the task's introduction and after any source edit, with
-fail-closed attribution when no protocol anchor exists. Supervisor, user, child,
-tool, streaming, quoted, indented or nested copies, records naming another task,
-and records before the introduction are ignored. Scope is the main workflow only.
+fail-closed attribution when no protocol anchor exists. Records are top-level
+only: Supervisor, user, child, tool, streaming, quoted or indented copies, copies
+inside any enclosing code block, records naming another task, and records before
+the introduction are ignored. An enclosing block opens with an unindented run of
+three or more backticks or tildes and closes only at a bare run of the same
+character at least as long, so an example fenced with four backticks or with
+tildes may contain three-backtick lines; an unclosed block leaves the rest of the
+message inert. Scope is the main workflow only.
 A local native child never records a contribution: it returns its external outcome
 to the main, which relays it with its own record. No contributor thread IDs or
 native descendants are created for external work.
@@ -90,11 +98,14 @@ Accepted records are stored on the main workflow document as `contributions[]`,
 one entry per `contributionId` with its latest `state`, `revision`, `summary`,
 `references`, `externalRef`, source thread/run/message IDs, `recordedAt` and the
 current `assessment` or `null`. Each import adds `contribution_recorded` evidence
-under revision CAS. The first revision is 1 (`awaiting_result` or `result`); each
-later one must be exactly the current revision plus 1. An identical replay is a
-no-op. A same-revision change, a gap, a lower revision, an unknown node or any
-change after `withdrawn` is ignored with one bounded diagnostic in the task's single
-`workflowProtocolDiagnostic` slot, using fixed `contribution_*` codes. A record in
+under revision CAS. The first revision is 1, as `awaiting_result` or, when the
+result is already available, directly as `result`; each later one must be exactly
+the current revision plus 1. An identical replay is a no-op. A same-revision
+change, a gap, a lower revision, an unknown node or any change after `withdrawn` is
+not imported and leaves one bounded diagnostic in the task's single
+`workflowProtocolDiagnostic` slot, using fixed `contribution_*` codes. Later
+observations re-evaluate the main's attributable records, so a record naming a node
+that does not exist yet imports once that node is in the plan. A record in
 an earlier main reply than the stored revision's reply is superseded and never
 imported later. A later valid record clears a contribution diagnostic. A node
 later removed from the plan keeps its contributions as history; a withdrawal may
@@ -104,7 +115,9 @@ empty.
 
 The root assesses a `result` with `workflow_write` action `assess_contribution`.
 It records `accepted` or `needs_more` for the contribution's current result
-revision as `contribution_assessed` evidence and sets the current assessment. After
+revision as `contribution_assessed` evidence and sets the current assessment. The
+root may assess the same result revision again: the latest assessment is current
+and each one stays in evidence. After
 `needs_more`, ordinary dialogue follows and the main posts the next revision, which
 clears the current assessment while evidence keeps the history. Receipt, assessment
 and step completion stay separate: no record or assessment changes a status, and

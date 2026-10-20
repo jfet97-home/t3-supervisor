@@ -157,9 +157,12 @@ Part of a main-workflow step may be handled outside any conversation the
 Supervisor can observe: by an external agent, tool, service or person. The
 operative main records it in its own completed reply with an exact
 `external-contribution` record: first as `awaiting_result`, then, when the outcome
-returns, as `result` in the next revision, optionally with file, URL, source or
-text references. `withdrawn` ends a contribution. The introduction explains the
-format; no progress reports are expected while the work is opaque.
+returns, as `result` in the next revision (or directly as `result` at revision 1
+when the outcome is already available), optionally with file, URL, source or
+text references. A reply carries at most one revision per contribution, and a
+record inside any enclosing code block is ignored. `withdrawn` ends a
+contribution. The introduction explains the format; no progress reports are
+expected while the work is opaque.
 
 The Supervisor knows the step is awaiting an external result but never polls,
 steers or claims progress for that work. When a result arrives, the root judges it

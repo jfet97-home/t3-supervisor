@@ -6,7 +6,7 @@ import {join} from "node:path";
 import {GuidanceStore} from "../src/guidance-store.js";
 import {ProjectSupervisorStore, defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {SupervisorTeamStore} from "../src/supervisor-team-store.js";
-import {SupervisorHelperTransport, helperDeliveryBody, helperDeliveryBudget, publishedRendering, renderedLengthBound} from "../src/supervisor-helper-transport.js";
+import {SupervisorHelperTransport, attributesHelperDelivery, helperDeliveryBody, helperDeliveryBudget, publishedRendering, renderedLengthBound} from "../src/supervisor-helper-transport.js";
 import {SupervisorTeamRuntime, teamNotificationText} from "../src/supervisor-team-runtime.js";
 import {SupervisorConversationStore} from "../src/supervisor-conversation-store.js";
 import {ProjectSupervisorMonitorStore} from "../src/supervisor-monitor-store.js";
@@ -1365,5 +1365,257 @@ test("an exact frame at the rendered-prompt log cap binds from chat when the log
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "waiting");
     assert.equal(renderedReceipt(f, input.messageId), publishedWrapper(input.text));
     assert.equal(f.state.posts, 1);
+  } finally {await f.cleanup();}
+});
+
+const frameMessage = (taskId: string, text: string, id: string) => ({id, threadId: "helper", scheduledTaskId: taskId, runId: "frame-run",
+  nodeId: "root", role: "user" as const, text: publishedWrapper(text), creationSource: "server", createdBy: "system", streaming: false,
+  createdAt: "2026-10-16T10:00:00Z", updatedAt: "2026-10-16T10:00:00Z"});
+
+test("a clean 4xx stays rejected until an exact frame appears, and reconcileDelivery then keeps the contradiction", async () => {
+  const f = await fixture();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  try {
+    let reads = 0;
+    const transport = new SupervisorHelperTransport({...f.options, projection: async () => {
+      if (++reads === 2) {entered.resolve();await release.promise;throw new Error("unreadable");}
+      return f.helper;
+    }, fetch: async () => {f.state.posts++;return new Response("no", {status: 400});}});
+    const input = {threadId: "helper", commandId: "later-reconcile", messageId: "later-reconcile-message", text: "Later reconcile frame"};
+    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "rejected");
+    assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true}).contradicted, undefined);
+    const reading = transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(5000));
+    await entered.promise;
+    f.helper.messages.push(frameMessage(String(f.tasks[0]!.id), input.text, "later-reconcile-frame"));
+    const other = new SupervisorHelperTransport(f.options);
+    assert.equal(await other.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true; state?: string}).contradicted, true);
+    release.resolve();
+    assert.equal(await reading, "uncertain", "a contradiction stored during the read is not a definite rejection");
+    const receipt = JSON.parse(receiptDocument(f, input.messageId)) as {state?: string; contradicted?: true; text?: string};
+    assert.equal(receipt.state, "rejected");
+    assert.equal(receipt.contradicted, true);
+    assert.equal(receipt.text, input.text);
+    assert.equal(f.state.posts, 1);
+  } finally {release.resolve();await f.cleanup();}
+});
+
+test("a later exact frame keeps a rejected notice unresolved, unretried and unposted when the helper becomes unreadable", async () => {
+  const f = await fixture();
+  try {
+    let unreadable = false;
+    f.options.projection = async () => {if (unreadable) throw new Error("unreadable");return f.helper;};
+    const transport = new SupervisorHelperTransport({...f.options, fetch: async () => {f.state.posts++;return new Response("no", {status: 409});}});
+    const team = teamRuntime(f, transport);
+    const transfer = f.team.release(f.binding, "branch", new Map([[f.binding.mainThreadId, null], ["branch", f.binding.mainThreadId]]));
+    const notice = f.team.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch && value.kind === "handover_release")!;
+    const text = teamNotificationText(f.binding, notice).text;
+    const messageId = `supervisor-team-notice:${notice.id}:attempt:0`;
+    const input = {threadId: "helper", commandId: messageId, messageId, text};
+    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "rejected", "a clean 4xx is a definite rejection");
+    assert.equal((JSON.parse(receiptDocument(f, messageId)) as {contradicted?: true}).contradicted, undefined);
+    f.helper.messages.push(frameMessage(String(f.tasks[0]!.id), text, "later-notice-frame"));
+    const cycle = async () => {team.runtime.startCycle(f.binding);await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));};
+    await cycle();
+    const current = () => f.team.snapshot(f.binding).notifications.find(value => value.id === notice.id)!;
+    const receipt = () => JSON.parse(receiptDocument(f, messageId)) as {state?: string; contradicted?: true};
+    assert.equal(receipt().contradicted, true, "the readable cycle persists the contradiction");
+    assert.equal(receipt().state, "rejected");
+    assert.notEqual(current().state, "failed");
+    assert.notEqual(current().state, "acknowledged");
+    await cycle();
+    unreadable = true;
+    await cycle();
+    assert.notEqual(current().state, "failed");
+    assert.notEqual(current().state, "acknowledged");
+    assert.equal(f.team.retryFailedNotifications(f.binding, "helper"), 0);
+    assert.equal(f.state.posts, 1);
+  } finally {await f.cleanup();}
+});
+
+test("a pre-render rejection contradicted by a visible frame stays uncertain after the frame disappears", async () => {
+  const f = await fixture();
+  try {
+    f.state.emitMessage = false;f.state.loseReply = true;
+    const transport = new SupervisorHelperTransport(f.options);
+    const input = {threadId: "helper", commandId: "pre-render-contradiction", messageId: "pre-render-contradiction-message", text: "Pre-render contradiction body"};
+    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    const taskId = String(f.tasks[0]!.id);
+    addNativeWebhookDelivery(f, {id: "pre-render-delivery", body: f.state.lastPostedBody!, renderedPrompt: null, outcome: "rejected_signature"});
+    f.helper.messages.push(frameMessage(taskId, input.text, `scheduled-task-message:${taskId}:webhook:pre-render-delivery`));
+    assert.equal(await transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    const receipt = JSON.parse(receiptDocument(f, input.messageId)) as {state?: string; contradicted?: true; text?: string; nativeDeliveryId?: string};
+    assert.equal(receipt.state, "rejected");
+    assert.equal(receipt.contradicted, true);
+    assert.equal(receipt.text, input.text);
+    assert.equal(receipt.nativeDeliveryId, "pre-render-delivery");
+    f.helper.messages.splice(0);
+    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain", "a readable projection without the frame is still unresolved");
+    assert.equal(await transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    let reads = 0;
+    const unreadable = new SupervisorHelperTransport({...f.options, projection: async () => {reads += 1;throw new Error("unreadable");}});
+    assert.equal(await unreadable.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    assert.equal(await unreadable.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    assert.equal(reads, 0, "a contradicted receipt needs no projection read");
+    const restarted = new SupervisorHelperTransport(f.options);
+    assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true}).contradicted, true);
+    assert.equal(await restarted.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    assert.equal(f.state.posts, 1);
+  } finally {await f.cleanup();}
+});
+
+test("a stored contradiction survives a late save that omits the flag and a restart", async () => {
+  const f = await fixture();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let slow: Promise<unknown> = Promise.resolve();
+  try {
+    f.state.emitMessage = false;f.state.loseReply = true;
+    let lookups = 0;
+    const rpc = f.options.rpc;
+    const transport = new SupervisorHelperTransport({...f.options, rpc: async (tag, args) => {
+      if (tag === "scheduledTasks.listWebhookDeliveries" && ++lookups === 1) {entered.resolve();await release.promise;}
+      return rpc(tag, args);
+    }});
+    const input = {threadId: "helper", commandId: "sticky-save", messageId: "sticky-save-message", text: "Sticky contradiction"};
+    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    addNativeWebhookDelivery(f, {id: "sticky-delivery", body: f.state.lastPostedBody!, renderedPrompt: publishedWrapper(input.text), outcome: "accepted"});
+    slow = transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(5000));
+    await entered.promise;
+    const taskId = String(f.tasks[0]!.id);
+    f.helper.messages.push(frameMessage(taskId, input.text, `scheduled-task-message:${taskId}:webhook:sticky-delivery`));
+    const summary = f.state.webhookDeliveries[0]!;
+    const detail = f.state.webhookDeliveryDetails.get("sticky-delivery")!.delivery as {outcome: string; renderedPrompt: string | null};
+    summary.outcome = "rejected_signature";detail.outcome = "rejected_signature";detail.renderedPrompt = null;
+    assert.equal(await new SupervisorHelperTransport(f.options).reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true}).contradicted, true);
+    summary.outcome = "accepted";detail.outcome = "accepted";detail.renderedPrompt = publishedWrapper(input.text);
+    f.helper.messages.splice(0);
+    release.resolve();
+    assert.equal(await slow, "uncertain", "the in-flight reconcile cannot report the contradicted receipt as delivered");
+    const after = JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true; state?: string; text?: string};
+    assert.equal(after.contradicted, true, "a late posted save does not clear the flag");
+    assert.equal(after.state, "rejected", "a late posted save does not leave the rejected state");
+    assert.equal(after.text, input.text);
+    const restarted = new SupervisorHelperTransport({...f.options, projection: async () => {throw new Error("unreadable");}});
+    assert.equal(await restarted.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true; state?: string}).state, "rejected");
+    assert.equal(f.state.posts, 1);
+  } finally {release.resolve();await slow.catch(() => undefined);await f.cleanup();}
+});
+
+test("a refused send of a contradicted receipt is uncertain and posts nothing", async () => {
+  const f = await fixture();
+  try {
+    const transport = new SupervisorHelperTransport({...f.options, fetch: async (_url, options) => {
+      f.state.posts++;
+      const body = JSON.parse(String(options?.body)) as {text: string};
+      f.helper.messages.push(frameMessage(String(f.tasks[0]!.id), body.text, "refused-frame"));
+      return new Response("conflict", {status: 409});
+    }});
+    const input = {threadId: "helper", commandId: "refused-contradiction", messageId: "refused-contradiction-message", text: "Refused contradiction"};
+    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true}).contradicted, true);
+    f.store.setBinding({...f.binding, state: "creating"});
+    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain", "an unready binding is not a definite rejection");
+    f.store.setBinding({...f.binding, state: "ready"});
+    assert.equal(await transport.send(f.binding, {...input, text: "changed contradiction text"}, AbortSignal.timeout(1000)), "uncertain", "a hash mismatch is not a definite rejection");
+    f.store.setBinding({...f.binding, threadId: `${f.binding.threadId}-replaced`});
+    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain", "a replaced binding is not a definite rejection");
+    assert.equal(f.state.posts, 1);
+  } finally {await f.cleanup();}
+});
+
+test("the matcher refuses a contradicted receipt, so a check-in and a readiness request are never failed or completed", async () => {
+  const direct = await fixture();
+  try {
+    const transport = new SupervisorHelperTransport({...direct.options, fetch: async (_url, options) => {
+      direct.state.posts++;
+      const body = JSON.parse(String(options?.body)) as {text: string};
+      direct.helper.messages.push(frameMessage(String(direct.tasks[0]!.id), body.text, "matcher-frame"));
+      return new Response("conflict", {status: 409});
+    }});
+    const input = {threadId: "helper", commandId: "matcher", messageId: "matcher-message", text: "Matcher contradiction"};
+    assert.equal(await transport.send(direct.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    const stored = JSON.parse(receiptDocument(direct, input.messageId)) as {contradicted?: true; state?: string; text: string; threadId: string; taskId: string};
+    const message = direct.helper.messages[0]!;
+    assert.equal(attributesHelperDelivery({...stored, state: "posted"}, message, direct.helper.messages), false,
+      "a contradicted receipt does not attribute even when presented as posted");
+    assert.equal(transport.matchesMessage(direct.binding, input.messageId, input.text, message, direct.helper.messages), false);
+    assert.equal(attributesHelperDelivery({...stored, state: "posted", contradicted: undefined}, message, direct.helper.messages), true,
+      "the same frame would attribute if the contradiction flag were absent");
+  } finally {await direct.cleanup();}
+
+  const checkIn = await fixture();
+  try {
+    const transport = new SupervisorHelperTransport({...checkIn.options, fetch: async (_url, options) => {
+      checkIn.state.posts++;
+      const body = JSON.parse(String(options?.body)) as {text: string};
+      checkIn.helper.messages.push(frameMessage(String(checkIn.tasks[0]!.id), body.text, "check-in-frame"));
+      return new Response("conflict", {status: 409});
+    }});
+    const team = teamRuntime(checkIn, transport);
+    team.runtime.startCycle(checkIn.binding);
+    await team.runtime.runHelperBatch(checkIn.binding, team.threads, team.batch, AbortSignal.timeout(1000));
+    const request = team.requests.requests("p", "helper").find(item => item.id.startsWith("team-review:"))!;
+    assert.equal(request.state, "uncertain");
+    const native = checkIn.helper.messages[0]!;
+    checkIn.helper.runs.push({id: "check-in-run", threadId: "helper", ordinal: 1, status: "completed", requestedAt: "2026-10-16T10:00:00Z",
+      startedAt: "2026-10-16T10:00:00Z", completedAt: "2026-10-16T10:00:05Z", rootNodeId: "root", userMessageId: native.id});
+    native.runId = "check-in-run";
+    checkIn.helper.messages.push({id: "check-in-final", threadId: "helper", runId: "check-in-run", nodeId: "root", role: "assistant",
+      text: `Checked. ${request.completionMarker}`, ordinal: 2, streaming: false, createdAt: "2026-10-16T10:00:05Z", updatedAt: "2026-10-16T10:00:05Z"});
+    for (let cycle = 0; cycle < 3; cycle++) {team.runtime.startCycle(checkIn.binding);await team.runtime.reconcile(checkIn.binding, team.threads, AbortSignal.timeout(1000));}
+    assert.equal(team.requests.requests("p", "helper").find(item => item.id === request.id)?.state, "uncertain");
+    assert.equal(checkIn.state.posts, 1);
+  } finally {await checkIn.cleanup();}
+
+  const readiness = await fixture();
+  try {
+    const transport = new SupervisorHelperTransport({...readiness.options, fetch: async (_url, options) => {
+      readiness.state.posts++;
+      const body = JSON.parse(String(options?.body)) as {text: string};
+      readiness.helper.messages.push(frameMessage(String(readiness.tasks[0]!.id), body.text, "ready-frame"));
+      return new Response("conflict", {status: 409});
+    }});
+    const requests = new SupervisorConversationStore(readiness.db);
+    const runtime = new SupervisorTeamRuntime({store: readiness.store, teamStore: readiness.team, requests, monitor: new ProjectSupervisorMonitorStore(readiness.db),
+      rpc: readiness.options.rpc, helperTransport: transport, projection: readiness.options.projection});
+    const threads = [readiness.helper.thread, {id: readiness.binding.mainThreadId, title: "main", projectId: "p",
+      lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: readiness.binding.mainThreadId}} as ThreadInfo];
+    runtime.startCycle(readiness.binding);await runtime.reconcile(readiness.binding, threads, AbortSignal.timeout(1000));
+    const request = requests.requests("p", "helper").find(item => item.id.startsWith("team-ready:"))!;
+    assert.equal(request.state, "uncertain");
+    const member = readiness.team.snapshot(readiness.binding).members.find(value => value.threadId === "helper")!;
+    readiness.team.markReady(readiness.binding, "helper", member.epoch);
+    const native = readiness.helper.messages[0]!;
+    readiness.helper.runs.push({id: "ready-run", threadId: "helper", ordinal: 1, status: "completed", requestedAt: "2026-10-16T10:00:00Z",
+      startedAt: "2026-10-16T10:00:00Z", completedAt: "2026-10-16T10:00:05Z", rootNodeId: "root", userMessageId: native.id});
+    native.runId = "ready-run";
+    readiness.helper.messages.push({id: "ready-final", threadId: "helper", runId: "ready-run", nodeId: "root", role: "assistant",
+      text: `Ready. ${request.completionMarker}`, ordinal: 2, streaming: false, createdAt: "2026-10-16T10:00:05Z", updatedAt: "2026-10-16T10:00:05Z"});
+    for (let cycle = 0; cycle < 3; cycle++) {runtime.startCycle(readiness.binding);await runtime.reconcile(readiness.binding, threads, AbortSignal.timeout(1000));}
+    assert.equal(requests.requests("p", "helper").find(item => item.id === request.id)?.state, "uncertain");
+    assert.equal(readiness.state.posts, 1);
+  } finally {await readiness.cleanup();}
+});
+
+test("a clean no-frame 4xx notice still fails on the first readable cycle and can be retried", async () => {
+  const f = await fixture();
+  try {
+    const transport = new SupervisorHelperTransport({...f.options, fetch: async () => {f.state.posts++;return new Response("no", {status: 409});}});
+    const team = teamRuntime(f, transport);
+    const transfer = f.team.release(f.binding, "branch", new Map([[f.binding.mainThreadId, null], ["branch", f.binding.mainThreadId]]));
+    const notice = f.team.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch && value.kind === "handover_release")!;
+    team.runtime.startCycle(f.binding);await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));
+    const failed = f.team.snapshot(f.binding).notifications.find(value => value.id === notice.id)!;
+    assert.equal(failed.state, "failed");
+    assert.equal(failed.deliveryAttempt, 0);
+    assert.equal(f.state.posts, 1);
+    assert.equal((JSON.parse(receiptDocument(f, `supervisor-team-notice:${notice.id}:attempt:0`)) as {contradicted?: true; state?: string}).contradicted, undefined);
+    assert.equal(f.team.retryFailedNotifications(f.binding, "helper"), 1);
+    assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === notice.id)?.deliveryAttempt, 1);
+    assert.equal(f.state.posts, 1, "retry eligibility does not post by itself");
   } finally {await f.cleanup();}
 });

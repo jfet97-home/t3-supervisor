@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -10,7 +10,7 @@ import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { ProjectSupervisorStore, defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { ProjectSupervisor } from "../src/project-supervisor.js";
-import { SupervisorConversation, firstObservedOrdinal, workflowIntroductionText } from "../src/supervisor-conversation.js";
+import { SupervisorConversation, externalContributionFences, firstObservedOrdinal, workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
 import { parseWorkflowInterpretation, prepareWorkflowRequest, validateWorkflowPlan, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import type { ConversationRequest, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
@@ -3724,6 +3724,79 @@ test("only the main's own completed replies after its introduction import extern
   assert.deepEqual([contribution.sourceThreadId, contribution.sourceRunId], [operativeThreadId, recorded.runId]);
 });
 
+test("contribution records inside any enclosing backtick or tilde block stay inert until a bare run at least as long closes it", () => {
+  const probe = contributionFence({contributionId: "probe"});
+  const top = contributionFence({contributionId: "top-level"});
+  const ids = (...lines: string[]) => externalContributionFences(lines.join("\n")).map(fence => (fence.value as {contributionId?: unknown} | null)?.contributionId ?? null);
+  assert.deepEqual(ids(probe, top), ["probe", "top-level"]);
+  assert.deepEqual(ids("````md", probe, "````"), [], "a four-backtick example");
+  assert.deepEqual(ids("~~~", probe, "~~~"), [], "a tilde example");
+  assert.deepEqual(ids("~~~~ `info` with backticks", probe, "~~~~"), [], "a tilde info string may hold backticks");
+  assert.deepEqual(ids("`````markdown", "```text", "inner", "```", probe, "`````"), [], "a five-backtick block holding three-backtick lines");
+  assert.deepEqual(ids("````md", "```", "inner", "```", probe, "````"), [], "three-backtick lines never close a four-backtick block");
+  assert.deepEqual(ids("~~~", "```", probe, "```", "~~~", top), ["top-level"], "backtick lines never close a tilde block");
+  assert.deepEqual(ids("````md", "```", probe, "```", "````", top), ["top-level"], "a real record after the closed block is read");
+  assert.deepEqual(ids("~~~~", probe, "~~~~~~ \t", top), ["top-level"], "a longer closing run with trailing whitespace closes the block");
+  assert.deepEqual(ids("````external-contribution", JSON.stringify({contributionId: "probe"}), "````", top), ["top-level"],
+    "only the exact three-backtick record fence is a record");
+  assert.deepEqual(ids("```not`a fence", top), ["top-level"], "a backtick line whose info string holds a backtick opens nothing");
+  assert.deepEqual(ids("````md", "an example left open", probe, "```", top), [], "an unclosed block keeps every later record inert");
+  assert.deepEqual(ids("````md", probe, "   ````", top), ["top-level"], "a matching closing line indented by up to three spaces closes the block");
+  assert.deepEqual(ids("````md", probe, "    ````", top), [], "a closing line indented by four spaces does not close the block");
+  assert.deepEqual(ids("  ````md", probe, "  ````", top), ["top-level"], "an opening line indented by up to three spaces encloses a column-0 record");
+  assert.deepEqual(ids("   ~~~text", probe, "~~~", top), ["top-level"], "an indented tilde opening encloses a column-0 record");
+  assert.deepEqual(ids("  ````md", probe), [], "an indented opening left open keeps a column-0 record inert");
+  assert.deepEqual(ids("    ````md", top), ["top-level"], "a line indented by four spaces is not an enclosing fence");
+  assert.deepEqual(ids("\t````md", top), ["top-level"], "a tab-indented line is not an enclosing fence");
+  assert.deepEqual(ids("> ````md", top), ["top-level"], "a quoted line opens nothing");
+  assert.deepEqual(ids(" " + probe.split("\n")[0]!, ...probe.split("\n").slice(1), top), ["top-level"],
+    "an indented record fence is an ordinary code block, not a record; its own closing line ends it");
+});
+
+test("contribution examples inside longer or tilde fences stay inert while a later top-level record imports", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const nodeId = await agreeMainWorkflow(fixture, clock.now);
+  const example = (contributionId: string) => contributionFence(contributionValue(fixture.task, nodeId, {contributionId}));
+  appendMainReply(fixture, ["Format reference:", "````md", example("four-backtick-example"), "````"].join("\n"), clock.now + 100);
+  appendMainReply(fixture, ["~~~text", example("tilde-example"), "~~~"].join("\n"), clock.now + 101);
+  appendMainReply(fixture, ["`````markdown", "```text", "nested", "```", example("five-backtick-example"), "`````"].join("\n"), clock.now + 102);
+  appendMainReply(fixture, ["````md", "```", "an inner block", "```", example("short-close-example"), "````"].join("\n"), clock.now + 103);
+  appendMainReply(fixture, ["````md", "an example left open", example("unclosed-example"), "```", "", example("after-unclosed-example")].join("\n"), clock.now + 104);
+  await observeAgreement(fixture, clock.now + 20_000);
+  assert.deepEqual(mainContributions(fixture), [], "records inside four-backtick, tilde, longer and unclosed blocks stay inert");
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.workflowProtocolDiagnostic ?? null, null);
+
+  const recorded = appendMainReply(fixture, ["Here is the format:", "````md", example("format-example"), "```", "````", "", "My real record:",
+    example("external-review")].join("\n"), clock.now + 105);
+  await observeAgreement(fixture, clock.now + 30_000);
+  assert.deepEqual(mainContributions(fixture), [["external-review", 1, "awaiting_result", recorded.id]]);
+  const contribution = fixture.workflows.get(projectId, operativeThreadId)!.contributions[0]!;
+  assert.deepEqual([contribution.sourceThreadId, contribution.sourceRunId, contribution.sourceMessageId], [operativeThreadId, recorded.runId, recorded.id]);
+  assert.equal(fixture.projectStore.task(fixture.task.threadId)?.workflowProtocolDiagnostic ?? null, null);
+});
+
+test("workflow-acceptance fences keep their earlier parsing inside a four-backtick block", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const context = prepareTaskContext(fixture, {text: "The current task context.", completionMarker: "current context completed"}, clock.now - 1);
+  fixture.conversation.requests.saveRequest({...context, state: "completed", sentAt: clock.now - 1, error: null});
+  appendNoticeToOperative(fixture);
+  appendSupervisorProposal(fixture, fixture.task.id, workflowRecord(fixture.task, fixture.task.id).workflow, clock.now);
+  await observeAgreement(fixture, clock.now + 1);
+  assert.ok(fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id));
+
+  // only contribution records track longer and tilde enclosing fences, so this compact reply is still diagnosed
+  const compactProposalId = "compact-reply-inside-four-backticks";
+  const compact = appendOperativeAcceptance(fixture, null, clock.now + 2, {text: ["````md", workflowFence("workflow-acceptance",
+    {taskId: fixture.task.id, proposalId: compactProposalId, mainThreadId: fixture.task.threadId, accepted: true}), "````"].join("\n")});
+  await observeAgreement(fixture, clock.now + 30_000);
+  assert.deepEqual(fixture.projectStore.task(fixture.task.threadId)?.workflowProtocolDiagnostic, {role: "operative", proposalId: compactProposalId,
+    messageId: compact.id, code: "record_fields", observedAt: clock.now + 30_000});
+});
+
 test("after a source edit only later main replies attribute contributions, and an unanchored task fails closed", async t => {
   const clock = {now: baseTime};
   const fixture = await makeFixture(clock);
@@ -3839,8 +3912,32 @@ test("the operative introduction explains the contribution record without asking
   assert.match(text, /exact fence named external-contribution/u);
   assert.match(text, new RegExp(`taskId ${JSON.stringify(fixture.task.id)}`, "u"));
   assert.match(text, /reporting a result never completes a step, and no progress reports are needed/u);
+  assert.match(text, /a result that is already available may be posted directly as revision 1/u);
+  assert.match(text, /Post at most one revision per contribution in a message and send the next one in a later reply\./u);
+  assert.match(text, /A record inside any other code block is ignored/u);
+  assert.match(text, /a record naming a nodeId that does not exist yet is not imported but is checked again later/u);
   const role = (fixture.makeProjectSupervisor().conversation as unknown as {roleFor(binding: BindingRecord): string}).roleFor(fixture.binding);
   assert.match(role, /assess_contribution/u);
   assert.match(role, /an assessment never changes a status and an accepted result does not complete the step/u);
   assert.match(role, /Only the root assesses; helpers cannot\./u);
+  assert.match(role, /You may assess the same result revision again; the latest assessment is current and each one stays as evidence\./u);
+  assert.match(role, /a record naming a node that does not exist yet is not imported and is re-evaluated on later observations/u);
+});
+
+test("the contribution docs state the top-level, one-revision, direct-result, unknown-node and re-assessment rules", async () => {
+  const flat = async (path: string) => (await readFile(new URL(path, import.meta.url), "utf8")).replace(/\s+/gu, " ");
+  const workflowMcp = await flat("../docs/workflow-mcp.md");
+  for (const clause of [
+    "when the result is already available, directly as `result`",
+    "at most one revision per contribution: a further record for the same contribution in that message is not imported (`contribution_duplicate_in_message`)",
+    "Records are top-level only",
+    "copies inside any enclosing code block",
+    "closes only at a bare run of the same character at least as long",
+    "an unclosed block leaves the rest of the message inert",
+    "a record naming a node that does not exist yet imports once that node is in the plan",
+    "The root may assess the same result revision again: the latest assessment is current and each one stays in evidence.",
+  ]) assert.ok(workflowMcp.includes(clause), clause);
+  const supervision = await flat("../docs/project-supervision.md");
+  for (const clause of ["directly as `result` at revision 1", "A reply carries at most one revision per contribution", "a record inside any enclosing code block is ignored"])
+    assert.ok(supervision.includes(clause), clause);
 });
