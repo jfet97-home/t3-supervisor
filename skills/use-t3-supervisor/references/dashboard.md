@@ -122,7 +122,8 @@ references and external references are the main's untrusted report, shown as pla
 text; they are not observed execution. An accepted result does not complete the
 step, and the dashboard cannot edit or assess contributions. A
 `contribution_*` diagnostic means the main's latest record was not recorded and
-needs a corrected record in dialogue.
+explains what needs attention. Follow its specific reason; a missing plan node
+can become available after a plan update without changing an otherwise valid record.
 
 Native idle/no-AppRun mirrors are not child completion. The Supervisor observes
 normal actions/results and supplies the assessment without requiring constant agent
