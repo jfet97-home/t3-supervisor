@@ -1191,7 +1191,7 @@ test("native late original completion acknowledges the proven run while delivere
   const f = await recoveryFixture();t.after(f.cleanup);
   const review = f.review("late-completion-review");
   await f.cycles();f.expose(review, "running");await f.cycles();
-  // The native completion can be a later run of the same exact message. The stored
+  // the native completion can be a later run of the same exact message. The stored
   // interruption is historical evidence, not a constraint that discards native truth.
   const late = f.expose(f.original, "completed");
   late.id = "late-original-native-run";

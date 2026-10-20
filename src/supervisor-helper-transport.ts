@@ -140,7 +140,7 @@ export class SupervisorHelperTransport {
     return native?.outcome === "accepted" ? "waiting" :
       delivery.state === "posted" && delivery.nativeDeliveryId ? "waiting" : "uncertain";
   }
-  // Read-only reconciliation of an existing receipt; it never posts. A durable rejected receipt or a native
+  // read-only reconciliation of an existing receipt; it never posts. A durable rejected receipt or a native
   // rejected webhook outcome proves non-delivery; anything else leaves the identity unresolved.
   async reconcileDelivery(binding: BindingRecord, input: SupervisorHelperMessage, signal: AbortSignal): Promise<"absent" | SupervisorHelperSendResult> {
     const row = this.options.store.store.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")

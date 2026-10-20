@@ -39,7 +39,7 @@ const fixture = async () => {
   const workflows = new WorkflowWriteController({supervisors, team, workflows: new WorkflowStateStore(supervisors, () => true),
     native, isEnabled: () => true, maxEvidenceWaitMs: 0});
   const controller = new SupervisorTeamController(workflows, team, null);
-  // Create only the local durable receipt table. No native RPC/POST is used by this fixture.
+  // create only the local durable receipt table. No native RPC/POST is used by this fixture.
   new SupervisorHelperTransport({store: supervisors, rpc: null, baseUrl: "http://unused.invalid", projection: native.projection});
   const assignment = team.assign(binding, "branch", member.threadId, new Map([["branch", "main"]]));
   const pending = team.snapshot(binding).notifications.find(value => value.assignmentEpoch === assignment.epoch)!;
@@ -162,7 +162,7 @@ test("review operation replay is durable and concurrent distinct operations admi
   const winnerIndex = results.findIndex(value => value.status === "ok");
   const winner = winnerIndex === 0 ? f.args : competing;
   assert.equal(f.team.snapshot(f.binding).notifications.filter(value => value.kind === "handover_review").length, 1);
-  // Recreate the controller and remove native helper visibility: exact replay does
+  // recreate the controller and remove native helper visibility: exact replay does
   // not mutate, redeliver, or need to reconsider the already-committed chain.
   const restarted = new SupervisorTeamController(f.controller.workflows, new SupervisorTeamStore(f.supervisors), null);
   f.projections.delete(f.member.threadId);f.proof(winner);

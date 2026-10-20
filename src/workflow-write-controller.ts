@@ -287,10 +287,10 @@ const referenceDiagnostic = (plan: unknown): WorkflowApplyDiagnostic | null => {
   return visit(plan, "/input/plan", 0);
 };
 
-// The store points into the canonical plan, which keeps submitted groups index-for-index. A workflow
+// the store points into the canonical plan, which keeps submitted groups index-for-index. A workflow
 // node submitted without its own plan is expanded by the service, so a pointer inside that expansion
 // maps to the nearest submitted ancestor, as does a status the caller omitted and the service inherited.
-// Paths use the same /input base as the other apply diagnostics.
+// paths use the same /input base as the other apply diagnostics.
 export const submittedApplyPointer = (submittedPlan: unknown, path: string): string => {
   if (path === "/status") return "/input/status";
   const segments = path.split("/").slice(1);

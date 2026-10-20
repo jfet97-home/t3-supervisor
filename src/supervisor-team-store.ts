@@ -515,16 +515,16 @@ export class SupervisorTeamStore {
   }
 
   private handoverPendingRequests(binding: TeamBinding, assignment: TeamAssignment): TeamRequest[] {
-    // The frozen affected-subtree IDs include inherited/older-epoch effects. Also fence any
+    // the frozen affected-subtree IDs include inherited/older-epoch effects. Also fence any
     // request of this exact transfer epoch, without sweeping in unrelated inherited siblings.
     return this.unresolvedRequests(binding).filter(request => assignment.pendingRequestIds?.includes(request.requestId) ||
       request.targets.some(target => target.assignmentRootThreadId === assignment.subtreeRootThreadId && target.assignmentEpoch === assignment.epoch));
   }
 
-  // The root is an original notice at an exact attempt. The ordered open set is that
+  // the root is an original notice at an exact attempt. The ordered open set is that
   // original (if unresolved), followed by every unresolved, delivered, ended review of
   // it in creation order. A review snapshots this set, never the effects' success/failure.
-  // An acknowledged original can still have interrupted reviews needing their own review.
+  // an acknowledged original can still have interrupted reviews needing their own review.
   handoverReviewContext(binding: TeamBinding, input: HandoverReviewInput): {original: TeamNotification; chain: TeamNotification[]} {
     this.currentBinding(binding);
     const notifications = this.notificationsFor(binding);
@@ -568,7 +568,7 @@ export class SupervisorTeamStore {
           throw new Error("supervisor_team_review_operation_conflict");
         return existing;
       }
-      // Controller has just read native truth. Recompute state/authority and the entire
+      // controller has just read native truth. Recompute state/authority and the entire
       // open set in this transaction: no competing review or epoch change can slip in.
       const {original, chain} = this.handoverReviewContext(binding, parsed);
       const review = this.addNotification(binding, {id, kind: "handover_review", recipientThreadId: original.recipientThreadId, memberEpoch: original.memberEpoch,
@@ -583,7 +583,7 @@ export class SupervisorTeamStore {
     });
   }
 
-  // A never-sent (pending) or definitively rejected (failed) handover notice cannot have native effects. It is
+  // a never-sent (pending) or definitively rejected (failed) handover notice cannot have native effects. It is
   // obsolete once its transfer epoch ended or, for a review, once an exact attempt in its frozen chain closed:
   // no review can be created while an unsent one exists, so its open set only shrinks. Obsolete notices are
   // superseded with attempt and failure reason kept; sent or uncertain attempts keep their own fence.
@@ -818,7 +818,7 @@ export class SupervisorTeamStore {
     });
   }
 
-  // Internal service acknowledgement for ordinary notices. No team tool exposes this
+  // internal service acknowledgement for ordinary notices. No team tool exposes this
   // method. Interrupted handovers and reviews require the native reconciliation path.
   acknowledgeNotification(binding: TeamBinding, actorThreadId: string, notificationId: string, expectedMemberEpoch: number, now = Date.now(),
     expectedDeliveryAttempt?: number): TeamNotification {
@@ -836,9 +836,9 @@ export class SupervisorTeamStore {
     });
   }
 
-  // Service-only: the runtime proves the completed run against the exact transport
+  // service-only: the runtime proves the completed run against the exact transport
   // message and its final marker. A helper ID (even with a guessed run ID) cannot ACK.
-  // A completed review closes only the chain attempts the runtime has just proven natively
+  // a completed review closes only the chain attempts the runtime has just proven natively
   // ended without completion; any other attempt keeps its own fence.
   acknowledgeNotificationRun(binding: TeamBinding, actorThreadId: string, notificationId: string, expectedDeliveryAttempt: number,
     completedRunId: string, now = Date.now(), nativelyClosable: readonly HandoverAttempt[] = []): TeamNotification {
@@ -850,13 +850,13 @@ export class SupervisorTeamStore {
       if (!notification) throw new Error("supervisor_team_notification_missing");
       if (notification.deliveryAttempt !== expectedDeliveryAttempt) throw new Error("supervisor_team_notification_attempt_conflict");
       // observedRun records historic interruption; the proven completion may arrive late.
-      // Preserve it rather than forcing completion to equal a stale observed run.
+      // preserve it rather than forcing completion to equal a stale observed run.
       if (notification.state === "acknowledged") return notification;
       const next = this.finishNotification(binding, {...notification, completedRunId}, now);
       if (notification.reviewOf) {
         const assignment = notification.assignmentRootThreadId ? this.assignment(binding, notification.assignmentRootThreadId) : null;
         const member = this.member(binding, notification.recipientThreadId);
-        // A stale review may ACK itself, but can never close another epoch's chain.
+        // a stale review may ACK itself, but can never close another epoch's chain.
         if (assignment?.state === "transferring" && assignment.epoch === notification.assignmentEpoch &&
           member?.state === "ready" && member.epoch === notification.memberEpoch) {
           for (const identity of notification.reviewChain ?? []) {
@@ -867,7 +867,7 @@ export class SupervisorTeamStore {
               current.observedRun?.runId !== identity.runId || current.memberEpoch !== notification.memberEpoch ||
               current.recipientThreadId !== notification.recipientThreadId || current.assignmentRootThreadId !== notification.assignmentRootThreadId ||
               current.assignmentEpoch !== notification.assignmentEpoch) continue;
-            // Closure changes only notice bookkeeping. Never settle a TeamRequest here.
+            // closure changes only notice bookkeeping. Never settle a TeamRequest here.
             this.saveNotification(binding, {...current, resolvedByReview: {reviewNotificationId: notification.id, reviewRunId: completedRunId, resolvedAt: now}, updatedAt: now});
           }
         }

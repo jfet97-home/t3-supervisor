@@ -19,7 +19,7 @@ const locator = {
 };
 const text = (maxLength: number) => ({type: "string", minLength: 1, maxLength});
 const unresolvedGuideAttentionGraceMs = 60_000;
-// Native/provider errors can contain input or message bodies. Only these fixed codes
+// native/provider errors can contain input or message bodies. Only these fixed codes
 // may escape the review action; do not forward arbitrary Error.message strings.
 const handoverReviewErrors = new Set([
   "supervisor_team_notification_missing", "supervisor_team_review_requires_handover", "supervisor_team_notification_attempt_conflict",
@@ -217,7 +217,7 @@ export class SupervisorTeamController {
       projection.thread.archivedAt != null || projection.thread.deletedAt != null) throw new Error("supervisor_team_review_native_unavailable");
     for (const notification of chain) {
       const {marker} = teamNotificationText(binding, notification);
-      // Read only the existing transport receipt. No channel creation, POST or native
+      // read only the existing transport receipt. No channel creation, POST or native
       // mutation is permitted here. Its exact sent bytes + owned scheduled task identify
       // the delivery; regenerated text would not survive a later wording change.
       const row = this.workflows.options.supervisors.store.db.prepare(
