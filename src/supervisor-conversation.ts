@@ -51,8 +51,8 @@ const observedAfter = (value: Record<string, unknown>, since: number): boolean =
 type ExactWorkflowFenceRecord = {value: unknown | null; malformedJson: boolean; lineCount: number};
 
 // reads only top-level fences of exactly one kind; quoted, indented and nested copies are ignored. With enclosingFences, any
-// unindented run of three or more backticks or tildes encloses everything up to a bare run of the same character at least as
-// long, and an unclosed one leaves the rest of the message inert
+// run of three or more backticks or tildes indented by at most three spaces encloses everything up to a bare run of the
+// same character at least as long, and an unclosed one leaves the rest of the message inert
 const exactFenceRecords = (text: string, kind: string, maxRecords: number, enclosingFences = false): ExactWorkflowFenceRecord[] => {
   if (text.length > maxWorkflowProtocolTextLength) return [];
   const lines = text.split(/\r?\n/u);

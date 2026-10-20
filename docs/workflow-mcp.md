@@ -85,11 +85,11 @@ protocol records: after the task's introduction and after any source edit, with
 fail-closed attribution when no protocol anchor exists. Records are top-level
 only: Supervisor, user, child, tool, streaming, quoted or indented copies, copies
 inside any enclosing code block, records naming another task, and records before
-the introduction are ignored. An enclosing block opens with an unindented run of
-three or more backticks or tildes and closes only at a bare run of the same
-character at least as long, so an example fenced with four backticks or with
-tildes may contain three-backtick lines; an unclosed block leaves the rest of the
-message inert. Scope is the main workflow only.
+the introduction are ignored. An enclosing block opens with a run of three or more
+backticks or tildes indented by at most three spaces and closes only at a bare
+run of the same character at least as long, so an example fenced with four
+backticks or with tildes may contain three-backtick lines; an unclosed block
+leaves the rest of the message inert. Scope is the main workflow only.
 A local native child never records a contribution: it returns its external outcome
 to the main, which relays it with its own record. No contributor thread IDs or
 native descendants are created for external work.

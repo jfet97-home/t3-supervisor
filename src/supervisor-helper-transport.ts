@@ -13,7 +13,8 @@ type Channel = {taskId: string; helperThreadId: string; createdAt: string | null
 type Delivery = SupervisorHelperMessage & {hash: string; taskId: string; state: "posting" | "posted" | "rejected"; nativeDeliveryId?: string;
   renderedText?: string; nativeMessageId?: string; contradicted?: true};
 // fields the shared attribution predicate reads. Callers pass a receipt document; they do not rebuild a renderer.
-// contradicted is write-once: a rejection that coexists with an exact message stays unresolved permanently.
+// contradicted is write-once: a rejection that coexists with an exact message, or with a rendering already bound to
+// that attempt, stays unresolved permanently.
 export type HelperDeliveryAttribution = {state: string; text: string; threadId: string; taskId: string; nativeDeliveryId?: unknown;
   renderedText?: unknown; nativeMessageId?: unknown; contradicted?: unknown};
 const promptTemplate = "{{body.text}}";
@@ -254,11 +255,16 @@ export class SupervisorHelperTransport {
     channel = {...channel, createdAt: task.createdAt, state: "ready"};this.saveChannel(binding, channel);
     return {channel, task};
   }
-  // whether this rejection coexists with an exact message. The check uses a posted view and ignores a flag
-  // already stored, so the message that proves the contradiction is still visible to the predicate.
-  private attributingMessage(delivery: Delivery, messages: readonly MessageInfo[]): boolean {
+  // whether this rejection coexists with delivery evidence for the same attempt: a rendering or message id already
+  // bound (it stays evidence after its message can no longer be read), or an exact message in `messages`, which is
+  // null when the projection could not be read. The message check uses a posted view and ignores a flag already
+  // stored, so the message that proves the contradiction is still visible to the predicate.
+  private contradicts(binding: BindingRecord, delivery: Delivery, messages: readonly MessageInfo[] | null): boolean {
+    const stored = this.delivery(binding, delivery.messageId);
+    const attempts = stored !== null && stored.hash === delivery.hash ? [delivery, stored] : [delivery];
+    if (attempts.some(value => typeof value.renderedText === "string" || typeof value.nativeMessageId === "string")) return true;
     const projected: HelperDeliveryAttribution = {...delivery, state: "posted", contradicted: undefined};
-    return messages.some(message => attributesHelperDelivery(projected, message, messages));
+    return messages !== null && messages.some(message => attributesHelperDelivery(projected, message, messages));
   }
   // an exact chat frame fills a rendering the native log did not supply. It never replaces one already stored.
   private bindAttributed(binding: BindingRecord, delivery: Delivery, messages: readonly MessageInfo[]): Delivery {
@@ -273,13 +279,16 @@ export class SupervisorHelperTransport {
     this.save(binding, {...delivery, state, renderedText, nativeMessageId});
     return this.delivery(binding, delivery.messageId) ?? {...delivery, state, renderedText, nativeMessageId};
   }
+  // a result computed across an await re-reads the receipt: an overlap may have stored a contradiction meanwhile,
+  // and a contradicted receipt is never reported rejected, waiting or anything else but uncertain
+  private settled(binding: BindingRecord, messageId: string, value: SupervisorHelperSendResult): SupervisorHelperSendResult {
+    return this.delivery(binding, messageId)?.contradicted === true ? "uncertain" : value;
+  }
   // `messages` is the helper's current native projection, or null when it could not be read
   private async reconcileReceipt(binding: BindingRecord, delivery: Delivery, signal: AbortSignal,
     messages: readonly MessageInfo[] | null): Promise<SupervisorHelperSendResult> {
     if (delivery.contradicted === true) return "uncertain";
-    // an overlap may have stored the contradiction while this read was in flight
-    const settle = (value: SupervisorHelperSendResult): SupervisorHelperSendResult =>
-      this.delivery(binding, delivery.messageId)?.contradicted === true ? "uncertain" : value;
+    const settle = (value: SupervisorHelperSendResult) => this.settled(binding, delivery.messageId, value);
     // a failing delivery-log read is not proof the chat frame is absent
     let native: {id: string; outcome: string; renderedPrompt?: string} | null = null;
     try {native = await this.resolveWebhookDelivery(delivery, signal);} catch {native = null;}
@@ -288,8 +297,9 @@ export class SupervisorHelperTransport {
       scheduledWebhookMessageId(delivery.taskId, native.id) !== delivery.nativeMessageId) native = null;
     if (native && preRenderRejectionOutcomes.has(native.outcome)) {
       const seen = {...delivery, nativeDeliveryId: native.id};
-      // a visible exact message contradicts a pre-render rejection: remember it, or a later disappearance becomes definite
-      if (messages && this.attributingMessage(seen, messages)) {
+      // a bound rendering or a visible exact message contradicts a pre-render rejection: remember it, or a later
+      // disappearance becomes definite
+      if (this.contradicts(binding, seen, messages)) {
         this.save(binding, {...seen, state: "rejected", contradicted: true});
         return "uncertain";
       }
@@ -324,9 +334,9 @@ export class SupervisorHelperTransport {
     let messages: readonly MessageInfo[] | null = null;
     try {messages = (await this.options.projection(delivery.threadId, signal)).messages;} catch {messages = null;}
     if (this.delivery(binding, delivery.messageId)?.contradicted === true) return "uncertain";
-    // a durable rejection plus an exact message is a contradiction: persist it, never acknowledge it
+    // a durable rejection plus a bound rendering or an exact message is a contradiction: persist it, never acknowledge it
     if (delivery.state === "rejected") {
-      if (messages && this.attributingMessage(delivery, messages)) {
+      if (this.contradicts(binding, delivery, messages)) {
         this.save(binding, {...delivery, state: "rejected", contradicted: true});
         return "uncertain";
       }
@@ -352,36 +362,40 @@ export class SupervisorHelperTransport {
     if (delivery && delivery.hash !== hash) return refused;
     // already contradicted: unresolved whether or not the helper can be read
     if (contradicted) return "uncertain";
+    // every result after the first await below is settled against the receipt as stored at return time
+    const settle = (value: SupervisorHelperSendResult) => this.settled(binding, input.messageId, value);
     try {
       const helper = await this.options.projection(input.threadId, signal);
-      // a durable rejection plus an exact message is persisted, then stays unresolved with no acknowledgement
+      // a durable rejection plus a bound rendering or an exact message is persisted, then stays unresolved with no acknowledgement
       if (delivery?.state === "rejected") {
-        if (this.attributingMessage(delivery, helper.messages)) {
+        if (this.contradicts(binding, delivery, helper.messages)) {
           this.save(binding, {...delivery, state: "rejected", contradicted: true});
           return "uncertain";
         }
-        return "rejected";
+        return settle("rejected");
       }
       if (helper.thread.id !== input.threadId || helper.thread.lineage.parentThreadId !== binding.threadId ||
         helper.thread.lineage.relationshipToParent !== "subagent" || helper.thread.archivedAt != null || helper.thread.deletedAt != null ||
-        !this.options.store.ownedIds.has(input.threadId)) return refused;
-      if (delivery) return await this.reconcileReceipt(binding, delivery, signal, helper.messages);
-      if (!Array.isArray(helper.runtimeRequests) || helper.runtimeRequests.some(item => !record(item) || item.status === "pending")) return "busy";
+        !this.options.store.ownedIds.has(input.threadId)) return settle(refused);
+      if (delivery) return settle(await this.reconcileReceipt(binding, delivery, signal, helper.messages));
+      if (!Array.isArray(helper.runtimeRequests) || helper.runtimeRequests.some(item => !record(item) || item.status === "pending")) return settle("busy");
       const channel = await this.readyChannel(binding, helper, signal);
-      if (!channel || !record(channel.task.webhook) || typeof channel.task.webhook.path !== "string") return "busy";
+      if (!channel || !record(channel.task.webhook) || typeof channel.task.webhook.path !== "string") return settle("busy");
       const endpoint = new URL(channel.task.webhook.path, this.options.baseUrl);
-      if (endpoint.origin !== new URL(this.options.baseUrl).origin || endpoint.search || endpoint.hash) return "rejected";
-      if (authorized && !authorized()) return "revoked";
+      if (endpoint.origin !== new URL(this.options.baseUrl).origin || endpoint.search || endpoint.hash) return settle("rejected");
+      if (authorized && !authorized()) return settle("revoked");
       const posting: Delivery = {...input, hash, taskId: channel.channel.taskId, state: "posting"};
       this.save(binding, posting);
       // a webhook has no client idempotency key; never repeat an uncertain post
       const response = await (this.options.fetch ?? fetch)(endpoint, {method: "POST", headers: {"content-type": "application/json"},
         body: helperDeliveryBody(input.messageId, input.text), signal});
       if (response.status >= 400 && response.status < 500) {
-        const contradicts = this.attributingMessage(posting, helper.messages);
+        // a rendering bound by an overlapping reconciliation while the POST was in flight is read back from the receipt
+        const contradicts = this.contradicts(binding, posting, helper.messages);
         this.save(binding, {...posting, state: "rejected", ...(contradicts ? {contradicted: true as const} : {})});
-        // the rejection response and an exact message together stay unresolved; they are not acknowledged
-        return contradicts ? "uncertain" : "rejected";
+        // the rejection response and an exact message together stay unresolved; they are not acknowledged. The
+        // snapshot predates the POST, so a contradiction stored while it was in flight is read back from the receipt.
+        return contradicts ? "uncertain" : settle("rejected");
       }
       if (!response.ok) return "uncertain";
       const result: unknown = await response.json();
@@ -390,7 +404,8 @@ export class SupervisorHelperTransport {
       this.save(binding, posted);
       const bound = this.bindAttributed(binding, this.delivery(binding, input.messageId) ?? posted, helper.messages);
       const attributed = helper.messages.some(message => attributesHelperDelivery(bound, message, helper.messages));
-      return nativeDeliveryId || attributed ? "waiting" : "uncertain";
+      // a delivery id in the reply does not outweigh a contradiction stored while the POST was in flight
+      return settle(nativeDeliveryId || attributed ? "waiting" : "uncertain");
     } catch {return "uncertain";}
   }
   async retire(binding: BindingRecord, helperThreadId: string, signal: AbortSignal): Promise<boolean> {

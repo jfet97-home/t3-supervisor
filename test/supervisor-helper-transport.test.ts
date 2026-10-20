@@ -1505,6 +1505,163 @@ test("a stored contradiction survives a late save that omits the flag and a rest
   } finally {release.resolve();await slow.catch(() => undefined);await f.cleanup();}
 });
 
+test("a send that read a rejected receipt before an overlap stored its contradiction is uncertain", async () => {
+  const f = await fixture();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let late: Promise<unknown> = Promise.resolve();
+  try {
+    const input = {threadId: "helper", commandId: "local-overlap", messageId: "local-overlap", text: "one exact local overlap request"};
+    const clean = new SupervisorHelperTransport({...f.options, fetch: async () => {f.state.posts++;return new Response("rejected", {status: 400});}});
+    assert.equal(await clean.send(f.binding, input, AbortSignal.timeout(1000)), "rejected");
+    const taskId = (JSON.parse(receiptDocument(f, input.messageId)) as {taskId: string}).taskId;
+    const stale = {...f.helper, messages: []};
+    late = new SupervisorHelperTransport({...f.options, projection: async () => {entered.resolve();await release.promise;return stale;}})
+      .send(f.binding, input, AbortSignal.timeout(5000));
+    await entered.promise;
+    const frame = frameMessage(taskId, input.text, `scheduled-task-message:${taskId}:webhook:local-observed-copy`);
+    const observer = new SupervisorHelperTransport({...f.options, projection: async () => ({...f.helper, messages: [frame]})});
+    assert.equal(await observer.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true}).contradicted, true);
+    release.resolve();
+    assert.equal(await late, "uncertain", "the stale empty projection cannot turn a stored contradiction into a definite rejection");
+    const receipt = JSON.parse(receiptDocument(f, input.messageId)) as {state?: string; contradicted?: true; text?: string};
+    assert.equal(receipt.contradicted, true);
+    assert.equal(receipt.state, "rejected");
+    assert.equal(receipt.text, input.text);
+    assert.equal(f.state.posts, 1);
+  } finally {release.resolve();await late.catch(() => undefined);await f.cleanup();}
+});
+
+test("a contradiction stored while the POST is in flight wins over its late 4xx or accepted reply", async () => {
+  for (const reply of [() => new Response("conflict", {status: 409}), () => Response.json({deliveryId: "in-flight-delivery"}, {status: 202})]) {
+    const f = await fixture();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let sending: Promise<unknown> = Promise.resolve();
+    try {
+      // the sender's projection is a copy, so a frame that appears later is not in its pre-POST snapshot
+      const transport = new SupervisorHelperTransport({...f.options, projection: async () => ({...f.helper, messages: [...f.helper.messages]}),
+        fetch: async () => {f.state.posts++;entered.resolve();await release.promise;return reply();}});
+      const input = {threadId: "helper", commandId: "in-flight", messageId: "in-flight-message", text: "In-flight contradiction"};
+      sending = transport.send(f.binding, input, AbortSignal.timeout(5000));
+      await entered.promise;
+      const taskId = String(f.tasks[0]!.id);
+      addNativeWebhookDelivery(f, {id: "in-flight-delivery", body: helperDeliveryBody(input.messageId, input.text), renderedPrompt: null, outcome: "rejected_signature"});
+      f.helper.messages.push(frameMessage(taskId, input.text, `scheduled-task-message:${taskId}:webhook:in-flight-delivery`));
+      assert.equal(await new SupervisorHelperTransport(f.options).reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+      assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true}).contradicted, true);
+      release.resolve();
+      assert.equal(await sending, "uncertain", "a late reply cannot report the contradicted attempt as rejected or delivered");
+      const receipt = JSON.parse(receiptDocument(f, input.messageId)) as {state?: string; contradicted?: true; text?: string};
+      assert.equal(receipt.contradicted, true);
+      assert.equal(receipt.state, "rejected");
+      assert.equal(receipt.text, input.text);
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+      assert.equal(f.state.posts, 1);
+    } finally {release.resolve();await sending.catch(() => undefined);await f.cleanup();}
+  }
+});
+
+test("a message bound earlier contradicts a later pre-render rejection when its frame is unreadable or gone", async () => {
+  for (const [outcome, view] of [["rejected_signature", "unreadable"], ["rate_limited", "frame removed"]] as const) {
+    const f = await fixture();
+    try {
+      f.state.emitMessage = false;
+      let unreadable = false;
+      const transport = new SupervisorHelperTransport({...f.options, projection: async () => {if (unreadable) throw new Error("unreadable");return f.helper;}});
+      const input = {threadId: "helper", commandId: `bound-${outcome}`, messageId: `bound-${outcome}-message`, text: `Bound ${outcome} body`};
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "waiting", outcome);
+      const taskId = String(f.tasks[0]!.id);
+      const nativeMessageId = `scheduled-task-message:${taskId}:webhook:native-delivery`;
+      f.helper.messages.push(frameMessage(taskId, input.text, nativeMessageId));
+      assert.equal(await transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "waiting", outcome);
+      assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {nativeMessageId?: string}).nativeMessageId, nativeMessageId, outcome);
+      addNativeWebhookDelivery(f, {id: "native-delivery", body: f.state.lastPostedBody!, renderedPrompt: null, outcome});
+      if (view === "unreadable") unreadable = true;
+      else f.helper.messages.splice(0);
+      assert.equal(await transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain", `${outcome}: ${view}`);
+      const receipt = JSON.parse(receiptDocument(f, input.messageId)) as {state?: string; contradicted?: true; nativeMessageId?: string; text?: string};
+      assert.equal(receipt.contradicted, true, outcome);
+      assert.equal(receipt.state, "rejected", outcome);
+      assert.equal(receipt.nativeMessageId, nativeMessageId, outcome);
+      assert.equal(receipt.text, input.text, outcome);
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain", outcome);
+      assert.equal(f.state.posts, 1, outcome);
+    } finally {await f.cleanup();}
+  }
+});
+
+test("a bound message keeps a notice's later pre-render rejection unfailed, unretried and unposted", async () => {
+  const f = await fixture();
+  try {
+    f.state.emitMessage = false;
+    let unreadable = false;
+    // the runtime's own reads miss the frame that the transport's read binds
+    f.options.projection = async () => {if (unreadable) throw new Error("unreadable");return {...f.helper, messages: []};};
+    const transport = new SupervisorHelperTransport({...f.options, projection: async () => {if (unreadable) throw new Error("unreadable");return f.helper;}});
+    const team = teamRuntime(f, transport);
+    const transfer = f.team.release(f.binding, "branch", new Map([[f.binding.mainThreadId, null], ["branch", f.binding.mainThreadId]]));
+    const notice = f.team.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch && value.kind === "handover_release")!;
+    const text = teamNotificationText(f.binding, notice).text;
+    const messageId = `supervisor-team-notice:${notice.id}:attempt:0`;
+    const cycle = async () => {team.runtime.startCycle(f.binding);await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));};
+    const current = () => f.team.snapshot(f.binding).notifications.find(value => value.id === notice.id)!;
+    const receipt = () => JSON.parse(receiptDocument(f, messageId)) as {state?: string; contradicted?: true; nativeMessageId?: string};
+    await cycle();
+    assert.equal(f.state.posts, 1);
+    assert.equal(current().state, "uncertain");
+    const taskId = String(f.tasks[0]!.id);
+    const nativeMessageId = `scheduled-task-message:${taskId}:webhook:native-delivery`;
+    f.helper.messages.push(frameMessage(taskId, text, nativeMessageId));
+    await cycle();
+    assert.equal(receipt().nativeMessageId, nativeMessageId, "the transport's own read bound the frame");
+    assert.equal(current().state, "uncertain");
+    addNativeWebhookDelivery(f, {id: "native-delivery", body: f.state.lastPostedBody!, renderedPrompt: null, outcome: "rejected_signature"});
+    unreadable = true;
+    await cycle();
+    assert.equal(receipt().contradicted, true);
+    assert.equal(receipt().state, "rejected");
+    assert.notEqual(current().state, "failed");
+    assert.notEqual(current().state, "acknowledged");
+    assert.equal(f.team.retryFailedNotifications(f.binding, "helper"), 0);
+    await cycle();
+    unreadable = false;
+    await cycle();
+    assert.notEqual(current().state, "failed");
+    assert.equal(f.state.posts, 1);
+  } finally {await f.cleanup();}
+});
+
+test("a frame bound by an overlap while the POST is in flight contradicts its late 4xx reply", async () => {
+  const f = await fixture();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let sending: Promise<unknown> = Promise.resolve();
+  try {
+    f.state.emitMessage = false;
+    const transport = new SupervisorHelperTransport({...f.options, projection: async () => ({...f.helper, messages: [...f.helper.messages]}),
+      fetch: async () => {f.state.posts++;entered.resolve();await release.promise;return new Response("conflict", {status: 409});}});
+    const input = {threadId: "helper", commandId: "overlap-bound", messageId: "overlap-bound-message", text: "Overlap bound frame"};
+    sending = transport.send(f.binding, input, AbortSignal.timeout(5000));
+    await entered.promise;
+    const taskId = String(f.tasks[0]!.id);
+    const nativeMessageId = `scheduled-task-message:${taskId}:webhook:overlap-delivery`;
+    f.helper.messages.push(frameMessage(taskId, input.text, nativeMessageId));
+    assert.equal(await new SupervisorHelperTransport(f.options).reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "waiting");
+    assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {nativeMessageId?: string}).nativeMessageId, nativeMessageId);
+    release.resolve();
+    assert.equal(await sending, "uncertain", "a 4xx reply cannot reject an attempt whose message is already bound");
+    const receipt = JSON.parse(receiptDocument(f, input.messageId)) as {state?: string; contradicted?: true; nativeMessageId?: string};
+    assert.equal(receipt.contradicted, true);
+    assert.equal(receipt.state, "rejected");
+    assert.equal(receipt.nativeMessageId, nativeMessageId);
+    f.helper.messages.splice(0);
+    assert.equal(await transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    assert.equal(f.state.posts, 1);
+  } finally {release.resolve();await sending.catch(() => undefined);await f.cleanup();}
+});
+
 test("a refused send of a contradicted receipt is uncertain and posts nothing", async () => {
   const f = await fixture();
   try {
