@@ -3,7 +3,8 @@ import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect, Schema } from "effect";
+import { Context, Effect, Layer, Schema } from "effect";
+import { createServer } from "node:http";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { parseInterpretation, ProjectSupervisor } from "../src/project-supervisor.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../src/project-supervisor-store.js";
@@ -11,7 +12,7 @@ import type { SupervisorModelSelection } from "../src/project-supervisor-contrac
 import { ProjectSupervisorSnapshot } from "../src/project-supervisor-contract.js";
 import { SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
-import { T3TransportError } from "../src/t3.js";
+import { makeT3Client, T3Client, T3TransportError, type T3ClientShape } from "../src/t3.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
 import { makeDefinitionFixture, stepSource } from "./project-definitions-fixture.js";
 
@@ -255,8 +256,10 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
       threads: [...projections.values()].map((projection) => projection.thread),
     }),
   };
+  let nativeProjection: ((threadId: string) => ReturnType<T3ClientShape["projection"]>) | null = null;
   const t3 = {
     projection: (threadId: string) => {
+      if (nativeProjection) return nativeProjection(threadId);
       projectionReads.push(threadId);
       const knownFailure = projectionFailures.get(threadId);
       if (knownFailure) return Effect.fail(knownFailure);
@@ -403,6 +406,7 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
     setNextMissingProjectionFailure: (error: T3TransportError) => { nextMissingProjectionFailure = error; },
     setProjectionFailure: (threadId: string, error: T3TransportError) => {projectionFailures.set(threadId, error);},
     setScheduledTasks: (tasks: Record<string, unknown>[]) => {scheduledTasks = tasks;},
+    useNativeProjection: (read: (threadId: string) => ReturnType<T3ClientShape["projection"]>) => {nativeProjection = read;},
     get scheduledTasks() {return scheduledTasks;},
     setLegacyBaseline: (baseline: Record<string, unknown>) => {
       supervisorStore.store.db.prepare("INSERT INTO meta VALUES('supervisor_activation_baseline',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(baseline));
@@ -1492,4 +1496,51 @@ test("repeated short passes rotate past a hung Supervisor and keep later mains p
   });
   for (let attempt = 0; attempt < 3; attempt++) await supervisor.runOnce(AbortSignal.timeout(25));
   assert.equal(touched.size, 9, "the same slow first binding must not permanently hide tail mains");
+});
+
+test("a main conversation over the buffered cap is discovered and interpreted from its exact old source", async (t) => {
+  const turns: Turn[] = [{ id: "before-activation", sequence: 5, text: "Earlier unrelated request" },
+    { id: "old-task", sequence: 11, text: "Build the invoice export" },
+    ...Array.from({ length: 12 }, (_, index) => ({ id: `later-${index}`, sequence: 12 + index, text: `Follow-up request ${index}` }))];
+  const fixture = await makeFixture([{ threadId: "huge-main", projectId: "project-a", turns }]);
+  t.after(fixture.cleanup);
+  // every native read is served in full over HTTP, padded with arrays the Supervisor never reads
+  const retainedBudget = 96 * 1024;
+  const padding = Array.from({ length: 300 }, (_, index) => ({ position: index, visibility: "local", sourceThreadId: "huge-main",
+    sourceItemId: `row-${index}`, item: { id: `row-${index}`, text: "p".repeat(1000) } }));
+  let largestBody = 0;
+  const server = createServer((request, response) => {
+    const id = decodeURIComponent((request.url ?? "").replace("/api/orchestration/threads/", ""));
+    const projection = fixture.projections.get(id);
+    if (!projection) {response.writeHead(404).end();return;}
+    const body = JSON.stringify({ snapshotSequence: 20, projection: { ...projection, visibleTurnItems: padding, checkpoints: padding.slice(0, 40) } });
+    largestBody = Math.max(largestBody, Buffer.byteLength(body));
+    response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }).end(body);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const client = await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+    const context = yield* Layer.build(makeT3Client({ baseUrl: `http://127.0.0.1:${address.port}`, token: "test-token", maxResponseBytes: retainedBudget }));
+    return Context.get(context, T3Client);
+  })));
+  fixture.useNativeProjection(threadId => client.projection(threadId));
+
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  assert.ok(largestBody > 2 * retainedBudget, "the native body exceeds what the buffered reader accepts");
+  const task = fixture.supervisorStore.task("huge-main");
+  assert.equal(task?.sourceMessageId, "old-task", "the first request after activation stays the source behind twelve newer turns");
+  assert.equal(task?.sourceRunId, "run-old-task");
+  assert.equal(task?.status, "waiting");
+  const binding = fixture.supervisorStore.bindings().find(value => value.mainThreadId === "huge-main");
+  assert.ok(binding);
+  const supervisorProjection = fixture.projections.get(binding.threadId);
+  assert.ok(supervisorProjection);
+  completeSupervisorRequest(supervisorProjection, task.messageId, workflowResult("old-task", "Build the invoice export",
+    "The source request asks for an export to be built."));
+  await supervisor.runOnce();
+  assert.equal(fixture.supervisorStore.task("huge-main")?.status, "inferred");
+  assert.equal(fixture.supervisorStore.task("huge-main")?.objective, "Build the invoice export");
 });

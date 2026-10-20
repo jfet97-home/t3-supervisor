@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { gzipSync } from "node:zlib";
 import type { Duplex } from "node:stream";
 import { test } from "node:test";
 import { Context, Effect, Fiber, Layer } from "effect";
@@ -301,6 +302,146 @@ test("HTTP streamed response limit has a typed response_too_large code", async (
   }
 });
 
+
+const unreadKeys = ["visibleTurnItems", "plans", "checkpointScopes", "checkpoints", "contextHandoffs", "contextTransfers", "providerSessions"];
+
+// a full snapshot whose unread arrays carry `padding` bytes; what the Supervisor keeps stays small
+const paddedSnapshot = (threadId: string, padding: number): JsonRecord => {
+  const projection = makeProjection(threadId);
+  projection.messages = [{id: "message-1", threadId, runId: "run-completed", nodeId: "node-root", role: "user", text: "Old anchor",
+    streaming: false, createdAt: "2026-10-07T10:01:00.000Z", updatedAt: "2026-10-07T10:01:00.000Z"}];
+  projection.turnItems = [{id: "item-1", threadId, runId: "run-completed", type: "user_message", messageId: "message-1", text: "Old anchor"}];
+  projection.futureArray = [{kept: true}];
+  const rows = Math.max(1, Math.ceil(padding / 1024));
+  projection.visibleTurnItems = Array.from({length: rows}, (_, index) => ({position: index, visibility: "local", sourceThreadId: threadId,
+    sourceItemId: `row-${index}`, item: {id: `row-${index}`, text: "v".repeat(1000)}}));
+  projection.checkpoints = [{id: "checkpoint-1", files: ["a", "b"]}];
+  projection.plans = [];
+  return {snapshotSequence: 33, projection, additionalField: "preserved"};
+};
+
+const withoutUnread = (body: JsonRecord): JsonRecord => {
+  const projection = Object.fromEntries(Object.entries(body.projection as JsonRecord).filter(([key]) => !unreadKeys.includes(key)));
+  return {...body, projection};
+};
+
+test("a full snapshot over the retained budget is read exactly once its unread arrays are dropped", async () => {
+  const threadId = "thread-1";
+  const body = paddedSnapshot(threadId, 300_000);
+  const encoded = Buffer.byteLength(JSON.stringify(body));
+  const server = await startMockServer((_request, response) => sendJson(response, 200, body));
+  try {
+    // the wire body exceeds what the buffered reader would accept, the kept part does not
+    const client = await getClient(server.baseUrl, {maxResponseBytes: 64 * 1024});
+    assert.ok(encoded > 4 * 64 * 1024);
+    const snapshot = await Effect.runPromise(client.projection(threadId));
+    assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), withoutUnread(JSON.parse(JSON.stringify(body)) as JsonRecord));
+    assert.equal(snapshot.additionalField, "preserved");
+    assert.deepEqual((snapshot.projection as JsonRecord).futureArray, [{kept: true}], "an unknown array is kept");
+    assert.equal((snapshot.projection as JsonRecord).visibleTurnItems, undefined);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a snapshot over a byte budget is typed, memoized for its thread and read again after expiry", async () => {
+  let now = 1_000_000;
+  let reads = 0;
+  let body = paddedSnapshot("thread-1", 300_000);
+  const server = await startMockServer((request, response) => {
+    reads++;
+    if (request.url?.endsWith("/thread-2")) {sendJson(response, 200, paddedSnapshot("thread-2", 1000));return;}
+    sendJson(response, 200, body);
+  });
+  try {
+    const client = await getClient(server.baseUrl, {maxResponseBytes: 64 * 1024, maxProjectionTransferBytes: 128 * 1024, now: () => now});
+    const tooLarge = (error: unknown) => error instanceof T3TransportError && error.code === "response_too_large";
+    await assert.rejects(Effect.runPromise(client.projection("thread-1")), tooLarge);
+    assert.equal(reads, 1);
+    await assert.rejects(Effect.runPromise(client.projection("thread-1")), tooLarge);
+    assert.equal(reads, 1, "a memoized oversized thread is not fetched again");
+    await Effect.runPromise(client.projection("thread-2"));
+    assert.equal(reads, 2, "the memo is per thread");
+    body = paddedSnapshot("thread-1", 10_000);
+    now += 10 * 60_000 + 1;
+    assert.equal((await Effect.runPromise(client.projection("thread-1"))).projection.thread.id, "thread-1");
+    assert.equal(reads, 3, "the thread is read again after the memo expires");
+    // the retained budget, not only the transfer budget, fails typed
+    const retained = paddedSnapshot("thread-1", 1000);
+    (retained.projection as JsonRecord).messages = [{id: "huge", threadId: "thread-1", runId: null, nodeId: null, role: "user",
+      text: "m".repeat(70 * 1024), streaming: false, createdAt: "x", updatedAt: "x"}];
+    body = retained;
+    now += 10 * 60_000 + 1;
+    await assert.rejects(Effect.runPromise(client.projection("thread-1")), tooLarge);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a timed-out snapshot read is not memoized as oversized", async () => {
+  let reads = 0;
+  let slow = true;
+  const server = await startMockServer((_request, response) => {
+    reads++;
+    if (slow) setTimeout(() => {if (!response.destroyed) sendJson(response, 200, paddedSnapshot("thread-1", 1000));}, 150);
+    else sendJson(response, 200, paddedSnapshot("thread-1", 1000));
+  });
+  try {
+    const client = await getClient(server.baseUrl, {httpTimeoutMs: 25});
+    await assert.rejects(Effect.runPromise(client.projection("thread-1")),
+      (error: unknown) => error instanceof T3TransportError && error.code === undefined && /timed out/.test(error.message));
+    slow = false;
+    await Effect.runPromise(client.projection("thread-1"));
+    assert.equal(reads, 2);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a gzip snapshot counts decompressed bytes toward the transfer budget, and a large content-length fails early", async () => {
+  const body = JSON.stringify(paddedSnapshot("thread-1", 200_000));
+  const compressed = gzipSync(body);
+  let declared: number | null = null;
+  const server = await startMockServer((_request, response) => {
+    response.writeHead(200, {"content-type": "application/json", "content-encoding": "gzip",
+      "content-length": declared ?? compressed.length});
+    if (declared === null) response.end(compressed);
+    else response.end();
+  });
+  try {
+    assert.ok(compressed.length < 64 * 1024 && Buffer.byteLength(body) > 128 * 1024);
+    const roomy = await getClient(server.baseUrl, {maxResponseBytes: 64 * 1024});
+    assert.equal((await Effect.runPromise(roomy.projection("thread-1"))).projection.thread.id, "thread-1");
+    const tight = await getClient(server.baseUrl, {maxResponseBytes: 64 * 1024, maxProjectionTransferBytes: 128 * 1024});
+    await assert.rejects(Effect.runPromise(tight.projection("thread-1")),
+      (error: unknown) => error instanceof T3TransportError && error.code === "response_too_large");
+    declared = 10 * 1024 * 1024;
+    await assert.rejects(Effect.runPromise(tight.projection("thread-1")),
+      (error: unknown) => error instanceof T3TransportError && error.code === "response_too_large");
+  } finally {
+    await server.close();
+  }
+});
+
+test("a full snapshot over 32 MiB on the wire is read with the default budgets when what is kept fits", async () => {
+  const threadId = "large-thread";
+  const body = paddedSnapshot(threadId, 36 * 1024 * 1024);
+  const text = JSON.stringify(body);
+  assert.ok(Buffer.byteLength(text) > 32 * 1024 * 1024);
+  const server = await startMockServer((_request, response) => {
+    response.writeHead(200, {"content-type": "application/json", "content-length": Buffer.byteLength(text)});
+    response.end(text);
+  });
+  try {
+    const client = await getClient(server.baseUrl);
+    const snapshot = await Effect.runPromise(client.projection(threadId));
+    assert.equal(snapshot.projection.messages[0]?.text, "Old anchor");
+    assert.equal(snapshot.projection.runs.length, 2);
+    assert.equal((snapshot.projection as JsonRecord).visibleTurnItems, undefined);
+  } finally {
+    await server.close();
+  }
+});
 
 test("HTTP 404 exposes only a safe status hint", async () => {
   const server = await startMockServer((_request, response) => {

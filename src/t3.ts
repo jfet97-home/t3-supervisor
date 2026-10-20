@@ -1,9 +1,21 @@
 import { Context, Effect, Layer } from "effect";
 import WebSocket from "ws";
+import { ProjectionStreamError, readProjectionSnapshot } from "./t3-projection-stream.js";
 import type { JsonRecord, Projection, SourceItem } from "./types.js";
 
 const ORCHESTRATION_PROTOCOL = 2;
 const MAX_HTTP_RESPONSE_BYTES = 32 * 1024 * 1024;
+/** accounted bytes of a thread projection the Supervisor keeps: the arrays it reads, a shared text counted once */
+const MAX_RETAINED_PROJECTION_BYTES = 32 * 1024 * 1024;
+/**
+ * Bytes of one full thread snapshot read from T3, including the arrays the Supervisor never keeps. The largest thread
+ * measured in production is 36,108,568 bytes; this bound leaves about 3.7 times that, and the unchanged HTTP deadline
+ * still bounds the time spent.
+ */
+const MAX_PROJECTION_TRANSFER_BYTES = 128 * 1024 * 1024;
+/** a thread whose snapshot exceeded a byte budget is not read again in full for this long */
+const OVERSIZED_PROJECTION_MEMO_MS = 10 * 60_000;
+const OVERSIZED_PROJECTION_MEMO_LIMIT = 512;
 const MAX_WEBSOCKET_FRAME_BYTES = 32 * 1024 * 1024;
 const MAX_BUFFERED_WEBSOCKET_BYTES = 32 * 1024 * 1024;
 const MAX_BUFFERED_WEBSOCKET_FRAMES = 8;
@@ -54,6 +66,8 @@ export interface T3ClientOptions {
   token: string;
   httpTimeoutMs?: number;
   maxResponseBytes?: number;
+  maxProjectionTransferBytes?: number;
+  now?: () => number;
   webSocketHandshakeTimeoutMs?: number;
   heartbeatIntervalMs?: number;
   heartbeatTimeoutMs?: number;
@@ -512,13 +526,18 @@ const makeService = (options: T3ClientOptions): T3ClientShape => {
   const token = options.token.trim();
   const httpTimeoutMs = options.httpTimeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
   const maxResponseBytes = Math.min(options.maxResponseBytes ?? MAX_HTTP_RESPONSE_BYTES, MAX_HTTP_RESPONSE_BYTES);
+  const maxRetainedProjectionBytes = Math.min(options.maxResponseBytes ?? MAX_RETAINED_PROJECTION_BYTES, MAX_RETAINED_PROJECTION_BYTES);
+  const maxProjectionTransferBytes = Math.min(options.maxProjectionTransferBytes ?? MAX_PROJECTION_TRANSFER_BYTES,
+    MAX_PROJECTION_TRANSFER_BYTES);
+  const now = options.now ?? Date.now;
   const webSocketHandshakeTimeoutMs = options.webSocketHandshakeTimeoutMs ?? DEFAULT_WEBSOCKET_HANDSHAKE_TIMEOUT_MS;
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
   if (!Number.isSafeInteger(httpTimeoutMs) || httpTimeoutMs <= 0 || httpTimeoutMs > DEFAULT_HTTP_TIMEOUT_MS) {
     throw new T3TransportError("T3 HTTP timeout must be between 1 and 20000 milliseconds");
   }
-  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
+  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0 ||
+    !Number.isSafeInteger(maxProjectionTransferBytes) || maxProjectionTransferBytes <= 0) {
     throw new T3TransportError("T3 HTTP response limit must be positive");
   }
   if (!Number.isSafeInteger(webSocketHandshakeTimeoutMs) ||
@@ -539,7 +558,9 @@ const makeService = (options: T3ClientOptions): T3ClientShape => {
   baseUrl.search = "";
   baseUrl.hash = "";
 
-  const getJson = (path: string, operation: string, protocolHeader: boolean): Effect.Effect<unknown, T3TransportError> =>
+  const getJson = (path: string, operation: string, protocolHeader: boolean,
+    consume: (response: Response, signal: AbortSignal) => Promise<unknown> =
+      (response, signal) => readResponseBody(response, maxResponseBytes, signal, operation)): Effect.Effect<unknown, T3TransportError> =>
     Effect.tryPromise({
       try: async (signal) => {
         let didTimeout = false;
@@ -560,9 +581,14 @@ const makeService = (options: T3ClientOptions): T3ClientShape => {
             void response.body?.cancel().catch(() => undefined);
             throw new T3TransportError(`T3 ${operation} returned HTTP ${response.status}`, response.status);
           }
-          return await readResponseBody(response, maxResponseBytes, combinedSignal, operation);
+          return await consume(response, combinedSignal);
         } catch (cause) {
           if (cause instanceof T3TransportError) throw cause;
+          if (cause instanceof ProjectionStreamError && cause.code !== "interrupted") {
+            throw cause.code === "invalid"
+              ? new T3TransportError(`T3 ${operation} response was not valid JSON`)
+              : new T3TransportError(`T3 ${operation} response exceeded the byte limit`, undefined, "response_too_large");
+          }
           throw new T3TransportError(didTimeout ? `T3 ${operation} request timed out` : `T3 ${operation} request failed`);
         } finally {
           clearTimeout(timeoutId);
@@ -572,6 +598,36 @@ const makeService = (options: T3ClientOptions): T3ClientShape => {
         ? cause
         : new T3TransportError(`T3 ${operation} request failed`)
     });
+
+  // the full snapshot streams: arrays the Supervisor never reads are validated and dropped, and only the kept part counts
+  // toward the retained budget, while every byte read counts toward the transfer budget
+  const readProjectionBody = async (response: Response, signal: AbortSignal): Promise<unknown> => {
+    const contentLength = response.headers.get("content-length");
+    if (contentLength !== null && Number(contentLength) > maxProjectionTransferBytes) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new ProjectionStreamError("transfer_too_large");
+    }
+    if (response.body === null) throw new T3TransportError("T3 thread projection response was empty");
+    return readProjectionSnapshot(response.body,
+      {retainedBytes: maxRetainedProjectionBytes, transferBytes: maxProjectionTransferBytes}, signal);
+  };
+  const oversizedUntil = new Map<string, number>();
+  const knownOversized = (threadId: string): boolean => {
+    const until = oversizedUntil.get(threadId);
+    if (until === undefined) return false;
+    if (until > now()) return true;
+    oversizedUntil.delete(threadId);
+    return false;
+  };
+  const rememberOversized = (threadId: string): void => {
+    oversizedUntil.delete(threadId);
+    oversizedUntil.set(threadId, now() + OVERSIZED_PROJECTION_MEMO_MS);
+    while (oversizedUntil.size > OVERSIZED_PROJECTION_MEMO_LIMIT) {
+      const oldest = oversizedUntil.keys().next().value;
+      if (oldest === undefined) break;
+      oversizedUntil.delete(oldest);
+    }
+  };
 
   return {
     descriptor: () => getJson("/.well-known/t3/environment", "environment descriptor", false).pipe(
@@ -584,8 +640,15 @@ const makeService = (options: T3ClientOptions): T3ClientShape => {
     ),
     projection: (threadId) => {
       if (!isNonEmptyString(threadId)) return Effect.fail(new T3TransportError("T3 thread id must not be empty"));
+      // a snapshot that exceeded a byte budget is deterministic; it is not fetched again within the memo period
+      if (knownOversized(threadId)) {
+        return Effect.fail(new T3TransportError("T3 thread projection response exceeded the byte limit", undefined, "response_too_large"));
+      }
       const path = `/api/orchestration/threads/${encodeURIComponent(threadId)}`;
-      return getJson(path, "thread projection", true).pipe(
+      return getJson(path, "thread projection", true, readProjectionBody).pipe(
+        Effect.tapError((error) => Effect.sync(() => {
+          if (error.code === "response_too_large") rememberOversized(threadId);
+        })),
         Effect.flatMap((value) => {
           const snapshot = makeProjectionSnapshot(value, threadId);
           return snapshot === undefined
