@@ -101,6 +101,17 @@ test("review_handover requires exact native root proof and offers no helper ackn
   assert.ok(f.reads.includes(f.member.threadId), "the root action reads current native helper truth");
 });
 
+test("review verification identifies an existing attempt by its stored sent bytes", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const logicalId = `supervisor-team-notice:${f.original.id}:attempt:0`;
+  const earlier = `${f.helper.messages[0]!.text}\nEarlier role wording.`;
+  f.guidance.db.prepare("UPDATE supervisor_helper_deliveries SET document=? WHERE message_id=?").run(
+    JSON.stringify({messageId: logicalId, threadId: f.member.threadId, taskId: "owned-task", text: earlier, state: "posted"}), logicalId);
+  f.helper.messages[0]!.text = earlier;
+  f.proof(f.args);
+  assert.equal((await f.call()).status, "ok", "a wording change after sending does not orphan the attempt");
+});
+
 test("current native running completed missing or changed evidence refuses review without mutation", async t => {
   const variants = ["running", "completed", "missing-run", "missing-message", "different-text", "different-task", "changed-ended-status", "other-running-run", "other-completed-run", "marker-completed"] as const;
   for (const variant of variants) {

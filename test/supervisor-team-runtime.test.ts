@@ -50,6 +50,7 @@ const webhookTransport = (result: "waiting" | "busy" | "uncertain" | "rejected" 
       return Boolean(delivery && delivery.threadId === message.threadId && delivery.commandId === message.commandId && delivery.text === message.text);
     },
     reconcileDelivery: async (_binding, message) => !sent.has(message.messageId) ? "absent" : rejectedReceipts.has(message.messageId) ? "rejected" : "uncertain",
+    receiptText: (_binding, messageId) => sent.get(messageId)?.text ?? null,
     matchesMessage: (_binding, logicalId, text, native) => {
       const delivery = sent.get(logicalId);
       return Boolean(delivery && delivery.text === text && native.threadId === delivery.threadId && native.text === text &&
@@ -1236,6 +1237,52 @@ test("native late original completion supersedes an unsent review before deliver
   assert.equal(f.teamStore.unresolvedRequests(f.binding).length, 1);
 });
 
+test("a completed review leaves an attempt fenced while a later run of its message is still running", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  f.teamStore.settleRequest(f.binding, "guide:recovery-effect");
+  const review = f.review("sibling-run-review");
+  await f.cycles();
+  const restarted = {id: "original-restarted", threadId: f.member.threadId, ordinal: 50, status: "running", requestedAt: iso(time), startedAt: iso(time),
+    completedAt: null, rootNodeId: null, userMessageId: `native-message:${f.original.id}:0`};
+  f.projection.runs.push(restarted);
+  f.expose(review, "completed");await f.cycles();
+  assert.equal(f.current(review).state, "acknowledged", "the review acknowledges itself");
+  assert.equal(f.current(f.original).resolvedByReview, undefined, "a running run of the original keeps its fence");
+  assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "transferring");
+  restarted.status = "completed";
+  f.projection.messages.push({id: "restarted-final", threadId: f.member.threadId, runId: restarted.id, nodeId: null, role: "assistant",
+    text: teamNotificationText(f.binding, f.original).marker, streaming: false, ordinal: 60, createdAt: iso(time + 2), updatedAt: iso(time + 2)});
+  await f.cycles();
+  assert.deepEqual({state: f.current(f.original).state, completedRunId: f.current(f.original).completedRunId}, {state: "acknowledged", completedRunId: restarted.id},
+    "the original closes only through its own completed run");
+  assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "root");
+});
+
+test("an attempt sent with earlier wording is still matched and acknowledged by its own completed run", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  const messageId = `supervisor-team-notice:${f.original.id}:attempt:0`;
+  const earlier = `${f.transport.sent.get(messageId)!.text}\nEarlier role wording.`;
+  f.transport.sent.set(messageId, {...f.transport.sent.get(messageId)!, text: earlier});
+  const native = f.projection.messages.find(value => value.id === `native-message:${f.original.id}:0`)!;
+  native.text = earlier;
+  assert.notEqual(teamNotificationText(f.binding, f.original).text, earlier);
+  f.expose(f.original, "completed");await f.cycles();
+  assert.equal(f.current(f.original).state, "acknowledged");
+  assert.equal(f.transport.attempts.filter(value => value === messageId).length, 1, "nothing is sent again");
+});
+
+test("observing a quarantined helper's remaining notice never turns quarantine into missing", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  f.teamStore.quarantineMember(f.binding, f.member.threadId);
+  const runtime = f.runtime(f.transport.transport, async threadId => {
+    if (threadId === f.member.threadId) throw new T3TransportError("helper deleted", 404);
+    return f.projections.get(threadId)!;
+  });
+  for (let cycle = 0; cycle < 4; cycle++) {runtime.startCycle(f.binding);await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));}
+  assert.equal(f.teamStore.snapshot(f.binding).members.find(value => value.threadId === f.member.threadId)?.state, "quarantined");
+  assert.equal(f.current(f.original).state, "delivered");
+});
+
 test("a durably rejected review receipt fails the review after a crash without posting again", async t => {
   const f = await recoveryFixture();t.after(f.cleanup);
   const review = f.review("crash-rejected-receipt");
@@ -1263,12 +1310,27 @@ test("the team view states review progress and completion in words without the r
   assert.match(during.currentState ?? "", /root-requested review of an interrupted handover is in progress/u);
   assert.equal(JSON.stringify(during).includes(review.reviewNote!), false, "the untrusted root note is not displayed");
   f.teamStore.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, "delivered", Date.now(), 0);
-  f.teamStore.acknowledgeNotificationRun(f.binding, f.binding.threadId, review.id, 0, "native-review-run");
+  f.teamStore.acknowledgeNotificationRun(f.binding, f.binding.threadId, review.id, 0, "native-review-run", Date.now(), review.reviewChain);
   const after = handovers();
   assert.deepEqual(after.pendingHandovers.map(item => [item.review, item.runStatus]), [["completed", "interrupted"]]);
   assert.doesNotMatch(after.currentState ?? "", /awaiting confirmation|ended before confirming/u);
   f.teamStore.completeTransfer(f.binding, "branch", f.assignment.epoch);
   assert.deepEqual(handovers().pendingHandovers, [], "reviewed history leaves the pending list once its transfer ends");
+});
+
+test("the team view hides a superseded review and prints no raw notification IDs in issues", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  f.teamStore.settleRequest(f.binding, "guide:recovery-effect");
+  const review = f.review("superseded-view-review");
+  f.teamStore.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, "sending");
+  f.teamStore.markNotificationRejected(f.binding, f.binding.threadId, review.id, "Definite rejection", 0);
+  f.teamStore.acknowledgeNotificationRun(f.binding, f.binding.threadId, f.original.id, 0, "late-original-run");
+  assert.equal(f.current(review).state, "superseded");
+  const view = supervisorTeamView(f.teamStore, f.binding, f.threadList, f.requests);
+  const row = view.members.find(item => item.threadId === f.member.threadId)!;
+  assert.deepEqual(row.pendingHandovers, [], "closed notices are not listed as pending work");
+  const summaries = [...view.issues, ...row.issues].map(issue => issue.summary).join("\n");
+  for (const id of [f.original.id, review.id, f.original.observedRun!.runId]) assert.equal(summaries.includes(id), false, "visible issue text carries no raw ID");
 });
 
 test("a notice closed by a completed review is not re-presented in later helper check-ins", async t => {

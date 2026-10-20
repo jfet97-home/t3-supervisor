@@ -3,7 +3,7 @@ import type { BindingRecord, ProjectSupervisorStore } from "./project-supervisor
 import { SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorBatch, type SupervisorMonitorThreadBatch } from "./supervisor-monitor.js";
 import { ProjectSupervisorMonitorStore } from "./supervisor-monitor-store.js";
 import type { ConversationRequest, SupervisorConversationStore } from "./supervisor-conversation-store.js";
-import { SupervisorTeamStore, endedWithoutCompletion, notificationClosed, type SupervisorTeamSnapshot, type TeamEvent, type TeamMember, type TeamNotification, type TeamRequest, type TeamRequestTarget } from "./supervisor-team-store.js";
+import { SupervisorTeamStore, endedWithoutCompletion, notificationClosed, type HandoverAttempt, type SupervisorTeamSnapshot, type TeamEvent, type TeamMember, type TeamNotification, type TeamRequest, type TeamRequestTarget } from "./supervisor-team-store.js";
 import { type SupervisorRpc } from "./supervisor-native.js";
 import { T3TransportError } from "./t3.js";
 import type { SupervisorHelperDeliveryTransport, SupervisorHelperSendResult } from "./supervisor-helper-transport.js";
@@ -205,18 +205,18 @@ export class SupervisorTeamRuntime {
     await this.retireHelper(binding, member.threadId, signal);
   }
 
-  private async readMemberProjection(binding: BindingRecord, member: TeamMember, signal: AbortSignal): Promise<Projection | null> {
+  private async readMemberProjection(binding: BindingRecord, member: TeamMember, signal: AbortSignal, observeOnly = false): Promise<Projection | null> {
     if (signal.aborted || !this.consumeReadBudget(binding)) return null;
     try {
       const value = await this.options.projection(member.threadId, signal);
       if (value.thread.id !== member.threadId) return null;
       if (value.thread.archivedAt != null || value.thread.deletedAt != null) {
-        await this.loseMember(binding, member, signal, "The helper conversation is archived or deleted; its check-in was closed and pending operational effects remain fenced.");
+        if (!observeOnly) await this.loseMember(binding, member, signal, "The helper conversation is archived or deleted; its check-in was closed and pending operational effects remain fenced.");
         return null;
       }
       return value;
     } catch (cause) {
-      if (cause instanceof T3TransportError && cause.httpStatus === 404) {
+      if (!observeOnly && cause instanceof T3TransportError && cause.httpStatus === 404) {
         await this.loseMember(binding, member, signal, "The helper conversation returned native 404; its check-in was closed and pending operational effects remain fenced.");
       }
       return null;
@@ -503,25 +503,46 @@ export class SupervisorTeamRuntime {
 
   private serviceNotificationAttention(binding: BindingRecord, notification: TeamNotification): void {
     const attempt = notification.deliveryAttempt ?? 0;
-    const summary = `Helper notification ${notification.id} attempt ${attempt} has no visible completion marker after bounded reconciliation. Preserve its identity and handover fence; do not infer acknowledgment or retry with a new ID.`;
+    const summary = "A helper handover notice has no visible completion marker after bounded reconciliation. Preserve its identity and handover fence; do not infer acknowledgment or retry with a new ID. The team read lists its exact notification and attempt.";
     this.emitServiceAttention(binding,
       `helper-notification-unresolved:${fingerprint([binding.threadId, binding.generation, notification.id, attempt]).slice(0, 32)}`,
       notification.recipientThreadId, notification.assignmentRootThreadId ?? undefined, summary);
   }
 
-  private notificationRunCompleted(projection: Projection, notification: TeamNotification, binding: BindingRecord): string | null {
-    const {text, marker} = teamNotificationText(binding, notification);
+  // An attempt with a delivery receipt is identified by the exact bytes it sent, so a later wording change
+  // cannot orphan it; generated text only applies to an attempt that has never been posted.
+  private noticeText(binding: BindingRecord, notification: TeamNotification): {text: string; marker: string; messageId: string} {
     const messageId = `supervisor-team-notice:${notification.id}:attempt:${notification.deliveryAttempt}`;
+    const generated = teamNotificationText(binding, notification);
+    return {text: this.options.helperTransport?.receiptText(binding, messageId) ?? generated.text, marker: generated.marker, messageId};
+  }
+
+  private noticeEvidence(binding: BindingRecord, projection: Projection, notification: TeamNotification) {
+    const {text, marker, messageId} = this.noticeText(binding, notification);
     return teamNotificationEvidence(projection, notification, marker,
-      message => this.options.helperTransport?.matchesMessage(binding, messageId, text, message) === true).completedRun?.id ?? null;
+      message => this.options.helperTransport?.matchesMessage(binding, messageId, text, message) === true);
+  }
+
+  private notificationRunCompleted(projection: Projection, notification: TeamNotification, binding: BindingRecord): string | null {
+    return this.noticeEvidence(binding, projection, notification).completedRun?.id ?? null;
+  }
+
+  // Closure repeats the creation-time native check on the current projection: an attempt whose message has a
+  // running, missing or marker-completed run is not closed by the review and keeps its own fence.
+  private nativelyClosable(binding: BindingRecord, projection: Projection, review: TeamNotification): HandoverAttempt[] {
+    const notifications = this.options.teamStore.snapshot(binding).notifications;
+    return (review.reviewChain ?? []).filter(entry => {
+      const member = notifications.find(value => value.id === entry.notificationId && value.deliveryAttempt === entry.deliveryAttempt);
+      if (!member) return false;
+      const evidence = this.noticeEvidence(binding, projection, member);
+      return Boolean(evidence.message) && !evidence.completedRun && evidence.runs.some(run => run.id === entry.runId) &&
+        evidence.runs.every(run => endedWithoutCompletion.has(run.status));
+    });
   }
 
   // a delivered attempt whose native run ended without its marker is recorded and surfaced once; it is never resent or relabelled
   private notificationRunEnded(binding: BindingRecord, projection: Projection, notification: TeamNotification): boolean {
-    const {text, marker} = teamNotificationText(binding, notification);
-    const messageId = `supervisor-team-notice:${notification.id}:attempt:${notification.deliveryAttempt ?? 0}`;
-    const evidence = teamNotificationEvidence(projection, notification, marker,
-      message => this.options.helperTransport?.matchesMessage(binding, messageId, text, message) === true);
+    const evidence = this.noticeEvidence(binding, projection, notification);
     const run = evidence.runs.find(item => item.id === (notification.observedRun?.runId ?? evidence.message?.runId)) ??
       (evidence.runs.length === 1 ? evidence.runs[0] : undefined);
     if (!run || !endedWithoutCompletion.has(run.status) || evidence.completedRun) return false;
@@ -532,7 +553,7 @@ export class SupervisorTeamRuntime {
     this.emitServiceAttention(binding,
       `helper-notification-interrupted:${fingerprint([binding.threadId, binding.generation, notification.id, attempt, run.id]).slice(0, 32)}`,
       notification.recipientThreadId, notification.assignmentRootThreadId ?? undefined,
-      `Helper notification ${notification.id} attempt ${attempt} was delivered, but its native run ${run.id} ended ${run.status} before confirming. Its effects are unknown: the handover stays fenced, the root keeps responsibility, and nothing was resent. Use the root review_handover action to inspect all unresolved attempts, or consider reassignment or quarantine.`);
+      `A delivered helper handover notice's native run ended ${run.status} before confirming. Its effects are unknown: the handover stays fenced, the root keeps responsibility, and nothing was resent. Read the team for its exact notification, attempt and observed run, then use the root review_handover action to inspect all unresolved attempts, or consider reassignment or quarantine.`);
     return true;
   }
 
@@ -547,10 +568,10 @@ export class SupervisorTeamRuntime {
     this.notificationOffset.set(binding.threadId, (offset + 1) % candidates.length);
     const member = snapshot.members.find(value => value.threadId === notification.recipientThreadId);
     if (!member) return;
-    const projection = await this.readMemberProjection(binding, member, signal);
+    // a non-ready member is only observed here: a lost conversation must not turn quarantine into missing
+    const projection = await this.readMemberProjection(binding, member, signal, member.state !== "ready");
     if (!projection || !this.validHelper(member, binding, projection)) return;
-    const {text} = teamNotificationText(binding, notification);
-    const messageId = `supervisor-team-notice:${notification.id}:attempt:${notification.deliveryAttempt ?? 0}`;
+    const {text, messageId} = this.noticeText(binding, notification);
     const visible = projection.messages.some(item => item.threadId === member.threadId && this.options.helperTransport?.matchesMessage(binding, messageId, text, item));
     if (visible) {
       if (notification.state === "pending" && !this.updateNotificationDelivery(binding, notification, "sending")) return;
@@ -559,7 +580,8 @@ export class SupervisorTeamRuntime {
       const completedRunId = this.notificationRunCompleted(projection, notification, binding);
       if (completedRunId) {
         try {
-          this.options.teamStore.acknowledgeNotificationRun(binding, binding.threadId, notification.id, notification.deliveryAttempt, completedRunId);
+          this.options.teamStore.acknowledgeNotificationRun(binding, binding.threadId, notification.id, notification.deliveryAttempt, completedRunId, Date.now(),
+            notification.reviewOf ? this.nativelyClosable(binding, projection, notification) : []);
         } catch { /* a retried or reassigned notification keeps its current attempt */ }
       }
       else if (notification.resolvedByReview) return;

@@ -68,7 +68,8 @@ export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRe
           .map(value => ({threadId: value.subtreeRootThreadId, title: byId.get(value.subtreeRootThreadId)?.title ?? null,
             state: value.state === "transferring" ? "transfer" : value.memberThreadId === member.threadId ? "active" : "released"})),
         pendingHandovers: snapshot.notifications.flatMap(value => {
-          if (value.recipientThreadId !== member.threadId || value.state === "acknowledged" || value.assignmentRootThreadId === null) return [];
+          // acknowledged and superseded notices are closed; a review-closed original stays visible below as completed
+          if (value.recipientThreadId !== member.threadId || value.state === "acknowledged" || value.state === "superseded" || value.assignmentRootThreadId === null) return [];
           // a reviewed notice is history once its transfer epoch has ended
           if (value.resolvedByReview && !transferring.has(`${value.assignmentRootThreadId}:${value.assignmentEpoch}`)) return [];
           const original = value.reviewOf ? snapshot.notifications.find(notice => notice.id === value.reviewOf!.notificationId) : value;

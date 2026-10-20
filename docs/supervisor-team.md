@@ -135,7 +135,9 @@ native caller proof. Quarantine advances the helper epoch and returns its assign
 coverage to active root ownership, but keeps the root observe-only for affected
 work while unresolved writes or delivery effects remain. It preserves every
 unresolved request and every sending, sent, uncertain or delivered notification;
-only a handover notice that is still pending and has never been sent may be superseded.
+only a handover notice of the ended transfer epoch that was never sent (pending) or
+was definitively rejected (failed) is superseded, keeping its attempt and failure
+reason. Observing a quarantined helper's remaining notices never marks it missing.
 These notices remain visible until acknowledged or otherwise reconciled. A known
 definite notification failure can be retried by the root when its recipient is
 still a current ready helper; unrelated unknown guide effects remain fenced. An
@@ -160,6 +162,9 @@ follow-up task records or completion wakes to the root. Direct WebSocket or MCP
 helper messages have different T3 semantics. Webhook POSTs have no client idempotency
 key: an uncertain send is never posted again; the service reconciles its original
 scheduled-message identity and request text, retaining unresolved work meanwhile.
+Once an attempt has a delivery receipt, its exact sent bytes identify it for matching,
+acknowledgement, review and reconciliation; regenerated text, for example after a role
+wording change, applies only to an attempt that was never posted.
 A notice or check-in is `failed` only when T3 definitively rejected that exact POST or
 nothing was ever posted for its identity. A later refusal (helper unavailable, binding
 replaced, changed content) of an identity whose earlier POST has an unknown outcome
@@ -213,6 +218,10 @@ attempt, including earlier reviews, perform only genuinely missing duties within
 current authority, and state which effects remain unresolved. It must never
 replay an operational instruction or infer non-execution from interruption. Its
 own exact native completed run and final marker acknowledge only that review.
+At that point the service repeats the creation-time native check on the current
+projection: a chain attempt whose message now has a running, missing or
+marker-completed run is not closed by the review and keeps its fence; a
+marker-completed attempt is acknowledged through its own completed run.
 Generic monitor check-in markers and helper/tool acknowledgement claims cannot
 acknowledge a handover or review.
 For each still-unresolved chain member in the same current assignment and member

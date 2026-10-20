@@ -358,7 +358,7 @@ test("interrupted review chains close durably without acknowledging history or s
   const restarted = new SupervisorTeamStore(new ProjectSupervisorStore(guidance, new Set()));
   assert.deepEqual(restarted.snapshot(f.binding).notifications.find(value => value.id === second.id), second);
   interruptNotice(restarted, f.binding, second);
-  restarted.acknowledgeNotificationRun(f.binding, f.binding.threadId, second.id, second.deliveryAttempt, `run:${second.id}`, 130);
+  restarted.acknowledgeNotificationRun(f.binding, f.binding.threadId, second.id, second.deliveryAttempt, `run:${second.id}`, 130, second.reviewChain);
   const snapshot = restarted.snapshot(f.binding);
   for (const previous of [f.original, first]) {
     const closed = snapshot.notifications.find(value => value.id === previous.id)!;
@@ -477,7 +477,7 @@ test("a rejected review never strands its chain, while an unknown review POST ke
       continue;
     }
     const third = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "third-review", [first])));
-    f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, third.id, 0, "third-review-completed");
+    f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, third.id, 0, "third-review-completed", Date.now(), third.reviewChain);
     assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === first.id)?.resolvedByReview?.reviewNotificationId, third.id);
     f.team.settleRequest(f.binding, "guide:unresolved");
     f.team.completeTransfer(f.binding, "branch-a", f.transfer.epoch);
@@ -492,7 +492,7 @@ test("an unsent review retires when an exact attempt of its own chain closes, an
     const second = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, `second-${state}`, [first]));
     if (state === "failed") f.team.markNotificationRejected(f.binding, f.binding.threadId, second.id, "Definite rejection", 0);
     assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === second.id)?.state, state, "its chain [first] is still open");
-    f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, first.id, 0, "late-first-review");
+    f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, first.id, 0, "late-first-review", Date.now(), first.reviewChain);
     assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === second.id)?.state, "superseded");
     assert.throws(() => f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, `third-${state}`, [first])), /supervisor_team_review_chain_closed/u);
     f.team.settleRequest(f.binding, "guide:unresolved");
@@ -501,7 +501,7 @@ test("an unsent review retires when an exact attempt of its own chain closes, an
   const f = await interruptedHandover();t.after(f.cleanup);
   const first = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "closure-first")));
   const second = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "closure-second", [f.original, first])));
-  f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, first.id, 0, "late-first");
+  f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, first.id, 0, "late-first", Date.now(), first.reviewChain);
   assert.ok(f.team.snapshot(f.binding).notifications.find(value => value.id === f.original.id)?.resolvedByReview);
   const third = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "closure-third", [second]));
   f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, f.original.id, 0, "late-original-after-review");
@@ -566,7 +566,7 @@ test("an interrupted sent review remains reviewable after the original late ackn
   const second = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "review-only-unresolved-effects", [first]));
   assert.deepEqual(second.reviewChain, [attempt(first)]);
   interruptNotice(f.team, f.binding, second);
-  f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, second.id, 0, "second-review-completed");
+  f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, second.id, 0, "second-review-completed", Date.now(), second.reviewChain);
   assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === first.id)?.resolvedByReview?.reviewNotificationId, second.id);
   assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === f.original.id)?.resolvedByReview, undefined);
 });

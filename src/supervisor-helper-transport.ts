@@ -44,6 +44,12 @@ export class SupervisorHelperTransport {
     const delivery = JSON.parse(String(row.document)) as Delivery;
     return delivery.hash === workflowRequestHash(input);
   }
+  // the exact bytes an existing attempt sent; they, not regenerated text, identify that attempt from then on
+  receiptText(binding: BindingRecord, logicalMessageId: string): string | null {
+    const row = this.options.store.store.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
+      .get(binding.threadId, binding.generation, logicalMessageId);
+    return row ? (JSON.parse(String(row.document)) as Delivery).text : null;
+  }
   matchesMessage(binding: BindingRecord, logicalMessageId: string, text: string, message: MessageInfo): boolean {
     const row = this.options.store.store.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
       .get(binding.threadId, binding.generation, logicalMessageId);
@@ -198,4 +204,4 @@ export class SupervisorHelperTransport {
     } catch {return false;}
   }
 }
-export type SupervisorHelperDeliveryTransport = Pick<SupervisorHelperTransport, "send" | "hasDelivery" | "reconcileDelivery" | "matchesMessage" | "retire">;
+export type SupervisorHelperDeliveryTransport = Pick<SupervisorHelperTransport, "send" | "hasDelivery" | "reconcileDelivery" | "receiptText" | "matchesMessage" | "retire">;

@@ -838,8 +838,10 @@ export class SupervisorTeamStore {
 
   // Service-only: the runtime proves the completed run against the exact transport
   // message and its final marker. A helper ID (even with a guessed run ID) cannot ACK.
+  // A completed review closes only the chain attempts the runtime has just proven natively
+  // ended without completion; any other attempt keeps its own fence.
   acknowledgeNotificationRun(binding: TeamBinding, actorThreadId: string, notificationId: string, expectedDeliveryAttempt: number,
-    completedRunId: string, now = Date.now()): TeamNotification {
+    completedRunId: string, now = Date.now(), nativelyClosable: readonly HandoverAttempt[] = []): TeamNotification {
     return this.atomic(() => {
       this.currentBinding(binding);
       if (actorThreadId !== binding.threadId) throw new Error("supervisor_team_root_actor_required");
@@ -858,6 +860,8 @@ export class SupervisorTeamStore {
         if (assignment?.state === "transferring" && assignment.epoch === notification.assignmentEpoch &&
           member?.state === "ready" && member.epoch === notification.memberEpoch) {
           for (const identity of notification.reviewChain ?? []) {
+            if (!nativelyClosable.some(entry => entry.notificationId === identity.notificationId && entry.deliveryAttempt === identity.deliveryAttempt &&
+              entry.runId === identity.runId)) continue;
             const current = this.notificationsFor(binding).find(value => value.id === identity.notificationId);
             if (!current || notificationClosed(current) || current.state !== "delivered" || current.deliveryAttempt !== identity.deliveryAttempt ||
               current.observedRun?.runId !== identity.runId || current.memberEpoch !== notification.memberEpoch ||

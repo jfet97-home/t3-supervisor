@@ -216,16 +216,18 @@ export class SupervisorTeamController {
       projection.thread.lineage.parentThreadId !== binding.threadId || projection.thread.lineage.relationshipToParent !== "subagent" ||
       projection.thread.archivedAt != null || projection.thread.deletedAt != null) throw new Error("supervisor_team_review_native_unavailable");
     for (const notification of chain) {
-      const {text, marker} = teamNotificationText(binding, notification);
+      const {marker} = teamNotificationText(binding, notification);
       // Read only the existing transport receipt. No channel creation, POST or native
-      // mutation is permitted here. Text + owned scheduled task identify the delivery.
+      // mutation is permitted here. Its exact sent bytes + owned scheduled task identify
+      // the delivery; regenerated text would not survive a later wording change.
       const row = this.workflows.options.supervisors.store.db.prepare(
         "SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
         .get(binding.threadId, binding.generation, `supervisor-team-notice:${notification.id}:attempt:${notification.deliveryAttempt}`);
       const delivery: unknown = row && JSON.parse(String(row.document));
-      if (!isRecord(delivery) || delivery.state === "rejected" || delivery.text !== text || delivery.threadId !== notification.recipientThreadId ||
+      if (!isRecord(delivery) || delivery.state === "rejected" || typeof delivery.text !== "string" || delivery.threadId !== notification.recipientThreadId ||
         !id(delivery.taskId)) throw new Error("supervisor_team_review_native_unavailable");
-      const evidence = teamNotificationEvidence(projection, notification, marker, message => message.text === text &&
+      const sent = delivery.text;
+      const evidence = teamNotificationEvidence(projection, notification, marker, message => message.text === sent &&
         message.scheduledTaskId === delivery.taskId && message.creationSource === "server");
       if (evidence.completedRun) throw new Error("supervisor_team_review_native_completed");
       const run = evidence.runs.find(value => value.id === notification.observedRun?.runId);
