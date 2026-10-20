@@ -559,11 +559,12 @@ const makeService = (options: T3ClientOptions): T3ClientShape => {
   baseUrl.hash = "";
 
   const getJson = (path: string, operation: string, protocolHeader: boolean,
-    consume: (response: Response, signal: AbortSignal) => Promise<unknown> =
+    consume: (response: Response, signal: AbortSignal, deadline: number) => Promise<unknown> =
       (response, signal) => readResponseBody(response, maxResponseBytes, signal, operation)): Effect.Effect<unknown, T3TransportError> =>
     Effect.tryPromise({
       try: async (signal) => {
         let didTimeout = false;
+        const deadline = performance.now() + httpTimeoutMs;
         const timeoutController = new AbortController();
         const combinedSignal = AbortSignal.any([signal, timeoutController.signal]);
         const timeoutId = setTimeout(() => {
@@ -581,10 +582,12 @@ const makeService = (options: T3ClientOptions): T3ClientShape => {
             void response.body?.cancel().catch(() => undefined);
             throw new T3TransportError(`T3 ${operation} returned HTTP ${response.status}`, response.status);
           }
-          return await consume(response, combinedSignal);
+          return await consume(response, combinedSignal, deadline);
         } catch (cause) {
           if (cause instanceof T3TransportError) throw cause;
           if (cause instanceof ProjectionStreamError && cause.code !== "interrupted") {
+            if (cause.code === "timed_out") throw new T3TransportError(`T3 ${operation} request timed out`);
+            if (cause.code === "unreadable") throw new T3TransportError(`T3 ${operation} response could not be read`);
             throw cause.code === "invalid"
               ? new T3TransportError(`T3 ${operation} response was not valid JSON`)
               : new T3TransportError(`T3 ${operation} response exceeded the byte limit`, undefined, "response_too_large");
@@ -601,7 +604,7 @@ const makeService = (options: T3ClientOptions): T3ClientShape => {
 
   // the full snapshot streams: arrays the Supervisor never reads are validated and dropped, and only the kept part counts
   // toward the retained budget, while every byte read counts toward the transfer budget
-  const readProjectionBody = async (response: Response, signal: AbortSignal): Promise<unknown> => {
+  const readProjectionBody = async (response: Response, signal: AbortSignal, deadline: number): Promise<unknown> => {
     const contentLength = response.headers.get("content-length");
     if (contentLength !== null && Number(contentLength) > maxProjectionTransferBytes) {
       void response.body?.cancel().catch(() => undefined);
@@ -609,7 +612,7 @@ const makeService = (options: T3ClientOptions): T3ClientShape => {
     }
     if (response.body === null) throw new T3TransportError("T3 thread projection response was empty");
     return readProjectionSnapshot(response.body,
-      {retainedBytes: maxRetainedProjectionBytes, transferBytes: maxProjectionTransferBytes}, signal);
+      {retainedBytes: maxRetainedProjectionBytes, transferBytes: maxProjectionTransferBytes, deadline}, signal);
   };
   const oversizedUntil = new Map<string, number>();
   const knownOversized = (threadId: string): boolean => {

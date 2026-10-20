@@ -378,6 +378,42 @@ test("a snapshot over a byte budget is typed, memoized for its thread and read a
   }
 });
 
+test("a projection body whose content hides under __proto__ fails validation through the client", async () => {
+  const projection = makeProjection("thread-1");
+  const server = await startMockServer((_request, response) => {
+    const body = `{"snapshotSequence":1,"projection":{"__proto__":${JSON.stringify(projection)}}}`;
+    response.writeHead(200, {"content-type": "application/json", "content-length": Buffer.byteLength(body)});
+    response.end(body);
+  });
+  try {
+    const client = await getClient(server.baseUrl);
+    await assert.rejects(Effect.runPromise(client.projection("thread-1")),
+      (error: unknown) => error instanceof T3TransportError && /unsupported schema or shape/.test(error.message));
+  } finally {
+    await server.close();
+  }
+});
+
+test("a snapshot read that stalls mid-body times out without being memoized", async () => {
+  let reads = 0;
+  const text = JSON.stringify(paddedSnapshot("thread-1", 1000));
+  const server = await startMockServer((_request, response) => {
+    reads++;
+    response.writeHead(200, {"content-type": "application/json", "content-length": Buffer.byteLength(text)});
+    if (reads === 1) response.write(text.slice(0, 200));
+    else response.end(text);
+  });
+  try {
+    const client = await getClient(server.baseUrl, {httpTimeoutMs: 100});
+    await assert.rejects(Effect.runPromise(client.projection("thread-1")),
+      (error: unknown) => error instanceof T3TransportError && error.code === undefined && /timed out/.test(error.message));
+    assert.equal((await Effect.runPromise(client.projection("thread-1"))).projection.thread.id, "thread-1");
+    assert.equal(reads, 2, "a timeout is not remembered as an oversized snapshot");
+  } finally {
+    await server.close();
+  }
+});
+
 test("a timed-out snapshot read is not memoized as oversized", async () => {
   let reads = 0;
   let slow = true;
@@ -415,9 +451,14 @@ test("a gzip snapshot counts decompressed bytes toward the transfer budget, and 
     const tight = await getClient(server.baseUrl, {maxResponseBytes: 64 * 1024, maxProjectionTransferBytes: 128 * 1024});
     await assert.rejects(Effect.runPromise(tight.projection("thread-1")),
       (error: unknown) => error instanceof T3TransportError && error.code === "response_too_large");
+    // a fresh client, so the earlier failure's memo cannot answer for the header precheck
     declared = 10 * 1024 * 1024;
-    await assert.rejects(Effect.runPromise(tight.projection("thread-1")),
+    let requests = 0;
+    server.http.on("request", () => {requests++;});
+    const fresh = await getClient(server.baseUrl, {maxResponseBytes: 64 * 1024, maxProjectionTransferBytes: 128 * 1024});
+    await assert.rejects(Effect.runPromise(fresh.projection("thread-1")),
       (error: unknown) => error instanceof T3TransportError && error.code === "response_too_large");
+    assert.equal(requests, 1, "the declared length was checked on a real request");
   } finally {
     await server.close();
   }

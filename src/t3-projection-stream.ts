@@ -9,7 +9,8 @@
 export const UNREAD_PROJECTION_KEYS: ReadonlySet<string> = new Set(["visibleTurnItems", "plans", "checkpointScopes",
   "checkpoints", "contextHandoffs", "contextTransfers", "providerSessions"]);
 
-export type ProjectionStreamFailure = "retained_too_large" | "transfer_too_large" | "invalid" | "interrupted";
+export type ProjectionStreamFailure = "retained_too_large" | "transfer_too_large" | "invalid" | "unreadable" | "interrupted" |
+  "timed_out";
 
 export class ProjectionStreamError extends Error {
   readonly _tag = "ProjectionStreamError";
@@ -22,9 +23,15 @@ export class ProjectionStreamError extends Error {
 export interface ProjectionStreamBudget {
   /** UTF-8 bytes of retained records, a string shared by a turn item and its message counted once */
   retainedBytes: number;
-  /** bytes read from the response body, retained or skipped */
+  /** bytes read from the response body after any content decoding, retained or skipped */
   transferBytes: number;
+  /** monotonic time, in `now()` milliseconds, after which the read fails as timed out */
+  deadline: number;
+  now?: () => number;
 }
+
+// immediately available chunks never return to the event loop on their own, so timers and aborts would starve
+const YIELD_INTERVAL_MS = 20;
 
 const SPACE = 0x20, TAB = 0x09, LF = 0x0a, CR = 0x0d;
 const QUOTE = 0x22, BACKSLASH = 0x5c, COMMA = 0x2c, COLON = 0x3a;
@@ -41,18 +48,34 @@ class ByteCursor {
   private chunk: Uint8Array = new Uint8Array(0);
   private position = 0;
   private transferred = 0;
-  private captured: Uint8Array[] | null = null;
+  private captured: Uint8Array[] = [];
   private capturedBytes = 0;
   private captureLimit = 0;
 
+  private yieldedAt: number;
+
   constructor(private readonly reader: ReadableStreamDefaultReader<Uint8Array>, private readonly transferLimit: number,
-    private readonly signal: AbortSignal) {}
+    private readonly signal: AbortSignal, private readonly deadline: number, private readonly now: () => number) {
+    this.yieldedAt = now();
+  }
+
+  /** fails once cancelled or past the deadline; called between chunks and before publishing */
+  check(): void {
+    if (this.signal.aborted) throw new ProjectionStreamError("interrupted");
+    if (this.now() > this.deadline) throw new ProjectionStreamError("timed_out");
+  }
 
   private async fill(): Promise<boolean> {
-    if (this.signal.aborted) throw new ProjectionStreamError("interrupted");
+    this.check();
+    if (this.now() - this.yieldedAt >= YIELD_INTERVAL_MS) {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      this.yieldedAt = this.now();
+      this.check();
+    }
     let result: ReadableStreamReadResult<Uint8Array>;
     try {result = await this.reader.read();}
-    catch {throw new ProjectionStreamError(this.signal.aborted ? "interrupted" : "invalid");}
+    // a body the connection stopped delivering is unreadable, not malformed
+    catch {throw new ProjectionStreamError(this.signal.aborted ? "interrupted" : "unreadable");}
     if (result.done) return false;
     this.transferred += result.value.byteLength;
     if (this.transferred > this.transferLimit) throw new ProjectionStreamError("transfer_too_large");
@@ -62,7 +85,7 @@ class ByteCursor {
   }
 
   private keep(end: number, start: number): void {
-    if (this.captured === null || end <= start) return;
+    if (end <= start) return;
     this.capturedBytes += end - start;
     if (this.capturedBytes > this.captureLimit) throw new ProjectionStreamError("retained_too_large");
     this.captured.push(this.chunk.slice(start, end));
@@ -102,13 +125,13 @@ class ByteCursor {
     return this.position >= this.chunk.length && !await this.fill();
   }
 
-  /** scans one JSON value; returns its exact bytes when `limit` is given, otherwise skips it */
-  async value(limit?: number): Promise<Uint8Array | null> {
+  /** scans one JSON value and returns its exact bytes, failing once they exceed `limit` */
+  async value(limit: number): Promise<Uint8Array> {
     await this.skipWhitespace();
     const first = await this.peek();
-    this.captured = limit === undefined ? null : [];
+    this.captured = [];
     this.capturedBytes = 0;
-    this.captureLimit = limit ?? 0;
+    this.captureLimit = limit;
     let depth = 0;
     let inString = false;
     let escaped = false;
@@ -156,11 +179,10 @@ class ByteCursor {
     }
   }
 
-  private finish(start: number): Uint8Array | null {
+  private finish(start: number): Uint8Array {
     this.keep(this.position, start);
     const parts = this.captured;
-    this.captured = null;
-    if (parts === null) return null;
+    this.captured = [];
     const bytes = new Uint8Array(this.capturedBytes);
     let offset = 0;
     for (const part of parts) {
@@ -171,33 +193,47 @@ class ByteCursor {
   }
 }
 
-const decoder = new TextDecoder("utf-8", {fatal: true});
+// a byte order mark is kept, so JSON.parse rejects it inside a value exactly as it would inside the whole body
+const decoder = new TextDecoder("utf-8", {fatal: true, ignoreBOM: true});
 
-const parseBytes = (bytes: Uint8Array | null): unknown => {
-  if (bytes === null) throw new ProjectionStreamError("invalid");
+const parseBytes = (bytes: Uint8Array): unknown => {
   try {return JSON.parse(decoder.decode(bytes)) as unknown;}
   catch {throw new ProjectionStreamError("invalid");}
 };
 
-const readKey = async (cursor: ByteCursor): Promise<string> => {
+const MAX_KEY_BYTES = 4096;
+
+const readKey = async (cursor: ByteCursor): Promise<{key: string; bytes: number}> => {
   await cursor.skipWhitespace();
   if (await cursor.peek() !== QUOTE) throw new ProjectionStreamError("invalid");
-  const key = parseBytes(await cursor.value(4096));
+  let raw: Uint8Array;
+  // a key no native snapshot uses is malformed input, not a byte budget overflow worth memoizing
+  try {raw = await cursor.value(MAX_KEY_BYTES);}
+  catch (error) {
+    if (error instanceof ProjectionStreamError && error.code === "retained_too_large") throw new ProjectionStreamError("invalid");
+    throw error;
+  }
+  const key = parseBytes(raw);
   if (typeof key !== "string") throw new ProjectionStreamError("invalid");
   await cursor.expect(COLON);
-  return key;
+  return {key, bytes: raw.byteLength};
+};
+
+// an own data property, as JSON.parse creates, even for a key such as __proto__
+const defineOwn = (target: Record<string, unknown>, key: string, value: unknown): void => {
+  Object.defineProperty(target, key, {value, writable: true, enumerable: true, configurable: true});
 };
 
 /** reads `{...}` key by key; a repeated key is rejected rather than silently replaced */
-const readObject = async (cursor: ByteCursor, onKey: (key: string) => Promise<void>): Promise<void> => {
+const readObject = async (cursor: ByteCursor, onKey: (key: string, keyBytes: number) => Promise<void>): Promise<void> => {
   await cursor.expect(OPEN_OBJECT);
   if (await cursor.accept(CLOSE_OBJECT)) return;
   const seen = new Set<string>();
   for (;;) {
-    const key = await readKey(cursor);
+    const {key, bytes} = await readKey(cursor);
     if (seen.has(key)) throw new ProjectionStreamError("invalid");
     seen.add(key);
-    await onKey(key);
+    await onKey(key, bytes);
     if (await cursor.accept(COMMA)) continue;
     await cursor.expect(CLOSE_OBJECT);
     return;
@@ -211,35 +247,41 @@ const readObject = async (cursor: ByteCursor, onKey: (key: string) => Promise<vo
 export const readProjectionSnapshot = async (body: ReadableStream<Uint8Array>, budget: ProjectionStreamBudget,
   signal: AbortSignal): Promise<Record<string, unknown>> => {
   const reader = body.getReader();
-  const cursor = new ByteCursor(reader, budget.transferBytes, signal);
+  const cursor = new ByteCursor(reader, budget.transferBytes, signal, budget.deadline, budget.now ?? (() => performance.now()));
   let retained = 0;
   const remaining = (): number => budget.retainedBytes - retained;
-  const retain = (bytes: Uint8Array | null): unknown => {
-    retained += bytes?.byteLength ?? 0;
+  const charge = (bytes: number): void => {
+    retained += bytes;
+    if (retained > budget.retainedBytes) throw new ProjectionStreamError("retained_too_large");
+  };
+  const retain = (bytes: Uint8Array): unknown => {
+    retained += bytes.byteLength;
     if (retained > budget.retainedBytes) throw new ProjectionStreamError("retained_too_large");
     return parseBytes(bytes);
   };
   const snapshot: Record<string, unknown> = {};
   try {
-    await readObject(cursor, async (key) => {
+    await readObject(cursor, async (key, keyBytes) => {
+      charge(keyBytes);
       if (key !== "projection") {
-        snapshot[key] = retain(await cursor.value(remaining()));
+        defineOwn(snapshot, key, retain(await cursor.value(remaining())));
         return;
       }
       const projection: Record<string, unknown> = {};
       const messageText = new Map<string, string>();
-      await readObject(cursor, async (field) => {
+      await readObject(cursor, async (field, fieldBytes) => {
         // an unread array is still parsed element by element, so a body JSON.parse would reject is rejected; nothing is retained
         const unread = UNREAD_PROJECTION_KEYS.has(field);
+        if (!unread) charge(fieldBytes);
         await cursor.skipWhitespace();
         if (await cursor.peek() !== OPEN_ARRAY) {
           if (unread) parseBytes(await cursor.value(budget.retainedBytes));
-          else projection[field] = retain(await cursor.value(remaining()));
+          else defineOwn(projection, field, retain(await cursor.value(remaining())));
           return;
         }
         await cursor.expect(OPEN_ARRAY);
         const values: unknown[] = [];
-        if (!unread) projection[field] = values;
+        if (!unread) defineOwn(projection, field, values);
         if (await cursor.accept(CLOSE_ARRAY)) return;
         for (;;) {
           if (unread) {
@@ -251,7 +293,7 @@ export const readProjectionSnapshot = async (body: ReadableStream<Uint8Array>, b
           // one record may transiently exceed what remains, because a shared text is not retained twice
           const raw = await cursor.value(budget.retainedBytes);
           const element = parseBytes(raw);
-          let charged = raw?.byteLength ?? 0;
+          let charged = raw.byteLength;
           if (field === "messages" && record(element) && typeof element.id === "string" && typeof element.text === "string")
             messageText.set(element.id, element.text);
           if (field === "turnItems" && record(element) && (element.type === "user_message" || element.type === "assistant_message") &&
@@ -270,11 +312,11 @@ export const readProjectionSnapshot = async (body: ReadableStream<Uint8Array>, b
           return;
         }
       });
-      snapshot.projection = projection;
+      defineOwn(snapshot, "projection", projection);
     });
     if (!await cursor.atEnd()) throw new ProjectionStreamError("invalid");
     // a deadline that expired during the last synchronous parse still publishes nothing
-    if (signal.aborted) throw new ProjectionStreamError("interrupted");
+    cursor.check();
     return snapshot;
   } finally {
     void reader.cancel().catch(() => undefined);

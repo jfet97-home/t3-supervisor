@@ -16,7 +16,7 @@ const streamOf = (bytes: Uint8Array, cuts: readonly number[] = []): ReadableStre
   });
 };
 
-const budget = {retainedBytes: 1 << 20, transferBytes: 4 << 20};
+const budget = {retainedBytes: 1 << 20, transferBytes: 4 << 20, deadline: Number.POSITIVE_INFINITY};
 
 const snapshotBody = () => ({
   snapshotSequence: 17,
@@ -77,12 +77,12 @@ test("unread arrays do not count toward the retained budget, but retained record
   const bytes = encoder.encode(JSON.stringify(body));
   assert.ok(bytes.length > 800_000);
   const retainedOnly = encoder.encode(JSON.stringify(expectedView(body))).length;
-  const result = await readProjectionSnapshot(streamOf(bytes, [4096, 65_536]), {retainedBytes: retainedOnly + 64, transferBytes: bytes.length},
+  const result = await readProjectionSnapshot(streamOf(bytes, [4096, 65_536]), {retainedBytes: retainedOnly + 64, transferBytes: bytes.length, deadline: Number.POSITIVE_INFINITY},
     AbortSignal.timeout(5000));
   assert.deepEqual(result, expectedView(JSON.parse(JSON.stringify(body)) as ReturnType<typeof snapshotBody>));
-  await assert.rejects(readProjectionSnapshot(streamOf(bytes), {retainedBytes: 500, transferBytes: bytes.length}, AbortSignal.timeout(5000)),
+  await assert.rejects(readProjectionSnapshot(streamOf(bytes), {retainedBytes: 500, transferBytes: bytes.length, deadline: Number.POSITIVE_INFINITY}, AbortSignal.timeout(5000)),
     (error: unknown) => error instanceof ProjectionStreamError && error.code === "retained_too_large");
-  await assert.rejects(readProjectionSnapshot(streamOf(bytes, [4096]), {retainedBytes: bytes.length, transferBytes: bytes.length - 1},
+  await assert.rejects(readProjectionSnapshot(streamOf(bytes, [4096]), {retainedBytes: bytes.length, transferBytes: bytes.length - 1, deadline: Number.POSITIVE_INFINITY},
     AbortSignal.timeout(5000)), (error: unknown) => error instanceof ProjectionStreamError && error.code === "transfer_too_large");
 });
 
@@ -122,6 +122,91 @@ test("truncated, trailing, duplicated or malformed bodies fail as invalid", asyn
   broken[index] = 0xff;
   await assert.rejects(readProjectionSnapshot(streamOf(broken), budget, AbortSignal.timeout(5000)),
     (error: unknown) => error instanceof ProjectionStreamError && error.code === "invalid");
+});
+
+test("a __proto__ key in the envelope or projection is an own field, exactly as JSON.parse makes it", async () => {
+  const projection = snapshotBody().projection;
+  const text = `{"snapshotSequence":3,"__proto__":{"polluted":true},"projection":{"__proto__":{"thread":{"id":"hidden"}},${JSON.stringify(projection).slice(1)}}`;
+  const result = await readProjectionSnapshot(streamOf(encoder.encode(text), [7, 40]), budget, AbortSignal.timeout(5000));
+  const expected = JSON.parse(text) as Record<string, Record<string, unknown>>;
+  for (const key of UNREAD_PROJECTION_KEYS) delete expected.projection![key];
+  assert.deepEqual(result, expected);
+  assert.ok(Object.hasOwn(result, "__proto__") && Object.hasOwn(result.projection as object, "__proto__"));
+  assert.equal(Object.getPrototypeOf(result), Object.prototype);
+  assert.equal(Object.getPrototypeOf(result.projection), Object.prototype);
+  // a body whose only projection content sits under __proto__ has no own thread, runs or messages
+  const hidden = await readProjectionSnapshot(streamOf(encoder.encode(`{"snapshotSequence":1,"projection":{"__proto__":${
+    JSON.stringify({thread: projection.thread, runs: [], messages: []})}}}`)), budget, AbortSignal.timeout(5000));
+  assert.equal(Object.hasOwn(hidden.projection as object, "thread"), false);
+  assert.equal((hidden.projection as Record<string, unknown>).thread, undefined);
+});
+
+test("a byte order mark before a retained or unread value is rejected as JSON.parse would", async () => {
+  const text = JSON.stringify(snapshotBody());
+  for (const [label, value] of [["unread", text.replace('"plans":[', '"plans":[\ufeff0,')], ["retained", text.replace('"snapshotSequence":17', '"snapshotSequence":\ufeff17')]] as const) {
+    assert.throws(() => JSON.parse(value), SyntaxError);
+    await assert.rejects(readProjectionSnapshot(streamOf(encoder.encode(value)), budget, AbortSignal.timeout(5000)),
+      (error: unknown) => error instanceof ProjectionStreamError && error.code === "invalid", label);
+  }
+});
+
+test("chunks that arrive back to back still meet the deadline and let timers run", async () => {
+  const tiny = encoder.encode(`{"snapshotSequence":1,"projection":{"thread":{"id":"t"},"runs":[],"messages":[],"plans":[${Array(200_000).fill("null").join(",")}]}}`);
+  const immediate = () => {
+    let offset = 0;
+    return new ReadableStream<Uint8Array>({pull(controller) {
+      if (offset >= tiny.length) {controller.close();return;}
+      controller.enqueue(tiny.slice(offset, offset + 4096));
+      offset += 4096;
+    }});
+  };
+  let clock = 0;
+  await assert.rejects(readProjectionSnapshot(immediate(), {...budget, deadline: 50, now: () => clock++}, AbortSignal.timeout(5000)),
+    (error: unknown) => error instanceof ProjectionStreamError && error.code === "timed_out");
+  // a timer scheduled before a long read fires while the read is still in progress
+  let timerFired = false;
+  let readFinished = false;
+  setTimeout(() => {timerFired = true;}, 0);
+  let observedDuringRead = false;
+  const probe = setInterval(() => {if (!readFinished && timerFired) observedDuringRead = true;}, 0);
+  let slowClock = 0;
+  await readProjectionSnapshot(immediate(), {...budget, now: () => (slowClock += 5)}, AbortSignal.timeout(5000));
+  readFinished = true;
+  clearInterval(probe);
+  assert.equal(timerFired, true);
+  assert.equal(observedDuringRead, true, "the read yields to the event loop between chunks");
+});
+
+test("sharing an identical text charges it once, which a budget between both sizes proves", async () => {
+  const text = "s".repeat(20_000);
+  const body = (itemText: string) => encoder.encode(JSON.stringify({snapshotSequence: 1, projection: {thread: {id: "t"}, runs: [],
+    messages: [{id: "m", threadId: "t", text}], turnItems: [{id: "i", threadId: "t", type: "user_message", messageId: "m", text: itemText}]}}));
+  // the shared form needs about one copy of the text, the unshared form about two
+  const limits = {...budget, retainedBytes: 30_000};
+  const shared = await readProjectionSnapshot(streamOf(body(text)), limits, AbortSignal.timeout(5000));
+  const projection = shared.projection as {messages: Array<{text: string}>; turnItems: Array<{text: string}>};
+  assert.equal(projection.turnItems[0]!.text, projection.messages[0]!.text);
+  await assert.rejects(readProjectionSnapshot(streamOf(body(`${text.slice(1)}x`)), limits, AbortSignal.timeout(5000)),
+    (error: unknown) => error instanceof ProjectionStreamError && error.code === "retained_too_large", "a differing text is charged twice");
+});
+
+test("retained keys are charged, an oversized key is invalid, and a failing body is unreadable", async () => {
+  const keys = Object.fromEntries(Array.from({length: 2000}, (_, index) => [`k${"x".repeat(100)}${index}`, 0]));
+  const many = encoder.encode(JSON.stringify({snapshotSequence: 1, projection: {thread: {id: "t"}, runs: [], messages: [], ...keys}}));
+  await assert.rejects(readProjectionSnapshot(streamOf(many), {...budget, retainedBytes: 100_000}, AbortSignal.timeout(5000)),
+    (error: unknown) => error instanceof ProjectionStreamError && error.code === "retained_too_large", "keys count toward the budget");
+  const longKey = encoder.encode(`{"${"k".repeat(5000)}":1,"snapshotSequence":1}`);
+  await assert.rejects(readProjectionSnapshot(streamOf(longKey), budget, AbortSignal.timeout(5000)),
+    (error: unknown) => error instanceof ProjectionStreamError && error.code === "invalid");
+  const bytes = encoder.encode(JSON.stringify(snapshotBody()));
+  let pulls = 0;
+  const broken = new ReadableStream<Uint8Array>({pull(controller) {
+    pulls++;
+    if (pulls === 3) {controller.error(new Error("socket closed"));return;}
+    controller.enqueue(bytes.slice((pulls - 1) * 64, pulls * 64));
+  }});
+  await assert.rejects(readProjectionSnapshot(broken, budget, AbortSignal.timeout(5000)),
+    (error: unknown) => error instanceof ProjectionStreamError && error.code === "unreadable");
 });
 
 test("an aborted read stops with interrupted and keeps no partial result", async () => {
