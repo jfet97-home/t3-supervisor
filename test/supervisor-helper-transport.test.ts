@@ -184,7 +184,8 @@ test("hostile or incomplete native delivery detail never binds a rendering nor c
     content_type: detail => {detail.contentType = "text/plain";},
     rendered_not_string: detail => {detail.renderedPrompt = null;},
     rendered_empty: detail => {detail.renderedPrompt = "";},
-    rendered_oversized: detail => {detail.renderedPrompt = "x".repeat(400_001);},
+    // a logged prompt is cut to 64 Ki characters without a flag, so a prompt of exactly that length may be cut
+    rendered_at_log_cap: detail => {detail.renderedPrompt = "x".repeat(64 * 1024);},
     detail_missing: () => {},
   };
   for (const [mode, corrupt] of Object.entries(hostile)) {
@@ -282,7 +283,10 @@ test("a late POST reply keeps a rendering proven while the POST was in flight", 
 });
 
 test("a lost-reply delivery is recovered by its exact body and binds its published rendering", async () => {
-  for (const outcome of ["accepted", "dispatch_failed"] as const) {
+  // a delivery can be marked dispatch_failed after its message was created, so only that visible message proves
+  // delivery and a projection without it stays uncertain, never rejected
+  const cases = [["accepted", false, "waiting"], ["dispatch_failed", true, "waiting"], ["dispatch_failed", false, "uncertain"]] as const;
+  for (const [outcome, visible, expected] of cases) {
     const f = await fixture();
     try {
       f.state.renderWrapper = publishedWrapper;f.state.loseReply = true;
@@ -290,16 +294,41 @@ test("a lost-reply delivery is recovered by its exact body and binds its publish
       const input = {threadId: "helper", commandId: "lost-" + outcome, messageId: "lost-" + outcome + "-message", text: "Check-in lost " + outcome};
       assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
       const native = f.helper.messages[0]!;
-      f.helper.messages.splice(0);
+      if (!visible) f.helper.messages.splice(0);
       addNativeWebhookDelivery(f, {id: "recovered-" + outcome, body: f.state.lastPostedBody!, renderedPrompt: publishedWrapper(input.text), outcome});
-      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), outcome === "accepted" ? "waiting" : "rejected");
+      const label = `${outcome}, message ${visible ? "visible" : "not visible"}`;
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), expected, label);
       const receipt = JSON.parse(receiptDocument(f, input.messageId)) as Record<string, unknown>;
-      assert.equal(receipt.nativeDeliveryId, "recovered-" + outcome);
-      assert.equal(receipt.text, input.text);
-      if (outcome === "accepted") {
-        assert.equal(receipt.renderedText, publishedWrapper(input.text));
-        assert.equal(transport.matchesMessage(f.binding, input.messageId, input.text, native), true);
-      } else assert.equal(receipt.state, "rejected");
+      assert.equal(receipt.nativeDeliveryId, "recovered-" + outcome, label);
+      assert.equal(receipt.text, input.text, label);
+      assert.equal(receipt.state, "posted", label);
+      assert.equal(receipt.renderedText, publishedWrapper(input.text), label);
+      assert.equal(transport.matchesMessage(f.binding, input.messageId, input.text, native), true, label);
+      if (!visible) {
+        // a stale projection that later shows the exact rendered message proves the delivery
+        f.helper.messages.push(native);
+        assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "waiting", label);
+      }
+      assert.equal(f.state.posts, 1, label);
+    } finally {await f.cleanup();}
+  }
+});
+
+test("a rendering at T3's 64 Ki character prompt log cap never binds, because T3 may have cut it", async () => {
+  for (const [length, binds] of [[64 * 1024, false], [64 * 1024 - 1, true]] as const) {
+    const f = await fixture();
+    try {
+      f.state.renderWrapper = publishedWrapper;f.state.loseReply = true;
+      const transport = new SupervisorHelperTransport(f.options);
+      const input = {threadId: "helper", commandId: "cap", messageId: "cap-message", text: "x".repeat(length - publishedWrapper("").length)};
+      assert.equal(publishedWrapper(input.text).length, length);
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+      const before = receiptDocument(f, input.messageId);
+      addNativeWebhookDelivery(f, {id: "cap-delivery", body: f.state.lastPostedBody!, renderedPrompt: publishedWrapper(input.text), outcome: "accepted"});
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), binds ? "waiting" : "uncertain", `length ${length}`);
+      if (binds) assert.equal(renderedReceipt(f, input.messageId), publishedWrapper(input.text));
+      else assert.equal(receiptDocument(f, input.messageId), before, `length ${length}: the receipt is unchanged`);
+      assert.equal(transport.matchesMessage(f.binding, input.messageId, input.text, f.helper.messages[0]!), binds, `length ${length}`);
       assert.equal(f.state.posts, 1);
     } finally {await f.cleanup();}
   }
@@ -545,7 +574,7 @@ test("accepted webhook without a native delivery identity remains uncertain with
   } finally {await f.cleanup();}
 });
 
-test("team runtime reconciles an accepted webhook receipt and surfaces native dispatch failure", async () => {
+test("a known native dispatch failure without a visible message keeps the check-in uncertain and fenced without reposting", async () => {
   const f = await fixture();
   try {
     f.state.emitMessage = false;
@@ -564,18 +593,56 @@ test("team runtime reconciles an accepted webhook receipt and surfaces native di
     team.runtime.startCycle(f.binding);
     await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));
 
-    const failed = team.requests.requests("p", "helper").find(item => item.id === request?.id);
-    assert.equal(failed?.state, "failed");
-    assert.equal(failed?.failureAcknowledged, undefined);
+    const current = team.requests.requests("p", "helper").find(item => item.id === request?.id);
+    assert.equal(current?.state, "uncertain");
     assert.equal(f.state.posts, 1);
     assert.equal(f.state.webhookDeliveryLookups, 1);
-    assert.equal(f.team.unresolvedRequests(f.binding).find(item => item.requestId === request?.id), undefined);
+    assert.equal(f.state.webhookDetailLookups, 1, "the known delivery's detail is read before any conclusion");
+    const receipt = JSON.parse(receiptDocument(f, request!.messageId)) as Record<string, unknown>;
+    assert.equal(receipt.state, "posted");
+    assert.equal(receipt.nativeDeliveryId, "native-delivery");
+    assert.equal(f.team.unresolvedRequests(f.binding).find(item => item.requestId === request?.id)?.state, "uncertain");
     const partition = team.runtime.partition(f.binding, team.threads, team.batch[0]!.batch);
     assert.equal(partition.rootBatch, null);
-    assert.ok(partition.rootEvents.some(event => event.kind === "service_attention" && event.memberThreadId === "helper"));
     await team.runtime.runHelperBatch(f.binding, team.threads, partition.helperBatches, AbortSignal.timeout(1000));
     assert.equal(f.state.posts, 1);
     assert.equal(team.requests.requests("p", "helper").length, 1);
+  } finally {await f.cleanup();}
+});
+
+test("a known native dispatch failure whose wrapped message is visible binds its rendering and completes through its own run", async () => {
+  const f = await fixture();
+  try {
+    f.state.renderWrapper = publishedWrapper;
+    const transport = new SupervisorHelperTransport(f.options);
+    const team = teamRuntime(f, transport);
+    team.runtime.startCycle(f.binding);
+    await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
+    const request = team.requests.pending("p", "helper")!;
+    assert.equal(request.state, "waiting");
+    addNativeWebhookDelivery(f, {id: "native-delivery", body: f.state.lastPostedBody!, renderedPrompt: publishedWrapper(request.text), outcome: "dispatch_failed"});
+
+    team.requests.noticeSent("helper", 0);
+    team.runtime.startCycle(f.binding);
+    await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));
+    assert.equal(team.requests.requests("p", "helper").find(item => item.id === request.id)?.state, "waiting");
+    assert.equal(f.state.webhookDetailLookups, 1);
+    const receipt = JSON.parse(receiptDocument(f, request.messageId)) as Record<string, unknown>;
+    assert.equal(receipt.state, "posted");
+    assert.equal(receipt.nativeDeliveryId, "native-delivery");
+    assert.equal(receipt.text, request.text);
+    assert.equal(receipt.renderedText, publishedWrapper(request.text));
+    assert.ok(f.team.unresolvedRequests(f.binding).some(item => item.requestId === request.id));
+
+    const native = f.helper.messages[0]!;
+    f.helper.runs.push({id: "scheduler-run", threadId: "helper", ordinal: 1, status: "completed", requestedAt: "2026-10-16T10:00:00Z",
+      startedAt: "2026-10-16T10:00:00Z", completedAt: "2026-10-16T10:00:05Z", rootNodeId: "root", userMessageId: native.id});
+    f.helper.messages.push({id: "scheduler-final", threadId: "helper", runId: "scheduler-run", nodeId: "root", role: "assistant",
+      text: `Checked. ${request.completionMarker}`, ordinal: 2, streaming: false, createdAt: "2026-10-16T10:00:05Z", updatedAt: "2026-10-16T10:00:05Z"});
+    for (let cycle = 0; cycle < 3; cycle++) {team.runtime.startCycle(f.binding);await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));}
+    assert.equal(team.requests.requests("p", "helper").find(item => item.id === request.id)?.state, "completed");
+    assert.equal(f.team.unresolvedRequests(f.binding).length, 0);
+    assert.equal(f.state.posts, 1);
   } finally {await f.cleanup();}
 });
 
@@ -614,7 +681,7 @@ test("team runtime recovers an exact accepted delivery receipt after the POST re
   } finally {await f.cleanup();}
 });
 
-test("team runtime fails a lost-reply check-in only after exact native dispatch failure is recovered", async () => {
+test("a lost-reply check-in with a recovered native dispatch failure stays uncertain until its own wrapped message completes", async () => {
   const f = await fixture();
   try {
     f.state.emitMessage = false;f.state.loseReply = true;
@@ -628,28 +695,39 @@ test("team runtime fails a lost-reply check-in only after exact native dispatch 
     const body = f.state.lastPostedBody;
     assert.ok(body);
     const posted = JSON.parse(body!) as {batchId: string; text: string};
-    addNativeWebhookDelivery(f, {id: "recovered-failed-delivery", body: body!, renderedPrompt: posted.text, outcome: "dispatch_failed"});
+    addNativeWebhookDelivery(f, {id: "recovered-failed-delivery", body: body!, renderedPrompt: publishedWrapper(posted.text), outcome: "dispatch_failed"});
 
     team.runtime.startCycle(f.binding);
     await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));
 
-    const failed = team.requests.requests("p", "helper").find(item => item.id === original?.id);
-    assert.equal(failed?.state, "failed");
-    const row = f.db.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
-      .get(f.binding.threadId, f.binding.generation, original!.messageId);
-    const delivery = JSON.parse(String(row?.document)) as {state: string; nativeDeliveryId?: string};
-    assert.equal(delivery.state, "rejected");
+    const current = team.requests.requests("p", "helper").find(item => item.id === original?.id);
+    assert.equal(current?.state, "uncertain");
+    const delivery = JSON.parse(receiptDocument(f, original!.messageId)) as Record<string, unknown>;
+    assert.equal(delivery.state, "posted");
     assert.equal(delivery.nativeDeliveryId, "recovered-failed-delivery");
+    assert.equal(delivery.text, posted.text);
+    assert.equal(delivery.renderedText, publishedWrapper(posted.text));
     assert.equal(f.state.posts, 1);
     assert.equal(f.state.webhookDeliveryLookups, 1);
     assert.equal(f.state.webhookDetailLookups, 1);
-    assert.equal(f.team.unresolvedRequests(f.binding).find(item => item.requestId === original?.id), undefined);
-    assert.ok(team.runtime.partition(f.binding, team.threads, team.batch[0]!.batch).rootEvents.some(event =>
-      event.kind === "service_attention" && event.memberThreadId === "helper"));
+    assert.equal(f.team.unresolvedRequests(f.binding).find(item => item.requestId === original?.id)?.state, "uncertain");
+
+    // the projection catches up: the exact wrapped message and its own completed run prove the delivery
+    f.helper.messages.push({id: "late-native-message", threadId: "helper", scheduledTaskId: String(f.tasks[0]!.id), runId: "late-run", nodeId: "root",
+      role: "user", text: publishedWrapper(posted.text), creationSource: "server", createdBy: "system", streaming: false,
+      createdAt: "2026-10-16T10:00:01Z", updatedAt: "2026-10-16T10:00:01Z"});
+    f.helper.runs.push({id: "late-run", threadId: "helper", ordinal: 1, status: "completed", requestedAt: "2026-10-16T10:00:01Z",
+      startedAt: "2026-10-16T10:00:01Z", completedAt: "2026-10-16T10:00:05Z", rootNodeId: "root", userMessageId: "late-native-message"});
+    f.helper.messages.push({id: "late-final", threadId: "helper", runId: "late-run", nodeId: "root", role: "assistant",
+      text: `Checked. ${original!.completionMarker}`, ordinal: 2, streaming: false, createdAt: "2026-10-16T10:00:05Z", updatedAt: "2026-10-16T10:00:05Z"});
+    for (let cycle = 0; cycle < 3; cycle++) {team.runtime.startCycle(f.binding);await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));}
+    assert.equal(team.requests.requests("p", "helper").find(item => item.id === original?.id)?.state, "completed");
+    assert.equal(f.team.unresolvedRequests(f.binding).length, 0);
+    assert.equal(f.state.posts, 1);
   } finally {await f.cleanup();}
 });
 
-test("a released waiting check-in reconciles its native failure without reposting before handover completes", async () => {
+test("a released check-in with a native dispatch failure keeps the handover open without reposting until its own run completes", async () => {
   const f = await fixture();
   try {
     f.state.emitMessage = false;
@@ -676,13 +754,10 @@ test("a released waiting check-in reconciles its native failure without repostin
     f.state.nativeOutcome = "dispatch_failed";
     team.runtime.startCycle(f.binding);
     await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));
-    const failed = team.requests.requests("p", "helper").find(item => item.id === original?.id);
-    assert.equal(failed?.state, "failed");
+    assert.equal(team.requests.requests("p", "helper").find(item => item.id === original?.id)?.state, "uncertain");
     assert.equal(f.state.posts, 2);
     assert.equal(f.state.webhookDeliveryLookups, 2);
-    assert.equal(f.team.unresolvedRequests(f.binding).find(item => item.requestId === original?.id), undefined);
-    assert.ok(team.runtime.partition(f.binding, team.threads, team.batch[0]!.batch).rootEvents.some(event =>
-      event.kind === "service_attention" && event.memberThreadId === "helper"));
+    assert.equal(f.team.unresolvedRequests(f.binding).find(item => item.requestId === original?.id)?.state, "uncertain");
     assert.equal(f.team.snapshot(f.binding).assignments.find(item => item.subtreeRootThreadId === "branch")?.state, "transferring");
 
     const userMessage = f.helper.messages.find(item => item.text === (JSON.parse(f.state.lastPostedBody ?? "null") as {text?: string} | null)?.text);
@@ -699,30 +774,45 @@ test("a released waiting check-in reconciles its native failure without repostin
     team.runtime.startCycle(f.binding);
     await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));
     assert.equal(f.team.snapshot(f.binding).notifications.find(item => item.id === releaseNotice.id)?.state, "acknowledged");
+    // the uncertain check-in keeps its own fence, so the acknowledged release alone does not complete the handover
+    assert.equal(f.team.snapshot(f.binding).assignments.find(item => item.subtreeRootThreadId === "branch")?.state, "transferring");
+    assert.equal(team.requests.requests("p", "helper").find(item => item.id === original?.id)?.state, "uncertain");
+
+    // the check-in's own message appears late with its completed run
+    f.helper.messages.push({id: "check-in-message", threadId: "helper", scheduledTaskId: String(f.tasks[0]!.id), runId: "check-in-run", nodeId: "root",
+      role: "user", text: original!.text, creationSource: "server", createdBy: "system", streaming: false,
+      createdAt: "2026-10-16T10:00:03Z", updatedAt: "2026-10-16T10:00:03Z"});
+    f.helper.runs.push({id: "check-in-run", threadId: "helper", ordinal: 2, status: "completed", requestedAt: "2026-10-16T10:00:03Z",
+      startedAt: "2026-10-16T10:00:03Z", completedAt: "2026-10-16T10:00:04Z", rootNodeId: "root", userMessageId: "check-in-message"});
+    f.helper.messages.push({id: "check-in-final", threadId: "helper", runId: "check-in-run", nodeId: "root", role: "assistant",
+      text: `Checked. ${original!.completionMarker}`, ordinal: 2, streaming: false, createdAt: "2026-10-16T10:00:04Z", updatedAt: "2026-10-16T10:00:04Z"});
+    for (let cycle = 0; cycle < 3; cycle++) {team.runtime.startCycle(f.binding);await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));}
+    assert.equal(team.requests.requests("p", "helper").find(item => item.id === original?.id)?.state, "completed");
     assert.equal(f.team.coverage(f.binding, "branch", parents).state, "root");
     assert.equal(f.state.posts, 2);
   } finally {await f.cleanup();}
 });
 
 test("a pre-render native rejection is recoverable from its exact body receipt", async () => {
-  const f = await fixture();
-  try {
-    f.state.emitMessage = false;f.state.loseReply = true;
-    const transport = new SupervisorHelperTransport(f.options);
-    const input = {threadId: "helper", commandId: "lost-disabled", messageId: "lost-disabled-message", text: "Exact disabled delivery body"};
-    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
-    const body = f.state.lastPostedBody;
-    assert.ok(body);
-    addNativeWebhookDelivery(f, {id: "recovered-disabled-delivery", body: body!, renderedPrompt: null, outcome: "disabled"});
+  for (const outcome of ["disabled", "rejected_signature", "rate_limited", "expired"]) {
+    const f = await fixture();
+    try {
+      f.state.emitMessage = false;f.state.loseReply = true;
+      const transport = new SupervisorHelperTransport(f.options);
+      const input = {threadId: "helper", commandId: "lost-" + outcome, messageId: "lost-" + outcome + "-message", text: "Exact " + outcome + " delivery body"};
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+      const body = f.state.lastPostedBody;
+      assert.ok(body);
+      addNativeWebhookDelivery(f, {id: "recovered-" + outcome + "-delivery", body: body!, renderedPrompt: null, outcome});
 
-    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "rejected");
-    const row = f.db.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
-      .get(f.binding.threadId, f.binding.generation, input.messageId);
-    const delivery = JSON.parse(String(row?.document)) as {state: string; nativeDeliveryId?: string};
-    assert.equal(delivery.state, "rejected");
-    assert.equal(delivery.nativeDeliveryId, "recovered-disabled-delivery");
-    assert.equal(f.state.posts, 1);
-  } finally {await f.cleanup();}
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "rejected", outcome);
+      const delivery = JSON.parse(receiptDocument(f, input.messageId)) as Record<string, unknown>;
+      assert.equal(delivery.state, "rejected", outcome);
+      assert.equal(delivery.nativeDeliveryId, "recovered-" + outcome + "-delivery", outcome);
+      assert.equal(delivery.renderedText, undefined, outcome);
+      assert.equal(f.state.posts, 1, outcome);
+    } finally {await f.cleanup();}
+  }
 });
 
 test("wrong or ambiguous webhook bodies do not recover an unknown delivery identity", async () => {

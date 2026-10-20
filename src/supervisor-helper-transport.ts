@@ -13,14 +13,16 @@ type Delivery = SupervisorHelperMessage & {hash: string; taskId: string; state: 
   renderedText?: string};
 const promptTemplate = "{{body.text}}";
 const MAX_WEBHOOK_DELIVERY_DETAILS = 5;
-const rejectedWebhookOutcomes = new Set(["dispatch_failed", "rejected_signature", "disabled", "rate_limited", "expired"]);
+// outcomes T3 logs before rendering a prompt; it logs dispatch_failed after rendering, also once a message exists
 const preRenderRejectionOutcomes = new Set(["rejected_signature", "disabled", "rate_limited", "expired"]);
-const MAX_RENDERED_PROMPT_LENGTH = 400_000;
+// the native delivery log keeps at most 64 Ki characters of a rendered prompt and flags no cut, so a logged prompt
+// of that length may be truncated: it never binds, and its attempt stays unmatched and fenced
+const NATIVE_RENDERED_PROMPT_LOG_LIMIT = 64 * 1024;
 // the native user message an attempt produces: its proven rendered prompt, or the sent text while none is bound
 export const nativeMessageText = (delivery: {text: string; renderedText?: unknown}): string =>
   typeof delivery.renderedText === "string" ? delivery.renderedText : delivery.text;
 const renderedPromptOf = (detail: Record<string, unknown>): string | null =>
-  typeof detail.renderedPrompt === "string" && detail.renderedPrompt.length > 0 && detail.renderedPrompt.length <= MAX_RENDERED_PROMPT_LENGTH
+  typeof detail.renderedPrompt === "string" && detail.renderedPrompt.length > 0 && detail.renderedPrompt.length < NATIVE_RENDERED_PROMPT_LOG_LIMIT
     ? detail.renderedPrompt : null;
 
 /** Uses a genuine native webhook task, without timers or repeated tasks on the root. */
@@ -104,7 +106,8 @@ export class SupervisorHelperTransport {
       const summary = result.deliveries.find(item => item.id === nativeDeliveryId && item.taskId === delivery.taskId);
       if (!summary || typeof summary.outcome !== "string") return null;
       const resolved = {id: nativeDeliveryId, outcome: summary.outcome};
-      if (delivery.renderedText !== undefined || rejectedWebhookOutcomes.has(summary.outcome)) return resolved;
+      // a dispatch failure needs the rendering too: T3 may have created the message before it failed
+      if (delivery.renderedText !== undefined || preRenderRejectionOutcomes.has(summary.outcome)) return resolved;
       // binding the rendered prompt is best effort: unavailable or mismatched detail leaves the attempt unmatched
       try {
         const value = await this.options.rpc!("scheduledTasks.getWebhookDelivery", {id: delivery.taskId, deliveryId: nativeDeliveryId}, signal);
@@ -175,19 +178,30 @@ export class SupervisorHelperTransport {
     channel = {...channel, createdAt: task.createdAt, state: "ready"};this.saveChannel(binding, channel);
     return {channel, task};
   }
-  private async reconcileReceipt(binding: BindingRecord, delivery: Delivery, signal: AbortSignal): Promise<SupervisorHelperSendResult> {
+  private renderedMessage(delivery: Delivery, rendered: string, message: MessageInfo): boolean {
+    return message.threadId === delivery.threadId && message.scheduledTaskId === delivery.taskId && message.creationSource === "server" &&
+      message.text === rendered;
+  }
+  // `messages` is the helper's current native projection, or null when it could not be read
+  private async reconcileReceipt(binding: BindingRecord, delivery: Delivery, signal: AbortSignal,
+    messages: readonly MessageInfo[] | null): Promise<SupervisorHelperSendResult> {
     const native = await this.resolveWebhookDelivery(delivery, signal);
-    if (native && rejectedWebhookOutcomes.has(native.outcome)) {
+    if (native && preRenderRejectionOutcomes.has(native.outcome)) {
       this.save(binding, {...delivery, nativeDeliveryId: native.id, state: "rejected"});return "rejected";
     }
+    const rendered = delivery.renderedText ?? native?.renderedPrompt;
     // a bound rendered prompt is never replaced; the sent text, hash and identities are never changed
     if (native) this.save(binding, {...delivery, nativeDeliveryId: native.id, state: "posted",
-      ...(delivery.renderedText === undefined && native.renderedPrompt !== undefined ? {renderedText: native.renderedPrompt} : {})});
+      ...(delivery.renderedText === undefined && rendered !== undefined ? {renderedText: rendered} : {})});
+    // a delivery is also marked dispatch_failed after T3 created its message, and a projection lacking the message
+    // may be stale: only the exact rendered message proves delivery, and nothing here proves non-delivery
+    if (native?.outcome === "dispatch_failed")
+      return rendered !== undefined && messages?.some(message => this.renderedMessage(delivery, rendered, message)) ? "waiting" : "uncertain";
     return native?.outcome === "accepted" ? "waiting" :
       delivery.state === "posted" && delivery.nativeDeliveryId ? "waiting" : "uncertain";
   }
   // read-only reconciliation of an existing receipt; it never posts. A durable rejected receipt or a native
-  // rejected webhook outcome proves non-delivery; anything else leaves the identity unresolved.
+  // rejection before rendering proves non-delivery; anything else leaves the identity unresolved.
   async reconcileDelivery(binding: BindingRecord, input: SupervisorHelperMessage, signal: AbortSignal): Promise<"absent" | SupervisorHelperSendResult> {
     const row = this.options.store.store.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
       .get(binding.threadId, binding.generation, input.messageId);
@@ -196,7 +210,7 @@ export class SupervisorHelperTransport {
     if (delivery.hash !== workflowRequestHash(input)) return "uncertain";
     if (delivery.state === "rejected") return "rejected";
     if (!this.options.rpc) return "uncertain";
-    try {return await this.reconcileReceipt(binding, delivery, signal);} catch {return "uncertain";}
+    try {return await this.reconcileReceipt(binding, delivery, signal, null);} catch {return "uncertain";}
   }
   // `authorized` is re-checked after this method's own awaits, immediately before the receipt and POST, so
   // authority revoked meanwhile (for example a quarantine) posts nothing.
@@ -220,7 +234,7 @@ export class SupervisorHelperTransport {
         !this.options.store.ownedIds.has(input.threadId)) return refused;
       if (delivery) {
         if (helper.messages.some(message => this.matchesMessage(binding, input.messageId, input.text, message))) return "waiting";
-        return await this.reconcileReceipt(binding, delivery, signal);
+        return await this.reconcileReceipt(binding, delivery, signal, helper.messages);
       }
       if (!Array.isArray(helper.runtimeRequests) || helper.runtimeRequests.some(item => !record(item) || item.status === "pending")) return "busy";
       const channel = await this.readyChannel(binding, helper, signal);

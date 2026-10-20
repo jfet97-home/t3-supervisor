@@ -182,8 +182,16 @@ of the same attempt keeps it, so an overlapping reconciliation or a late POST re
 neither replace nor erase it. The native message must then equal that rendering, in the owned
 helper thread, with the same scheduled task and a server origin. The sent text,
 hash and identities never change, nothing is reposted, and missing, truncated or
-mismatched detail leaves the attempt unmatched and fenced. A lost reply is recovered
-from the exact body. A durable or native
+mismatched detail leaves the attempt unmatched and fenced. T3 logs at most 64 Ki
+characters of a rendered prompt without flagging a cut, so a logged rendering of exactly
+that length never binds and its attempt stays fenced; nothing is claimed for prompts of
+that size. A lost reply is recovered from the exact body. T3 logs `rejected_signature`,
+`disabled`, `rate_limited` and `expired` before rendering anything; these are definite
+rejections. `dispatch_failed` is logged after rendering, also when T3 had already created
+the message, and a projection that lacks the message may be stale. It therefore never
+counts as a rejection: only the exact rendered message in the helper thread proves the
+delivery, and otherwise the attempt stays uncertain and fenced. This includes T3's
+prompt-too-long case, which T3 reports only as free text. A durable or pre-render native
 rejection of an attempted POST is reconciled read-only even when the helper can no
 longer be read, so it cannot strand a definitely undelivered notice.
 A notice or check-in is `failed` only when T3 definitively rejected that exact POST or
