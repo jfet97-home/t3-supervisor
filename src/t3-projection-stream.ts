@@ -23,15 +23,17 @@ export class ProjectionStreamError extends Error {
 export interface ProjectionStreamBudget {
   /** UTF-8 bytes of retained records, a string shared by a turn item and its message counted once */
   retainedBytes: number;
-  /** bytes read from the response body after any content decoding, retained or skipped */
+  /** Bytes read from the response body after any content decoding, retained or skipped */
   transferBytes: number;
-  /** monotonic time, in `now()` milliseconds, after which the read fails as timed out */
+  /** Monotonic time, in `now()` milliseconds, after which the read fails as timed out */
   deadline: number;
   now?: () => number;
 }
 
 // immediately available chunks never return to the event loop on their own, so timers and aborts would starve
 const YIELD_INTERVAL_MS = 20;
+// an incoming chunk is scanned in slices of at most this size, so the deadline and yields never depend on its size
+const SCAN_SLICE_BYTES = 64 * 1024;
 
 const SPACE = 0x20, TAB = 0x09, LF = 0x0a, CR = 0x0d;
 const QUOTE = 0x22, BACKSLASH = 0x5c, COMMA = 0x2c, COLON = 0x3a;
@@ -47,6 +49,8 @@ const record = (value: unknown): value is Record<string, unknown> =>
 class ByteCursor {
   private chunk: Uint8Array = new Uint8Array(0);
   private position = 0;
+  private pending: Uint8Array = new Uint8Array(0);
+  private pendingOffset = 0;
   private transferred = 0;
   private captured: Uint8Array[] = [];
   private capturedBytes = 0;
@@ -59,7 +63,7 @@ class ByteCursor {
     this.yieldedAt = now();
   }
 
-  /** fails once cancelled or past the deadline; called between chunks and before publishing */
+  /** Fails once cancelled or past the deadline; called between slices and before publishing */
   check(): void {
     if (this.signal.aborted) throw new ProjectionStreamError("interrupted");
     if (this.now() > this.deadline) throw new ProjectionStreamError("timed_out");
@@ -72,14 +76,19 @@ class ByteCursor {
       this.yieldedAt = this.now();
       this.check();
     }
-    let result: ReadableStreamReadResult<Uint8Array>;
-    try {result = await this.reader.read();}
-    // a body the connection stopped delivering is unreadable, not malformed
-    catch {throw new ProjectionStreamError(this.signal.aborted ? "interrupted" : "unreadable");}
-    if (result.done) return false;
-    this.transferred += result.value.byteLength;
-    if (this.transferred > this.transferLimit) throw new ProjectionStreamError("transfer_too_large");
-    this.chunk = result.value;
+    if (this.pendingOffset >= this.pending.byteLength) {
+      let result: ReadableStreamReadResult<Uint8Array>;
+      try {result = await this.reader.read();}
+      // a body the connection stopped delivering is unreadable, not malformed
+      catch {throw new ProjectionStreamError(this.signal.aborted ? "interrupted" : "unreadable");}
+      if (result.done) return false;
+      this.transferred += result.value.byteLength;
+      if (this.transferred > this.transferLimit) throw new ProjectionStreamError("transfer_too_large");
+      this.pending = result.value;
+      this.pendingOffset = 0;
+    }
+    this.chunk = this.pending.subarray(this.pendingOffset, this.pendingOffset + SCAN_SLICE_BYTES);
+    this.pendingOffset += this.chunk.byteLength;
     this.position = 0;
     return true;
   }
@@ -112,7 +121,7 @@ class ByteCursor {
     this.position++;
   }
 
-  /** consumes `byte` if it is next, after whitespace */
+  /** Consumes `byte` if it is next, after whitespace */
   async accept(byte: number): Promise<boolean> {
     await this.skipWhitespace();
     if (await this.peek() !== byte) return false;
@@ -125,7 +134,7 @@ class ByteCursor {
     return this.position >= this.chunk.length && !await this.fill();
   }
 
-  /** scans one JSON value and returns its exact bytes, failing once they exceed `limit` */
+  /** Scans one JSON value and returns its exact bytes, failing once they exceed `limit` */
   async value(limit: number): Promise<Uint8Array> {
     await this.skipWhitespace();
     const first = await this.peek();
@@ -224,7 +233,7 @@ const defineOwn = (target: Record<string, unknown>, key: string, value: unknown)
   Object.defineProperty(target, key, {value, writable: true, enumerable: true, configurable: true});
 };
 
-/** reads `{...}` key by key; a repeated key is rejected rather than silently replaced */
+/** Reads `{...}` key by key; a repeated key is rejected rather than silently replaced */
 const readObject = async (cursor: ByteCursor, onKey: (key: string, keyBytes: number) => Promise<void>): Promise<void> => {
   await cursor.expect(OPEN_OBJECT);
   if (await cursor.accept(CLOSE_OBJECT)) return;
@@ -315,7 +324,7 @@ export const readProjectionSnapshot = async (body: ReadableStream<Uint8Array>, b
       defineOwn(snapshot, "projection", projection);
     });
     if (!await cursor.atEnd()) throw new ProjectionStreamError("invalid");
-    // a deadline that expired during the last synchronous parse still publishes nothing
+    // the read that reported the end already checked; publishing stays explicitly gated all the same
     cursor.check();
     return snapshot;
   } finally {

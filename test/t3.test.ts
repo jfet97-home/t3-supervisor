@@ -414,6 +414,43 @@ test("a snapshot read that stalls mid-body times out without being memoized", as
   }
 });
 
+test("the stream deadline and a broken body map to retryable timeout and unreadable failures through the client", async () => {
+  const text = JSON.stringify(paddedSnapshot("thread-1", 100_000));
+  const firstPart = deferred<void>();
+  const proceed = deferred<void>();
+  let mode: "deadline" | "broken" | "whole" = "deadline";
+  let reads = 0;
+  const server = await startMockServer((_request, response) => {
+    reads++;
+    response.writeHead(200, {"content-type": "application/json", "content-length": Buffer.byteLength(text)});
+    if (mode === "whole") {response.end(text);return;}
+    response.write(text.slice(0, 40_000), () => firstPart.resolve());
+    if (mode === "broken") {setTimeout(() => response.socket?.destroy(), 20);return;}
+    void proceed.promise.then(() => response.end(text.slice(40_000)));
+  });
+  const realNow = performance.now.bind(performance);
+  try {
+    const client = await getClient(server.baseUrl);
+    // the stream's own deadline trips first: the clock jumps past it while the body is still arriving
+    const pending = Effect.runPromise(client.projection("thread-1"));
+    await within(firstPart.promise);
+    performance.now = () => realNow() + 60_000;
+    proceed.resolve();
+    await assert.rejects(pending, (error: unknown) => error instanceof T3TransportError && error.code === undefined &&
+      /request timed out/.test(error.message));
+    performance.now = realNow;
+    mode = "broken";
+    await assert.rejects(Effect.runPromise(client.projection("thread-1")), (error: unknown) => error instanceof T3TransportError &&
+      error.code === undefined && /could not be read/.test(error.message));
+    mode = "whole";
+    assert.equal((await Effect.runPromise(client.projection("thread-1"))).projection.thread.id, "thread-1");
+    assert.equal(reads, 3, "neither failure is remembered as an oversized snapshot");
+  } finally {
+    performance.now = realNow;
+    await server.close();
+  }
+});
+
 test("a timed-out snapshot read is not memoized as oversized", async () => {
   let reads = 0;
   let slow = true;

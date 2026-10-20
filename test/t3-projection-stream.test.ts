@@ -209,6 +209,37 @@ test("retained keys are charged, an oversized key is invalid, and a failing body
     (error: unknown) => error instanceof ProjectionStreamError && error.code === "unreadable");
 });
 
+test("one huge chunk of tiny values is still scanned in slices that meet the deadline and let timers run", async () => {
+  const tiny = encoder.encode(`{"snapshotSequence":1,"projection":{"thread":{"id":"t"},"runs":[],"messages":[],"plans":[${Array(400_000).fill("null").join(",")}]}}`);
+  const single = () => new ReadableStream<Uint8Array>({start(controller) {controller.enqueue(tiny);controller.close();}});
+  let clock = 0;
+  await assert.rejects(readProjectionSnapshot(single(), {...budget, deadline: 10, now: () => clock++}, AbortSignal.timeout(5000)),
+    (error: unknown) => error instanceof ProjectionStreamError && error.code === "timed_out", "the deadline trips inside one chunk");
+  let timerFired = false;
+  let firedDuringRead = false;
+  let reading = true;
+  setTimeout(() => {timerFired = true;if (reading) firedDuringRead = true;}, 0);
+  let slowClock = 0;
+  await readProjectionSnapshot(single(), {...budget, now: () => (slowClock += 5)}, AbortSignal.timeout(5000));
+  reading = false;
+  assert.equal(timerFired, true);
+  assert.equal(firedDuringRead, true, "the read yields to the event loop inside one chunk");
+});
+
+test("an abort that lands as the body ends is never published", async () => {
+  const controller = new AbortController();
+  const bytes = encoder.encode(JSON.stringify(snapshotBody()));
+  let sent = false;
+  // a zero high-water mark pulls only on demand, so the abort coincides with the read that reports the end
+  const body = new ReadableStream<Uint8Array>({pull(stream) {
+    if (!sent) {sent = true;stream.enqueue(bytes);return;}
+    controller.abort();
+    stream.close();
+  }}, new CountQueuingStrategy({highWaterMark: 0}));
+  await assert.rejects(readProjectionSnapshot(body, budget, controller.signal),
+    (error: unknown) => error instanceof ProjectionStreamError && error.code === "interrupted");
+});
+
 test("an aborted read stops with interrupted and keeps no partial result", async () => {
   const controller = new AbortController();
   let pulls = 0;

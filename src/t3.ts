@@ -5,7 +5,7 @@ import type { JsonRecord, Projection, SourceItem } from "./types.js";
 
 const ORCHESTRATION_PROTOCOL = 2;
 const MAX_HTTP_RESPONSE_BYTES = 32 * 1024 * 1024;
-/** accounted bytes of a thread projection the Supervisor keeps: the arrays it reads, a shared text counted once */
+/** Accounted bytes of a thread projection the Supervisor keeps: the arrays it reads, a shared text counted once */
 const MAX_RETAINED_PROJECTION_BYTES = 32 * 1024 * 1024;
 /**
  * Bytes of one full thread snapshot read from T3, including the arrays the Supervisor never keeps. The largest thread
@@ -13,7 +13,7 @@ const MAX_RETAINED_PROJECTION_BYTES = 32 * 1024 * 1024;
  * still bounds the time spent.
  */
 const MAX_PROJECTION_TRANSFER_BYTES = 128 * 1024 * 1024;
-/** a thread whose snapshot exceeded a byte budget is not read again in full for this long */
+/** A thread whose snapshot exceeded a byte budget is not read again in full for this long */
 const OVERSIZED_PROJECTION_MEMO_MS = 10 * 60_000;
 const OVERSIZED_PROJECTION_MEMO_LIMIT = 512;
 const MAX_WEBSOCKET_FRAME_BYTES = 32 * 1024 * 1024;
