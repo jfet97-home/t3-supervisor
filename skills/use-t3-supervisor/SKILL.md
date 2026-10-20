@@ -81,10 +81,11 @@ work stays unresolved; relevant activity reuses the same Supervisor identity.
 
 The team view distinguishes the root, direct helpers and operational children.
 Inspect readiness, assignments, handovers, unknown delivery and issues. Helper limits
-are0–20, default5; lowering a limit preserves existing helpers. Membership and scoped
+are 0–20, default 5; lowering a limit preserves existing helpers. Membership and scoped
 assignments are managed by the owning root, not by messaging a helper. Uncertain
 handover does not prove coverage; quarantine revokes service authority, not the
-native conversation. Read the reference before any requested team change.
+native conversation. An interrupted handover is recovered by a root-requested review,
+which never proves its effects absent. Read the reference before any requested team change.
 
 Pending owner input defers guidance; Supervisor does not answer it. Late steering
 can start a new native turn. Unknown delivery is reconciled before retry or reroute;

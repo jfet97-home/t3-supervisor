@@ -146,8 +146,27 @@ stop or cancel the native T3 conversation or a turn already running there. A roo
 `retry` starts a new attempt only for definite failures when the recipient remains
 ready. Unrelated unknown guide effects retain their identities and remain fenced;
 failed check-in acknowledgements wait for unresolved member requests. Observe-only
-rows accompany otherwise due root work/events without repeatedly waking it. The dashboard
-keeps failed, uncertain, delivered-but-unacknowledged, and superseded notices visible.
+rows accompany otherwise due root work/events without repeatedly waking it. Pending
+handovers keep failed, uncertain and delivered-but-unacknowledged notices visible.
+Superseded notices were never posted or were definitively rejected; they are closed
+and leave that list.
+
+A delivered handover notice whose native run ended before confirming shows "Native
+run ended … before confirming; nothing was resent". Its effects are unknown and the
+root keeps responsibility. The root can then use the native-proof `supervision_team`
+action `review_handover`. It sends a distinct review notice asking the same helper
+to inspect the actual effects of every unresolved attempt, including earlier
+interrupted reviews, and to perform only genuinely missing duties. The dashboard
+labels that notice "Root-requested effect review"; the reviewed notice shows "Root-requested
+review in progress; the root keeps responsibility". Once the helper's own review run
+completes with its marker, the reviewed notice shows "Root-requested review completed
+by the helper’s native run; this does not prove its effects were absent, and request
+fences remain separate" until its transfer ends. A completed review is notice
+bookkeeping only: uncertain guidance and request effects stay fenced, and the
+transfer completes only after they settle. An interrupted review can itself be
+reviewed. An unknown review delivery is never repeated and blocks a further review
+until it reconciles. For exact inputs, chain and closure rules, see
+`docs/supervisor-team.md` in the T3 Supervisor repository.
 
 The team snapshot includes an observation time. Incomplete or unavailable state is
 explicit; after a refresh failure, retained data is stale. Opening a T3 link does
