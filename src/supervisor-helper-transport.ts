@@ -18,6 +18,25 @@ const preRenderRejectionOutcomes = new Set(["rejected_signature", "disabled", "r
 // the native delivery log keeps at most 64 Ki characters of a rendered prompt and flags no cut, so a logged prompt
 // of that length may be truncated: it never binds, and its attempt stays unmatched and fenced
 const NATIVE_RENDERED_PROMPT_LOG_LIMIT = 64 * 1024;
+// the native delivery log keeps at most 64 KiB of a request body and flags a longer one as truncated
+const NATIVE_DELIVERY_BODY_LOG_LIMIT = 64 * 1024;
+// published T3 frames {{body.text}} in an open and close tag with a 12-hex frame ID plus an untrusted-data note:
+// 195 code units measured; the allowance keeps a margin for that frame
+const RENDER_FRAME_ALLOWANCE = 256;
+// T3 inserts one U+2060 after each mention trigger (currency sign, @, a slash command, t3-context: and
+// webhook-data); counting every currency sign, @, slash, t3-context and webhook is a superset of those insertions
+const mentionTriggerSuperset = /[\p{Sc}@/]|t3-context|webhook/giu;
+// the exact request body the transport posts; receipts and native detail are compared against the same bytes
+export const helperDeliveryBody = (messageId: string, text: string): string => JSON.stringify({batchId: messageId, text});
+// an upper bound, in UTF-16 code units, of the prompt T3 renders from this text
+export const renderedLengthBound = (text: string): number =>
+  text.length + RENDER_FRAME_ALLOWANCE + (text.match(mentionTriggerSuperset)?.length ?? 0);
+// whether a delivery stays within the rendered bound and stays provable from T3's native delivery log, or why not
+export const helperDeliveryBudget = (messageId: string, text: string, maxRenderedLength: number): "fits" | "rendered_too_large" | "body_too_large" => {
+  const rendered = renderedLengthBound(text);
+  if (rendered > maxRenderedLength || rendered >= NATIVE_RENDERED_PROMPT_LOG_LIMIT) return "rendered_too_large";
+  return new TextEncoder().encode(helperDeliveryBody(messageId, text)).length > NATIVE_DELIVERY_BODY_LOG_LIMIT ? "body_too_large" : "fits";
+};
 // the native user message an attempt produces: its proven rendered prompt, or the sent text while none is bound
 export const nativeMessageText = (delivery: {text: string; renderedText?: unknown}): string =>
   typeof delivery.renderedText === "string" ? delivery.renderedText : delivery.text;
@@ -89,7 +108,7 @@ export class SupervisorHelperTransport {
   // native delivery detail is evidence for this attempt only when it reproduces the exact durable request: same
   // delivery and task, POST JSON, the exact untruncated body and byte count, and no missing template fields.
   private exactDetail(delivery: Delivery, detail: unknown, deliveryId: string, summary: Record<string, unknown>): Record<string, unknown> | null {
-    const expectedBody = JSON.stringify({batchId: delivery.messageId, text: delivery.text});
+    const expectedBody = helperDeliveryBody(delivery.messageId, delivery.text);
     if (!record(detail) || detail.id !== deliveryId || detail.taskId !== delivery.taskId ||
       typeof detail.receivedAt !== "string" || detail.receivedAt.length === 0 || detail.receivedAt !== summary.receivedAt ||
       detail.method !== "POST" || summary.method !== "POST" || detail.contentType !== "application/json" || summary.contentType !== "application/json" ||
@@ -117,7 +136,7 @@ export class SupervisorHelperTransport {
       } catch {return resolved;}
     }
 
-    const expectedBody = JSON.stringify({batchId: delivery.messageId, text: delivery.text});
+    const expectedBody = helperDeliveryBody(delivery.messageId, delivery.text);
     const expectedBodyBytes = new TextEncoder().encode(expectedBody).length;
     const candidates = result.deliveries.filter(item => item.taskId === delivery.taskId && item.method === "POST" &&
       item.contentType === "application/json" && item.bodyBytes === expectedBodyBytes && typeof item.id === "string");
@@ -247,7 +266,7 @@ export class SupervisorHelperTransport {
       this.save(binding, posting);
       // a webhook has no client idempotency key; never repeat an uncertain post
       const response = await (this.options.fetch ?? fetch)(endpoint, {method: "POST", headers: {"content-type": "application/json"},
-        body: JSON.stringify({batchId: input.messageId, text: input.text}), signal});
+        body: helperDeliveryBody(input.messageId, input.text), signal});
       if (response.status >= 400 && response.status < 500) {this.save(binding, {...posting, state: "rejected"});return "rejected";}
       if (!response.ok) return "uncertain";
       const result: unknown = await response.json();

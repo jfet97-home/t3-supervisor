@@ -17,9 +17,13 @@ edit shared policy, recruit helpers or grant authority.
 For workflow link and apply, a target is eligible when it is unarchived, undeleted
 and currently assigned to the helper. Its T3 run may be idle or finished; this is
 separate from the steerable active-run requirement for `supervision_guide`.
-Normal monitor envelopes carry complete `workflow_read` and link arguments plus
-locator bases for apply, guide and report. An entry's `input` is the complete MCP
-argument object; pass it as the arguments without nesting it again. The
+Normal monitor envelopes carry complete per-target `workflow_read` and link
+arguments. An entry's `input` is the complete MCP argument object; pass it as the
+arguments without nesting it again. Apply, guide and report start from the original
+`workflow_read` input of that same target record in the latest normal monitor
+envelope, copied exactly without read-pagination fields such as `workflowOffset`,
+`lineageOffset` or `limit`, so each authority locator is copied rather than repeated
+in separate per-target bases. A notification's `workflow_read` input is for reads only. The
 `workflow_write_link_child` envelope label is not a tool name: pass its `input` to
 `workflow_write`, with top-level `childThreadId`.
 `workflow_read` has no `targetThreadId`; guide and report do use `targetThreadId`.
@@ -39,13 +43,16 @@ the resulting verified native MCP tool identity and complete arguments count, an
 never claim or fabricate a tool call.
 
 Apply has `action` and authority locators at the top level, with mutation fields
-nested under `input`: `{action:"apply", ...locatorBases.workflow_write_apply,
-input:{operationId, workflowId, expectedRevision, note, plan}}`. The `workflowId`
+nested under `input`: `{action:"apply", ...toolInputs.workflow_read.input,
+input:{operationId, workflowId, expectedRevision, note, plan}}`, using that target's
+own `workflow_read` input and a fresh read of that target's own child workflow. The `workflowId`
 and `expectedRevision` come from a fresh child read, and `note` is required. Omit
 `sourceBinding`, `requirements` and `issues` so the service supplies trusted context.
 For a new local step, use this structural shape inside the plan and choose task-specific content: `{kind:'sequence',nodes:[{kind:'step',definitionId:null,localId:'local-check',name:'Check child result',description:'...',reason:'...',status:'planned'}]}`. Omit `nodeId` so the service allocates it, and preserve actual returned `nodeId` values in later edits. For new local steps, omit `templatePath` and never copy a parent's `templatePath` into another child plan; this does not apply to genuine named-workflow expansion.
-Guide and report need fresh action-specific content, so their locator bases are not
-callable payloads. Each new mutation gets a unique operation ID; reuse one only to
+Guide arguments are that target's `workflow_read` input plus that record's exact
+`targetThreadId`, never its `assignmentRootThreadId`; report arguments also add
+`action:"report"`. Both need fresh
+action-specific content, so neither is a ready call. Each new mutation gets a unique operation ID; reuse one only to
 retry the exact same arguments after an uncertain result.
 
 Each target's `activityRefs` provides ready-to-use item-only or message-only
@@ -56,12 +63,22 @@ invented reference. Read additional records with bounded native pagination and
 use their exact returned IDs. References remain optional navigation evidence;
 they do not establish completion or authorize a workflow write.
 
-Each helper review is sized against the serialized prompt. It may include only a
+Each helper review is sized against what T3 actually delivers. It is accepted only
+when an upper bound of its rendered prompt stays within 40,000 UTF-16 code units and
+its exact webhook body stays within the 64 KiB T3 records for delivery proof. The
+bound adds a 256-unit allowance for T3's untrusted-data frame (195 measured) and one
+unit for every `@`, currency sign, `/`, `t3-context` and `webhook`, covering T3's
+mention neutralization. A review may include only a
 subset of assigned targets; its counts and trigger cover that subset, and completion
-acknowledges only the included monitor versions and notifications. Fitting targets
+acknowledges only the included monitor versions and notifications. For an included
+target that means every frozen monitor version, including items beyond its preview. Fitting targets
 left out by the size bound remain pending for a later review. If a target cannot fit
-even in a one-target review, the root receives a stable attention event and its
-monitor activity remains pending.
+even in a one-target review, together with the applicable notifications, no request
+is prepared for it; the root receives a stable attention event naming whether the
+rendered bound or the delivery body was exceeded, and the target's recorded monitor
+activity remains pending and unacknowledged.
+The bound applies when a review is built; an existing request keeps its exact text
+and delivery receipt.
 
 When an eligible assigned child has no workflow document, its helper may use the
 supplied `link_child` input for that exact child. It includes the helper's own

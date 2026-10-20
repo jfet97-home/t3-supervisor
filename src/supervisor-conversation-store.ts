@@ -56,6 +56,9 @@ export type WorkflowAgreementCandidate = {
 };
 
 /** Keeps native request identities and unacknowledged activity through restarts. */
+// the native message identity of a conversation request, also the batchId of its helper webhook delivery
+export const conversationRequestMessageId = (requestId: string): string => `supervisor-review:${requestId}`;
+
 export class SupervisorConversationStore {
   constructor(readonly store: GuidanceStore) {
     store.db.exec(`CREATE TABLE IF NOT EXISTS supervisor_conversation_requests(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL);
@@ -82,7 +85,7 @@ export class SupervisorConversationStore {
     if (this.pending(input.projectId, input.supervisorThreadId)) throw new Error("supervisor_request_inflight");
     this.prune(now);
     const id = input.id ?? randomUUID();
-    const request: ConversationRequest = {...input, id, messageId: `supervisor-review:${id}`, state: "prepared", createdAt: now, sentAt: null, runId: null, error: null};
+    const request: ConversationRequest = {...input, id, messageId: conversationRequestMessageId(id), state: "prepared", createdAt: now, sentAt: null, runId: null, error: null};
     this.saveRequest(request);return request;
   }
   introduction(taskId: string): WorkflowIntroduction | null {
