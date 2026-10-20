@@ -197,8 +197,9 @@ export class SupervisorHelperTransport {
     // may be stale: only the exact rendered message proves delivery, and nothing here proves non-delivery
     if (native?.outcome === "dispatch_failed")
       return rendered !== undefined && messages?.some(message => this.renderedMessage(delivery, rendered, message)) ? "waiting" : "uncertain";
-    return native?.outcome === "accepted" ? "waiting" :
-      delivery.state === "posted" && delivery.nativeDeliveryId ? "waiting" : "uncertain";
+    // without current native evidence (T3 trims its delivery log) an earlier read proves nothing, so a posted
+    // receipt alone never makes an attempt waiting
+    return native?.outcome === "accepted" ? "waiting" : "uncertain";
   }
   // read-only reconciliation of an existing receipt; it never posts. A durable rejected receipt or a native
   // rejection before rendering proves non-delivery; anything else leaves the identity unresolved.

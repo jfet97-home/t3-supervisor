@@ -646,6 +646,72 @@ test("a known native dispatch failure whose wrapped message is visible binds its
   } finally {await f.cleanup();}
 });
 
+test("a posted receipt without current native evidence stays uncertain across restart until its exact message is visible", async () => {
+  // a trimmed native delivery log leaves neither an earlier dispatch failure nor an accepted POST reply as evidence
+  for (const variant of ["recovered dispatch failure", "accepted POST reply"] as const) {
+    const f = await fixture();
+    try {
+      f.state.emitMessage = false;f.state.loseReply = variant === "recovered dispatch failure";
+      const input = {threadId: "helper", commandId: "trimmed", messageId: "trimmed-message", text: "Check-in trimmed"};
+      const transport = new SupervisorHelperTransport(f.options);
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), f.state.loseReply ? "uncertain" : "waiting", variant);
+      if (f.state.loseReply) {
+        addNativeWebhookDelivery(f, {id: "trimmed-delivery", body: f.state.lastPostedBody!, renderedPrompt: input.text, outcome: "dispatch_failed"});
+        assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain", variant);
+      }
+      const receipt = JSON.parse(receiptDocument(f, input.messageId)) as Record<string, unknown>;
+      assert.equal(receipt.state, "posted", variant);
+      assert.equal(typeof receipt.nativeDeliveryId, "string", variant);
+      const before = receiptDocument(f, input.messageId);
+
+      f.state.webhookDeliveries.splice(0);f.state.webhookDeliveryDetails.clear();
+      const restarted = new SupervisorHelperTransport(f.options);
+      assert.equal(await restarted.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain", variant);
+      assert.equal(await restarted.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain", variant);
+      assert.equal(receiptDocument(f, input.messageId), before, `${variant}: the receipt is unchanged`);
+
+      f.helper.messages.push({id: "trimmed-native", threadId: "helper", scheduledTaskId: String(f.tasks[0]!.id), runId: "trimmed-run", nodeId: "root",
+        role: "user", text: input.text, creationSource: "server", createdBy: "system", streaming: false,
+        createdAt: "2026-10-16T10:00:01Z", updatedAt: "2026-10-16T10:00:01Z"});
+      assert.equal(await restarted.send(f.binding, input, AbortSignal.timeout(1000)), "waiting", variant);
+      assert.equal(f.state.posts, 1, variant);
+    } finally {await f.cleanup();}
+  }
+});
+
+test("a lost-reply check-in with a native dispatch failure stays uncertain after its log entry is trimmed and the runtime restarts", async () => {
+  const f = await fixture();let openDb = f.db;
+  try {
+    f.state.emitMessage = false;f.state.loseReply = true;
+    const team = teamRuntime(f, new SupervisorHelperTransport(f.options));
+    team.runtime.startCycle(f.binding);
+    await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
+    const original = team.requests.pending("p", "helper")!;
+    assert.equal(original.state, "uncertain");
+    const posted = JSON.parse(f.state.lastPostedBody!) as {text: string};
+    addNativeWebhookDelivery(f, {id: "trimmed-failed-delivery", body: f.state.lastPostedBody!, renderedPrompt: publishedWrapper(posted.text), outcome: "dispatch_failed"});
+    team.runtime.startCycle(f.binding);
+    await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));
+    assert.equal(team.requests.requests("p", "helper").find(item => item.id === original.id)?.state, "uncertain");
+    assert.equal((JSON.parse(receiptDocument(f, original.messageId)) as Record<string, unknown>).state, "posted");
+
+    // the native delivery log is trimmed, then the service restarts over the same durable state
+    f.state.webhookDeliveries.splice(0);f.state.webhookDeliveryDetails.clear();
+    f.db.close();openDb = new GuidanceStore(f.directory);
+    const store = new ProjectSupervisorStore(openDb, new Set());
+    const teamStore = new SupervisorTeamStore(store);
+    const requests = new SupervisorConversationStore(openDb);
+    const runtime = new SupervisorTeamRuntime({store, teamStore, requests, monitor: new ProjectSupervisorMonitorStore(openDb),
+      rpc: f.options.rpc, helperTransport: new SupervisorHelperTransport({...f.options, store}), projection: f.options.projection});
+    const lookups = f.state.webhookDeliveryLookups;
+    for (let cycle = 0; cycle < 3; cycle++) {runtime.startCycle(f.binding);await runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));}
+    assert.ok(f.state.webhookDeliveryLookups > lookups, "the restarted runtime reconciles the receipt natively");
+    assert.equal(requests.requests("p", "helper").find(item => item.id === original.id)?.state, "uncertain");
+    assert.equal(teamStore.unresolvedRequests(f.binding).find(item => item.requestId === original.id)?.state, "uncertain");
+    assert.equal(f.state.posts, 1);
+  } finally {openDb.close();await rm(f.directory, {recursive: true, force: true});}
+});
+
 test("team runtime recovers an exact accepted delivery receipt after the POST reply is lost", async () => {
   const f = await fixture();
   try {
@@ -950,11 +1016,12 @@ test("a missing channel after an accepted POST cannot prove non-delivery or unlo
     const current = team.requests.pending("p", "helper");
     assert.equal(current?.id, original?.id);
     assert.equal(current?.messageId, original?.messageId);
-    assert.equal(current?.state, "waiting");
+    // without native delivery evidence the accepted POST reply alone does not keep the attempt waiting
+    assert.equal(current?.state, "uncertain");
     assert.equal(f.state.posts, 1);
     assert.equal(f.state.webhookDeliveryLookups, 1);
     assert.equal(team.requests.requests("p", "helper").find(item => item.id === original?.id)?.failureAcknowledged, undefined);
-    assert.equal(f.team.unresolvedRequests(f.binding).find(item => item.requestId === original?.id)?.state, "pending");
+    assert.equal(f.team.unresolvedRequests(f.binding).find(item => item.requestId === original?.id)?.state, "uncertain");
     assert.equal(f.team.snapshot(f.binding).events.filter(event => event.kind === "service_attention" &&
       event.summary.includes("no visible terminal native run")).length, 1);
     assert.equal(team.runtime.hasBlockingWork(f.binding), true);
