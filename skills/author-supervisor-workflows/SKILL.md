@@ -5,120 +5,106 @@ description: Create or refine T3 Supervisor step and workflow catalogs from proj
 
 # Author Supervisor workflows
 
-Turn the project's important recurring obligations into a small, understandable
-catalog. Keep humans able to inspect and change each responsibility, its
-applicability, owner and completion evidence. Use the current product Guide or
-definition documentation as the syntax authority; read
-[definition patterns](references/definition-patterns.md) when writing the files.
-For dashboard configuration and runtime controls, use
-[use-t3-supervisor](../use-t3-supervisor/SKILL.md).
+Turn important recurring duties into a catalog humans can read and maintain. Use the
+current product Guide or definition docs as the syntax authority; [definition
+patterns](references/definition-patterns.md) explains the file format and review
+pattern. Dashboard work belongs to [use-t3-supervisor](../use-t3-supervisor/SKILL.md).
 
-## Establish the authoring boundary
+## Scope and evidence
 
-Identify the target checkout, existing catalog, requested outcomes, count limits
-and whether the result is a proposal or an adopted policy. A maximum is a ceiling,
-not a target. Count distinct step definitions separately from their reused
-occurrences; do not hide extra responsibilities in inline steps to evade a budget.
-Do not assume fewer definitions are necessarily better.
+Establish the checkout, existing catalog, requested outcomes, count limits and proposal
+and adoption boundary. Count definitions separately from reused occurrences. A maximum
+is a ceiling, not a target; neither fewer definitions nor filling every slot is a goal.
+Do not hide extra responsibilities in inline steps to evade limits.
 
-Read applicable project instructions, skills and maintained knowledge first.
-Authoring or committing definitions does not authorize enabling supervision,
-applying them to a live project, changing services or adding Git hooks. Keep
-deterministic enforcement separate unless the request explicitly includes it.
+Read project instructions, matched skills and knowledge. Research project and
+orchestration and tooling histories, including human conversations across authorized local,
+remote and CLI sources. Record coverage gaps. Search snippets identify leads; read their
+context and later corrections. Current artifacts and later explicit instructions
+supersede historical commands.
 
-## Recover the duties and their reasons
+Keep a private ledger: source anchor, requested behavior, criticism or failure,
+correction, current authority and implied duty. Separate human decisions from generated
+summaries, scheduler prompts and mirrors; repetition is not independent evidence. Do not
+publish raw private histories.
 
-Investigate both the project's development history and the orchestration/tooling
-history that shaped it, including their human conversations. Search across the
-available local, remote and CLI histories within the authorized scope. Inventory
-coverage and gaps; titles and search snippets are discovery aids, not conclusions.
-Read the relevant conversation context and follow later corrections and decisions.
-Current artifacts and explicit later instructions supersede historical commands.
+Study incomplete reviews, dismissed preservation regressions, missed shared consumers,
+proof of the wrong claim, data and rollout assumptions and premature completion.
+Identify why the process failed; retain consequential duties supported by current
+sources, rather than one permanent step per incident.
 
-Keep a private evidence ledger: source anchor, requested behavior, failure or
-criticism, corrected rule, current authority, and the duty it implies. Distinguish
-human instructions from generated summaries, scheduler prompts and mirrored text.
-Do not count repetition as independent evidence or publish raw private histories.
+## Compare interpretations
 
-Look particularly for incomplete reviews, dismissed findings, missed shared
-consumers, evidence that proved the wrong claim, data/rollout assumptions, and
-premature completion. Recover why the existing process failed, including cases
-where the implementer dismissed a preservation regression as outside the feature.
-Retain consequential duties supported by current sources; do not turn every past
-incident into a new permanent step.
+Recommend at least two genuinely different models using high or stronger reasoning for
+substantial research and catalog design. Discover supported settings and verify actual
+models/options; aliases or a prompt to think hard are insufficient. This authoring
+recommendation does not impose the same execution policy on every generated workflow.
+Respect the project's policy and the user's budget, delegation and review limits.
 
-## Compare independent interpretations
+When collaboration is authorized, assign independent passes a common goal and
+complementary evidence. Compare concise source-backed duties, omissions and proposed
+boundaries, exchange objections and agree on one proposal. Agreement or a majority is
+not evidence. Reuse conversations within the main's cycle through supported, authorized
+APIs. If the user prohibits another review, honor that and report the verification
+limit; do not claim another model confirmed unreviewed changes.
 
-Recommend at least two genuinely different models with high or stronger reasoning
-for substantial history research and catalog design. Discover supported models
-and settings and verify actual configuration; aliases or a prompt saying "think
-hard" are insufficient. Respect the user's budget, delegation and review limits.
-This recommendation does not itself require two-model execution in every workflow
-the catalog will define; derive that policy from the project and user.
+## Choose responsibilities and structure
 
-When collaboration is authorized, give independent passes complementary evidence
-sets and the same goal. Have them return concise, source-backed duties, omissions
-and proposed boundaries. Compare disagreements, exchange concrete objections and
-converge on one proposal. Agreement or a majority never replaces evidence. For
-iterative discussion, reuse the same model conversations within the main's cycle
-through supported transports, respecting their creation and lifecycle rules.
-Do not start another review when the user has ruled it out; state the resulting
-verification limit rather than claiming another model confirmed later changes.
+Map each important duty to its source, step and workflow intents. A step owns a coherent
+responsibility or outcome; a workflow composes work for an intent with a distinct
+result, ordering or authority. Do not define either per tool call, model, turn or review
+round.
 
-## Design responsibilities before choosing counts
+Reuse steps and named workflows. Split responsibilities when applicability, evidence or
+independently controlled decisions differ. Explain dependencies: later data constraints
+revise the same design decision, not a competing record. Parallelize independent work
+and order evidence and approval dependencies. Workflow references stay acyclic; parallel
+groups do not launch agents.
 
-Map each important duty to a proposed step, its workflow intents and source.
-A step represents a coherent responsibility or outcome; a workflow composes steps
-and other workflows for an intent with a distinct result, ordering or authority.
-Neither should be defined per tool call, model, conversation turn or review round.
+Justify each definition and plausible merges and splits. Show lost coverage if the
+budget is too small; leave spare capacity when appropriate. Keep counts, properties and
+unresolved choices visible to the human maintainer.
 
-Reuse steps and named workflows. Split a combined responsibility when its parts
-have different applicability, evidence or independently controlled decisions.
-For example, design can be settled while a data/rollout decision remains open.
-Explain their dependency and how a later constraint revises the same decision,
-rather than creating competing sources of truth. Parallelize independent work;
-keep evidence and approval dependencies ordered. Named workflow references must
-remain acyclic, and parallel groups do not launch agents automatically.
+## Write for humans
 
-Explain why each definition exists, which plausible merges or splits were rejected
-and what coverage would be lost. If the budget is too small, show the tradeoff;
-do not squeeze unrelated responsibilities together silently. If it is generous,
-leave unused capacity. Keep proposed counts and unresolved choices visible to the
-human who will maintain them.
+A description should show what the work is, when it applies, who does it and what
+evidence or completion it requires. Use ordinary direct sentences and short parallel
+lists. Remove repeated rationale, reminders and defensive boilerplate. Keep prohibitions
+that prevent a known failure. Avoid cryptic compressed prose.
 
-## Write the semantic contracts
+State a rule where its decision belongs. Keep essential conditions and exceptions
+visible; put shared procedural detail in one maintained home and explicitly tell readers
+to consult it. Do not duplicate a workflow's completion contract in every member, hide
+important conditions behind vague links, or move the same wall of text unchanged
+elsewhere.
 
-Put applicability, role ownership, required inputs, evidence and completion in
-each description. Link the actual authoritative project files in `references`,
-especially maintained Markdown instructions and skills; keep private history
-anchors in the private ledger. Read supporting files: listing a path proves
-neither access nor consultation and grants no permission.
+When shortening, map every original obligation to retained wording or its actual
+canonical source. Check actors, triggers, authority, named cases, evidence limits and
+exceptions. Compare readability and word counts, without imposing a quota that would
+discard relevant detail.
 
-Separate `required` inclusion from `fixed` structure and from a default template.
-Account for requirements once per current main task, including nested reuse.
-Genuine inapplicability needs a reason; missing resources or inconvenient review
-are unresolved gaps. Do not invent unsupported applicability or iteration fields.
+## Encode and deliver
 
-For an iterative process, let its workflow description own repetition and the
-completion rule. Reference that workflow directly from callers. Add a findings
-step only for the main's real accounting responsibility, not as a wrapper whose
-sole purpose is invoking Review. Distinguish reviewer assessment from author fixes
-and main accounting. The reference describes the review-specific safeguards.
+Descriptions carry applicability, roles, inputs, evidence and completion. Link real
+authoritative project files, especially maintained Markdown docs and skills. Read them:
+references prove neither consultation nor access and grant no permission.
 
-## Check and deliver the catalog
+Separate required inclusion, fixed structure and default templates. Account for
+requirements once per main task, including nested reuse. Genuine inapplicability needs a
+reason; unavailable resources are gaps. Do not invent schema fields.
 
-Check coverage against the evidence ledger, ownership, ordering, applicability,
-human control and the actual requested outcome. Use concrete scenarios: a factual
-question, a consequential change, a reporting-only review, a rejected rebuttal,
-a relevant fix, a changed base and an interrupted reviewer conversation.
+Let an iterative workflow's description own repetition and completion; callers reference
+it directly. A findings step owns the main's accounting, not a wrapper whose only
+purpose is invoking Review. Distinguish reviewer assessment from author fixes. The
+reference explains reporting versus acceptance and persistent review.
 
-Validate with the current product's definition reader or parser where available:
-supported fields, filenames/IDs, all referenced definitions, acyclic expansion,
-counts and complete diagnostics. Separately check that supporting paths exist and
-are appropriate; the product does not verify their contents or existence. Report
-parser success as format/graph evidence, not proof of actual workflow execution.
+Check the ledger and concrete cases: factual answers, consequential changes, report-only
+review, contested rebuttals, fixes, changed bases and interrupted chats. Use the current
+definition reader or parser for fields, filenames and IDs, references, acyclic
+expansion, counts and complete diagnostics. Separately check supporting files. Parser
+success proves format and graph validity, not execution.
 
-Deliver the definitions, a compact intent/step map, source-backed rationale for
-the counts and properties, and material open decisions or coverage limits. Follow
-the repository's requested commit/push procedure. Keep proposal publication,
-policy adoption and Supervisor activation separate; do not activate by implication.
+Deliver definitions, a compact intent and step map, rationale and material gaps. Follow
+the requested Git procedure. Drafting, publication, policy adoption and Supervisor
+activation remain separate; authoring does not authorize live changes, services or
+Git-hook enforcement.
