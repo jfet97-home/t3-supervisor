@@ -172,7 +172,16 @@ key: an uncertain send is never posted again; the service reconciles its origina
 scheduled-message identity and request text, retaining unresolved work meanwhile.
 Once an attempt has a delivery receipt, its exact sent bytes identify it for matching,
 acknowledgement, review and reconciliation; regenerated text, for example after a role
-wording change, applies only to an attempt that was never posted. A durable or native
+wording change, applies only to an attempt that was never posted. T3 renders the
+posted body into the native user message, and published builds wrap it as untrusted
+webhook data. The service therefore binds, once, the rendered prompt that T3 reports
+in the native delivery detail for exactly that attempt. The detail must name the same
+delivery and task, a POST of JSON, the exact untruncated body and byte count, and no
+missing fields. The native message must then equal that rendering, in the owned
+helper thread, with the same scheduled task and a server origin. The sent text,
+hash and identities never change, nothing is reposted, and missing, truncated or
+mismatched detail leaves the attempt unmatched and fenced. A lost reply is recovered
+from the exact body. A durable or native
 rejection of an attempted POST is reconciled read-only even when the helper can no
 longer be read, so it cannot strand a definitely undelivered notice.
 A notice or check-in is `failed` only when T3 definitively rejected that exact POST or

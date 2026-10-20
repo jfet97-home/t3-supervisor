@@ -365,7 +365,8 @@ export class SupervisorTeamRuntime {
     }
     if (request.runId !== run.id) {request.runId = run.id;this.options.requests.saveRequest(request);}
     if (!terminal.has(run.status)) return;
-    const completed = run.status === "completed" && message?.text === request.text && run.userMessageId === message.id &&
+    // the message was matched against the receipt's proven native rendering, so its text is not compared again
+    const completed = run.status === "completed" && message !== undefined && run.userMessageId === message.id &&
       !projection.messages.some(item => item.runId === run.id && item.role === "user" && item.id !== message.id && typeof item.senderThreadId !== "string") &&
       projection.messages.filter(item => item.runId === run.id && item.role === "assistant" && item.streaming !== true && typeof item.text === "string")
         .sort((left, right) => Number(left.ordinal ?? 0) - Number(right.ordinal ?? 0)).at(-1)?.text?.includes(request.completionMarker) === true &&
@@ -500,7 +501,7 @@ export class SupervisorTeamRuntime {
     if (!terminal.has(run.status)) return;
     const finalText = projection.messages.filter(item => item.runId === run.id && item.role === "assistant" && item.streaming !== true && typeof item.text === "string")
       .sort((left, right) => Number(left.ordinal ?? 0) - Number(right.ordinal ?? 0)).at(-1)?.text ?? "";
-    const nativeComplete = run.status === "completed" && message?.text === request.text && run.userMessageId === message.id &&
+    const nativeComplete = run.status === "completed" && message !== undefined && run.userMessageId === message.id &&
       !projection.messages.some(item => item.runId === run.id && item.role === "user" && item.id !== message.id && typeof item.senderThreadId !== "string") &&
       hasCompletionMarker(finalText, request.completionMarker);
     const current = this.options.teamStore.snapshot(binding).members.find(item => item.threadId === member.threadId);

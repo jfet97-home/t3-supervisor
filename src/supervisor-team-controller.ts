@@ -7,6 +7,7 @@ import {canSupervisorContact, hasPendingOwnerInput, resolveSteerableRun} from ".
 import {childOrigin} from "./supervisor-observation.js";
 import type {BindingRecord} from "./project-supervisor-store.js";
 import {endedWithoutCompletion, maxHandoverReviewChain, parseHandoverReview, type HandoverReviewInput, type SupervisorTeamStore} from "./supervisor-team-store.js";
+import {nativeMessageText} from "./supervisor-helper-transport.js";
 import {teamNotificationEvidence, teamNotificationText} from "./supervisor-team-runtime.js";
 import type {Projection, ThreadInfo} from "./types.js";
 
@@ -226,8 +227,9 @@ export class SupervisorTeamController {
       const delivery: unknown = row && JSON.parse(String(row.document));
       if (!isRecord(delivery) || delivery.state === "rejected" || typeof delivery.text !== "string" || delivery.threadId !== notification.recipientThreadId ||
         !id(delivery.taskId)) throw new Error("supervisor_team_review_native_unavailable");
-      const sent = delivery.text;
-      const evidence = teamNotificationEvidence(projection, notification, marker, message => message.text === sent &&
+      // the sent bytes may be rendered by T3 into a wrapped native message; only the receipt's proven rendering counts
+      const rendered = nativeMessageText({text: delivery.text, renderedText: delivery.renderedText});
+      const evidence = teamNotificationEvidence(projection, notification, marker, message => message.text === rendered &&
         message.scheduledTaskId === delivery.taskId && message.creationSource === "server");
       if (evidence.completedRun) throw new Error("supervisor_team_review_native_completed");
       const run = evidence.runs.find(value => value.id === notification.observedRun?.runId);
