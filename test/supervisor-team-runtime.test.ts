@@ -35,7 +35,7 @@ const nodesOf = (projection: Projection): Array<Record<string, unknown>> => {
   return projection.nodes as Array<Record<string, unknown>>;
 };
 
-const webhookTransport = (result: "waiting" | "busy" | "uncertain" | "rejected" = "waiting"):
+const webhookTransport = (result: "waiting" | "busy" | "uncertain" | "rejected" | "revoked" = "waiting"):
   {transport: SupervisorHelperDeliveryTransport; sent: Map<string, {threadId: string; commandId: string; text: string; taskId: string}>; attempts: string[]; retired: string[];
     rejectedReceipts: Set<string>} => {
   const sent = new Map<string, {threadId: string; commandId: string; text: string; taskId: string}>();
@@ -525,6 +525,17 @@ test("registration readiness uses a finite native check-in and exact member epoc
   assert.equal(f.requests.requests(projectId, member.threadId).find(item => item.id === request.id)?.state, "completed");
   assert.equal(f.teamStore.resolveActor(f.binding, member.threadId, member.epoch), null);
   assert.equal(f.teamStore.snapshot(f.binding).members.find(item => item.threadId === member.threadId)?.state, "ready");
+});
+
+test("a readiness delivery revoked before its POST fails as never posted instead of waiting forever", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const member = f.teamStore.registerMember(f.binding, {threadId: "helper-revoked-ready", taskId: "bootstrap-task", bootstrapRunId: "bootstrap-run", now: time});
+  f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
+  const runtime = f.runtime(webhookTransport("revoked").transport);
+  runtime.startCycle(f.binding);await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  const request = f.requests.requests(projectId, member.threadId).find(item => item.id.startsWith("team-ready:"))!;
+  assert.equal(request.state, "failed");
+  assert.match(request.error ?? "", /nothing was posted/u);
 });
 
 test("failed readiness waits for the root retry acknowledgment before another attempt", async t => {
@@ -1335,6 +1346,20 @@ test("a marker-completed copy acknowledges nothing while another strongly linked
   firstRun.status = "interrupted";await f.cycles();
   assert.deepEqual({state: f.current(f.original).state, completedRunId: f.current(f.original).completedRunId}, {state: "acknowledged", completedRunId: "completed-copy-run"},
     "the retained completion acknowledges once every linked run is terminal");
+
+  const h = await recoveryFixture();t.after(h.cleanup);
+  h.teamStore.settleRequest(h.binding, "guide:recovery-effect");
+  const receipt = h.projection.messages.find(value => value.id === `native-message:${h.original.id}:0`)!;
+  h.projection.runs.push({id: "live-only", threadId: h.member.threadId, ordinal: 81, status: "running", requestedAt: iso(time), startedAt: iso(time),
+    completedAt: null, rootNodeId: null});
+  h.projection.runs.push({id: "marker-run", threadId: h.member.threadId, ordinal: 82, status: "completed", requestedAt: iso(time), startedAt: iso(time),
+    completedAt: iso(time + 1), rootNodeId: null, userMessageId: receipt.id});
+  h.projection.messages.push({id: "marker-final", threadId: h.member.threadId, runId: "marker-run", nodeId: null, role: "assistant",
+    text: teamNotificationText(h.binding, h.original).marker, streaming: false, ordinal: 91, createdAt: iso(time + 1), updatedAt: iso(time + 1)});
+  receipt.runId = "live-only";
+  await h.cycles();
+  assert.equal(h.current(h.original).state, "delivered", "a run named only by the message's runId also defers acknowledgement");
+  assert.equal(h.teamStore.coverage(h.binding, "branch", parents).state, "transferring");
 
   const g = await recoveryFixture();t.after(g.cleanup);
   const review = g.review("live-review-copy");await g.cycles();
