@@ -1319,6 +1319,36 @@ test("review evidence includes a live run named only by the message and every co
   assert.equal(copies.transport.attempts.filter(value => value.includes(copies.original.id)).length, 1, "nothing is posted again");
 });
 
+test("a marker-completed copy acknowledges nothing while another strongly linked run is live", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  f.teamStore.settleRequest(f.binding, "guide:recovery-effect");
+  const first = f.projection.messages.find(value => value.id === `native-message:${f.original.id}:0`)!;
+  const firstRun = f.projection.runs.find(value => value.id === first.runId)!;
+  firstRun.status = "running";
+  f.projection.messages.push({...first, id: "completed-copy", runId: "completed-copy-run"});
+  f.projection.runs.push({...firstRun, id: "completed-copy-run", userMessageId: "completed-copy", status: "completed", ordinal: 80});
+  f.projection.messages.push({id: "copy-final", threadId: f.member.threadId, runId: "completed-copy-run", nodeId: null, role: "assistant",
+    text: teamNotificationText(f.binding, f.original).marker, streaming: false, ordinal: 90, createdAt: iso(time), updatedAt: iso(time)});
+  await f.cycles();
+  assert.equal(f.current(f.original).state, "delivered", "a live copy keeps the attempt open");
+  assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "transferring");
+  firstRun.status = "interrupted";await f.cycles();
+  assert.deepEqual({state: f.current(f.original).state, completedRunId: f.current(f.original).completedRunId}, {state: "acknowledged", completedRunId: "completed-copy-run"},
+    "the retained completion acknowledges once every linked run is terminal");
+
+  const g = await recoveryFixture();t.after(g.cleanup);
+  const review = g.review("live-review-copy");await g.cycles();
+  const completed = g.expose(review, "completed");
+  const message = g.projection.messages.find(value => value.id === completed.userMessageId)!;
+  g.projection.messages.push({...message, id: "live-review-copy", runId: "live-review-copy-run"});
+  g.projection.runs.push({...completed, id: "live-review-copy-run", userMessageId: "live-review-copy", status: "running", ordinal: 99});
+  g.teamStore.settleRequest(g.binding, "guide:recovery-effect");
+  await g.cycles();
+  assert.notEqual(g.current(review).state, "acknowledged", "a live duplicate of the review defers its own acknowledgement");
+  assert.equal(g.current(g.original).resolvedByReview, undefined);
+  assert.equal(g.teamStore.coverage(g.binding, "branch", parents).state, "transferring");
+});
+
 test("a quarantine during an in-flight helper read survives a late 404 with its request fence", async t => {
   const f = await recoveryFixture();t.after(f.cleanup);
   activate(f.teamStore, f.binding, f.member, "other");

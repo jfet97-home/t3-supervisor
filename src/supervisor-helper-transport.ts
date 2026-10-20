@@ -4,7 +4,8 @@ import type {BindingRecord, ProjectSupervisorStore} from "./project-supervisor-s
 import type {MessageInfo, Projection} from "./types.js";
 
 export type SupervisorHelperMessage = {threadId: string; commandId: string; messageId: string; text: string};
-export type SupervisorHelperSendResult = "waiting" | "busy" | "uncertain" | "rejected";
+// "revoked": the caller's authority ended after this method's reads and before any receipt or POST
+export type SupervisorHelperSendResult = "waiting" | "busy" | "uncertain" | "rejected" | "revoked";
 type Channel = {taskId: string; helperThreadId: string; createdAt: string | null; state: "creating" | "ready" | "retiring" | "retired"};
 type Delivery = SupervisorHelperMessage & {hash: string; taskId: string; state: "posting" | "posted" | "rejected"; nativeDeliveryId?: string};
 const promptTemplate = "{{body.text}}";
@@ -180,7 +181,7 @@ export class SupervisorHelperTransport {
       if (!channel || !record(channel.task.webhook) || typeof channel.task.webhook.path !== "string") return "busy";
       const endpoint = new URL(channel.task.webhook.path, this.options.baseUrl);
       if (endpoint.origin !== new URL(this.options.baseUrl).origin || endpoint.search || endpoint.hash) return "rejected";
-      if (authorized && !authorized()) return "busy";
+      if (authorized && !authorized()) return "revoked";
       const posting: Delivery = {...input, hash, taskId: channel.channel.taskId, state: "posting"};
       this.save(binding, posting);
       // a webhook has no client idempotency key; never repeat an uncertain post

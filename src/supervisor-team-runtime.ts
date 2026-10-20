@@ -94,7 +94,9 @@ export function teamNotificationEvidence(projection: Projection, notification: T
   const messageRunIds = new Set(messages.flatMap(message => typeof message.runId === "string" ? [message.runId] : []));
   const runs = projection.runs.filter(run => run.threadId === notification.recipientThreadId &&
     (typeof run.userMessageId === "string" && messageIds.has(run.userMessageId) || messageRunIds.has(run.id)));
-  const completedRun = runs.find(run => run.status === "completed" && typeof run.userMessageId === "string" && messageIds.has(run.userMessageId) &&
+  // completion counts only once every strongly linked run is terminal: a live or unknown-status copy defers it
+  const settled = runs.every(run => run.status === "completed" || endedWithoutCompletion.has(run.status));
+  const completedRun = !settled ? undefined : runs.find(run => run.status === "completed" && typeof run.userMessageId === "string" && messageIds.has(run.userMessageId) &&
     !projection.messages.some(item => item.threadId === notification.recipientThreadId && item.runId === run.id && item.role === "user" && !messageIds.has(item.id) && typeof item.senderThreadId !== "string") &&
     hasCompletionMarker(projection.messages.filter(item => item.threadId === notification.recipientThreadId && item.runId === run.id &&
       item.role === "assistant" && item.streaming !== true && typeof item.text === "string")
@@ -447,8 +449,9 @@ export class SupervisorTeamRuntime {
     }
     else if (result === "busy") this.options.requests.saveRequest({...request, state: request.sentAt === null ? "prepared" : "uncertain",
       sentAt: request.sentAt, error: "The helper is busy or its delivery transport is unavailable; readiness keeps its identity and will wait."});
-    else if (result === "rejected") {
-      const failed = {...request, state: "failed" as const, sentAt, error: "T3 rejected the exact helper readiness delivery."};
+    else if (result === "rejected" || result === "revoked") {
+      const failed = {...request, state: "failed" as const, sentAt, error: result === "revoked"
+        ? "The helper lost its authority before the readiness delivery was posted; nothing was posted." : "T3 rejected the exact helper readiness delivery."};
       this.options.requests.saveRequest(failed);
       this.serviceAttention(binding, member.threadId, failed, "The helper readiness delivery was rejected. Review the failed request and use the team retry action before another readiness attempt.");
     }
@@ -648,6 +651,8 @@ export class SupervisorTeamRuntime {
     if (result !== "waiting") {
       if (result === "rejected") {
         this.markNotificationRejected(binding, notification);
+      } else if (result === "revoked") {
+        this.markNotificationRejected(binding, notification, neverPostedReason);
       } else {
         if (!this.updateNotificationDelivery(binding, notification, "uncertain")) return;
         if (this.notificationNeedsAttention(notification)) this.serviceNotificationAttention(binding, notification);
@@ -797,8 +802,11 @@ export class SupervisorTeamRuntime {
     }
     else if (result === "busy") this.options.requests.saveRequest({...request, state: request.sentAt === null ? "prepared" : "uncertain",
       sentAt: request.sentAt, error: "The helper is busy or its delivery transport is unavailable; this request keeps its identity and will wait."});
-    else if (result === "rejected") {
-      const failed = {...request, state: "failed" as const, sentAt, error: "T3 rejected this exact helper delivery; pending activity is retained."};
+    else if (result === "rejected" || result === "revoked") {
+      // both prove this exact check-in was never delivered, so only its own request fence settles
+      const failed = {...request, state: "failed" as const, sentAt, error: result === "revoked"
+        ? "The helper lost its authority before this check-in was posted; nothing was posted and pending activity is retained."
+        : "T3 rejected this exact helper delivery; pending activity is retained."};
       this.options.requests.saveRequest(failed);
       this.options.teamStore.settleRequest(binding, teamRequest.requestId);
       this.serviceAttention(binding, member.threadId, failed,

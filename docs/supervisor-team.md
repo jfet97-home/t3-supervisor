@@ -141,7 +141,9 @@ reason. Observing a quarantined helper's remaining notices never marks it missin
 and neither does a helper read that was already in flight when the root quarantined it.
 Eligibility is re-read after every await and immediately before a POST, so nothing is
 posted after quarantine; an attempted notice with no delivery receipt was never posted
-and, once its recipient is no longer eligible, fails as definitely undelivered.
+and, once its recipient is no longer eligible, fails as definitely undelivered. A
+check-in or readiness delivery whose authority ends before its POST likewise fails as
+never posted and settles only its own request fence.
 These notices remain visible until acknowledged or otherwise reconciled. A known
 definite notification failure can be retried by the root when its recipient is
 still a current ready helper; unrelated unknown guide effects remain fenced. An
@@ -230,7 +232,8 @@ marker-completed run is not closed by the review and keeps its fence; a
 marker-completed attempt is acknowledged through its own completed run.
 Native evidence for an attempt is every copy of its exact receipt message and every run
 strongly linked to one, by its userMessageId or by the message's own runId; any live
-run keeps the attempt open.
+or unknown-status run keeps the attempt open, and a marker completion is only used
+once every linked run is terminal.
 Generic monitor check-in markers and helper/tool acknowledgement claims cannot
 acknowledge a handover or review.
 For each still-unresolved chain member in the same current assignment and member

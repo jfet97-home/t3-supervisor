@@ -183,9 +183,30 @@ test("authority revoked during the transport's own reads posts nothing and leave
     let revoked = false;
     const transport = new SupervisorHelperTransport({...f.options, projection: async () => {revoked = true;return f.helper;}});
     const input = {threadId: "helper", commandId: "revoked", messageId: "revoked-message", text: "Revoked before POST"};
-    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000), () => !revoked), "busy");
+    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000), () => !revoked), "revoked");
     assert.equal(f.state.posts, 0);
     assert.equal(transport.receiptText(f.binding, input.messageId), null);
+  } finally {await f.cleanup();}
+});
+
+test("a check-in revoked before its POST fails and settles only its own request fence", async () => {
+  const f = await fixture();
+  try {
+    let revoked = false;
+    const transport = new SupervisorHelperTransport({...f.options, projection: async () => {
+      if (!revoked) {revoked = true;f.team.quarantineMember(f.binding, "helper");}
+      return f.helper;
+    }});
+    const r = teamRuntime(f, transport);
+    r.runtime.startCycle(f.binding);
+    await r.runtime.runHelperBatch(f.binding, r.threads, r.batch, AbortSignal.timeout(5000));
+    const request = r.requests.requests(f.binding.projectId, "helper").find(value => value.id.startsWith("team-review:"))!;
+    assert.ok(request);
+    for (let cycle = 0; cycle < 5; cycle++) {r.runtime.startCycle(f.binding);await r.runtime.reconcile(f.binding, r.threads, AbortSignal.timeout(5000));}
+    assert.equal(f.state.posts, 0);
+    assert.equal(transport.receiptText(f.binding, request.messageId), null);
+    assert.equal(r.requests.requests(f.binding.projectId, "helper").find(value => value.id === request.id)?.state, "failed");
+    assert.equal(f.team.unresolvedRequests(f.binding).length, 0, "proven non-delivery releases only that check-in's fence");
   } finally {await f.cleanup();}
 });
 
