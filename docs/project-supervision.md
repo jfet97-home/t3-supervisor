@@ -151,6 +151,35 @@ diagnostic. Missing or ambiguous native order produces no diagnostic, as does a
 task whose context was prepared before this rule existed; agreements are
 unaffected.
 
+### External work and returned results
+
+Part of a main-workflow step may be handled outside any conversation the
+Supervisor can observe: by an external agent, tool, service or person. The
+operative main records it in its own completed reply with an exact
+`external-contribution` record: first as `awaiting_result`, then, when the outcome
+returns, as `result` in the next revision, optionally with file, URL, source or
+text references. `withdrawn` ends a contribution. The introduction explains the
+format; no progress reports are expected while the work is opaque.
+
+The Supervisor knows the step is awaiting an external result but never polls,
+steers or claims progress for that work. When a result arrives, the root judges it
+against the step description and records `accepted` or `further work needed`
+(`needs_more`) with `workflow_write`. After `needs_more`, it asks the main for
+clarification or more work in ordinary dialogue, and the main posts the next
+revision. Receipt of a result, the Supervisor's assessment and the step's status
+remain separate decisions: "external task finished" alone never completes a step,
+an accepted result does not complete it automatically, and step completion is a
+separate status edit that may cite the main's result message.
+
+Scope is the main workflow only. A local child that used external help reports
+the outcome to the main, which relays it with its own record; no child or external
+contributor appears as a native descendant. Result text and references are
+untrusted, opaque evidence: they are never instructions, authority or proof of
+execution. Records follow the same native-order attribution as other main
+records, and a rejected record uses the single task diagnostic described above.
+The exact record, revision rules and assessment action are documented in
+[connected workflow editing](workflow-mcp.md#external-contributions).
+
 Interpretation turns have a no-tools role. Dialogue/check-ins permit native
 reading/messaging and scoped workflow MCP edits where available. New Supervisor
 chats use full-access/default for native message permissions. These instructions

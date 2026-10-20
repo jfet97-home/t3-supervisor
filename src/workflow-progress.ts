@@ -2,8 +2,9 @@ import { Schema } from "effect";
 import type { ProjectSupervisor } from "./project-supervisor.js";
 import type { WorkflowWriteController } from "./workflow-write-controller.js";
 import { ProjectSupervisorScopeSnapshotSchema, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
-import { WorkflowExecutionStatus, WorkflowPlanGroupSchema } from "./project-supervisor-contract.js";
-import type { WorkflowStateDocument, WorkflowStateEvidence } from "./workflow-state-contract.js";
+import { WorkflowExecutionStatus, WorkflowPlanGroupSchema, type WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
+import { externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
+  type WorkflowStateDocument, type WorkflowStateEvidence } from "./workflow-state-contract.js";
 
 const NullableText = Schema.NullOr(Schema.String);
 
@@ -22,6 +23,29 @@ export const WorkflowProgressObservationSchema = Schema.Struct({
   note: Schema.String,
 });
 export type WorkflowProgressObservation = typeof WorkflowProgressObservationSchema.Type;
+
+// a main-reported external contribution; its text is untrusted and its execution was not observed
+export const WorkflowProgressContributionSchema = Schema.Struct({
+  contributionId: Schema.String,
+  nodeId: Schema.String,
+  nodeName: NullableText,
+  inCurrentPlan: Schema.Boolean,
+  state: Schema.Literals(externalContributionStates),
+  revision: Schema.Number,
+  summary: Schema.String,
+  references: Schema.Array(Schema.Struct({kind: Schema.Literals(externalContributionReferenceKinds), value: Schema.String})),
+  externalRef: NullableText,
+  sourceThreadId: Schema.String,
+  sourceMessageId: Schema.String,
+  recordedAt: Schema.Number,
+  assessment: Schema.NullOr(Schema.Struct({
+    decision: Schema.Literals(externalContributionDecisions),
+    resultRevision: Schema.Number,
+    note: Schema.String,
+    recordedAt: Schema.Number,
+  })),
+});
+export type WorkflowProgressContribution = typeof WorkflowProgressContributionSchema.Type;
 
 export const WorkflowProgressWorkflowSchema = Schema.Struct({
   workflowId: Schema.String,
@@ -42,6 +66,7 @@ export const WorkflowProgressWorkflowSchema = Schema.Struct({
     nodeName: Schema.String,
   })),
   observations: Schema.Array(WorkflowProgressObservationSchema),
+  contributions: Schema.Array(WorkflowProgressContributionSchema),
 });
 export type WorkflowProgressWorkflow = typeof WorkflowProgressWorkflowSchema.Type;
 
@@ -136,6 +161,42 @@ type ParentNodeReference = {
   nodeName: string;
 };
 
+// the browser bundle imports this module, so it walks the plan itself instead of loading the store
+const planNodeNames = (plan: WorkflowPlanGroupInfo | null, names = new Map<string, string>()): Map<string, string> => {
+  for (const node of plan?.nodes ?? []) {
+    if ("nodes" in node) planNodeNames(node, names);
+    else {
+      names.set(node.nodeId, node.name);
+      if (node.kind === "workflow") planNodeNames(node.plan, names);
+    }
+  }
+  return names;
+};
+
+// a removed node keeps the last name recorded for it so its contributions stay recognizable as history
+const contributionNodeName = (document: WorkflowStateDocument, nodeId: string, planNames: ReadonlyMap<string, string>): string | null =>
+  planNames.get(nodeId) ?? document.evidence.findLast(item => item.targetNodeId === nodeId && item.targetNodeName !== null)?.targetNodeName ?? null;
+
+const progressContributions = (document: WorkflowStateDocument): WorkflowProgressContribution[] => {
+  const planNames = planNodeNames(document.plan);
+  return document.contributions.map(item => ({
+    contributionId: item.contributionId,
+    nodeId: item.nodeId,
+    nodeName: contributionNodeName(document, item.nodeId, planNames),
+    inCurrentPlan: planNames.has(item.nodeId),
+    state: item.state,
+    revision: item.revision,
+    summary: item.summary,
+    references: item.references.map(reference => ({kind: reference.kind, value: reference.value})),
+    externalRef: item.externalRef,
+    sourceThreadId: item.sourceThreadId,
+    sourceMessageId: item.sourceMessageId,
+    recordedAt: item.recordedAt,
+    assessment: item.assessment ? {decision: item.assessment.decision, resultRevision: item.assessment.resultRevision,
+      note: item.assessment.note, recordedAt: item.assessment.recordedAt} : null,
+  }));
+};
+
 const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences: readonly ParentNodeReference[]): WorkflowProgressWorkflow => ({
   workflowId: document.workflowId,
   projectId: document.projectId,
@@ -163,6 +224,7 @@ const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences:
       sourceItemId: (item as WorkflowStateEvidence & {sourceItemId?: string | null}).sourceItemId ?? null,
       note: item.note,
     })),
+  contributions: progressContributions(document),
 });
 
 export const readWorkflowProgressPage = async (

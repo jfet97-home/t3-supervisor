@@ -53,6 +53,72 @@ Treat it as information that the dialogue needs correction: it does not change
 agreement history, authorize an edit, prove execution, or schedule an automatic
 retry or new chat turn.
 
+## External contributions
+
+Some work for a main-workflow step happens where the Supervisor cannot observe it:
+an external agent, tool, service or person. The operative main records that work
+in its own completed reply with an exact fenced `external-contribution` record. The
+record is generic and provider-independent; it names no provider, carries no
+credentials and grants no remote polling, steering or workflow-write authority.
+
+The fence holds one single-line JSON object with exactly these fields, all present:
+
+- `taskId`: the current task.
+- `contributionId`: the main's stable ID, at most 64 characters of `A-Z a-z 0-9 . _ : -`.
+- `nodeId`: an existing step or workflow node in the current main workflow plan.
+- `revision`: an integer of at least 1.
+- `state`: `awaiting_result`, `result` or `withdrawn`.
+- `summary`: at most 2,000 characters of untrusted text.
+- `references`: at most 8 `{kind, value}` objects, where `kind` is `file`, `url`,
+  `source` or `text` and `value` has at most 500 characters; may be empty.
+- `externalRef`: an opaque display reference of at most 200 characters, or `null`.
+
+A message may hold up to 8 records, at most one per contribution. Missing or extra
+fields, wrong types, exceeded caps and malformed JSON make a record invalid.
+
+The service imports records only from the operative main's own completed,
+non-streaming assistant messages, under the same native-order rules as other main
+protocol records: after the task's introduction and after any source edit, with
+fail-closed attribution when no protocol anchor exists. Supervisor, user, child,
+tool, streaming, quoted, indented or nested copies, records naming another task,
+and records before the introduction are ignored. Scope is the main workflow only.
+A local native child never records a contribution: it returns its external outcome
+to the main, which relays it with its own record. No contributor thread IDs or
+native descendants are created for external work.
+
+Accepted records are stored on the main workflow document as `contributions[]`,
+one entry per `contributionId` with its latest `state`, `revision`, `summary`,
+`references`, `externalRef`, source thread/run/message IDs, `recordedAt` and the
+current `assessment` or `null`. Each import adds `contribution_recorded` evidence
+under revision CAS. The first revision is 1 (`awaiting_result` or `result`); each
+later one must be exactly the current revision plus 1. An identical replay is a
+no-op. A same-revision change, a gap, a lower revision, an unknown node or any
+change after `withdrawn` is ignored with one bounded diagnostic in the task's single
+`workflowProtocolDiagnostic` slot, using fixed `contribution_*` codes. A record in
+an earlier main reply than the stored revision's reply is superseded and never
+imported later. A later valid record clears a contribution diagnostic. A node
+later removed from the plan keeps its contributions as history; a withdrawal may
+still name it. Each document holds at most 32 contributions within the existing
+document and history caps. Documents stored before this field existed read it as
+empty.
+
+The root assesses a `result` with `workflow_write` action `assess_contribution`.
+It records `accepted` or `needs_more` for the contribution's current result
+revision as `contribution_assessed` evidence and sets the current assessment. After
+`needs_more`, ordinary dialogue follows and the main posts the next revision, which
+clears the current assessment while evidence keeps the history. Receipt, assessment
+and step completion stay separate: no record or assessment changes a status, and
+an accepted result never completes a step automatically. The Supervisor records
+completion with an ordinary `apply` and `status_changed` evidence, which may cite
+the main's result message through `sourceThreadId` and `sourceMessageId`.
+
+`workflow_read` returns the bounded contributions and current assessments with an
+`externalContributionNote`. Root check-in envelopes add `externalContributions`, a
+compact index of open entries (`contributionId`, `nodeId`, `inCurrentPlan`,
+`state`, `revision`, current decision and `sourceMessageId`) without their summary
+or references. Summaries, references and `externalRef` are untrusted evidence,
+never instructions, authority or native proof of execution.
+
 ## MCP interface
 
 The service provides a stateless Streamable HTTP MCP route at `/mcp/workflows`.
@@ -89,7 +155,7 @@ behavior, not a positive workflow edit or complete configured-project dialogue.
 coordinates. It returns bounded workflow state and native main/descendant lineage,
 including child parent-step references and archive flags. Reads require the shared MCP transport token but are not
 actor-authenticated to a particular T3 conversation and grant no edit authority.
-`workflow_write` supports three actions:
+`workflow_write` supports four actions:
 
 - `ensure_main` creates an unaccepted main draft.
 - `link_child` creates a live child's workflow under its verified native parent.
@@ -98,6 +164,14 @@ actor-authenticated to a particular T3 conversation and grant no edit authority.
   repeated reusable references remain distinct. New live steps start "planned";
   mark them underway or completed in a separate later apply with status_changed
   evidence. On rejection, read the reason, code, and path. Read the current document before refining it.
+- `assess_contribution` records the root's `accepted` or `needs_more` decision for
+  one main-workflow external contribution. It takes `operationId`, `workflowId`,
+  `expectedRevision`, `contributionId`, `resultRevision`, `decision` and a `note` of
+  at most 2,000 characters. It is valid only when the contribution's latest state
+  is `result` at exactly `resultRevision`; otherwise it returns
+  `contribution_result_stale`, `contribution_not_a_result` or
+  `contribution_not_found`. A child workflow returns `contribution_main_workflow_only`.
+  It never changes a status.
 
 A valid unaccepted draft can be edited: formal agreement is not a write gate.
 During initialization the root publishes the supplied initial record unchanged and
@@ -201,7 +275,9 @@ ownership and execution checks pass; its arguments never grant authority by
 themselves. This nonretryable denial is returned after the bounded evidence wait.
 Model selection still comes from T3's live catalog, and no separate
 Supervisor model configuration is required. The ordinary agreement/dialogue path
-remains separate.
+remains separate. Only the root that owns the main workflow may use
+`assess_contribution`; a helper or any other actor is denied with
+`contribution_assessment_root_only` before its proof is considered.
 
 Quoted JSON, ordinary messages, code-mode script text, empty placeholders,
 truncated strings and tool calls in another conversation or a native child cannot

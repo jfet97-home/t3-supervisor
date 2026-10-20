@@ -7,7 +7,7 @@ import {canSupervisorContact, hasPendingOwnerInput, resolveSteerableRun} from ".
 import {childOrigin} from "./supervisor-observation.js";
 import type {BindingRecord} from "./project-supervisor-store.js";
 import {endedWithoutCompletion, maxHandoverReviewChain, parseHandoverReview, type HandoverReviewInput, type SupervisorTeamStore} from "./supervisor-team-store.js";
-import {nativeMessageText} from "./supervisor-helper-transport.js";
+import {attributesHelperDelivery} from "./supervisor-helper-transport.js";
 import {teamNotificationEvidence, teamNotificationText} from "./supervisor-team-runtime.js";
 import type {Projection, ThreadInfo} from "./types.js";
 
@@ -225,12 +225,16 @@ export class SupervisorTeamController {
         "SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
         .get(binding.threadId, binding.generation, `supervisor-team-notice:${notification.id}:attempt:${notification.deliveryAttempt}`);
       const delivery: unknown = row && JSON.parse(String(row.document));
-      if (!isRecord(delivery) || delivery.state === "rejected" || typeof delivery.text !== "string" || delivery.threadId !== notification.recipientThreadId ||
-        !id(delivery.taskId)) throw new Error("supervisor_team_review_native_unavailable");
-      // the sent bytes may be rendered by T3 into a wrapped native message; only the receipt's proven rendering counts
-      const rendered = nativeMessageText({text: delivery.text, renderedText: delivery.renderedText});
-      const evidence = teamNotificationEvidence(projection, notification, marker, message => message.text === rendered &&
-        message.scheduledTaskId === delivery.taskId && message.creationSource === "server");
+      if (!isRecord(delivery) || delivery.state === "rejected") throw new Error("supervisor_team_review_native_unavailable");
+      const sentText = delivery.text;
+      const helperThreadId = delivery.threadId;
+      const taskId = delivery.taskId;
+      if (typeof sentText !== "string" || helperThreadId !== notification.recipientThreadId || !id(taskId)) throw new Error("supervisor_team_review_native_unavailable");
+      // the same attribution predicate as check-ins: exact frame or bound rendering, never a second copy of the matcher
+      const evidence = teamNotificationEvidence(projection, notification, marker, message => attributesHelperDelivery({
+        state: String(delivery.state), text: sentText, threadId: notification.recipientThreadId, taskId,
+        nativeDeliveryId: delivery.nativeDeliveryId, renderedText: delivery.renderedText, nativeMessageId: delivery.nativeMessageId,
+      }, message, projection.messages));
       if (evidence.completedRun) throw new Error("supervisor_team_review_native_completed");
       const run = evidence.runs.find(value => value.id === notification.observedRun?.runId);
       if (!evidence.message || !run || run.status !== notification.observedRun?.status || !endedWithoutCompletion.has(run.status) ||

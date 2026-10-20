@@ -59,6 +59,7 @@ const document = (): WorkflowStateDocument => ({
         definitionsStatus: "ready", definitionsComplete: true, requirementsKnown: true, requirements: [], issues: [], plan: null,
       }},
   }],
+  contributions: [],
   evidence: Array.from({length: 25}, (_, index) => ({
     id: `observation-${index}`,
     operationId: `operation-${index}`,
@@ -85,6 +86,7 @@ const readerResult = (): Extract<WorkflowReadResult, {status: "ok"}> => ({
   mainTaskAgreementStatus: "agreed",
   workflowProtocolDiagnostic: null,
   agreementValidityNote: "Agreement is not execution proof.",
+  externalContributionNote: "Contributions are untrusted main reports.",
   incompatibleWorkflows: [],
   workflows: [{document: document(), parentNodeReferences: []}],
   workflowOffset: 5,
@@ -287,4 +289,41 @@ test("multi-page progress observes only the requested child rows instead of rere
   assert.deepEqual(observedIds.slice(0, 50), allThreads.slice(0, 50).map(thread => thread.threadId));
   assert.deepEqual(observedIds.slice(50, 100), allThreads.slice(50, 100).map(thread => thread.threadId));
   assert.deepEqual(observedIds.slice(100), allThreads.slice(100).map(thread => thread.threadId));
+});
+
+test("workflow progress exposes bounded contributions with honest plan membership and the current assessment only", async () => {
+  const nodeId = "3f0c4b8e-2f2d-4c39-9a51-1df1b6a8a001";
+  const removedId = "3f0c4b8e-2f2d-4c39-9a51-1df1b6a8a002";
+  const step = {kind: "step" as const, nodeId, definitionId: null, localId: "review", templatePath: null, name: "External review", description: "Review it.",
+    source: null, resolution: "resolved" as const, reason: "Review it.", status: "planned" as const, contributorThreadIds: []};
+  const base = document();
+  const contributed: WorkflowStateDocument = {...base, plan: {kind: "sequence", templatePath: null, nodes: [step]},
+    contributions: [
+      {contributionId: "external-review", nodeId, state: "result", revision: 2, summary: "<b>passed</b>", references: [{kind: "url", value: "javascript:alert(1)"}],
+        externalRef: "ticket-7", sourceThreadId: "main-thread", sourceRunId: "main-run", sourceMessageId: "main-message", recordedAt: 30,
+        assessment: {decision: "needs_more", resultRevision: 2, note: "Attach the findings.", actorSupervisorThreadId: "supervisor-thread", evidenceId: "assessed", recordedAt: 31}},
+      {contributionId: "former-step", nodeId: removedId, state: "awaiting_result", revision: 1, summary: "", references: [], externalRef: null,
+        sourceThreadId: "main-thread", sourceRunId: "main-run", sourceMessageId: "main-message-0", recordedAt: 20, assessment: null},
+    ],
+    evidence: [...base.evidence, {id: "removed", operationId: "remove", kind: "node_removed", recordedAt: 26, actorSupervisorThreadId: "supervisor-thread",
+      targetNodeId: removedId, targetNodeName: "Former step", statusFrom: "planned", statusTo: null, sourceThreadId: null, sourceRunId: null,
+      sourceMessageId: null, agreementKey: null, note: "Removed."}]};
+  const workflowReader = {read: async () => ({...readerResult(), workflows: [{document: contributed, parentNodeReferences: []}]})} as unknown as WorkflowWriteController;
+  const supervision = {
+    workflowLocator: () => ({supervisorThreadId: "supervisor-thread", bindingGeneration: 7}),
+    scopeSnapshot: async () => scopeSnapshot(),
+  } as unknown as ProjectSupervisor;
+  const result = await readWorkflowProgressPage(supervision, workflowReader, {
+    projectId: "project", mainThreadId: "main-thread", workflowOffset: 0, lineageOffset: 0, limit: 20,
+  }, AbortSignal.timeout(1000));
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.workflows[0]?.contributions, [
+    {contributionId: "external-review", nodeId, nodeName: "External review", inCurrentPlan: true, state: "result", revision: 2, summary: "<b>passed</b>",
+      references: [{kind: "url", value: "javascript:alert(1)"}], externalRef: "ticket-7", sourceThreadId: "main-thread", sourceMessageId: "main-message",
+      recordedAt: 30, assessment: {decision: "needs_more", resultRevision: 2, note: "Attach the findings.", recordedAt: 31}},
+    {contributionId: "former-step", nodeId: removedId, nodeName: "Former step", inCurrentPlan: false, state: "awaiting_result", revision: 1, summary: "",
+      references: [], externalRef: null, sourceThreadId: "main-thread", sourceMessageId: "main-message-0", recordedAt: 20, assessment: null},
+  ]);
+  assert.equal(result.workflows[0]?.observations.some(item => item.id === "removed"), false);
+  assert.deepEqual(Schema.decodeUnknownSync(WorkflowProgressSnapshotSchema)(result), result);
 });

@@ -17,10 +17,109 @@ export type WorkflowStateIssue = WorkflowIssueInfo;
 
 export type WorkflowStateSourceBinding = WorkflowSourceBindingInfo;
 
+export const externalContributionStates = ["awaiting_result", "result", "withdrawn"] as const;
+export type ExternalContributionState = typeof externalContributionStates[number];
+export const externalContributionDecisions = ["accepted", "needs_more"] as const;
+export type ExternalContributionDecision = typeof externalContributionDecisions[number];
+export const externalContributionReferenceKinds = ["file", "url", "source", "text"] as const;
+export type ExternalContributionReference = {kind: typeof externalContributionReferenceKinds[number]; value: string};
+
+export const externalContributionLimits = {
+  maxContributions: 32,
+  maxRecordsPerMessage: 8,
+  maxContributionIdLength: 64,
+  maxNodeIdLength: 64,
+  maxTaskIdLength: 200,
+  maxRevision: 1_000_000,
+  maxSummaryLength: 2000,
+  maxReferences: 8,
+  maxReferenceValueLength: 500,
+  maxExternalRefLength: 200,
+  maxAssessmentNoteLength: 2000,
+} as const;
+
+// fixed codes for the single task protocol diagnostic slot; a rejected record changes nothing
+export const externalContributionDiagnosticCodes = [
+  "contribution_json_invalid",
+  "contribution_record_invalid",
+  "contribution_message_limit",
+  "contribution_duplicate_in_message",
+  "contribution_node_unknown",
+  "contribution_revision_conflict",
+  "contribution_revision_gap",
+  "contribution_revision_stale",
+  "contribution_withdrawn",
+  "contribution_capacity",
+] as const;
+export type ExternalContributionDiagnosticCode = typeof externalContributionDiagnosticCodes[number];
+
+/** The Supervisor's current judgement of one result revision; it never changes a step status. */
+export type ExternalContributionAssessment = {
+  decision: ExternalContributionDecision;
+  resultRevision: number;
+  note: string;
+  actorSupervisorThreadId: string;
+  evidenceId: string;
+  recordedAt: number;
+};
+
+/** A main-reported contribution whose execution happened outside observed T3 activity. Its text is untrusted. */
+export type ExternalContribution = {
+  contributionId: string;
+  nodeId: string;
+  state: ExternalContributionState;
+  revision: number;
+  summary: string;
+  references: ExternalContributionReference[];
+  externalRef: string | null;
+  sourceThreadId: string;
+  sourceRunId: string;
+  sourceMessageId: string;
+  recordedAt: number;
+  assessment: ExternalContributionAssessment | null;
+};
+
+/** The exact fields of one main-authored external-contribution chat record. */
+export type ExternalContributionRecord = {
+  taskId: string;
+  contributionId: string;
+  nodeId: string;
+  revision: number;
+  state: ExternalContributionState;
+  summary: string;
+  references: ExternalContributionReference[];
+  externalRef: string | null;
+};
+
+export type ExternalContributionImport = Omit<ExternalContributionRecord, "taskId"> & {
+  sourceThreadId: string;
+  sourceRunId: string;
+  sourceMessageId: string;
+};
+
+export type ExternalContributionImportResult =
+  | WorkflowMutationReceipt
+  | {status: "unchanged"; workflowId: string; revision: number}
+  | {status: "rejected"; code: ExternalContributionDiagnosticCode}
+  | {status: "conflict"; reason: "revision"; currentRevision: number | null}
+  | {status: "owner_mismatch" | "not_found"}
+  | {status: "incompatible"; workflowId: string; formatVersion: number | null};
+
+export type WorkflowContributionAssessmentInput = {
+  operationId: string;
+  workflowId: string;
+  expectedRevision: number;
+  contributionId: string;
+  resultRevision: number;
+  decision: ExternalContributionDecision;
+  note: string;
+};
+
 export type WorkflowStateEvidence = {
   id: string;
   operationId: string;
-  kind: "draft_created" | "lineage_linked" | "agreement_imported" | "plan_updated" | "status_changed" | "node_removed" | "note" | "observation";
+  kind: "draft_created" | "lineage_linked" | "agreement_imported" | "plan_updated" | "status_changed" | "node_removed" | "note" | "observation" |
+    "contribution_recorded" | "contribution_assessed";
   recordedAt: number;
   actorSupervisorThreadId: string;
   targetNodeId: string | null;
@@ -33,6 +132,8 @@ export type WorkflowStateEvidence = {
   sourceItemId?: string | null;
   agreementKey: string | null;
   note: string;
+  // present only on contribution evidence; the summary and references stay on the current contribution entry
+  contribution?: {contributionId: string; revision: number; state: ExternalContributionState | null; decision: ExternalContributionDecision | null};
 };
 
 export type WorkflowStateEvidenceInput = {
@@ -78,6 +179,8 @@ export type WorkflowStateDocument = {
   plan: WorkflowStatePlan;
   currentAgreementKey: string | null;
   acceptedAgreements: AcceptedWorkflowAgreementRecord[];
+  // main workflow only; a stored document without this field reads as empty
+  contributions: ExternalContribution[];
   evidence: WorkflowStateEvidence[];
   createdAt: number;
   updatedAt: number;
@@ -144,7 +247,7 @@ export type WorkflowMutationReceipt = {
 export type WorkflowMutationResult = WorkflowMutationReceipt | {
   status: "conflict";
   operationId: string;
-  reason: "revision" | "operation_id_reused" | "workflow_exists" | "child_already_linked" | "parent_missing" | "not_found";
+  reason: "revision" | "operation_id_reused" | "workflow_exists" | "child_already_linked" | "parent_missing" | "not_found" | "contribution_result_stale";
   currentRevision: number | null;
 } | {
   status: "owner_mismatch";

@@ -113,6 +113,17 @@ After switching main/project, never interpret the old main's data as the new sco
 Incomplete native scope, incompatible state and unavailable reads require attention;
 they do not mean an empty or completed workflow.
 
+A main-workflow step may show read-only external contributions reported by the
+main for work done outside observed conversations. Labels read "Awaiting external
+result", "External result received – awaiting assessment", "External result
+accepted", "Further work requested" or withdrawn; contributions for a step removed
+from the plan are listed separately as no longer in the current plan. Summaries,
+references and external references are the main's untrusted report, shown as plain
+text; they are not observed execution. An accepted result does not complete the
+step, and the dashboard cannot edit or assess contributions. A
+`contribution_*` diagnostic means the main's latest record was not recorded and
+needs a corrected record in dialogue.
+
 Native idle/no-AppRun mirrors are not child completion. The Supervisor observes
 normal actions/results and supplies the assessment without requiring constant agent
 reports. Its links explain the judgment, not independent proof of semantic success.

@@ -13,7 +13,7 @@ import type {
   WorkflowProtocolDiagnostic,
   WorkflowProposalInfo,
 } from "../../src/project-supervisor-contract.js";
-import type { WorkflowProgressCoverage, WorkflowProgressSnapshot, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
+import type { WorkflowProgressContribution, WorkflowProgressCoverage, WorkflowProgressSnapshot, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
 import { defaultMonitoringSettings, defaultSupervisorTeamSettings } from "../../src/project-supervisor-contract.js";
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "./project-supervisor-api.js";
 import { idleControlActivity, SupervisionControlPanel } from "./supervisor-control.js";
@@ -188,13 +188,42 @@ function WorkflowSource({source, templatePath}: {source: WorkflowProposalInfo["r
   return <p className="small muted">Source: {source?.origin ?? "not recorded"}{source?.path && <> · <code>{source.path}</code></>}{templatePath && <> · template <code>{templatePath}</code></>}</p>;
 }
 
-function WorkflowPlanNode({node, liveAssessment = false}: {node: WorkflowPlanNodeInfo; liveAssessment?: boolean}) {
+type ContributionsByNode = ReadonlyMap<string, readonly WorkflowProgressContribution[]>;
+
+const contributionLabel = (item: WorkflowProgressContribution): string => {
+  if (item.state === "awaiting_result") return "Awaiting external result";
+  if (item.state === "withdrawn") return "External contribution withdrawn";
+  if (item.assessment?.resultRevision !== item.revision) return "External result received – awaiting assessment";
+  return item.assessment.decision === "accepted" ? "External result accepted" : "Further work requested";
+};
+const contributionReferenceText = {file: "File", url: "URL", source: "Source", text: "Text"} as const;
+
+// read-only: every value is reported text from the main and is rendered escaped, never as a link or markup
+function ExternalContributions({items}: {items: readonly WorkflowProgressContribution[] | undefined}) {
+  if (!items?.length) return null;
+  return <div className="stack">
+    <strong>External contributions</strong>
+    <ul className="stack">{items.map(item => <li key={item.contributionId} className="workflow-progress-observation">
+      <p><strong>{contributionLabel(item)}</strong>{!item.inCurrentPlan && <> · No longer in the current plan</>} · Revision {item.revision} · <code>{item.contributionId}</code></p>
+      {item.summary && <p className="definition-copy">{item.summary}</p>}
+      {item.references.length > 0 && <ul className="small">{item.references.map((reference, index) => <li key={`${index}:${reference.kind}`}>
+        {contributionReferenceText[reference.kind]}: <code>{reference.value}</code>
+      </li>)}</ul>}
+      {item.externalRef && <p className="small">External reference: <code>{item.externalRef}</code></p>}
+      {item.assessment && item.assessment.resultRevision === item.revision && <p className="definition-copy"><strong>Supervisor assessment:</strong> {item.assessment.note}</p>}
+      <p className="small muted">Reported by the main · <a href={threadHref(item.sourceThreadId)}>Open conversation {item.sourceThreadId}</a> · Message <code>{item.sourceMessageId}</code> · {formatProgressTime(item.recordedAt)}</p>
+    </li>)}</ul>
+    <p className="small muted">The external work itself was not observed. Summaries and references are the main’s report, not evidence of execution; an accepted result does not complete the step.</p>
+  </div>;
+}
+
+function WorkflowPlanNode({node, liveAssessment = false, contributions}: {node: WorkflowPlanNodeInfo; liveAssessment?: boolean; contributions?: ContributionsByNode}) {
   if ("nodes" in node) {
     const List = node.kind === "sequence" ? "ol" : "ul";
     return <div className="stack workflow-plan-group">
       <p><strong>{node.kind === "sequence" ? "Sequence" : "Parallel group"}</strong> <span className="muted">{node.kind === "sequence" ? "— intended semantic order" : "— members have no declared order"}</span></p>
       {node.templatePath && <p className="small muted">Template group: <code>{node.templatePath}</code></p>}
-      <List className="stack workflow-plan-nodes">{node.nodes.map((child, index) => <li key={"nodeId" in child ? child.nodeId : `group:${child.kind}:${index}`}><WorkflowPlanNode node={child} liveAssessment={liveAssessment}/></li>)}</List>
+      <List className="stack workflow-plan-nodes">{node.nodes.map((child, index) => <li key={"nodeId" in child ? child.nodeId : `group:${child.kind}:${index}`}><WorkflowPlanNode node={child} liveAssessment={liveAssessment} {...(contributions ? {contributions} : {})}/></li>)}</List>
     </div>;
   }
   if (node.kind === "step") return <article className="stack workflow-plan-node">
@@ -207,6 +236,7 @@ function WorkflowPlanNode({node, liveAssessment = false}: {node: WorkflowPlanNod
     <p><strong>Plan status:</strong> {liveAssessment ? node.status === "underway" ? "Underway" : node.status === "completed" ? "Completed" : planStatusText[node.status] : planStatusText[node.status]} · <strong>Definition:</strong> {node.resolution === "resolved" ? "Resolved" : "Unresolved"}</p>
     <p>{node.reason}</p>
     {node.contributorThreadIds.length > 0 && <div><strong>Contributors</strong><ul>{node.contributorThreadIds.map(threadId => <li key={threadId}><a href={`t3-thread://v1/${threadId}`}>Child conversation <code>{threadId}</code></a></li>)}</ul></div>}
+    <ExternalContributions items={contributions?.get(node.nodeId)}/>
   </article>;
   if (node.kind !== "workflow") return null;
   return <article className="stack workflow-plan-node">
@@ -224,7 +254,8 @@ function WorkflowPlanNode({node, liveAssessment = false}: {node: WorkflowPlanNod
         <p>{omission.reason}</p>
       </li>)}</ul>
     </div>}
-    {node.plan && <WorkflowPlanNode node={node.plan} liveAssessment={liveAssessment}/>}
+    <ExternalContributions items={contributions?.get(node.nodeId)}/>
+    {node.plan && <WorkflowPlanNode node={node.plan} liveAssessment={liveAssessment} {...(contributions ? {contributions} : {})}/>}
     {!node.plan && node.resolution !== "resolved" && <p className="muted">The referenced workflow could not be expanded completely.</p>}
     {node.contributorThreadIds.length > 0 && <div><strong>Contributors</strong><ul>{node.contributorThreadIds.map(threadId => <li key={threadId}><a href={`t3-thread://v1/${threadId}`}>Child conversation <code>{threadId}</code></a></li>)}</ul></div>}
   </article>;
@@ -356,6 +387,12 @@ function WorkflowProtocolDiagnosticView({diagnostic}: {diagnostic: WorkflowProto
   if (!diagnostic) return null;
   const isSupervisor = diagnostic.role === "supervisor";
   const notFormal = diagnostic.code === "plan_not_formal";
+  if (diagnostic.code.startsWith("contribution_")) return <section className="notice stack" aria-labelledby="workflow-protocol-diagnostic-title">
+    <h5 id="workflow-protocol-diagnostic-title">External contribution record needs follow-up</h5>
+    <p>The main assistant’s latest external-contribution record was not recorded. It needs a complete record with the next revision for an existing step of the current main workflow.</p>
+    <p className="muted">This diagnostic is informational. It does not change any recorded contribution, assessment or step status.</p>
+    <p className="small muted"><strong>Record:</strong> Main assistant external contribution · <strong>Code:</strong> <code>{diagnostic.code}</code> · <strong>Message ID:</strong> <code>{diagnostic.messageId}</code></p>
+  </section>;
 
   return <section className="notice stack" aria-labelledby="workflow-protocol-diagnostic-title">
     <h5 id="workflow-protocol-diagnostic-title">Workflow dialogue needs follow-up</h5>
@@ -554,6 +591,9 @@ function WorkflowAssignee({coverage}: {coverage: WorkflowProgressCoverage | unde
 
 function WorkflowProgressDetails({workflow, scopeThread}: {workflow: WorkflowProgressWorkflow; scopeThread?: WorkflowProgressScopeThread}) {
   const lifecycle = scopeThread ? lifecyclePresentation(scopeThread) : null;
+  const contributions = new Map<string, WorkflowProgressContribution[]>();
+  for (const item of workflow.contributions) if (item.inCurrentPlan) contributions.set(item.nodeId, [...(contributions.get(item.nodeId) ?? []), item]);
+  const removedContributions = workflow.contributions.filter(item => !item.inCurrentPlan);
   return <article className="stack workflow-progress-document">
     <div className="row between">
       <h5>{workflow.parentThreadId ? "Child workflow" : "Main workflow"}</h5>
@@ -576,8 +616,15 @@ function WorkflowProgressDetails({workflow, scopeThread}: {workflow: WorkflowPro
       </li>)}</ul>
     </div>}
     {workflow.plan
-      ? <WorkflowPlanNode node={workflow.plan} liveAssessment/>
+      ? <WorkflowPlanNode node={workflow.plan} liveAssessment contributions={contributions}/>
       : <p className="muted">No current plan structure was recorded for this conversation.</p>}
+    {removedContributions.length > 0 && <div className="stack">
+      <h6>External contributions for steps no longer in the plan</h6>
+      {[...new Set(removedContributions.map(item => item.nodeId))].map(nodeId => <div key={nodeId} className="stack">
+        <p className="small"><strong>Former step:</strong> {removedContributions.find(item => item.nodeId === nodeId)?.nodeName ?? "Name not recorded"} · <code>{nodeId}</code></p>
+        <ExternalContributions items={removedContributions.filter(item => item.nodeId === nodeId)}/>
+      </div>)}
+    </div>}
     <div className="stack">
       <h6>Recent Supervisor observations</h6>
       {workflow.observations.length === 0

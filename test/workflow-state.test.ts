@@ -7,9 +7,9 @@ import {test} from "node:test";
 import {fingerprint, GuidanceStore} from "../src/guidance-store.js";
 import {defaultSupervisorModel, ProjectSupervisorStore} from "../src/project-supervisor-store.js";
 import {proposalContextFromDefinitions, validateWorkflowApplyAgainstPinnedContext, validateWorkflowPlan} from "../src/supervisor-workflow.js";
-import {acceptedWorkflowPlansForBinding, WorkflowStateStore} from "../src/workflow-state-store.js";
-import {workflowMutationLimits} from "../src/workflow-state-contract.js";
-import type {WorkflowAgreementImport, WorkflowApplyInput, WorkflowOwner, WorkflowStatePlan, WorkflowStateSourceBinding} from "../src/workflow-state-contract.js";
+import {acceptedWorkflowPlansForBinding, parseExternalContributionRecord, WorkflowStateStore} from "../src/workflow-state-store.js";
+import {externalContributionLimits, workflowMutationLimits} from "../src/workflow-state-contract.js";
+import type {ExternalContributionImport, WorkflowAgreementImport, WorkflowApplyInput, WorkflowOwner, WorkflowStatePlan, WorkflowStateSourceBinding} from "../src/workflow-state-contract.js";
 import type {ProjectDefinitionSnapshot} from "../src/project-definitions-contract.js";
 import type {WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo} from "../src/project-supervisor-contract.js";
 
@@ -653,5 +653,209 @@ test("document status changes still require untargeted status_changed evidence a
       assert.equal(dangling.diagnostic, undefined);
     }
     assert.equal(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.revision, started.revision);
+  } finally {await closeFixture(fixture);}
+});
+
+const contributionRecord = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({taskId: "task-a", contributionId: "review:external-1",
+  nodeId: "e4b9739d-55f2-4c66-80ba-afdf6ec7c23f", revision: 1, state: "awaiting_result", summary: "An external reviewer is checking the export.",
+  references: [{kind: "url", value: "https://reviews.example/42"}], externalRef: "review-42", ...overrides});
+
+const contribution = (nodeId: string, overrides: Partial<ExternalContributionImport> = {}): ExternalContributionImport => ({contributionId: "review:external-1",
+  nodeId, revision: 1, state: "awaiting_result", summary: "An external reviewer is checking the export.", references: [], externalRef: null,
+  sourceThreadId: "main-a", sourceRunId: "run-main", sourceMessageId: "message-1", ...overrides});
+
+const seedLocalMain = (fixture: Fixture) => {
+  assert.equal(fixture.supervisors.store.transaction(() => fixture.workflows.importAcceptedAgreementInTransaction(fixture.owner, acceptedAgreement(fixture.proposal), 100)).status, "applied");
+  const document = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+  const steps = planEntities(document.plan);
+  assert.equal(steps.length, 2);
+  return {document, first: steps[0]!, second: steps[1]!};
+};
+
+const record = (fixture: Fixture, input: ExternalContributionImport, now = 500) =>
+  fixture.supervisors.store.transaction(() => fixture.workflows.recordContributionInTransaction(fixture.owner, input, now));
+
+const statusSnapshot = (fixture: Fixture) => {
+  const document = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+  return {status: document.status, nodes: planEntities(document.plan).map(node => [node.nodeId, node.status, [...node.contributorThreadIds]])};
+};
+
+test("external-contribution records parse only with every exact field, type and cap", () => {
+  const parsed = parseExternalContributionRecord(contributionRecord());
+  assert.deepEqual(parsed, contributionRecord());
+  assert.deepEqual(parseExternalContributionRecord(contributionRecord({references: [], externalRef: null, summary: ""}))?.references, []);
+  const atCaps = contributionRecord({contributionId: "a".repeat(64), summary: "s".repeat(externalContributionLimits.maxSummaryLength),
+    references: Array.from({length: externalContributionLimits.maxReferences}, (_, index) => ({kind: (["file", "url", "source", "text"] as const)[index % 4], value: "v".repeat(500)})),
+    externalRef: "r".repeat(200)});
+  assert.ok(parseExternalContributionRecord(atCaps), "every cap is inclusive");
+  const missing = contributionRecord();
+  delete missing.externalRef;
+  const rejected: Array<[string, unknown]> = [
+    ["missing field", missing],
+    ["extra field", contributionRecord({mainThreadId: "main-a"})],
+    ["array", [contributionRecord()]],
+    ["null", null],
+    ["string revision", contributionRecord({revision: "1"})],
+    ["zero revision", contributionRecord({revision: 0})],
+    ["fractional revision", contributionRecord({revision: 1.5})],
+    ["unknown state", contributionRecord({state: "done"})],
+    ["long summary", contributionRecord({summary: "s".repeat(2001)})],
+    ["non-string summary", contributionRecord({summary: null})],
+    ["too many references", contributionRecord({references: Array.from({length: 9}, () => ({kind: "text", value: "x"}))})],
+    ["reference extra key", contributionRecord({references: [{kind: "url", value: "https://example.test", label: "x"}]})],
+    ["reference kind", contributionRecord({references: [{kind: "link", value: "https://example.test"}]})],
+    ["long reference", contributionRecord({references: [{kind: "text", value: "v".repeat(501)}]})],
+    ["empty reference", contributionRecord({references: [{kind: "text", value: ""}]})],
+    ["references object", contributionRecord({references: {kind: "text", value: "x"}})],
+    ["long externalRef", contributionRecord({externalRef: "r".repeat(201)})],
+    ["empty externalRef", contributionRecord({externalRef: ""})],
+    ["contribution ID characters", contributionRecord({contributionId: "two words"})],
+    ["long contribution ID", contributionRecord({contributionId: "a".repeat(65)})],
+    ["numeric node ID", contributionRecord({nodeId: 7})],
+    ["missing task ID", contributionRecord({taskId: ""})],
+  ];
+  for (const [label, value] of rejected) assert.equal(parseExternalContributionRecord(value), null, label);
+});
+
+test("contribution revisions start at one, grow by one, replay as no-ops and end at withdrawn", async () => {
+  const fixture = await makeFixture([], false);
+  try {
+    const {first} = seedLocalMain(fixture);
+    const before = statusSnapshot(fixture);
+    const created = record(fixture, contribution(first.nodeId), 500);
+    assert.equal(created.status, "applied");
+    let document = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    assert.equal(document.revision, 2);
+    assert.deepEqual(document.contributions, [{...contribution(first.nodeId), recordedAt: 500, assessment: null}]);
+    const recorded = document.evidence.at(-1)!;
+    assert.equal(recorded.kind, "contribution_recorded");
+    assert.deepEqual(recorded.contribution, {contributionId: "review:external-1", revision: 1, state: "awaiting_result", decision: null});
+    assert.equal(recorded.targetNodeId, first.nodeId);
+    assert.equal(recorded.sourceMessageId, "message-1");
+
+    assert.deepEqual(record(fixture, contribution(first.nodeId, {sourceMessageId: "message-repeat"})), {status: "unchanged", workflowId: document.workflowId, revision: 2},
+      "an identical replay from a later message keeps the original source");
+    assert.deepEqual(record(fixture, contribution(first.nodeId, {summary: "Changed without a new revision."})), {status: "rejected", code: "contribution_revision_conflict"});
+    assert.deepEqual(record(fixture, contribution(first.nodeId, {revision: 3, state: "result"})), {status: "rejected", code: "contribution_revision_gap"});
+    assert.deepEqual(record(fixture, contribution(first.nodeId, {contributionId: "late-start", revision: 2})), {status: "rejected", code: "contribution_revision_gap"});
+    assert.deepEqual(record(fixture, contribution(first.nodeId, {contributionId: "never-registered", state: "withdrawn"})), {status: "rejected", code: "contribution_record_invalid"});
+    assert.equal(record(fixture, contribution(first.nodeId, {revision: 2, state: "result", summary: "The external review passed.", sourceMessageId: "message-2"})).status, "applied");
+    assert.deepEqual(record(fixture, contribution(first.nodeId)), {status: "rejected", code: "contribution_revision_stale"});
+    assert.equal(record(fixture, contribution(first.nodeId, {revision: 3, state: "withdrawn", summary: "No longer needed.", sourceMessageId: "message-3"})).status, "applied");
+    document = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    assert.equal(document.revision, 4);
+    assert.deepEqual(record(fixture, contribution(first.nodeId, {revision: 4, state: "result"})), {status: "rejected", code: "contribution_withdrawn"});
+    assert.deepEqual(record(fixture, contribution(first.nodeId, {revision: 3, state: "withdrawn", summary: "No longer needed.", sourceMessageId: "message-3"})),
+      {status: "unchanged", workflowId: document.workflowId, revision: 4});
+    assert.deepEqual(document.evidence.filter(item => item.kind === "contribution_recorded").map(item => [item.contribution?.revision, item.contribution?.state, item.sourceMessageId]),
+      [[1, "awaiting_result", "message-1"], [2, "result", "message-2"], [3, "withdrawn", "message-3"]]);
+    assert.deepEqual(statusSnapshot(fixture), before, "a contribution never changes statuses or contributor threads");
+  } finally {await closeFixture(fixture);}
+});
+
+test("contributions need a current main-plan node and keep their history when the node is removed", async () => {
+  const fixture = await makeFixture([], false);
+  try {
+    assert.deepEqual(record(fixture, contribution(randomUUID())), {status: "rejected", code: "contribution_node_unknown"}, "no main workflow yet");
+    const {first, second} = seedLocalMain(fixture);
+    assert.deepEqual(record(fixture, contribution(randomUUID())), {status: "rejected", code: "contribution_node_unknown"});
+    assert.equal(record(fixture, contribution(second.nodeId, {contributionId: "removed-node"})).status, "applied");
+    assert.equal(record(fixture, contribution(second.nodeId, {contributionId: "withdrawn-later"})).status, "applied");
+    const current = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const removed = fixture.workflows.apply(fixture.owner, applyInput(fixture, current, {...current.plan!, nodes: [first]}, "remove-second"), validationFor(fixture), 600);
+    assert.equal(removed.status, "applied", JSON.stringify(removed));
+    const after = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    assert.deepEqual(after.contributions.map(item => [item.contributionId, item.nodeId]), [["removed-node", second.nodeId], ["withdrawn-later", second.nodeId]],
+      "a Supervisor edit keeps contributions for a removed node as history");
+    assert.ok(after.evidence.some(item => item.kind === "node_removed" && item.targetNodeId === second.nodeId));
+    assert.deepEqual(record(fixture, contribution(second.nodeId, {contributionId: "removed-node", revision: 2, state: "result"})),
+      {status: "rejected", code: "contribution_node_unknown"});
+    assert.equal(record(fixture, contribution(second.nodeId, {contributionId: "withdrawn-later", revision: 2, state: "withdrawn"})).status, "applied",
+      "a withdrawal may still name the removed node");
+    assert.equal(record(fixture, contribution(first.nodeId, {contributionId: "removed-node", revision: 2, state: "result", summary: "Moved to the remaining step."})).status, "applied",
+      "a later revision may move the contribution to a current node");
+  } finally {await closeFixture(fixture);}
+});
+
+test("a contribution assessment covers one exact result revision, never changes status and is cleared by a later main revision", async () => {
+  const fixture = await makeFixture([], false);
+  try {
+    const {first} = seedLocalMain(fixture);
+    record(fixture, contribution(first.nodeId), 500);
+    const before = statusSnapshot(fixture);
+    let document = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const assess = (overrides: Record<string, unknown> = {}, now = 700) => fixture.supervisors.store.transaction(() => fixture.workflows.assessContributionInTransaction(fixture.owner,
+      {operationId: "assess-1", workflowId: document.workflowId, expectedRevision: document.revision, contributionId: "review:external-1",
+        resultRevision: 1, decision: "accepted", note: "The external review satisfies the step.", ...overrides} as never, now));
+    assert.deepEqual(assess(), {status: "invalid", operationId: "assess-1", reason: "contribution_not_a_result"});
+    record(fixture, contribution(first.nodeId, {revision: 2, state: "result", summary: "Review passed.", sourceMessageId: "message-2"}), 600);
+    document = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    assert.deepEqual(assess({expectedRevision: document.revision - 1}), {status: "conflict", operationId: "assess-1", reason: "revision", currentRevision: document.revision});
+    assert.deepEqual(assess({resultRevision: 1}), {status: "conflict", operationId: "assess-1", reason: "contribution_result_stale", currentRevision: document.revision});
+    assert.deepEqual(assess({contributionId: "unknown"}), {status: "invalid", operationId: "assess-1", reason: "contribution_not_found"});
+    assert.deepEqual(assess({decision: "completed", resultRevision: 2}), {status: "invalid", operationId: "assess-1", reason: "invalid_contribution_assessment"});
+    const accepted = assess({resultRevision: 2, decision: "needs_more", note: "Attach the reviewer's findings."});
+    assert.equal(accepted.status, "applied");
+    assert.deepEqual(assess({resultRevision: 2, decision: "needs_more", note: "Attach the reviewer's findings."}, 999), accepted, "an exact replay returns its receipt");
+    assert.deepEqual(assess({resultRevision: 2, decision: "accepted", note: "Attach the reviewer's findings."}),
+      {status: "conflict", operationId: "assess-1", reason: "operation_id_reused", currentRevision: null});
+    document = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    const assessed = document.evidence.at(-1)!;
+    assert.equal(assessed.kind, "contribution_assessed");
+    assert.deepEqual(assessed.contribution, {contributionId: "review:external-1", revision: 2, state: "result", decision: "needs_more"});
+    assert.equal(assessed.sourceMessageId, "message-2", "the assessment cites the main's result message");
+    assert.deepEqual(document.contributions[0]?.assessment, {decision: "needs_more", resultRevision: 2, note: "Attach the reviewer's findings.",
+      actorSupervisorThreadId: fixture.owner.supervisorThreadId, evidenceId: assessed.id, recordedAt: 700});
+    assert.deepEqual(statusSnapshot(fixture), before, "an assessment never changes a status");
+
+    record(fixture, contribution(first.nodeId, {revision: 3, state: "result", summary: "Findings attached.", sourceMessageId: "message-3"}), 800);
+    document = fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+    assert.equal(document.contributions[0]?.assessment, null, "a later main revision clears the current assessment");
+    assert.ok(document.evidence.some(item => item.kind === "contribution_assessed" && item.contribution?.decision === "needs_more"), "history stays in evidence");
+    const final = fixture.supervisors.store.transaction(() => fixture.workflows.assessContributionInTransaction(fixture.owner, {operationId: "assess-2",
+      workflowId: document.workflowId, expectedRevision: document.revision, contributionId: "review:external-1", resultRevision: 3, decision: "accepted",
+      note: "The findings satisfy the step."}, 900));
+    assert.equal(final.status, "applied");
+    assert.deepEqual(statusSnapshot(fixture), before, "an accepted result does not complete the step");
+  } finally {await closeFixture(fixture);}
+});
+
+test("contributions persist across reopen and a stored document without the field still loads as empty", async () => {
+  const fixture = await makeFixture([], false);
+  try {
+    const {first} = seedLocalMain(fixture);
+    const raw = fixture.guidance.db.prepare("SELECT document FROM supervisor_workflow_state WHERE thread_id=?").get("main-a") as {document: string};
+    const stored = JSON.parse(raw.document) as Record<string, unknown>;
+    delete stored.contributions;
+    fixture.guidance.db.prepare("UPDATE supervisor_workflow_state SET document=? WHERE thread_id=?").run(JSON.stringify(stored), "main-a");
+    assert.deepEqual(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId)?.contributions, []);
+    assert.equal(record(fixture, contribution(first.nodeId), 500).status, "applied");
+    fixture.guidance.close();
+    const guidance = new GuidanceStore(fixture.directory);
+    const reopened = new WorkflowStateStore(new ProjectSupervisorStore(guidance, new Set()));
+    try {
+      const document = reopened.get(fixture.owner.projectId, fixture.owner.mainThreadId)!;
+      assert.deepEqual(document.contributions.map(item => [item.contributionId, item.revision, item.state, item.sourceMessageId]),
+        [["review:external-1", 1, "awaiting_result", "message-1"]]);
+    } finally {guidance.close();}
+  } finally {await rm(fixture.directory, {recursive: true, force: true});}
+});
+
+test("contribution capacity is bounded per document and by the evidence history cap", async () => {
+  const fixture = await makeFixture([], false);
+  try {
+    const {first} = seedLocalMain(fixture);
+    for (let index = 0; index < externalContributionLimits.maxContributions; index++)
+      assert.equal(record(fixture, contribution(first.nodeId, {contributionId: `external-${index}`, summary: "s".repeat(2000),
+        references: Array.from({length: 8}, () => ({kind: "text" as const, value: "v".repeat(500)})), externalRef: "r".repeat(200)})).status, "applied");
+    assert.deepEqual(record(fixture, contribution(first.nodeId, {contributionId: "one-too-many"})), {status: "rejected", code: "contribution_capacity"});
+    assert.equal(record(fixture, contribution(first.nodeId, {contributionId: "external-0", revision: 2, state: "result"})).status, "applied",
+      "existing contributions still accept revisions at the cap");
+    const raw = fixture.guidance.db.prepare("SELECT document FROM supervisor_workflow_state WHERE thread_id=?").get("main-a") as {document: string};
+    const stored = JSON.parse(raw.document) as {evidence: unknown[]};
+    const filler = stored.evidence.at(-1) as Record<string, unknown>;
+    while (stored.evidence.length < workflowMutationLimits.maxEvidence) stored.evidence.push({...filler, id: randomUUID()});
+    fixture.guidance.db.prepare("UPDATE supervisor_workflow_state SET document=? WHERE thread_id=?").run(JSON.stringify(stored), "main-a");
+    assert.deepEqual(record(fixture, contribution(first.nodeId, {contributionId: "external-1", revision: 2, state: "result"})), {status: "rejected", code: "contribution_capacity"});
   } finally {await closeFixture(fixture);}
 });

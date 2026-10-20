@@ -120,7 +120,7 @@ const progressSnapshot: WorkflowProgressSnapshot = {
   workflows: [
     {workflowId: "main-workflow", projectId: "project", mainThreadId: "task-thread", threadId: "task-thread", parentThreadId: null,
       revision: 2, status: "underway", objective: "Review the source change", plan, updatedAt: 1_800_000_000_080,
-      parentNodeReferences: [], observations: []},
+      parentNodeReferences: [], observations: [], contributions: []},
     {workflowId: "child-workflow", projectId: "project", mainThreadId: "task-thread", threadId: "child-one", parentThreadId: "task-thread",
       revision: 1, status: "needs_attention", objective: "Review the integration", plan: null, updatedAt: 1_800_000_000_070,
       parentNodeReferences: [
@@ -131,6 +131,7 @@ const progressSnapshot: WorkflowProgressSnapshot = {
         targetNodeId: "step-inspect", targetNodeName: "Inspect source", statusFrom: null, statusTo: null,
         sourceThreadId: "child-one", sourceRunId: "child-run", sourceMessageId: "child-message", sourceItemId: "child-item",
         note: "The Supervisor observed the linked test output."}],
+      contributions: [],
     },
   ],
   workflowOffset: 0,
@@ -1007,4 +1008,58 @@ test("Plan retains unavailable diagnostics without claiming unreadable records a
   assert.match(html, /Unsupported retained scope state/);
   assert.match(html, /Their absence has not been established/);
   assert.doesNotMatch(html, /No task interpretation or plan has been recorded/);
+});
+
+test("external contributions render read-only per node with text labels, escaped text and no unsafe links", () => {
+  const contribution = (overrides: Partial<WorkflowProgressSnapshot["workflows"][number]["contributions"][number]>) => ({
+    contributionId: "external", nodeId: "step-inspect", nodeName: "Inspect source", inCurrentPlan: true, state: "awaiting_result" as const, revision: 1,
+    summary: "", references: [], externalRef: null, sourceThreadId: "task-thread", sourceMessageId: "main-message", recordedAt: 1_800_000_000_100,
+    assessment: null, ...overrides});
+  const contributions = [
+    contribution({contributionId: "awaiting", summary: "<script>alert(1)</script>",
+      references: [{kind: "url", value: "javascript:alert(1)"}, {kind: "url", value: "data:text/html,<b>x</b>"}, {kind: "url", value: "https://reports.example/42"}],
+      externalRef: "<img src=x onerror=alert(1)>"}),
+    contribution({contributionId: "received", nodeId: "step-e2e", nodeName: "End-to-end testing", state: "result", revision: 2, summary: "Tests passed elsewhere."}),
+    contribution({contributionId: "accepted", nodeId: "step-local", nodeName: "Check migration notes", state: "result", revision: 2,
+      assessment: {decision: "accepted", resultRevision: 2, note: "The notes satisfy the step.", recordedAt: 1_800_000_000_110}}),
+    contribution({contributionId: "needs-more", nodeId: "workflow-reviewer", nodeName: "Reviewer", state: "result", revision: 3,
+      assessment: {decision: "needs_more", resultRevision: 3, note: "Attach the reviewer findings.", recordedAt: 1_800_000_000_120}}),
+    contribution({contributionId: "withdrawn", nodeId: "step-local", nodeName: "Check migration notes", state: "withdrawn", revision: 2}),
+    contribution({contributionId: "former", nodeId: "step-gone", nodeName: "Former step", inCurrentPlan: false, state: "result", revision: 1}),
+  ];
+  const render = (withContributions: boolean) => renderToStaticMarkup(createElement(WorkflowProgressPanel, {
+    mainThreadId: "task-thread", connected: true,
+    progress: {key: "progress-key", pages: [{...progressSnapshot, workflows: progressSnapshot.workflows.map(item =>
+      item.workflowId === "main-workflow" && withContributions ? {...item, contributions} : item)}], loading: false, error: null},
+    onRefresh: () => {}, onLoadMore: () => {},
+  }));
+  const html = render(true);
+  const baseline = render(false);
+  for (const label of ["Awaiting external result", "External result received – awaiting assessment", "External result accepted", "Further work requested",
+    "External contribution withdrawn", "No longer in the current plan", "External contributions for steps no longer in the plan", "Former step"])
+    assert.ok(html.includes(label), label);
+  assert.match(html, /<strong>External contributions<\/strong><ul class="stack"><li class="workflow-progress-observation">/);
+  assert.match(html, /Attach the reviewer findings\./);
+  assert.match(html, /The external work itself was not observed/);
+  assert.match(html, /an accepted result does not complete the step/);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /<code>&lt;img src=x onerror=alert\(1\)&gt;<\/code>/);
+  assert.doesNotMatch(html, /<script>|<img src=x|<b>x<\/b>/);
+  assert.doesNotMatch(html, /href="(?:javascript|data|https?):/i);
+  assert.match(html, /URL: <code>https:\/\/reports\.example\/42<\/code>/);
+  assert.match(html, /href="t3-thread:\/\/v1\/task-thread">Open conversation task-thread<\/a> · Message <code>main-message<\/code>/);
+  for (const control of [/<input/g, /<button/g, /<form/g, /<textarea/g, /<select/g, /role="status"/g, /role="alert"/g, /aria-live/g])
+    assert.equal(html.match(control)?.length ?? 0, baseline.match(control)?.length ?? 0, `no new ${control.source}`);
+});
+
+test("an external contribution diagnostic explains the record without implying a status change", () => {
+  const html = renderTaskView({...snapshot.tasks[0]!, workflowProtocolDiagnostic: {
+    role: "operative", proposalId: null, messageId: "<b>main-message</b>", code: "contribution_revision_gap", observedAt: 1_800_000_000_400,
+  }});
+  assert.match(html, /External contribution record needs follow-up/);
+  assert.match(html, /next revision for an existing step of the current main workflow/);
+  assert.match(html, /does not change any recorded contribution, assessment or step status/);
+  assert.match(html, /Code:<\/strong> <code>contribution_revision_gap<\/code>/);
+  assert.match(html, /<code>&lt;b&gt;main-message&lt;\/b&gt;<\/code>/);
+  assert.doesNotMatch(html, /workflow acceptance was not recognized/);
 });

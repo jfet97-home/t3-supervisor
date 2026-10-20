@@ -233,6 +233,15 @@ ID; repeated references do not merge contributions or evidence. Template revisio
 agreement history and provenance remain explicit. Changed files
 are reviewed rather than silently changing the meaning of an existing agreement.
 
+Work that a step needs may also happen outside any observed conversation, through
+an external agent, tool, service or person. The main reports such work and its
+returned result with an `external-contribution` record for a step of its own
+workflow; children relay external outcomes through the main. The Supervisor
+assesses a returned result against the step description as accepted or needing
+more work. A reported result, its receipt and that assessment never complete the
+step by themselves; the step's status changes only through a separate Supervisor
+edit. See [connected workflow editing](workflow-mcp.md#external-contributions).
+
 Editing the original task message triggers fresh interpretation and negotiation.
 Earlier accepted plans remain history. A new proposal for unchanged task material
 cannot silently discard already accepted or live fixed commitments.

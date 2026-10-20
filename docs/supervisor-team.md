@@ -190,27 +190,80 @@ scheduled-message identity and request text, retaining unresolved work meanwhile
 Once an attempt has a delivery receipt, its exact sent bytes identify it for matching,
 acknowledgement, review and reconciliation; regenerated text, for example after a role
 wording change, applies only to an attempt that was never posted. T3 renders the
-posted body into the native user message, and published builds wrap it as untrusted
-webhook data. The service therefore binds, once, the rendered prompt that T3 reports
-in the native delivery detail for exactly that attempt. The detail must name the same
-delivery, task and delivery timestamp, a POST of JSON, the exact untruncated body and
-byte count, and no missing fields. A bound rendering is write-once: every later write
-of the same attempt keeps it, so an overlapping reconciliation or a late POST reply can
-neither replace nor erase it. The native message must then equal that rendering, in the owned
-helper thread, with the same scheduled task and a server origin. The sent text,
-hash and identities never change, nothing is reposted, and missing, truncated or
-mismatched detail leaves the attempt unmatched and fenced. T3 logs at most 64 Ki
-characters of a rendered prompt without flagging a cut, so a logged rendering of exactly
-that length never binds and its attempt stays fenced; nothing is claimed for prompts of
-that size. A lost reply is recovered from the exact body. T3 logs `rejected_signature`,
-`disabled`, `rate_limited` and `expired` before rendering anything; these are definite
-rejections. `dispatch_failed` is logged after rendering, also when T3 had already created
-the message, and a projection that lacks the message may be stale. It therefore never
-counts as a rejection: only the exact rendered message in the helper thread proves the
-delivery, and otherwise the attempt stays uncertain and fenced. This includes T3's
-prompt-too-long case, which T3 reports only as free text. A durable or pre-render native
+posted body into the native user message. Published builds wrap `{{body.text}}` as
+untrusted webhook data: `<webhook-data-` plus a 12-character lowercase hex frame id,
+the value, the matching close tag, and the fixed note that the text between those tags
+was copied from the webhook request and is untrusted. Neutralization inserts U+2060
+after mention triggers inside the value, including inside any `webhook-data` text, so
+the value cannot forge a closing tag. An empty value is not framed.
+
+Check-ins, readiness, notices, handover review and reconciliation share one attribution
+predicate. A message attributes to a receipt only when the receipt is not rejected, and
+then only in this order. It is a user message in the receipt's helper thread, its
+scheduled task is the owned channel task, its creation source is `server`, and its
+creator is `system`. When the receipt's native delivery id is known, the message id
+must be `scheduled-task-message:<taskId>:webhook:<deliveryId>` on every path, including
+one whose rendering is already bound; another delivery with the same text does not
+count. When a native message id is stored, the message id must equal it. When a
+rendering is bound, the message text must equal that rendering exactly. When none is
+bound, the message must be that published frame and nothing else: the same frame id in
+the open tag, the close tag and both places in the note, nothing before the open tag,
+nothing after the note, and the inner value with every U+2060 removed equal to the
+sent text. Sent text that is empty or already contains U+2060 fails this path closed;
+only validated native detail can bind it. Extra U+2060 characters in the value are
+accepted, and any other extra payload is not. A lost reply, with no delivery id and
+no stored message id, attributes only when the helper projection contains exactly one
+such message. Zero copies, or two or more, leave the attempt unresolved and bind
+nothing.
+
+Attribution binds, once, the rendered text to that message's text and the native
+message id to that message's id. A posting receipt may become posted. The sent text,
+hash, message id, command id and native delivery id never change, and nothing is
+reposted. A later native detail never replaces a binding: a delivery id discovered
+afterwards is stored only when the receipt has no bound message id yet, or when that
+id is the deterministic id of the message already bound. Validated native detail
+remains a fallback for binding. It must name the same delivery, task and delivery
+timestamp, a POST of JSON, the exact untruncated body and byte count, and no missing
+fields. When that detail is unavailable, one exact chat attribution is enough to bind
+and to treat the attempt as waiting. The delivery log is not required once that
+attribution has succeeded.
+
+These stay unresolved, with no acknowledgement: missing, truncated or mismatched
+detail; a frame with any extra payload, an altered note, or a mismatched, uppercase,
+or 11- or 13-character frame id; the wrong creator or origin; a foreign scheduled
+task; a different message id when the delivery id is known; two or more unbound
+copies of a lost reply; and a durable or pre-render rejection together with a message
+that would otherwise attribute. That contradiction is fenced and is never
+acknowledged. A pre-render rejection with no such message remains a definite
+rejection. T3 logs `rejected_signature`, `disabled`, `rate_limited` and `expired`
+before rendering anything. `dispatch_failed` is logged after rendering, also when T3
+had already created the message, and a projection that lacks the message may be
+stale. It never counts as a rejection: an attributed message makes the attempt
+waiting, and otherwise it stays uncertain and fenced. This includes T3's
+prompt-too-long case, which T3 reports only as free text.
+
+T3 logs at most 64 Ki characters of a rendered prompt without flagging a cut, so a
+logged prompt of that length never binds from the delivery log. A visible message
+that is the exact published frame can still bind from chat. Completion is unchanged.
+Only runs of the attributed message count, linked by its `userMessageId` or by the
+message's own run id. Every strongly linked run must be terminal, and the exact
+final-line marker must be in that run's final non-streaming assistant message, in
+the current member and assignment epochs. Each request or notice settles only its
+own fence. A generic done, a later helper turn, copied or pasted text, or another
+request's message cannot acknowledge it.
+
+The frame shape, the U+2060-only neutralization and the deterministic message id
+were checked on installed build 3386. A change in any of them fails closed.
+An agent that holds the webhook URL can POST one genuine system/server message, and
+when the delivery id was lost that single copy can bind; completion still requires
+that message's own terminal run and marker. WebSocket `message.dispatch` in the
+3360 source forces `createdBy` to `user`, so a client-dispatched message is excluded
+even when it sets the scheduled task and a server creation source. Recovery while
+delivery detail is missing is source-tested only. A durable or pre-render native
 rejection of an attempted POST is reconciled read-only even when the helper can no
-longer be read, so it cannot strand a definitely undelivered notice.
+longer be read, so it cannot strand a definitely undelivered notice. When the
+projection cannot be read, a durable rejection with no contradicting message still
+counts as rejected.
 A notice or check-in is `failed` only when T3 definitively rejected that exact POST or
 nothing was ever posted for its identity. A later refusal (helper unavailable, binding
 replaced, changed content) of an identity whose earlier POST has an unknown outcome
@@ -247,7 +300,7 @@ silently retried. An already acknowledged original is omitted from the open set;
 its interrupted, sent reviews can still require another review.
 
 Before creating anything, the action reads the helper's current native projection.
-Every chain member's exact transport message must be visible, its recorded run
+Every chain member's attributed transport message must be visible, its recorded run
 must exist with the same terminal interrupted/failed/cancelled/rolled_back status,
 and no run of that message may be running, completed or have a completed final
 assistant marker. Native completion refuses the action so normal reconciliation
@@ -268,10 +321,11 @@ At that point the service repeats the creation-time native check on the current
 projection: a chain attempt whose message now has a running, missing or
 marker-completed run is not closed by the review and keeps its fence; a
 marker-completed attempt is acknowledged through its own completed run.
-Native evidence for an attempt is every copy of its exact receipt message and every run
-strongly linked to one, by its userMessageId or by the message's own runId; any live
-or unknown-status run keeps the attempt open, and a marker completion is only used
-once every linked run is terminal.
+Native evidence for an attempt is the one message the shared attribution predicate
+admits, and every run strongly linked to it, by its userMessageId or by the message's
+own runId. A second unbound copy is not evidence. Any live or unknown-status run
+keeps the attempt open, and a marker completion is only used once every linked run
+is terminal.
 Generic monitor check-in markers and helper/tool acknowledgement claims cannot
 acknowledge a handover or review.
 For each still-unresolved chain member in the same current assignment and member

@@ -5,9 +5,19 @@ import {fingerprint} from "./guidance-store.js";
 import type {ProjectSupervisorStore} from "./project-supervisor-store.js";
 import {validateWorkflowApplyAgainstPinnedContext} from "./supervisor-workflow.js";
 import {
+  externalContributionDecisions,
+  externalContributionLimits,
+  externalContributionReferenceKinds,
+  externalContributionStates,
   workflowExecutionStatuses,
   workflowMutationLimits,
   type AcceptedWorkflowAgreementRecord,
+  type ExternalContribution,
+  type ExternalContributionDiagnosticCode,
+  type ExternalContributionImport,
+  type ExternalContributionImportResult,
+  type ExternalContributionRecord,
+  type WorkflowContributionAssessmentInput,
   type WorkflowAgreementImport,
   type WorkflowApplyInput,
   type WorkflowControllerLineage,
@@ -145,6 +155,66 @@ const validOmissions = (value: unknown): boolean => Array.isArray(value) && valu
 
 const newNodeMustStartPlannedExpected = "insert with status \"planned\" in this apply, then change status in a separate apply with status_changed evidence.";
 const missingStatusChangedEvidenceExpected = "include status_changed evidence for this status change in the same apply.";
+
+const contributionIdPattern = /^[A-Za-z0-9._:-]{1,64}$/u;
+const contributionStates = new Set<string>(externalContributionStates);
+const contributionDecisions = new Set<string>(externalContributionDecisions);
+const contributionReferenceKinds = new Set<string>(externalContributionReferenceKinds);
+const contributionRecordKeys = ["taskId", "contributionId", "nodeId", "revision", "state", "summary", "references", "externalRef"] as const;
+const exactRecordKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
+  Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+const validContributionId = (value: unknown): value is string => typeof value === "string" && contributionIdPattern.test(value);
+const validContributionRevision = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && Number(value) >= 1 && Number(value) <= externalContributionLimits.maxRevision;
+const validContributionReferences = (value: unknown): value is ExternalContributionRecord["references"] => Array.isArray(value) &&
+  value.length <= externalContributionLimits.maxReferences && value.every(item => isRecord(item) && exactRecordKeys(item, ["kind", "value"]) &&
+    typeof item.kind === "string" && contributionReferenceKinds.has(item.kind) && typeof item.value === "string" &&
+    item.value.length > 0 && item.value.length <= externalContributionLimits.maxReferenceValueLength);
+const validContributionContent = (value: Record<string, unknown>): boolean =>
+  validContributionId(value.contributionId) && typeof value.nodeId === "string" && value.nodeId.length > 0 &&
+  value.nodeId.length <= externalContributionLimits.maxNodeIdLength && validContributionRevision(value.revision) &&
+  typeof value.state === "string" && contributionStates.has(value.state) &&
+  typeof value.summary === "string" && value.summary.length <= externalContributionLimits.maxSummaryLength &&
+  validContributionReferences(value.references) && (value.externalRef === null || typeof value.externalRef === "string" &&
+    value.externalRef.length > 0 && value.externalRef.length <= externalContributionLimits.maxExternalRefLength);
+
+/** Parses one external-contribution chat record exactly: every field present, no extras, bounded text. */
+export const parseExternalContributionRecord = (value: unknown): ExternalContributionRecord | null =>
+  isRecord(value) && exactRecordKeys(value, contributionRecordKeys) && typeof value.taskId === "string" && value.taskId.length > 0 &&
+  value.taskId.length <= externalContributionLimits.maxTaskIdLength && validContributionContent(value)
+    ? {taskId: value.taskId as string, contributionId: value.contributionId as string, nodeId: value.nodeId as string,
+      revision: value.revision as number, state: value.state as ExternalContributionRecord["state"], summary: value.summary as string,
+      references: (value.references as ExternalContributionRecord["references"]).map(item => ({kind: item.kind, value: item.value})),
+      externalRef: value.externalRef as string | null}
+    : null;
+
+const contributionContentKey = (value: Pick<ExternalContribution, "nodeId" | "state" | "summary" | "references" | "externalRef">): string =>
+  JSON.stringify([value.nodeId, value.state, value.summary, value.references.map(item => [item.kind, item.value]), value.externalRef]);
+
+const validContributionAssessment = (value: unknown): boolean => value === null || isRecord(value) &&
+  typeof value.decision === "string" && contributionDecisions.has(value.decision) && validContributionRevision(value.resultRevision) &&
+  typeof value.note === "string" && value.note.trim().length > 0 && value.note.length <= externalContributionLimits.maxAssessmentNoteLength &&
+  validId(value.actorSupervisorThreadId) && validId(value.evidenceId) && Number.isFinite(value.recordedAt);
+
+const validContributions = (value: unknown): value is ExternalContribution[] => Array.isArray(value) &&
+  value.length <= externalContributionLimits.maxContributions && new Set(value.map(item => isRecord(item) ? item.contributionId : null)).size === value.length &&
+  value.every(item => isRecord(item) && validContributionContent(item) && validId(item.sourceThreadId) && validId(item.sourceRunId) &&
+    validId(item.sourceMessageId) && Number.isFinite(item.recordedAt) && validContributionAssessment(item.assessment));
+
+const validEvidenceContribution = (value: unknown): boolean => value === undefined || isRecord(value) &&
+  validContributionId(value.contributionId) && validContributionRevision(value.revision) &&
+  (value.state === null || typeof value.state === "string" && contributionStates.has(value.state)) &&
+  (value.decision === null || typeof value.decision === "string" && contributionDecisions.has(value.decision));
+
+const validContributionImport = (value: unknown): value is ExternalContributionImport => isRecord(value) &&
+  exactRecordKeys(value, ["contributionId", "nodeId", "revision", "state", "summary", "references", "externalRef", "sourceThreadId", "sourceRunId", "sourceMessageId"]) &&
+  validContributionContent(value) && validId(value.sourceThreadId) && validId(value.sourceRunId) && validId(value.sourceMessageId);
+
+const validContributionAssessmentInput = (value: unknown): value is WorkflowContributionAssessmentInput => isRecord(value) &&
+  validId(value.operationId) && validId(value.workflowId) && Number.isSafeInteger(value.expectedRevision) && Number(value.expectedRevision) >= 1 &&
+  validContributionId(value.contributionId) && validContributionRevision(value.resultRevision) &&
+  typeof value.decision === "string" && contributionDecisions.has(value.decision) &&
+  typeof value.note === "string" && value.note.trim().length > 0 && value.note.length <= externalContributionLimits.maxAssessmentNoteLength;
 
 // points into the canonical plan; workflow_write maps it onto the submitted arguments
 const planStatusPointer = (plan: WorkflowStatePlan, target: PlanEntity): string | null => {
@@ -293,6 +363,8 @@ const validEvidenceInput = (evidence: unknown): evidence is readonly WorkflowSta
     ((item as Record<string, unknown>).sourceMessageId === undefined || (item as Record<string, unknown>).sourceMessageId === null || validId((item as Record<string, unknown>).sourceMessageId)) &&
     ((item as Record<string, unknown>).sourceItemId === undefined || (item as Record<string, unknown>).sourceItemId === null || validId((item as Record<string, unknown>).sourceItemId)));
 
+export const workflowPlanEntities = collectPlanEntities;
+
 const copyPlanNode = (node: WorkflowPlanNodeInfo): WorkflowPlanNodeInfo => {
   if (isPlanGroup(node)) return {...node, nodes: node.nodes.map(copyPlanNode)};
   if (node.kind === "step") return {...node, ...definitionReferenceFields(node.references), source: node.source ? {...node.source} : null, contributorThreadIds: [...node.contributorThreadIds]};
@@ -338,6 +410,30 @@ const sourceBindingOf = (workflow: WorkflowAgreementInfo["workflow"], taskId: st
   proposalId,
   sourceHash,
 });
+
+/**
+ * Decides one contribution revision against the current main document: revisions start at 1 and grow by exactly one,
+ * an identical replay is a no-op, and withdrawn is terminal.
+ */
+export const contributionImportDecision = (document: WorkflowStateDocument, input: Omit<ExternalContributionImport, "sourceThreadId" | "sourceRunId" | "sourceMessageId">):
+  | {kind: "unchanged"}
+  | {kind: "rejected"; code: ExternalContributionDiagnosticCode}
+  | {kind: "record"; existing: ExternalContribution | null; node: PlanEntity | null} => {
+  const existing = document.contributions.find(item => item.contributionId === input.contributionId) ?? null;
+  if (existing && existing.revision === input.revision && contributionContentKey(existing) === contributionContentKey(input)) return {kind: "unchanged"};
+  const reject = (code: ExternalContributionDiagnosticCode) => ({kind: "rejected" as const, code});
+  if (existing?.state === "withdrawn") return reject("contribution_withdrawn");
+  if (existing && input.revision === existing.revision) return reject("contribution_revision_conflict");
+  if (existing && input.revision < existing.revision) return reject("contribution_revision_stale");
+  if (input.revision !== (existing?.revision ?? 0) + 1) return reject("contribution_revision_gap");
+  if (!existing && input.state === "withdrawn") return reject("contribution_record_invalid");
+  const node = collectPlanEntities(document.plan).find(item => item.nodeId === input.nodeId) ?? null;
+  // a withdrawal may still name a node the plan has since removed
+  if (!node && !(input.state === "withdrawn" && existing?.nodeId === input.nodeId)) return reject("contribution_node_unknown");
+  if (!existing && document.contributions.length >= externalContributionLimits.maxContributions) return reject("contribution_capacity");
+  if (document.evidence.length >= workflowMutationLimits.maxEvidence) return reject("contribution_capacity");
+  return {kind: "record", existing, node};
+};
 
 /** Persists workflow plans without treating them as a scheduler or execution claim. */
 export class WorkflowStateStore {
@@ -664,6 +760,87 @@ export class WorkflowStateStore {
     return receipt;
   }
 
+  /**
+   * Records one revision of a main-authored external contribution on the main workflow. It never changes a node status
+   * or the plan; a later revision clears the current assessment while evidence keeps the history.
+   */
+  recordContributionInTransaction(owner: WorkflowOwner, input: ExternalContributionImport, now = Date.now()): ExternalContributionImportResult {
+    if (!validContributionImport(input)) return {status: "rejected", code: "contribution_record_invalid"};
+    if (!this.currentOwner(owner)) return {status: "owner_mismatch"};
+    const row = this.workflowByThread(owner, owner.mainThreadId);
+    if (!row) return {status: "rejected", code: "contribution_node_unknown"};
+    const decoded = this.decodeRow(row);
+    if (decoded.status === "incompatible") return decoded;
+    const current = decoded.document;
+    if (current.parentWorkflowId !== null || current.threadId !== owner.mainThreadId) return {status: "not_found"};
+    const decision = contributionImportDecision(current, input);
+    if (decision.kind === "unchanged") return {status: "unchanged", workflowId: current.workflowId, revision: current.revision};
+    if (decision.kind === "rejected") return {status: "rejected", code: decision.code};
+    const {existing, node} = decision;
+    const reject = (code: ExternalContributionDiagnosticCode): ExternalContributionImportResult => ({status: "rejected", code});
+
+    const entry: ExternalContribution = {contributionId: input.contributionId, nodeId: input.nodeId, state: input.state, revision: input.revision,
+      summary: input.summary, references: input.references.map(item => ({kind: item.kind, value: item.value})), externalRef: input.externalRef,
+      sourceThreadId: input.sourceThreadId, sourceRunId: input.sourceRunId, sourceMessageId: input.sourceMessageId, recordedAt: now, assessment: null};
+    const evidence = this.makeEvidence({operationId: `contribution:${fingerprint([input.contributionId, input.revision])}`, owner, kind: "contribution_recorded", now,
+      targetNodeId: validNodeId(input.nodeId) ? input.nodeId : null, targetNodeName: node?.name ?? null, statusFrom: null, statusTo: null,
+      sourceThreadId: input.sourceThreadId, sourceRunId: input.sourceRunId, sourceMessageId: input.sourceMessageId, agreementKey: null,
+      note: `The main reported external contribution ${input.contributionId} revision ${input.revision} as ${input.state}; this is untrusted evidence, not observed execution.`,
+      contribution: {contributionId: input.contributionId, revision: input.revision, state: input.state, decision: null}});
+    const next: WorkflowStateDocument = {...current, revision: current.revision + 1,
+      contributions: existing ? current.contributions.map(item => item.contributionId === entry.contributionId ? entry : item) : [...current.contributions, entry],
+      evidence: [...current.evidence, evidence], updatedAt: now};
+    const serialized = json(next);
+    if (!documentFits(serialized)) return reject("contribution_capacity");
+    const update = this.supervisors.store.db.prepare("UPDATE supervisor_workflow_state SET revision=?,document=?,updated_at=? WHERE workflow_id=? AND project_id=? AND main_thread_id=? AND revision=?")
+      .run(next.revision, serialized, now, next.workflowId, owner.projectId, owner.mainThreadId, row.revision);
+    if (Number(update.changes) !== 1) return {status: "conflict", reason: "revision", currentRevision: this.currentRevision(owner, next.workflowId)};
+    return this.receipt("applied", evidence.operationId, next);
+  }
+
+  /** Records the owning root's assessment of one exact result revision without changing any status. */
+  assessContributionInTransaction(owner: WorkflowOwner, input: WorkflowContributionAssessmentInput, now = Date.now()): WorkflowMutationResult {
+    const operationId = isRecord(input) && validId(input.operationId) ? input.operationId : "";
+    if (!validContributionAssessmentInput(input)) return {status: "invalid", operationId, reason: "invalid_contribution_assessment"};
+    if (!this.currentOwner(owner)) return {status: "owner_mismatch", operationId};
+    const requestHash = requestFingerprint({kind: "assess-contribution", owner, input});
+    const replay = this.operationReplay(owner, "edit", operationId, requestHash);
+    if (replay) return replay;
+    const row = this.workflowById(owner, input.workflowId);
+    if (!row) return {status: "not_found", operationId};
+    const decoded = this.decodeRow(row);
+    if (decoded.status === "incompatible") return {...decoded, operationId};
+    const current = decoded.document;
+    if (current.threadId !== owner.mainThreadId || current.parentWorkflowId !== null)
+      return {status: "invalid", operationId, reason: "contribution_main_workflow_only"};
+    if (current.revision !== input.expectedRevision) return {status: "conflict", operationId, reason: "revision", currentRevision: current.revision};
+    const contribution = current.contributions.find(item => item.contributionId === input.contributionId);
+    if (!contribution) return {status: "invalid", operationId, reason: "contribution_not_found"};
+    if (contribution.revision !== input.resultRevision)
+      return {status: "conflict", operationId, reason: "contribution_result_stale", currentRevision: current.revision};
+    if (contribution.state !== "result") return {status: "invalid", operationId, reason: "contribution_not_a_result"};
+    if (current.evidence.length >= workflowMutationLimits.maxEvidence) return {status: "invalid", operationId, reason: "evidence_capacity"};
+    const node = collectPlanEntities(current.plan).find(item => item.nodeId === contribution.nodeId) ?? null;
+    const evidence = this.makeEvidence({operationId, owner, kind: "contribution_assessed", now,
+      targetNodeId: validNodeId(contribution.nodeId) ? contribution.nodeId : null, targetNodeName: node?.name ?? null, statusFrom: null, statusTo: null,
+      sourceThreadId: contribution.sourceThreadId, sourceRunId: contribution.sourceRunId, sourceMessageId: contribution.sourceMessageId,
+      agreementKey: null, note: input.note,
+      contribution: {contributionId: contribution.contributionId, revision: contribution.revision, state: contribution.state, decision: input.decision}});
+    const assessed: ExternalContribution = {...contribution, assessment: {decision: input.decision, resultRevision: input.resultRevision, note: input.note,
+      actorSupervisorThreadId: owner.supervisorThreadId, evidenceId: evidence.id, recordedAt: now}};
+    const next: WorkflowStateDocument = {...current, revision: current.revision + 1,
+      contributions: current.contributions.map(item => item.contributionId === assessed.contributionId ? assessed : item),
+      evidence: [...current.evidence, evidence], updatedAt: now};
+    const serialized = json(next);
+    if (!documentFits(serialized)) return {status: "invalid", operationId, reason: "document_capacity"};
+    const update = this.supervisors.store.db.prepare("UPDATE supervisor_workflow_state SET revision=?,document=?,updated_at=? WHERE workflow_id=? AND project_id=? AND main_thread_id=? AND revision=?")
+      .run(next.revision, serialized, now, current.workflowId, owner.projectId, owner.mainThreadId, input.expectedRevision);
+    if (Number(update.changes) !== 1) return {status: "conflict", operationId, reason: "revision", currentRevision: this.currentRevision(owner, current.workflowId)};
+    const receipt = this.receipt("applied", operationId, next);
+    this.recordOperation(owner, "edit", operationId, requestHash, receipt, now);
+    return receipt;
+  }
+
   private currentOwner(owner: WorkflowOwner): boolean {
     if (!this.supervisors.scopeCompatible || !validId(owner.projectId) || !validId(owner.mainThreadId) || !validId(owner.supervisorThreadId) ||
       !Number.isSafeInteger(owner.bindingGeneration) || owner.bindingGeneration < 1) return false;
@@ -699,7 +876,7 @@ export class WorkflowStateStore {
     revision: number, now: number): WorkflowStateDocument {
     return {formatVersion: 2, workflowId: randomUUID(), projectId: owner.projectId, mainThreadId: owner.mainThreadId, threadId,
       parentWorkflowId, parentThreadId, revision, status: "planned", objective: null, sourceBinding: null, requirements: [], issues: [], plan: null,
-      currentAgreementKey: null, acceptedAgreements: [], evidence: [], createdAt: now, updatedAt: now};
+      currentAgreementKey: null, acceptedAgreements: [], contributions: [], evidence: [], createdAt: now, updatedAt: now};
   }
 
   private makeEvidence(input: Omit<WorkflowStateEvidence, "id" | "recordedAt" | "actorSupervisorThreadId"> & {owner: WorkflowOwner; now: number}): WorkflowStateEvidence {
@@ -739,7 +916,7 @@ export class WorkflowStateStore {
       value.revision !== row.revision || value.parentWorkflowId !== row.parent_workflow_id || value.parentThreadId !== row.parent_thread_id)
       return {status: "incompatible", workflowId: row.workflow_id,
         formatVersion: isRecord(value) && Number.isSafeInteger(value.formatVersion) ? Number(value.formatVersion) : null};
-    return {status: "found", document: value as unknown as WorkflowStateDocument};
+    return {status: "found", document: {...value, contributions: value.contributions ?? []} as unknown as WorkflowStateDocument};
   }
 
   private normalizePlan(input: WorkflowStatePlan, existing: WorkflowStatePlan, submittedNodeIds: ReadonlySet<string>):
@@ -835,8 +1012,10 @@ const validDocument = (value: Record<string, unknown>): boolean => value.formatV
     validRequirements(item.requirements) && validIssues(item.issues) && validPlan(item.plan) && item.plan !== null &&
     isRecord(item.agreement) && item.agreement.status === "agreed" && validId(item.agreement.proposalId) &&
     isRecord(item.agreement.workflow) && validPlan(item.agreement.workflow.plan)) &&
+  (value.contributions === undefined || validContributions(value.contributions)) &&
   Array.isArray(value.evidence) && value.evidence.length <= workflowMutationLimits.maxEvidence && value.evidence.every(item => isRecord(item) &&
-    validId(item.id) && validId(item.operationId) && ["draft_created", "lineage_linked", "agreement_imported", "plan_updated", "status_changed", "node_removed", "note", "observation"].includes(String(item.kind)) &&
+    validId(item.id) && validId(item.operationId) && ["draft_created", "lineage_linked", "agreement_imported", "plan_updated", "status_changed", "node_removed", "note", "observation",
+      "contribution_recorded", "contribution_assessed"].includes(String(item.kind)) && validEvidenceContribution(item.contribution) &&
     Number.isFinite(item.recordedAt) && validId(item.actorSupervisorThreadId) && (item.targetNodeId === null || validNodeId(item.targetNodeId)) &&
     (item.targetNodeName === null || validPlanText(item.targetNodeName)) && (item.statusFrom === null || isStatus(item.statusFrom)) &&
     (item.statusTo === null || isStatus(item.statusTo)) && (item.sourceThreadId === null || validId(item.sourceThreadId)) &&
