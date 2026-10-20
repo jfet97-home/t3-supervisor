@@ -263,9 +263,10 @@ delivery detail is missing is source-tested only. A durable or pre-render native
 rejection of an attempted POST is reconciled read-only even when the helper can no
 longer be read, so it cannot strand a definitely undelivered notice. When the
 projection cannot be read, a durable rejection with no contradicting message still
-counts as rejected. A rejection contradicted by an exact message, or by a rendering
-or message already bound to that attempt, stays unresolved permanently, even when
-that message can no longer be read. It is never retried and needs root action.
+counts as rejected. A rejection contradicted by an exact message, by a rendering or
+message already bound to that attempt, or by its recorded acceptance (a 2xx reply
+or a native outcome past rendering) stays unresolved permanently, even when that
+message can no longer be read. It is never retried and needs root action.
 A notice or check-in is `failed` only when T3 definitively rejected that exact POST or
 nothing was ever posted for its identity. A later refusal (helper unavailable, binding
 replaced, changed content) of an identity whose earlier POST has an unknown outcome

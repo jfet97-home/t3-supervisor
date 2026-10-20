@@ -1633,6 +1633,100 @@ test("a bound message keeps a notice's later pre-render rejection unfailed, unre
   } finally {await f.cleanup();}
 });
 
+test("an accepted POST later logged as a pre-render rejection keeps its notice unfailed, while a lost reply still fails", async () => {
+  for (const accepted of [true, false]) {
+    const f = await fixture();
+    try {
+      f.state.emitMessage = false;f.state.loseReply = !accepted;
+      let unreadable = false;
+      f.options.projection = async () => {if (unreadable) throw new Error("unreadable");return f.helper;};
+      const transport = new SupervisorHelperTransport(f.options);
+      const team = teamRuntime(f, transport);
+      const transfer = f.team.release(f.binding, "branch", new Map([[f.binding.mainThreadId, null], ["branch", f.binding.mainThreadId]]));
+      const notice = f.team.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch && value.kind === "handover_release")!;
+      const text = teamNotificationText(f.binding, notice).text;
+      const messageId = `supervisor-team-notice:${notice.id}:attempt:0`;
+      const cycle = async () => {team.runtime.startCycle(f.binding);await team.runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));};
+      const current = () => f.team.snapshot(f.binding).notifications.find(value => value.id === notice.id)!;
+      const receipt = () => JSON.parse(receiptDocument(f, messageId)) as {state?: string; contradicted?: true};
+      await cycle();
+      assert.equal(f.state.posts, 1);
+      assert.equal(current().state, "uncertain");
+      assert.equal(receipt().state, accepted ? "posted" : "posting");
+      const taskId = String(f.tasks[0]!.id);
+      const deliveryId = accepted ? "native-delivery" : "lost-delivery";
+      // the accepted attempt's original frame exists but cannot be read when the log reports a pre-render outcome
+      if (accepted) f.helper.messages.push(frameMessage(taskId, text, `scheduled-task-message:${taskId}:webhook:${deliveryId}`));
+      addNativeWebhookDelivery(f, {id: deliveryId, body: f.state.lastPostedBody!, renderedPrompt: null, outcome: "rejected_signature"});
+      unreadable = true;
+      await cycle();
+      if (!accepted) {
+        // a lost reply has no acceptance evidence, so its pre-render rejection still fails the notice as before
+        assert.equal(receipt().state, "rejected");
+        assert.equal(receipt().contradicted, undefined);
+        assert.equal(current().state, "failed");
+        assert.equal(f.team.retryFailedNotifications(f.binding, "helper"), 1);
+        continue;
+      }
+      assert.equal(receipt().contradicted, true, "an accepted POST contradicts a later pre-render rejection");
+      assert.equal(receipt().state, "rejected");
+      assert.notEqual(current().state, "failed");
+      assert.equal(f.team.retryFailedNotifications(f.binding, "helper"), 0);
+      await cycle();
+      unreadable = false;
+      await cycle();
+      assert.notEqual(current().state, "failed");
+      assert.notEqual(current().state, "acknowledged");
+      assert.equal(f.state.posts, 1);
+    } finally {await f.cleanup();}
+  }
+});
+
+test("an accepted POST later logged as a pre-render rejection is unresolved through reconcileDelivery and send", async () => {
+  for (const entry of ["reconcileDelivery", "send"] as const) {
+    const f = await fixture();
+    try {
+      f.state.emitMessage = false;
+      let unreadable = false;
+      const transport = new SupervisorHelperTransport({...f.options, projection: async () => {if (unreadable) throw new Error("unreadable");return f.helper;}});
+      const input = {threadId: "helper", commandId: `accepted-${entry}`, messageId: `accepted-${entry}-message`, text: `Accepted ${entry} body`};
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "waiting", entry);
+      addNativeWebhookDelivery(f, {id: "native-delivery", body: f.state.lastPostedBody!, renderedPrompt: null, outcome: "rate_limited"});
+      // reconcileDelivery reads an unreadable helper; send reads a helper whose frame is simply not visible
+      unreadable = entry === "reconcileDelivery";
+      const result = entry === "send" ? await transport.send(f.binding, input, AbortSignal.timeout(1000)) :
+        await transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000));
+      assert.equal(result, "uncertain", entry);
+      const receipt = JSON.parse(receiptDocument(f, input.messageId)) as {state?: string; contradicted?: true; nativeDeliveryId?: string};
+      assert.equal(receipt.contradicted, true, entry);
+      assert.equal(receipt.state, "rejected", entry);
+      assert.equal(receipt.nativeDeliveryId, "native-delivery", entry);
+      assert.equal(f.state.posts, 1, entry);
+    } finally {await f.cleanup();}
+  }
+});
+
+test("a rejected receipt an earlier version left with a bound rendering stays unresolved, and one without stays rejected", async () => {
+  for (const rendered of [true, false]) {
+    const f = await fixture();
+    try {
+      f.state.emitMessage = false;f.state.loseReply = true;
+      const transport = new SupervisorHelperTransport(f.options);
+      const input = {threadId: "helper", commandId: `legacy-${rendered}`, messageId: `legacy-${rendered}-message`, text: `Legacy ${rendered} body`};
+      assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+      // an earlier version saved a pre-render rejection over a receipt whose rendering native detail had already bound
+      const legacy = {...JSON.parse(receiptDocument(f, input.messageId)) as Record<string, unknown>, state: "rejected", nativeDeliveryId: "legacy-delivery",
+        ...(rendered ? {renderedText: publishedWrapper(input.text)} : {})};
+      f.db.db.prepare("UPDATE supervisor_helper_deliveries SET document=? WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
+        .run(JSON.stringify(legacy), f.binding.threadId, f.binding.generation, input.messageId);
+      const unreadable = new SupervisorHelperTransport({...f.options, projection: async () => {throw new Error("unreadable");}});
+      assert.equal(await unreadable.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), rendered ? "uncertain" : "rejected");
+      assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true}).contradicted, rendered ? true : undefined);
+      assert.equal(f.state.posts, 1);
+    } finally {await f.cleanup();}
+  }
+});
+
 test("a frame bound by an overlap while the POST is in flight contradicts its late 4xx reply", async () => {
   const f = await fixture();
   const entered = Promise.withResolvers<void>();

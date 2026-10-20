@@ -13,8 +13,8 @@ type Channel = {taskId: string; helperThreadId: string; createdAt: string | null
 type Delivery = SupervisorHelperMessage & {hash: string; taskId: string; state: "posting" | "posted" | "rejected"; nativeDeliveryId?: string;
   renderedText?: string; nativeMessageId?: string; contradicted?: true};
 // fields the shared attribution predicate reads. Callers pass a receipt document; they do not rebuild a renderer.
-// contradicted is write-once: a rejection that coexists with an exact message, or with a rendering already bound to
-// that attempt, stays unresolved permanently.
+// contradicted is write-once: a rejection that coexists with an exact message, a rendering already bound to that
+// attempt or its recorded acceptance stays unresolved permanently.
 export type HelperDeliveryAttribution = {state: string; text: string; threadId: string; taskId: string; nativeDeliveryId?: unknown;
   renderedText?: unknown; nativeMessageId?: unknown; contradicted?: unknown};
 const promptTemplate = "{{body.text}}";
@@ -255,14 +255,16 @@ export class SupervisorHelperTransport {
     channel = {...channel, createdAt: task.createdAt, state: "ready"};this.saveChannel(binding, channel);
     return {channel, task};
   }
-  // whether this rejection coexists with delivery evidence for the same attempt: a rendering or message id already
-  // bound (it stays evidence after its message can no longer be read), or an exact message in `messages`, which is
-  // null when the projection could not be read. The message check uses a posted view and ignores a flag already
-  // stored, so the message that proves the contradiction is still visible to the predicate.
+  // whether this rejection coexists with delivery evidence for the same attempt: recorded acceptance (a posted receipt
+  // comes only from a 2xx reply, an exact message or a native outcome past rendering), a rendering or message id
+  // already bound (both stay evidence after the message can no longer be read), or an exact message in `messages`,
+  // which is null when the projection could not be read. The message check uses a posted view and ignores a flag
+  // already stored, so the message that proves the contradiction is still visible to the predicate.
   private contradicts(binding: BindingRecord, delivery: Delivery, messages: readonly MessageInfo[] | null): boolean {
     const stored = this.delivery(binding, delivery.messageId);
     const attempts = stored !== null && stored.hash === delivery.hash ? [delivery, stored] : [delivery];
-    if (attempts.some(value => typeof value.renderedText === "string" || typeof value.nativeMessageId === "string")) return true;
+    if (attempts.some(value => value.state === "posted" || typeof value.renderedText === "string" ||
+      typeof value.nativeMessageId === "string")) return true;
     const projected: HelperDeliveryAttribution = {...delivery, state: "posted", contradicted: undefined};
     return messages !== null && messages.some(message => attributesHelperDelivery(projected, message, messages));
   }
