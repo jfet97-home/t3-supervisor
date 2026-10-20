@@ -158,10 +158,12 @@ action `review_handover`. It sends a distinct review notice asking the same help
 to inspect the actual effects of every unresolved attempt, including earlier
 interrupted reviews, and to perform only genuinely missing duties. The dashboard
 labels that notice "Root-requested effect review"; the reviewed notice shows "Root-requested
-review in progress; the root keeps responsibility". Once the helper's own review run
-completes with its marker, the reviewed notice shows "Root-requested review completed
-by the helper’s native run; this does not prove its effects were absent, and request
-fences remain separate" until its transfer ends. A completed review is notice
+review in progress; the root keeps responsibility". When the helper's own review run
+completes with its marker and current native evidence still shows the reviewed attempt
+ended without completing in the same transfer, the reviewed notice shows "Root-requested
+review completed by the helper’s native run; this does not prove its effects were
+absent, and request fences remain separate" until its transfer ends; otherwise it stays
+unresolved. A completed review is notice
 bookkeeping only: uncertain guidance and request effects stay fenced, and the
 transfer completes only after they settle. An interrupted review can itself be
 reviewed. An unknown review delivery is never repeated and blocks a further review

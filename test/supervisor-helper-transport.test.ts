@@ -7,7 +7,7 @@ import {GuidanceStore} from "../src/guidance-store.js";
 import {ProjectSupervisorStore, defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {SupervisorTeamStore} from "../src/supervisor-team-store.js";
 import {SupervisorHelperTransport} from "../src/supervisor-helper-transport.js";
-import {SupervisorTeamRuntime} from "../src/supervisor-team-runtime.js";
+import {SupervisorTeamRuntime, teamNotificationText} from "../src/supervisor-team-runtime.js";
 import {SupervisorConversationStore} from "../src/supervisor-conversation-store.js";
 import {ProjectSupervisorMonitorStore} from "../src/supervisor-monitor-store.js";
 import {SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorBatch, type SupervisorMonitorThreadBatch} from "../src/supervisor-monitor.js";
@@ -175,6 +175,33 @@ test("a refusal after an unknown POST never reports the original identity as rej
       assert.equal(f.state.posts, 1);
     } finally {await f.cleanup();}
   }
+});
+
+test("a durably rejected review reconciles read-only after its helper becomes unavailable", async () => {
+  const f = await fixture();
+  try {
+    const transport = new SupervisorHelperTransport({...f.options, fetch: async () => {f.state.posts++;return new Response("Rejected", {status: 400});}});
+    const r = teamRuntime(f, transport);
+    const transfer = f.team.release(f.binding, "branch", new Map([["main", null], ["branch", "main"]]));
+    const original = f.team.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch)!;
+    f.team.updateNotificationDelivery(f.binding, f.binding.threadId, original.id, "sending");
+    f.team.updateNotificationDelivery(f.binding, f.binding.threadId, original.id, "delivered");
+    f.team.recordNotificationRun(f.binding, f.binding.threadId, original.id, 0, {runId: "original-run", status: "interrupted"});
+    const review = f.team.reviewHandover(f.binding, f.binding.threadId, {operationId: "unavailable-rejected-review", notificationId: original.id,
+      expectedDeliveryAttempt: 0, expectedRunId: "original-run", expectedChain: [{notificationId: original.id, deliveryAttempt: 0, runId: "original-run"}]});
+    f.team.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, "sending");
+    const messageId = `supervisor-team-notice:${review.id}:attempt:0`;
+    const input = {threadId: review.recipientThreadId, commandId: messageId, messageId, text: teamNotificationText(f.binding, review).text};
+    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(5000)), "rejected");
+    // a crash before the team state changed: restart turns sending into uncertain while the rejected receipt stays durable
+    new SupervisorTeamStore(f.store);
+    f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, original.id, 0, "late-original-completed");
+    f.helper.thread.archivedAt = "2026-10-20T00:00:00.000Z";
+    for (let cycle = 0; cycle < 6; cycle++) {r.runtime.startCycle(f.binding);await r.runtime.reconcile(f.binding, r.threads, AbortSignal.timeout(5000));}
+    const after = f.team.snapshot(f.binding).notifications.find(value => value.id === review.id)!;
+    assert.equal(after.state, "superseded", "definite rejection reconciles without a readable helper and retires with its ended epoch");
+    assert.equal(f.state.posts, 1, "nothing is posted again");
+  } finally {await f.cleanup();}
 });
 
 test("accepted webhook without a native delivery identity remains uncertain without reposting", async () => {

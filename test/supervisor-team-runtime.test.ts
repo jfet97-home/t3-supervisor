@@ -1271,6 +1271,25 @@ test("an attempt sent with earlier wording is still matched and acknowledged by 
   assert.equal(f.transport.attempts.filter(value => value === messageId).length, 1, "nothing is sent again");
 });
 
+test("a quarantine during an in-flight helper read survives a late 404 with its request fence", async t => {
+  const f = await recoveryFixture();t.after(f.cleanup);
+  activate(f.teamStore, f.binding, f.member, "other");
+  const coverage = f.teamStore.coverage(f.binding, "other", parents);
+  f.teamStore.recordRequest(f.binding, {requestId: "team-review:quarantine-race", memberThreadId: f.member.threadId, memberEpoch: f.member.epoch,
+    targets: [{targetThreadId: "other", assignmentRootThreadId: "other", assignmentEpoch: coverage.assignmentEpoch!}], parentById: parents});
+  f.teamStore.setRequestState(f.binding, f.binding.threadId, "team-review:quarantine-race", 0, "uncertain");
+  let quarantined = false;
+  const runtime = f.runtime(f.transport.transport, async threadId => {
+    if (threadId !== f.member.threadId) return f.projections.get(threadId)!;
+    if (!quarantined) {quarantined = true;f.teamStore.quarantineMember(f.binding, f.member.threadId);}
+    throw new T3TransportError("helper deleted", 404);
+  });
+  runtime.startCycle(f.binding);await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
+  assert.ok(quarantined);
+  assert.equal(f.teamStore.snapshot(f.binding).members.find(value => value.threadId === f.member.threadId)?.state, "quarantined");
+  assert.ok(f.teamStore.unresolvedRequests(f.binding).some(value => value.requestId === "team-review:quarantine-race"), "the uncertain check-in stays fenced");
+});
+
 test("observing a quarantined helper's remaining notice never turns quarantine into missing", async t => {
   const f = await recoveryFixture();t.after(f.cleanup);
   f.teamStore.quarantineMember(f.binding, f.member.threadId);

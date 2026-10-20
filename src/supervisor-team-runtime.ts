@@ -207,16 +207,22 @@ export class SupervisorTeamRuntime {
 
   private async readMemberProjection(binding: BindingRecord, member: TeamMember, signal: AbortSignal, observeOnly = false): Promise<Projection | null> {
     if (signal.aborted || !this.consumeReadBudget(binding)) return null;
+    // the member can change during the awaited read (for example a root quarantine); a lost conversation
+    // only applies to the exact member state and epoch that was read
+    const unchanged = () => {
+      const current = this.options.teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
+      return current?.state === member.state && current.epoch === member.epoch;
+    };
     try {
       const value = await this.options.projection(member.threadId, signal);
       if (value.thread.id !== member.threadId) return null;
       if (value.thread.archivedAt != null || value.thread.deletedAt != null) {
-        if (!observeOnly) await this.loseMember(binding, member, signal, "The helper conversation is archived or deleted; its check-in was closed and pending operational effects remain fenced.");
+        if (!observeOnly && unchanged()) await this.loseMember(binding, member, signal, "The helper conversation is archived or deleted; its check-in was closed and pending operational effects remain fenced.");
         return null;
       }
       return value;
     } catch (cause) {
-      if (!observeOnly && cause instanceof T3TransportError && cause.httpStatus === 404) {
+      if (!observeOnly && cause instanceof T3TransportError && cause.httpStatus === 404 && unchanged()) {
         await this.loseMember(binding, member, signal, "The helper conversation returned native 404; its check-in was closed and pending operational effects remain fenced.");
       }
       return null;
@@ -568,10 +574,18 @@ export class SupervisorTeamRuntime {
     this.notificationOffset.set(binding.threadId, (offset + 1) % candidates.length);
     const member = snapshot.members.find(value => value.threadId === notification.recipientThreadId);
     if (!member) return;
+    const {text, messageId} = this.noticeText(binding, notification);
+    const message = {threadId: member.threadId, commandId: messageId, messageId, text};
+    const attempted = ["sending", "uncertain"].includes(notification.state) && this.options.helperTransport.hasDelivery(binding, message);
     // a non-ready member is only observed here: a lost conversation must not turn quarantine into missing
     const projection = await this.readMemberProjection(binding, member, signal, member.state !== "ready");
-    if (!projection || !this.validHelper(member, binding, projection)) return;
-    const {text, messageId} = this.noticeText(binding, notification);
+    if (!projection || !this.validHelper(member, binding, projection)) {
+      // a durable or native rejection of an attempted POST needs no helper read; reconcile it read-only so an
+      // archived, deleted or no longer eligible helper cannot strand a definitely undelivered notice
+      if (attempted && this.consumeReadBudget(binding) &&
+        await this.options.helperTransport.reconcileDelivery(binding, message, signal) === "rejected") this.markNotificationRejected(binding, notification);
+      return;
+    }
     const visible = projection.messages.some(item => item.threadId === member.threadId && this.options.helperTransport?.matchesMessage(binding, messageId, text, item));
     if (visible) {
       if (notification.state === "pending" && !this.updateNotificationDelivery(binding, notification, "sending")) return;
@@ -596,9 +610,7 @@ export class SupervisorTeamRuntime {
     // The transport durably records an attempt before POST. With a receipt, a review is never sent again:
     // it only reconciles that receipt read-only, so durable or native rejection evidence still fails it
     // after a crash. Without one, a busy/pre-send crash has not posted anything and ordinary delivery runs.
-    const message = {threadId: member.threadId, commandId: messageId, messageId, text};
-    if (notification.kind === "handover_review" && ["sending", "uncertain"].includes(notification.state) &&
-      this.options.helperTransport.hasDelivery(binding, message)) {
+    if (notification.kind === "handover_review" && attempted) {
       if (!this.consumeReadBudget(binding)) return;
       const receipt = await this.options.helperTransport.reconcileDelivery(binding, message, signal);
       if (receipt === "rejected") this.markNotificationRejected(binding, notification);

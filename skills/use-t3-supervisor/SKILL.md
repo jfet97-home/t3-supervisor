@@ -84,8 +84,8 @@ Inspect readiness, assignments, handovers, unknown delivery and issues. Helper l
 are 0–20, default 5; lowering a limit preserves existing helpers. Membership and scoped
 assignments are managed by the owning root, not by messaging a helper. Uncertain
 handover does not prove coverage; quarantine revokes service authority, not the
-native conversation. An interrupted handover is recovered by a root-requested review,
-which never proves its effects absent. Read the reference before any requested team change.
+native conversation. An interrupted handover can be reviewed through a root-requested
+review, which never proves its effects absent. Read the reference before any requested team change.
 
 Pending owner input defers guidance; Supervisor does not answer it. Late steering
 can start a new native turn. Unknown delivery is reconciled before retry or reroute;

@@ -137,7 +137,8 @@ work while unresolved writes or delivery effects remain. It preserves every
 unresolved request and every sending, sent, uncertain or delivered notification;
 only a handover notice of the ended transfer epoch that was never sent (pending) or
 was definitively rejected (failed) is superseded, keeping its attempt and failure
-reason. Observing a quarantined helper's remaining notices never marks it missing.
+reason. Observing a quarantined helper's remaining notices never marks it missing,
+and neither does a helper read that was already in flight when the root quarantined it.
 These notices remain visible until acknowledged or otherwise reconciled. A known
 definite notification failure can be retried by the root when its recipient is
 still a current ready helper; unrelated unknown guide effects remain fenced. An
@@ -164,7 +165,9 @@ key: an uncertain send is never posted again; the service reconciles its origina
 scheduled-message identity and request text, retaining unresolved work meanwhile.
 Once an attempt has a delivery receipt, its exact sent bytes identify it for matching,
 acknowledgement, review and reconciliation; regenerated text, for example after a role
-wording change, applies only to an attempt that was never posted.
+wording change, applies only to an attempt that was never posted. A durable or native
+rejection of an attempted POST is reconciled read-only even when the helper can no
+longer be read, so it cannot strand a definitely undelivered notice.
 A notice or check-in is `failed` only when T3 definitively rejected that exact POST or
 nothing was ever posted for its identity. A later refusal (helper unavailable, binding
 replaced, changed content) of an identity whose earlier POST has an unknown outcome
