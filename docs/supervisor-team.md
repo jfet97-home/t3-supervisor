@@ -143,7 +143,9 @@ Eligibility is re-read after every await and immediately before a POST, so nothi
 posted after quarantine; an attempted notice with no delivery receipt was never posted
 and, once its recipient is no longer eligible, fails as definitely undelivered. A
 check-in or readiness delivery whose authority ends before its POST likewise fails as
-never posted and settles only its own request fence.
+never posted and settles only its own request fence, in one transaction. After a
+restart, a quarantined helper's check-in or readiness request without a delivery
+receipt is recognised the same way; anything with a receipt keeps its fence.
 These notices remain visible until acknowledged or otherwise reconciled. A known
 definite notification failure can be retried by the root when its recipient is
 still a current ready helper; unrelated unknown guide effects remain fenced. An

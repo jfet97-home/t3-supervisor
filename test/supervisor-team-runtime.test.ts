@@ -43,8 +43,12 @@ const webhookTransport = (result: "waiting" | "busy" | "uncertain" | "rejected" 
   const attempts: string[] = [];
   const retired: string[] = [];
   const transport: SupervisorHelperDeliveryTransport = {
-    send: async (_binding, message) => {attempts.push(message.messageId);sent.set(message.messageId,
-      {threadId: message.threadId, commandId: message.commandId, text: message.text, taskId: `scheduled-${message.threadId}`});return result;},
+    send: async (_binding, message) => {
+      attempts.push(message.messageId);
+      // "revoked" is returned before any receipt or POST, so no receipt is recorded for it
+      if (result !== "revoked") sent.set(message.messageId, {threadId: message.threadId, commandId: message.commandId, text: message.text, taskId: `scheduled-${message.threadId}`});
+      return result;
+    },
     hasDelivery: (_binding, message) => {
       const delivery = sent.get(message.messageId);
       return Boolean(delivery && delivery.threadId === message.threadId && delivery.commandId === message.commandId && delivery.text === message.text);

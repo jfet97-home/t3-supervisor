@@ -210,6 +210,53 @@ test("a check-in revoked before its POST fails and settles only its own request 
   } finally {await f.cleanup();}
 });
 
+test("a revoked check-in recovers its own fence across restart boundaries without posting", async t => {
+  for (const phase of ["normal", "before-failed-save", "after-failed-save"] as const) await t.test(phase, async t => {
+    const f = await fixture();let openDb = f.db;
+    t.after(async () => {openDb.close();await rm(f.directory, {recursive: true, force: true});});
+    let revoked = false;
+    const transport = new SupervisorHelperTransport({...f.options, projection: async () => {
+      if (!revoked) {
+        revoked = true;
+        const member = f.team.snapshot(f.binding).members.find(value => value.threadId === "helper")!;
+        const parentById = new Map([["main", null], ["branch", "main"]]);
+        const coverage = f.team.coverage(f.binding, "branch", parentById);
+        f.team.recordRequest(f.binding, {requestId: "guide:unrelated", memberThreadId: member.threadId, memberEpoch: member.epoch,
+          targets: [{targetThreadId: "branch", assignmentRootThreadId: "branch", assignmentEpoch: coverage.assignmentEpoch!}], parentById});
+        f.team.setRequestState(f.binding, f.binding.threadId, "guide:unrelated", 0, "uncertain");
+        f.team.quarantineMember(f.binding, "helper");
+      }
+      return f.helper;
+    }});
+    const r = teamRuntime(f, transport);
+    const save = r.requests.saveRequest.bind(r.requests);
+    r.requests.saveRequest = request => {
+      if (request.state === "failed" && phase === "before-failed-save") throw new Error("restart_boundary");
+      save(request);
+      if (request.state === "failed" && phase === "after-failed-save") throw new Error("restart_boundary");
+    };
+    r.runtime.startCycle(f.binding);
+    const dispatch = r.runtime.runHelperBatch(f.binding, r.threads, r.batch, AbortSignal.timeout(5000));
+    if (phase === "normal") await dispatch;
+    else await assert.rejects(dispatch, /restart_boundary/u);
+    const original = r.requests.requests(f.binding.projectId, "helper").find(value => value.id.startsWith("team-review:"))!;
+    assert.ok(original);
+    // reopen the durable state with a fresh runtime, discarding the injected fault
+    f.db.close();openDb = new GuidanceStore(f.directory);
+    const store = new ProjectSupervisorStore(openDb, new Set());
+    const team = new SupervisorTeamStore(store);
+    const requests = new SupervisorConversationStore(openDb);
+    const runtime = new SupervisorTeamRuntime({store, teamStore: team, requests, monitor: new ProjectSupervisorMonitorStore(openDb),
+      rpc: f.options.rpc, helperTransport: new SupervisorHelperTransport({...f.options, store}), projection: f.options.projection});
+    for (let cycle = 0; cycle < 6; cycle++) {runtime.startCycle(f.binding);await runtime.reconcile(f.binding, r.threads, AbortSignal.timeout(5000));}
+    const pending = team.unresolvedRequests(f.binding);
+    assert.equal(f.state.posts, 0);
+    assert.equal(pending.find(value => value.requestId === "guide:unrelated")?.state, "uncertain", "an unrelated unknown fence survives");
+    assert.equal(pending.some(value => value.requestId === original.id), false, "the never-posted check-in releases only its own fence");
+    assert.equal(requests.requests(f.binding.projectId, "helper").find(value => value.id === original.id)?.state, "failed");
+  });
+});
+
 test("a durably rejected review reconciles read-only after its helper becomes unavailable", async () => {
   const f = await fixture();
   try {

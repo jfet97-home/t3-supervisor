@@ -388,11 +388,34 @@ export class SupervisorTeamRuntime {
       "The helper check-in failed without an exact native completion marker. Review the failed request and use the team retry action before another check-in.");
   }
 
+  // A quarantined helper's check-in or readiness request without a delivery receipt never reached a POST (the
+  // transport records a receipt first), including one interrupted between a revoked send and its failure. It fails
+  // and settles only its own fence; anything with a receipt keeps its fence and nothing is resent.
+  private failNeverPostedRequests(binding: BindingRecord, member: TeamMember): void {
+    const unresolved = new Set(this.options.teamStore.unresolvedRequests(binding).map(value => value.requestId));
+    for (const request of this.options.requests.requests(binding.projectId, member.threadId)) {
+      if (request.kind !== "review" || !(request.id.startsWith("team-review:") || request.id.startsWith("team-ready:")) ||
+        this.options.helperTransport?.receiptText(binding, request.messageId) !== null) continue;
+      const open = ["prepared", "sending", "waiting", "uncertain"].includes(request.state);
+      if (!open && !(request.state === "failed" && unresolved.has(request.id))) continue;
+      const failed = open ? {...request, state: "failed" as const,
+        error: "The helper lost its authority before this request was posted; nothing was posted and pending activity is retained."} : request;
+      this.options.store.store.transaction(() => {
+        if (open) this.options.requests.saveRequest(failed);
+        if (unresolved.has(request.id)) this.options.teamStore.settleRequest(binding, request.id);
+      });
+      if (open) this.serviceAttention(binding, member.threadId, failed, "A quarantined helper's request was never posted. Pending activity is retained; its other fences remain.");
+    }
+  }
+
   async reconcile(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
     let snapshot = this.options.teamStore.snapshot(binding);
     for (const member of snapshot.members.filter(value => value.state === "missing" || value.state === "retired"))
       await this.loseMember(binding, member, signal, `The helper is already ${member.state}; its check-in was closed and pending operational effects remain fenced.`);
-    for (const member of snapshot.members.filter(value => value.state === "quarantined")) await this.retireHelper(binding, member.threadId, signal);
+    for (const member of snapshot.members.filter(value => value.state === "quarantined")) {
+      this.failNeverPostedRequests(binding, member);
+      await this.retireHelper(binding, member.threadId, signal);
+    }
     await this.reconcileNotifications(binding, snapshot, signal);
     snapshot = this.options.teamStore.snapshot(binding);
     const members = snapshot.members.filter(member => member.state === "ready" || member.state === "registering");
@@ -807,8 +830,11 @@ export class SupervisorTeamRuntime {
       const failed = {...request, state: "failed" as const, sentAt, error: result === "revoked"
         ? "The helper lost its authority before this check-in was posted; nothing was posted and pending activity is retained."
         : "T3 rejected this exact helper delivery; pending activity is retained."};
-      this.options.requests.saveRequest(failed);
-      this.options.teamStore.settleRequest(binding, teamRequest.requestId);
+      // failure and its own fence settle together, so a restart cannot leave one without the other
+      this.options.store.store.transaction(() => {
+        this.options.requests.saveRequest(failed);
+        this.options.teamStore.settleRequest(binding, teamRequest.requestId);
+      });
       this.serviceAttention(binding, member.threadId, failed,
         "T3 rejected the helper check-in delivery. Pending activity is retained; review the failed request and use the team retry action before another check-in.");
     } else {
