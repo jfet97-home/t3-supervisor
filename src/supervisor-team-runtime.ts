@@ -700,30 +700,35 @@ export class SupervisorTeamRuntime {
     if (!this.options.helperTransport || !batches.length) return;
     const offset = this.helperOffset.get(binding.threadId) ?? 0;
     const ordered = [...batches.slice(offset % batches.length), ...batches.slice(0, offset % batches.length)];
-    const batch = ordered.find(candidate => !this.hasUnacknowledgedFailure(binding, candidate.actorThreadId) &&
+    const eligible = ordered.filter(candidate => !this.hasUnacknowledgedFailure(binding, candidate.actorThreadId) &&
       !this.options.requests.pending(binding.projectId, candidate.actorThreadId) &&
       !this.options.teamStore.unresolvedRequests(binding).some(request => request.memberThreadId === candidate.actorThreadId));
-    if (!batch) return;
+    // a helper none of whose targets fits a check-in yields this call to the next eligible helper; any other stop ends it
+    for (const batch of eligible) if (await this.runSelectedHelperBatch(binding, threads, batches, batch, signal) !== "unfittable") return;
+  }
+
+  private async runSelectedHelperBatch(binding: BindingRecord, threads: readonly ThreadInfo[], batches: readonly SupervisorTeamHelperBatch[],
+    batch: SupervisorTeamHelperBatch, signal: AbortSignal): Promise<"prepared" | "unfittable" | "stopped"> {
     const parents = this.parentById(binding, threads);
-    if (!parents) return;
+    if (!parents) return "stopped";
     const member = this.options.teamStore.snapshot(binding).members.find(value => value.threadId === batch.actorThreadId && value.state === "ready" && value.epoch === batch.memberEpoch);
-    if (!member || this.options.teamStore.resolveActor(binding, member.threadId, member.epoch)?.role !== "helper") return;
+    if (!member || this.options.teamStore.resolveActor(binding, member.threadId, member.epoch)?.role !== "helper") return "stopped";
     const now = Date.now();
-    if (now - (this.options.requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
+    if (now - (this.options.requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return "stopped";
     for (const target of batch.targets) {
       const coverage = this.options.teamStore.coverage(binding, target.targetThreadId, parents);
       if (coverage.state !== "assigned" || coverage.actorThreadId !== member.threadId || coverage.memberEpoch !== member.epoch ||
-        coverage.assignmentRootThreadId !== target.assignmentRootThreadId || coverage.assignmentEpoch !== target.assignmentEpoch) return;
+        coverage.assignmentRootThreadId !== target.assignmentRootThreadId || coverage.assignmentEpoch !== target.assignmentEpoch) return "stopped";
     }
     const projection = await this.readMemberProjection(binding, member, signal);
-    if (!projection) return;
-    if (!this.validHelper(member, binding, projection)) return;
+    if (!projection) return "stopped";
+    if (!this.validHelper(member, binding, projection)) return "stopped";
     const currentParents = this.parentById(binding, threads);
     if (!currentParents || batch.targets.some(target => {
       const coverage = this.options.teamStore.coverage(binding, target.targetThreadId, currentParents);
       return coverage.state !== "assigned" || coverage.actorThreadId !== member.threadId || coverage.memberEpoch !== member.epoch ||
         coverage.assignmentRootThreadId !== target.assignmentRootThreadId || coverage.assignmentEpoch !== target.assignmentEpoch;
-    })) return;
+    })) return "stopped";
     const requestId = `team-review:${randomUUID()}`;
     const completionMarker = `Supervisor team check-in ${requestId} completed`;
     // a notice closed by a completed review is history; re-presenting it would replay its instruction
@@ -792,7 +797,7 @@ export class SupervisorTeamRuntime {
       this.emitServiceAttention(binding, eventId, member.threadId, unprocessableTargets[0]?.target.targetThreadId,
         `A one-target check-in, including the applicable notifications, exceeds the ${maxHelperCheckinRenderedLength}-code-unit rendered bound for ${renderedCount} assigned target(s) and the 64 KiB delivery body T3 records for proof for ${bodyCount}; ${missingThreadCount} target(s) lack a matching frozen monitor thread. No request was prepared for them, and their recorded monitor activity remains pending and unacknowledged. Root review is needed for: ${targetIds}${unprocessableTargets.length > 4 ? ", and others" : ""}.`);
     }
-    if (!selectedReview) return;
+    if (!selectedReview) return unprocessableTargets.length ? "unfittable" : "stopped";
     const request = this.options.store.store.transaction(() => {
       const value = this.options.requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: member.threadId,
         kind: "review", taskId: null, text: selectedReview!.text, batch: selectedReview!.batch, completionMarker,
@@ -803,6 +808,7 @@ export class SupervisorTeamRuntime {
     });
     this.helperOffset.set(binding.threadId, (batches.indexOf(batch) + 1) % batches.length);
     await this.dispatchHelperRequest(binding, member, request, this.currentRequest(binding, request.id)!, threads, signal);
+    return "prepared";
   }
 
   private async dispatchHelperRequest(binding: BindingRecord, member: TeamMember, request: ConversationRequest, teamRequest: TeamRequest,

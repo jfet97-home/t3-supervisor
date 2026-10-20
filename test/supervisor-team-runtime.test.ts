@@ -963,7 +963,7 @@ const deliverNote = (f: Awaited<ReturnType<typeof fixture>>, member: TeamMember,
 test("mentions T3 neutralizes count against the rendered check-in bound", async t => {
   const team = await largeHelperTeam(t, 12);
   const {f, member} = team;
-  // T3 adds one U+2060 after each @, so this note renders at twice its logical length
+  // published T3 adds one U+2060 after each @, so this note renders at twice its logical length
   const message = "@".repeat(8000);
   const note = deliverNote(f, member, "mention-note", message, time + 5);
   const delivered = await team.deliverNextCheckin(time + 11);
@@ -1133,21 +1133,16 @@ test("a helper whose check-ins cannot fit does not stop another helper's check-i
     assert.deepEqual(partition.helperBatches.map(batch => batch.actorThreadId), [blocked.threadId, fitting.threadId]);
     return partition.helperBatches;
   };
-  // the blocked helper comes first in rotation, overflows and returns without preparing anything
+  // the blocked helper comes first in rotation and cannot fit; the same call goes on to the fitting helper
   runtime.startCycle(f.binding);
   await runtime.runHelperBatch(f.binding, f.threadList, helperBatches(), AbortSignal.timeout(5000));
   assert.ok(f.teamStore.snapshot(f.binding).events.some(item => item.kind === "service_attention" && item.memberThreadId === blocked.threadId &&
     item.id.startsWith("helper-review-size:")));
-  assert.equal(f.requests.pending(projectId, fitting.threadId), null);
-  for (let cycle = 0; cycle < 2 && !f.requests.pending(projectId, fitting.threadId); cycle++) {
-    runtime.startCycle(f.binding);
-    await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));
-    runtime.startCycle(f.binding);
-    await runtime.runHelperBatch(f.binding, f.threadList, helperBatches(), AbortSignal.timeout(5000));
-  }
-  assert.ok(f.requests.pending(projectId, fitting.threadId), "the fitting helper receives its check-in within two normal cycles");
+  const request = f.requests.pending(projectId, fitting.threadId);
+  assert.ok(request, "the fitting helper receives its check-in in the same call");
+  assertDeliverableCheckin(request, "fitting helper check-in");
   assert.equal(f.requests.pending(projectId, blocked.threadId), null);
-  assert.deepEqual(transport.attempts, [f.requests.pending(projectId, fitting.threadId)!.messageId]);
+  assert.deepEqual(transport.attempts, [request.messageId]);
 });
 
 test("a check-in built under the earlier size bound keeps its exact text and delivery identity across restart", async t => {

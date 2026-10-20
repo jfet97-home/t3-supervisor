@@ -23,7 +23,7 @@ const NATIVE_DELIVERY_BODY_LOG_LIMIT = 64 * 1024;
 // published T3 frames {{body.text}} in an open and close tag with a 12-hex frame ID plus an untrusted-data note:
 // 195 code units measured; the allowance keeps a margin for that frame
 const RENDER_FRAME_ALLOWANCE = 256;
-// T3 inserts one U+2060 after each mention trigger (currency sign, @, a slash command, t3-context: and
+// published T3 inserts one U+2060 after each mention trigger (currency sign, @, a slash command, t3-context: and
 // webhook-data); counting every currency sign, @, slash, t3-context and webhook is a superset of those insertions
 const mentionTriggerSuperset = /[\p{Sc}@/]|t3-context|webhook/giu;
 // the exact request body the transport posts; receipts and native detail are compared against the same bytes
