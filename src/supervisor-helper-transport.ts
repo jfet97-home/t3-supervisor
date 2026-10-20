@@ -151,7 +151,9 @@ export class SupervisorHelperTransport {
     if (!this.options.rpc) return "uncertain";
     try {return await this.reconcileReceipt(binding, delivery, signal);} catch {return "uncertain";}
   }
-  async send(binding: BindingRecord, input: SupervisorHelperMessage, signal: AbortSignal): Promise<SupervisorHelperSendResult> {
+  // `authorized` is re-checked after this method's own awaits, immediately before the receipt and POST, so
+  // authority revoked meanwhile (for example a quarantine) posts nothing.
+  async send(binding: BindingRecord, input: SupervisorHelperMessage, signal: AbortSignal, authorized?: () => boolean): Promise<SupervisorHelperSendResult> {
     if (!this.options.rpc || !this.options.store.enabled(binding.projectId)) return "busy";
     const row = this.options.store.store.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
       .get(binding.threadId, binding.generation, input.messageId);
@@ -178,6 +180,7 @@ export class SupervisorHelperTransport {
       if (!channel || !record(channel.task.webhook) || typeof channel.task.webhook.path !== "string") return "busy";
       const endpoint = new URL(channel.task.webhook.path, this.options.baseUrl);
       if (endpoint.origin !== new URL(this.options.baseUrl).origin || endpoint.search || endpoint.hash) return "rejected";
+      if (authorized && !authorized()) return "busy";
       const posting: Delivery = {...input, hash, taskId: channel.channel.taskId, state: "posting"};
       this.save(binding, posting);
       // a webhook has no client idempotency key; never repeat an uncertain post

@@ -165,8 +165,9 @@ review completed by the helper’s native run; this does not prove its effects w
 absent, and request fences remain separate" until its transfer ends; otherwise it stays
 unresolved. A completed review is notice
 bookkeeping only: uncertain guidance and request effects stay fenced, and the
-transfer completes only after they settle. An interrupted review can itself be
-reviewed. An unknown review delivery is never repeated and blocks a further review
+transfer completes only after they settle. If a review is itself interrupted, the next
+review again names the original handover and includes the interrupted review in its
+chain. An unknown review delivery is never repeated and blocks a further review
 until it reconciles. For exact inputs, chain and closure rules, see
 `docs/supervisor-team.md` in the T3 Supervisor repository.
 

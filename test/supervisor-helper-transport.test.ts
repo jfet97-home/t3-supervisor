@@ -177,6 +177,18 @@ test("a refusal after an unknown POST never reports the original identity as rej
   }
 });
 
+test("authority revoked during the transport's own reads posts nothing and leaves no receipt", async () => {
+  const f = await fixture();
+  try {
+    let revoked = false;
+    const transport = new SupervisorHelperTransport({...f.options, projection: async () => {revoked = true;return f.helper;}});
+    const input = {threadId: "helper", commandId: "revoked", messageId: "revoked-message", text: "Revoked before POST"};
+    assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000), () => !revoked), "busy");
+    assert.equal(f.state.posts, 0);
+    assert.equal(transport.receiptText(f.binding, input.messageId), null);
+  } finally {await f.cleanup();}
+});
+
 test("a durably rejected review reconciles read-only after its helper becomes unavailable", async () => {
   const f = await fixture();
   try {

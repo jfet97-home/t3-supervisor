@@ -139,6 +139,9 @@ only a handover notice of the ended transfer epoch that was never sent (pending)
 was definitively rejected (failed) is superseded, keeping its attempt and failure
 reason. Observing a quarantined helper's remaining notices never marks it missing,
 and neither does a helper read that was already in flight when the root quarantined it.
+Eligibility is re-read after every await and immediately before a POST, so nothing is
+posted after quarantine; an attempted notice with no delivery receipt was never posted
+and, once its recipient is no longer eligible, fails as definitely undelivered.
 These notices remain visible until acknowledged or otherwise reconciled. A known
 definite notification failure can be retried by the root when its recipient is
 still a current ready helper; unrelated unknown guide effects remain fenced. An
@@ -225,6 +228,9 @@ At that point the service repeats the creation-time native check on the current
 projection: a chain attempt whose message now has a running, missing or
 marker-completed run is not closed by the review and keeps its fence; a
 marker-completed attempt is acknowledged through its own completed run.
+Native evidence for an attempt is every copy of its exact receipt message and every run
+strongly linked to one, by its userMessageId or by the message's own runId; any live
+run keeps the attempt open.
 Generic monitor check-in markers and helper/tool acknowledgement claims cannot
 acknowledge a handover or review.
 For each still-unresolved chain member in the same current assignment and member

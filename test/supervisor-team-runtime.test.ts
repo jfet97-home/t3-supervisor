@@ -1271,6 +1271,54 @@ test("an attempt sent with earlier wording is still matched and acknowledged by 
   assert.equal(f.transport.attempts.filter(value => value === messageId).length, 1, "nothing is sent again");
 });
 
+test("a quarantine during an in-flight read stops the pending send and retires a never-posted notice", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const member = readyMember(f.teamStore, f.binding, "race-helper");
+  activate(f.teamStore, f.binding, member, "branch");
+  const transfer = f.teamStore.release(f.binding, "branch", parents);
+  const notice = f.teamStore.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch)!;
+  f.teamStore.updateNotificationDelivery(f.binding, f.binding.threadId, notice.id, "sending");
+  f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
+  const transport = webhookTransport("waiting");
+  let quarantined = false;
+  const runtime = f.runtime(transport.transport, async threadId => {
+    if (threadId === member.threadId && !quarantined) {quarantined = true;f.teamStore.quarantineMember(f.binding, member.threadId);}
+    return f.projections.get(threadId)!;
+  });
+  for (let cycle = 0; cycle < 3; cycle++) {runtime.startCycle(f.binding);await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));}
+  assert.ok(quarantined);
+  assert.deepEqual(transport.attempts, [], "nothing is posted after authority was revoked");
+  const retired = f.teamStore.snapshot(f.binding).notifications.find(value => value.id === notice.id)!;
+  assert.equal(retired.state, "superseded");
+  assert.match(retired.failureReason ?? "", /never posted/u);
+  assert.equal(f.teamStore.snapshot(f.binding).members.find(value => value.threadId === member.threadId)?.state, "quarantined");
+});
+
+test("review evidence includes a live run named only by the message and every copy of the receipt", async t => {
+  const named = await recoveryFixture();t.after(named.cleanup);
+  const review = named.review("named-run-review");
+  await named.cycles();
+  const original = named.projection.messages.find(value => value.id === `native-message:${named.original.id}:0`)!;
+  named.projection.runs.push({id: "named-only-run", threadId: named.member.threadId, ordinal: 70, status: "running", requestedAt: iso(time),
+    startedAt: iso(time), completedAt: null, rootNodeId: null});
+  original.runId = "named-only-run";
+  named.expose(review, "completed");await named.cycles();
+  assert.equal(named.current(review).state, "acknowledged");
+  assert.equal(named.current(named.original).resolvedByReview, undefined, "a run named by the message keeps its fence");
+
+  const copies = await recoveryFixture();t.after(copies.cleanup);
+  const first = copies.projection.messages.find(value => value.id === `native-message:${copies.original.id}:0`)!;
+  copies.projection.messages.push({...first, id: "native-message-copy", runId: "copy-run"});
+  copies.projection.runs.push({id: "copy-run", threadId: copies.member.threadId, ordinal: 80, status: "completed", requestedAt: iso(time),
+    startedAt: iso(time), completedAt: iso(time + 1), rootNodeId: null, userMessageId: "native-message-copy"});
+  copies.projection.messages.push({id: "copy-final", threadId: copies.member.threadId, runId: "copy-run", nodeId: null, role: "assistant",
+    text: teamNotificationText(copies.binding, copies.original).marker, streaming: false, ordinal: 90, createdAt: iso(time + 1), updatedAt: iso(time + 1)});
+  await copies.cycles();
+  assert.deepEqual({state: copies.current(copies.original).state, completedRunId: copies.current(copies.original).completedRunId},
+    {state: "acknowledged", completedRunId: "copy-run"}, "a duplicate receipt copy does not hide its own completed marker");
+  assert.equal(copies.transport.attempts.filter(value => value.includes(copies.original.id)).length, 1, "nothing is posted again");
+});
+
 test("a quarantine during an in-flight helper read survives a late 404 with its request fence", async t => {
   const f = await recoveryFixture();t.after(f.cleanup);
   activate(f.teamStore, f.binding, f.member, "other");

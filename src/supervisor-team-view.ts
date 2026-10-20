@@ -33,6 +33,7 @@ export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRe
   const openReviews = unresolvedNotices.filter(value => value.kind === "handover_review" && !value.observedRun);
   const reviewingMembers = new Set(openReviews.map(value => value.recipientThreadId));
   const interruptedNotices = new Set(unresolvedNotices.filter(value => value.observedRun).map(value => value.recipientThreadId));
+  const failedNotices = new Set(snapshot.notifications.filter(value => value.assignmentRootThreadId !== null && value.state === "failed").map(value => value.recipientThreadId));
   const transferring = new Set(snapshot.assignments.filter(value => value.state === "transferring").map(value => `${value.subtreeRootThreadId}:${value.epoch}`));
   const reviewStatus = (value: TeamNotification): "requested" | "in_progress" | "completed" | undefined =>
     value.resolvedByReview ? "completed" : openReviews.some(review => review.reviewChain?.some(entry => entry.notificationId === value.id && entry.deliveryAttempt === value.deliveryAttempt))
@@ -59,9 +60,10 @@ export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRe
             (guideCountsByMember.get(member.threadId) ?? 0) > 0 ? "An operational-child steer is still awaiting native-history confirmation on its original target; no alternate route has been sent." :
           pending?.state === "uncertain" ? "Check-in delivery is uncertain; its original identity is retained." :
             pending ? "A bounded monitoring turn is in progress." :
-            reviewingMembers.has(member.threadId) ? "A root-requested review of an interrupted handover is in progress; the root keeps responsibility until the helper's review run completes with its marker, and request fences stay separate." :
+            reviewingMembers.has(member.threadId) ? "A root-requested review of an interrupted handover is in progress; the root keeps responsibility until the helper’s review run completes with its marker, and request fences stay separate." :
             interruptedNotices.has(member.threadId) ? "A delivered handover notice ended before confirming; the root keeps responsibility and nothing was resent." :
             unconfirmedNotices.has(member.threadId) ? "A handover notice is awaiting confirmation; the root keeps responsibility until it is confirmed." :
+            failedNotices.has(member.threadId) ? "A handover notice was definitely not delivered; the root keeps responsibility and can retry it." :
             "Available for the next check-in or reassignment.",
         lastAssessment: member.lastAssessment ? {summary: member.lastAssessment, assessedAt: assessment?.createdAt ?? null} : null,
         assignments: snapshot.assignments.filter(value => value.memberThreadId === member.threadId || value.toMemberThreadId === member.threadId || value.fromMemberThreadId === member.threadId)
