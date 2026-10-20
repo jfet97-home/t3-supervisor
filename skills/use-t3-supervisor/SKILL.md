@@ -24,6 +24,10 @@ replays a rejected mutation. Inspect uncertain outcomes before another write.
 
 ## Projects and definitions
 
+To create or refine a step/workflow catalog from a project's instructions, history
+and human corrections, use [author-supervisor-workflows](../author-supervisor-workflows/SKILL.md).
+Authoring a catalog does not itself enable supervision or adopt its policy.
+
 Steps, workflows and inline local steps may carry optional `references` lists of
 checkout-relative file paths. Definitions and Plan display them read-only; edit
 the source YAML/frontmatter and refresh. Referenced files are not opened automatically.

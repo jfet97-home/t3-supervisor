@@ -50,6 +50,9 @@ The generic T3 catalog is stored in `/data/catalog.sqlite3`; project supervision
 ## Development
 
 The [usage skill](skills/use-t3-supervisor/SKILL.md) describes ordinary dashboard workflows for agent sessions.
+The [workflow-authoring skill](skills/author-supervisor-workflows/SKILL.md) derives
+reusable steps and workflows from project guidance, development history and human
+corrections, with a recommendation for two distinct models using high reasoning.
 
 ```sh
 npm ci
