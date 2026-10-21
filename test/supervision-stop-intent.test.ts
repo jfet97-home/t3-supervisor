@@ -60,12 +60,62 @@ test("bounded Italian stop forms count, and Italian negation, quotation and unre
   ]) assert.equal(affirmsSupervisionStop(text), false, text);
 });
 
+test("a request to stop, avoid or end a stop keeps supervision, and single-quoted text is only quoted", () => {
+  for (const text of [
+    "Non voglio più interrompere la supervisione.",
+    "Non voglio più smettere di supervisionare.",
+    "Niente più interruzioni della supervisione.",
+    "Smetti di fermare la supervisione.",
+    "Basta con le interruzioni della supervisione.",
+    "Evita di disattivare la supervisione.",
+    "Annulla il build invece di fermare la supervisione.",
+    "Stop interrupting the supervision.",
+    "Quit turning supervision off.",
+    "Avoid having to stop supervision.",
+    "End the pause of supervision.",
+    "I no longer want to stop supervising this chat.",
+    "Pause the build rather than disable supervision.",
+    "Hör auf, die Supervision zu beenden.",
+    "What does 'stop supervising this chat' mean?",
+    "Cosa significa 'ferma la supervisione'?",
+    "Cosa vuol dire ‘disattiva la supervisione’?",
+    "Was heißt ‚Supervision beenden‘?",
+  ]) {
+    assert.equal(affirmsSupervisionStop(text), false, text);
+    assert.equal(affirmsSupervisionStop(text, {direct: true}), false, `${text} (direct)`);
+  }
+  assert.equal(affirmsSupervisionStop("Cosa significa 'fermati'?", {direct: true}), false);
+  for (const text of [
+    "Non voglio più essere supervisionato.",
+    "Non voglio più la tua supervisione.",
+    "Ferma la supervisione dell'operativo.",
+    "Basta, ferma la supervisione.",
+    "Please stop supervising this chat, it's done.",
+    "Stop supervising this chat 'cause it's done.",
+    "I'm done: stop supervising this chat.",
+  ]) assert.equal(affirmsSupervisionStop(text), true, text);
+  const words = unquotedText("Don't wait for the 'operative-b' chat; stop supervising dell'utente's operative-a.");
+  assert.match(words, /Don't wait/u);
+  assert.match(words, /dell'utente's operative-a/u);
+  assert.equal(namesThread(words, "operative-b"), false);
+});
+
 test("a bare stop counts only when addressed to the Supervisor in its own conversation", () => {
-  for (const text of ["Fermati.", "Stop!", "Basta, grazie.", "Per favore fermati", "Stop please.", "Stopp."])
+  for (const text of ["Fermati.", "Stop!", "Basta, grazie.", "Per favore fermati", "Stop please.", "Stopp.", "stop yourself", "Please stop yourself now."])
     assert.equal(affirmsSupervisionStop(text, {direct: true}), true, text);
-  for (const text of ["Non fermarti.", "Fermati quando hai finito di leggere il log.", "> Fermati.", "Stop the build."])
+  for (const text of ["Non fermarti.", "Fermati quando hai finito di leggere il log.", "> Fermati.", "Stop the build.", "Don't stop yourself.",
+    "What does 'stop yourself' mean?", "Stop yourself from cancelling the task."])
     assert.equal(affirmsSupervisionStop(text, {direct: true}), false, text);
-  assert.equal(affirmsSupervisionStop("Fermati.", {direct: false}), false, "in the supervised chat or another chat a bare stop is not about supervision");
+  for (const text of ["Fermati.", "stop yourself", "Stop yourself!"])
+    assert.equal(affirmsSupervisionStop(text, {direct: false}), false, `${text}: in the supervised chat or another chat a bare stop is not about supervision`);
+});
+
+test("a long line of unclosed quotation marks is scanned in linear time", () => {
+  // each mark rescanned the rest of the line before: 200,000 of them took 8-40 s per kind
+  const started = performance.now();
+  for (const mark of ["„", "“", "«", "»", "‹", " 'x", "‘x", "‚x", "\"x"])
+    assert.equal(affirmsSupervisionStop(`${mark.repeat(200_000 / mark.length)} stop supervising this chat`, {direct: true}), true, mark);
+  assert.ok(performance.now() - started < 2_000, `${Math.round(performance.now() - started)} ms`);
 });
 
 test("quoted, fenced and indented text is removed before target and intent checks", () => {

@@ -265,10 +265,11 @@ in the same environment whose genuine user message names the exact target chat I
 Only the human's own unquoted words count: they must affirmatively ask to stop
 supervision (English, German or Italian, such as "ferma la supervisione" or "non
 supervisionare più questa chat"), and they must not name another chat. In the
-Supervisor conversation itself a bare "stop" or "fermati" is addressed to the Supervisor
+Supervisor conversation itself a bare "stop", "stop yourself" or "fermati" is addressed to the Supervisor
 and also counts. Quoted, pasted
-or fenced text, a negated request and an ordinary task cancellation never stop
-supervision. A stop instruction written before the latest explicit Enable supervision,
+or fenced text, a negated request, a request to stop or avoid a stop (such as "stop
+interrupting the supervision" or "non voglio più interrompere la supervisione") and an
+ordinary task cancellation never stop supervision. A stop instruction written before the latest explicit Enable supervision,
 including a replayed tool call, never reverses it.
 The stop is saved in the instance thread policy (the same list as the excluded chats),
 survives restarts, and only an explicit human Enable supervision resumes it. A stop

@@ -4455,6 +4455,10 @@ test("Italian stop requests work on every route, while Italian negation, quotati
     ["it-relay-bare", operativeThreadId, fixture.operative, "Fermati.", "stop_instruction_not_found"],
     ["it-chat-negated", "scratch-chat", scratch, `Non fermare la supervisione di ${operativeThreadId}.`, "stop_instruction_not_found"],
     ["it-chat-quoted", "scratch-chat", scratch, `Cosa vuol dire «ferma la supervisione di ${operativeThreadId}»?`, "stop_instruction_not_found"],
+    ["it-chat-single-quoted", "scratch-chat", scratch, `Cosa vuol dire 'ferma la supervisione di ${operativeThreadId}'?`, "stop_instruction_not_found"],
+    ["it-direct-reversed", fixture.binding.threadId, fixture.supervisor, "Non voglio più interrompere la supervisione.", "stop_instruction_not_found"],
+    ["en-relay-self", operativeThreadId, fixture.operative, "Stop yourself.", "stop_instruction_not_found"],
+    ["en-chat-self", "scratch-chat", scratch, `Stop yourself, ${operativeThreadId}.`, "stop_instruction_not_found"],
     ["it-chat-two", "scratch-chat", scratch, `Disattiva la supervisione di ${operativeThreadId} oppure operative-sibling, non ho ancora deciso.`, "target_ambiguous"],
   ] as const) assert.deepEqual(await stop(caller, source, id, text), {status: "denied", reason}, id);
   assert.deepEqual(fixture.threadPolicy.get().excludedThreadIds, []);
@@ -4467,6 +4471,9 @@ test("Italian stop requests work on every route, while Italian negation, quotati
   await enable();
   assert.deepEqual(await stop("scratch-chat", scratch, "it-chat", `Non supervisionare più ${operativeThreadId}.`),
     {status: "stopped", targetThreadId: operativeThreadId, route: "chat", alreadyStopped: false});
+  await enable();
+  assert.deepEqual(await stop(fixture.binding.threadId, fixture.supervisor, "en-direct-self", "Stop yourself."),
+    {status: "stopped", targetThreadId: operativeThreadId, route: "direct", alreadyStopped: false}, "a self-addressed stop in the Supervisor conversation");
 });
 
 test("a replayed or older native stop never reverses a later explicit Enable", async t => {
