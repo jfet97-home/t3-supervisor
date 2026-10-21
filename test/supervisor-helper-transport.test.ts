@@ -1893,3 +1893,17 @@ test("a clean no-frame 4xx notice still fails on the first readable cycle and ca
     assert.equal(f.state.posts, 1, "retry eligibility does not post by itself");
   } finally {await f.cleanup();}
 });
+
+test("a project disabled during the transport's own reads posts nothing and keeps the identity waiting", async () => {
+  const f = await fixture();
+  try {
+    const transport = new SupervisorHelperTransport({...f.options, projection: async () => {
+      f.db.db.prepare("UPDATE meta SET value=? WHERE key=?").run(JSON.stringify({enabled: false, manual: true, generation: 2}), 'supervisor_control:"p"');
+      return f.helper;
+    }});
+    const input = {threadId: "helper", commandId: "disabled", messageId: "disabled-message", text: "Disabled before POST"};
+    const result = await transport.send(f.binding, input, AbortSignal.timeout(1000), () => true);
+    assert.equal(result, "busy");
+    assert.equal(f.state.posts, 0);
+  } finally {await f.cleanup();}
+});

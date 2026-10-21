@@ -703,3 +703,55 @@ test("a semantic not-needed decision is persisted without negotiation and the ne
   assert.equal(fixture.dispatches().length, 2, "a later genuine request is interpreted again in the same Supervisor conversation");
   assert.equal(fixture.dispatches().at(-1)?.payload.threadId, fixture.binding()!.threadId);
 });
+
+test("after an explicit Enable only a request written after it is interpreted", async (t) => {
+  const fixture = await makeFixture();
+  t.after(fixture.cleanup);
+  const source = fixture.projections.get(sourceThreadId)!;
+  source.messages[0]!.text = "Thank the colleague for the documents and ask for the missing one.";
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  const first = fixture.task()!;
+  const native = fixture.projections.get(fixture.binding()!.threadId)!;
+  completeSupervisorRequest(native, first.messageId, JSON.stringify({objective: "Thank the colleague and ask for the missing document",
+    reason: "A short self-contained message with no workflow obligations.", sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null}));
+  await supervisor.runOnce();
+  assert.equal(fixture.task()!.status, "not_supervised");
+  // a request the human wrote while supervision was stopped, then an explicit Enable
+  appendSourceMessage(source, "stopped-period-request", 2, "Now implement the export retry policy in the service.");
+  const written = Date.parse(source.messages.at(-1)!.createdAt);
+  (supervisor as unknown as {store: {recordChatEnable(id: string, at: number): void}}).store.recordChatEnable(sourceThreadId, written + 1_000);
+  await supervisor.runOnce();
+  assert.equal(fixture.task()!.sourceMessageId, sourceMessageId, "the stopped-period request is not the next request");
+  assert.equal(fixture.dispatches().length, 1);
+  appendSourceMessage(source, "after-enable-request", 3, "Also add a retry test.");
+  source.messages.at(-1)!.createdAt = new Date(written + 2_000).toISOString();
+  await supervisor.runOnce();
+  assert.equal(fixture.task()!.sourceMessageId, "after-enable-request");
+  assert.equal(fixture.dispatches().length, 2);
+});
+
+test("a request queued or sent before an explicit Enable is never interpreted after it", async (t) => {
+  const fixture = await makeFixture();
+  t.after(fixture.cleanup);
+  const source = fixture.projections.get(sourceThreadId)!;
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  const first = fixture.task()!;
+  const dispatched = fixture.dispatches().length;
+  // the stop put an undispatched interpretation back in the queue; the human then enabled supervision again
+  const store = (supervisor as unknown as {store: {saveTask(task: unknown): void; recordChatEnable(id: string, at: number): void}}).store;
+  store.saveTask({...first, status: "queued", dispatchedAt: null, messageId: `${first.messageId}-requeued`, reason: "Supervision was stopped for this chat before dispatch; this task identity remains unsent."});
+  store.recordChatEnable(sourceThreadId, Date.parse(source.messages[0]!.createdAt) + 1_000);
+  const native = fixture.projections.get(fixture.binding()!.threadId)!;
+  for (const run of native.runs) run.status = "completed";
+  native.thread.activeRunId = null;
+  await supervisor.runOnce();
+  assert.equal(fixture.task()!.status, "expired");
+  assert.equal(fixture.dispatches().length, dispatched, "nothing is dispatched for the request written before the Enable");
+  // an interpretation already sent before the Enable, with no native outcome, is closed unapplied instead of replayed
+  store.saveTask({...first, status: "uncertain", messageId: `${first.messageId}-lost`, dispatchedAt: Date.parse(source.messages[0]!.createdAt), replayCount: 0});
+  await supervisor.runOnce();
+  assert.equal(fixture.task()!.status, "expired");
+  assert.equal(fixture.dispatches().length, dispatched, "a pre-Enable interpretation is never resent");
+});

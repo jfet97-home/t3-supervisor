@@ -25,7 +25,6 @@ import { SupervisorConversation } from "./supervisor-conversation.js";
 import type { GlobalDefinitionsControlInput, SupervisionControlInput, SupervisionSetupInput } from "./supervisor-control-contract.js";
 import { WorkflowStateStore } from "./workflow-state-store.js";
 import { monitorActivityReference, observeScopeThread, SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS, SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
-import { affirmsSupervisionStop, namesThread, unquotedText } from "./supervision-stop-intent.js";
 
 type SetupCheckoutTarget = {origin: "project"; threadId: string | null; workspaceRoot: string; branch: string | null; isGitRepository: boolean};
 type SetupOutcome = {status: "created" | "committed" | "unchanged" | "stale" | "conflict" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string | null; branch: string | null; message: string};
@@ -64,16 +63,22 @@ const sameDefinitionRead = (left: ProjectDefinitionSnapshot | null | undefined, 
       globalRevision: right.globalRevision ?? null, revision: right.revision, status: right.status, steps: right.steps, workflows: right.workflows,
       config: right.config, projectConfig: right.projectConfig, complete: right.complete, sources: right.sources, issues: right.issues}));
 
-export const taskSource = (projection: Projection, afterOrdinal: number): {run: RunInfo; message: MessageInfo} | null => {
+// the first genuine human request after a run ordinal; after an explicit Enable only one written after it (`writtenAfter`) counts
+export const taskSource = (projection: Projection, afterOrdinal: number, writtenAfter: number | null = null): {run: RunInfo; message: MessageInfo} | null => {
   for (const run of [...projection.runs].sort((a,b) => a.ordinal - b.ordinal)) {
     if (run.ordinal <= afterOrdinal || !run.rootNodeId || run.threadId !== projection.thread.id || typeof run.userMessageId !== "string") continue;
     const message = projection.messages.find(m => m.id === run.userMessageId && m.threadId === projection.thread.id && m.runId === run.id &&
       m.role === "user" && m.createdBy === "user" && m.streaming === false && !m.id.startsWith("supervisor-notice:") && (m.creationSource === "web" || m.creationSource === "mobile") &&
       !m.senderThreadId && !m.scheduledTaskId && !m.source);
+    if (writtenAfter !== null && !((timestampMs(message?.createdAt) ?? 0) > writtenAfter)) continue;
     if (message && message.text.trim() && nativeUserMessageVisible(projection, run, message)) return {run, message};
   }
   return null;
 };
+
+// an exact whole-token mention of a chat ID; a prefix of a longer ID never names that chat
+const namesThread = (text: string, threadId: string): boolean =>
+  new RegExp(`(?<![A-Za-z0-9:_%.-])${threadId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}(?![A-Za-z0-9:_%-]|\\.[A-Za-z0-9:_%-])`, "u").test(text);
 
 /** Coordinates ordinary T3 conversations; provider execution remains entirely in T3. */
 export class ProjectSupervisor {
@@ -750,14 +755,14 @@ export class ProjectSupervisor {
       catch {return {status: "unavailable", reason: "evidence_projection_unavailable", retryable: true};}
       const message = this.genuineUserMessage(projection, input.userMessageId);
       if (!message) continue;
-      // only the human's own unquoted words count: they must ask to stop supervision, not merely quote, negate or cancel a task
-      if (!affirmsSupervisionStop(message.text, {direct: candidate.route === "direct"})) return {status: "denied", reason: "stop_instruction_not_found"};
-      const words = unquotedText(message.text);
-      // a human message that names another chat's ID authorizes only that chat, never the agent's choice of a different one,
-      // and naming two chats, the caller's own included, leaves the choice to the human; Supervisor and subagent IDs are not targets
+      // the calling assistant judges that the human asked to stop; the service only verifies provenance, target and ordering
+      const words = message.text;
+      // a human message that names another chat's ID authorizes only that chat, never the agent's choice of a different one, and
+      // naming any second chat, the caller's own, a child or another Supervisor included, leaves the choice to the human; only the
+      // target's own Supervisor conversation may be named alongside it
       const namesTarget = namesThread(words, target.id);
-      if (catalog.threads.some(thread => thread.id !== target.id && thread.lineage?.relationshipToParent !== "subagent" &&
-        !isSupervisorThread(this.config, thread) && namesThread(words, thread.id)))
+      const pairedSupervisorId = this.store.bindings().find(item => item.mainThreadId === target.id)?.threadId;
+      if (catalog.threads.some(thread => thread.id !== target.id && thread.id !== pairedSupervisorId && namesThread(words, thread.id)))
         return {status: "denied", reason: namesTarget ? "target_ambiguous" : "target_not_named_by_user"};
       // a request from another chat must name the exact target so the human, not the agent, selects the stopped scope
       if (candidate.route === "chat" && !namesTarget) return {status: "denied", reason: "target_not_named_by_user"};
@@ -944,7 +949,8 @@ export class ProjectSupervisor {
           const projection = await this.projection(thread.id, signal);
           if (!this.eligible(projection.thread, catalog.threads) || projection.thread.projectId !== project.id) continue;
           const baseline = this.store.baselineOrdinal(thread.id, projection);if (baseline === null) continue;
-          const task = taskSource(projection, Math.max(baseline, previous?.sourceOrdinal ?? 0));
+          // an explicit Enable supervises the chat's next request: a request written while supervision was stopped is not interpreted
+          const task = taskSource(projection, Math.max(baseline, previous?.sourceOrdinal ?? 0), this.store.chatEnabledAt(thread.id));
           if (!task) {
             if (!active(projection) && typeof thread.latestRunId === "string") {
               if (this.examinedNonTasks.size >= 10_000) this.examinedNonTasks.clear();
@@ -1030,7 +1036,20 @@ export class ProjectSupervisor {
     this.observeModel(binding, projection);
     const jobs = this.store.tasksFor(binding);
     const inflight = jobs.find(t => ["dispatching","waiting","uncertain"].includes(t.status));
-    if (inflight) {if (this.projectEnabled(binding.projectId)) await this.reconcile(inflight, projection, signal);return;}
+    if (inflight) {
+      if (!this.projectEnabled(binding.projectId)) return;
+      // an interpretation sent before the latest explicit Enable is never applied or resent: it waits only while its native run
+      // is active, then closes unapplied, so the chat's next request is interpreted afresh
+      const enabledAt = this.store.chatEnabledAt(inflight.threadId);
+      if (enabledAt !== null && inflight.dispatchedAt !== null && inflight.dispatchedAt <= enabledAt) {
+        const message = projection.messages.find(m => m.id === inflight.messageId && m.threadId === inflight.supervisorThreadId);
+        const run = message ? projection.runs.find(r => r.userMessageId === inflight.messageId && r.threadId === inflight.supervisorThreadId && r.id === message.runId) : undefined;
+        if (!run || ["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(run.status))
+          this.complete(inflight, "expired", null, "Supervision was enabled again after this request; only a request written after the Enable is supervised.");
+        return;
+      }
+      await this.reconcile(inflight, projection, signal);return;
+    }
     if (this.conversation.hasInflight(binding.projectId, binding.threadId)) {if (this.projectEnabled(binding.projectId)) await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
     if (active(projection)) {if (this.projectEnabled(binding.projectId)) await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
     let job = jobs.find(t => t.status === "queued");
@@ -1038,6 +1057,11 @@ export class ProjectSupervisor {
     const source = await this.projection(job.threadId, signal);
     if (!this.projectEnabled(binding.projectId)) return;
     if (!this.currentSource(job, source)) {this.complete(job, "unavailable", null, "The task source changed or became unavailable.");return;}
+    // an explicit Enable supervises the chat's next request: a request queued before it is not interpreted afterwards
+    const enabledAt = this.store.chatEnabledAt(job.threadId), sourceMessageId = job.sourceMessageId;
+    if (enabledAt !== null && !((timestampMs(source.messages.find(item => item.id === sourceMessageId)?.createdAt) ?? 0) > enabledAt)) {
+      this.complete(job, "expired", null, "Supervision was enabled again after this request; only a request written after the Enable is supervised.");return;
+    }
     if (job.definitionContext == null) {
       let definitions: ProjectDefinitionSnapshot;
       try {

@@ -102,9 +102,9 @@ work stays unresolved; relevant activity reuses the same Supervisor identity.
 - In the supervised chat, ask the assistant to tell its Supervisor; the Supervisor cites your original message.
 - From another chat in the same T3 environment, name the exact chat ID in your request; that chat's assistant calls
   `supervision_stop` with your message ID.
-- Say it in your own words, for example "Stop supervising this chat." or "Ferma la supervisione di questa chat."; in
-  the Supervisor conversation "Stop yourself." or "Fermati." is enough. Quoted or pasted text, a negated or reversed request, a task cancellation or a
-  message naming two chats does not stop supervision; the assistant then says so, and the Stop supervision button always works.
+- Say it in your own words, in any language, for example "Stop supervising this chat." or "Ferma la supervisione di
+  questa chat."; the assistant judges your request. A message naming two chats does not stop supervision; the assistant
+  then says so, and points to the Stop supervision button.
 - Removing a chat from, or adding it to, the excluded chats in Settings is the same Enable or Stop.
 - A stop survives restarts, cancels unsent check-ins and settles only the Supervisor conversation, even if it was
   pinned or kept active before the stop. It does not stop or change the supervised chat, other chats or the project.

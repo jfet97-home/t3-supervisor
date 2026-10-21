@@ -262,22 +262,22 @@ A human can stop supervision of one chat: from the dashboard's selected-chat Sto
 supervision control, by telling its Supervisor directly, by asking the operative to
 relay the request with the human's original message ID, or from another ordinary chat
 in the same environment whose genuine user message names the exact target chat ID.
-Only the human's own unquoted words count: they must affirmatively ask to stop
-supervision (English, German or Italian, such as "stop and disable supervision", "ferma
-la supervisione" or "non supervisionare mai più questa chat"), and they must not name a
-second chat, the caller's own included. In the Supervisor conversation itself a bare
-"stop", "stop yourself", "stop it" or "fermati" is addressed to the Supervisor and also
-counts. Quoted, pasted or fenced text (a quotation may span lines), a negated request
-(also "Do not, under any circumstances, stop …"), a request to stop or avoid a stop (such
-as "stop interrupting the supervision" or "non voglio più interrompere la supervisione")
-and an ordinary task cancellation never stop supervision. When a stop is refused, the
-assistant tells the human that supervision was not stopped and that the dashboard's Stop
-supervision control always works. A stop dates from the human's instruction: a stop
+The assistant that calls `supervision_stop` judges that a genuine human asked to stop, in
+any language; the service does not interpret the words. It verifies deterministically that
+the cited message is that human's original native message, that the caller's own native
+call belongs to it, and that the message names no second chat (the caller's own, a child
+chat or another Supervisor conversation; only the target's own Supervisor conversation may
+be mentioned) and, from another chat, names the exact target. When a stop is refused, the
+assistant tells the human that supervision was not stopped and points them to the
+dashboard's Stop supervision control. A stop dates from the human's instruction: a stop
 instruction written before the latest explicit Enable supervision, including a replayed
 tool call, never reverses it, and repeating an earlier stop never re-dates it.
 The stop is saved in the instance thread policy (the same list as the excluded chats;
 adding or removing a chat there is the same human Stop or Enable as the dashboard control),
-survives restarts, and only an explicit human Enable supervision resumes it. A stop
+survives restarts, and only an explicit human Enable supervision resumes it. Enable
+supervises the chat's next request: a request written while supervision was stopped is not
+interpreted, an interpretation queued or sent before the Enable is closed unapplied, and the
+Supervisor reviews nothing until the human writes in the main again. A stop
 cancels unsent check-ins, keeps sent and uncertain delivery identities, sends no new
 check-in, introduction or contact (rechecked immediately before every send), and
 settles the owned Supervisor once it is idle and every accepted delivery, the
@@ -308,7 +308,8 @@ settlement is not deletion or agreement invalidation. A settled Supervisor is ne
 woken, and its main never contacted, to review backlog, repair old records, recover
 definitions or introduce historical work, for example after re-enabling a project or a
 chat, or a deployment. Agent and automated activity in the main stays pending; a genuine
-human message in the main after the settle wakes the same Supervisor through monitoring.
+human message in the main after the settle (and after a re-enabled project's activation
+boundary) wakes the same Supervisor through monitoring.
 
 ## Supervisor teams
 

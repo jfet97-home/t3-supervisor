@@ -385,6 +385,8 @@ export class SupervisorHelperTransport {
       if (!channel || !record(channel.task.webhook) || typeof channel.task.webhook.path !== "string") return settle("busy");
       const endpoint = new URL(channel.task.webhook.path, this.options.baseUrl);
       if (endpoint.origin !== new URL(this.options.baseUrl).origin || endpoint.search || endpoint.hash) return settle("rejected");
+      // project or global supervision disabled during the awaited reads: nothing is posted and the identity waits
+      if (!this.options.store.enabled(binding.projectId)) return settle("busy");
       if (authorized && !authorized()) return settle("revoked");
       const posting: Delivery = {...input, hash, taskId: channel.channel.taskId, state: "posting"};
       this.save(binding, posting);
