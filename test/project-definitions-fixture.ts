@@ -1,6 +1,35 @@
 import { Effect } from "effect";
 import { ProjectDefinitionLoader } from "../src/project-definitions.js";
 import { ProjectFileError, type ProjectFiles, type ProjectWriter } from "../src/project-files.js";
+import { stringify } from "yaml";
+import { definitionCatalogPath, type DefinitionCatalogKind, type DefinitionReference, type EffectiveConfigurationInfo, type ProjectConfigurationInfo } from "../src/project-definitions-contract.js";
+
+/** A navigation summary for test definitions; real summaries say what a definition is for and when it applies. */
+export const testSummary = (id: string): string => `Use ${id} when the task needs it.`;
+export const indexEntry = (kind: DefinitionCatalogKind, id: string, required = false, summary = testSummary(id)) =>
+  ({id, path: definitionCatalogPath(kind, id), summary, required});
+const flagged = (required: readonly DefinitionReference[], kind: DefinitionCatalogKind, id: string): boolean =>
+  required.some(reference => kind === "steps" ? "step" in reference && reference.step === id : "workflow" in reference && reference.workflow === id);
+type IndexOptions = {steps?: readonly string[]; workflows?: readonly string[]; required?: readonly DefinitionReference[]; default_workflow?: string};
+/** An authored project.yaml index of the given definition IDs; required names the flagged ones. */
+export const projectIndex = (options: IndexOptions = {}): ProjectConfigurationInfo => ({
+  workflows: (options.workflows ?? []).map(id => indexEntry("workflows", id, flagged(options.required ?? [], "workflows", id))),
+  steps: (options.steps ?? []).map(id => indexEntry("steps", id, flagged(options.required ?? [], "steps", id))),
+  ...(options.default_workflow ? {default_workflow: options.default_workflow} : {}),
+});
+export const indexSource = (options: IndexOptions = {}): string => stringify(projectIndex(options), {lineWidth: 0});
+type IndexedDefinition = {readonly id: string; readonly origin?: "global" | "project" | undefined; readonly sourceId?: string | undefined; readonly summary?: string | undefined};
+/** The effective index a loader derives for a snapshot's definitions; a required ID without a definition keeps its row. */
+export const effectiveIndex = (definitions: {readonly steps: readonly IndexedDefinition[]; readonly workflows: readonly IndexedDefinition[]},
+  required: readonly DefinitionReference[] = [], default_workflow?: string): EffectiveConfigurationInfo => {
+  const rows = (kind: DefinitionCatalogKind, items: readonly IndexedDefinition[]) => {
+    const extra = required.flatMap(reference => kind === "steps" ? "step" in reference ? [reference.step] : [] : "workflow" in reference ? [reference.workflow] : [])
+      .filter(id => !items.some(item => item.id === id)).map((id): IndexedDefinition => ({id}));
+    return [...items, ...extra].map(item => ({...indexEntry(kind, item.sourceId ?? item.id, flagged(required, kind, item.id), item.summary ?? testSummary(item.sourceId ?? item.id)),
+      id: item.id, origin: item.origin ?? "project" as const, sourceId: item.sourceId ?? item.id}));
+  };
+  return {workflows: rows("workflows", definitions.workflows), steps: rows("steps", definitions.steps), ...(default_workflow ? {default_workflow} : {})};
+};
 
 export const stepSource = (id: string, description = "Inspect the changed behavior.") =>
   `---\nid: ${id}\nname: ${id}\ndescription: ${description}\n---\n`;
@@ -113,5 +142,12 @@ export function makeDefinitionFixture(options: {
     },
     writeFile: setupWriter.writeFile,
   };
-  return {loader, files, writer, trees, directories, failures, truncatedPaths, truncatedFiles, calls, writes, addFile, addDirectory, root, projectId, globalRoot, threadRoot};
+  /** Writes a project.yaml that indexes every step and workflow file present under the root. */
+  const writeIndex = (targetRoot: string, options: Omit<IndexOptions, "steps" | "workflows"> & {omit?: readonly string[]} = {}) => {
+    const present = (kind: DefinitionCatalogKind, extension: string) => [...(trees.get(targetRoot)?.keys() ?? [])]
+      .flatMap(path => {const match = new RegExp(`^\\.t3-supervisor/${kind}/([a-z0-9][a-z0-9_-]{0,63})\\.${extension}$`).exec(path);return match ? [match[1]!] : [];})
+      .filter(id => !(options.omit ?? []).includes(id)).sort();
+    addFile(targetRoot, ".t3-supervisor/project.yaml", indexSource({...options, steps: present("steps", "md"), workflows: present("workflows", "yaml")}));
+  };
+  return {loader, files, writer, trees, directories, failures, truncatedPaths, truncatedFiles, calls, writes, addFile, addDirectory, writeIndex, root, projectId, globalRoot, threadRoot};
 }

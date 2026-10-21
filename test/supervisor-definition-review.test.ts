@@ -7,7 +7,7 @@ import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions,
 import type { TaskRecord } from "../src/project-supervisor-store.js";
 import type { Projection } from "../src/types.js";
 import { prepareWorkflowRequest, validateWorkflowPlan } from "../src/supervisor-workflow.js";
-import { stepSource } from "./project-definitions-fixture.js";
+import { effectiveIndex, indexSource, projectIndex, stepSource, testSummary } from "./project-definitions-fixture.js";
 
 const projectId = "project-a";
 const operativeThreadId = "operative-thread";
@@ -17,27 +17,34 @@ const userText = "Please update the project's required checks for this feature."
 const root = "/workspace/project";
 const oldRevision = "a".repeat(64);
 const newRevision = "b".repeat(64);
-const definitions = (overrides: Partial<ProjectDefinitionSnapshot> = {}): ProjectDefinitionSnapshot => ({
-  projectId,
-  threadId: operativeThreadId,
-  workspaceRoot: root,
-  revision: oldRevision,
-  globalOnly: false,
-  globalRevision: null,
-  editingAvailable: true,
-  status: "ready",
-  steps: [{id: "verify", name: "Verification", description: "Verify the change.", origin: "project", path: ".t3-supervisor/steps/verify.md", sourceId: "verify"}],
-  workflows: [],
-  config: {required: [{step: "verify"}]},
-  projectConfig: {required: [{step: "verify"}]},
-  complete: true,
-  sources: [
-    {path: ".t3-supervisor/project.yaml", content: "required:\n  - step: verify\n", origin: "project"},
-    {path: ".t3-supervisor/steps/verify.md", content: stepSource("verify", "Verify the change."), origin: "project"},
-  ],
-  issues: [],
-  ...overrides,
-});
+const definitions = (overrides: Partial<ProjectDefinitionSnapshot> = {}): ProjectDefinitionSnapshot => {
+  const steps: ProjectDefinitionSnapshot["steps"] = overrides.steps ??
+    [{id: "verify", name: "Verification", description: "Verify the change.", summary: testSummary("verify"), origin: "project", path: ".t3-supervisor/steps/verify.md", sourceId: "verify"}];
+  const workflows: ProjectDefinitionSnapshot["workflows"] = overrides.workflows ?? [];
+  const index = {steps: steps.map(step => step.id), workflows: workflows.map(workflow => workflow.id), required: [{step: "verify"}]};
+  return {
+    projectId,
+    threadId: operativeThreadId,
+    workspaceRoot: root,
+    revision: oldRevision,
+    globalOnly: false,
+    globalRevision: null,
+    editingAvailable: true,
+    status: "ready",
+    steps,
+    workflows,
+    config: effectiveIndex({steps, workflows}, index.required),
+    projectConfig: projectIndex(index),
+    definitionFiles: [],
+    complete: true,
+    sources: [
+      {path: ".t3-supervisor/project.yaml", content: indexSource({steps: ["verify"], required: [{step: "verify"}]}), origin: "project"},
+      {path: ".t3-supervisor/steps/verify.md", content: stepSource("verify", "Verify the change."), origin: "project"},
+    ],
+    issues: [],
+    ...overrides,
+  };
+};
 
 const task = (overrides: Partial<TaskRecord> = {}): TaskRecord => {
   const approved = definitions();
@@ -126,7 +133,7 @@ test("approved definitions require the stored complete snapshot and do not use a
 
 test("approved snapshots retain reusable, workflow and inline file references and reject malformed lists", () => {
   const approved = definitions({steps: definitions().steps.map(step => ({...step, references: ["docs/verify.md"]})),
-    workflows: [{id: "delivery", name: "Delivery", description: "Deliver the change.", fixed: false, references: ["docs/delivery.md"],
+    workflows: [{id: "delivery", name: "Delivery", description: "Deliver the change.", summary: testSummary("delivery"), fixed: false, references: ["docs/delivery.md"],
       sequence: [{step: {id: "local", name: "Local", description: "Check local behavior.", references: ["src/local.ts"]}}]}]});
   assert.deepEqual(extractApprovedProjectDefinitions(task({definitionSnapshot: approved})), approved);
   const malformed = structuredClone(approved);
@@ -234,7 +241,7 @@ test("stopped, failed and cancelled runs retain their real user request and auth
 
 test("revert decisions may cite no users and retain a null observed revision for missing definitions", () => {
   const current = task();
-  const missing = definitions({status: "missing", revision: null, projectConfig: null, config: {required: []}, steps: [], workflows: [], complete: false,
+  const missing = definitions({status: "missing", revision: null, projectConfig: null, config: effectiveIndex({steps: [], workflows: []}), steps: [], workflows: [], complete: false,
     sources: [], issues: [{path: ".t3-supervisor/project.yaml", code: "configuration_missing", message: "Missing."}]});
   const parsed = parseProjectDefinitionDecisionRecord(decisionRecord({observedRevision: null, decision: "revert_requested", userMessageIds: [],
     reason: "No real user message authorized these agent-authored file changes."}), current, missing, agentProjection([]));
@@ -249,7 +256,7 @@ test("revert decisions may cite no users and retain a null observed revision for
 test("decision reasons and review envelopes redact credentials and preserve complete definition snapshots", () => {
   const current = task();
   const observed = definitions({revision: newRevision,
-    steps: [{id: "verify", name: "secret=step-token", description: "Keep token=step-secret private.", origin: "project",
+    steps: [{id: "verify", name: "secret=step-token", description: "Keep token=step-secret private.", summary: testSummary("verify"), origin: "project",
       path: ".t3-supervisor/steps/verify.md", sourceId: "verify"}],
     sources: definitions().sources.map(source => source.path.endsWith("steps/verify.md")
       ? {...source, content: stepSource("verify", "Check safely with api_key=private-instructions and password:private-result.")} : source)});
@@ -276,7 +283,7 @@ test("decision reasons and review envelopes redact credentials and preserve comp
 
 test("review requests handle invalid snapshots and refresh proposals after restore or authorization", () => {
   const current = task();
-  const invalid = definitions({status: "invalid", revision: null, projectConfig: null, config: {required: []}, steps: [], workflows: [], complete: false,
+  const invalid = definitions({status: "invalid", revision: null, projectConfig: null, config: effectiveIndex({steps: [], workflows: []}), steps: [], workflows: [], complete: false,
     sources: [], issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "The configuration is invalid."}]});
   const invalidRequest = buildProjectDefinitionReviewRequest(current, definitions(), invalid, agentProjection(), "Invalid marker").text;
   assert.ok(invalidRequest);
@@ -321,13 +328,13 @@ test("recovery shares only byte-identical approved entries while keeping changed
   assert.ok(changedRequest);
   const changedEnvelope = parseEnvelope(changedRequest) as {approved: {sources: unknown[]}};
   assert.deepEqual(changedEnvelope.approved.sources, approved.sources, "comparison occurs before credential redaction");
-  const removed = definitions({revision: newRevision, steps: [], config: {required: []}, projectConfig: {required: []},
+  const removed = definitions({revision: newRevision, steps: [], config: effectiveIndex({steps: [], workflows: []}), projectConfig: projectIndex(),
     sources: approved.sources.filter(source => source.path.endsWith("project.yaml"))});
   const removedRequest = buildProjectDefinitionReviewRequest(current, approved, removed, agentProjection(), "Removed source marker").text;
   assert.ok(removedRequest);
   assert.equal((parseEnvelope(removedRequest).approved as {steps: Array<{id: string}>}).steps[0]?.id, approved.steps[0]?.id);
   assert.ok((parseEnvelope(removedRequest).approved as {sources: Array<{content?: string}>}).sources.some(source => source.content === approved.sources[1]!.content));
-  const invalid = definitions({status: "invalid", revision: null, projectConfig: null, config: {required: []}, steps: [], workflows: [], complete: false,
+  const invalid = definitions({status: "invalid", revision: null, projectConfig: null, config: effectiveIndex({steps: [], workflows: []}), steps: [], workflows: [], complete: false,
     sources: [], issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "The configuration is invalid."}]});
   const invalidRequest = buildProjectDefinitionReviewRequest(current, approved, invalid, agentProjection(), "Invalid source marker").text;
   assert.ok(invalidRequest);
@@ -337,9 +344,9 @@ test("recovery shares only byte-identical approved entries while keeping changed
 test("recovery retains effective parsed global guidance and rewritten references", () => {
   const base = definitions();
   const step = {...base.steps[0]!, id: "g123_verify", origin: "global" as const};
-  const workflow = {id: "g123_review", name: "Global review", description: "Keep the effective global contract.", fixed: true,
+  const workflow = {id: "g123_review", name: "Global review", description: "Keep the effective global contract.", summary: testSummary("review"), fixed: true,
     sequence: [{step: "g123_verify"}], origin: "global" as const, path: ".t3-supervisor/workflows/review.yaml", sourceId: "review"};
-  const approved = {...base, globalRevision: "global-old", globalOnly: true, projectConfig: null, config: {required: [{step: "g123_verify"}]},
+  const approved = {...base, globalRevision: "global-old", globalOnly: true, projectConfig: null, config: effectiveIndex({steps: [step], workflows: [workflow]}, [{step: "g123_verify"}]),
     steps: [step], workflows: [workflow], sources: [...base.sources.map(source => ({...source, origin: "global" as const})),
       {path: workflow.path, origin: "global" as const, content: "name: Global review\nsequence:\n  - step: verify\n"}]};
   const observed = {...approved, revision: newRevision, globalRevision: "global-new"};

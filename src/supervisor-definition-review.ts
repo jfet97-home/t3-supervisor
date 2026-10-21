@@ -50,17 +50,19 @@ const metadata = (value: Record<string, unknown>): {origin?: "global" | "project
   ...(typeof value.sourceId === "string" ? {sourceId: value.sourceId} : {}),
 });
 
-const validReference = (value: unknown): value is {step: string} | {workflow: string} => record(value) && Object.keys(value).length === 1 &&
-  (typeof value.step === "string" && definitionIdPattern.test(value.step) || typeof value.workflow === "string" && definitionIdPattern.test(value.workflow));
-
-const validConfiguration = (value: unknown): value is {required: Array<{step: string} | {workflow: string}>; default_workflow?: string} => {
-  if (!record(value) || !optionalFields(value, ["required"], ["default_workflow"]) || !Array.isArray(value.required) ||
-    value.required.length > MAX_FILES || value.default_workflow !== undefined &&
-      (typeof value.default_workflow !== "string" || !definitionIdPattern.test(value.default_workflow)) ||
-    !value.required.every(validReference)) return false;
-  const keys = value.required.map(reference => "step" in reference ? `step:${reference.step}` : `workflow:${reference.workflow}`);
-  return new Set(keys).size === keys.length;
+// a snapshot saved before project.yaml became the index of definitions fails here and needs a fresh definition read
+const validConfiguration = (value: unknown, effective: boolean): boolean => {
+  if (!record(value) || !optionalFields(value, ["workflows", "steps"], ["default_workflow"]) || !Array.isArray(value.workflows) || !Array.isArray(value.steps) ||
+    value.workflows.length + value.steps.length > MAX_FILES || value.default_workflow !== undefined &&
+      (typeof value.default_workflow !== "string" || !definitionIdPattern.test(value.default_workflow))) return false;
+  const fields = ["id", "path", "summary", "required", ...(effective ? ["origin", "sourceId"] : [])];
+  return [...value.workflows, ...value.steps].every(entry => record(entry) && exactFields(entry, fields) && typeof entry.id === "string" &&
+    definitionIdPattern.test(entry.id) && boundedText(entry.path, 4096) && boundedText(entry.summary, 4096) && typeof entry.required === "boolean" &&
+    (!effective || (entry.origin === "global" || entry.origin === "project") && typeof entry.sourceId === "string" && definitionIdPattern.test(entry.sourceId)));
 };
+const validDefinitionFile = (value: unknown): boolean => record(value) && exactFields(value, ["origin", "kind", "id", "path"]) &&
+  (value.origin === "global" || value.origin === "project") && (value.kind === "workflows" || value.kind === "steps") &&
+  typeof value.id === "string" && definitionIdPattern.test(value.id) && boundedText(value.path, 4096);
 
 const validDefinitionNode = (value: unknown, depth: number, budget: {count: number}): boolean => {
   if (depth > 64 || ++budget.count > 1000 || !record(value) || Object.keys(value).length !== 1) return false;
@@ -77,15 +79,18 @@ const validDefinitionNode = (value: unknown, depth: number, budget: {count: numb
 };
 
 const snapshot = (value: unknown, task: TaskRecord, statuses: readonly string[]): ProjectDefinitionSnapshot | null => {
-  if (!record(value) || !optionalFields(value, ["projectId", "threadId", "workspaceRoot", "revision", "editingAvailable", "status", "steps", "workflows", "config", "projectConfig", "complete", "sources", "issues"], ["globalOnly", "globalRevision"]) ||
+  if (!record(value) || !optionalFields(value, ["projectId", "threadId", "workspaceRoot", "revision", "editingAvailable", "status", "steps", "workflows", "config", "projectConfig",
+    "definitionFiles", "complete", "sources", "issues"], ["globalOnly", "globalRevision"]) ||
     Object.hasOwn(value, "globalOnly") && typeof value.globalOnly !== "boolean" ||
     Object.hasOwn(value, "globalRevision") && value.globalRevision !== null && !boundedText(value.globalRevision, 256) ||
     value.projectId !== task.projectId || value.threadId !== task.threadId || !boundedText(value.workspaceRoot, 4096) ||
     value.workspaceRoot && !value.workspaceRoot.startsWith("/") && !value.workspaceRoot.startsWith("~") ||
     !(value.revision === null || boundedText(value.revision, 256)) || !statuses.includes(String(value.status)) || typeof value.editingAvailable !== "boolean" ||
     typeof value.complete !== "boolean" || !Array.isArray(value.steps) || value.steps.length > MAX_FILES ||
-    !Array.isArray(value.workflows) || value.workflows.length > MAX_FILES || !validConfiguration(value.config) ||
-    !(value.projectConfig === null || validConfiguration(value.projectConfig)) || !Array.isArray(value.sources) || value.sources.length > MAX_FILES ||
+    !Array.isArray(value.workflows) || value.workflows.length > MAX_FILES || !validConfiguration(value.config, true) ||
+    !(value.projectConfig === null || validConfiguration(value.projectConfig, false)) ||
+    !Array.isArray(value.definitionFiles) || value.definitionFiles.length > 1000 || !value.definitionFiles.every(validDefinitionFile) ||
+    !Array.isArray(value.sources) || value.sources.length > MAX_FILES ||
     !Array.isArray(value.issues) || value.issues.length > 10_000) return null;
 
   const steps: ProjectDefinitionSnapshot["steps"][number][] = [];
@@ -105,24 +110,24 @@ const snapshot = (value: unknown, task: TaskRecord, statuses: readonly string[])
   }
 
   for (const item of value.steps) {
-    if (!record(item) || !optionalFields(item, ["id", "name", "description"], ["origin", "path", "sourceId", "references"]) || !validMetadata(item) ||
+    if (!record(item) || !optionalFields(item, ["id", "name", "description", "summary"], ["origin", "path", "sourceId", "references"]) || !validMetadata(item) ||
       Object.hasOwn(item, "references") && !validDefinitionReferences(item.references) ||
-      !boundedText(item.id, 64) || !definitionIdPattern.test(item.id) || !boundedText(item.name, 160) || !boundedText(item.description, 8000)) return null;
+      !boundedText(item.id, 64) || !definitionIdPattern.test(item.id) || !boundedText(item.name, 160) || !boundedText(item.description, 8000) || !boundedText(item.summary, 4096)) return null;
     summaryBytes += Buffer.byteLength(JSON.stringify(item), "utf8");
-    steps.push({id: item.id, name: item.name, description: item.description, ...definitionReferenceFields(item.references as readonly string[] | undefined), ...metadata(item)});
+    steps.push({id: item.id, name: item.name, description: item.description, summary: item.summary, ...definitionReferenceFields(item.references as readonly string[] | undefined), ...metadata(item)});
   }
 
   const nodeBudget = {count: 0};
   for (const item of value.workflows) {
-    if (!record(item) || !optionalFields(item, ["id", "name", "description", "fixed"], ["sequence", "parallel", "origin", "path", "sourceId", "references"]) || !validMetadata(item) ||
+    if (!record(item) || !optionalFields(item, ["id", "name", "description", "summary", "fixed"], ["sequence", "parallel", "origin", "path", "sourceId", "references"]) || !validMetadata(item) ||
       Object.hasOwn(item, "references") && !validDefinitionReferences(item.references) ||
-      !boundedText(item.id, 64) || !definitionIdPattern.test(item.id) || !boundedText(item.name, 160) || !boundedText(item.description, 8000) ||
+      !boundedText(item.id, 64) || !definitionIdPattern.test(item.id) || !boundedText(item.name, 160) || !boundedText(item.description, 8000) || !boundedText(item.summary, 4096) ||
       typeof item.fixed !== "boolean" || Object.hasOwn(item, "sequence") === Object.hasOwn(item, "parallel")) return null;
     const key = Object.hasOwn(item, "sequence") ? "sequence" : "parallel";
     if (!Array.isArray(item[key]) || item[key].length === 0 || item[key].length > 1000 ||
       !item[key].every(node => validDefinitionNode(node, 0, nodeBudget))) return null;
     summaryBytes += Buffer.byteLength(JSON.stringify(item), "utf8");
-    workflows.push({id: item.id, name: item.name, description: item.description, fixed: item.fixed, ...definitionReferenceFields(item.references as readonly string[] | undefined),
+    workflows.push({id: item.id, name: item.name, description: item.description, summary: item.summary, fixed: item.fixed, ...definitionReferenceFields(item.references as readonly string[] | undefined),
       ...(key === "sequence" ? {sequence: item.sequence as ProjectDefinitionSnapshot["workflows"][number]["sequence"]} :
         {parallel: item.parallel as ProjectDefinitionSnapshot["workflows"][number]["parallel"]}), ...metadata(item)});
   }
@@ -146,9 +151,9 @@ const snapshot = (value: unknown, task: TaskRecord, statuses: readonly string[])
     status: value.status as ProjectDefinitionSnapshot["status"],
     steps,
     workflows,
-    config: {required: value.config.required.map(item => ({...item})), ...(value.config.default_workflow ? {default_workflow: value.config.default_workflow} : {})},
-    projectConfig: value.projectConfig ? {required: value.projectConfig.required.map(item => ({...item})),
-      ...(value.projectConfig.default_workflow ? {default_workflow: value.projectConfig.default_workflow} : {})} : null,
+    config: structuredClone(value.config) as ProjectDefinitionSnapshot["config"],
+    projectConfig: value.projectConfig === null ? null : structuredClone(value.projectConfig) as NonNullable<ProjectDefinitionSnapshot["projectConfig"]>,
+    definitionFiles: structuredClone(value.definitionFiles) as ProjectDefinitionSnapshot["definitionFiles"],
     complete: value.complete,
     sources,
     issues,

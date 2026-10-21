@@ -28,6 +28,30 @@ edits, including shared skills, routers, documentation and hooks. Authoring, com
 catalog adoption or enabling Supervisor does not itself approve them. Conditional
 wording is not a substitute for permission.
 
+## Definition index
+
+`project.yaml` indexes reusable definitions. It is not a whitelist of task plans.
+Its only keys are `workflows`, `steps` (both lists, `[]` allowed) and optional
+`default_workflow`. A new folder starts with `workflows: []`, then `steps: []`,
+plus `steps/.gitkeep` and `workflows/.gitkeep`. Add, rename or remove a reusable
+file and its index entry in the same edit. Every entry has exactly `id`, `path`,
+`summary` and `required` (`true` or `false`). `id` is lowercase letters, digits,
+`-` or `_`, at most 64 characters, and unique in its list. `path` is
+`workflows/<id>.yaml` or `steps/<id>.md`. At most 100 entries. The parser
+requires a summary to be nonempty, at most two nonempty lines, and at most 240
+characters. When writing one, say what the definition is for and when it
+applies; a descriptive name can be enough. The file description stays the
+policy. `required: true` is the only authored inclusion flag. `default_workflow`,
+when present, names a workflow id in that index and is only a starting
+suggestion. Do not add a top-level `required:` list. Keep every existing entry's
+flag, summary and path unless the change is intentional. An unlisted file is
+`definition_unlisted` and is not read. A missing indexed file is
+`catalog_entry_missing`; the row and its flag stay, and a required one stays
+unresolved. Either issue makes the collection invalid. Read `project.yaml`
+first, then the full definitions that apply. Negotiated plans may add local
+steps that are not index entries. Do not automatically edit files outside
+`.t3-supervisor`.
+
 ## Scope and evidence
 
 Establish the checkout, existing catalog, requested outcomes, count limits and proposal
@@ -113,9 +137,10 @@ references prove neither consultation nor access and grant no permission. Suppor
 references must be versioned and available in the target checkout, without ignored or
 machine-local dependencies.
 
-Separate required inclusion, fixed structure and default templates. Account for
+Separate `required: true`, fixed structure and `default_workflow`. Account for
 requirements once per main task, including nested reuse. Genuine inapplicability needs a
-reason; unavailable resources are gaps. Do not invent schema fields.
+reason; unavailable resources are gaps. Do not invent schema fields or a second
+required list.
 
 Let an iterative workflow's description own repetition and completion; callers reference
 it directly. A findings step owns the main's accounting, not a wrapper whose only

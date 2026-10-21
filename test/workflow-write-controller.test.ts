@@ -17,6 +17,7 @@ import { submittedApplyPointer, WorkflowWriteController, workflowReadToolDefinit
 import { workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, workflowTurnItemDetailMaxBytes } from "../src/workflow-write-evidence.js";
 import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo } from "../src/project-supervisor-contract.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
+import { effectiveIndex, projectIndex, testSummary } from "./project-definitions-fixture.js";
 import { parseWorkflowInterpretation, proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
 import { WebSocketServer } from "ws";
 import { createWorkflowMcpEndpoint } from "../src/workflow-mcp.js";
@@ -113,8 +114,9 @@ const makeFixture = async (mainThread = thread("main-workflows", "project-workfl
     status: "ready",
     steps: [],
     workflows: [],
-    config: {required: []},
-    projectConfig: {required: []},
+    config: effectiveIndex({steps: [], workflows: []}),
+    projectConfig: projectIndex(),
+    definitionFiles: [],
     complete: true,
     sources: [],
     issues: [],
@@ -292,6 +294,13 @@ const applyArgs = (fixture: Fixture, input: WorkflowApplyPatch) => {
       ...input,
     },
   };
+};
+
+/** The snapshot with exactly these definitions, each indexed in project.yaml as the loader derives it. */
+const snapshotWith = (base: ProjectDefinitionSnapshot, steps: ProjectDefinitionSnapshot["steps"], workflows: ProjectDefinitionSnapshot["workflows"]): ProjectDefinitionSnapshot => {
+  const ids = {steps: steps.map(step => step.id), workflows: workflows.map(workflow => workflow.id)};
+  return {...base, steps, workflows, config: effectiveIndex({steps: ids.steps.map(id => ({id})), workflows: ids.workflows.map(id => ({id}))}),
+    projectConfig: projectIndex(ids)};
 };
 
 const proposalForDefinitions = (definitions: ProjectDefinitionSnapshot, plan: WorkflowPlanGroupInfo): WorkflowProposalInfo => {
@@ -1009,13 +1018,11 @@ test("apply denies a null-plan provisional current task before reading or changi
 test("an unaccepted proposal can omit an optional fixed workflow on its first live apply", async () => {
   const fixture = await makeFixture();
   try {
-    const definitions: ProjectDefinitionSnapshot = {
-      ...fixture.definitionReader.current,
-      steps: [{id: "optional-review-step", name: "Review evidence", description: "Check the supporting evidence.",
+    const definitions = snapshotWith(fixture.definitionReader.current,
+      [{id: "optional-review-step", name: "Review evidence", description: "Check the supporting evidence.", summary: testSummary("optional-review-step"),
         origin: "project", path: ".t3-supervisor/steps/review-evidence.md", sourceId: "project:review-evidence"}],
-      workflows: [{id: "optional-fixed-review", name: "Fixed review", description: "Keep this sequence intact when selected.", fixed: true,
-        sequence: [{step: "optional-review-step"}], origin: "project", path: ".t3-supervisor/workflows/fixed-review.md", sourceId: "project:fixed-review"}],
-    };
+      [{id: "optional-fixed-review", name: "Fixed review", description: "Keep this sequence intact when selected.", summary: testSummary("optional-fixed-review"), fixed: true,
+        sequence: [{step: "optional-review-step"}], origin: "project", path: ".t3-supervisor/workflows/fixed-review.md", sourceId: "project:fixed-review"}]);
     const proposal = proposalForDefinitions(definitions, sequencePlan([
       localStep("Task outcome", "Complete the current request."),
       {kind: "workflow", definitionId: "optional-fixed-review", reason: "Use the review workflow if it fits this task."},
@@ -1045,13 +1052,11 @@ test("an unaccepted proposal can omit an optional fixed workflow on its first li
 test("an unchanged-source accepted fixed workflow survives when the mutable plan has diverged", async () => {
   const fixture = await makeFixture();
   try {
-    const definitions: ProjectDefinitionSnapshot = {
-      ...fixture.definitionReader.current,
-      steps: [{id: "accepted-review-step", name: "Review evidence", description: "Check the accepted evidence trail.",
+    const definitions = snapshotWith(fixture.definitionReader.current,
+      [{id: "accepted-review-step", name: "Review evidence", description: "Check the accepted evidence trail.", summary: testSummary("accepted-review-step"),
         origin: "project", path: ".t3-supervisor/steps/accepted-review.md", sourceId: "project:accepted-review-step"}],
-      workflows: [{id: "accepted-fixed-review", name: "Accepted fixed review", description: "Keep the accepted review sequence intact.", fixed: true,
-        sequence: [{step: "accepted-review-step"}], origin: "project", path: ".t3-supervisor/workflows/accepted-review.md", sourceId: "project:accepted-fixed-review"}],
-    };
+      [{id: "accepted-fixed-review", name: "Accepted fixed review", description: "Keep the accepted review sequence intact.", summary: testSummary("accepted-fixed-review"), fixed: true,
+        sequence: [{step: "accepted-review-step"}], origin: "project", path: ".t3-supervisor/workflows/accepted-review.md", sourceId: "project:accepted-fixed-review"}]);
     const acceptedProposal = proposalForDefinitions(definitions, sequencePlan([
       localStep("Accepted task outcome", "Complete the task that was reviewed."),
       {kind: "workflow", definitionId: "accepted-fixed-review", reason: "Include the fixed review in the accepted plan."},
@@ -1122,13 +1127,11 @@ test("an unchanged-source accepted fixed workflow survives when the mutable plan
 test("a same-source accepted TaskRecord plan is protected when live agreement import is absent", async () => {
   const fixture = await makeFixture();
   try {
-    const definitions: ProjectDefinitionSnapshot = {
-      ...fixture.definitionReader.current,
-      steps: [{id: "task-record-review-step", name: "Review result", description: "Check the accepted result.",
+    const definitions = snapshotWith(fixture.definitionReader.current,
+      [{id: "task-record-review-step", name: "Review result", description: "Check the accepted result.", summary: testSummary("task-record-review-step"),
         origin: "project", path: ".t3-supervisor/steps/task-record-review.md", sourceId: "project:task-record-review-step"}],
-      workflows: [{id: "task-record-fixed-review", name: "Accepted task review", description: "Keep the accepted review sequence intact.", fixed: true,
-        sequence: [{step: "task-record-review-step"}], origin: "project", path: ".t3-supervisor/workflows/task-record-review.md", sourceId: "project:task-record-fixed-review"}],
-    };
+      [{id: "task-record-fixed-review", name: "Accepted task review", description: "Keep the accepted review sequence intact.", summary: testSummary("task-record-fixed-review"), fixed: true,
+        sequence: [{step: "task-record-review-step"}], origin: "project", path: ".t3-supervisor/workflows/task-record-review.md", sourceId: "project:task-record-fixed-review"}]);
     const acceptedProposal = proposalForDefinitions(definitions, sequencePlan([
       localStep("Accepted task", "Complete the accepted request."),
       {kind: "workflow", definitionId: "task-record-fixed-review", reason: "Include the fixed review in the accepted proposal."},
@@ -1187,13 +1190,11 @@ test("a same-source accepted TaskRecord plan is protected when live agreement im
 test("same task and definition pin preserve added fixed workflows across proposal IDs but permit an adopted new pin", async () => {
   const fixture = await makeFixture();
   try {
-    const firstDefinitions: ProjectDefinitionSnapshot = {
-      ...fixture.definitionReader.current,
-      steps: [{id: "fixed-review-step", name: "Review evidence", description: "Check the complete evidence trail.",
+    const firstDefinitions = snapshotWith(fixture.definitionReader.current,
+      [{id: "fixed-review-step", name: "Review evidence", description: "Check the complete evidence trail.", summary: testSummary("fixed-review-step"),
         origin: "project", path: ".t3-supervisor/steps/review-evidence.md", sourceId: "project:review-evidence"}],
-      workflows: [{id: "fixed-review", name: "Fixed review", description: "Preserve the original review sequence.", fixed: true,
-        sequence: [{step: "fixed-review-step"}], origin: "project", path: ".t3-supervisor/workflows/fixed-review.md", sourceId: "project:fixed-review"}],
-    };
+      [{id: "fixed-review", name: "Fixed review", description: "Preserve the original review sequence.", summary: testSummary("fixed-review"), fixed: true,
+        sequence: [{step: "fixed-review-step"}], origin: "project", path: ".t3-supervisor/workflows/fixed-review.md", sourceId: "project:fixed-review"}]);
     const initialProposal = proposalForDefinitions(firstDefinitions,
       sequencePlan([localStep("Baseline review", "Review the current task context.")]));
     replaceCurrentProposal(fixture, "proposal-current", firstDefinitions, initialProposal);
@@ -1231,12 +1232,7 @@ test("same task and definition pin preserve added fixed workflows across proposa
     assert.equal(retained.revision, afterFirst.revision);
     assert.ok(planEntities(retained.plan).some(node => node.kind === "workflow" && node.definitionId === "fixed-review" && node.fixed === true));
 
-    const replacementDefinitions: ProjectDefinitionSnapshot = {
-      ...firstDefinitions,
-      revision: "definition-revision-2",
-      steps: [],
-      workflows: [],
-    };
+    const replacementDefinitions: ProjectDefinitionSnapshot = {...snapshotWith(firstDefinitions, [], []), revision: "definition-revision-2"};
     const replacementProposal = proposalForDefinitions(replacementDefinitions,
       sequencePlan([localStep("Reviewed replacement", "Use the newly authorized definition revision.")]));
     replaceCurrentProposal(fixture, "proposal-authorized-replacement", replacementDefinitions, replacementProposal, {definitionReview: {
@@ -1265,13 +1261,11 @@ test("same task and definition pin preserve added fixed workflows across proposa
 test("a reinterpreted source hash releases fixed commitments from the prior task source", async () => {
   const fixture = await makeFixture();
   try {
-    const definitions: ProjectDefinitionSnapshot = {
-      ...fixture.definitionReader.current,
-      steps: [{id: "source-fixed-step", name: "Review prior source", description: "Keep the prior task's fixed review complete.",
+    const definitions = snapshotWith(fixture.definitionReader.current,
+      [{id: "source-fixed-step", name: "Review prior source", description: "Keep the prior task's fixed review complete.", summary: testSummary("source-fixed-step"),
         origin: "project", path: ".t3-supervisor/steps/source-review.md", sourceId: "project:source-review"}],
-      workflows: [{id: "source-fixed-review", name: "Prior source review", description: "Review the original task source.", fixed: true,
-        sequence: [{step: "source-fixed-step"}], origin: "project", path: ".t3-supervisor/workflows/source-review.md", sourceId: "project:source-fixed-review"}],
-    };
+      [{id: "source-fixed-review", name: "Prior source review", description: "Review the original task source.", summary: testSummary("source-fixed-review"), fixed: true,
+        sequence: [{step: "source-fixed-step"}], origin: "project", path: ".t3-supervisor/workflows/source-review.md", sourceId: "project:source-fixed-review"}]);
     const initialProposal = proposalForDefinitions(definitions,
       sequencePlan([localStep("Original task", "Implement the original task request.")]));
     replaceCurrentProposal(fixture, "proposal-original-source", definitions, initialProposal);
@@ -1312,13 +1306,11 @@ test("a reinterpreted source hash releases fixed commitments from the prior task
 test("child fixed workflows survive a new same-pin main proposal without inheriting main requirements", async () => {
   const fixture = await makeFixture();
   try {
-    const definitions: ProjectDefinitionSnapshot = {
-      ...fixture.definitionReader.current,
-      steps: [{id: "child-fixed-step", name: "Review child output", description: "Inspect the child contribution.",
+    const definitions = snapshotWith(fixture.definitionReader.current,
+      [{id: "child-fixed-step", name: "Review child output", description: "Inspect the child contribution.", summary: testSummary("child-fixed-step"),
         origin: "project", path: ".t3-supervisor/steps/child-review.md", sourceId: "project:child-review"}],
-      workflows: [{id: "child-fixed-review", name: "Child fixed review", description: "Keep the child review complete.", fixed: true,
-        sequence: [{step: "child-fixed-step"}], origin: "project", path: ".t3-supervisor/workflows/child-review.md", sourceId: "project:child-fixed-review"}],
-    };
+      [{id: "child-fixed-review", name: "Child fixed review", description: "Keep the child review complete.", summary: testSummary("child-fixed-review"), fixed: true,
+        sequence: [{step: "child-fixed-step"}], origin: "project", path: ".t3-supervisor/workflows/child-review.md", sourceId: "project:child-fixed-review"}]);
     const initialProposal = proposalForDefinitions(definitions,
       sequencePlan([localStep("Main proposal", "Keep the parent task context.")]));
     replaceCurrentProposal(fixture, "proposal-child-current", definitions, initialProposal);

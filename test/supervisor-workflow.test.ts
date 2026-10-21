@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { workflowDefinitionExpansionLimits } from "../src/project-definitions-contract.js";
+import type { DefinitionReference, ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
+import { requiredReferences, workflowDefinitionExpansionLimits } from "../src/project-definitions-contract.js";
 import type { WorkflowPlanNodeInfo, WorkflowPlanStepInfo, WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import {
   parseWorkflowInterpretation,
@@ -16,16 +16,26 @@ import {
   validateWorkflowRecord,
   workflowRecordDiagnostic,
 } from "../src/supervisor-workflow.js";
-import { makeDefinitionFixture, stepSource, workflowSource } from "./project-definitions-fixture.js";
+import { indexSource, makeDefinitionFixture, stepSource, testSummary, workflowSource } from "./project-definitions-fixture.js";
 
 const threadId = "thread";
 const sourceMessageId = "m1";
-type Files = Record<string, string>;
+type IndexFlags = {required?: DefinitionReference[]; default_workflow?: string};
+/** Files under .t3-supervisor; project.yaml is either raw text or the flags of an index over every step and workflow file present. */
+type Files = Record<string, string | IndexFlags>;
 
 const load = async (files: Files, options: {globalEnabled?: boolean; globalFiles?: Files} = {}) => {
   const fixture = makeDefinitionFixture({globalEnabled: options.globalEnabled ?? false});
-  for (const [path, contents] of Object.entries(files)) fixture.addFile(fixture.threadRoot!, `.t3-supervisor/${path}`, contents);
-  for (const [path, contents] of Object.entries(options.globalFiles ?? {})) fixture.addFile(fixture.globalRoot, `.t3-supervisor/${path}`, contents);
+  const write = (root: string, entries: Files) => {
+    for (const [path, contents] of Object.entries(entries)) {
+      if (typeof contents === "string") fixture.addFile(root, `.t3-supervisor/${path}`, contents);
+      else if (path !== "project.yaml") throw new Error(`${path} needs file contents`);
+    }
+    const index = entries["project.yaml"];
+    if (index !== undefined && typeof index !== "string") fixture.writeIndex(root, index);
+  };
+  write(fixture.threadRoot!, files);
+  write(fixture.globalRoot, options.globalFiles ?? {});
   return {fixture, snapshot: await fixture.loader.load("project", threadId)};
 };
 
@@ -52,7 +62,7 @@ const proposalRecord = (workflow: WorkflowProposalInfo) => ({
   plan: workflow.plan,
 });
 
-const emptyConfig = {"project.yaml": "required: []\n", "workflows/.gitkeep": ""};
+const emptyConfig: Files = {"project.yaml": {}, "workflows/.gitkeep": ""};
 const commonSteps = {
   "steps/inspect.md": stepSource("inspect", "Inspect the current behavior."),
   "steps/e2e.md": stepSource("e2e", "Verify the user flow."),
@@ -73,7 +83,7 @@ test("canonical authoring material expands the default, avoids recursive duplica
   const {snapshot} = await load({
     ...commonSteps,
     "steps/publish.md": stepSource("publish", "Prepare the requested handoff."),
-    "project.yaml": "default_workflow: delivery\nrequired:\n  - workflow: delivery\n  - step: e2e\n  - step: publish\n",
+    "project.yaml": {default_workflow: "delivery", required: [{workflow: "delivery"}, {step: "e2e"}, {step: "publish"}]},
     "workflows/reviewer.yaml": reviewer(),
     "workflows/delivery.yaml": delivery(),
   });
@@ -115,7 +125,7 @@ test("canonical authoring material expands the default, avoids recursive duplica
 
 test("canonical authoring material keeps missing and cyclic required sources explicit", async () => {
   const {snapshot} = await load({
-    "project.yaml": "required:\n  - step: missing-check\n  - workflow: cycle\n",
+    "project.yaml": indexSource({steps: ["missing-check"], workflows: ["cycle"], required: [{step: "missing-check"}, {workflow: "cycle"}]}),
     "workflows/cycle.yaml": workflowSource("Cycle", "  - workflow: cycle\n"),
   });
   const context = prepareWorkflowRequest(threadId, sourceMessageId, "Ship export support", snapshot).context;
@@ -123,7 +133,8 @@ test("canonical authoring material keeps missing and cyclic required sources exp
 
   const material = canonicalAuthoringMaterial(context);
   assert.equal(material.complete, false);
-  assert.deepEqual(material.requiredReferences, ["step:missing-check", "workflow:cycle"]);
+  // required references derive from the index flags: workflows before steps
+  assert.deepEqual(material.requiredReferences, ["workflow:cycle", "step:missing-check"]);
   assert.deepEqual(material.omittedReferences, []);
   assert.ok(material.workflow);
   assert.ok(material.workflow.requirements.some(item => item.state === "unknown" || item.state === "unresolved"));
@@ -136,7 +147,7 @@ test("canonical authoring material keeps missing and cyclic required sources exp
 test("the bounded request includes exact nested template paths for fixed-workflow insertions", async () => {
   const {snapshot} = await load({
     ...commonSteps,
-    "project.yaml": "required:\n  - workflow: delivery\n",
+    "project.yaml": {required: [{workflow: "delivery"}]},
     "workflows/reviewer.yaml": reviewer(true),
     "workflows/delivery.yaml": delivery(true),
   });
@@ -148,8 +159,8 @@ test("the bounded request includes exact nested template paths for fixed-workflo
   assert.match(prepared.requestText, /workflow:delivery\/root\/0\/workflow:reviewer\/root\/1/u);
   assert.match(prepared.requestText, /"fixed":true/u);
   assert.ok(prepared.requestText.length <= 120_000);
-  assert.equal(prepared.workflow.requirements[0]?.id, snapshot.config.required[0] && "workflow" in snapshot.config.required[0]
-    ? snapshot.config.required[0].workflow : "");
+  const firstRequired = requiredReferences(snapshot.config)[0];
+  assert.equal(prepared.workflow.requirements[0]?.id, firstRequired && "workflow" in firstRequired ? firstRequired.workflow : "");
 });
 
 test("nested reusable paths stay stable across normalization and strict record validation preserves occurrence IDs", async () => {
@@ -194,7 +205,7 @@ test("nested reusable paths stay stable across normalization and strict record v
 });
 
 test("strict workflow records ignore object key order while preserving values and array order", async () => {
-  const {snapshot} = await load({...commonSteps, "project.yaml": "required:\n  - step: e2e\n  - step: inspect\n"});
+  const {snapshot} = await load({...commonSteps, "project.yaml": {required: [{step: "e2e"}, {step: "inspect"}]}});
   const prepared = prepareWorkflowRequest(threadId, sourceMessageId, "Ship export support", snapshot);
   assert.ok(prepared.context);
   const workflow = validateWorkflowPlan({
@@ -259,7 +270,7 @@ test("repeated workflow templates create distinct occurrences without merging th
 test("a required workflow is satisfied by its exact recursive reference", async () => {
   const {snapshot} = await load({
     ...commonSteps,
-    "project.yaml": "required:\n  - workflow: delivery\n",
+    "project.yaml": {required: [{workflow: "delivery"}]},
     "workflows/reviewer.yaml": reviewer(),
     "workflows/delivery.yaml": delivery(),
   });
@@ -277,7 +288,7 @@ test("a required fixed workflow nested in a named delivery uses its contextual t
     reason: "This task requires the original inspection and recording sequence."}];
   const {snapshot} = await load({
     ...commonSteps,
-    "project.yaml": "default_workflow: delivery\nrequired:\n  - workflow: protected-check\n",
+    "project.yaml": {default_workflow: "delivery", required: [{workflow: "protected-check"}]},
     "workflows/protected-check.yaml": workflowSource("Protected result check", "  - step:\n      id: inspect-results\n      name: Inspect implementation results\n      description: Inspect implementation outputs before recording.\n  - step:\n      id: record-results\n      name: Record implementation results\n      description: Record evidence after inspection.\n", {fixed: true}),
     "workflows/delivery.yaml": workflowSource("Delivery", "  - workflow: protected-check\n  - step: deliver\n"),
   });
@@ -346,7 +357,7 @@ test("a required flexible workflow nested in a named delivery uses contextual pa
     reason: "This task requires the reviewer workflow."}];
   const {snapshot} = await load({
     ...commonSteps,
-    "project.yaml": "default_workflow: delivery\nrequired:\n  - workflow: reviewer\n",
+    "project.yaml": {default_workflow: "delivery", required: [{workflow: "reviewer"}]},
     "workflows/reviewer.yaml": reviewer(),
     "workflows/delivery.yaml": delivery(),
   });
@@ -378,7 +389,7 @@ test("a required flexible workflow nested in a named delivery uses contextual pa
 test("a required reusable step inside a referenced workflow counts once for the main task", async () => {
   const {snapshot} = await load({
     ...commonSteps,
-    "project.yaml": "required:\n  - step: e2e\n",
+    "project.yaml": {required: [{step: "e2e"}]},
     "workflows/reviewer.yaml": reviewer(),
   });
   const {result} = interpret(snapshot, {
@@ -396,13 +407,13 @@ test("applicable but omitted reusable requirements retain their canonical unreso
       kind: "step" as const,
       id: "e2e",
       reason: "UI changes need E2E.",
-      files: {...commonSteps, "project.yaml": "required:\n  - step: e2e\n"},
+      files: {...commonSteps, "project.yaml": {required: [{step: "e2e"}]}},
     },
     {
       kind: "workflow" as const,
       id: "reviewer",
       reason: "This task needs review.",
-      files: {...commonSteps, "project.yaml": "required:\n  - workflow: reviewer\n", "workflows/reviewer.yaml": reviewer()},
+      files: {...commonSteps, "project.yaml": {required: [{workflow: "reviewer"}]}, "workflows/reviewer.yaml": reviewer()},
     },
   ];
   const explanation = "The exact reusable definition is not integrated in the plan.";
@@ -429,7 +440,7 @@ test("applicable but omitted reusable requirements retain their canonical unreso
 });
 
 test("null-plan provisional records round-trip only in their exact service shape", async () => {
-  const {snapshot} = await load({...commonSteps, "project.yaml": "required:\n  - step: e2e\n"});
+  const {snapshot} = await load({...commonSteps, "project.yaml": {required: [{step: "e2e"}]}});
   const {prepared, result} = interpret(snapshot, null);
   assert.equal(result.workflow.status, "provisional");
   assert.equal(result.workflow.plan, null);
@@ -543,7 +554,7 @@ test("new workflow-reference wrappers keep null paths while their nested source 
 });
 
 test("near-limit required assessment reasons still round-trip after canonical unresolved explanation", async () => {
-  const {snapshot} = await load({...commonSteps, "project.yaml": "required:\n  - step: e2e\n"});
+  const {snapshot} = await load({...commonSteps, "project.yaml": {required: [{step: "e2e"}]}});
   const reason = "R".repeat(1000);
   const {prepared, result} = interpret(snapshot, {
     requirements: [{kind: "step", id: "e2e", applies: true, reason}],
@@ -604,7 +615,7 @@ test("a fixed outer workflow protects original commitments inside a flexible nes
 test("a local filler cannot make a required flexible workflow included after all original members are omitted", async () => {
   const {snapshot} = await load({
     ...commonSteps,
-    "project.yaml": "required:\n  - workflow: reviewer\n",
+    "project.yaml": {required: [{workflow: "reviewer"}]},
     "workflows/reviewer.yaml": reviewer(),
   });
   const {prepared, result} = interpret(snapshot, {
@@ -632,7 +643,7 @@ test("a local filler cannot make a required flexible workflow included after all
 test("a same-named local step cannot satisfy a required reusable step", async () => {
   const {snapshot} = await load({
     ...commonSteps,
-    "project.yaml": "required:\n  - step: e2e\n",
+    "project.yaml": {required: [{step: "e2e"}]},
   });
   const {result} = interpret(snapshot, {
     requirements: [{kind: "step", id: "e2e", applies: true, reason: "The flow changed."}],
@@ -659,12 +670,12 @@ test("a missing project scope stays provisional instead of becoming a known empt
 
 test("known global requirements survive a missing local scope while the policy remains provisional", async () => {
   const {snapshot} = await load({}, {globalEnabled: true, globalFiles: {
-    "project.yaml": "required:\n  - step: shared-e2e\n",
+    "project.yaml": {required: [{step: "shared-e2e"}]},
     "steps/shared-e2e.md": stepSource("shared-e2e", "Verify the shared user flow."),
     "workflows/.gitkeep": "",
   }});
   assert.notEqual(snapshot.status, "ready");
-  const globalRequirement = snapshot.config.required[0];
+  const globalRequirement = requiredReferences(snapshot.config)[0];
   assert.ok(globalRequirement && "step" in globalRequirement);
   const {prepared, result} = interpret(snapshot, {
     requirements: [{kind: "step", id: globalRequirement.step, applies: true, reason: "The user flow changes."}],
@@ -679,9 +690,9 @@ test("known global requirements survive a missing local scope while the policy r
 test("an invalid global config leaves readable local requirements included or unresolved, not unknown", async () => {
   const {snapshot} = await load({
     ...commonSteps,
-    "project.yaml": "required:\n  - step: e2e\n  - step: report\n",
+    "project.yaml": {required: [{step: "e2e"}, {step: "report"}]},
   }, {globalEnabled: true, globalFiles: {
-    "project.yaml": "required: nope\n",
+    "project.yaml": "workflows: []\nsteps: nope\n",
     "steps/.gitkeep": "",
     "workflows/.gitkeep": "",
   }});
@@ -699,7 +710,7 @@ test("an invalid global config leaves readable local requirements included or un
 });
 
 test("a long task excerpt does not erase known references or make the unchanged source snapshot stale", async () => {
-  const {snapshot} = await load({...commonSteps, "project.yaml": "required:\n  - step: e2e\n"});
+  const {snapshot} = await load({...commonSteps, "project.yaml": {required: [{step: "e2e"}]}});
   const task = `Fix this failure:\n${"x".repeat(80_000)}`;
   const prepared = prepareWorkflowRequest(threadId, sourceMessageId, task, snapshot);
   assert.ok(prepared.context);
@@ -720,7 +731,7 @@ test("a long task excerpt does not erase known references or make the unchanged 
 test("long required descriptions stay complete while every configured reference remains in the prompt", async () => {
   const ids = Array.from({length: 12}, (_, index) => `step-${index}`);
   const files: Files = {
-    "project.yaml": `required:\n${ids.map(id => `  - step: ${id}`).join("\n")}\n`,
+    "project.yaml": indexSource({steps: ids, required: ids.map(id => ({step: id}))}),
     "workflows/.gitkeep": "",
   };
   for (const id of ids) files[`steps/${id}.md`] = stepSource(id, `Read the full subsystem and report its behavior. ${"detail ".repeat(600)}`);
@@ -1020,11 +1031,11 @@ test("only accepted or current fixed occurrences constrain the first workflow ap
 });
 
 test("a manifest too large for one interpretation request keeps the reader and names what it omitted", async () => {
-  const {snapshot} = await load({"project.yaml": "required:\n  - step: scope\n", "steps/scope.md": stepSource("scope", "Scope guidance.")});
+  const {snapshot} = await load({"project.yaml": {required: [{step: "scope"}]}, "steps/scope.md": stepSource("scope", "Scope guidance.")});
   const reader = {supervisorThreadId: "supervisor-root:reader", bindingGeneration: 3};
   const envelopeOf = (text: string) => JSON.parse(text.split("UNTRUSTED_WORKFLOW_ENVELOPE\n")[1]!.split("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE")[0]!);
   const wide = {...snapshot, workflows: Array.from({length: 40}, (_, index) => ({id: `workflow-${index}`, name: `Workflow ${index}`,
-    description: "A workflow with many members.", fixed: false, sequence: Array.from({length: 400}, () => ({step: "scope"}))}))};
+    description: "A workflow with many members.", summary: testSummary(`workflow-${index}`), fixed: false, sequence: Array.from({length: 400}, () => ({step: "scope"}))}))};
   const counted = prepareWorkflowRequest(threadId, sourceMessageId, "Implement the export.", wide as ProjectDefinitionSnapshot, {reader});
   const countedEnvelope = envelopeOf(counted.requestText);
   assert.ok(counted.requestText.length <= 120_000, `bounded: ${counted.requestText.length}`);
@@ -1037,7 +1048,7 @@ test("a manifest too large for one interpretation request keeps the reader and n
     read: "workflow_read view definitions returns the full manifest; definitionIds return complete definitions."});
   assert.equal(counted.context?.promptComplete, true, "complete definitions stay retrievable, so the request is not downgraded");
   const many = {...snapshot, workflows: Array.from({length: 4000}, (_, index) => ({id: `workflow-${index}-${"x".repeat(40)}`, name: `Workflow ${index} ${"y".repeat(40)}`,
-    description: "A workflow.", fixed: false, sequence: [{step: "scope"}]}))};
+    description: "A workflow.", summary: testSummary(`workflow-${index}`), fixed: false, sequence: [{step: "scope"}]}))};
   const prefix = prepareWorkflowRequest(threadId, sourceMessageId, "Implement the export.", many as ProjectDefinitionSnapshot, {reader});
   const prefixEnvelope = envelopeOf(prefix.requestText);
   assert.ok(prefix.requestText.length <= 120_000 && prefixEnvelope.reader, "an ID prefix still fits with the reader");
@@ -1048,7 +1059,7 @@ test("a manifest too large for one interpretation request keeps the reader and n
 test("reader-based interpretation carries a manifest, earlier unresolved requests and reader coordinates instead of the catalog", async () => {
   const guidance = (id: string) => `${id} guidance. ${"Preserve the requested outcome, the evidence and the completion rules. ".repeat(24)}END_${id}`;
   const stepIds = ["scope", "evidence", "design", "data", "implement", "prevent", "verify", "correctness", "fit", "findings", "deliver"];
-  const files: Files = {"project.yaml": "required:\n  - step: scope\n  - workflow: review\n"};
+  const files: Files = {"project.yaml": {required: [{step: "scope"}, {workflow: "review"}]}};
   for (const id of stepIds) files[`steps/${id}.md`] = stepSource(id, guidance(id));
   files["workflows/review.yaml"] = workflowSource("Review", "  - parallel:\n      - step: correctness\n      - step: fit\n  - step: findings\n", {fixed: true});
   for (const id of ["change", "plan", "investigate", "release"])
@@ -1077,10 +1088,15 @@ test("reader-based interpretation carries a manifest, earlier unresolved request
     "only advertised workflow_read fields");
   assert.deepEqual(envelope.definitions.workflows.find((item: {id: string}) => item.id === "review").members, ["step:correctness", "step:fit", "step:findings"]);
   assert.ok(envelope.definitions.steps.every((item: {summary: string}) => item.summary.length <= 260));
+  // the manifest carries each definition's project.yaml index summary verbatim, never an excerpt of its description
+  assert.deepEqual(envelope.definitions.steps.map((item: {id: string; summary: string}) => [item.id, item.summary]),
+    [...stepIds].sort().map(id => [id, testSummary(id)]));
+  assert.deepEqual(envelope.definitions.workflows.map((item: {id: string; summary: string}) => [item.id, item.summary]),
+    ["change", "investigate", "plan", "release", "review"].map(id => [id, testSummary(id)]));
 });
 
 test("a semantic not-needed decision returns no workflow and is distinct from an unclear task", async () => {
-  const {snapshot} = await load({"project.yaml": "required:\n  - step: inspect\n", "steps/inspect.md": stepSource("inspect"),
+  const {snapshot} = await load({"project.yaml": {required: [{step: "inspect"}]}, "steps/inspect.md": stepSource("inspect"),
     "workflows/check.yaml": workflowSource("Check", "  - step: inspect\n")});
   assert.equal(snapshot.status, "ready");
   const context = prepareWorkflowRequest(threadId, sourceMessageId, "Thank the colleague for the documents.", snapshot).context!;

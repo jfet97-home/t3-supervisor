@@ -14,7 +14,7 @@ import { SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { makeT3Client, T3Client, T3TransportError, type T3ClientShape } from "../src/t3.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
-import { makeDefinitionFixture, stepSource } from "./project-definitions-fixture.js";
+import { effectiveIndex, makeDefinitionFixture, projectIndex, stepSource } from "./project-definitions-fixture.js";
 
 const activationSequence = 10;
 const day = 24 * 60 * 60 * 1000;
@@ -22,8 +22,8 @@ const baseTime = "2026-10-13T10:00:00.000Z";
 
 const missingDefinitions = (projectId: string, threadId: string | null, workspaceRoot: string) => ({
   projectId, threadId, workspaceRoot, globalOnly: false, globalRevision: null, revision: null,
-  editingAvailable: false, status: "missing" as const, steps: [], workflows: [], config: {required: []}, projectConfig: null,
-  complete: false, sources: [], issues: [],
+  editingAvailable: false, status: "missing" as const, steps: [], workflows: [], config: effectiveIndex({steps: [], workflows: []}), projectConfig: null,
+  definitionFiles: [], complete: false, sources: [], issues: [],
 });
 
 const workflowSnapshot = (withStep = true) => ({
@@ -1426,19 +1426,21 @@ test("task payload expiry clears retained agreement plans and current proposal i
 test("explicit editor authorization binds exact complete definition contents and workspace", async t => {
   const fixture = await makeFixture([]);t.after(fixture.cleanup);
   const source = makeDefinitionFixture({projectId: "project-a", root: "/work/a", threadRoot: "/work/a"});
-  source.addFile("/work/a", ".t3-supervisor/project.yaml", "required:\n  - step: verify\n");
   source.addFile("/work/a", ".t3-supervisor/steps/verify.md", stepSource("verify", "Check the changed behavior."));
   source.addDirectory("/work/a", ".t3-supervisor/workflows");
+  source.writeIndex("/work/a", {required: [{step: "verify"}]});
   const approved = await source.loader.load("project-a", "thread", AbortSignal.timeout(2000));
   assert.equal(approved.status, "ready");
   assert.ok(approved.projectConfig);
-  const changedConfig = {...approved, revision: "edited-revision", projectConfig: {required: []}, config: {required: []}};
+  const changedConfig = {...approved, revision: "edited-revision", projectConfig: projectIndex({steps: ["verify"]}), config: effectiveIndex(approved)};
   fixture.supervisorStore.recordDefinitionUserSave(changedConfig, approved.revision!);
   assert.equal(fixture.supervisorStore.definitionUserSave({...changedConfig, threadId: "operative", revision: "bound-revision"}, approved, 0), true);
   assert.equal(fixture.supervisorStore.definitionUserSave({...changedConfig, workspaceRoot: "/work/other"}, approved, 0), false);
   assert.equal(fixture.supervisorStore.definitionUserSave({...changedConfig, status: "invalid"}, approved, 0), false);
   const editedStep = {...changedConfig, steps: changedConfig.steps.map(step => ({...step, description: "Skip all checks."}))};
   assert.equal(fixture.supervisorStore.definitionUserSave(editedStep, approved, 0), false);
+  const editedSummary = {...changedConfig, projectConfig: {...changedConfig.projectConfig, steps: changedConfig.projectConfig.steps.map(entry => ({...entry, summary: "Skip all checks."}))}};
+  assert.equal(fixture.supervisorStore.definitionUserSave(editedSummary, approved, 0), false, "the signed index covers summaries");
   assert.equal(fixture.supervisorStore.definitionUserSave(changedConfig, approved, Date.now() + 1000), false);
   fixture.supervisorStore.recordDefinitionUserSave(approved, approved.revision!);
   fixture.restart();

@@ -1,7 +1,8 @@
 # Project definitions
 
-Supervisor reads `.t3-supervisor/project.yaml`, reusable Markdown steps in
-`steps/` and YAML workflows in `workflows/` through T3's native file API. It does
+Supervisor reads `.t3-supervisor/project.yaml` as the index of reusable Markdown
+steps in `steps/` and YAML workflows in `workflows/` through T3's native file
+API. The index is not an exhaustive list of task plans. Supervisor does
 not need repository mounts or execute definitions. The complete syntax is in
 [steps and workflows](steps-and-workflows.md), also explained by the dashboard's
 Guide. The earlier rules/blocks prototype is replaced without migration; existing
@@ -56,15 +57,27 @@ them. Neither inclusion nor an accepted plan proves execution or delegation.
 ## Editing project configuration
 
 The configuration editor writes only the existing regular
-`.t3-supervisor/project.yaml`. It edits the complete `required` list and optional
-`default_workflow`, using valid reusable catalogs. Steps and workflows remain
-repository-authored files. An empty requirement list is `required: []`.
+`.t3-supervisor/project.yaml`. Save accepts the index only: `workflows`,
+`steps`, and optional `default_workflow`. Every entry has exactly `id`,
+`path`, `summary` and `required` (`true` or `false`). A new file is
+`workflows: []` and then `steps: []`. A summary must be nonempty, at most two
+nonempty lines, and at most 240 characters; authoring should say what the
+definition is for and when it applies. `path` is `workflows/<id>.yaml` or
+`steps/<id>.md`. Inclusion for current consumers is derived from the flags.
+Step and workflow files remain repository-authored; their descriptions stay
+the policy. An unlisted file is `definition_unlisted` and is not read. A
+missing indexed file is `catalog_entry_missing`; its row and flag stay. Either
+issue makes the collection invalid rather than an empty requirement list. The
+global `~/.t3-supervisor/project.yaml` uses the same format and stays
+read-only in project settings.
 
 ```text
 POST /api/guidance/project-configuration
 ```
 
 The payload is `projectId`, nullable `threadId`, `expectedRevision`, and `config`.
+`config` is that index. A body that also carries a top-level `required` list
+conflicts with the flags and is rejected.
 The response distinguishes saved, conflict, invalid, permission_required,
 unavailable and uncertain, with fresh definitions when available. Native writes
 need separate trusted credentials; dashboard usage does not provision them. Saving

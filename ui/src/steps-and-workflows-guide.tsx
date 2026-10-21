@@ -4,8 +4,12 @@ const layoutExample = `.t3-supervisor/
   project.yaml
   steps/
     e2e-testing.md
+    inspect-change.md
+    security-review.md
+    report-findings.md
   workflows/
-    reviewer.yaml`;
+    reviewer.yaml
+    delivery.yaml`;
 
 const stepExample = `---
 id: e2e-testing
@@ -54,9 +58,32 @@ const localStepExample = `sequence:
         - docs/upgrade.md
         - src/migration.ts`;
 
-const configurationExample = `required:
-  - step: e2e-testing
-  - workflow: reviewer
+const configurationExample = `workflows:
+  - id: reviewer
+    path: workflows/reviewer.yaml
+    summary: Review the change and verify affected behavior.
+    required: true
+  - id: delivery
+    path: workflows/delivery.yaml
+    summary: Implement, review and deliver the agreed change.
+    required: false
+steps:
+  - id: e2e-testing
+    path: steps/e2e-testing.md
+    summary: Test changed behavior in the real application and report limitations.
+    required: true
+  - id: inspect-change
+    path: steps/inspect-change.md
+    summary: Inspect the change for defects and unmet requirements.
+    required: false
+  - id: security-review
+    path: steps/security-review.md
+    summary: Check trust boundaries affected by the change.
+    required: false
+  - id: report-findings
+    path: steps/report-findings.md
+    summary: Report actionable review findings and remaining limitations.
+    required: false
 default_workflow: delivery`;
 
 const fixedInsertionExample = `sequence:
@@ -100,7 +127,7 @@ const questions = [
   },
   {
     question: "Can I define a workflow inline or use `steps:` for an ordered list?",
-    answer: "No. `workflow:` only references a reusable workflow by ID. Use `sequence:` for ordered contents, including at the workflow root; definitions cannot be nested under a workflow reference.",
+    answer: "No. In a workflow, `workflow:` only references a reusable workflow by ID. Use `sequence:` for ordered contents, including at the workflow root; definitions cannot be nested under a workflow reference. The `steps:` list in project.yaml is an index of reusable files, not workflow contents.",
   },
   {
     question: "Do I need a second E2E item when the required reviewer workflow already contains it?",
@@ -170,7 +197,8 @@ export function StepsAndWorkflowsGuide() {
     <Topic id="guide-layout-title" title="Where definitions live">
       <p>Project definitions belong to the operative checkout, so another checkout can have a different configuration. The opt-in global scope uses the same file layout. The Projects page shows the active scope, source paths and origin.</p>
       <Example label="Project definition layout" value={layoutExample}/>
-      <p><code>project.yaml</code> holds project-wide requirements and an optional starting workflow. Files in <code>steps/</code> and <code>workflows/</code> hold reusable definitions. A project configuration editor writes only the selected checkout's <code>project.yaml</code>; step and workflow files are inspected as repository source.</p>
+      <p><code>project.yaml</code> indexes every reusable definition, including optional ones, with a short summary and a required flag. Both the Supervisor and the supervised agent start there, then read the full relevant definitions in <code>steps/</code> and <code>workflows/</code> on demand. Summaries guide reading; full definitions remain authoritative policy.</p>
+      <p>The project configuration editor changes only the selected checkout's <code>project.yaml</code>. Full definition files stay separate. For a new project, start with <code>workflows: []</code> and <code>steps: []</code>; when adding a reusable file, add its index entry too.</p>
     </Topic>
 
     <Topic id="guide-step-title" title="A step describes one piece of work">
@@ -195,9 +223,12 @@ export function StepsAndWorkflowsGuide() {
       <p>References are shown read-only in Definitions and Plan views. Edit the source definition file to change them, then refresh. Supervisor records the paths without opening files or checking whether they exist. A listed path is supporting material, not a command, file permission or evidence that the file was read.</p>
     </Topic>
 
-    <Topic id="guide-config-title" title="Project requirements and the default workflow">
-      <p><code>project.yaml</code> requires a <code>required</code> list; use <code>required: []</code> when this checkout has no local requirements. The optional <code>default_workflow</code> names a starting template; it does not limit negotiation to that one workflow.</p>
+    <Topic id="guide-config-title" title="The project index, requirements and default workflow">
+      <p><code>project.yaml</code> requires separate <code>workflows</code> and <code>steps</code> lists, even when empty. Every entry has an <code>id</code>, <code>path</code>, <code>summary</code> and explicit <code>required: true</code> or <code>required: false</code>. These flags are the only authored requirements; there is no separate top-level required list.</p>
+      <p>Paths are relative to <code>.t3-supervisor</code> and must be exactly <code>workflows/&lt;id&gt;.yaml</code> or <code>steps/&lt;id&gt;.md</code>. Each summary is trimmed, nonempty text of at most 2 logical lines and 240 characters. Briefly explain purpose or applicability from the full description; line wrapping in the editor is not an extra logical line.</p>
       <Example label="project.yaml" value={configurationExample}/>
+      <p>The optional <code>default_workflow</code> names an indexed workflow as a starting suggestion. The index is authoritative for reusable files, not an exhaustive whitelist of possible task plans: negotiate local steps, new combinations and revisions as the task evolves, preserving required and fixed commitments.</p>
+      <p>The editor lists workflows and steps separately. Change summaries and required flags, or add an unlisted file explicitly, then Save and reload to verify the index. Invalid or missing rows remain visible. Removing an entry does not delete its file, and leaving a reusable file unlisted is an error. Global entries remain separate and read-only.</p>
       <p>Required items must be accounted for in the plan. Inclusion is recursive: if the required reviewer workflow contains the required E2E step, that step is already accounted for. The plan adds missing requirements where they fit instead of blindly appending them. A manual workflow choice does not waive a requirement.</p>
       <p>Applicability is described in the step or workflow description. A genuinely not-applicable item remains visible with its reason; an applicable requirement cannot be silently waived. Unclear applicability and broken references remain explicit open issues.</p>
     </Topic>
@@ -228,6 +259,7 @@ export function StepsAndWorkflowsGuide() {
 
     <Topic id="guide-errors-title" title="Cycles, invalid definitions and recovery">
       <p>Direct and indirect workflow cycles are errors and include the exact reference chain. Reusing a workflow in separate branches is allowed; a cycle occurs when expansion returns to a workflow already on the current path. File, size, total expanded-node and depth bounds keep reading finite.</p>
+      <p>Missing indexed files, unlisted files, duplicate IDs and mismatched paths are diagnosed. Repair the index or the definition file explicitly; missing or invalid definitions do not silently lose their required flags.</p>
       <p>Definition errors appear in this UI and in the operational Supervisor context. Readable definitions and diagnostics are passed as bounded, untrusted data; a broken reference is not recursively expanded. The Supervisor raises the issue and can continue planning with a finite provisional plan. Incomplete or unreadable files never become a claim that requirements are absent, and unresolved required or fixed commitments stay visible.</p>
       <p>A <code>complete</code> read means the service finished reading the relevant files; it does not mean those definitions are valid. Check the reported issue and source, repair the repository file, then refresh. A global-only view is inspectable but is not editable through a project editor.</p>
       <p>Provisional dialogue can continue with invalid or incomplete definitions so planning remains useful. A formal saved agreement requires a current, complete, valid definition snapshot and resolved commitments. A known revision on an invalid collection identifies the observed files; it does not approve them as policy.</p>

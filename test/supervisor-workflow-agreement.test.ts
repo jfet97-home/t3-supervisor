@@ -5,28 +5,36 @@ import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contr
 import { WorkflowProtocolDiagnosticSchema } from "../src/project-supervisor-contract.js";
 import { parseWorkflowInterpretation, prepareWorkflowRequest, validateWorkflowPlan, workflowRecordDiagnostic, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import { diagnoseWorkflowProposalRecord, extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, parseWorkflowProposalRecord, workflowAgreementPlanHash, workflowProtocolDiagnosticCodes } from "../src/supervisor-workflow-agreement.js";
+import { effectiveIndex, projectIndex, testSummary } from "./project-definitions-fixture.js";
 
-const definitions = (overrides: Partial<ProjectDefinitionSnapshot> = {}): ProjectDefinitionSnapshot => ({
-  projectId: "project-a",
-  threadId: "thread-a",
-  workspaceRoot: "/work/project",
-  globalOnly: false,
-  globalRevision: null,
-  revision: "revision-ready",
-  editingAvailable: true,
-  status: "ready",
-  steps: [
-    {id: "verify", name: "Verify behavior", description: "Check the changed behavior.", origin: "project", path: ".t3-supervisor/steps/verify.md", sourceId: "project:verify"},
-    {id: "publish", name: "Prepare handoff", description: "Write a concise handoff.", origin: "project", path: ".t3-supervisor/steps/publish.md", sourceId: "project:publish"},
-  ],
-  workflows: [],
-  config: {required: [{step: "verify"}]},
-  projectConfig: {required: [{step: "verify"}]},
-  complete: true,
-  sources: [],
-  issues: [],
-  ...overrides,
-});
+const definitions = (overrides: Partial<ProjectDefinitionSnapshot> = {}): ProjectDefinitionSnapshot => {
+  const steps: ProjectDefinitionSnapshot["steps"] = overrides.steps ?? [
+    {id: "verify", name: "Verify behavior", description: "Check the changed behavior.", summary: testSummary("verify"), origin: "project", path: ".t3-supervisor/steps/verify.md", sourceId: "project:verify"},
+    {id: "publish", name: "Prepare handoff", description: "Write a concise handoff.", summary: testSummary("publish"), origin: "project", path: ".t3-supervisor/steps/publish.md", sourceId: "project:publish"},
+  ];
+  const workflows: ProjectDefinitionSnapshot["workflows"] = overrides.workflows ?? [];
+  const ids = {steps: steps.map(step => step.id), workflows: workflows.map(workflow => workflow.id)};
+  const required = [{step: "verify"}];
+  return {
+    projectId: "project-a",
+    threadId: "thread-a",
+    workspaceRoot: "/work/project",
+    globalOnly: false,
+    globalRevision: null,
+    revision: "revision-ready",
+    editingAvailable: true,
+    status: "ready",
+    steps,
+    workflows,
+    config: effectiveIndex({steps: ids.steps.map(id => ({id})), workflows: ids.workflows.map(id => ({id}))}, required),
+    projectConfig: projectIndex({...ids, required}),
+    definitionFiles: [],
+    complete: true,
+    sources: [],
+    issues: [],
+    ...overrides,
+  };
+};
 
 const contextFor = (snapshot: ProjectDefinitionSnapshot) => prepareWorkflowRequest("thread-a", "message-a", "Check this task.", snapshot).context!;
 
@@ -57,6 +65,7 @@ const deliveryDefinitions = (): ProjectDefinitionSnapshot => definitions({
     id: "delivery",
     name: "Delivery",
     description: "Use the reusable delivery guidance.",
+    summary: testSummary("delivery"),
     fixed: false,
     sequence: [
       {step: {id: "subtotal", name: "Review the subtotal", description: "Check the subtotal."}},

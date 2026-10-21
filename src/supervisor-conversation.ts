@@ -3,7 +3,7 @@ import { ProjectSupervisorMonitorStore } from "./supervisor-monitor-store.js";
 import { isCurrentMainGraphRun, SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch, type SupervisorNativeChildLifecycleEvidence } from "./supervisor-monitor.js";
 import { SupervisorConversationStore, type ConversationRequest, type WorkflowAgreementCandidate, type WorkflowIntroduction } from "./supervisor-conversation-store.js";
 import { record, SupervisorRpcError, type SupervisorRpc } from "./supervisor-native.js";
-import { fixedOccurrencesPreserved, manifestMembers, parseWorkflowInterpretation, manifestSummary, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, workflowTemplatesFor, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
+import { fixedOccurrencesPreserved, manifestMembers, parseWorkflowInterpretation, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, workflowTemplatesFor, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
 import { compactProposalDigest, exactFenceRecords, extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, resolveCompactAcceptance, resolveCompactProposal, workflowAgreementPlanHash, workflowProtocolDiagnosticCodes, type CompactProposalPins, type StoredProposalDigest, type WorkflowAgreementRecordKind } from "./supervisor-workflow-agreement.js";
 import { extractApprovedProjectDefinitions, extractProjectDefinitionDecisionRecords, parseProjectDefinitionDecisionRecord, buildProjectDefinitionReviewRequest } from "./supervisor-definition-review.js";
 import type { BindingRecord, ProjectSupervisorStore, ProtocolAnchor, TaskRecord } from "./project-supervisor-store.js";
@@ -260,7 +260,7 @@ export const workflowIntroductionText = (task: TaskRecord, currentDefinitionRead
   const workflow = task.workflow!;
   const proposalId = task.workflowProposalId ?? task.id;
   const snapshot = task.definitionSnapshot ?? task.definitionContext;
-  const scope = snapshot?.globalOnly ? "This checkout uses shared definitions only." : `Checkout definitions are under ${workflow.workspaceRoot}/.t3-supervisor/ (project.yaml, steps/<id>.md, workflows/<id>.yaml).`;
+  const scope = snapshot?.globalOnly ? "This checkout uses shared definitions only." : `Checkout definitions are indexed in ${workflow.workspaceRoot}/.t3-supervisor/project.yaml; read the full steps/<id>.md and workflows/<id>.yaml files it lists that apply.`;
   const sharedConfigPaths = snapshot?.sources.filter(source => source.origin === "global" && source.path.endsWith("/project.yaml"))
     .map(source => redact(source.path)) ?? [];
   const sourceText = snapshot?.sources.length ? `${snapshot.sources.length} definition source files were loaded.${sharedConfigPaths.length ? ` Shared configuration: ${sharedConfigPaths.join(", ")}.` : ""}` : "No readable definition source files are available.";
@@ -369,13 +369,15 @@ export class SupervisorConversation {
       requirements: task.workflow?.requirements ?? [], outline: task.workflow?.plan ? renderPlan(task.workflow.plan) : null};
     if (view === "definitions") {
       if (!snapshot || !definitionState) return {status: "unavailable", view, reason: "definitions_unavailable"};
+      // a snapshot saved before project.yaml became the index has no summaries; it needs a fresh definition read
+      if (!Array.isArray(snapshot.config.workflows) || !Array.isArray(snapshot.config.steps)) return {status: "unavailable", view, reason: "definitions_refresh_required"};
       const sources = input.includeSources ? snapshot.sources.map(source => ({path: redact(source.path), origin: source.origin ?? "project", content: redact(source.content)})) : undefined;
       const selected = input.definitionIds ? new Set(input.definitionIds) : null;
       if (!selected) return {status: "ok", view, ...definitionState,
-        steps: snapshot.steps.map(step => ({id: step.id, name: redact(step.name), summary: manifestSummary(step.description), ...(step.path ? {path: redact(step.path)} : {})})),
-        workflows: snapshot.workflows.map(workflow => ({id: workflow.id, name: redact(workflow.name), fixed: workflow.fixed, summary: manifestSummary(workflow.description),
+        steps: snapshot.steps.map(step => ({id: step.id, name: redact(step.name), summary: redact(step.summary), ...(step.path ? {path: redact(step.path)} : {})})),
+        workflows: snapshot.workflows.map(workflow => ({id: workflow.id, name: redact(workflow.name), fixed: workflow.fixed, summary: redact(workflow.summary),
           members: manifestMembers(workflow.sequence ?? workflow.parallel ?? [])})),
-        note: "Request complete definitions with definitionIds before relying on their guidance.", ...(sources ? {sources} : {})};
+        note: "Summaries come from the project.yaml index and only guide what to read; request complete definitions with definitionIds before relying on their guidance.", ...(sources ? {sources} : {})};
       const steps = snapshot.steps.filter(step => selected.has(step.id)).map(step => ({...step, name: redact(step.name), description: redact(step.description)}));
       const workflows = snapshot.workflows.filter(workflow => selected.has(workflow.id)).map(workflow => ({...workflow, name: redact(workflow.name), description: redact(workflow.description)}));
       const found = new Set([...steps.map(step => step.id), ...workflows.map(workflow => workflow.id)]);

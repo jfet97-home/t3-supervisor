@@ -38,11 +38,16 @@ is explicit. Context is remembered per project in the current tab; hash links ta
 precedence. An unavailable conversation never falls back to another checkout.
 Drafts survive switching views, including instance Settings exclusions.
 
-Projects reads the selected operative checkout's `.t3-supervisor/project.yaml`,
-`steps/` and `workflows/`. Check source path, workspace, freshness, diagnostics and
-completeness; unavailable reads never mean no requirements. Guide explains the
-format without requiring a configured project. Global definitions, when enabled,
-are separately marked and read-only in the project editor.
+Projects reads the selected operative checkout's `.t3-supervisor/project.yaml`
+index, then the listed full step and workflow files that apply. A summary says
+what to read and is not the policy. The index is not a whitelist of task plans;
+negotiated local steps remain available. Check source path, workspace, freshness,
+diagnostics and completeness. An unlisted file (`definition_unlisted`) is not
+read. A missing indexed file (`catalog_entry_missing`) keeps its row and required
+flag. Either issue makes the collection invalid and never means no requirements.
+Guide explains the format without requiring a configured project. Global
+definitions, when enabled, are separately marked and read-only in the project
+editor.
 
 Steps have id/name/description. Workflows compose sequence/parallel groups, step
 references/local steps and named workflow references. Instructions, applicability
@@ -51,9 +56,11 @@ task; fixed protects original nested commitments and relationships while permitt
 support work. Repeated references have distinct occurrences.
 
 Edit only the requested project configuration and confirm the working-tree target.
-Save writes local project.yaml requirements/default workflow, leaves files
-uncommitted and does not edit the step/workflow catalog. Empty requirements use
-`required: []`. Refresh/reconcile conflicting or uncertain writes; Discard removes
+Save writes the local index only: `workflows`, `steps` (each entry `id`, `path`,
+`summary`, `required`) and the optional `default_workflow`. It does not accept a
+separate required list. It leaves files uncommitted and does not edit step or
+workflow files. A new project file is `workflows: []` and then `steps: []`. An
+invalid row stays visible and the unsaved draft is kept. Refresh/reconcile conflicting or uncertain writes; Discard removes
 an unsaved draft. A definite authentication rejection requires a new explicit Save.
 
 First setup selects the exact checkout/branch. Create leaves files uncommitted;

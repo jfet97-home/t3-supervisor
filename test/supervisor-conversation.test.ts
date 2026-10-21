@@ -24,6 +24,7 @@ import { compactProposalDigest, parseWorkflowAgreementRecord, workflowAgreementP
 import { SupervisorTeamStore } from "../src/supervisor-team-store.js";
 import { ThreadPolicyStore } from "../src/thread-policy.js";
 import { WorkflowWriteController, type SupervisionStopInput } from "../src/workflow-write-controller.js";
+import { effectiveIndex, indexSource, projectIndex, testSummary } from "./project-definitions-fixture.js";
 
 const projectId = "project-a";
 const operativeThreadId = "operative-a";
@@ -43,13 +44,14 @@ const definitions = (): ProjectDefinitionSnapshot => ({
   globalOnly: false,
   editingAvailable: true,
   status: "ready",
-  steps: [{id: "test-plan", name: "Test plan", description: "Verify the behavior.", origin: "project", path: ".t3-supervisor/steps/test-plan.md", sourceId: "project:test-plan"}],
+  steps: [{id: "test-plan", name: "Test plan", description: "Verify the behavior.", summary: testSummary("test-plan"), origin: "project", path: ".t3-supervisor/steps/test-plan.md", sourceId: "project:test-plan"}],
   workflows: [],
-  config: {required: [{step: "test-plan"}]},
-  projectConfig: {required: [{step: "test-plan"}]},
+  config: effectiveIndex({steps: [{id: "test-plan"}], workflows: []}, [{step: "test-plan"}]),
+  projectConfig: projectIndex({steps: ["test-plan"], required: [{step: "test-plan"}]}),
+  definitionFiles: [],
   complete: true,
   sources: [
-    {path: ".t3-supervisor/project.yaml", content: "required:\n  - step: test-plan\n", origin: "project"},
+    {path: ".t3-supervisor/project.yaml", content: indexSource({steps: ["test-plan"], required: [{step: "test-plan"}]}), origin: "project"},
     {path: ".t3-supervisor/steps/test-plan.md", content: "---\nid: test-plan\nname: Test plan\ndescription: Verify the behavior.\n---\n", origin: "project"},
   ],
   issues: [],
@@ -57,11 +59,15 @@ const definitions = (): ProjectDefinitionSnapshot => ({
 
 const fixedWorkflowDefinitions = (nextRevision = revision, workflowIds: readonly string[] = ["reviewer"]): ProjectDefinitionSnapshot => {
   const snapshot = definitions();
-  const workflows = workflowIds.map(id => ({id, name: id === "reviewer" ? "Reviewer" : "Live audit", description: `Complete ${id}.`, fixed: true,
+  const workflows = workflowIds.map(id => ({id, name: id === "reviewer" ? "Reviewer" : "Live audit", description: `Complete ${id}.`, summary: testSummary(id), fixed: true,
     sequence: [{step: "test-plan" as const}], origin: "project" as const, path: `.t3-supervisor/workflows/${id}.yaml`, sourceId: `project:${id}`}));
   const sources = workflowIds.map(id => ({path: `.t3-supervisor/workflows/${id}.yaml`,
     content: `id: ${id}\nname: ${id === "reviewer" ? "Reviewer" : "Live audit"}\ndescription: Complete ${id}.\nfixed: true\nsequence:\n  - step: test-plan\n`, origin: "project" as const}));
-  return {...snapshot, revision: nextRevision, workflows, sources: [...snapshot.sources, ...sources]};
+  const index = {steps: ["test-plan"], workflows: workflowIds, required: [{step: "test-plan"}]};
+  return {...snapshot, revision: nextRevision, workflows,
+    config: effectiveIndex({steps: [{id: "test-plan"}], workflows: workflowIds.map(id => ({id}))}, index.required),
+    projectConfig: projectIndex(index),
+    sources: [...snapshot.sources.map(source => source.path === ".t3-supervisor/project.yaml" ? {...source, content: indexSource(index)} : source), ...sources]};
 };
 
 const renamedStepDefinitions = (nextRevision: string, name: string): ProjectDefinitionSnapshot => {
@@ -75,18 +81,18 @@ const renamedStepDefinitions = (nextRevision: string, name: string): ProjectDefi
 const nestedCatalogDefinitions = (): ProjectDefinitionSnapshot => {
   const stepIds = ["scope", "evidence", "design", "data", "implement", "prevent", "verify", "correctness", "fit", "findings", "deliver"];
   const steps = stepIds.map(id => ({id, name: `Check ${id}`, description: `${id}: ${"Preserve the requested outcome, source evidence, scope and completion rules. ".repeat(19)}END_${id}`,
-    origin: "project" as const, path: `.t3-supervisor/steps/${id}.md`, sourceId: id}));
-  const review = {id: "review", name: "Review", description: "Reuse the same two independent reviewer conversations across rounds. ".repeat(35), fixed: true,
+    summary: testSummary(id), origin: "project" as const, path: `.t3-supervisor/steps/${id}.md`, sourceId: id}));
+  const review = {id: "review", name: "Review", description: "Reuse the same two independent reviewer conversations across rounds. ".repeat(35), summary: testSummary("review"), fixed: true,
     sequence: [{parallel: [{step: "correctness"}, {step: "fit"}]}, {step: "findings"}],
     origin: "project" as const, path: ".t3-supervisor/workflows/review.yaml", sourceId: "review"};
   const workflows: ProjectDefinitionSnapshot["workflows"] = [review, ...["change", "plan", "investigate", "release"].map(id => ({
-    id, name: id, description: `Complete ${id} within the current authority and preserve unresolved obligations.`, fixed: false,
+    id, name: id, description: `Complete ${id} within the current authority and preserve unresolved obligations.`, summary: testSummary(id), fixed: false,
     sequence: [...stepIds.slice(0, 7).map(step => ({step})), {workflow: "review"}, {step: "deliver"}],
     origin: "project" as const, path: `.t3-supervisor/workflows/${id}.yaml`, sourceId: id,
   }))];
-  const config = {required: [{step: "scope"}, {workflow: "review"}]};
-  return {...definitions(), steps, workflows, config, projectConfig: config,
-    sources: [{path: ".t3-supervisor/project.yaml", content: stringify(config), origin: "project"},
+  const index = {steps: stepIds, workflows: workflows.map(workflow => workflow.id), required: [{step: "scope"}, {workflow: "review"}]};
+  return {...definitions(), steps, workflows, config: effectiveIndex({steps, workflows}, index.required), projectConfig: projectIndex(index),
+    sources: [{path: ".t3-supervisor/project.yaml", content: indexSource(index), origin: "project"},
       ...steps.map(({id, name, description, path}) => ({path, content: `---\n${stringify({id, name, description})}---\n`, origin: "project" as const})),
       ...workflows.map(({id, name, description, fixed, sequence, path}) => ({path: path!, content: stringify({id, name, description, fixed, sequence}), origin: "project" as const}))]};
 };
@@ -2484,7 +2490,7 @@ test("invalid and incomplete definitions still introduce finite provisional plan
     const clock = {now: baseTime + index * 1_000_000};
     const fixture = await makeFixture(clock, {operativeActive: false});
     t.after(fixture.cleanup);
-    const observed = {...snapshot, config: {required: [{step: "test-plan"}]}};
+    const observed = {...snapshot, config: effectiveIndex({steps: [{id: "test-plan"}], workflows: []}, [{step: "test-plan"}])};
     const context = prepareWorkflowRequest(operativeThreadId, sourceMessageId, sourceText, observed).context;
     assert.ok(context);
     const raw = {requirements: [{kind: "step", id: "test-plan", applies: "unknown", reason: "The effective project configuration is incomplete."}], plan: {kind: "sequence", nodes: [
@@ -3707,7 +3713,10 @@ test("a dashboard config save never approves unrelated catalog edits or an older
   t.mock.method(Date, "now", () => clock.now);
   appendNoticeToOperative(fixture);
   const approved = definitions();
-  const changed = {...approved, revision: "ui-config-and-agent-step", projectConfig: {required: []}, config: {required: []},
+  // the save keeps test-plan indexed but clears its required flag
+  const unrequiredProjectConfig = projectIndex({steps: ["test-plan"]});
+  const unrequiredConfig = effectiveIndex({steps: [{id: "test-plan"}], workflows: []});
+  const changed = {...approved, revision: "ui-config-and-agent-step", projectConfig: unrequiredProjectConfig, config: unrequiredConfig,
     steps: [{...approved.steps[0]!, description: "Skip all verification."}],
     sources: approved.sources.map(source => source.path.endsWith("steps/test-plan.md")
       ? {...source, content: source.content.replace("Verify the behavior.", "Skip all verification.")} : source)};
@@ -3718,7 +3727,7 @@ test("a dashboard config save never approves unrelated catalog edits or an older
   assert.deepEqual(fixture.projectStore.task(operativeThreadId)?.definitionSnapshot?.steps, approved.steps);
 
   clock.now += 60_000;
-  const configOnly = {...approved, revision: "explicit-ui-config", projectConfig: {required: []}, config: {required: []}};
+  const configOnly = {...approved, revision: "explicit-ui-config", projectConfig: unrequiredProjectConfig, config: unrequiredConfig};
   fixture.setDefinitions(configOnly);
   fixture.projectStore.recordDefinitionUserSave(configOnly, changed.revision);
   await observeAgreement(fixture, clock.now + 30_000);

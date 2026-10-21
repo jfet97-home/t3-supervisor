@@ -10,7 +10,7 @@ import { workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { ProjectSupervisorStore, type SupervisorBaseline, type SupervisionFolderPresence } from "../src/project-supervisor-store.js";
 import type { TaskRecord } from "../src/project-supervisor-store.js";
 import { T3TransportError } from "../src/t3.js";
-import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
+import { requiredReferences, type ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import type { ProjectInfo, Projection, SupervisorConfig, ThreadInfo } from "../src/types.js";
 import { makeDefinitionFixture, stepSource } from "./project-definitions-fixture.js";
 
@@ -57,12 +57,12 @@ const withStore = async <A>(work: (store: ProjectSupervisorStore, directory: str
 
 const scopedDefinitionSnapshot = async (globalEnabled: boolean, scratch = false, projectId = "project-a", root = "/work/project-a"): Promise<ProjectDefinitionSnapshot> => {
   const fixture = makeDefinitionFixture({projectId, root, threadRoot: root, globalEnabled, scratch});
-  fixture.addFile(root, ".t3-supervisor/project.yaml", "required:\n  - step: local-check\n");
   fixture.addFile(root, ".t3-supervisor/steps/local-check.md", stepSource("local-check", "Verify local behavior."));
   fixture.addDirectory(root, ".t3-supervisor/workflows");
-  fixture.addFile(fixture.globalRoot, ".t3-supervisor/project.yaml", "required:\n  - step: global-check\n");
+  fixture.writeIndex(root, {required: [{step: "local-check"}]});
   fixture.addFile(fixture.globalRoot, ".t3-supervisor/steps/global-check.md", stepSource("global-check", "Verify shared behavior."));
   fixture.addDirectory(fixture.globalRoot, ".t3-supervisor/workflows");
+  fixture.writeIndex(fixture.globalRoot, {required: [{step: "global-check"}]});
   return fixture.loader.load(projectId, "thread", AbortSignal.timeout(2000));
 };
 
@@ -484,7 +484,7 @@ test("Scratch workflow introductions point to shared definitions and omit a proj
   const definitionSnapshot = await scopedDefinitionSnapshot(true, true, "scratch-project", "/scratch");
   assert.equal(definitionSnapshot.globalOnly, true);
   assert.equal(definitionSnapshot.status, "ready");
-  const globalReference = definitionSnapshot.config.required[0];
+  const globalReference = requiredReferences(definitionSnapshot.config)[0];
   assert.ok(globalReference && "step" in globalReference);
   const globalStep = definitionSnapshot.steps.find(step => step.id === globalReference.step);
   assert.ok(globalStep);

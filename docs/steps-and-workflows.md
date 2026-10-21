@@ -151,19 +151,55 @@ This protection includes the original commitments of nested workflow references.
 A member assessed not applicable stays visible with its reason rather than being
 removed. Fixed does not imply mandatory project-wide inclusion.
 
-## Project requirements
+## Definition index
 
-Project-wide configuration lives in `.t3-supervisor/project.yaml`:
+`.t3-supervisor/project.yaml` is the index of reusable steps and workflows for
+that scope. It is not a whitelist of task plans. The file has exactly the keys
+`workflows` and `steps`, both required lists that may be `[]`, and an optional
+`default_workflow`. Every entry has exactly `id`, `path`, `summary` and
+`required`. `required` is `true` or `false`. `id` matches
+`^[a-z0-9][a-z0-9_-]{0,63}$` and is unique within its list. `path` is relative
+to `.t3-supervisor` and is exactly `workflows/<id>.yaml` or `steps/<id>.md`.
+`default_workflow` must name a workflow in `workflows`. The two lists together
+hold at most 100 entries. A top-level `required:` key is rejected; there is no
+fallback and no second authored requirement list.
 
 ```yaml
-required:
-  - step: e2e-testing
-  - workflow: reviewer
+workflows:
+  - id: reviewer
+    path: workflows/reviewer.yaml
+    summary: Use to review a frozen change before the governed action, and again after material fixes.
+    required: true
+steps:
+  - id: e2e-testing
+    path: steps/e2e-testing.md
+    summary: Use when changed behavior needs proof in the real application; editorial work explains why it does not.
+    required: true
+default_workflow: reviewer
 ```
 
-An optional `default_workflow` may name a starting template. It is not the only
-workflow that can be negotiated. The required list can name reusable steps and
-whole workflows. Required controls inclusion; fixed controls preservation.
+A new project file is written as `workflows: []` and then `steps: []`.
+`default_workflow` is a starting suggestion, not the only plan and not an
+implied requirement. `required: true` is the only authored inclusion flag;
+current consumers derive inclusion from those flags. Fixed stays on the
+workflow file.
+
+The parser trims a summary and requires it to be nonempty, at most two
+nonempty lines, and at most 240 characters. When authoring or reviewing, write
+what the definition is for and when it applies. A descriptive name can be a
+fine summary. The full step or workflow file remains the policy; a summary
+only dispatches that read.
+
+Only indexed files are read. A file in `steps/` or `workflows/` that is not
+indexed is `definition_unlisted` and is not read. An indexed row whose file is
+missing is `catalog_entry_missing`; the row and its `required` flag stay, so a
+required one remains an unresolved requirement. Either issue makes the
+collection invalid, and plans stay provisional until it is fixed. Negotiated
+plans may still add task-local steps. Supervisor and the supervised agent start
+at `project.yaml`, then read each listed full definition that applies. The
+introduction says so. The manifest shows each indexed definition's id, name,
+summary and members; `workflow_read` with `definitionIds` returns the full
+definition.
 
 The main agent and Supervisor negotiate the actual plan for the current task.
 The plan must account for each required item. Inclusion inside a referenced

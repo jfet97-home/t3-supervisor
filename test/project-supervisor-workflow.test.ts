@@ -14,7 +14,7 @@ import type { WorkflowIntroduction } from "../src/supervisor-conversation-store.
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
-import { stepSource } from "./project-definitions-fixture.js";
+import { effectiveIndex, indexSource, projectIndex, stepSource, testSummary } from "./project-definitions-fixture.js";
 
 const projectId = "project-a";
 const sourceThreadId = "source-thread";
@@ -56,13 +56,14 @@ const definitionSnapshot = (overrides: Partial<ProjectDefinitionSnapshot> = {}):
   globalRevision: null,
   editingAvailable: true,
   status: "ready",
-  steps: [{id: "test-plan", name: "Test plan", description: "Verify behavior.", origin: "project", path: ".t3-supervisor/steps/test-plan.md", sourceId: "test-plan"}],
+  steps: [{id: "test-plan", name: "Test plan", description: "Verify behavior.", summary: testSummary("test-plan"), origin: "project", path: ".t3-supervisor/steps/test-plan.md", sourceId: "test-plan"}],
   workflows: [],
-  config: {required: [{step: "test-plan"}]},
-  projectConfig: {required: [{step: "test-plan"}]},
+  config: effectiveIndex({steps: [{id: "test-plan"}], workflows: []}, [{step: "test-plan"}]),
+  projectConfig: projectIndex({steps: ["test-plan"], required: [{step: "test-plan"}]}),
+  definitionFiles: [],
   complete: true,
   sources: [
-    {path: ".t3-supervisor/project.yaml", content: "required:\n  - step: test-plan\n", origin: "project"},
+    {path: ".t3-supervisor/project.yaml", content: indexSource({steps: ["test-plan"], required: [{step: "test-plan"}]}), origin: "project"},
     {path: ".t3-supervisor/steps/test-plan.md", content: stepSource("test-plan", "Verify behavior."), origin: "project"},
   ],
   issues: [],
@@ -71,7 +72,7 @@ const definitionSnapshot = (overrides: Partial<ProjectDefinitionSnapshot> = {}):
 
 const unavailableDefinitionSnapshot = (): ProjectDefinitionSnapshot => ({...definitionSnapshot(),
   workspaceRoot: "/work/project/worktrees/feature", revision: null, editingAvailable: false, status: "unavailable",
-  steps: [], workflows: [], config: {required: []}, projectConfig: null, complete: false, sources: [],
+  steps: [], workflows: [], config: {workflows: [], steps: []}, projectConfig: null, definitionFiles: [], complete: false, sources: [],
   issues: [{path: ".t3-supervisor", code: "definition_read_failed",
     message: "Definition sources could not be read. Requirements and policy remain unknown; make a finite provisional plan."}],
 });
@@ -345,7 +346,8 @@ test("dispatch uses complete definitions from the operative source worktree", as
   assert.match(String(dispatch.text), /"workspaceRoot":"\/work\/project\/worktrees\/feature"/u);
   assert.match(String(dispatch.text), /"revision":"revision-1"/u);
   assert.match(String(dispatch.text), /"required":\[\{"step":"test-plan"\}\]/u);
-  assert.match(String(dispatch.text), /Verify behavior\./u);
+  // the manifest carries the definition's project.yaml index summary, not a sentence derived from its description
+  assert.ok(String(dispatch.text).includes(`"summary":${JSON.stringify(testSummary("test-plan"))}`));
 });
 
 test("a correlated native result appears in the project DTO without repeating or self-triggering work", async (t) => {

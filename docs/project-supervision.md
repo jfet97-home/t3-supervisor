@@ -23,7 +23,7 @@ running native turn may finish. Re-enabling captures a discovery boundary instea
 of replaying all work submitted while disabled. There is no pause-monitoring mode.
 
 First setup selects an exact checkout/branch. Create writes only the new
-`project.yaml` (`required: []`), `steps/.gitkeep` and `workflows/.gitkeep`. Create +
+`project.yaml` (`workflows: []`, then `steps: []`), `steps/.gitkeep` and `workflows/.gitkeep`. Create +
 commit requires a clean safe Git state, no in-progress operation/lock, fresh native
 Git preflight and the separate commit/probe grants. It never switches branches,
 initializes Git or stages unrelated files. Native Git can reset the index, so
@@ -43,8 +43,13 @@ The Supervisor interprets the latest genuine request together with earlier unres
 requests in the same main, such as an issue link that did not yet establish an
 objective; a bootstrap, setup or recovery instruction is treated as a step toward
 that request, not its replacement. With the workflow MCP available, interpretation
-receives a short definition manifest and reads complete definitions on demand through
-`workflow_read`, so the catalog is not pushed into the prompt. A manifest too large for
+receives a short manifest of each indexed definition's id, name, summary and
+members, and reads complete definitions on demand through `workflow_read` with
+`definitionIds`, so full descriptions are not pushed into the prompt. A summary
+is navigation, not policy. The operative introduction says that
+`.t3-supervisor/project.yaml` is the index and to read the listed full files
+it needs. The index is not a whitelist of task plans; negotiated local steps
+remain available. A manifest too large for
 one request keeps the reader and shrinks to member counts, then to a prefix of IDs and
 names, stating what it omitted. Interpretation first
 decides whether supervision is needed: a short self-contained communication, lookup
@@ -77,7 +82,8 @@ agent, schedules a task or proves successful execution.
 
 Startup is compact. The initialization turn only confirms the service-prepared
 proposal by echoing its exact reference `{taskId, proposalId, digest}`; definitions
-stay available through `workflow_read`. The operative introduction opens with the
+stay available through `workflow_read`. The operative introduction says that `.t3-supervisor/project.yaml` is the
+index and to read the listed full files it needs. It opens with the
 obligation to agree a task-relevant workflow before implementing (evidence gathering
 and bootstrap work may come first; the Supervisor cannot block tools), then an outline
 and the exact acceptance record. Wakes carry the full standing instructions once per
@@ -373,7 +379,9 @@ budget and do not become confirmed success.
 Settings saves use generation checks. Drafts survive conflicts and connection or
 authentication failures; reauthentication never automatically repeats a rejected
 write. Existing private state, instance settings, ownership and supervision history
-survive definition-format replacement. Old prototype plans are not valid
+survive definition-format replacement. A saved definition snapshot in the
+previous configuration shape stays history: it is not migrated or reset, and
+fresh context requires a current index read. Old prototype plans are not valid
 new-format plans; no migration or broad state reset is required.
 
 Native frames, task inputs, prompt size, response size, queued/lifetime records,

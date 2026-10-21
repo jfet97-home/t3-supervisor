@@ -11,9 +11,12 @@ import {forgeDashboardToken} from "../src/service-auth.js";
 import {startGuidanceUi} from "../src/guidance-ui.js";
 import type {GuidanceRuntime} from "../src/guidance.js";
 import type {SupervisorConfig} from "../src/types.js";
-import {makeDefinitionFixture, stepSource, workflowSource} from "./project-definitions-fixture.js";
+import {requiredReferences, type DefinitionReference} from "../src/project-definitions-contract.js";
+import {indexEntry, indexSource, makeDefinitionFixture, projectIndex, stepSource, workflowSource} from "./project-definitions-fixture.js";
 
-const seedProject = (f: ReturnType<typeof makeDefinitionFixture>, config = "required: []\n") => {
+const localIndex = (required: readonly DefinitionReference[] = []) =>
+  projectIndex({steps: ["local-step", "second-step"], workflows: ["local-flow"], required});
+const seedProject = (f: ReturnType<typeof makeDefinitionFixture>, config = indexSource({steps: ["local-step", "second-step"], workflows: ["local-flow"]})) => {
   f.addFile(f.root, ".t3-supervisor/project.yaml", config);
   f.addFile(f.root, ".t3-supervisor/steps/local-step.md", stepSource("local-step"));
   f.addFile(f.root, ".t3-supervisor/steps/second-step.md", stepSource("second-step"));
@@ -22,15 +25,33 @@ const seedProject = (f: ReturnType<typeof makeDefinitionFixture>, config = "requ
 
 test("saves only local project.yaml, preserves valid YAML comments and retains global policy", async () => {
   const f = makeDefinitionFixture({globalEnabled: true});
-  f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", "required:\n  - step: shared-step\ndefault_workflow: shared-flow\n");
+  const globalIndex = indexSource({steps: ["shared-step"], workflows: ["shared-flow"], required: [{step: "shared-step"}], default_workflow: "shared-flow"});
+  f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", globalIndex);
   f.addFile(f.globalRoot, ".t3-supervisor/steps/shared-step.md", stepSource("shared-step"));
   f.addFile(f.globalRoot, ".t3-supervisor/workflows/shared-flow.yaml", workflowSource("Shared flow", "  - step: shared-step\n"));
-  const oldConfig = `# project options\nrequired:\n  # keep the existing local requirement\n  - step: local-step # keep this reference comment\ndefault_workflow: local-flow # keep this default comment\n`;
+  const oldConfig = `# project options
+workflows:
+  # the local flow
+  - id: local-flow # keep this row comment
+    path: workflows/local-flow.yaml
+    summary: Run the local flow for checkout changes.
+    required: false
+steps:
+  - id: local-step
+    path: steps/local-step.md
+    summary: Check the local behavior. # keep this summary comment
+    required: true
+  - id: second-step
+    path: steps/second-step.md
+    summary: Run the second check.
+    required: false
+default_workflow: local-flow # keep this default comment
+`;
   seedProject(f, oldConfig);
   const observed = await f.loader.load(f.projectId);
   assert.equal(observed.status, "ready");
-  assert.equal(observed.projectConfig?.required[0] && "step" in observed.projectConfig.required[0] ? observed.projectConfig.required[0].step : null, "local-step");
-  assert.equal(observed.config.required.length, 2);
+  assert.deepEqual(requiredReferences(observed.projectConfig!), [{step: "local-step"}]);
+  assert.equal(requiredReferences(observed.config).length, 2, "the global requirement stays in the effective index");
 
   let savedSnapshotRevision: string | undefined;
   const editor = new ProjectConfigEditor(f.loader, f.writer, definitions => {savedSnapshotRevision = definitions.revision ?? undefined;});
@@ -38,50 +59,71 @@ test("saves only local project.yaml, preserves valid YAML comments and retains g
     projectId: f.projectId,
     threadId: null,
     expectedRevision: observed.revision!,
-    config: {required: [{step: "local-step"}, {step: "second-step"}, {workflow: "local-flow"}], default_workflow: "local-flow"},
+    config: {
+      workflows: [{...observed.projectConfig!.workflows[0]!, summary: "Run the local flow for checkout changes.\r\n  Use it for every local edit.  "}],
+      steps: [observed.projectConfig!.steps[0]!, {...observed.projectConfig!.steps[1]!, required: true}],
+      default_workflow: "local-flow",
+    },
   };
   const result = await editor.save(input);
-  assert.equal(result.status, "saved");
+  assert.equal(result.status, "saved", result.message);
   assert.equal(result.definitions?.complete, true);
-  assert.deepEqual(result.definitions?.projectConfig, input.config);
-  assert.equal(result.definitions?.config.required.length, 4);
+  assert.equal(result.definitions?.projectConfig?.workflows[0]?.summary, "Run the local flow for checkout changes.\nUse it for every local edit.", "a two-line summary is saved normalized");
+  assert.deepEqual(requiredReferences(result.definitions!.projectConfig!), [{step: "local-step"}, {step: "second-step"}]);
+  assert.equal(requiredReferences(result.definitions!.config).length, 3);
   assert.equal(result.definitions?.config.default_workflow, "local-flow");
   assert.ok(savedSnapshotRevision);
   assert.deepEqual(f.writes.map(write => [write.root, write.path]), [[f.root, ".t3-supervisor/project.yaml"]]);
   const written = f.trees.get(f.root)?.get(".t3-supervisor/project.yaml") ?? "";
-  assert.match(written, /# project options/);
-  assert.match(written, /# keep the existing local requirement/);
-  assert.match(written, /# keep this reference comment/);
-  assert.match(written, /# keep this default comment/);
-  assert.equal(f.trees.get(f.globalRoot)?.get(".t3-supervisor/project.yaml"), "required:\n  - step: shared-step\ndefault_workflow: shared-flow\n");
+  for (const comment of ["# project options", "# the local flow", "# keep this row comment", "# keep this summary comment", "# keep this default comment"])
+    assert.ok(written.includes(comment), comment);
+  assert.doesNotMatch(written, /^required:/mu, "no second required source is written");
+  assert.equal(f.trees.get(f.globalRoot)?.get(".t3-supervisor/project.yaml"), globalIndex);
 });
 
-test("rejects stale or global/unknown references before writing", async () => {
+test("indexes an existing unlisted file and rejects stale, missing-file, global, malformed or old-format indexes before writing", async () => {
   const f = makeDefinitionFixture({globalEnabled: true});
   seedProject(f);
-  f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", "required: []\n");
+  f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", indexSource({steps: ["shared"]}));
   f.addFile(f.globalRoot, ".t3-supervisor/steps/shared.md", stepSource("shared"));
+  f.addDirectory(f.globalRoot, ".t3-supervisor/workflows");
   const initial = await f.loader.load(f.projectId);
   const editor = new ProjectConfigEditor(f.loader, f.writer);
   f.addFile(f.root, ".t3-supervisor/steps/new-step.md", stepSource("new-step"));
-  const stale = await editor.save({projectId: f.projectId, threadId: null, expectedRevision: initial.revision!, config: {required: []}});
+  const stale = await editor.save({projectId: f.projectId, threadId: null, expectedRevision: initial.revision!, config: localIndex()});
   assert.equal(stale.status, "conflict");
   assert.equal(f.writes.length, 0);
 
   const fresh = await f.loader.load(f.projectId);
-  const globalStep = fresh.steps.find(step => step.origin === "global")!;
-  const injected = await editor.save({projectId: f.projectId, threadId: null, expectedRevision: fresh.revision!, config: {required: [{step: globalStep.id}]}});
+  assert.ok(fresh.issues.some(issue => issue.code === "definition_unlisted" && issue.path.endsWith("new-step.md")));
+  const globalStep = fresh.config.steps.find(row => row.origin === "global")!;
+  const save = (config: unknown) => editor.save({projectId: f.projectId, threadId: null, expectedRevision: fresh.revision!, config: config as ProjectConfigSave["config"]});
+  const injected = await save({...localIndex(), steps: [...localIndex().steps, indexEntry("steps", globalStep.id)]});
   assert.equal(injected.status, "invalid");
-  const unknown = await editor.save({projectId: f.projectId, threadId: null, expectedRevision: fresh.revision!, config: {required: [{step: "missing"}]}});
-  assert.equal(unknown.status, "invalid");
+  assert.match(injected.message, /needs an existing \.t3-supervisor\/steps\//u, "a global row cannot be written into the local index");
+  const missing = await save({...localIndex(), steps: [...localIndex().steps, indexEntry("steps", "missing")]});
+  assert.equal(missing.status, "invalid");
+  assert.match(missing.message, /missing needs an existing \.t3-supervisor\/steps\/missing\.md/u);
+  const threeLines = await save({...localIndex(), steps: [{...localIndex().steps[0]!, summary: "One.\nTwo.\nThree."}, localIndex().steps[1]!]});
+  assert.equal(threeLines.status, "invalid");
+  assert.match(threeLines.message, /at most 2 nonempty lines/u);
+  const wrongPath = await save({...localIndex(), steps: [{...localIndex().steps[0]!, path: "steps/elsewhere.md"}, localIndex().steps[1]!]});
+  assert.match(wrongPath.message, /path must be steps\/local-step\.md/u);
+  assert.equal((await save({required: [{step: "local-step"}]})).status, "invalid", "the old required list is not an accepted payload");
   assert.equal(f.writes.length, 0);
+
+  const indexed = await save({...localIndex([{step: "new-step"}]), steps: [...localIndex().steps, indexEntry("steps", "new-step", true, "Check new behavior before release.")]});
+  assert.equal(indexed.status, "saved", indexed.message);
+  assert.equal(indexed.definitions?.status, "ready");
+  assert.ok(indexed.definitions?.steps.some(step => step.id === "new-step" && step.summary === "Check new behavior before release."));
+  assert.deepEqual(requiredReferences(indexed.definitions!.projectConfig!), [{step: "new-step"}]);
 });
 
 test("reports definite permission and uncertain native write outcomes without retrying", async () => {
   const f = makeDefinitionFixture();
   seedProject(f);
   const definitions = await f.loader.load(f.projectId);
-  const input: ProjectConfigSave = {projectId: f.projectId, threadId: null, expectedRevision: definitions.revision!, config: {required: [{step: "local-step"}]}};
+  const input: ProjectConfigSave = {projectId: f.projectId, threadId: null, expectedRevision: definitions.revision!, config: localIndex([{step: "local-step"}])};
   const editor = new ProjectConfigEditor(f.loader, f.writer);
   f.writer.writeProjectConfig = async () => {throw new ProjectFileError("permission_required", "write");};
   assert.equal((await editor.save(input)).status, "permission_required");
@@ -117,7 +159,7 @@ test("native project writer checks the regular project.yaml target and writes on
     const writer = makeProjectWriter(`http://127.0.0.1:${address.port}`, "fixture");
     const signal = AbortSignal.timeout(5000);
     assert.equal(await writer.checkProjectConfigFile("/workspace", signal), true);
-    await writer.writeProjectConfig("/workspace", "required: []\n", signal);
+    await writer.writeProjectConfig("/workspace", "workflows: []\nsteps: []\n", signal);
     assert.equal(calls.filter(call => call.tag === "projects.writeFile").length, 1);
     assert.equal(calls.find(call => call.tag === "projects.writeFile")?.payload.relativePath, ".t3-supervisor/project.yaml");
     targetKind = "directory";
@@ -158,7 +200,7 @@ test("project-configuration endpoint keeps session, origin and CSRF checks", asy
     const observed = await observedResponse.json() as {status: string; revision: string; projectConfig: unknown};
     assert.equal(observed.status, "ready");
     assert.ok(observed.revision);
-    const payload = {projectId: "project", threadId: null, expectedRevision: observed.revision, config: {required: [{step: "local-step"}]}};
+    const payload = {projectId: "project", threadId: null, expectedRevision: observed.revision, config: localIndex([{step: "local-step"}])};
     const rejected = await fetch(origin + "/api/guidance/project-configuration", {
       method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify(payload),
     });

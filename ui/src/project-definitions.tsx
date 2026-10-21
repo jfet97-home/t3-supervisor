@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { GuidanceSnapshot } from "../../src/guidance-contract.js";
-import type { DefinitionNode, DefinitionStepInfo, DefinitionWorkflowInfo, ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
+import { requiredReferences, type DefinitionNode, type DefinitionStepInfo, type DefinitionWorkflowInfo, type ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import { loadProjectDefinitions } from "./project-definitions-api.js";
 import { ProjectConfigurationEditor } from "./project-configuration-editor.js";
 import { ProjectSupervisorPanel } from "./project-supervisor.js";
@@ -82,19 +82,52 @@ function WorkflowContents({workflow, definitions}: {workflow: DefinitionWorkflow
 function EffectiveConfiguration({definitions}: {definitions: ProjectDefinitionSnapshot}) {
   const readable = definitions.complete && definitions.status === "ready";
   const config = definitions.config;
+  const required = requiredReferences(config);
   return <section className="stack" aria-labelledby="effective-config-title">
-    <div><h3 id="effective-config-title">Effective requirements <span className="muted">({config.required.length} references)</span></h3>
+    <div><h3 id="effective-config-title">Effective requirements <span className="muted">({required.length} references)</span></h3>
       <p className="muted">This view combines the selected checkout with enabled global definitions. The project editor below changes only the checkout's project.yaml.</p></div>
-    {config.required.length === 0
+    {required.length === 0
       ? <p className="panel muted">{readable ? "No effective required references are configured." : "No readable required references are available. Invalid or incomplete source may contain additional requirements."}</p>
-      : <ul className="panel stack effective-requirements">{config.required.map((reference, index) => {
+      : <ul className="panel stack effective-requirements">{required.map((reference, index) => {
         const kind = "step" in reference ? "step" : "workflow";
         const id = "step" in reference ? reference.step : reference.workflow;
         return <li key={`${kind}:${id}:${index}`}><strong>{kind === "step" ? "Required step" : "Required workflow"}:</strong> <DefinitionLink kind={kind} id={id} steps={definitions.steps} workflows={definitions.workflows}/></li>;
       })}</ul>}
     <p><strong>Effective default workflow:</strong> {config.default_workflow
       ? <DefinitionLink kind="workflow" id={config.default_workflow} steps={definitions.steps} workflows={definitions.workflows}/>
-      : "None"}</p>
+      : "None"} <span className="muted">· starting suggestion</span></p>
+  </section>;
+}
+
+function DefinitionCatalog({kind, definitions}: {kind: "workflows" | "steps"; definitions: ProjectDefinitionSnapshot}) {
+  const entries = definitions.config[kind];
+  const title = kind === "workflows" ? "Workflows" : "Steps";
+  const singular = kind === "workflows" ? "workflow" : "step";
+  return <section className="stack" aria-labelledby={`project-${kind}-title`}>
+    <div><h3 id={`project-${kind}-title`}>{title} index <span className="muted">({entries.length})</span></h3>
+      <p className="muted">Summaries help you choose what to read. Open the full definition for its policy; global entries are read-only here.</p></div>
+    {entries.length === 0 && <p className="panel muted">{definitions.complete && definitions.status === "ready" ? `No reusable ${kind} are indexed in the effective scope.` : `No readable ${kind} index entries are available. See the status and issues above.`}</p>}
+    {entries.map(entry => {
+      const step = kind === "steps" ? definitions.steps.find(item => item.id === entry.id && item.origin === entry.origin) : undefined;
+      const workflow = kind === "workflows" ? definitions.workflows.find(item => item.id === entry.id && item.origin === entry.origin) : undefined;
+      return <div className="panel stack" key={`${entry.origin}:${entry.id}`}>
+        <div className="row between"><h4 className="definition-path"><code>{entry.sourceId}</code></h4><div className="row">
+          <span className="muted small">{entry.origin === "global" ? "Global · read-only" : "Project"}</span>
+          <span className={`pill ${entry.required ? "blue" : ""}`}>{entry.required ? "Required" : "Optional"}</span>
+          {workflow?.fixed && <span className="pill blue">Fixed</span>}
+        </div></div>
+        <p className="muted small definition-path"><code>{entry.path}</code></p>
+        <p className="definition-index-summary">{entry.summary}</p>
+        {step || workflow ? <details className="definition-block">
+          <summary>Full definition: {step?.name ?? workflow!.name}</summary>
+          {workflow ? <WorkflowContents workflow={workflow} definitions={definitions}/> : <>
+            <DefinitionSource definition={step!}/>
+            <p className="definition-copy">{step!.description}</p>
+            <DefinitionReferences references={step!.references}/>
+          </>}
+        </details> : <p className="pill amber">Missing or invalid {singular}: {entry.sourceId}. Its index entry and required flag are retained.</p>}
+      </div>;
+    })}
   </section>;
 }
 
@@ -109,7 +142,8 @@ export function DefinitionsContent({definitions}: {definitions: ProjectDefinitio
       {definitions.workspaceRoot && <p className="muted definition-path">Working checkout: <code>{definitions.workspaceRoot}</code></p>}
       {definitions.workspaceRoot && !definitions.globalOnly && <p className="muted definition-path">Project source: <code>{definitions.workspaceRoot}/.t3-supervisor</code></p>}
       {definitions.globalOnly && <p>Global-only scope. Project editing does not write global definitions.</p>}
-      <p>Definitions follow the selected checkout. Enabled global definitions use the same layout and their origin is shown with each item.</p>
+      <p>Start with <code>project.yaml</code>, the index of all reusable definitions in this checkout, then read relevant full definitions. Enabled global definitions use the same layout and their origin is shown with each item.</p>
+      <p className="muted">The index inventories reusable files; task plans can add local steps and new combinations while preserving required and fixed commitments.</p>
       {definitions.status === "missing" && <p>No definitions were found in the selected scope. The expected layout is <code>.t3-supervisor/project.yaml</code>, <code>steps/</code> and <code>workflows/</code>. A missing scope does not establish that another enabled scope is empty.</p>}
       {definitions.status === "invalid" && <p>This collection has invalid files or references. Readable definitions are shown below, but an invalid or incomplete collection never means requirements are absent.</p>}
       {!definitions.complete && <p>The read was incomplete. The items shown may be only part of the requirements; resolve the access or source issues and refresh.</p>}
@@ -121,25 +155,8 @@ export function DefinitionsContent({definitions}: {definitions: ProjectDefinitio
 
     <EffectiveConfiguration definitions={definitions}/>
 
-    <section className="stack" aria-labelledby="project-step-title">
-      <div><h3 id="project-step-title">Reusable steps <span className="muted">({definitions.steps.length})</span></h3><p className="muted">Each step has an ID, name, complete description and optional file references.</p></div>
-      {definitions.steps.length === 0 && <p className="panel muted">{readableAndValid ? "No reusable steps are defined in the effective scope." : "No readable reusable steps are available. See the status and issues above."}</p>}
-      {definitions.steps.map(step => <details className="panel definition-block" key={`${step.origin ?? ""}:${step.id}`}>
-        <summary>{step.name} <span className="muted small">{step.sourceId ?? step.id}.md</span></summary>
-        <DefinitionSource definition={step}/>
-        <p className="definition-copy">{step.description}</p>
-        <DefinitionReferences references={step.references}/>
-      </details>)}
-    </section>
-
-    <section className="stack" aria-labelledby="project-workflow-title">
-      <div><h3 id="project-workflow-title">Reusable workflows <span className="muted">({definitions.workflows.length})</span></h3><p className="muted">Inspect the plan structure, nested groups and source descriptions.</p></div>
-      {definitions.workflows.length === 0 && <p className="panel muted">{readableAndValid ? "No reusable workflows are defined in the effective scope." : "No readable reusable workflows are available. See the status and issues above."}</p>}
-      {definitions.workflows.map(workflow => <details className="panel definition-block" key={`${workflow.origin ?? ""}:${workflow.id}`}>
-        <summary>{workflow.name} <span className="muted small">{workflow.sourceId ?? workflow.id}.yaml</span>{workflow.fixed && <span className="pill blue">Fixed</span>}</summary>
-        <WorkflowContents workflow={workflow} definitions={definitions}/>
-      </details>)}
-    </section>
+    <DefinitionCatalog kind="workflows" definitions={definitions}/>
+    <DefinitionCatalog kind="steps" definitions={definitions}/>
 
     <details className="panel stack" aria-labelledby="project-source-title">
       <summary id="project-source-title">Definition source files</summary><p className="muted">Raw bounded content is shown as text to help diagnose invalid files.</p>

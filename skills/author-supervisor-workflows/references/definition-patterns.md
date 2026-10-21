@@ -32,10 +32,11 @@ definition IDs, access grants or proof that their targets were read.
 
 A workflow has `name`, `description`, optional `references` and `fixed`, and one root
 `sequence` or `parallel`. Its ID is its YAML filename. Members can be `step` references,
-local step objects, named `workflow` references or nested groups. There is no `steps`,
-`inline`, `instructions`, `outcome` or `iterative` field. Steps have no structural
-children. Promote genuinely shared responsibilities to reusable files, and define every
-referenced ID before claiming a valid catalog.
+local step objects, named `workflow` references or nested groups. A workflow file has
+no `steps`, `inline`, `instructions`, `outcome` or `iterative` field; `steps` is an
+index key in `project.yaml` only. Steps have no structural children. Promote genuinely
+shared responsibilities to reusable files, and define every referenced ID and its index
+entry before claiming a valid catalog.
 
 ## Short descriptions with complete contracts
 
@@ -85,11 +86,34 @@ from the YAML.
 
 Choose `fixed: true` only when the original members, descriptions, references, order and
 parallel relationships must survive adaptation. It permits added support work.
-Project-wide required inclusion is a separate choice in `project.yaml`:
+`project.yaml` is the index of every reusable step and workflow, not a whitelist of
+task plans. A new project file is `workflows: []` and then `steps: []`:
 
 ```yaml
-required:
-  - workflow: review
+workflows: []
+steps: []
+```
+
+Each entry has exactly `id`, `path`, `summary` and `required` (`true` or `false`).
+`path` is `workflows/<id>.yaml` or `steps/<id>.md`. The parser accepts a summary
+only when it is nonempty, at most two nonempty lines, and at most 240 characters.
+Write what the definition is for and when it applies; a descriptive name can be
+a fine summary, and the file description stays the policy. `required: true` is
+the only inclusion flag. Optional `default_workflow` names one workflow id already
+in `workflows`. Do not add a top-level `required:` key. Read the index first, then
+the full definition files that apply. Keep existing flags, summaries and paths
+unless the change is intentional. An unlisted file is `definition_unlisted` and
+is not read. A missing indexed file is `catalog_entry_missing`; the row and its
+flag stay. The referenced step files are indexed in the same edit; the fragment
+below shows the workflow flag only.
+
+```yaml
+workflows:
+  - id: review
+    path: workflows/review.yaml
+    summary: Use to independently assess a frozen change or plan, and to account for the findings before the governed action.
+    required: true
+steps: []
 ```
 
 Choose required review from the project's risks and requested outcomes; substantive

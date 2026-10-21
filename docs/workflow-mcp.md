@@ -167,9 +167,10 @@ workflow documents:
 
 - `context`: the current task, its revision pins, objective, earlier unresolved request
   IDs, proposal identity and digest, agreement and diagnostics.
-- `definitions`: a manifest of the task's pinned definitions, or with `definitionIds`
-  complete selected definitions and the exact templates of selected workflows; add
-  `includeSources` for raw definition files when diagnosing invalid definitions.
+- `definitions`: a manifest of each indexed definition's id, name, summary and
+  members, or with `definitionIds` the complete selected definitions and the exact
+  templates of selected workflows. A summary is not the definition's policy text.
+  Add `includeSources` for raw definition files when diagnosing invalid definitions.
 - `instructions`: the full standing Supervisor instructions and their version.
 - `check`: a dry run of one compact `workflow-proposal` record, returning the outline,
   formal state, digest and acceptance record, or the first failing code, path and

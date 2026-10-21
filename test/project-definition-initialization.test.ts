@@ -115,13 +115,13 @@ test("global opt-in initializes a server-home scaffold once and preserves existi
   assert.equal(created.status, "created");
   assert.equal(created.workspaceRoot, "~");
   assert.equal(created.path, "~/.t3-supervisor");
-  assert.equal(f.trees.get("~")?.get(".t3-supervisor/project.yaml"), "required: []\n");
+  assert.equal(f.trees.get("~")?.get(".t3-supervisor/project.yaml"), "workflows: []\nsteps: []\n");
   assert.equal(f.trees.get("~")?.get(".t3-supervisor/steps/.gitkeep"), "");
   assert.equal(f.trees.get("~")?.get(".t3-supervisor/workflows/.gitkeep"), "");
   assert.equal(f.commits.length, 0);
   assert.ok(await f.loader.globalFingerprint(AbortSignal.timeout(5000)));
 
-  const existing = "required: []\n";
+  const existing = "workflows: []\nsteps: []\n";
   f.addFile("~", ".t3-supervisor/project.yaml", existing);
   const before = f.writes.length;
   const unchanged = await f.loader.initializeGlobal(AbortSignal.timeout(5000));
@@ -137,7 +137,7 @@ test("project Create writes only the scaffold files and Create plus commit stage
   }, AbortSignal.timeout(5000));
   assert.equal(created.status, "created");
   assert.deepEqual(createFixture.writes.map(write => [write.path, write.contents]), [
-    [".t3-supervisor/project.yaml", "required: []\n"],
+    [".t3-supervisor/project.yaml", "workflows: []\nsteps: []\n"],
     [".t3-supervisor/steps/.gitkeep", ""],
     [".t3-supervisor/workflows/.gitkeep", ""],
   ]);
@@ -206,12 +206,12 @@ test("setup refuses stale branches, existing folders, and Create plus commit out
   assert.equal(staleFixture.writes.length, 0);
 
   const existingFixture = fixture({isRepo: true, branch: "feature"});
-  existingFixture.addFile("/worktrees/feature", ".t3-supervisor/project.yaml", "required: []\n");
+  existingFixture.addFile("/worktrees/feature", ".t3-supervisor/project.yaml", "workflows: []\nsteps: []\n");
   const conflict = await existingFixture.loader.initialize("project", "main-thread", {
     origin: "project", action: "create", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
   }, AbortSignal.timeout(5000));
   assert.equal(conflict.status, "conflict");
-  assert.equal(existingFixture.trees.get("/worktrees/feature")?.get(".t3-supervisor/project.yaml"), "required: []\n");
+  assert.equal(existingFixture.trees.get("/worktrees/feature")?.get(".t3-supervisor/project.yaml"), "workflows: []\nsteps: []\n");
   assert.equal(existingFixture.writes.length, 0);
 
   const noGitFixture = fixture({isRepo: false, branch: null, worktree: null});
@@ -335,7 +335,7 @@ test("setup rechecks the operative checkout branch before each native file write
   }, AbortSignal.timeout(5000));
   assert.equal(outcome.status, "stale");
   assert.equal(f.writes.length, 1);
-  assert.equal(f.trees.get("/worktrees/feature")?.get(".t3-supervisor/project.yaml"), "required: []\n");
+  assert.equal(f.trees.get("/worktrees/feature")?.get(".t3-supervisor/project.yaml"), "workflows: []\nsteps: []\n");
   assert.equal(f.trees.get("/worktrees/feature")?.has(".t3-supervisor/steps/.gitkeep"), false);
   assert.match(outcome.message, /left uncommitted/);
 });

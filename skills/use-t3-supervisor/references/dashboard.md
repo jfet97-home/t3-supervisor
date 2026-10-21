@@ -45,11 +45,14 @@ fallback. Refresh explicitly after repository edits. Inspect source paths,
 reusable steps, nested workflows, requirements, completeness and diagnostics.
 The Guide contains complete syntax examples and FAQ independently of this selection.
 
-The project configuration editor saves the existing local project.yaml, with
-required step/workflow references and optional default_workflow. Effective global
-requirements remain separate and read-only. Step/workflow catalog definitions
-are authored in the repository. Confirm the target before Save. This leaves files
-uncommitted and does not execute or accept a workflow.
+The project configuration editor saves the existing local `project.yaml` index
+only: `workflows` and `steps`, each entry `id`, `path`, `summary` and `required`,
+plus an optional `default_workflow`. A new file is `workflows: []` and then
+`steps: []`. The global `~/.t3-supervisor/project.yaml` uses the same format and
+stays read-only here. Step and workflow files stay repository-authored. A summary
+is navigation; the file is the policy. Confirm the target before Save. Invalid
+rows and unsaved drafts remain. This leaves files uncommitted and does not
+execute or accept a workflow.
 
 ## Drafts and conflicts
 

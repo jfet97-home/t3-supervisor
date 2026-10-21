@@ -53,17 +53,17 @@ const unavailable = (thread: ThreadInfo) => Boolean(thread.archivedAt || thread.
 const supervisorUnavailable = (thread: ThreadInfo) => Boolean(thread.archivedAt || thread.deletedAt);
 
 const unavailableDefinitions = (job: TaskRecord): ProjectDefinitionSnapshot => ({projectId: job.projectId, threadId: job.threadId,
-  workspaceRoot: "", revision: null, editingAvailable: false, status: "unavailable", steps: [], workflows: [], config: {required: []},
-  projectConfig: null, complete: false, sources: [], issues: [{path: "", code: "definition_read_failed",
+  workspaceRoot: "", revision: null, editingAvailable: false, status: "unavailable", steps: [], workflows: [], config: {workflows: [], steps: []},
+  projectConfig: null, definitionFiles: [], complete: false, sources: [], issues: [{path: "", code: "definition_read_failed",
     message: "Definition sources could not be read. Requirements and policy remain unknown; make a finite provisional plan."}]});
 
 const sameDefinitionRead = (left: ProjectDefinitionSnapshot | null | undefined, right: ProjectDefinitionSnapshot): boolean =>
   Boolean(left && fingerprint({projectId: left.projectId, threadId: left.threadId, workspaceRoot: left.workspaceRoot, globalOnly: left.globalOnly ?? null,
     globalRevision: left.globalRevision ?? null, revision: left.revision, status: left.status, steps: left.steps, workflows: left.workflows,
-    config: left.config, projectConfig: left.projectConfig, complete: left.complete, sources: left.sources, issues: left.issues}) ===
+    config: left.config, projectConfig: left.projectConfig, definitionFiles: left.definitionFiles, complete: left.complete, sources: left.sources, issues: left.issues}) ===
     fingerprint({projectId: right.projectId, threadId: right.threadId, workspaceRoot: right.workspaceRoot, globalOnly: right.globalOnly ?? null,
       globalRevision: right.globalRevision ?? null, revision: right.revision, status: right.status, steps: right.steps, workflows: right.workflows,
-      config: right.config, projectConfig: right.projectConfig, complete: right.complete, sources: right.sources, issues: right.issues}));
+      config: right.config, projectConfig: right.projectConfig, definitionFiles: right.definitionFiles, complete: right.complete, sources: right.sources, issues: right.issues}));
 
 // the first genuine human request after a run ordinal; after an explicit Enable only one written after it (`writtenAfter`) counts
 export const taskSource = (projection: Projection, afterOrdinal: number, writtenAfter: number | null = null): {run: RunInfo; message: MessageInfo} | null => {

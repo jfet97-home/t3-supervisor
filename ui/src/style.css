@@ -104,7 +104,15 @@ details[open] > summary { margin-bottom: 12px; }
 .definition-nodes { padding-left: 24px; margin: 8px 0 0; }
 .definition-node-content, .definition-node-group { padding: 10px 0; }
 .effective-requirements { margin: 0; padding-left: 42px; }
-.project-config-requirement { padding: 16px; border: 1px solid var(--line); border-radius: 6px; }
+.project-config-entry { padding: 16px; border: 1px solid var(--line); border-radius: 6px; }
+.project-config-identity { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 12px; }
+.project-config-identity label { display: grid; gap: 6px; }
+.project-config-summary { min-height: 0; line-height: 1.5; }
+.project-config-required { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+.project-config-unlisted { margin: 0; padding-left: 20px; }
+.project-config-unlisted li { margin-top: 8px; overflow-wrap: anywhere; }
+.definition-index-summary { white-space: pre-line; overflow-wrap: anywhere; }
+@media (max-width: 700px) { .project-config-identity { grid-template-columns: minmax(0, 1fr); } }
 .workflow-plan-group { padding: 4px 0 4px 12px; border-left: 2px solid var(--line); }
 .workflow-plan-nodes { padding-left: 24px; margin: 4px 0 0; }
 .workflow-plan-node, .workflow-progress-document, .workflow-progress-thread, .supervisor-team-member { padding: 16px; border: 1px solid var(--line); border-radius: 6px; overflow-wrap: anywhere; }

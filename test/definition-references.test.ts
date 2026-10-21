@@ -10,7 +10,7 @@ import {fixedOccurrencesPreserved, prepareWorkflowRequest, validateWorkflowPlan,
 import {DefinitionsContent} from "../ui/src/project-definitions.js";
 import {redact} from "../src/credential-redaction.js";
 import {DefinitionReferences} from "../ui/src/definition-references.js";
-import {makeDefinitionFixture} from "./project-definitions-fixture.js";
+import {indexSource, makeDefinitionFixture} from "./project-definitions-fixture.js";
 
 const step = (references?: unknown) => `---\nid: review\nname: Review\ndescription: Review the change.\n${references === undefined ? "" : `references: ${JSON.stringify(references)}\n`}---\n`;
 const workflow = (references?: unknown, localReferences?: unknown) => `name: Delivery\ndescription: Deliver the change.\nfixed: true\n${references === undefined ? "" : `references: ${JSON.stringify(references)}\n`}sequence:\n  - step: review\n  - step:\n      id: local\n      name: Local check\n      description: Check the local code.\n${localReferences === undefined ? "" : `      references: ${JSON.stringify(localReferences)}\n`}`;
@@ -41,11 +41,11 @@ test("file references reject malformed lists, absolute paths and URLs consistent
 
 const fixture = async (global = false) => {
   const f = makeDefinitionFixture({globalEnabled: global});
-  f.addFile(f.threadRoot!, ".t3-supervisor/project.yaml", "required: []\ndefault_workflow: delivery\n");
+  f.addFile(f.threadRoot!, ".t3-supervisor/project.yaml", indexSource({steps: ["review"], workflows: ["delivery"], default_workflow: "delivery"}));
   f.addFile(f.threadRoot!, ".t3-supervisor/steps/review.md", step(paths));
   f.addFile(f.threadRoot!, ".t3-supervisor/workflows/delivery.yaml", workflow(["docs/delivery.md"], ["src/local.ts"]));
   if (global) {
-    f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", "required: []\n");
+    f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", indexSource({steps: ["review"], workflows: ["delivery"]}));
     f.addFile(f.globalRoot, ".t3-supervisor/steps/review.md", step(["docs/shared.md"]));
     f.addFile(f.globalRoot, ".t3-supervisor/workflows/delivery.yaml", workflow(["docs/shared-workflow.md"], ["src/shared.ts"]));
   }

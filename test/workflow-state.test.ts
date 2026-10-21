@@ -10,8 +10,9 @@ import {proposalContextFromDefinitions, validateWorkflowApplyAgainstPinnedContex
 import {acceptedWorkflowPlansForBinding, parseExternalContributionRecord, WorkflowStateStore} from "../src/workflow-state-store.js";
 import {externalContributionLimits, workflowMutationLimits} from "../src/workflow-state-contract.js";
 import type {ExternalContributionImport, WorkflowAgreementImport, WorkflowApplyInput, WorkflowOwner, WorkflowStatePlan, WorkflowStateSourceBinding} from "../src/workflow-state-contract.js";
-import type {ProjectDefinitionSnapshot} from "../src/project-definitions-contract.js";
+import type {DefinitionReference, ProjectDefinitionSnapshot} from "../src/project-definitions-contract.js";
 import type {WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo} from "../src/project-supervisor-contract.js";
+import {effectiveIndex, projectIndex, testSummary} from "./project-definitions-fixture.js";
 
 type Fixture = {
   directory: string;
@@ -26,7 +27,8 @@ type Fixture = {
 const contributorThreadId = "00000000-0000-4000-8000-000000000001";
 const taskSourceHash = fingerprint("Prepare the export workflow.");
 
-const definitionSnapshot = (required: ProjectDefinitionSnapshot["config"]["required"] = [{workflow: "release"}]): ProjectDefinitionSnapshot => ({
+const definitionIds = {steps: ["prepare", "verify", "publish"], workflows: ["release"]};
+const definitionSnapshot = (required: readonly DefinitionReference[] = [{workflow: "release"}]): ProjectDefinitionSnapshot => ({
   projectId: "project-a",
   threadId: "main-a",
   workspaceRoot: "/workspace/project-a",
@@ -36,15 +38,16 @@ const definitionSnapshot = (required: ProjectDefinitionSnapshot["config"]["requi
   editingAvailable: true,
   status: "ready",
   steps: [
-    {id: "prepare", name: "Prepare", description: "Prepare the release inputs.", origin: "project", path: "steps/prepare.md", sourceId: "project:step:prepare"},
-    {id: "verify", name: "Verify", description: "Run the release checks.", origin: "project", path: "steps/verify.md", sourceId: "project:step:verify"},
-    {id: "publish", name: "Publish", description: "Publish the release artifact.", origin: "project", path: "steps/publish.md", sourceId: "project:step:publish"},
+    {id: "prepare", name: "Prepare", description: "Prepare the release inputs.", summary: testSummary("prepare"), origin: "project", path: "steps/prepare.md", sourceId: "project:step:prepare"},
+    {id: "verify", name: "Verify", description: "Run the release checks.", summary: testSummary("verify"), origin: "project", path: "steps/verify.md", sourceId: "project:step:verify"},
+    {id: "publish", name: "Publish", description: "Publish the release artifact.", summary: testSummary("publish"), origin: "project", path: "steps/publish.md", sourceId: "project:step:publish"},
   ],
-  workflows: [{id: "release", name: "Release", description: "Prepare and publish a release.", fixed: true,
+  workflows: [{id: "release", name: "Release", description: "Prepare and publish a release.", summary: testSummary("release"), fixed: true,
     sequence: [{step: "prepare"}, {parallel: [{step: "verify"}, {step: "verify"}]}, {step: "publish"}],
     origin: "project", path: "workflows/release.yaml", sourceId: "project:workflow:release"}],
-  config: {required, default_workflow: "release"},
-  projectConfig: {required, default_workflow: "release"},
+  config: effectiveIndex({steps: definitionIds.steps.map(id => ({id})), workflows: definitionIds.workflows.map(id => ({id}))}, required, "release"),
+  projectConfig: projectIndex({...definitionIds, required, default_workflow: "release"}),
+  definitionFiles: [],
   complete: true,
   sources: [],
   issues: [],
@@ -82,7 +85,7 @@ const proposalPlan = (includeRelease: boolean): unknown => includeRelease ? {kin
   {kind: "workflow", definitionId: "release", reason: "Use the release template."},
 ]} : localPlanInput(["local-a", "local-b"]);
 
-const makeFixture = async (required: ProjectDefinitionSnapshot["config"]["required"] = [{workflow: "release"}], includeRelease = true): Promise<Fixture> => {
+const makeFixture = async (required: readonly DefinitionReference[] = [{workflow: "release"}], includeRelease = true): Promise<Fixture> => {
   const directory = await mkdtemp(join(tmpdir(), "workflow-state-test-"));
   const guidance = new GuidanceStore(directory);
   const supervisors = new ProjectSupervisorStore(guidance, new Set());

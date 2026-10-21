@@ -6,13 +6,16 @@ import { definitionReferenceFields, definitionReferenceProblem, describeDefiniti
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import { ProjectFileError, type FreshGitProbe, type ProjectCommitter, type ProjectFiles } from "./project-files.js";
-import {workflowDefinitionExpansionLimits, type DefinitionNode, type DefinitionReference, type DefinitionStepInfo, type DefinitionWorkflowInfo, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
+import {definitionIdPattern, normalizeProjectConfiguration, projectConfigurationError, workflowDefinitionExpansionLimits, type DefinitionCatalogEntry,
+  type DefinitionFileInfo, type DefinitionNode, type DefinitionStepInfo, type DefinitionWorkflowInfo, type EffectiveConfigurationInfo, type ProjectConfigurationInfo,
+  type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
 
 const MAX_FILES = 100;
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_TOTAL_BYTES = 512 * 1024;
 type MutableSnapshot = {-readonly [K in keyof ProjectDefinitionSnapshot]: ProjectDefinitionSnapshot[K] extends ReadonlyArray<infer V> ? V[] : ProjectDefinitionSnapshot[K]};
-type MutableScopeSnapshot = {steps: DefinitionStepInfo[]; workflows: DefinitionWorkflowInfo[]; config: ProjectConfigurationInfo; projectConfig: ProjectConfigurationInfo | null; sources: ProjectDefinitionSnapshot["sources"][number][]; issues: ProjectDefinitionSnapshot["issues"][number][]};
+type MutableScopeSnapshot = {steps: DefinitionStepInfo[]; workflows: DefinitionWorkflowInfo[]; config: EffectiveConfigurationInfo; projectConfig: ProjectConfigurationInfo | null;
+  definitionFiles: DefinitionFileInfo[]; sources: ProjectDefinitionSnapshot["sources"][number][]; issues: ProjectDefinitionSnapshot["issues"][number][]};
 type DefinitionOrigin = "global" | "project";
 type DefinitionScopeStatus = "ready" | "missing" | "invalid" | "permission_required" | "unavailable";
 export type DefinitionCheckoutTarget = {origin: "project"; threadId: string | null; workspaceRoot: string; branch: string | null; isGitRepository: boolean};
@@ -38,7 +41,7 @@ interface DefinitionScopeRead extends MutableScopeSnapshot {
   inputs: unknown[];
 }
 class DefinitionReadLimit extends Error {}
-const definitionId = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const definitionId = definitionIdPattern;
 const record = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const text = (v: unknown, max = 8000): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= max;
 const exact = (v: Record<string, unknown>, fields: string[]) => Object.keys(v).length === fields.length && fields.every(f => Object.hasOwn(v, f));
@@ -60,27 +63,31 @@ const yaml = (contents: string): unknown => {
 
 const definitionName = (value: unknown): value is string => text(value, 160);
 
+/** Parses the index of reusable definitions; its entries' required flags are the only authored requirements. */
 export const parseProjectConfiguration = (contents: string): ProjectConfigurationInfo => {
   const config = yaml(contents);
-  if (!record(config) || !(exact(config, ["required"]) || exact(config, ["required", "default_workflow"])) ||
-    !Array.isArray(config.required) || config.required.length > MAX_FILES ||
-    config.default_workflow !== undefined && (typeof config.default_workflow !== "string" || !definitionId.test(config.default_workflow)))
-    throw new Error("project.yaml needs required: [] and an optional default_workflow identifier.");
-  const seen = new Set<string>();
-  const required = config.required.map(value => {
-    if (!record(value) || Object.keys(value).length !== 1 ||
-      !(typeof value.step === "string" && definitionId.test(value.step) || typeof value.workflow === "string" && definitionId.test(value.workflow)))
-      throw new Error("Each required item must name one reusable step or workflow.");
-    const reference: DefinitionReference = typeof value.step === "string" ? {step: value.step} : {workflow: value.workflow as string};
-    const key = "step" in reference ? `step:${reference.step}` : `workflow:${reference.workflow}`;
-    if (seen.has(key)) throw new Error("Required definition references must be unique.");
-    seen.add(key);
-    return reference;
+  if (record(config) && Object.hasOwn(config, "required"))
+    throw new Error("project.yaml indexes every reusable definition: list workflows and steps entries with id, path, summary and required. The top-level required list was replaced by each entry's required flag.");
+  if (!record(config) || !(exact(config, ["workflows", "steps"]) || exact(config, ["workflows", "steps", "default_workflow"])) ||
+    !Array.isArray(config.workflows) || !Array.isArray(config.steps) || config.default_workflow !== undefined && typeof config.default_workflow !== "string")
+    throw new Error("project.yaml needs workflows and steps lists (use [] for none) and an optional default_workflow identifier.");
+  const rows = (kind: "workflows" | "steps", values: unknown[]): DefinitionCatalogEntry[] => values.map(value => {
+    if (!record(value) || !exact(value, ["id", "path", "summary", "required"]) || typeof value.id !== "string" || typeof value.path !== "string" ||
+      typeof value.summary !== "string" || typeof value.required !== "boolean")
+      throw new Error(`Each ${kind} entry needs exactly id, path, summary and required (true or false).`);
+    return {id: value.id, path: value.path, summary: value.summary, required: value.required};
   });
-  return {...(config.default_workflow === undefined ? {} : {default_workflow: config.default_workflow}), required};
+  const parsed = normalizeProjectConfiguration({workflows: rows("workflows", config.workflows), steps: rows("steps", config.steps),
+    ...(config.default_workflow === undefined ? {} : {default_workflow: config.default_workflow as string})});
+  const problem = projectConfigurationError(parsed);
+  if (problem) throw new Error(problem);
+  return parsed;
 };
 
-export const parseDefinitionStep = (id: string, contents: string): DefinitionStepInfo => {
+/** A definition file's own content; the summary comes from its project.yaml entry. */
+type ParsedStep = Omit<DefinitionStepInfo, "summary">;
+type ParsedWorkflow = Omit<DefinitionWorkflowInfo, "summary">;
+export const parseDefinitionStep = (id: string, contents: string): ParsedStep => {
   contents = contents.replace(/^\uFEFF/, "");
   if (!definitionId.test(id)) throw new Error("Invalid step filename.");
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(contents);
@@ -127,7 +134,7 @@ const collectLocalStepIds = (nodes: readonly DefinitionNode[], into: string[] = 
   return into;
 };
 
-export const parseDefinitionWorkflow = (id: string, contents: string): DefinitionWorkflowInfo => {
+export const parseDefinitionWorkflow = (id: string, contents: string): ParsedWorkflow => {
   if (!definitionId.test(id)) throw new Error("Invalid workflow filename.");
   const metadata = yaml(contents.replace(/^\uFEFF/, ""));
   const hasSequence = record(metadata) && Object.hasOwn(metadata, "sequence");
@@ -231,7 +238,8 @@ export class ProjectDefinitionLoader {
   }
 
   private async readScope(root: string, origin: DefinitionOrigin, signal: AbortSignal, budget: {value: number; files: number}): Promise<DefinitionScopeRead> {
-    const scope: DefinitionScopeRead = {status: "unavailable", complete: false, steps: [], workflows: [], config: {required: []}, projectConfig: null, sources: [], issues: [], inputs: []};
+    const scope: DefinitionScopeRead = {status: "unavailable", complete: false, steps: [], workflows: [], config: {workflows: [], steps: []}, projectConfig: null,
+      definitionFiles: [], sources: [], issues: [], inputs: []};
     const base = origin === "global" ? this.globalDefinitionsPath() : ".t3-supervisor";
     const showPath = (path: string) => path === "" ? base : `${base}/${path.replace(/^\.t3-supervisor\//, "")}`;
     const issue = (path: string, code: string, message: string) => scope.issues.push({path, code, message});
@@ -295,7 +303,7 @@ export class ProjectDefinitionLoader {
       for (const entry of entries) {
         if ([projectFile, ".t3-supervisor/steps", ".t3-supervisor/workflows", ".t3-supervisor/.DS_Store"].includes(entry.path)) continue;
         if ([".t3-supervisor/rules.yaml", ".t3-supervisor/blocks"].includes(entry.path))
-          issue(showPath(entry.path), "legacy_definition_format", "The old rules.yaml/blocks format is not loaded. Replace it with project.yaml, steps/ and workflows/; use required: [] for no requirements.");
+          issue(showPath(entry.path), "legacy_definition_format", "The old rules.yaml/blocks format is not loaded. Replace it with project.yaml, steps/ and workflows/; an empty index is workflows: [] and steps: [].");
         else issue(base, "unexpected_definition_entry", "Only project.yaml, steps/ and workflows/ belong in the definition folder. Unexpected entries are reported but not read.");
       }
       if (configEntry?.kind === "file") {
@@ -306,21 +314,31 @@ export class ProjectDefinitionLoader {
         } else {
           try {
             const contents = await readSource(projectFile);
-            try {scope.config = scope.projectConfig = parseProjectConfiguration(contents);}
+            try {
+              const index = scope.projectConfig = parseProjectConfiguration(contents);
+              const rows = (entries: readonly DefinitionCatalogEntry[]) => entries.map(entry => ({...entry, origin, sourceId: entry.id}));
+              scope.config = {workflows: rows(index.workflows), steps: rows(index.steps), ...(index.default_workflow ? {default_workflow: index.default_workflow} : {})};
+            }
             catch (error) {issue(showPath(projectFile), "project_configuration_invalid", error instanceof Error ? error.message : "project.yaml is invalid.");}
           } catch (error) {markIncomplete();noteReadFailure(error);issue(showPath(projectFile), "definition_source_unreadable", error instanceof Error ? error.message : "project.yaml could not be read.");}
         }
       } else {
         if (configEntry) markIncomplete();
         issue(showPath(projectFile), configEntry ? "project_configuration_invalid_path" : "configuration_missing",
-          configEntry ? "project.yaml must be a regular file." : "Add project.yaml with a required list; use required: [] for no requirements.");
+          configEntry ? "project.yaml must be a regular file." : "Add project.yaml indexing the workflows and steps; an empty index is workflows: [] and steps: [].");
       }
 
       const readDefinitions = async (kind: "steps" | "workflows") => {
         const directoryPath = `.t3-supervisor/${kind}`;
         const directory = entries.find(entry => entry.path === directoryPath);
+        // the index is authoritative: an indexed entry without its file stays, with its required flag, as a diagnosed gap
+        const reportMissing = (found: ReadonlySet<string>) => {
+          for (const entry of scope.projectConfig?.[kind] ?? []) if (!found.has(entry.id))
+            issue(showPath(`.t3-supervisor/${entry.path}`), "catalog_entry_missing", `project.yaml indexes ${kind === "steps" ? "step" : "workflow"} ${entry.id}, but ${entry.path} does not exist.`);
+        };
         if (!directory) {
           issue(showPath(directoryPath), `${kind}_directory_missing`, `Add the ${kind}/ directory to the definition folder.`);
+          reportMissing(new Set());
           return;
         }
         if (directory.kind !== "directory") {
@@ -375,6 +393,15 @@ export class ProjectDefinitionLoader {
               : "Workflows must be direct lowercase YAML files named with simple identifiers. Unsupported files are reported but not read.");
             continue;
           }
+          const id = match[1]!;
+          scope.definitionFiles.push({origin, kind, id, path: `${kind}/${entry.path.slice(directoryPath.length + 1)}`});
+          // only indexed files are reusable definitions; an unreadable index reads none, and an unlisted file is reported unread
+          const indexed = scope.projectConfig?.[kind].find(row => row.id === id);
+          if (!scope.projectConfig) continue;
+          if (!indexed) {
+            issue(showPath(entry.path), "definition_unlisted", `${entry.path.slice(directoryPath.length + 1)} is not indexed in project.yaml, so it is not loaded. Index it with a summary and required flag, or remove it.`);
+            continue;
+          }
           budget.files++;
           if (budget.files > MAX_FILES) {
             issue(showPath(entry.path), "definition_file_limit", "The active scopes exceed the 100 definition-file limit.");
@@ -390,13 +417,14 @@ export class ProjectDefinitionLoader {
             continue;
           }
           try {
-            const value = kind === "steps" ? parseDefinitionStep(match[1]!, contents) : parseDefinitionWorkflow(match[1]!, contents);
-            if (kind === "steps") scope.steps.push({...value as DefinitionStepInfo, origin, path: showPath(entry.path), sourceId: match[1]!});
-            else scope.workflows.push({...value as DefinitionWorkflowInfo, origin, path: showPath(entry.path), sourceId: match[1]!});
+            const value = kind === "steps" ? parseDefinitionStep(id, contents) : parseDefinitionWorkflow(id, contents);
+            if (kind === "steps") scope.steps.push({...value as ParsedStep, summary: indexed.summary, origin, path: showPath(entry.path), sourceId: id});
+            else scope.workflows.push({...value as ParsedWorkflow, summary: indexed.summary, origin, path: showPath(entry.path), sourceId: id});
           } catch (error) {
             issue(showPath(entry.path), `${kind}_invalid`, error instanceof Error ? error.message : `The ${kind} definition is invalid.`);
           }
         }
+        if (!collection.truncated) reportMissing(new Set(scope.definitionFiles.filter(file => file.kind === kind).map(file => file.id)));
       };
       await readDefinitions("steps");
       await readDefinitions("workflows");
@@ -419,11 +447,14 @@ export class ProjectDefinitionLoader {
     const report = (path: string, code: string, message: string) => global.issues.push({path, code, message});
     const stepRefs = new Set<string>(global.steps.map(step => step.sourceId ?? step.id));
     const workflowRefs = new Set<string>(global.workflows.map(workflow => workflow.sourceId ?? workflow.id));
-    for (const reference of global.config.required) {
-      const id = "step" in reference ? reference.step : reference.workflow;
-      ("step" in reference ? stepRefs : workflowRefs).add(id);
-      if ("step" in reference && !knownSteps.has(id)) report(`${this.globalDefinitionsPath()}/project.yaml`, "required_step_missing", `Required global step ${id} is missing or invalid.`);
-      if ("workflow" in reference && !knownWorkflows.has(id)) report(`${this.globalDefinitionsPath()}/project.yaml`, "required_workflow_missing", `Required global workflow ${id} is missing or invalid.`);
+    // every indexed row is namespaced, so a missing or invalid one keeps its row and required flag
+    for (const entry of global.config.steps) {
+      stepRefs.add(entry.sourceId);
+      if (entry.required && !knownSteps.has(entry.sourceId)) report(`${this.globalDefinitionsPath()}/project.yaml`, "required_step_missing", `Required global step ${entry.sourceId} is missing or invalid.`);
+    }
+    for (const entry of global.config.workflows) {
+      workflowRefs.add(entry.sourceId);
+      if (entry.required && !knownWorkflows.has(entry.sourceId)) report(`${this.globalDefinitionsPath()}/project.yaml`, "required_workflow_missing", `Required global workflow ${entry.sourceId} is missing or invalid.`);
     }
     if (global.config.default_workflow) workflowRefs.add(global.config.default_workflow);
     if (global.config.default_workflow && !knownWorkflows.has(global.config.default_workflow))
@@ -474,8 +505,8 @@ export class ProjectDefinitionLoader {
       ...(workflow.parallel ? {parallel: workflow.parallel.map(rewriteNode)} : {}),
     }));
     global.config = {
-      required: global.config.required.map(reference => "step" in reference
-        ? {step: stepMap.get(reference.step)!} : {workflow: workflowMap.get(reference.workflow)!}),
+      workflows: global.config.workflows.map(entry => ({...entry, id: workflowMap.get(entry.sourceId)!})),
+      steps: global.config.steps.map(entry => ({...entry, id: stepMap.get(entry.sourceId)!})),
       ...(global.config.default_workflow ? {default_workflow: workflowMap.get(global.config.default_workflow)!} : {}),
     };
     return global;
@@ -627,7 +658,7 @@ export class ProjectDefinitionLoader {
     const configPath = ".t3-supervisor/project.yaml";
     const stepsMarkerPath = ".t3-supervisor/steps/.gitkeep";
     const workflowsMarkerPath = ".t3-supervisor/workflows/.gitkeep";
-    const configContents = "required: []\n";
+    const configContents = "workflows: []\nsteps: []\n";
     const filesToCreate = [configPath, stepsMarkerPath, workflowsMarkerPath] as const;
     const written = new Set<string>();
     let safetyMessage: string | null = null;
@@ -744,7 +775,7 @@ export class ProjectDefinitionLoader {
 
   async load(projectId: string, threadId: string | null = null, parentSignal?: AbortSignal): Promise<ProjectDefinitionSnapshot> {
     const result: MutableSnapshot = {projectId, threadId, workspaceRoot: "", globalOnly: false, revision: null, editingAvailable: false,
-      status: "unavailable", steps: [], workflows: [], config: {required: []}, projectConfig: null, complete: false, sources: [], issues: []};
+      status: "unavailable", steps: [], workflows: [], config: {workflows: [], steps: []}, projectConfig: null, definitionFiles: [], complete: false, sources: [], issues: []};
     const inputs: unknown[] = [];
     const deadline = AbortSignal.timeout(30_000);
     const signal = parentSignal ? AbortSignal.any([deadline, parentSignal]) : deadline;
@@ -777,7 +808,8 @@ export class ProjectDefinitionLoader {
       const globalEnabled = this.globalEnabled(projectId);
       inputs.push(["globalDefinitionsEnabled", globalEnabled]);
       const budget = {value: 0, files: 0};
-      const emptyScope = (): DefinitionScopeRead => ({status: "missing", complete: true, steps: [], workflows: [], config: {required: []}, projectConfig: null, sources: [], issues: [], inputs: []});
+      const emptyScope = (): DefinitionScopeRead => ({status: "missing", complete: true, steps: [], workflows: [], config: {workflows: [], steps: []}, projectConfig: null,
+        definitionFiles: [], sources: [], issues: [], inputs: []});
       const globalScope = globalEnabled && this.globalRoot ? await this.readScope(this.globalRoot, "global", signal, budget) : emptyScope();
       result.globalRevision = globalEnabled ? this.fingerprintGlobalScope(globalScope) : null;
       inputs.push(["global", globalEnabled ? globalScope.inputs : ["disabled"]]);
@@ -787,25 +819,23 @@ export class ProjectDefinitionLoader {
       result.steps = [...namespacedGlobal.steps, ...projectScope.steps];
       result.workflows = [...namespacedGlobal.workflows, ...projectScope.workflows];
       result.projectConfig = scratch ? null : projectScope.projectConfig;
+      const defaultWorkflow = projectScope.config.default_workflow ?? (globalEnabled ? namespacedGlobal.config.default_workflow : undefined);
       result.config = {
-        required: [...(globalEnabled ? namespacedGlobal.config.required : []), ...projectScope.config.required],
-        ...((projectScope.config.default_workflow ?? (globalEnabled ? namespacedGlobal.config.default_workflow : undefined))
-          ? {default_workflow: projectScope.config.default_workflow ?? namespacedGlobal.config.default_workflow} : {}),
+        workflows: [...(globalEnabled ? namespacedGlobal.config.workflows : []), ...projectScope.config.workflows],
+        steps: [...(globalEnabled ? namespacedGlobal.config.steps : []), ...projectScope.config.steps],
+        ...(defaultWorkflow ? {default_workflow: defaultWorkflow} : {}),
       };
+      result.definitionFiles = [...(globalEnabled ? globalScope.definitionFiles : []), ...projectScope.definitionFiles];
       result.sources = [...(globalEnabled ? globalScope.sources : []), ...projectScope.sources];
       result.issues.push(...namespacedGlobal.issues, ...projectScope.issues);
       const activeScopes = [...(globalEnabled ? [globalScope] : []), ...(!scratch ? [projectScope] : [])];
       result.complete = activeScopes.every(scope => scope.complete);
       const stepsById = new Map(result.steps.map(step => [step.id, step]));
       const workflowsById = new Map(result.workflows.map(workflow => [workflow.id, workflow]));
-      const globalRequiredCount = globalEnabled ? namespacedGlobal.config.required.length : 0;
-      for (const [index, reference] of result.config.required.entries()) {
-        if (index < globalRequiredCount) continue;
-        if ("step" in reference && !stepsById.has(reference.step))
-          issue(".t3-supervisor/project.yaml", "required_step_missing", `Required step ${reference.step} is missing or invalid.`);
-        if ("workflow" in reference && !workflowsById.has(reference.workflow))
-          issue(".t3-supervisor/project.yaml", "required_workflow_missing", `Required workflow ${reference.workflow} is missing or invalid.`);
-      }
+      for (const entry of projectScope.config.steps) if (entry.required && !stepsById.has(entry.id))
+        issue(".t3-supervisor/project.yaml", "required_step_missing", `Required step ${entry.id} is missing or invalid.`);
+      for (const entry of projectScope.config.workflows) if (entry.required && !workflowsById.has(entry.id))
+        issue(".t3-supervisor/project.yaml", "required_workflow_missing", `Required workflow ${entry.id} is missing or invalid.`);
       if (projectScope.projectConfig?.default_workflow && !workflowsById.has(projectScope.projectConfig.default_workflow))
         issue(".t3-supervisor/project.yaml", "default_workflow_missing", `Default workflow ${result.config.default_workflow} is missing or invalid.`);
       const nodeReferences = (nodes: readonly DefinitionNode[], workflow: DefinitionWorkflowInfo): string[] => {
