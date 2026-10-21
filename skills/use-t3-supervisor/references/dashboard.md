@@ -1,22 +1,14 @@
 # Dashboard workflows
 
-The main navigation is Projects, Activity, Settings and Guide. Projects starts with
-an instance-local project list. Open a project, then choose its main conversation;
-Project root / defaults only is an explicit alternative for checkout configuration.
-A project remembers its last context in this browser tab. Hash addresses preserve
-project, conversation and view, and an explicit address wins over remembered state.
-Unavailable selections stay unavailable rather than silently changing checkout.
+The main navigation is Home, Projects, Activity and Settings, with Guide as a utility link. Home prioritizes current attention, supervised conversations with their objectives and freshness, then recent activity. Historical activity is not an unresolved-alert count. Native activity and Supervisor assessment remain separate. Unavailable projects and failed refreshes report limited coverage; retained data does not establish current health.
 
-Each project has four views:
+Projects has Conversations, Definitions and Project settings. Open a conversation for Overview, Plan & agreement and Supervision. A project remembers its last context in this browser tab. Hash addresses preserve project, conversation/checkout and view; an explicit address wins over remembered state. Definitions requires an explicit checkout, including project root. Switching project views retains that checkout draft. Unavailable selections never silently change checkout.
 
-- Progress shows its Supervisor binding, connected conversations and workflow
-  assessments, with a separate Supervisor team section. Expand conversation and
-  step details for provenance. Retry or replace native access remains explicit.
-- Plan shows task interpretation, proposals, agreement and definition-change review.
-- Definitions shows read validity, effective requirements, reusable steps/workflows,
-  collapsible raw sources and the local project.yaml editor.
-- Project settings contains the supervision switch, first setup, model defaults,
-  monitoring and helper limit.
+- Overview shows the current task, agreement and assessment, current attention, workflow records and connected conversations. A current assessment must match both the task identity and source; retained unlinked records are labeled. Failed, loading and incomplete reads remain distinct from absence.
+- Plan & agreement shows proposals, acceptance, requirements and definition-change review.
+- Supervision shows the bound Supervisor, team, assignments, monitoring details and explicit access recovery. Stop/Enable supervision is scoped to the selected chat and also available in Overview.
+- Definitions shows read validity, effective requirements, reusable steps/workflows, collapsible raw sources and the local project.yaml editor.
+- Project settings contains the supervision switch, first setup, model defaults, monitoring defaults and helper limit. It works without a selected conversation.
 
 Instance Settings contains the master switch, global definitions, exclusions and
 connection information. Advanced setup help is collapsed. Guide explains the file
@@ -76,8 +68,7 @@ write remain outside the V1 contract.
 
 Supervisor preferences belong to the project, independently of the configuration editor's
 selected working directory. Model and reasoning choices come from native T3
-capabilities. Save stores defaults for new Supervisors and shows the selected main conversation’s
-separately observed model. Each main gets its own bound Supervisor automatically.
+capabilities. Save stores defaults for new Supervisors. The selected conversation’s Supervision view shows its separately observed model. Each main gets its own bound Supervisor automatically.
 Edit existing models in T3. Independent requests and retries do not cross mains.
 
 Model drafts follow the same explicit refresh/conflict/session-guard rules. A
@@ -104,14 +95,14 @@ before reconsideration.
 ## Current workflow progress
 
 Select a main conversation to inspect current main and child workflow state in the
-live progress section. This is separate from task proposals and historical accepted
+Overview live progress section. This is separate from task proposals and historical accepted
 plans. The view includes native/delegated lineage and lifecycle, current semantic
 steps, overlapping parent contributions, recent Supervisor assessment notes and
 supporting activity links. Missing child workflows and unknown lifecycle remain
 visible without synthesizing successful execution. Load further pages when offered.
 
 Refresh reads state only: it does not wake a chat, save a workflow or accept a plan.
-A refresh failure retains the last successful data with an explicit stale warning.
+Home refresh retains the loaded conversation range, discarding and retrying a changed page sequence before replacing it. Filters apply to loaded rows. A refresh failure retains the last successful data with an explicit stale warning.
 After switching main/project, never interpret the old main's data as the new scope.
 Incomplete native scope, incompatible state and unavailable reads require attention;
 they do not mean an empty or completed workflow.

@@ -91,7 +91,7 @@ version and afterwards a compact core with their version; full instructions, tas
 context, definitions and dry-run checks are pulled on demand. Each wake row has one
 activity list and per-task context with revision pins, proposal identity and digest,
 agreement and repair state. Oversized requests stop before delivery with a visible
-reason in Progress and Plan; pending activity and uncertain delivery identities remain
+reason in Overview and Plan & agreement; pending activity and uncertain delivery identities remain
 intact. Retry stays explicit. Blocked startup also stops automatic definition review
 and renewal until Retry. Readable definition changes during healthy startup, including
 invalid or missing definitions, remain pending context work.
@@ -318,7 +318,7 @@ interrupted because supervision stopped, and other chats keep their supervision.
 Quiet completion/archive/deletion can settle the owned chat once children and
 pending work are quiet. A request cancelled before it started executed nothing, so the
 latest executed run decides whether the main finished. The binding records the first
-gate that keeps an owned Supervisor active as `settlementBlockedBy`, shown on Progress.
+gate that keeps an owned Supervisor active as `settlementBlockedBy`, shown in Supervision.
 A not-needed or unresolved request gets no check-ins, so unreviewed activity retained from
 an earlier request, or a replaced request's known-unsent draft, does not keep its Supervisor
 open; both stay as history. An incomplete activity scan or an introduction with an unknown

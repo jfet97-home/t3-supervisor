@@ -21,7 +21,7 @@ t3-supervisor auth forge
 
 For Docker or a VM, run the command inside that environment. Tokens expire after five minutes and can be used once. The browser keeps a 30-day browser session scoped to that address and port. Sessions survive restarts and deployments until their original expiry; signing out revokes the session.
 
-The dashboard has **Projects**, **Guide**, **Activity**, and **Settings**. Project file editing needs a separate native T3 filesystem read/write credential configured through deployment setup.
+The dashboard opens on **Home**, showing current attention and supervised work. **Projects**, **Activity**, and **Settings** remain directly accessible, with **Guide** as a utility link. Each conversation has **Overview**, **Plan & agreement**, and **Supervision** views. Project file editing needs a separate native T3 filesystem read/write credential configured through deployment setup.
 
 The Settings page lets you exclude chats from Project Supervisor selection. These choices are saved per instance and apply without a restart.
 

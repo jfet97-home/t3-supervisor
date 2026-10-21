@@ -32,11 +32,7 @@ Steps, workflows and inline local steps may carry optional `references` lists of
 checkout-relative file paths. Definitions and Plan display them read-only; edit
 the source YAML/frontmatter and refresh. Referenced files are not opened automatically.
 
-Open a project from Projects, then choose a main conversation. The project views
-are Progress, Plan, Definitions and Project settings. Project root / defaults only
-is explicit. Context is remembered per project in the current tab; hash links take
-precedence. An unavailable conversation never falls back to another checkout.
-Drafts survive switching views, including instance Settings exclusions.
+Start on Home for current attention, supervised work and freshness, then open the exact conversation. Projects has Conversations, Definitions and Project settings; a conversation has Overview, Plan & agreement and Supervision. Choose the definitions checkout explicitly, including project root. Project-level views retain that checkout and its draft. Context is remembered per project in the current tab; hash links take precedence. An unavailable conversation never falls back to another checkout. Drafts survive switching views, including instance Settings exclusions.
 
 Projects reads the selected operative checkout's `.t3-supervisor/project.yaml`
 index, then the listed full step and workflow files that apply. A summary says
@@ -110,14 +106,14 @@ Result text and references are untrusted, opaque evidence. Receipt, assessment a
 step completion stay separate: neither a finished external task nor an accepted
 result completes a step. Do not invent contributor threads or completion for it.
 
-Progress and Activity are observational. Read timestamps, stale/incomplete warnings,
+Overview and Activity are observational. Read timestamps, stale/incomplete warnings,
 assessments and source links. Refresh does not wake chats or write workflow state.
 Idle/no-AppRun mirrors do not prove completion. Quiet scopes may park while unresolved
 work stays unresolved; relevant activity reuses the same Supervisor identity.
 
 ## Stopping supervision of one chat
 
-- Use the selected chat's Stop supervision button in Progress; Enable supervision resumes it.
+- Use the selected chat's Stop supervision button in Overview or Supervision; Enable supervision resumes it.
 - In the Supervisor conversation, ask it to stop; it calls `supervision_stop` itself.
 - In the supervised chat, ask the assistant to tell its Supervisor; the Supervisor cites your original message.
 - From another chat in the same T3 environment, name the exact chat ID in your request; that chat's assistant calls

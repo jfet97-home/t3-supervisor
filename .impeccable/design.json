@@ -1,0 +1,415 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-21T21:13:43.047293Z",
+  "title": "Design System: Supervisor",
+  "extensions": {
+    "colorMeta": {
+      "ink": {
+        "role": "neutral",
+        "displayName": "Work ink"
+      },
+      "quiet": {
+        "role": "neutral",
+        "displayName": "Quiet ink"
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Work surface"
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Content boundary"
+      },
+      "soft": {
+        "role": "neutral",
+        "displayName": "Tonal inset"
+      },
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Work canvas"
+      },
+      "blue": {
+        "role": "primary",
+        "displayName": "Action blue"
+      },
+      "control-line": {
+        "role": "neutral",
+        "displayName": "Control outline"
+      },
+      "rail": {
+        "role": "neutral",
+        "displayName": "Midnight indigo"
+      },
+      "rail-quiet": {
+        "role": "neutral",
+        "displayName": "Quiet rail text"
+      },
+      "rail-selected": {
+        "role": "secondary",
+        "displayName": "Selected rail indigo"
+      },
+      "teal": {
+        "role": "secondary",
+        "displayName": "Route teal"
+      },
+      "dark-ink": {
+        "role": "neutral",
+        "displayName": "Work ink (dark)"
+      },
+      "dark-quiet": {
+        "role": "neutral",
+        "displayName": "Quiet ink (dark)"
+      },
+      "dark-surface": {
+        "role": "neutral",
+        "displayName": "Work surface (dark)"
+      },
+      "dark-line": {
+        "role": "neutral",
+        "displayName": "Content boundary (dark)"
+      },
+      "dark-soft": {
+        "role": "neutral",
+        "displayName": "Tonal inset (dark)"
+      },
+      "dark-canvas": {
+        "role": "neutral",
+        "displayName": "Work canvas (dark)"
+      },
+      "dark-blue": {
+        "role": "primary",
+        "displayName": "Action blue (dark)"
+      },
+      "dark-control-line": {
+        "role": "neutral",
+        "displayName": "Control outline (dark)"
+      },
+      "dark-teal": {
+        "role": "secondary",
+        "displayName": "Route teal (dark)"
+      },
+      "dark-rail": {
+        "role": "neutral",
+        "displayName": "Midnight indigo (dark)"
+      },
+      "on-accent": {
+        "role": "primary",
+        "displayName": "White action text"
+      },
+      "blue-hover": {
+        "role": "primary",
+        "displayName": "Deep action blue"
+      },
+      "dark-button-primary": {
+        "role": "primary",
+        "displayName": "Filled action blue (dark)"
+      },
+      "rail-hover": {
+        "role": "secondary",
+        "displayName": "Rail hover indigo"
+      },
+      "rail-active-icon": {
+        "role": "secondary",
+        "displayName": "Selected icon teal"
+      },
+      "rail-focus": {
+        "role": "secondary",
+        "displayName": "Rail focus teal"
+      },
+      "section-selected": {
+        "role": "secondary",
+        "displayName": "Selected view fill"
+      },
+      "section-selected-ink": {
+        "role": "secondary",
+        "displayName": "Selected view ink"
+      },
+      "dark-section-selected": {
+        "role": "secondary",
+        "displayName": "Selected view fill (dark)"
+      },
+      "dark-section-selected-ink": {
+        "role": "secondary",
+        "displayName": "Selected view ink (dark)"
+      },
+      "native-active": {
+        "role": "tertiary",
+        "displayName": "Native active green"
+      },
+      "invalid": {
+        "role": "tertiary",
+        "displayName": "Invalid border red"
+      },
+      "dark-invalid": {
+        "role": "tertiary",
+        "displayName": "Invalid border red (dark)"
+      },
+      "status-blue-bg": {
+        "role": "tertiary",
+        "displayName": "status blue bg"
+      },
+      "status-blue-ink": {
+        "role": "tertiary",
+        "displayName": "status blue ink"
+      },
+      "status-green-bg": {
+        "role": "tertiary",
+        "displayName": "status green bg"
+      },
+      "status-green-ink": {
+        "role": "tertiary",
+        "displayName": "status green ink"
+      },
+      "status-amber-bg": {
+        "role": "tertiary",
+        "displayName": "status amber bg"
+      },
+      "status-amber-ink": {
+        "role": "tertiary",
+        "displayName": "status amber ink"
+      },
+      "status-critical-bg": {
+        "role": "tertiary",
+        "displayName": "status critical bg"
+      },
+      "status-critical-ink": {
+        "role": "tertiary",
+        "displayName": "status critical ink"
+      },
+      "dark-status-blue-bg": {
+        "role": "tertiary",
+        "displayName": "status blue bg (dark)"
+      },
+      "dark-status-blue-ink": {
+        "role": "tertiary",
+        "displayName": "status blue ink (dark)"
+      },
+      "dark-status-green-bg": {
+        "role": "tertiary",
+        "displayName": "status green bg (dark)"
+      },
+      "dark-status-green-ink": {
+        "role": "tertiary",
+        "displayName": "status green ink (dark)"
+      },
+      "dark-status-amber-bg": {
+        "role": "tertiary",
+        "displayName": "status amber bg (dark)"
+      },
+      "dark-status-amber-ink": {
+        "role": "tertiary",
+        "displayName": "status amber ink (dark)"
+      },
+      "dark-status-critical-bg": {
+        "role": "tertiary",
+        "displayName": "status critical bg (dark)"
+      },
+      "dark-status-critical-ink": {
+        "role": "tertiary",
+        "displayName": "status critical ink (dark)"
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Operational page headings; the oversized sign-in slogan is not a reusable display role."
+      },
+      "headline-mobile": {
+        "displayName": "Headline Mobile",
+        "purpose": "Page headings at widths up to 760px."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Major work sections."
+      },
+      "title-mobile": {
+        "displayName": "Title Mobile",
+        "purpose": "Major work sections at widths up to 760px."
+      },
+      "section": {
+        "displayName": "Section",
+        "purpose": "Subordinate headings and fieldset legends."
+      },
+      "objective": {
+        "displayName": "Objective",
+        "purpose": "Focused task statement."
+      },
+      "objective-mobile": {
+        "displayName": "Objective Mobile",
+        "purpose": "Focused task statement at widths up to 760px."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Default work content."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Button text; ordinary form labels inherit their surrounding line height."
+      },
+      "navigation": {
+        "displayName": "Navigation",
+        "purpose": "Project and conversation navigation; current items increase to weight 600."
+      },
+      "caption": {
+        "displayName": "Caption",
+        "purpose": "Read times and supporting context."
+      },
+      "badge": {
+        "displayName": "Badge",
+        "purpose": "Sentence-case status labels."
+      },
+      "input": {
+        "displayName": "Input",
+        "purpose": "Native field text; weight follows its surrounding control or label."
+      },
+      "code": {
+        "displayName": "Code",
+        "purpose": "Literal source, identifiers and paths."
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "control-border",
+        "value": "border-color 140ms ease-out",
+        "purpose": "Buttons and links only when reduced motion is not requested; no lift or entrance animation."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact-desktop",
+        "value": "1150px"
+      },
+      {
+        "name": "mobile",
+        "value": "760px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Filled save action with explicit disabled and keyboard states.",
+      "html": "<button type=\"button\" class=\"ds-primary ds-primary-fill\">Save chat settings</button>",
+      "css": ".ds-primary{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-primary{display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 42px; min-width: 0; border: 1px solid var(--control-line, #8796a9); border-radius: 7px; background: var(--surface, #fff); padding: 8px 13px; cursor: pointer; touch-action: manipulation; font-size: 14px; font-weight: 550; line-height: 1.4; text-decoration: none; color: var(--ink, #202c3c);}.ds-primary:hover:not(:disabled){background: var(--soft, #edf2f7); border-color: var(--blue, #215eb2);}.ds-primary.ds-primary-fill{background: var(--blue, #215eb2); border-color: var(--blue, #215eb2); color: #fff;}.ds-primary.ds-primary-fill:hover:not(:disabled){background: #17467f;}.ds-primary:disabled{cursor: default; opacity: .55;}.ds-primary:focus-visible{outline: 3px solid var(--blue, #215eb2); outline-offset: 3px;}@media (pointer: coarse){.ds-primary{min-height:48px;}}@media (prefers-color-scheme: dark){.ds-primary.ds-primary-fill{background: #2863ac; color: #fff; border-color: #2863ac;}}@media (prefers-reduced-motion: no-preference){.ds-primary{transition: border-color 140ms ease-out;}}@media (prefers-color-scheme: dark){.ds-primary{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}"
+    },
+    {
+      "name": "Secondary button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Bordered refresh or recovery action.",
+      "html": "<button type=\"button\" class=\"ds-secondary\"><svg width=\"17\" height=\"17\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" focusable=\"false\"><path d=\"M20 7v5h-5 M20 12a8 8 0 1 0-2 6\"/></svg>Refresh overview</button>",
+      "css": ".ds-secondary{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-secondary{display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 42px; min-width: 0; border: 1px solid var(--control-line, #8796a9); border-radius: 7px; background: var(--surface, #fff); padding: 8px 13px; cursor: pointer; touch-action: manipulation; font-size: 14px; font-weight: 550; line-height: 1.4; text-decoration: none; color: var(--ink, #202c3c);}.ds-secondary:hover:not(:disabled){background: var(--soft, #edf2f7); border-color: var(--blue, #215eb2);}.ds-secondary:disabled{cursor: default; opacity: .55;}.ds-secondary:focus-visible{outline: 3px solid var(--blue, #215eb2); outline-offset: 3px;}@media (pointer: coarse){.ds-secondary{min-height:48px;}}@media (prefers-reduced-motion: no-preference){.ds-secondary{transition: border-color 140ms ease-out;}}@media (prefers-color-scheme: dark){.ds-secondary{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}.ds-secondary svg{flex-shrink:0;}"
+    },
+    {
+      "name": "Quiet button",
+      "kind": "button",
+      "refersTo": "button-quiet",
+      "description": "Low-emphasis action with no resting fill or visible border.",
+      "html": "<button type=\"button\" class=\"ds-quiet ds-quiet-fill\">Sign out</button>",
+      "css": ".ds-quiet{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-quiet{display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 42px; min-width: 0; border: 1px solid var(--control-line, #8796a9); border-radius: 7px; background: var(--surface, #fff); padding: 8px 13px; cursor: pointer; touch-action: manipulation; font-size: 14px; font-weight: 550; line-height: 1.4; text-decoration: none; color: var(--ink, #202c3c);}.ds-quiet:hover:not(:disabled){background: var(--soft, #edf2f7); border-color: var(--blue, #215eb2);}.ds-quiet:disabled{cursor: default; opacity: .55;}.ds-quiet.ds-quiet-fill{border-color: transparent; background: transparent;}.ds-quiet:focus-visible{outline: 3px solid var(--blue, #215eb2); outline-offset: 3px;}@media (pointer: coarse){.ds-quiet{min-height:48px;}}@media (prefers-reduced-motion: no-preference){.ds-quiet{transition: border-color 140ms ease-out;}}@media (prefers-color-scheme: dark){.ds-quiet{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}"
+    },
+    {
+      "name": "Search field",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "Native search with an SVG icon, quiet placeholder and visible focus.",
+      "html": "<label class=\"ds-search\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" focusable=\"false\"><path d=\"M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14 M15 15l6 6\"/></svg><input class=\"ds-search-input\" type=\"search\" aria-label=\"Search work\" placeholder=\"Search conversations or objectives\"></label>",
+      "css": ".ds-search{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:14px;line-height:1.55;color-scheme:light;}.ds-search-input{width: 100%; max-width: 100%; min-width: 0; min-height: 44px; border: 1px solid var(--control-line, #8796a9); border-radius: 7px; padding: 9px 12px; background: var(--surface, #fff); font-size: 16px; caret-color: var(--blue, #215eb2);}.ds-search-input::placeholder{color: var(--quiet, #53657a); opacity: 1;}.ds-search-input[aria-invalid=\"true\"]{border-color: #a32f25;}.ds-search-input:focus-visible{outline: 3px solid var(--blue, #215eb2); outline-offset: 3px;}.ds-search{position: relative; display: grid; gap: 6px;}.ds-search > svg{position: absolute; left: 12px; top: 13px; color: var(--quiet, #53657a);}.ds-search:has(> svg) > .ds-search-input{padding-left: 38px;}@media (prefers-color-scheme: dark){.ds-search-input[aria-invalid=\"true\"]{border-color: #ffb9b3;}}@media (prefers-color-scheme: dark){.ds-search{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}.ds-search-input{font:inherit;font-size:16px;color:inherit;} .ds-search{font-weight:550;} .ds-search svg{flex-shrink:0;} @media(pointer:coarse){.ds-search-input{min-height:48px;}}"
+    },
+    {
+      "name": "Rail navigation",
+      "kind": "nav",
+      "refersTo": "rail-navigation",
+      "description": "Indigo wayfinding with a current-page label and teal icon.",
+      "html": "<nav class=\"ds-rail-nav\" aria-label=\"Supervisor sections\"><a href=\"#home\" aria-current=\"page\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" focusable=\"false\"><path d=\"m3 10 9-7 9 7v10H3Z M9 20v-7h6v7\"/></svg><span>Home</span></a><a href=\"#projects\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" focusable=\"false\"><path d=\"M3 4h7v7H3Z M14 4h7v7h-7Z M3 15h7v6H3Z M14 15h7v6h-7Z\"/></svg><span>Projects</span></a><a href=\"#activity\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" focusable=\"false\"><path d=\"M3 12h4l3-8 4 16 3-8h4\"/></svg><span>Activity</span></a><a href=\"#settings\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" focusable=\"false\"><path d=\"M4 7h16 M4 17h16 M8 4v6 M16 14v6\"/></svg><span>Settings</span></a></nav>",
+      "css": ".ds-rail-nav{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-rail-nav{display: grid; gap: 5px;}.ds-rail-nav a{display: flex; gap: 12px; align-items: center; min-height: 46px; padding: 10px 13px; color: var(--rail-quiet, #becbdf); border-radius: 8px; text-decoration: none;}.ds-rail-nav a:hover{color: #fff; background: #2a3853;}.ds-rail-nav a[aria-current=\"page\"]{color: #fff; background: var(--rail-selected, #354563); font-weight: 600;}.ds-rail-nav a[aria-current=\"page\"] svg{color: #72ddd4;}.ds-rail-nav a:focus-visible{outline-color: #7ce0d8;}@media (max-width: 760px){.ds-rail-nav{display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3px;}}@media (max-width: 760px){.ds-rail-nav a{justify-content: center; flex-direction: column; gap: 4px; padding: 8px 3px; min-height: 57px; font-size: 12px;}}@media (max-width: 760px){.ds-rail-nav a{position: relative;}}@media (prefers-color-scheme: dark){.ds-rail-nav{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}.ds-rail-nav{background:var(--rail, #202944);padding:27px 18px 20px;width:220px;} .ds-rail-nav svg{flex-shrink:0;} @media(max-width:1150px){.ds-rail-nav{width:190px;padding-inline:12px;}} @media(max-width:760px){.ds-rail-nav{width:auto;padding:14px 16px 10px;}} .ds-rail-nav a:focus-visible{outline-width:3px;outline-style:solid;outline-offset:3px;}@media(forced-colors:active){.ds-rail-nav a[aria-current=\"page\"]{border:1px solid CanvasText;}}@media(prefers-reduced-motion:no-preference){.ds-rail-nav a{transition:border-color 140ms ease-out;}}"
+    },
+    {
+      "name": "Conversation navigation",
+      "kind": "nav",
+      "refersTo": "section-navigation",
+      "description": "Text links with a tonal teal current view.",
+      "html": "<nav class=\"ds-section-nav\" aria-label=\"Conversation views\"><a href=\"#overview\" aria-current=\"page\">Overview</a><a href=\"#plan\">Plan &amp; agreement</a><a href=\"#supervision\">Supervision</a></nav>",
+      "css": ".ds-section-nav{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-section-nav{display: flex; gap: 5px; border-bottom: 1px solid var(--line, #dce3eb); padding-bottom: 8px;}.ds-section-nav a{display: flex; align-items: center; min-height: 42px; padding: 8px 14px; border-radius: 7px; text-decoration: none; color: var(--quiet, #53657a); font-size: 14px;}.ds-section-nav a:hover{background: var(--soft, #edf2f7);}.ds-section-nav a[aria-current=\"page\"]{background: #e0eeef; color: #125d58; font-weight: 600;}@media (max-width: 760px){.ds-section-nav{gap: 2px;}}@media (max-width: 760px){.ds-section-nav a{justify-content: center; padding: 8px 10px; font-size: 13px;}}@media (prefers-color-scheme: dark){.ds-section-nav a[aria-current=\"page\"]{background: #254846; color: #b9eee5;}}@media (prefers-color-scheme: dark){.ds-section-nav{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}.ds-section-nav a:focus-visible{outline:3px solid var(--blue, #215eb2);outline-offset:3px;} @media(pointer:coarse){.ds-section-nav a{min-height:48px;}} @media(prefers-reduced-motion:no-preference){.ds-section-nav a{transition:border-color 140ms ease-out;}} @media(forced-colors:active){.ds-section-nav a[aria-current=\"page\"]{border:1px solid CanvasText;}}"
+    },
+    {
+      "name": "Status labels",
+      "kind": "chip",
+      "refersTo": "status-chip",
+      "description": "Named states in neutral, blue, green, amber and critical pairs.",
+      "html": "<span class=\"ds-pill\">Planned</span> <span class=\"ds-pill ds-blue\">Underway</span> <span class=\"ds-pill ds-green\">Completed</span> <span class=\"ds-pill ds-amber\">Needs attention</span> <span class=\"ds-pill ds-critical\">Blocked</span>",
+      "css": ".ds-pill{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-pill{display: inline-flex; align-items: center; width: fit-content; border-radius: 5px; padding: 3px 7px; background: var(--soft, #edf2f7); color: var(--quiet, #53657a); font-size: 12px; font-weight: 550; line-height: 1.5;}.ds-pill.ds-blue{background: #e7effc; color: #244b88;}.ds-pill.ds-green{background: #e2f1eb; color: #1d5d4b;}.ds-pill.ds-amber{background: #fcf0d9; color: #7b4b0d;}.ds-pill.ds-critical{background: #fbe6e4; color: #92332b;}@media (prefers-color-scheme: dark){.ds-pill.ds-blue{background: #263e64; color: #c6ddff;}}@media (prefers-color-scheme: dark){.ds-pill.ds-green{background: #203f3a; color: #b6e7d6;}}@media (prefers-color-scheme: dark){.ds-pill.ds-amber{background: #4c3a1c; color: #f4d699;}}@media (prefers-color-scheme: dark){.ds-pill.ds-critical{background: #512e30; color: #ffcfcb;}}@media (prefers-color-scheme: dark){.ds-pill{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}@media(forced-colors:active){.ds-pill{border:1px solid CanvasText;}}"
+    },
+    {
+      "name": "Work panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "Flat bordered surface; nested panels become separated sections.",
+      "html": "<section class=\"ds-panel\"><h3>Supervisor conversation</h3><p class=\"ds-panel-muted\">Conversation and model details</p></section>",
+      "css": ".ds-panel{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-panel{padding: 24px; border: 1px solid var(--line, #dce3eb); border-radius: var(--radius, 12px); background: var(--surface, #fff);}.ds-panel .ds-panel{padding: 16px 0; border: 0; border-top: 1px solid var(--line, #dce3eb); border-radius: 0;}@media (prefers-color-scheme: dark){.ds-panel{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}.ds-panel{display:grid;gap:20px;} .ds-panel h3{margin:0;font-size:17px;font-weight:650;line-height:1.4;} .ds-panel p{margin:0;overflow-wrap:anywhere;} .ds-panel-muted{color:var(--quiet, #53657a);} @media(max-width:760px){.ds-panel{padding:19px;}}"
+    },
+    {
+      "name": "Attention row",
+      "kind": "custom",
+      "refersTo": "attention-list",
+      "description": "A linked attention reason in one amber-bordered list.",
+      "html": "<div class=\"ds-attention-list\"><a class=\"ds-attention-row\" href=\"#conversation\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" focusable=\"false\"><path d=\"M12 3 2 21h20Z M12 9v5 M12 17v1\"/></svg><div><strong>Needs attention</strong><p>Supervision has an uncertain operation.</p></div><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" focusable=\"false\"><path d=\"M5 12h14 m-6-6 6 6-6 6\"/></svg></a></div>",
+      "css": ".ds-attention-list{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-attention-list{border: 1px solid #dac697; border-radius: 12px; overflow: hidden; background: var(--surface, #fff);}.ds-attention-row{display: flex; align-items: center; gap: 15px; padding: 17px 20px; color: var(--ink, #202c3c); text-decoration: none;}.ds-attention-row:not(:last-child){border-bottom: 1px solid var(--line, #dce3eb);}.ds-attention-row > svg:first-child{color: #8b5712; flex-shrink: 0;}.ds-attention-row > svg:last-child{margin-left: auto; flex-shrink: 0;}.ds-attention-row p{margin: 3px 0 0; font-size: 14px;}.ds-attention-row:hover{background: #fff9ec;}@media (max-width: 760px){.ds-attention-row{padding: 16px; gap: 10px;}}@media (max-width: 760px){.ds-attention-row > svg:first-child{display: none;}}@media (prefers-color-scheme: dark){.ds-attention-list{border-color: #7d6945;}}@media (prefers-color-scheme: dark){.ds-attention-row:hover{background: #35404c;}}@media (prefers-color-scheme: dark){.ds-attention-list{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}.ds-attention-row:focus-visible{outline:3px solid var(--blue, #215eb2);outline-offset:3px;} .ds-attention-row strong,.ds-attention-row p{overflow-wrap:anywhere;} @media(prefers-color-scheme:dark){.ds-attention-row>svg:first-child{color:#f4cf8b;}} @media(forced-colors:active){.ds-attention-list{border:1px solid CanvasText;}} @media(prefers-reduced-motion:no-preference){.ds-attention-row{transition:border-color 140ms ease-out;}}"
+    },
+    {
+      "name": "Task path",
+      "kind": "custom",
+      "refersTo": "task-path",
+      "description": "Task, agreement and assessment records in three stages that stack on mobile.",
+      "html": "<ol class=\"ds-task-path\" aria-label=\"Task, agreement and assessment\"><li><strong>Task interpretation</strong><span>Interpreted</span></li><li><strong>Plan agreement</strong><span>Awaiting acceptance</span></li><li><strong>Supervisor assessment</strong><span>Underway</span></li></ol>",
+      "css": ".ds-task-path{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-task-path{display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); list-style: none; padding: 0; margin: 24px 0 0; background: var(--soft, #edf2f7); border-radius: 9px;}.ds-task-path li{padding: 14px 18px;}.ds-task-path li:not(:last-child){border-right: 1px solid var(--line, #dce3eb);}.ds-task-path strong{display: block; margin-bottom: 4px; font-size: 13px;}.ds-task-path span{font-size: 13px; color: var(--quiet, #53657a);}@media (max-width: 760px){.ds-task-path{grid-template-columns: minmax(0, 1fr);}}@media (max-width: 760px){.ds-task-path li{padding: 12px 15px;}}@media (max-width: 760px){.ds-task-path li:not(:last-child){border: 0; border-bottom: 1px solid var(--line, #dce3eb);}}@media (prefers-color-scheme: dark){.ds-task-path{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}.ds-task-path li{overflow-wrap:anywhere;}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Transport Interchange Wayfinding",
+    "overview": "Transport interchange wayfinding gives Supervisor a stable midnight-indigo navigation field and clear work surfaces. Teal marks the selected route; action blue identifies links, controls and keyboard focus. The personality comes from aligned information, restrained geometry and readable operational type.\n\nThe workspace is compact without compressing the meaning of work. Objectives, supervision, native activity and read times have separate places. Borders and tonal insets organize detail; the same structure changes into stacked reading on narrow screens and follows the system color preference.",
+    "keyCharacteristics": [
+      "A persistent indigo navigation field beside a quiet work canvas.",
+      "Aligned rows and explicit text labels for state, scope and freshness.",
+      "Blue actions, teal selection and semantic amber/red attention.",
+      "Flat bordered surfaces, modest corners and minimal motion."
+    ],
+    "rules": [
+      {
+        "name": "The Accent Roles Rule",
+        "body": "Use action blue for links, controls and work-area focus. Use teal for selected project routes and conversation views; the indigo rail keeps its own selected fill and pale-teal icon.",
+        "section": "colors"
+      },
+      {
+        "name": "The State Needs Words Rule",
+        "body": "Pair every status color or activity dot with text. Amber and red describe an actual issue or state, and native activity remains separate from supervision and assessment.",
+        "section": "colors"
+      },
+      {
+        "name": "The Operational Type Rule",
+        "body": "Use the platform sans for work content, labels and operational headings. Reserve monospace for source, paths and identifiers; status labels stay in sentence case.",
+        "section": "typography"
+      },
+      {
+        "name": "The Single Boundary Rule",
+        "body": "Give a work surface one quiet border. Inside an existing panel, separate sections with rules and spacing instead of another rounded card.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do preserve the indigo navigation field and the distinction between canvas, work surface and tonal inset in both color schemes.",
+      "Do keep state labels, native activity, read times and uncertainty readable together.",
+      "Do use visible keyboard focus, labeled controls and the existing narrow-screen reflow.",
+      "Do draw icons as consistent stroked SVG and keep monospace for literal technical content."
+    ],
+    "donts": [
+      "Don't use amber or red as decoration, or let a color alone communicate status.",
+      "Don't add decorative shadows, gradients or nested rounded cards to the flat work surfaces.",
+      "Don't turn the task interpretation, agreement and assessment path into a percentage-complete indicator.",
+      "Don't reuse the sign-in display scale for workspace labels."
+    ]
+  }
+}
