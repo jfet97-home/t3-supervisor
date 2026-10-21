@@ -127,7 +127,8 @@ IDs, full findings handoff, required model diversity and reasoning settings pres
 Delays or unfavorable findings do not justify replacement. An unavailable compliant
 route is an explicit gap, not a waiver.
 
-Keep adoption separate from drafting. Changes to generally loaded instructions or skills
-can impose a policy even without enabling Supervisor. Until adoption is authorized, make
-such additions conditional on an explicit request or adoption; do not advertise a
-proposal while silently changing the project's active rules.
+Keep drafting, adoption and external edits separate. Follow the target-folder boundary
+in SKILL.md: keep execution guidance in the definitions and explain rationale in the
+response. Existing external files can be read or referenced. Propose external changes to the user and wait for
+explicit approval of those specific edits. Conditional wording, catalog adoption or
+Supervisor activation does not replace that approval.

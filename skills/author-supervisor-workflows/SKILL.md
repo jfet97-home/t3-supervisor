@@ -10,6 +10,20 @@ current product Guide or definition docs as the syntax authority; [definition
 patterns](references/definition-patterns.md) explains the file format and review
 pattern. Dashboard work belongs to [use-t3-supervisor](../use-t3-supervisor/SKILL.md).
 
+## Target project boundary
+
+Write only the needed `project.yaml`, `steps/*.md` and `workflows/*.yaml` inside the
+target project's `.t3-supervisor/` folder by default. Keep execution rules in their
+descriptions and explain rationale in the response; do not generate extra documentation. Investigate existing instructions and skills
+as evidence; reading or referencing them does not authorize changing them.
+
+At most propose changes outside that folder to the user, naming the files, concrete
+changes and effects on other users when Supervisor is absent or disabled. Apply only
+the specific changes the user explicitly approves. This covers AGENTS.md, CLAUDE.md,
+shared skills, routers, documentation and hooks. Authoring, commit/push,
+catalog adoption or enabling Supervisor does not itself approve those edits. Making
+an instruction conditional on Supervisor also does not authorize writing it.
+
 ## Scope and evidence
 
 Establish the checkout, existing catalog, requested outcomes, count limits and proposal
@@ -17,7 +31,7 @@ and adoption boundary. Count definitions separately from reused occurrences. A m
 is a ceiling, not a target; neither fewer definitions nor filling every slot is a goal.
 Do not hide extra responsibilities in inline steps to evade limits.
 
-Read project instructions, matched skills and knowledge. Research project and
+Read versioned project instructions and matched skills. Research project and
 orchestration and tooling histories, including human conversations across authorized local,
 remote and CLI sources. Record coverage gaps. Search snippets identify leads; read their
 context and later corrections. Current artifacts and later explicit instructions
@@ -76,8 +90,7 @@ lists. Remove repeated rationale, reminders and defensive boilerplate. Keep proh
 that prevent a known failure. Avoid cryptic compressed prose.
 
 State a rule where its decision belongs. Keep essential conditions and exceptions
-visible; put shared procedural detail in one maintained home and explicitly tell readers
-to consult it. Do not duplicate a workflow's completion contract in every member, hide
+visible; put shared rules in the owning step or workflow description and refer to it. Do not duplicate a workflow's completion contract in every member, hide
 important conditions behind vague links, or move the same wall of text unchanged
 elsewhere.
 
@@ -90,7 +103,9 @@ discard relevant detail.
 
 Descriptions carry applicability, roles, inputs, evidence and completion. Link real
 authoritative project files, especially maintained Markdown docs and skills. Read them:
-references prove neither consultation nor access and grant no permission.
+references prove neither consultation nor access and grant no permission. Supporting
+references must be versioned and available in the target checkout, without ignored or
+machine-local dependencies.
 
 Separate required inclusion, fixed structure and default templates. Account for
 requirements once per main task, including nested reuse. Genuine inapplicability needs a
