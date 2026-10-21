@@ -1010,6 +1010,21 @@ test("Plan retains unavailable diagnostics without claiming unreadable records a
   assert.doesNotMatch(html, /No task interpretation or plan has been recorded/);
 });
 
+test("blocked supervision is visible beside Progress and Plan even when the native conversation is ready", () => {
+  for (const section of ["progress", "plan"] as const) {
+    const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+      ...viewDefaults, section, snapshot: {...snapshot, monitoringStatus: {state: "unavailable", pendingItems: 0, nextReviewAt: null,
+        lastNoticeAt: null, retryable: true, message: "Complete supervision context exceeds its limit; <no sources were truncated>."}}, selection, monitoring,
+      threadId: "task-thread", connected: true, saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false,
+      shouldOfferRetry: true, retryButtonLabel: "Retry native access", canRetry: true,
+      onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+    }));
+    assert.match(html, /<p class="panel" role="alert"><strong>Supervision is blocked\.<\/strong>/u);
+    assert.match(html, /exceeds its limit; &lt;no sources were truncated&gt;/u);
+    assert.match(html, /<div class="panel stack"><h3>Native Supervisor access/u, "recovery stays visible in both task views");
+  }
+});
+
 test("external contributions render read-only per node with text labels, escaped text and no unsafe links", () => {
   const contribution = (overrides: Partial<WorkflowProgressSnapshot["workflows"][number]["contributions"][number]>) => ({
     contributionId: "external", nodeId: "step-inspect", nodeName: "Inspect source", inCurrentPlan: true, state: "awaiting_result" as const, revision: 1,

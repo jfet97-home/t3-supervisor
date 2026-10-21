@@ -173,7 +173,7 @@ test("native primary user messages use the running root_turn node", () => {
   const userRun = projection.runs.find(run => run.id === user.runId)!;
   assert.equal(nativeUserMessageVisible(projection, sourceRun, source), true);
   assert.equal(nativeUserMessageVisible(projection, userRun, user), true);
-  assert.equal(buildProjectDefinitionReviewRequest(task(), definitions(), definitions({revision: newRevision}), projection, "Running marker") !== null, true);
+  assert.equal(buildProjectDefinitionReviewRequest(task(), definitions(), definitions({revision: newRevision}), projection, "Running marker").text !== null, true);
 });
 
 test("restart_active preserves source and citation messages on interrupted historical roots", () => {
@@ -192,7 +192,7 @@ test("restart_active preserves source and citation messages on interrupted histo
   const parsed = parseProjectDefinitionDecisionRecord(decisionRecord(), current, observed, projection);
   assert.ok(parsed);
   assert.deepEqual(parsed.decision.userMessageIds, ["user-1"]);
-  const request = buildProjectDefinitionReviewRequest(current, definitions(), observed, projection, "Restart marker");
+  const request = buildProjectDefinitionReviewRequest(current, definitions(), observed, projection, "Restart marker").text;
   assert.ok(request);
   assert.deepEqual((parseEnvelope(request).userMessages as Array<Record<string, unknown>>).map(message => message.messageId), ["source-0", "user-1"]);
 
@@ -228,7 +228,7 @@ test("stopped, failed and cancelled runs retain their real user request and auth
     const source = projection.messages[0]!;const sourceRun = projection.runs.find(run => run.id === source.runId)!;
     assert.equal(nativeUserMessageVisible(projection, sourceRun, source), true, status);
     assert.ok(parseProjectDefinitionDecisionRecord(decisionRecord(), task(), definitions({revision: newRevision}), projection), status);
-    assert.ok(buildProjectDefinitionReviewRequest(task(), definitions(), definitions({revision: newRevision}), projection, "Stopped history marker"), status);
+    assert.ok(buildProjectDefinitionReviewRequest(task(), definitions(), definitions({revision: newRevision}), projection, "Stopped history marker").text, status);
   }
 });
 
@@ -256,7 +256,7 @@ test("decision reasons and review envelopes redact credentials and preserve comp
   const parsed = parseProjectDefinitionDecisionRecord(decisionRecord({reason: "Bearer abcdefghijklmnopqrstuvwxyz123456"}), current, observed, agentProjection());
   assert.equal(parsed?.decision.reason, "[redacted credential]");
 
-  const prompt = buildProjectDefinitionReviewRequest(current, definitions(), observed, agentProjection(), "Review marker");
+  const prompt = buildProjectDefinitionReviewRequest(current, definitions(), observed, agentProjection(), "Review marker").text;
   assert.ok(prompt);
   assert.match(prompt, /UNTRUSTED_PROJECT_DEFINITION_REVIEW_ENVELOPE/u);
   assert.match(prompt, /UNTRUSTED DATA/u);
@@ -278,7 +278,7 @@ test("review requests handle invalid snapshots and refresh proposals after resto
   const current = task();
   const invalid = definitions({status: "invalid", revision: null, projectConfig: null, config: {required: []}, steps: [], workflows: [], complete: false,
     sources: [], issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "The configuration is invalid."}]});
-  const invalidRequest = buildProjectDefinitionReviewRequest(current, definitions(), invalid, agentProjection(), "Invalid marker");
+  const invalidRequest = buildProjectDefinitionReviewRequest(current, definitions(), invalid, agentProjection(), "Invalid marker").text;
   assert.ok(invalidRequest);
   const invalidEnvelope = parseEnvelope(invalidRequest);
   assert.equal(invalidEnvelope.decisionTemplate !== null, true);
@@ -286,15 +286,63 @@ test("review requests handle invalid snapshots and refresh proposals after resto
   assert.equal(invalidEnvelope.proposalTemplate, null);
 
   const authorized = definitions({revision: newRevision});
-  const refreshRequest = buildProjectDefinitionReviewRequest(current, authorized, authorized, agentProjection(), "Refresh marker");
+  const refreshRequest = buildProjectDefinitionReviewRequest(current, authorized, authorized, agentProjection(), "Refresh marker").text;
   assert.ok(refreshRequest);
   const refreshEnvelope = parseEnvelope(refreshRequest);
   assert.equal(refreshEnvelope.decisionTemplate, null);
   assert.equal(refreshEnvelope.proposalTemplate !== null, true);
   assert.match(refreshRequest, /Reassess the real task against the complete current project configuration and definition catalog/u);
 
-  assert.equal(buildProjectDefinitionReviewRequest(current, definitions(), definitions({status: "permission_required", revision: null}), agentProjection(), "Blocked"), null);
+  assert.equal(buildProjectDefinitionReviewRequest(current, definitions(), definitions({status: "permission_required", revision: null}), agentProjection(), "Blocked").text, null);
   const staleSource = agentProjection();
   staleSource.messages[0]!.text = "tampered original source";
-  assert.equal(buildProjectDefinitionReviewRequest(current, definitions(), authorized, staleSource, "Stale source"), null);
+  assert.equal(buildProjectDefinitionReviewRequest(current, definitions(), authorized, staleSource, "Stale source").text, null);
+});
+
+test("recovery shares only byte-identical approved entries while keeping changed, removed and invalid sources complete", () => {
+  const approved = definitions();
+  const current = task();
+  const observed = definitions({revision: newRevision});
+  const request = buildProjectDefinitionReviewRequest(current, approved, observed, agentProjection(), "Shared source marker").text;
+  assert.ok(request);
+  const envelope = parseEnvelope(request) as {approved: Record<string, unknown[]>; observed: Record<string, unknown[]>};
+  for (const key of ["steps", "workflows", "sources"]) {
+    const reconstructed = envelope.approved[key]!.map(entry => typeof entry === "object" && entry !== null && "unchangedFromObserved" in entry
+      ? envelope.observed[key]![Number(entry.unchangedFromObserved)] : entry);
+    const expected = key === "sources" ? approved.sources : approved[key as "steps" | "workflows"].map(item =>
+      Object.fromEntries(Object.entries(item).filter(([field]) => !["description", "sequence", "parallel"].includes(field))));
+    assert.deepEqual(reconstructed, expected);
+  }
+  const changed = definitions({revision: newRevision, sources: approved.sources.map(source => ({...source, content: `${source.content}\n# token=different-secret`}))});
+  const changedRequest = buildProjectDefinitionReviewRequest(current, approved, changed, agentProjection(), "Changed marker").text;
+  assert.ok(changedRequest);
+  const changedEnvelope = parseEnvelope(changedRequest) as {approved: {sources: unknown[]}};
+  assert.deepEqual(changedEnvelope.approved.sources, approved.sources, "comparison occurs before credential redaction");
+  const removed = definitions({revision: newRevision, steps: [], config: {required: []}, projectConfig: {required: []},
+    sources: approved.sources.filter(source => source.path.endsWith("project.yaml"))});
+  const removedRequest = buildProjectDefinitionReviewRequest(current, approved, removed, agentProjection(), "Removed source marker").text;
+  assert.ok(removedRequest);
+  assert.equal((parseEnvelope(removedRequest).approved as {steps: Array<{id: string}>}).steps[0]?.id, approved.steps[0]?.id);
+  assert.ok((parseEnvelope(removedRequest).approved as {sources: Array<{content?: string}>}).sources.some(source => source.content === approved.sources[1]!.content));
+  const invalid = definitions({status: "invalid", revision: null, projectConfig: null, config: {required: []}, steps: [], workflows: [], complete: false,
+    sources: [], issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "The configuration is invalid."}]});
+  const invalidRequest = buildProjectDefinitionReviewRequest(current, approved, invalid, agentProjection(), "Invalid source marker").text;
+  assert.ok(invalidRequest);
+  assert.deepEqual((parseEnvelope(invalidRequest).approved as {sources: unknown[]}).sources, approved.sources);
+});
+
+test("recovery retains effective parsed global guidance and rewritten references", () => {
+  const base = definitions();
+  const step = {...base.steps[0]!, id: "g123_verify", origin: "global" as const};
+  const workflow = {id: "g123_review", name: "Global review", description: "Keep the effective global contract.", fixed: true,
+    sequence: [{step: "g123_verify"}], origin: "global" as const, path: ".t3-supervisor/workflows/review.yaml", sourceId: "review"};
+  const approved = {...base, globalRevision: "global-old", globalOnly: true, projectConfig: null, config: {required: [{step: "g123_verify"}]},
+    steps: [step], workflows: [workflow], sources: [...base.sources.map(source => ({...source, origin: "global" as const})),
+      {path: workflow.path, origin: "global" as const, content: "name: Global review\nsequence:\n  - step: verify\n"}]};
+  const observed = {...approved, revision: newRevision, globalRevision: "global-new"};
+  const result = buildProjectDefinitionReviewRequest(task(), approved, observed, agentProjection(), "Global marker");
+  assert.ok(result.text, result.error ?? "missing recovery");
+  const envelope = parseEnvelope(result.text) as {observed: {steps: unknown[]; workflows: unknown[]}};
+  assert.deepEqual(envelope.observed.steps, [step]);
+  assert.deepEqual(envelope.observed.workflows, [workflow]);
 });

@@ -821,6 +821,9 @@ export function ProjectSupervisorView({
 
   return <div className="stack">
     {!snapshot.available && <p className="panel" role="alert">Supervisor state is unavailable. {snapshot.message}</p>}
+    {(section === "all" || section === "progress" || section === "plan") &&
+      (snapshot.monitoringStatus?.state === "unavailable" || snapshot.monitoringStatus?.state === "uncertain") &&
+      <p className="panel" role="alert"><strong>{snapshot.monitoringStatus.state === "uncertain" ? "Supervision has an uncertain operation." : "Supervision is blocked."}</strong> {snapshot.monitoringStatus.message}</p>}
     <div hidden={section !== "all" && section !== "progress"} className="panel stack">
       <div className="row between">
         <h3>Supervisor conversation</h3>
@@ -920,7 +923,7 @@ export function ProjectSupervisorView({
       {dirty && <button type="button" disabled={saving || blocked} onClick={onDiscard}>Discard draft</button>}</div>
     </form>
 
-    {shouldOfferRetry && <div hidden={section !== "all" && section !== "progress"} className="panel stack">
+    {shouldOfferRetry && <div hidden={section !== "all" && section !== "progress" && section !== "plan"} className="panel stack">
       <h3>{snapshot.binding?.state === "missing" ? "Deleted Supervisor conversation" : "Native Supervisor access"}</h3>
       <p className="muted">{snapshot.binding?.state === "missing"
         ? "T3 confirmed that the bound conversation was deleted. This explicit action replaces it with a new Supervisor conversation."

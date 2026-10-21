@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { stringify } from "yaml";
 import { Effect } from "effect";
 import { GuidanceStore, fingerprint } from "../src/guidance-store.js";
 import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
@@ -12,12 +13,13 @@ import { ProjectSupervisorStore, defaultSupervisorModel, type BindingRecord, typ
 import { ProjectSupervisor } from "../src/project-supervisor.js";
 import { SupervisorConversation, externalContributionFences, firstObservedOrdinal, workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
-import { parseWorkflowInterpretation, prepareWorkflowRequest, validateWorkflowPlan, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
+import { parseWorkflowInterpretation, prepareWorkflowRequest, proposalContextFromDefinitions, validateWorkflowPlan, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import type { ConversationRequest, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
 import { SupervisorRpcError, type SupervisorRpc } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
 import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
+import { SupervisorTeamStore } from "../src/supervisor-team-store.js";
 
 const projectId = "project-a";
 const operativeThreadId = "operative-a";
@@ -64,6 +66,25 @@ const renamedStepDefinitions = (nextRevision: string, name: string): ProjectDefi
     steps: snapshot.steps.map(step => step.id === "test-plan" ? {...step, name} : step),
     sources: snapshot.sources.map(source => source.path.endsWith("steps/test-plan.md")
       ? {...source, content: source.content.replace("name: Test plan", `name: ${name}`)} : source)};
+};
+
+const nestedCatalogDefinitions = (): ProjectDefinitionSnapshot => {
+  const stepIds = ["scope", "evidence", "design", "data", "implement", "prevent", "verify", "correctness", "fit", "findings", "deliver"];
+  const steps = stepIds.map(id => ({id, name: `Check ${id}`, description: `${id}: ${"Preserve the requested outcome, source evidence, scope and completion rules. ".repeat(19)}END_${id}`,
+    origin: "project" as const, path: `.t3-supervisor/steps/${id}.md`, sourceId: id}));
+  const review = {id: "review", name: "Review", description: "Reuse the same two independent reviewer conversations across rounds. ".repeat(35), fixed: true,
+    sequence: [{parallel: [{step: "correctness"}, {step: "fit"}]}, {step: "findings"}],
+    origin: "project" as const, path: ".t3-supervisor/workflows/review.yaml", sourceId: "review"};
+  const workflows: ProjectDefinitionSnapshot["workflows"] = [review, ...["change", "plan", "investigate", "release"].map(id => ({
+    id, name: id, description: `Complete ${id} within the current authority and preserve unresolved obligations.`, fixed: false,
+    sequence: [...stepIds.slice(0, 7).map(step => ({step})), {workflow: "review"}, {step: "deliver"}],
+    origin: "project" as const, path: `.t3-supervisor/workflows/${id}.yaml`, sourceId: id,
+  }))];
+  const config = {required: [{step: "scope"}, {workflow: "review"}]};
+  return {...definitions(), steps, workflows, config, projectConfig: config,
+    sources: [{path: ".t3-supervisor/project.yaml", content: stringify(config), origin: "project"},
+      ...steps.map(({id, name, description, path}) => ({path, content: `---\n${stringify({id, name, description})}---\n`, origin: "project" as const})),
+      ...workflows.map(({id, name, description, fixed, sequence, path}) => ({path: path!, content: stringify({id, name, description, fixed, sequence}), origin: "project" as const}))]};
 };
 
 const requiredPlanForContext = (context: NonNullable<TaskRecord["definitionContext"]>, reason = "Verify the change."): WorkflowPlanValue => {
@@ -325,6 +346,7 @@ const addCommandActivity = (projection: Projection, id: string, input: string, n
 };
 
 interface FixtureOptions {
+  teamEnabled?: boolean;
   supervisorRuntimeMode?: string;
   supervisorInteractionMode?: string;
   workflow?: boolean;
@@ -524,6 +546,10 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     thread => thread.id.startsWith("operative-") && thread.projectId === projectId,
     () => true,
     workflows,
+    undefined,
+    options.teamEnabled ? new SupervisorTeamStore(projectStore) : undefined,
+    undefined,
+    options.helperProviderInstanceId,
   );
   const apiConfig = {
     dataDirectory: directory,
@@ -640,6 +666,185 @@ const installTaskDefinitions = (fixture: Awaited<ReturnType<typeof makeFixture>>
   fixture.setDefinitions(snapshot);
   return task;
 };
+
+const installNestedCatalog = (fixture: Awaited<ReturnType<typeof makeFixture>>): TaskRecord => {
+  const snapshot = nestedCatalogDefinitions();
+  const current = fixture.projectStore.task(fixture.task.threadId)!;
+  const prepared = prepareWorkflowRequest(current.threadId, current.sourceMessageId, sourceText, snapshot);
+  assert.ok(prepared.context);
+  const plan = validateWorkflowPlan({requirements: [{kind: "step", id: "scope", applies: true, reason: "Define the task."},
+    {kind: "workflow", id: "review", applies: true, reason: "Review substantive changes."}],
+  plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "scope", reason: "Start with scope."},
+    {kind: "workflow", definitionId: "change", reason: "Complete the requested change."}]}}, prepared.context);
+  assert.ok(plan);
+  const task: TaskRecord = {...current, definitionContext: prepared.context, definitionSnapshot: snapshot,
+    workflow: {status: "proposed", message: "A complete draft is ready.", workspaceRoot, revision, globalRevision: null, ...plan}};
+  fixture.projectStore.saveTask(task);
+  fixture.setDefinitions(snapshot);
+  return task;
+};
+
+test("a realistic nested catalog completes startup, introduction and exact acceptance without duplicated context", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock, {operativeActive: false, teamEnabled: true, helperProviderInstanceId: "isolated-helper-provider"});
+  t.after(fixture.cleanup);
+  const task = installNestedCatalog(fixture);
+  assert.equal(task.definitionSnapshot!.steps.length, 11);
+  assert.equal(task.definitionSnapshot!.workflows.length, 5);
+  assert.ok(JSON.stringify(task.workflow).length > 24_000, "the canonical plan alone exceeds the former prose limit");
+
+  await fixture.run();
+  const context = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.ok(context?.kind === "context", fixture.conversation.requests.introduction(task.id)?.error ?? "missing initialization");
+  assert.ok(context.text.length <= 120_000);
+  assert.doesNotMatch(context.text, /Root team coordination|Temporary helper provider isolation/u);
+  assert.match(context.text, /Workflow mutations, helper recruitment and child guidance wait for a service check-in/u);
+  assert.ok(context.text.length < 45_000);
+  const envelope = JSON.parse(context.text.match(/UNTRUSTED_CONTEXT_ENVELOPE\n([\s\S]*?)\nEND_UNTRUSTED_CONTEXT_ENVELOPE/u)![1]!);
+  assert.deepEqual(envelope.definitions.sources, task.definitionSnapshot!.sources.map(source => ({path: source.path, origin: source.origin})),
+    "an echo references already-interpreted source identities rather than repeating their contents");
+  assert.deepEqual(envelope.initialProposal, workflowRecord(task, task.id));
+  assert.equal(envelope.draft, undefined);
+  assert.equal(envelope.introduction, undefined);
+  assert.equal(context.text.split(JSON.stringify(envelope.initialProposal)).length - 1, 1, "one canonical proposal in the initialization");
+  assert.equal(context.text.split("END_correctness").length - 1, 1);
+  assert.equal(envelope.canonicalAuthoringMaterial, undefined);
+  assert.equal(envelope.definitions.steps, undefined);
+  const contextRun = fixture.supervisor.runs.find(run => run.userMessageId === context.messageId)!;
+  completeRun(fixture.supervisor, contextRun, `Ready. ${context.completionMarker}`, ++clock.now);
+  await fixture.run();
+  await fixture.run();
+  await fixture.run();
+  const introduction = fixture.conversation.requests.introduction(task.id)!;
+  assert.equal(introduction.state, "sent");
+  assert.ok(introduction.text.length > 24_000 && introduction.text.length <= 120_000);
+  assert.equal(introduction.text.split("END_correctness").length - 1, 1, "the full step guidance appears only in the canonical record");
+  assert.ok(introduction.text.includes(workflowFence("workflow-proposal", envelope.initialProposal)));
+  const notice = fixture.operative.messages.find(message => message.id === introduction.messageId)!;
+  const operativeRun = fixture.operative.runs.find(run => run.id === notice.runId)!;
+  appendMessageToRun(fixture.operative, operativeRun, {id: "nested-catalog-acceptance", role: "assistant",
+    text: workflowFence("workflow-acceptance", envelope.initialProposal), now: ++clock.now});
+  completeRun(fixture.operative, operativeRun, "Accepted the current workflow.", clock.now);
+  await observeAgreement(fixture, clock.now + 30_000);
+  assert.equal(fixture.projectStore.task(task.threadId)?.agreement?.status, "agreed");
+  assert.equal(fixture.workflows.get(projectId, operativeThreadId)?.sourceBinding?.proposalId, task.id);
+});
+
+test("oversized complete sources block before sending and an explicit retry recovers the same conversation", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const task = installNestedCatalog(fixture);
+  const oversized = {...task.definitionSnapshot!, status: "invalid" as const, complete: false, sources: [...task.definitionSnapshot!.sources,
+    {path: ".t3-supervisor/extra.md", content: "Complete source material. ".repeat(6_000), origin: "project" as const}]};
+  fixture.setDefinitions(oversized);
+  fixture.projectStore.saveTask({...task, definitionContext: proposalContextFromDefinitions(oversized), definitionSnapshot: oversized,
+    workflow: {...task.workflow!, status: "provisional", definitionsStatus: "invalid", definitionsComplete: false}});
+  await fixture.run();
+  assert.equal(fixture.calls.length, 0);
+  assert.equal(fixture.conversation.requests.introduction(task.id)?.state, "blocked");
+  assert.match(fixture.conversation.status(projectId, fixture.binding.threadId).message ?? "", /exceeds its limit/u);
+  await fixture.run();
+  assert.equal(fixture.calls.length, 0, "a size failure does not automatically retry or truncate");
+
+  fixture.setDefinitions(task.definitionSnapshot!);
+  fixture.projectStore.saveTask(task);
+  fixture.conversation.retry(projectId, fixture.binding.threadId);
+  await fixture.run();
+  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId)?.kind, "context");
+  assert.equal(fixture.calls.length, 1);
+  assert.equal(fixture.calls[0]!.payload.threadId, fixture.binding.threadId);
+});
+
+test("a main and two reviewer children share one complete task context and acknowledge every frozen activity", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const task = installNestedCatalog(fixture);
+  appendNoticeForTask(fixture, task, fixture.operative);
+  for (let index = 0; index < 3; index++) addCommandActivity(fixture.operative, `main-review-${index}`, "Main work", clock.now - 10_000 + index);
+  for (const id of ["correctness-reviewer", "fit-reviewer"]) {
+    const child = makeProjection(makeThread({id, title: id}));
+    child.thread.creationSource = "provider";
+    child.thread.lineage = {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId};
+    for (let index = 0; index < 3; index++) turnItemsOf(child).push({id: `${id}-${index}`, threadId: id, runId: null,
+      type: "command_execution", status: "completed", ordinal: index + 1, completedAt: iso(clock.now - 10_000 + index)});
+    fixture.addChildProjection(child);
+  }
+  await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
+  await fixture.run();
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.ok(request?.kind === "review" && request.batch);
+  assert.equal(request.batch.threads.length, 3);
+  const envelope = JSON.parse(request.text.match(/UNTRUSTED_MONITOR_ENVELOPE\n([\s\S]*?)\nEND_UNTRUSTED_MONITOR_ENVELOPE/u)![1]!);
+  assert.equal(envelope.threads.filter((row: {draft?: unknown}) => row.draft).length, 1);
+  const context = envelope.threads.find((row: {draft?: unknown}) => row.draft);
+  assert.deepEqual(context.draft, task.workflow);
+  for (const row of envelope.threads) {
+    assert.equal(row.taskContextThreadId, context.threadId);
+    assert.ok(row.items.length >= 3);
+    assert.ok(row.contactLimit);
+  }
+  assert.ok(request.text.length < 120_000);
+  const run = fixture.supervisor.runs.find(run => run.userMessageId === request.messageId)!;
+  completeRun(fixture.supervisor, run, `Reviewed all three chats. ${request.completionMarker}`, ++clock.now);
+  await fixture.run();
+  for (const row of request.batch.threads) assert.equal(fixture.conversation.monitor.pending(projectId, row.threadId).length, 0);
+});
+
+test("an oversized monitoring context becomes a visible unsent failure while pending activity remains intact", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const task = installNestedCatalog(fixture);
+  appendNoticeForTask(fixture, task, fixture.operative);
+  for (let index = 0; index < 3; index++) addCommandActivity(fixture.operative, `large-context-${index}`, "Work", clock.now - 10_000 + index);
+  await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
+  const plan = validateWorkflowPlan({requirements: [{kind: "step", id: "scope", applies: true, reason: "Define the task."},
+    {kind: "workflow", id: "review", applies: true, reason: "Review substantive changes."}],
+  plan: {kind: "sequence", nodes: Array.from({length: 3}, () => ({kind: "workflow", definitionId: "change", reason: "Review a separate deliverable."}))}}, task.definitionContext!);
+  assert.ok(plan);
+  fixture.projectStore.saveTask({...task, workflow: {...task.workflow!, ...plan}, agreement: {status: "agreed", message: "Earlier accepted plan.",
+    proposalId: "earlier-proposal", agreedAt: clock.now, supervisorMessageId: "earlier-root", agentMessageId: "earlier-main", workflow: task.workflow!}});
+  const pendingBefore = fixture.conversation.monitor.pending(projectId, operativeThreadId).map(item => item.id);
+  await fixture.run();
+  assert.equal(fixture.calls.length, 0);
+  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId), null);
+  const status = fixture.conversation.status(projectId, fixture.binding.threadId);
+  assert.equal(status.state, "unavailable");
+  assert.equal(status.retryable, true);
+  assert.match(status.message ?? "", /Complete monitoring context exceeds its limit/u);
+  assert.deepEqual(fixture.conversation.monitor.pending(projectId, operativeThreadId).map(item => item.id), pendingBefore);
+  await fixture.run();
+  assert.equal(fixture.conversation.requests.requests(projectId, fixture.binding.threadId).filter(request => request.state === "failed").length, 1);
+});
+
+test("an oversized stale-agreement recovery is visible without a definition review and can be explicitly retried", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const task = installNestedCatalog(fixture);
+  appendNoticeForTask(fixture, task, fixture.operative);
+  fixture.projectStore.saveTask({...task, agreement: {status: "stale", message: "Earlier evidence is no longer current.", proposalId: "earlier",
+    agreedAt: clock.now, supervisorMessageId: "earlier-root", agentMessageId: "earlier-main", workflow: task.workflow!}});
+  fixture.setDefinitions({...task.definitionSnapshot!, revision: "changed-large-catalog", sources: task.definitionSnapshot!.sources.map(source =>
+    ({...source, content: `${source.content}\n# ${"Full changed source material. ".repeat(400)}`}))});
+  await fixture.run();
+  assert.equal(fixture.calls.length, 0);
+  assert.equal(fixture.projectStore.task(task.threadId)?.definitionNoticeKey, undefined);
+  assert.equal(fixture.conversation.status(projectId, fixture.binding.threadId).state, "unavailable");
+  assert.match(fixture.conversation.status(projectId, fixture.binding.threadId).message ?? "", /Definition-recovery .*exceeds its limit/u);
+  fixture.setDefinitions(task.definitionSnapshot!);
+  fixture.conversation.retry(projectId, fixture.binding.threadId);
+  await fixture.run();
+  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId)?.kind, "review");
+  assert.equal(fixture.calls.length, 1);
+});
 
 const appendNoticeForTask = (
   fixture: Awaited<ReturnType<typeof makeFixture>>,
@@ -928,7 +1133,8 @@ test("context bootstrap is queued atomically, correlated to its own run, and onl
   assert.equal(request.messageId, contextCall.payload.messageId);
   assert.ok(request.completionMarker.length > 0);
   assert.ok(String(contextCall.payload.text).includes(request.completionMarker));
-  assert.ok(String(contextCall.payload.text).includes(`supervisorThreadId=${JSON.stringify(fixture.binding.threadId)}, bindingGeneration=${fixture.binding.generation}`));
+  assert.ok(String(contextCall.payload.text).includes(`"threadId":${JSON.stringify(fixture.binding.threadId)}`));
+  assert.match(String(contextCall.payload.text), /Use no tools in this initialization turn/u);
   assert.ok(String(contextCall.payload.text).includes("Steps describe outcomes or checks, not delegated tasks"));
   assert.ok(String(contextCall.payload.text).includes("For each new task, reassess required work for that task; earlier inclusion, completion, or review does not prove work for new changes"));
   const message = fixture.supervisor.messages.find(item => item.id === request.messageId && item.text === request.text);
@@ -3388,7 +3594,7 @@ test("changed definitions stay unapproved, trigger one bounded recovery review, 
   assert.deepEqual(task.definitionSnapshot, originalDefinitions, "the saved approved baseline is retained while changed files are reviewed");
   assert.ok(extractApprovedProjectDefinitions(task), "the complete baseline remains eligible for same-chat review");
   assert.ok(buildProjectDefinitionReviewRequest(task, originalDefinitions, changedDefinitions, fixture.operative,
-    "Supervisor definition check-in test completed"), "the factual recovery request fits the retained source context");
+    "Supervisor definition check-in test completed").text, "the factual recovery request fits the retained source context");
 
   await fixture.run();
   const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
