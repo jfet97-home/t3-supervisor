@@ -67,7 +67,7 @@ const definitionName = (value: unknown): value is string => text(value, 160);
 export const parseProjectConfiguration = (contents: string): ProjectConfigurationInfo => {
   const config = yaml(contents);
   if (record(config) && Object.hasOwn(config, "required"))
-    throw new Error("project.yaml indexes every reusable definition: list workflows and steps entries with id, path, summary and required. The top-level required list was replaced by each entry's required flag.");
+    throw new Error("project.yaml indexes every reusable definition: list workflows and steps entries with path, summary and optional required: true. The top-level required list was replaced by each entry's required flag (false when omitted).");
   if (!record(config) || !(exact(config, ["workflows", "steps"]) || exact(config, ["workflows", "steps", "default_workflow"])) ||
     !Array.isArray(config.workflows) || !Array.isArray(config.steps) || config.default_workflow !== undefined && typeof config.default_workflow !== "string")
     throw new Error("project.yaml needs workflows and steps lists (use [] for none) and an optional default_workflow identifier.");
