@@ -130,6 +130,11 @@ export const projectConfigurationError = (config: ProjectConfigurationInfo): str
     return `default_workflow ${config.default_workflow} must be an indexed workflow.`;
   return null;
 };
+/** Whether a snapshot carries the project.yaml index; one saved before the index format needs a fresh definition read. */
+export const definitionSnapshotIndexed = (definitions: {readonly config?: unknown; readonly definitionFiles?: unknown}): boolean => {
+  const config = definitions.config as {workflows?: unknown; steps?: unknown} | null | undefined;
+  return Boolean(config) && Array.isArray(config!.workflows) && Array.isArray(config!.steps) && Array.isArray(definitions.definitionFiles);
+};
 /** Inclusion derived from the required flags: workflows before steps, in index order. */
 export const requiredReferences = (config: {readonly workflows: ReadonlyArray<{readonly id: string; readonly required: boolean}>;
   readonly steps: ReadonlyArray<{readonly id: string; readonly required: boolean}>}): DefinitionReference[] =>

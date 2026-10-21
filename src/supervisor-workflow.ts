@@ -9,7 +9,7 @@ import type {
   DefinitionWorkflowInfo,
   ProjectDefinitionSnapshot,
 } from "./project-definitions-contract.js";
-import {requiredReferences, workflowDefinitionExpansionLimits} from "./project-definitions-contract.js";
+import {definitionSnapshotIndexed, requiredReferences, workflowDefinitionExpansionLimits} from "./project-definitions-contract.js";
 import type {
   WorkflowIssueInfo,
   WorkflowPlanGroupInfo,
@@ -1526,6 +1526,7 @@ export const parseWorkflowInterpretation = (text: string, sourceId: string, cont
 
 /** Revalidates the cached context against the full freshly loaded source snapshot. */
 export const proposalContextMatches = (context: ProposalContext, definitions: ProjectDefinitionSnapshot): boolean => {
+  if (!definitionSnapshotIndexed(definitions)) return false;
   const fresh = copyContext(definitions);
   return context.projectId === fresh.projectId && context.threadId === fresh.threadId && context.workspaceRoot === fresh.workspaceRoot &&
     context.globalOnly === fresh.globalOnly && context.globalRevision === fresh.globalRevision && context.revision === fresh.revision &&

@@ -14,7 +14,7 @@ import { ProjectSupervisor } from "../src/project-supervisor.js";
 import { supervisionStopToolDefinition } from "../src/workflow-write-controller.js";
 import { SupervisorConversation, externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
-import { parseWorkflowInterpretation, prepareWorkflowRequest, proposalContextFromDefinitions, validateWorkflowPlan, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
+import { parseWorkflowInterpretation, prepareWorkflowRequest, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import type { ConversationRequest, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
 import { SupervisorRpcError, type SupervisorRpc } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
@@ -4634,6 +4634,31 @@ test("compact drafts bind the observed task and definition revisions, check dete
   await observeAgreement(fixture, clock.now + 90_000);
   assert.equal(fixture.projectStore.task(task.threadId)?.agreement?.status, "agreed", "the exact reference records agreement");
   assert.equal(fixture.projectStore.task(task.threadId)?.agreement?.proposalId, "fresh-proposal");
+});
+
+test("a historical provisional snapshot saved before the project.yaml index fails explicitly without crashing or touching the stored task", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const current = fixture.projectStore.task(fixture.task.threadId)!;
+  const snapshot = current.definitionSnapshot!;
+  // the shape saved before the index: a required list, no index rows, no file inventory and no summaries
+  const historical: Record<string, unknown> = {...snapshot, config: {required: [{step: "test-plan"}]}, projectConfig: {required: [{step: "test-plan"}]},
+    steps: snapshot.steps.map(({summary: _summary, ...step}) => step), workflows: snapshot.workflows.map(({summary: _summary, ...workflow}) => workflow)};
+  delete historical.definitionFiles;
+  fixture.projectStore.saveTask({...current, definitionSnapshot: historical as never,
+    workflow: {...current.workflow!, status: "provisional", definitionsComplete: false, workspaceRoot: snapshot.workspaceRoot, revision: snapshot.revision}});
+  const stored = fixture.projectStore.task(fixture.task.threadId)!;
+  const before = JSON.stringify(stored);
+  const internal = fixture.conversation as unknown as {cachedProvisionalDefinitions(task: TaskRecord): unknown;
+    dialogueDefinitions(task: TaskRecord, signal: AbortSignal): Promise<unknown>};
+  assert.equal(internal.cachedProvisionalDefinitions(stored), null, "the historical snapshot is not reused and does not throw");
+  assert.equal(proposalContextMatches(current.definitionContext!, historical as never), false);
+  await assert.doesNotReject(internal.dialogueDefinitions(stored, AbortSignal.timeout(5_000)));
+  const view = await fixture.conversation.readContextView(fixture.binding, {view: "definitions"}, AbortSignal.timeout(5_000));
+  assert.deepEqual([view.status, view.reason], ["unavailable", "definitions_refresh_required"]);
+  assert.equal(JSON.stringify(fixture.projectStore.task(fixture.task.threadId)), before, "the stored task, its agreement and effect identities are untouched");
 });
 
 test("an unchanged interpreted proposal is reused by the exact reference view context shows, while changed content under its ID stays a strict conflict", async t => {

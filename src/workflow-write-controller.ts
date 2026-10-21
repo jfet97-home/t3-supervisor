@@ -32,7 +32,7 @@ import {
   type WorkflowEvidenceCheck,
 } from "./workflow-write-evidence.js";
 import {proposalContextFromDefinitions, proposalContextMatches, validateWorkflowApplyAgainstPinnedContext, type WorkflowApplyDiagnostic} from "./supervisor-workflow.js";
-import type {ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
+import {definitionSnapshotIndexed, type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
 import type {WorkflowPlanGroupInfo, WorkflowPlanStepInfo, WorkflowPlanWorkflowInfo, WorkflowProtocolDiagnostic, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
 
 export type WorkflowNativeAccess = {
@@ -952,6 +952,7 @@ export class WorkflowWriteController {
       task.definitionSnapshot.status !== "ready" || !task.definitionSnapshot.complete || !task.definitionSnapshot.revision ||
       task.definitionSnapshot.workspaceRoot !== task.workflow.workspaceRoot || task.definitionSnapshot.revision !== task.workflow.revision ||
       (task.definitionSnapshot.globalRevision ?? null) !== task.workflow.globalRevision) return {status: "invalid", reason: "current_task_has_no_valid_source_bound_plan"};
+    if (!definitionSnapshotIndexed(task.definitionSnapshot)) return {status: "invalid", reason: "definitions_refresh_required"};
     if (!this.options.loadDefinitions) return {status: "unavailable", reason: "definition_source_reader_unavailable"};
     let fresh: ProjectDefinitionSnapshot;
     try {fresh = await this.options.loadDefinitions(owner.projectId, owner.mainThreadId, signal);}

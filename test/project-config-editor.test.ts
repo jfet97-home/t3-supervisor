@@ -110,6 +110,10 @@ test("indexes an existing unlisted file and rejects stale, missing-file, global,
   const wrongPath = await save({...localIndex(), steps: [{...localIndex().steps[0]!, path: "steps/elsewhere.md"}, localIndex().steps[1]!]});
   assert.match(wrongPath.message, /path must be steps\/local-step\.md/u);
   assert.equal((await save({required: [{step: "local-step"}]})).status, "invalid", "the old required list is not an accepted payload");
+  const mixed = await save({...localIndex(), required: [{step: "local-step"}]});
+  assert.equal(mixed.status, "invalid", "a legacy required list beside the index is rejected, not dropped");
+  assert.match(mixed.message, /each entry's required flag/u);
+  assert.equal((await save({...localIndex(), steps: [{...localIndex().steps[0]!, extra: true}, localIndex().steps[1]!]})).status, "invalid");
   assert.equal(f.writes.length, 0);
 
   const indexed = await save({...localIndex([{step: "new-step"}]), steps: [...localIndex().steps, indexEntry("steps", "new-step", true, "Check new behavior before release.")]});
@@ -207,6 +211,15 @@ test("project-configuration endpoint keeps session, origin and CSRF checks", asy
     assert.equal(rejected.status, 403);
     assert.equal(f.writes.length, 0);
     const csrf = await fetch(origin + "/api/csrf", {headers}).then(response => response.json()) as {csrf: string};
+    // legacy or unknown fields are rejected while decoding the request, before any normalization or write
+    for (const config of [{...localIndex(), required: [{step: "local-step"}]}, {...localIndex(), steps: [{...localIndex().steps[0]!, extra: true}, localIndex().steps[1]!]}]) {
+      const strict = await fetch(origin + "/api/guidance/project-configuration", {
+        method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf.csrf},
+        body: JSON.stringify({...payload, config}),
+      });
+      assert.notEqual(strict.status, 200, JSON.stringify(config));
+      assert.equal(f.writes.length, 0, "nothing is written for a request with an unknown field");
+    }
     const saved = await fetch(origin + "/api/guidance/project-configuration", {
       method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf.csrf}, body: JSON.stringify(payload),
     });

@@ -2,7 +2,7 @@ import { isMap, isSeq, parseDocument, stringify } from "yaml";
 import { posix } from "node:path";
 import { ProjectDefinitionLoader, parseProjectConfiguration } from "./project-definitions.js";
 import { ProjectFileError, type ProjectWriter } from "./project-files.js";
-import { normalizeProjectConfiguration, type ProjectConfigSave, type ProjectConfigSaveOutcome, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
+import { type ProjectConfigSave, type ProjectConfigSaveOutcome, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 
 const configDocument = (config: ProjectConfigurationInfo) => ({
   workflows: config.workflows.map(entry => ({id: entry.id, path: entry.path, summary: entry.summary, required: entry.required})),
@@ -52,7 +52,8 @@ export class ProjectConfigEditor {
     if (!checkProjectConfigFile || !writeProjectConfig) return outcome("permission_required", "Project configuration editing needs the trusted native filesystem writer.");
     let intended: ReturnType<typeof parseProjectConfiguration>;
     try {
-      intended = parseProjectConfiguration(stringify(configDocument(normalizeProjectConfiguration(input.config)), {lineWidth: 0}));
+      // the submitted object is parsed as written, so a legacy or unknown field is rejected rather than dropped
+      intended = parseProjectConfiguration(stringify(input.config, {lineWidth: 0}));
     } catch (error) {return outcome("invalid", error instanceof Error ? error.message : "Check the project.yaml index entries.");}
     if (Buffer.byteLength(stringify(configDocument(intended), {lineWidth: 0}), "utf8") > 64 * 1024 || !/^[a-f0-9]{64}$/.test(input.expectedRevision))
       return outcome("invalid", "Check the 64 KiB project.yaml limit and refresh the definitions.");

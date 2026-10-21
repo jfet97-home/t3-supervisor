@@ -141,11 +141,12 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
         success: ProjectDefinitions,
         error: UiError,
       }),
+      // a legacy or unknown field is rejected at decoding, never stripped into a different save
       HttpApiEndpoint.post("saveProjectConfiguration", "/project-configuration", {
         payload: ProjectConfigSaveInput,
         success: ProjectConfigSaveResult,
         error: UiError,
-      }),
+      }).annotate(HttpApi.PayloadParseOptions, {onExcessProperty: "error"}),
       HttpApiEndpoint.post("threadPolicy", "/thread-policy", { payload: ThreadPolicy, success: ThreadPolicy, error: UiError }),
     )
     .prefix("/api/guidance"),
