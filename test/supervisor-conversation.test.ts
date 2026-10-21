@@ -3023,7 +3023,8 @@ test("protocol diagnostics keep their current-task attribution after the context
 
 const reinterpretEditedSource = async (f: Awaited<ReturnType<typeof makeFixture>>, now: number): Promise<RunInfo> => {
   const control = f.projectStore.control(projectId);
-  f.projectStore.saveControl(projectId, control.generation, true, {snapshotSequence: 1, threads: [{id: operativeThreadId, latestRunId: f.task.sourceRunId}]});
+  // the activation boundary predates the task's source run, as discovery requires
+  f.projectStore.saveControl(projectId, control.generation, true, {snapshotSequence: 1, threads: []});
   const supervisor = f.makeProjectSupervisor();
   await supervisor.runOnce(AbortSignal.timeout(10_000));
   const interpretation = f.supervisor.runs.find(item => item.userMessageId === f.projectStore.task(f.task.threadId)!.messageId);
@@ -3557,9 +3558,9 @@ test("editing the operative task requeues interpretation and releases fixed comm
     assert.equal(requeued.agreement?.status, "stale", "the old agreement remains visible as history");
     assert.equal(requeued.agreementSourceHash, originalSourceHash, "the accepted source binding remains attached to stale history");
 
+    // the activation boundary predates the task's source run, as discovery requires; a source at or before it is history
     const projectControl = fixture.projectStore.control(projectId);
-    fixture.projectStore.saveControl(projectId, projectControl.generation, true,
-      {snapshotSequence: 1, threads: [{id: operativeThreadId, latestRunId: task.sourceRunId}]});
+    fixture.projectStore.saveControl(projectId, projectControl.generation, true, {snapshotSequence: 1, threads: []});
     const projectSupervisor = fixture.makeProjectSupervisor();
     await projectSupervisor.runOnce(AbortSignal.timeout(10_000));
     requeued = fixture.projectStore.task(task.threadId)!;

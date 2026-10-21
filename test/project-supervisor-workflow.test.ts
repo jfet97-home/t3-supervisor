@@ -749,9 +749,60 @@ test("a request queued or sent before an explicit Enable is never interpreted af
   await supervisor.runOnce();
   assert.equal(fixture.task()!.status, "expired");
   assert.equal(fixture.dispatches().length, dispatched, "nothing is dispatched for the request written before the Enable");
-  // an interpretation already sent before the Enable, with no native outcome, is closed unapplied instead of replayed
-  store.saveTask({...first, status: "uncertain", messageId: `${first.messageId}-lost`, dispatchedAt: Date.parse(source.messages[0]!.createdAt), replayCount: 0});
+  // an interpretation sent before the Enable whose exact native run has ended is closed unapplied, never applied or resent
+  store.saveTask({...first, status: "waiting", dispatchedAt: Date.parse(source.messages[0]!.createdAt), replayCount: 0});
   await supervisor.runOnce();
   assert.equal(fixture.task()!.status, "expired");
+  assert.equal(fixture.task()!.objective, null);
   assert.equal(fixture.dispatches().length, dispatched, "a pre-Enable interpretation is never resent");
+});
+
+test("an interpretation sent before an explicit Enable with no native outcome keeps its identity and is never closed, replayed or applied", async (t) => {
+  const fixture = await makeFixture();
+  t.after(fixture.cleanup);
+  const source = fixture.projections.get(sourceThreadId)!;
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  const first = fixture.task()!;
+  const dispatched = fixture.dispatches().length;
+  const store = (supervisor as unknown as {store: {saveTask(task: unknown): void; recordChatEnable(id: string, at: number): void}}).store;
+  store.recordChatEnable(sourceThreadId, Date.parse(source.messages[0]!.createdAt) + 1_000);
+  const native = fixture.projections.get(fixture.binding()!.threadId)!;
+  for (const run of native.runs) run.status = "completed";
+  native.thread.activeRunId = null;
+  // absence of a native run is not proof of non-delivery, whether or not the identity carries its dispatch time
+  for (const [suffix, dispatchedAt] of [["lost", Date.parse(source.messages[0]!.createdAt)], ["undated", null]] as const) {
+    const held = {...first, status: "uncertain", messageId: `${first.messageId}-${suffix}`, dispatchedAt, replayCount: 0};
+    store.saveTask(held);
+    for (let cycle = 0; cycle < 3; cycle++) await supervisor.runOnce();
+    assert.equal(fixture.task()!.status, "uncertain", suffix);
+    assert.equal(fixture.task()!.messageId, held.messageId, suffix);
+    assert.equal(fixture.dispatches().length, dispatched, `${suffix}: nothing is resent`);
+  }
+  // a native message with this identity but other request text is not its outcome
+  store.saveTask({...first, status: "waiting", requestText: `${first.requestText} (changed)`, dispatchedAt: null, replayCount: 0});
+  await supervisor.runOnce();
+  assert.equal(fixture.task()!.status, "waiting");
+  assert.equal(fixture.dispatches().length, dispatched);
+});
+
+test("a queued request at or before the project activation boundary is never interpreted", async (t) => {
+  const fixture = await makeFixture();
+  t.after(fixture.cleanup);
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  const first = fixture.task()!;
+  const dispatched = fixture.dispatches().length;
+  const store = (supervisor as unknown as {store: {saveTask(task: unknown): void; control(projectId: string): {generation: number};
+    saveControl(projectId: string, generation: number, enabled: boolean, baseline?: unknown): unknown}}).store;
+  store.saveTask({...first, status: "queued", dispatchedAt: null, messageId: `${first.messageId}-requeued`, reason: "Supervision was disabled before dispatch; this task identity remains queued."});
+  // the project was disabled and enabled again with its boundary at the request's own run
+  store.saveControl(projectId, store.control(projectId).generation, false);
+  store.saveControl(projectId, store.control(projectId).generation, true, {snapshotSequence: 11, threads: [{id: sourceThreadId, latestRunId: first.sourceRunId}]});
+  const native = fixture.projections.get(fixture.binding()!.threadId)!;
+  for (const run of native.runs) run.status = "completed";
+  native.thread.activeRunId = null;
+  await supervisor.runOnce();
+  assert.equal(fixture.task()!.status, "expired");
+  assert.equal(fixture.dispatches().length, dispatched, "nothing is dispatched for a request before the boundary");
 });
