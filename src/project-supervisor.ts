@@ -1038,11 +1038,13 @@ export class ProjectSupervisor {
     const inflight = jobs.find(t => ["dispatching","waiting","uncertain"].includes(t.status));
     if (inflight) {
       if (!this.projectEnabled(binding.projectId)) return;
-      // an interpretation of a request written or sent before the latest explicit Enable is never applied or resent: only its
-      // positively matched native run closes it once ended; an absent or active outcome keeps the identity held unapplied
-      const enabledAt = this.store.chatEnabledAt(inflight.threadId);
+      // an interpretation of a request at or before the activation boundary, or written or sent before the latest explicit Enable,
+      // is never applied or resent: only its positively matched native run closes it once ended; an absent or active outcome keeps
+      // the identity held unapplied
+      const enabledAt = this.store.chatEnabledAt(inflight.threadId), floor = this.store.baselineOrdinal(inflight.threadId, main);
       const sourceAt = timestampMs(main.messages.find(m => m.id === inflight.sourceMessageId)?.createdAt) ?? 0;
-      if (enabledAt !== null && (sourceAt <= enabledAt || inflight.dispatchedAt !== null && inflight.dispatchedAt <= enabledAt)) {
+      if (floor === null || inflight.sourceOrdinal <= floor ||
+        enabledAt !== null && (sourceAt <= enabledAt || inflight.dispatchedAt !== null && inflight.dispatchedAt <= enabledAt)) {
         const message = projection.messages.find(m => m.id === inflight.messageId && m.threadId === inflight.supervisorThreadId && m.text === inflight.requestText);
         const run = message ? projection.runs.find(r => r.userMessageId === inflight.messageId && r.threadId === inflight.supervisorThreadId && r.id === message.runId) : undefined;
         if (run && ["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(run.status))

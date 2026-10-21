@@ -786,6 +786,35 @@ test("an interpretation sent before an explicit Enable with no native outcome ke
   assert.equal(fixture.dispatches().length, dispatched);
 });
 
+test("an interpretation in flight across a project re-enable boundary at its source is never applied or resent", async (t) => {
+  const fixture = await makeFixture();
+  t.after(fixture.cleanup);
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  const first = fixture.task()!;
+  const dispatched = fixture.dispatches().length;
+  const store = (supervisor as unknown as {store: {saveTask(task: unknown): void; control(projectId: string): {generation: number};
+    saveControl(projectId: string, generation: number, enabled: boolean, baseline?: unknown): unknown}}).store;
+  // the project was disabled and enabled again with its boundary at the request's own run while the interpretation was in flight
+  store.saveControl(projectId, store.control(projectId).generation, false);
+  store.saveControl(projectId, store.control(projectId).generation, true, {snapshotSequence: 11, threads: [{id: sourceThreadId, latestRunId: first.sourceRunId}]});
+  const native = fixture.projections.get(fixture.binding()!.threadId)!;
+  for (const run of native.runs) run.status = "completed";
+  native.thread.activeRunId = null;
+  // an identity with no native outcome stays held and is never resent
+  store.saveTask({...first, status: "uncertain", messageId: `${first.messageId}-lost`, replayCount: 0});
+  for (let cycle = 0; cycle < 3; cycle++) await supervisor.runOnce();
+  assert.equal(fixture.task()!.status, "uncertain");
+  assert.equal(fixture.task()!.messageId, `${first.messageId}-lost`);
+  assert.equal(fixture.dispatches().length, dispatched, "nothing is resent across the boundary");
+  // its exact native run has ended: it closes unapplied
+  store.saveTask({...first, status: "waiting", replayCount: 0});
+  await supervisor.runOnce();
+  assert.equal(fixture.task()!.status, "expired");
+  assert.equal(fixture.task()!.objective, null);
+  assert.equal(fixture.dispatches().length, dispatched);
+});
+
 test("a queued request at or before the project activation boundary is never interpreted", async (t) => {
   const fixture = await makeFixture();
   t.after(fixture.cleanup);
