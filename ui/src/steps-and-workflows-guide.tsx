@@ -59,31 +59,21 @@ const localStepExample = `sequence:
         - src/migration.ts`;
 
 const configurationExample = `workflows:
-  - id: reviewer
-    path: workflows/reviewer.yaml
+  - path: workflows/reviewer.yaml
     summary: Review the change and verify affected behavior.
     required: true
-  - id: delivery
-    path: workflows/delivery.yaml
+  - path: workflows/delivery.yaml
     summary: Implement, review and deliver the agreed change.
-    required: false
 steps:
-  - id: e2e-testing
-    path: steps/e2e-testing.md
+  - path: steps/e2e-testing.md
     summary: Test changed behavior in the real application and report limitations.
     required: true
-  - id: inspect-change
-    path: steps/inspect-change.md
+  - path: steps/inspect-change.md
     summary: Inspect the change for defects and unmet requirements.
-    required: false
-  - id: security-review
-    path: steps/security-review.md
+  - path: steps/security-review.md
     summary: Check trust boundaries affected by the change.
-    required: false
-  - id: report-findings
-    path: steps/report-findings.md
+  - path: steps/report-findings.md
     summary: Report actionable review findings and remaining limitations.
-    required: false
 default_workflow: delivery`;
 
 const fixedInsertionExample = `sequence:
@@ -197,7 +187,7 @@ export function StepsAndWorkflowsGuide() {
     <Topic id="guide-layout-title" title="Where definitions live">
       <p>Project definitions belong to the operative checkout, so another checkout can have a different configuration. The opt-in global scope uses the same file layout. The Projects page shows the active scope, source paths and origin.</p>
       <Example label="Project definition layout" value={layoutExample}/>
-      <p><code>project.yaml</code> indexes every reusable definition, including optional ones, with a short summary and a required flag. Both the Supervisor and the supervised agent start there, then read the full relevant definitions in <code>steps/</code> and <code>workflows/</code> on demand. Summaries guide reading; full definitions remain authoritative policy.</p>
+      <p><code>project.yaml</code> indexes every reusable definition, including optional ones, by path with a short summary and an optional required flag. Both the Supervisor and the supervised agent start there, then read the full relevant definitions in <code>steps/</code> and <code>workflows/</code> on demand. Summaries guide reading; full definitions remain authoritative policy.</p>
       <p>The project configuration editor changes only the selected checkout's <code>project.yaml</code>. Full definition files stay separate. For a new project, start with <code>workflows: []</code> and <code>steps: []</code>; when adding a reusable file, add its index entry too.</p>
     </Topic>
 
@@ -224,7 +214,7 @@ export function StepsAndWorkflowsGuide() {
     </Topic>
 
     <Topic id="guide-config-title" title="The project index, requirements and default workflow">
-      <p><code>project.yaml</code> requires separate <code>workflows</code> and <code>steps</code> lists, even when empty. Every entry has an <code>id</code>, <code>path</code>, <code>summary</code> and explicit <code>required: true</code> or <code>required: false</code>. These flags are the only authored requirements; there is no separate top-level required list.</p>
+      <p><code>project.yaml</code> requires separate <code>workflows</code> and <code>steps</code> lists, even when empty. Every entry has a <code>path</code> and <code>summary</code>; the file name in <code>path</code> is the definition ID. Add <code>required: true</code> to make it a requirement, since an omitted flag means <code>false</code>. These flags are the only authored requirements; there is no separate top-level required list.</p>
       <p>Paths are relative to <code>.t3-supervisor</code> and must be exactly <code>workflows/&lt;id&gt;.yaml</code> or <code>steps/&lt;id&gt;.md</code>. Each summary is trimmed, nonempty text of at most 2 logical lines and 240 characters. Briefly explain purpose or applicability from the full description; line wrapping in the editor is not an extra logical line.</p>
       <Example label="project.yaml" value={configurationExample}/>
       <p>The optional <code>default_workflow</code> names an indexed workflow as a starting suggestion. The index is authoritative for reusable files, not an exhaustive whitelist of possible task plans: negotiate local steps, new combinations and revisions as the task evolves, preserving required and fixed commitments.</p>

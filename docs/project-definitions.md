@@ -58,8 +58,10 @@ them. Neither inclusion nor an accepted plan proves execution or delegation.
 
 The configuration editor writes only the existing regular
 `.t3-supervisor/project.yaml`. Save accepts the index only: `workflows`,
-`steps`, and optional `default_workflow`. Every entry has exactly `id`,
-`path`, `summary` and `required` (`true` or `false`). A new file is
+`steps`, and optional `default_workflow`. Every entry has exactly `path` and
+`summary`, plus an optional `required` (`true` or `false`, default `false`);
+the file name in `path` is the definition ID. Saving writes `required: true`
+and omits false flags. A new file is
 `workflows: []` and then `steps: []`. A summary must be nonempty, at most two
 nonempty lines, and at most 240 characters; authoring should say what the
 definition is for and when it applies. `path` is `workflows/<id>.yaml` or

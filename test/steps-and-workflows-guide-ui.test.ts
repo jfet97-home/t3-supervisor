@@ -18,7 +18,8 @@ test("steps and workflows guide documents the approved layout, syntax and planni
   assert.match(html, /workflow: reviewer/);
   assert.match(html, /sequence:/);
   assert.match(html, /parallel:/);
-  assert.match(html, /workflows:[\s\S]*id: reviewer[\s\S]*path: workflows\/reviewer.yaml[\s\S]*summary:[\s\S]*required: true[\s\S]*steps:[\s\S]*id: e2e-testing/);
+  assert.match(html, /workflows:\n  - path: workflows\/reviewer.yaml\n    summary:[^\n]*\n    required: true[\s\S]*steps:\n  - path: steps\/e2e-testing.md/);
+  assert.doesNotMatch(html.slice(html.indexOf("workflows:\n  - path:"), html.indexOf("default_workflow: delivery")), /id:/, "the index example is path-only");
   assert.match(html, /default_workflow: delivery/);
   assert.match(html, /project\.yaml<\/code> requires separate <code>workflows<\/code> and <code>steps<\/code> lists/);
   assert.match(html, /Both the Supervisor and the supervised agent start there/);

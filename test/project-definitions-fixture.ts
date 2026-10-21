@@ -7,7 +7,7 @@ import { definitionCatalogPath, type DefinitionCatalogKind, type DefinitionRefer
 /** A navigation summary for test definitions; real summaries say what a definition is for and when it applies. */
 export const testSummary = (id: string): string => `Use ${id} when the task needs it.`;
 export const indexEntry = (kind: DefinitionCatalogKind, id: string, required = false, summary = testSummary(id)) =>
-  ({id, path: definitionCatalogPath(kind, id), summary, required});
+  ({path: definitionCatalogPath(kind, id), summary, required});
 const flagged = (required: readonly DefinitionReference[], kind: DefinitionCatalogKind, id: string): boolean =>
   required.some(reference => kind === "steps" ? "step" in reference && reference.step === id : "workflow" in reference && reference.workflow === id);
 type IndexOptions = {steps?: readonly string[]; workflows?: readonly string[]; required?: readonly DefinitionReference[]; default_workflow?: string};
@@ -25,8 +25,8 @@ export const effectiveIndex = (definitions: {readonly steps: readonly IndexedDef
   const rows = (kind: DefinitionCatalogKind, items: readonly IndexedDefinition[]) => {
     const extra = required.flatMap(reference => kind === "steps" ? "step" in reference ? [reference.step] : [] : "workflow" in reference ? [reference.workflow] : [])
       .filter(id => !items.some(item => item.id === id)).map((id): IndexedDefinition => ({id}));
-    return [...items, ...extra].map(item => ({...indexEntry(kind, item.sourceId ?? item.id, flagged(required, kind, item.id), item.summary ?? testSummary(item.sourceId ?? item.id)),
-      id: item.id, origin: item.origin ?? "project" as const, sourceId: item.sourceId ?? item.id}));
+    return [...items, ...extra].map(item => ({id: item.id, ...indexEntry(kind, item.sourceId ?? item.id, flagged(required, kind, item.id), item.summary ?? testSummary(item.sourceId ?? item.id)),
+      origin: item.origin ?? "project" as const, sourceId: item.sourceId ?? item.id}));
   };
   return {workflows: rows("workflows", definitions.workflows), steps: rows("steps", definitions.steps), ...(default_workflow ? {default_workflow} : {})};
 };

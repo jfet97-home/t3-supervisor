@@ -56,8 +56,8 @@ task; fixed protects original nested commitments and relationships while permitt
 support work. Repeated references have distinct occurrences.
 
 Edit only the requested project configuration and confirm the working-tree target.
-Save writes the local index only: `workflows`, `steps` (each entry `id`, `path`,
-`summary`, `required`) and the optional `default_workflow`. It does not accept a
+Save writes the local index only: `workflows`, `steps` (each entry `path`,
+`summary`, optional `required`) and the optional `default_workflow`. It does not accept a
 separate required list. It leaves files uncommitted and does not edit step or
 workflow files. A new project file is `workflows: []` and then `steps: []`. An
 invalid row stays visible and the unsaved draft is kept. Refresh/reconcile conflicting or uncertain writes; Discard removes

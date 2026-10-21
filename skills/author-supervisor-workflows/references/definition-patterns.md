@@ -94,8 +94,8 @@ workflows: []
 steps: []
 ```
 
-Each entry has exactly `id`, `path`, `summary` and `required` (`true` or `false`).
-`path` is `workflows/<id>.yaml` or `steps/<id>.md`. The parser accepts a summary
+Each entry has exactly `path` and `summary`, plus an optional `required` (`true` or `false`, default `false`).
+`path` is `workflows/<id>.yaml` or `steps/<id>.md`; its file name is the ID. The parser accepts a summary
 only when it is nonempty, at most two nonempty lines, and at most 240 characters.
 Write what the definition is for and when it applies; a descriptive name can be
 a fine summary, and the file description stays the policy. `required: true` is
@@ -109,8 +109,7 @@ below shows the workflow flag only.
 
 ```yaml
 workflows:
-  - id: review
-    path: workflows/review.yaml
+  - path: workflows/review.yaml
     summary: Use to independently assess a frozen change or plan, and to account for the findings before the governed action.
     required: true
 steps: []

@@ -40,8 +40,8 @@ const definitions: ProjectDefinitionSnapshot = {
     default_workflow: "reviewer",
   },
   projectConfig: {
-    workflows: [{id: "reviewer", path: "workflows/reviewer.yaml", summary: "Review changes before delivery.", required: false}],
-    steps: [{id: "e2e-testing", path: "steps/e2e-testing.md", summary: "Verify changed behavior in the real application.", required: true}],
+    workflows: [{path: "workflows/reviewer.yaml", summary: "Review changes before delivery.", required: false}],
+    steps: [{path: "steps/e2e-testing.md", summary: "Verify changed behavior in the real application.", required: true}],
     default_workflow: "reviewer",
   },
   definitionFiles: [
@@ -154,7 +154,7 @@ test("catalog UI retains required missing rows and separates authored summaries 
 test("catalog editor fields keep missing and invalid draft rows, label native controls and offer unlisted local files", () => {
   const config = {...definitions.projectConfig!, steps: [
     ...definitions.projectConfig!.steps,
-    {id: "missing", path: "../outside.md", summary: "First line\nSecond line\nThird line", required: true},
+    {path: "../outside.md", summary: "First line\nSecond line\nThird line", required: true},
   ]};
   const scope = {...definitions, definitionFiles: [...definitions.definitionFiles!,
     {origin: "project" as const, kind: "steps" as const, id: "unlisted", path: "steps/unlisted.md"},
@@ -168,11 +168,12 @@ test("catalog editor fields keep missing and invalid draft rows, label native co
   assert.match(html, /type="checkbox" checked=""/);
   assert.match(html, /rows="2" maxLength="240"/);
   assert.match(html, /purpose or applicability from the full description/);
-  assert.match(html, /Index unlisted/);
-  assert.doesNotMatch(html, /global-only|Index e2e-testing|disabled=""/);
+  assert.match(html, /Index steps\/unlisted\.md/);
+  assert.match(html, /the file name is the definition ID \(<code>e2e-testing<\/code>\)/);
+  assert.doesNotMatch(html, /global-only|Index steps\/e2e-testing|disabled=""|-id"/);
   const labels = [...html.matchAll(/<label[^>]* for="([^"]+)"/g)].map(match => match[1]);
   const controls = [...html.matchAll(/<(?:input|textarea)[^>]* id="([^"]+)"/g)].map(match => match[1]);
-  assert.equal(controls.length, 8);
+  assert.equal(controls.length, 6, "each row edits path, summary and required; the ID comes from the path");
   assert.equal(new Set(controls).size, controls.length);
   for (const id of controls) assert(labels.includes(id), `missing visible label for ${id}`);
   const locked = renderToStaticMarkup(createElement(ProjectCatalogFields, {...props, disabled: true}));
@@ -190,7 +191,7 @@ test("editor shared validation enforces summary and canonical path boundaries wi
   assert.match(projectConfigurationError(withStep({summary: "first\nsecond\nthird"}))!, /2/);
   assert.match(projectConfigurationError(withStep({summary: "a".repeat(241)}))!, /240/);
   assert.match(projectConfigurationError(withStep({summary: "  "}))!, /nonempty/);
-  assert.match(projectConfigurationError(withStep({path: "../steps/e2e-testing.md"}))!, /path must be steps\/e2e-testing.md/);
+  assert.match(projectConfigurationError(withStep({path: "../steps/e2e-testing.md"}))!, /path must be steps\/<id>\.md/);
   assert.match(projectConfigurationError({...base, steps: [...base.steps, ...base.steps]})!, /more than once/);
   assert.equal(projectConfigurationError(withStep({summary: "e2e-testing"})), null);
   assert.equal(projectConfigurationError(withStep({summary: "End-to-end testing"})), null);

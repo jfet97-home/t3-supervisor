@@ -156,23 +156,22 @@ removed. Fixed does not imply mandatory project-wide inclusion.
 `.t3-supervisor/project.yaml` is the index of reusable steps and workflows for
 that scope. It is not a whitelist of task plans. The file has exactly the keys
 `workflows` and `steps`, both required lists that may be `[]`, and an optional
-`default_workflow`. Every entry has exactly `id`, `path`, `summary` and
-`required`. `required` is `true` or `false`. `id` matches
-`^[a-z0-9][a-z0-9_-]{0,63}$` and is unique within its list. `path` is relative
-to `.t3-supervisor` and is exactly `workflows/<id>.yaml` or `steps/<id>.md`.
+`default_workflow`. Every entry has exactly `path` and `summary`, plus an
+optional `required` (`true` or `false`, default `false`). `path` is relative to
+`.t3-supervisor` and is exactly `workflows/<id>.yaml` or `steps/<id>.md`; the
+file name is the definition ID, so `<id>` matches `^[a-z0-9][a-z0-9_-]{0,63}$`.
+A path appears at most once.
 `default_workflow` must name a workflow in `workflows`. The two lists together
 hold at most 100 entries. A top-level `required:` key is rejected; there is no
 fallback and no second authored requirement list.
 
 ```yaml
 workflows:
-  - id: reviewer
-    path: workflows/reviewer.yaml
+  - path: workflows/reviewer.yaml
     summary: Use to review a frozen change before the governed action, and again after material fixes.
     required: true
 steps:
-  - id: e2e-testing
-    path: steps/e2e-testing.md
+  - path: steps/e2e-testing.md
     summary: Use when changed behavior needs proof in the real application; editorial work explains why it does not.
     required: true
 default_workflow: reviewer

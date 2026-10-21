@@ -8,33 +8,40 @@ import {requiredReferences} from "../src/project-definitions-contract.js";
 import {indexSource, makeDefinitionFixture, stepSource, workflowSource} from "./project-definitions-fixture.js";
 
 test("parses the strict project.yaml index and step formats", () => {
-  const index = "workflows:\n  - id: reviewer\n    path: workflows/reviewer.yaml\n    summary: |\n      Review a change before release.\n      Use it for every public change.\n    required: true\n" +
-    "steps:\n  - id: e2e-testing\n    path: steps/e2e-testing.md\n    summary: \"  Run end-to-end tests when behavior changes.  \"\n    required: false\ndefault_workflow: reviewer\n";
+  const index = "workflows:\n  - path: workflows/reviewer.yaml\n    summary: |\n      Review a change before release.\n      Use it for every public change.\n    required: true\n" +
+    "steps:\n  - path: steps/e2e-testing.md\n    summary: \"  Run end-to-end tests when behavior changes.  \"\n    required: false\ndefault_workflow: reviewer\n";
   assert.deepEqual(parseProjectConfiguration(index), {
-    workflows: [{id: "reviewer", path: "workflows/reviewer.yaml", summary: "Review a change before release.\nUse it for every public change.", required: true}],
-    steps: [{id: "e2e-testing", path: "steps/e2e-testing.md", summary: "Run end-to-end tests when behavior changes.", required: false}],
+    workflows: [{path: "workflows/reviewer.yaml", summary: "Review a change before release.\nUse it for every public change.", required: true}],
+    steps: [{path: "steps/e2e-testing.md", summary: "Run end-to-end tests when behavior changes.", required: false}],
     default_workflow: "reviewer",
   });
-  assert.deepEqual(requiredReferences(parseProjectConfiguration(index)), [{workflow: "reviewer"}], "the flags are the only authored requirement");
+  assert.deepEqual(requiredReferences(parseProjectConfiguration(index)), [{workflow: "reviewer"}], "the flags are the only authored requirement; the ID comes from the path");
   assert.deepEqual(parseProjectConfiguration("workflows: []\nsteps: []\n"), {workflows: [], steps: []});
+  // an omitted required flag is false; explicit flags are kept as written
+  const flags = parseProjectConfiguration("workflows: []\nsteps:\n  - {path: steps/check.md, summary: Check it.}\n  - {path: steps/lint_2.md, summary: Lint it., required: false}\n  - {path: steps/test.md, summary: Test it., required: true}\n");
+  assert.deepEqual(flags.steps.map(row => row.required), [false, false, true]);
+  assert.deepEqual(requiredReferences({...flags, steps: flags.steps.map(row => ({...row, required: true}))}), [{step: "check"}, {step: "lint_2"}, {step: "test"}]);
   assert.throws(() => parseProjectConfiguration("required: []\n"), /each entry's required flag/u, "the old top-level required list is rejected, not converted");
   const entry = (fields: string) => `workflows: []\nsteps:\n  - ${fields}\n`;
   for (const [text, reason] of [
     ["workflows: []\n", /workflows and steps lists/u],
     ["workflows: []\nsteps: []\nextra: true\n", /workflows and steps lists/u],
     ["workflows: []\nsteps: []\nrequired: []\n", /each entry's required flag/u],
-    [entry("{id: check, path: steps/check.md, summary: Check it., required: true, extra: 1}"), /exactly id, path, summary and required/u],
-    [entry("{id: check, path: steps/check.md, summary: Check it.}"), /exactly id, path, summary and required/u],
-    [entry("{id: check, path: steps/check.md, summary: Check it., required: \"yes\"}"), /exactly id, path, summary and required/u],
-    [entry("{id: Check, path: steps/Check.md, summary: Check it., required: false}"), /id must be lowercase/u],
-    [entry("{id: check, path: steps/other.md, summary: Check it., required: false}"), /path must be steps\/check\.md/u],
-    [entry("{id: check, path: ../steps/check.md, summary: Check it., required: false}"), /path must be steps\/check\.md/u],
-    [entry("{id: check, path: workflows/check.yaml, summary: Check it., required: false}"), /path must be steps\/check\.md/u],
-    [entry("{id: check, path: steps/check.md, summary: \"  \", required: false}"), /nonempty summary/u],
-    [entry("{id: check, path: steps/check.md, summary: \"One.\\nTwo.\\nThree.\", required: false}"), /at most 2 nonempty lines/u],
-    [entry("{id: check, path: steps/check.md, summary: \"One.\\n\\nTwo.\", required: false}"), /at most 2 nonempty lines/u],
-    [entry(`{id: check, path: steps/check.md, summary: ${"x".repeat(241)}, required: false}`), /at most 240 characters/u],
-    ["workflows: []\nsteps:\n  - {id: check, path: steps/check.md, summary: One., required: false}\n  - {id: check, path: steps/check.md, summary: Two., required: false}\n", /indexed more than once/u],
+    [entry("{id: check, path: steps/check.md, summary: Check it.}"), /exactly path, summary and optional required/u],
+    [entry("{path: steps/check.md, summary: Check it., required: true, extra: 1}"), /exactly path, summary and optional required/u],
+    [entry("{summary: Check it.}"), /exactly path, summary and optional required/u],
+    [entry("{path: 1, summary: Check it.}"), /exactly path, summary and optional required/u],
+    [entry("{path: steps/check.md, summary: Check it., required: null}"), /exactly path, summary and optional required/u],
+    [entry("{path: steps/check.md, summary: Check it., required: 1}"), /exactly path, summary and optional required/u],
+    [entry("{path: steps/check.md, summary: Check it., required: \"yes\"}"), /exactly path, summary and optional required/u],
+    ...["steps/Check.md", "../steps/check.md", "./steps/check.md", "steps/check.yaml", "workflows/check.yaml", "steps/nested/check.md", "steps/.md", `steps/${"x".repeat(65)}.md`, "\"\""]
+      .map(path => [entry(`{path: ${path}, summary: Check it.}`), /path must be steps\/<id>\.md/u] as const),
+    ["workflows:\n  - {path: steps/check.md, summary: Check it.}\nsteps: []\n", /path must be workflows\/<id>\.yaml/u],
+    [entry("{path: steps/check.md, summary: \"  \"}"), /nonempty summary/u],
+    [entry("{path: steps/check.md, summary: \"One.\\nTwo.\\nThree.\"}"), /at most 2 nonempty lines/u],
+    [entry("{path: steps/check.md, summary: \"One.\\n\\nTwo.\"}"), /at most 2 nonempty lines/u],
+    [entry(`{path: steps/check.md, summary: ${"x".repeat(241)}}`), /at most 240 characters/u],
+    ["workflows: []\nsteps:\n  - {path: steps/check.md, summary: One.}\n  - {path: steps/check.md, summary: Two., required: true}\n", /steps\/check\.md is indexed more than once/u],
     ["workflows: []\nsteps: []\ndefault_workflow: missing\n", /must be an indexed workflow/u],
     ["workflows: &shared []\nsteps: *shared\n", /aliases/u],
     ["workflows: !custom []\nsteps: []\n", /Invalid YAML/u],

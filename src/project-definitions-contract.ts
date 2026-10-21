@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 
 export const workflowDefinitionExpansionLimits = {maxNodes: 500, maxDepth: 32} as const;
 
@@ -52,12 +52,12 @@ export const definitionIdPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 export const catalogSummaryLimits = {maxLines: 2, maxChars: 240, maxEntries: 100} as const;
 export type DefinitionCatalogKind = "workflows" | "steps";
 
-/** One project.yaml index row; path is relative to .t3-supervisor and the required flag is the only authored requirement. */
+/** One project.yaml index row: its path (relative to .t3-supervisor) names the file and so the definition ID; the required flag, false when
+ * omitted, is the only authored requirement. */
 export const DefinitionCatalogEntry = Schema.Struct({
-  id: Schema.String,
   path: Schema.String,
   summary: Schema.String,
-  required: Schema.Boolean,
+  required: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))),
 });
 export type DefinitionCatalogEntry = typeof DefinitionCatalogEntry.Type;
 
@@ -69,7 +69,7 @@ export const ProjectConfigurationInfo = Schema.Struct({
 });
 export type ProjectConfigurationInfo = typeof ProjectConfigurationInfo.Type;
 
-/** An effective index row: global IDs are namespaced, sourceId keeps the authored ID and origin names the folder. */
+/** An effective index row: its ID comes from the path, global IDs are namespaced, sourceId keeps the file's ID and origin names the folder. */
 export const EffectiveCatalogEntry = Schema.Struct({
   id: Schema.String,
   path: Schema.String,
@@ -96,6 +96,11 @@ export const DefinitionFileInfo = Schema.Struct({
 export type DefinitionFileInfo = typeof DefinitionFileInfo.Type;
 
 export const definitionCatalogPath = (kind: DefinitionCatalogKind, id: string): string => kind === "workflows" ? `workflows/${id}.yaml` : `steps/${id}.md`;
+/** The definition ID an index path names, or null unless it is exactly workflows/<id>.yaml or steps/<id>.md. */
+export const catalogEntryId = (kind: DefinitionCatalogKind, path: string): string | null => {
+  const match = (kind === "workflows" ? /^workflows\/([a-z0-9][a-z0-9_-]{0,63})\.yaml$/u : /^steps\/([a-z0-9][a-z0-9_-]{0,63})\.md$/u).exec(path);
+  return match ? match[1]! : null;
+};
 /** Line endings become LF and each line and the whole summary are trimmed. */
 export const normalizeCatalogSummary = (summary: string): string => summary.replace(/\r\n?/gu, "\n").split("\n").map(line => line.trim()).join("\n").trim();
 export const catalogSummaryProblem = (summary: string): string | null => {
@@ -107,7 +112,7 @@ export const catalogSummaryProblem = (summary: string): string | null => {
   return null;
 };
 export const normalizeProjectConfiguration = (config: ProjectConfigurationInfo): ProjectConfigurationInfo => {
-  const rows = (entries: readonly DefinitionCatalogEntry[]) => entries.map(entry => ({id: entry.id, path: entry.path, summary: normalizeCatalogSummary(entry.summary), required: entry.required}));
+  const rows = (entries: readonly DefinitionCatalogEntry[]) => entries.map(entry => ({path: entry.path, summary: normalizeCatalogSummary(entry.summary), required: entry.required}));
   return {workflows: rows(config.workflows), steps: rows(config.steps), ...(config.default_workflow === undefined ? {} : {default_workflow: config.default_workflow})};
 };
 /** The first problem of an authored index, or null; the same rule the loader and the editor apply. */
@@ -116,17 +121,16 @@ export const projectConfigurationError = (config: ProjectConfigurationInfo): str
   for (const kind of ["workflows", "steps"] as const) {
     const seen = new Set<string>();
     for (const entry of config[kind]) {
-      const label = `${kind === "workflows" ? "Workflow" : "Step"} ${entry.id || "(no id)"}`;
-      if (!definitionIdPattern.test(entry.id)) return `${label}: id must be lowercase letters, digits, - or _ (at most 64 characters).`;
-      if (seen.has(entry.id)) return `${label} is indexed more than once.`;
-      seen.add(entry.id);
-      if (entry.path !== definitionCatalogPath(kind, entry.id)) return `${label}: path must be ${definitionCatalogPath(kind, entry.id)}.`;
+      const label = `${kind === "workflows" ? "Workflow" : "Step"} ${entry.path || "(no path)"}`;
+      if (!catalogEntryId(kind, entry.path)) return `${label}: path must be ${definitionCatalogPath(kind, "<id>")} with a lowercase id of letters, digits, - or _ (at most 64 characters).`;
+      if (seen.has(entry.path)) return `${label} is indexed more than once.`;
+      seen.add(entry.path);
       const summary = catalogSummaryProblem(entry.summary);
       if (summary) return `${label}: ${summary}.`;
       if (typeof entry.required !== "boolean") return `${label}: required must be true or false.`;
     }
   }
-  if (config.default_workflow !== undefined && !config.workflows.some(entry => entry.id === config.default_workflow))
+  if (config.default_workflow !== undefined && !config.workflows.some(entry => catalogEntryId("workflows", entry.path) === config.default_workflow))
     return `default_workflow ${config.default_workflow} must be an indexed workflow.`;
   return null;
 };
@@ -135,10 +139,16 @@ export const definitionSnapshotIndexed = (definitions: {readonly config?: unknow
   const config = definitions.config as {workflows?: unknown; steps?: unknown} | null | undefined;
   return Boolean(config) && Array.isArray(config!.workflows) && Array.isArray(config!.steps) && Array.isArray(definitions.definitionFiles);
 };
-/** Inclusion derived from the required flags: workflows before steps, in index order. */
-export const requiredReferences = (config: {readonly workflows: ReadonlyArray<{readonly id: string; readonly required: boolean}>;
-  readonly steps: ReadonlyArray<{readonly id: string; readonly required: boolean}>}): DefinitionReference[] =>
-  [...config.workflows.filter(entry => entry.required).map(entry => ({workflow: entry.id})), ...config.steps.filter(entry => entry.required).map(entry => ({step: entry.id}))];
+type IndexRow = {readonly id?: string; readonly path: string; readonly required: boolean};
+/** Inclusion derived from the required flags: workflows before steps, in index order. An effective row uses its runtime ID, an authored
+ * row the ID its path names. */
+export const requiredReferences = (config: {readonly workflows: readonly IndexRow[]; readonly steps: readonly IndexRow[]}): DefinitionReference[] => {
+  const ids = (kind: DefinitionCatalogKind) => config[kind].filter(entry => entry.required).flatMap(entry => {
+    const id = entry.id ?? catalogEntryId(kind, entry.path);
+    return id ? [id] : [];
+  });
+  return [...ids("workflows").map(id => ({workflow: id})), ...ids("steps").map(id => ({step: id}))];
+};
 
 export const DefinitionSource = Schema.Struct({
   path: Schema.String,

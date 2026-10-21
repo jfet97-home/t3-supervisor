@@ -32,17 +32,14 @@ test("saves only local project.yaml, preserves valid YAML comments and retains g
   const oldConfig = `# project options
 workflows:
   # the local flow
-  - id: local-flow # keep this row comment
-    path: workflows/local-flow.yaml
+  - path: workflows/local-flow.yaml # keep this row comment
     summary: Run the local flow for checkout changes.
     required: false
 steps:
-  - id: local-step
-    path: steps/local-step.md
+  - path: steps/local-step.md
     summary: Check the local behavior. # keep this summary comment
     required: true
-  - id: second-step
-    path: steps/second-step.md
+  - path: steps/second-step.md
     summary: Run the second check.
     required: false
 default_workflow: local-flow # keep this default comment
@@ -51,6 +48,8 @@ default_workflow: local-flow # keep this default comment
   const observed = await f.loader.load(f.projectId);
   assert.equal(observed.status, "ready");
   assert.deepEqual(requiredReferences(observed.projectConfig!), [{step: "local-step"}]);
+  assert.deepEqual(observed.config.steps.filter(row => row.origin === "project").map(row => [row.id, row.path]),
+    [["local-step", "steps/local-step.md"], ["second-step", "steps/second-step.md"]], "the runtime ID is the indexed file name");
   assert.equal(requiredReferences(observed.config).length, 2, "the global requirement stays in the effective index");
 
   let savedSnapshotRevision: string | undefined;
@@ -78,7 +77,20 @@ default_workflow: local-flow # keep this default comment
   for (const comment of ["# project options", "# the local flow", "# keep this row comment", "# keep this summary comment", "# keep this default comment"])
     assert.ok(written.includes(comment), comment);
   assert.doesNotMatch(written, /^required:/mu, "no second required source is written");
+  assert.doesNotMatch(written, /\bid:/u, "index rows stay path-only");
   assert.equal(f.trees.get(f.globalRoot)?.get(".t3-supervisor/project.yaml"), globalIndex);
+
+  // unchecking a requirement removes its flag from the compact file; reloading reads it back as false
+  const unchecked = await editor.save({...input, expectedRevision: result.definitions!.revision!, config: {...input.config,
+    steps: [input.config.steps[0]!, {...input.config.steps[1]!, required: false}]}});
+  assert.equal(unchecked.status, "saved", unchecked.message);
+  const compact = f.trees.get(f.root)?.get(".t3-supervisor/project.yaml") ?? "";
+  assert.doesNotMatch(compact, /required: false/u, "false flags are omitted");
+  assert.equal(compact.match(/required: true/gu)?.length, 1, "only the remaining requirement keeps its flag");
+  for (const comment of ["# project options", "# keep this summary comment", "# keep this default comment"]) assert.ok(compact.includes(comment), comment);
+  const reloaded = await f.loader.load(f.projectId);
+  assert.deepEqual(reloaded.projectConfig?.steps.map(row => [row.path, row.required]), [["steps/local-step.md", true], ["steps/second-step.md", false]]);
+  assert.deepEqual(reloaded.projectConfig?.workflows.map(row => row.required), [false]);
 });
 
 test("indexes an existing unlisted file and rejects stale, missing-file, global, malformed or old-format indexes before writing", async () => {
@@ -103,12 +115,18 @@ test("indexes an existing unlisted file and rejects stale, missing-file, global,
   assert.match(injected.message, /needs an existing \.t3-supervisor\/steps\//u, "a global row cannot be written into the local index");
   const missing = await save({...localIndex(), steps: [...localIndex().steps, indexEntry("steps", "missing")]});
   assert.equal(missing.status, "invalid");
-  assert.match(missing.message, /missing needs an existing \.t3-supervisor\/steps\/missing\.md/u);
+  assert.match(missing.message, /steps\/missing\.md needs an existing \.t3-supervisor\/steps\/missing\.md/u);
   const threeLines = await save({...localIndex(), steps: [{...localIndex().steps[0]!, summary: "One.\nTwo.\nThree."}, localIndex().steps[1]!]});
   assert.equal(threeLines.status, "invalid");
   assert.match(threeLines.message, /at most 2 nonempty lines/u);
-  const wrongPath = await save({...localIndex(), steps: [{...localIndex().steps[0]!, path: "steps/elsewhere.md"}, localIndex().steps[1]!]});
-  assert.match(wrongPath.message, /path must be steps\/local-step\.md/u);
+  for (const path of ["steps/Local Step.md", "workflows/local-flow.yaml", "steps/local-step.yaml", "./steps/local-step.md"]) {
+    const invalidPath = await save({...localIndex(), steps: [{...localIndex().steps[0]!, path}, localIndex().steps[1]!]});
+    assert.equal(invalidPath.status, "invalid", path);
+    assert.match(invalidPath.message, /path must be steps\/<id>\.md/u, path);
+  }
+  const duplicate = await save({...localIndex(), steps: [localIndex().steps[0]!, {...localIndex().steps[0]!, summary: "Run the check again."}]});
+  assert.match(duplicate.message, /steps\/local-step\.md is indexed more than once/u);
+  assert.equal((await save({...localIndex(), steps: [{id: "local-step", ...localIndex().steps[0]!}, localIndex().steps[1]!]})).status, "invalid", "an authored id is an unknown key");
   assert.equal((await save({required: [{step: "local-step"}]})).status, "invalid", "the old required list is not an accepted payload");
   const mixed = await save({...localIndex(), required: [{step: "local-step"}]});
   assert.equal(mixed.status, "invalid", "a legacy required list beside the index is rejected, not dropped");
@@ -204,7 +222,12 @@ test("project-configuration endpoint keeps session, origin and CSRF checks", asy
     const observed = await observedResponse.json() as {status: string; revision: string; projectConfig: unknown};
     assert.equal(observed.status, "ready");
     assert.ok(observed.revision);
-    const payload = {projectId: "project", threadId: null, expectedRevision: observed.revision, config: localIndex([{step: "local-step"}])};
+    // the dashboard may omit a false required flag; only the required row carries it
+    const compactRows = (rows: ReadonlyArray<{path: string; summary: string; required: boolean}>) =>
+      rows.map(({required, ...row}) => required ? {...row, required} : row);
+    const index = localIndex([{step: "local-step"}]);
+    const payload = {projectId: "project", threadId: null, expectedRevision: observed.revision,
+      config: {workflows: compactRows(index.workflows), steps: compactRows(index.steps)}};
     const rejected = await fetch(origin + "/api/guidance/project-configuration", {
       method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify(payload),
     });
@@ -212,7 +235,8 @@ test("project-configuration endpoint keeps session, origin and CSRF checks", asy
     assert.equal(f.writes.length, 0);
     const csrf = await fetch(origin + "/api/csrf", {headers}).then(response => response.json()) as {csrf: string};
     // legacy or unknown fields are rejected while decoding the request, before any normalization or write
-    for (const config of [{...localIndex(), required: [{step: "local-step"}]}, {...localIndex(), steps: [{...localIndex().steps[0]!, extra: true}, localIndex().steps[1]!]}]) {
+    for (const config of [{...localIndex(), required: [{step: "local-step"}]}, {...localIndex(), steps: [{...localIndex().steps[0]!, extra: true}, localIndex().steps[1]!]},
+      {...localIndex(), steps: [{id: "local-step", ...localIndex().steps[0]!}, localIndex().steps[1]!]}]) {
       const strict = await fetch(origin + "/api/guidance/project-configuration", {
         method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf.csrf},
         body: JSON.stringify({...payload, config}),
@@ -224,8 +248,16 @@ test("project-configuration endpoint keeps session, origin and CSRF checks", asy
       method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf.csrf}, body: JSON.stringify(payload),
     });
     assert.equal(saved.status, 200);
-    assert.equal((await saved.json() as {status: string}).status, "saved");
+    const savedBody = await saved.json() as {status: string; definitions: {projectConfig: {steps: Array<{path: string; required: boolean}>; workflows: Array<{required: boolean}>}}};
+    assert.equal(savedBody.status, "saved");
     assert.deepEqual(f.writes.map(write => write.path), [".t3-supervisor/project.yaml"]);
+    assert.deepEqual(savedBody.definitions.projectConfig.steps.map(row => [row.path, row.required]), [["steps/local-step.md", true], ["steps/second-step.md", false]],
+      "an omitted flag is saved and read back as false");
+    assert.deepEqual(savedBody.definitions.projectConfig.workflows.map(row => row.required), [false]);
+    const writtenIndex = f.writes[0]!.contents;
+    assert.doesNotMatch(writtenIndex, /required: false/u);
+    assert.equal(writtenIndex.match(/required: true/gu)?.length, 1);
+    assert.doesNotMatch(writtenIndex, /\bid:/u, "the saved index is path-only");
   } finally {
     await ui.close();
     await rm(directory, {recursive: true, force: true});

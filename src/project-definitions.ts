@@ -6,7 +6,7 @@ import { definitionReferenceFields, definitionReferenceProblem, describeDefiniti
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import { ProjectFileError, type FreshGitProbe, type ProjectCommitter, type ProjectFiles } from "./project-files.js";
-import {definitionIdPattern, normalizeProjectConfiguration, projectConfigurationError, workflowDefinitionExpansionLimits, type DefinitionCatalogEntry,
+import {catalogEntryId, definitionIdPattern, normalizeProjectConfiguration, projectConfigurationError, workflowDefinitionExpansionLimits, type DefinitionCatalogEntry,
   type DefinitionFileInfo, type DefinitionNode, type DefinitionStepInfo, type DefinitionWorkflowInfo, type EffectiveConfigurationInfo, type ProjectConfigurationInfo,
   type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
 
@@ -72,10 +72,11 @@ export const parseProjectConfiguration = (contents: string): ProjectConfiguratio
     !Array.isArray(config.workflows) || !Array.isArray(config.steps) || config.default_workflow !== undefined && typeof config.default_workflow !== "string")
     throw new Error("project.yaml needs workflows and steps lists (use [] for none) and an optional default_workflow identifier.");
   const rows = (kind: "workflows" | "steps", values: unknown[]): DefinitionCatalogEntry[] => values.map(value => {
-    if (!record(value) || !exact(value, ["id", "path", "summary", "required"]) || typeof value.id !== "string" || typeof value.path !== "string" ||
-      typeof value.summary !== "string" || typeof value.required !== "boolean")
-      throw new Error(`Each ${kind} entry needs exactly id, path, summary and required (true or false).`);
-    return {id: value.id, path: value.path, summary: value.summary, required: value.required};
+    // the path names the file and so the ID; an omitted required flag means false, a present one must be true or false
+    if (!record(value) || !(exact(value, ["path", "summary"]) || exact(value, ["path", "summary", "required"])) ||
+      typeof value.path !== "string" || typeof value.summary !== "string" || Object.hasOwn(value, "required") && typeof value.required !== "boolean")
+      throw new Error(`Each ${kind} entry needs exactly path, summary and optional required (true or false).`);
+    return {path: value.path, summary: value.summary, required: value.required === true};
   });
   const parsed = normalizeProjectConfiguration({workflows: rows("workflows", config.workflows), steps: rows("steps", config.steps),
     ...(config.default_workflow === undefined ? {} : {default_workflow: config.default_workflow as string})});
@@ -316,8 +317,12 @@ export class ProjectDefinitionLoader {
             const contents = await readSource(projectFile);
             try {
               const index = scope.projectConfig = parseProjectConfiguration(contents);
-              const rows = (entries: readonly DefinitionCatalogEntry[]) => entries.map(entry => ({...entry, origin, sourceId: entry.id}));
-              scope.config = {workflows: rows(index.workflows), steps: rows(index.steps), ...(index.default_workflow ? {default_workflow: index.default_workflow} : {})};
+              const rows = (kind: "workflows" | "steps", entries: readonly DefinitionCatalogEntry[]) => entries.map(entry => {
+                const id = catalogEntryId(kind, entry.path)!;
+                return {id, ...entry, origin, sourceId: id};
+              });
+              scope.config = {workflows: rows("workflows", index.workflows), steps: rows("steps", index.steps),
+                ...(index.default_workflow ? {default_workflow: index.default_workflow} : {})};
             }
             catch (error) {issue(showPath(projectFile), "project_configuration_invalid", error instanceof Error ? error.message : "project.yaml is invalid.");}
           } catch (error) {markIncomplete();noteReadFailure(error);issue(showPath(projectFile), "definition_source_unreadable", error instanceof Error ? error.message : "project.yaml could not be read.");}
@@ -333,8 +338,8 @@ export class ProjectDefinitionLoader {
         const directory = entries.find(entry => entry.path === directoryPath);
         // the index is authoritative: an indexed entry without its file stays, with its required flag, as a diagnosed gap
         const reportMissing = (found: ReadonlySet<string>) => {
-          for (const entry of scope.projectConfig?.[kind] ?? []) if (!found.has(entry.id))
-            issue(showPath(`.t3-supervisor/${entry.path}`), "catalog_entry_missing", `project.yaml indexes ${kind === "steps" ? "step" : "workflow"} ${entry.id}, but ${entry.path} does not exist.`);
+          for (const entry of scope.projectConfig?.[kind] ?? []) if (!found.has(entry.path))
+            issue(showPath(`.t3-supervisor/${entry.path}`), "catalog_entry_missing", `project.yaml indexes ${entry.path}, but that file does not exist.`);
         };
         if (!directory) {
           issue(showPath(directoryPath), `${kind}_directory_missing`, `Add the ${kind}/ directory to the definition folder.`);
@@ -394,12 +399,13 @@ export class ProjectDefinitionLoader {
             continue;
           }
           const id = match[1]!;
-          scope.definitionFiles.push({origin, kind, id, path: `${kind}/${entry.path.slice(directoryPath.length + 1)}`});
+          const relative = `${kind}/${entry.path.slice(directoryPath.length + 1)}`;
+          scope.definitionFiles.push({origin, kind, id, path: relative});
           // only indexed files are reusable definitions; an unreadable index reads none, and an unlisted file is reported unread
-          const indexed = scope.projectConfig?.[kind].find(row => row.id === id);
+          const indexed = scope.projectConfig?.[kind].find(row => row.path === relative);
           if (!scope.projectConfig) continue;
           if (!indexed) {
-            issue(showPath(entry.path), "definition_unlisted", `${entry.path.slice(directoryPath.length + 1)} is not indexed in project.yaml, so it is not loaded. Index it with a summary and required flag, or remove it.`);
+            issue(showPath(entry.path), "definition_unlisted", `${entry.path.slice(directoryPath.length + 1)} is not indexed in project.yaml, so it is not loaded. Index its path with a summary, or remove it.`);
             continue;
           }
           budget.files++;
@@ -424,7 +430,7 @@ export class ProjectDefinitionLoader {
             issue(showPath(entry.path), `${kind}_invalid`, error instanceof Error ? error.message : `The ${kind} definition is invalid.`);
           }
         }
-        if (!collection.truncated) reportMissing(new Set(scope.definitionFiles.filter(file => file.kind === kind).map(file => file.id)));
+        if (!collection.truncated) reportMissing(new Set(scope.definitionFiles.filter(file => file.kind === kind).map(file => file.path)));
       };
       await readDefinitions("steps");
       await readDefinitions("workflows");

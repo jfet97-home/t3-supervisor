@@ -55,10 +55,11 @@ const validConfiguration = (value: unknown, effective: boolean): boolean => {
   if (!record(value) || !optionalFields(value, ["workflows", "steps"], ["default_workflow"]) || !Array.isArray(value.workflows) || !Array.isArray(value.steps) ||
     value.workflows.length + value.steps.length > MAX_FILES || value.default_workflow !== undefined &&
       (typeof value.default_workflow !== "string" || !definitionIdPattern.test(value.default_workflow))) return false;
-  const fields = ["id", "path", "summary", "required", ...(effective ? ["origin", "sourceId"] : [])];
-  return [...value.workflows, ...value.steps].every(entry => record(entry) && exactFields(entry, fields) && typeof entry.id === "string" &&
-    definitionIdPattern.test(entry.id) && boundedText(entry.path, 4096) && boundedText(entry.summary, 4096) && typeof entry.required === "boolean" &&
-    (!effective || (entry.origin === "global" || entry.origin === "project") && typeof entry.sourceId === "string" && definitionIdPattern.test(entry.sourceId)));
+  // authored rows are path, summary and required; effective rows add the runtime ID and its origin
+  const fields = effective ? ["id", "path", "summary", "required", "origin", "sourceId"] : ["path", "summary", "required"];
+  return [...value.workflows, ...value.steps].every(entry => record(entry) && exactFields(entry, fields) && boundedText(entry.path, 4096) &&
+    boundedText(entry.summary, 4096) && typeof entry.required === "boolean" && (!effective || typeof entry.id === "string" && definitionIdPattern.test(entry.id) &&
+      (entry.origin === "global" || entry.origin === "project") && typeof entry.sourceId === "string" && definitionIdPattern.test(entry.sourceId)));
 };
 const validDefinitionFile = (value: unknown): boolean => record(value) && exactFields(value, ["origin", "kind", "id", "path"]) &&
   (value.origin === "global" || value.origin === "project") && (value.kind === "workflows" || value.kind === "steps") &&

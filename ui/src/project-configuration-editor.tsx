@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from "react";
-import { catalogSummaryLimits, definitionCatalogPath, normalizeProjectConfiguration, projectConfigurationError, requiredReferences, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
+import { catalogEntryId, catalogSummaryLimits, normalizeProjectConfiguration, projectConfigurationError, requiredReferences, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import { ProjectConfigRequestError, saveProjectConfiguration } from "./project-definitions-api.js";
 
 const emptyConfiguration = (): ProjectConfigurationInfo => ({workflows: [], steps: []});
@@ -9,7 +9,6 @@ const copyConfiguration = (value: ProjectConfigurationInfo): ProjectConfiguratio
   ...(value.default_workflow === undefined ? {} : {default_workflow: value.default_workflow}),
 });
 type CatalogKind = "workflows" | "steps";
-const canonicalPath = (kind: CatalogKind, id: string) => id ? definitionCatalogPath(kind, id) : "";
 
 // The index is the source of rows, including entries whose full definition cannot be read.
 export function ProjectCatalogFields({kind, config, definitions, disabled, onChange}: {
@@ -30,21 +29,16 @@ export function ProjectCatalogFields({kind, config, definitions, disabled, onCha
     <p id={`${prefix}-help`} className="muted">List every reusable {singular} file in this checkout. Paths are relative to <code>.t3-supervisor</code>; removing a row does not delete its file.</p>
     {entries.map((entry, index) => {
       const field = `${prefix}-${index}`;
-      const definition = definitions[kind].find(item => item.origin === "project" && item.id === entry.id);
+      const id = catalogEntryId(kind, entry.path);
+      const definition = id ? definitions[kind].find(item => item.origin === "project" && item.id === id) : undefined;
       return <fieldset key={index} className="stack project-config-entry">
         <legend>{kind === "steps" ? "Step" : "Workflow"} {index + 1}</legend>
         <div className="project-config-identity">
-          <label htmlFor={`${field}-id`}>ID
-            <input id={`${field}-id`} value={entry.id} required maxLength={64} autoCapitalize="none" spellCheck={false} aria-describedby={`${prefix}-help`} onChange={event => {
-              const id = event.target.value;
-              updateEntry(index, {id, ...(entry.path === canonicalPath(kind, entry.id) || !entry.path ? {path: canonicalPath(kind, id)} : {})});
-            }}/>
-          </label>
           <label htmlFor={`${field}-path`}>Path
             <input id={`${field}-path`} value={entry.path} required autoCapitalize="none" spellCheck={false} aria-describedby={`${field}-path-help`} onChange={event => updateEntry(index, {path: event.target.value})}/>
           </label>
         </div>
-        <p id={`${field}-path-help`} className="muted small definition-path">Use <code>{kind}/&lt;id&gt;.{kind === "steps" ? "md" : "yaml"}</code>, matching the ID above.</p>
+        <p id={`${field}-path-help`} className="muted small definition-path">Use <code>{kind}/&lt;id&gt;.{kind === "steps" ? "md" : "yaml"}</code>; the file name is the definition ID{id ? <> (<code>{id}</code>)</> : null}.</p>
         <label htmlFor={`${field}-summary`}>Summary</label>
         <textarea id={`${field}-summary`} className="project-config-summary" rows={2} maxLength={catalogSummaryLimits.maxChars} required value={entry.summary} aria-describedby={`${field}-summary-help`} onChange={event => updateEntry(index, {summary: event.target.value})}/>
         <p id={`${field}-summary-help`} className="muted small">Briefly explain purpose or applicability from the full description. At most 2 lines · {entry.summary.length}/240 characters. The definition file remains the full policy.</p>
@@ -52,12 +46,12 @@ export function ProjectCatalogFields({kind, config, definitions, disabled, onCha
           <label className="project-config-required" htmlFor={`${field}-required`}><input id={`${field}-required`} type="checkbox" checked={entry.required} onChange={event => updateEntry(index, {required: event.target.checked})}/> Required</label>
           <button type="button" onClick={() => onChange({...config, [kind]: entries.filter((_, position) => position !== index)})}>Remove {singular} {index + 1}</button>
         </div>
-        {entry.id && !definition && <p className="muted small">Missing or invalid in the current read. This entry and its required flag are kept; saving checks the indexed file again.</p>}
+        {id && !definition && <p className="muted small">Missing or invalid in the current read. This entry and its required flag are kept; saving checks the indexed file again.</p>}
       </fieldset>;
     })}
     {entries.length === 0 && <p>No local {kind} are indexed. Any existing {singular} files must be added before this index is valid.</p>}
-    {unlisted.length > 0 && <div className="stack"><p>Files not indexed in this draft:</p><ul className="project-config-unlisted">{unlisted.map(file => <li key={file.path}><code>{file.path}</code> <button type="button" disabled={config.steps.length + config.workflows.length >= catalogSummaryLimits.maxEntries} onClick={() => onChange({...config, [kind]: [...entries, {id: file.id, path: file.path, summary: "", required: false}]})}>Index {file.id}</button></li>)}</ul></div>}
-    <div><button type="button" disabled={config.steps.length + config.workflows.length >= catalogSummaryLimits.maxEntries} onClick={() => onChange({...config, [kind]: [...entries, {id: "", path: "", summary: "", required: false}]})}>Add {singular}</button></div>
+    {unlisted.length > 0 && <div className="stack"><p>Files not indexed in this draft:</p><ul className="project-config-unlisted">{unlisted.map(file => <li key={file.path}><code>{file.path}</code> <button type="button" disabled={config.steps.length + config.workflows.length >= catalogSummaryLimits.maxEntries} onClick={() => onChange({...config, [kind]: [...entries, {path: file.path, summary: "", required: false}]})}>Index {file.path}</button></li>)}</ul></div>}
+    <div><button type="button" disabled={config.steps.length + config.workflows.length >= catalogSummaryLimits.maxEntries} onClick={() => onChange({...config, [kind]: [...entries, {path: "", summary: "", required: false}]})}>Add {singular}</button></div>
   </fieldset>;
 }
 
@@ -83,6 +77,7 @@ export function ProjectConfigurationEditor({definitions, csrfToken, onSaved, onD
   useEffect(() => {onDirtyChange(dirty);}, [dirty, onDirtyChange]);
   useEffect(() => {if (message && messageAlert) error.current?.focus();}, [message, messageAlert]);
   const update = (next: ProjectConfigurationInfo) => {setConfig(next);setMessage("");setMessageAlert(false);};
+  const workflowIds = [...new Set(config.workflows.flatMap(workflow => catalogEntryId("workflows", workflow.path) ?? []))];
   const unreadableSource = brokenConfigSource && <details className="definition-block"><summary>Inspect the unreadable project.yaml source</summary><pre className="definition-copy">{brokenConfigSource.content}</pre></details>;
 
   if (definitions.globalOnly) return <div className="panel stack"><h3>Project configuration</h3><p className="muted">This view is global-only. Its definitions are inspectable, but a project editor does not write global files.</p></div>;
@@ -153,8 +148,8 @@ export function ProjectConfigurationEditor({definitions, csrfToken, onSaved, onD
         update(event.target.value ? {...index, default_workflow: event.target.value} : index);
       }}>
         <option value="">No default workflow</option>
-        {config.default_workflow && !config.workflows.some(workflow => workflow.id === config.default_workflow) && <option value={config.default_workflow}>{config.default_workflow} · missing from index</option>}
-        {config.workflows.filter(workflow => workflow.id).map((workflow, index) => <option key={index} value={workflow.id}>{workflow.id}</option>)}
+        {config.default_workflow && !workflowIds.includes(config.default_workflow) && <option value={config.default_workflow}>{config.default_workflow} · missing from index</option>}
+        {workflowIds.map(id => <option key={id} value={id}>{id}</option>)}
       </select>
       <p id="project-config-default-help" className="muted">Choose an indexed workflow in this checkout. Task plans can use other workflows, new combinations and local steps while preserving required and fixed commitments.</p>
     </fieldset>

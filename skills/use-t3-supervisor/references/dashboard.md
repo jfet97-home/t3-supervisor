@@ -46,7 +46,7 @@ reusable steps, nested workflows, requirements, completeness and diagnostics.
 The Guide contains complete syntax examples and FAQ independently of this selection.
 
 The project configuration editor saves the existing local `project.yaml` index
-only: `workflows` and `steps`, each entry `id`, `path`, `summary` and `required`,
+only: `workflows` and `steps`, each entry `path`, `summary` and optional `required`,
 plus an optional `default_workflow`. A new file is `workflows: []` and then
 `steps: []`. The global `~/.t3-supervisor/project.yaml` uses the same format and
 stays read-only here. Step and workflow files stay repository-authored. A summary

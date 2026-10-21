@@ -34,10 +34,11 @@ wording is not a substitute for permission.
 Its only keys are `workflows`, `steps` (both lists, `[]` allowed) and optional
 `default_workflow`. A new folder starts with `workflows: []`, then `steps: []`,
 plus `steps/.gitkeep` and `workflows/.gitkeep`. Add, rename or remove a reusable
-file and its index entry in the same edit. Every entry has exactly `id`, `path`,
-`summary` and `required` (`true` or `false`). `id` is lowercase letters, digits,
-`-` or `_`, at most 64 characters, and unique in its list. `path` is
-`workflows/<id>.yaml` or `steps/<id>.md`. At most 100 entries. The parser
+file and its index entry in the same edit. Every entry has exactly `path` and
+`summary`, plus an optional `required` (`true` or `false`, default `false`).
+`path` is `workflows/<id>.yaml` or `steps/<id>.md`; its file name is the ID
+(lowercase letters, digits, `-` or `_`, at most 64 characters). Each path
+appears once. At most 100 entries. The parser
 requires a summary to be nonempty, at most two nonempty lines, and at most 240
 characters. When writing one, say what the definition is for and when it
 applies; a descriptive name can be enough. The file description stays the

@@ -2,11 +2,13 @@ import { isMap, isSeq, parseDocument, stringify } from "yaml";
 import { posix } from "node:path";
 import { ProjectDefinitionLoader, parseProjectConfiguration } from "./project-definitions.js";
 import { ProjectFileError, type ProjectWriter } from "./project-files.js";
-import { type ProjectConfigSave, type ProjectConfigSaveOutcome, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
+import { type DefinitionCatalogEntry, type ProjectConfigSave, type ProjectConfigSaveOutcome, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 
+// the saved index is compact: a required entry says required: true and every other entry omits the flag
+const entryDocument = (entry: DefinitionCatalogEntry) => ({path: entry.path, summary: entry.summary, ...(entry.required ? {required: true} : {})});
 const configDocument = (config: ProjectConfigurationInfo) => ({
-  workflows: config.workflows.map(entry => ({id: entry.id, path: entry.path, summary: entry.summary, required: entry.required})),
-  steps: config.steps.map(entry => ({id: entry.id, path: entry.path, summary: entry.summary, required: entry.required})),
+  workflows: config.workflows.map(entryDocument),
+  steps: config.steps.map(entryDocument),
   ...(config.default_workflow ? {default_workflow: config.default_workflow} : {}),
 });
 
@@ -23,10 +25,13 @@ const serializeConfig = (config: ProjectConfigurationInfo, previous?: string): s
       if (!isSeq(list)) return intended;
       const prior = [...list.items];
       list.items = config[kind].map(entry => {
-        const matching = prior.find(node => isMap(node) && node.get("id") === entry.id);
-        if (!matching) return document.createNode({id: entry.id, path: entry.path, summary: entry.summary, required: entry.required});
-        const node = (matching as {clone: () => unknown}).clone() as ReturnType<typeof document.createNode> & {get(key: string): unknown; set(key: string, value: unknown): void};
-        for (const field of ["path", "summary", "required"] as const) if (node.get(field) !== entry[field]) node.set(field, entry[field]);
+        const matching = prior.find(node => isMap(node) && node.get("path") === entry.path);
+        if (!matching) return document.createNode(entryDocument(entry));
+        const node = (matching as {clone: () => unknown}).clone() as ReturnType<typeof document.createNode> & {get(key: string): unknown; set(key: string, value: unknown): void;
+          delete(key: string): boolean};
+        if (node.get("summary") !== entry.summary) node.set("summary", entry.summary);
+        if (entry.required) {if (node.get("required") !== true) node.set("required", true);}
+        else node.delete("required");
         return node;
       });
     }
@@ -80,7 +85,7 @@ export class ProjectConfigEditor {
       const files = new Set(fresh.definitionFiles.filter(file => file.origin === "project").map(file => `${file.kind}:${file.path}`));
       for (const kind of ["workflows", "steps"] as const) {
         const missing = intended[kind].find(entry => !files.has(`${kind}:${entry.path}`));
-        if (missing) return outcome("invalid", `Indexed ${kind === "workflows" ? "workflow" : "step"} ${missing.id} needs an existing .t3-supervisor/${missing.path}; add the file to the repository or remove the row.`, fresh);
+        if (missing) return outcome("invalid", `Indexed ${missing.path} needs an existing .t3-supervisor/${missing.path}; add the file to the repository or remove the row.`, fresh);
       }
       const target = ".t3-supervisor/project.yaml";
       const previousContents = fresh.sources.find(source => source.origin === "project" && source.path === target)?.content;
