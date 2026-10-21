@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
-export type ProjectSection = "progress" | "plan" | "supervision" | "definitions" | "settings";
+export type ProjectSection = "progress" | "plan" | "supervision" | "definitions" | "settings" | "conversations";
 export type Route = {page: "home" | "projects" | "activity" | "settings" | "guide"; projectId: string; main: string | null; section: ProjectSection};
 export const directoryRoute: Route = {page: "projects", projectId: "", main: null, section: "progress"};
 export const homeRoute: Route = {...directoryRoute, page: "home"};
-export const projectSections: readonly ProjectSection[] = ["progress", "plan", "supervision", "definitions", "settings"];
+export const projectSections: readonly ProjectSection[] = ["progress", "plan", "supervision", "definitions", "settings", "conversations"];
 export type NavigationGuard = (next: Route) => boolean;
 
 export function parseRoute(hash: string): Route {

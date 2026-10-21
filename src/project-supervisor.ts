@@ -1,4 +1,5 @@
 import {SupervisorHelperTransport} from "./supervisor-helper-transport.js";
+import { assessmentForTask, workflowAssessment } from "./workflow-assessment.js";
 import { buildDashboardOverview } from "./dashboard-overview.js";
 import {supervisorTeamView} from "./supervisor-team-view.js";
 import {SupervisorTeamStore} from "./supervisor-team-store.js";
@@ -636,7 +637,7 @@ export class ProjectSupervisor {
   }
   async overview(page: {offset: number; limit: number}) {
     const catalog = await Effect.runPromise(this.source.catalog());
-    return buildDashboardOverview({...page, observedAt: this.now(),
+    return buildDashboardOverview({...page, fingerprint, observedAt: this.now(),
       available: this.store.scopeCompatible && Boolean(this.operateRpc), globallyEnabled: this.store.control(null).enabled,
       projects: catalog.projects, threads: catalog.threads, bindings: this.store.scopeCompatible ? this.store.bindings() : [],
       tasks: projectId => this.store.tasks(projectId),
@@ -649,8 +650,7 @@ export class ProjectSupervisor {
       monitoring: binding => this.conversation.status(binding.projectId, binding.threadId),
       assessment: (binding, task) => {
         const result = this.workflowStates.getState(binding.projectId, binding.mainThreadId);
-        if (result.status !== "found" || task && result.document.sourceBinding?.sourceHash !== task.sourceHash) return null;
-        return {status: result.document.status, summary: (result.document.evidence.at(-1)?.note ?? result.document.objective ?? "").slice(0, 800), updatedAt: result.document.updatedAt};
+        return result.status === "found" ? assessmentForTask(workflowAssessment(result.document), task) : null;
       },
       excluded: new Set(currentThreadPolicy(this.config).excludedThreadIds)});
   }
@@ -700,7 +700,7 @@ export class ProjectSupervisor {
     const chatSupervision = mainThreadId ? {stopped: policy.excludedThreadIds.includes(mainThreadId), policyGeneration: policy.generation,
       stoppedBy: binding?.supervisionStop?.route ?? null, stoppedAt: binding?.supervisionStop?.stoppedAt ?? null} : null;
     return {projectId, mainThreadId, chatSupervision, team: binding ? supervisorTeamView(this.team, binding, catalog.threads, this.conversation.requests, this.now()) : null, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring, teamSettings: current.teamSettings ?? {maxHelpersPerRoot: 5}}, monitoringStatus: this.conversation.status(projectId, binding?.threadId ?? null), binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models, available, message,
-      tasks: (binding ? this.store.tasksFor(binding) : []).slice(-200).reverse().map(({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview,workflowProtocolDiagnostic}) => ({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow: workflow ?? null,
+      tasks: (binding ? this.store.tasksFor(binding) : []).slice(-200).reverse().map(({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview,workflowProtocolDiagnostic}) => ({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow: workflow ?? null,
         ...(workflowProposalId ? {workflowProposalId} : {}), agreement: agreement ?? null, workflowProtocolDiagnostic: workflowProtocolDiagnostic ?? null,
         ...(definitionReview ? {definitionReview} : {})}))};
   }

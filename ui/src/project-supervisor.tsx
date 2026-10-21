@@ -1,8 +1,10 @@
+import { assessmentForTask } from "../../src/workflow-assessment.js";
 import { workAttention } from "../../src/dashboard-overview.js";
 import React, { useEffect, useRef, useState, type FormEvent } from "react";
 import { DefinitionReferences } from "./definition-references.js";
 import type {
   ProjectSupervisorInfo,
+  TaskInterpretationInfo,
   ProjectSupervisorTeamInfo,
   DefinitionReviewInfo,
   SupervisorModelInfo,
@@ -682,8 +684,9 @@ function WorkflowProgressDetails({workflow, scopeThread}: {workflow: WorkflowPro
   </article>;
 }
 
-export function WorkflowProgressPanel({mainThreadId, connected, progress, onRefresh, onLoadMore}: {
+export function WorkflowProgressPanel({mainThreadId, currentTask, connected, progress, onRefresh, onLoadMore}: {
   mainThreadId: string | null;
+  currentTask?: TaskInterpretationInfo | undefined;
   connected: boolean;
   progress: WorkflowProgressPanelState;
   onRefresh: () => void;
@@ -730,10 +733,10 @@ export function WorkflowProgressPanel({mainThreadId, connected, progress, onRefr
             {scopeIssues.length > 0 && <ul>{scopeIssues.map((issue, index) => <li key={`${issue.code}:${index}`}>{issue.message}</li>)}</ul>}
           </div>}
           {workflows.length > 0 && <div className="stack">
-            <h4>Current workflow records</h4>
+            <h4>Workflow records</h4>
             {workflows.map(workflow => {
               const scopeThread = threadById.get(workflow.threadId);
-              return <WorkflowProgressDetails key={workflow.workflowId} workflow={workflow} {...(scopeThread ? {scopeThread} : {})}/>;
+              return <div className="stack" key={workflow.workflowId}>{workflow.threadId === mainThreadId && !assessmentForTask(workflow.assessment, currentTask) && <p className="notice">Retained workflow record. It is not linked to the current task.</p>}<WorkflowProgressDetails workflow={workflow} {...(scopeThread ? {scopeThread} : {})}/></div>;
             })}
           </div>}
           {threads.length > 0 && <div className="stack">
@@ -857,8 +860,17 @@ export function ProjectSupervisorView({
   const listedSelection = snapshot.models.some(model => modelKey(model) === selectedModelKey(selection));
   const providerGroups = [...new Set(snapshot.models.map(model => model.providerName))];
   const selectedTask = threadId ? snapshot.tasks.find(task => task.threadId === threadId && task.projectId === snapshot.projectId) : undefined;
+  const progressPages = workflowProgress?.pages ?? [];
+  const mainWorkflow = progressPages.flatMap(page => page.workflows).find(workflow => workflow.threadId === threadId);
+  const currentAssessment = assessmentForTask(mainWorkflow?.assessment, selectedTask);
+  const progressComplete = progressPages.length > 0 && progressPages.every(page => page.status === "ok") && !progressPages.at(-1)?.workflowHasMore;
+  const assessmentSummary = currentAssessment ? currentAssessment.status.replaceAll("_", " ")
+    : workflowProgress?.error ? "Assessment unavailable"
+    : workflowProgress?.loading ? "Reading assessment…"
+    : !progressComplete ? "Assessment coverage incomplete"
+    : mainWorkflow ? "Retained workflow; not linked to this task" : "No current workflow record";
   const attention = workAttention({enabled: attentionEnabled && !snapshot.chatSupervision?.stopped, bindingState: snapshot.binding?.state ?? null,
-    settlementState: snapshot.binding?.settlementState ?? null, monitoring: snapshot.monitoringStatus, task: selectedTask});
+    settlementState: snapshot.binding?.settlementState ?? null, monitoring: snapshot.monitoringStatus, task: selectedTask, assessment: currentAssessment});
   const taskLabels: Record<string, string> = {inferred: "Interpreted", needs_context: "Needs clarification", not_supervised: "Supervision not needed", queued: "Queued", dispatching: "Contacting Supervisor", waiting: "Awaiting interpretation", uncertain: "Outcome uncertain", unavailable: "Unavailable", expired: "Earlier request expired"};
   const fieldsDisabled = !connected || !snapshot.available || fieldsBusy || blocked;
   const intervalError = monitoringError(monitoring.intervalMinutes, 1, 60, "maximum pending activity age in minutes");
@@ -880,7 +892,7 @@ export function ProjectSupervisorView({
       <ol className="task-path" aria-label="Task, agreement and assessment">
         <li><strong>Task interpretation</strong><span>{selectedTask ? selectedTask.status === "inferred" ? "Interpreted" : selectedTask.status.replaceAll("_", " ") : "Not recorded"}</span></li>
         <li><strong>Plan agreement</strong><span>{selectedTask?.agreement?.status === "agreed" ? "Agreed" : selectedTask?.agreement?.status === "stale" ? "Needs review" : selectedTask?.workflow?.status === "proposed" ? "Awaiting acceptance" : "Not agreed"}</span></li>
-        <li><strong>Supervisor assessment</strong><span>{workflowProgress?.pages.flatMap(page => page.workflows).find(workflow => workflow.threadId === threadId)?.status.replaceAll("_", " ") ?? "No current workflow record"}</span></li>
+        <li><strong>Supervisor assessment</strong><span>{assessmentSummary}{currentAssessment && <small>Read {new Date(progressPages[0]!.observedAt).toLocaleTimeString()}</small>}{workflowProgress?.loading && currentAssessment && <small>Refreshing retained assessment…</small>}{workflowProgress?.error && <small>{workflowProgress.error} {currentAssessment ? "Showing the retained assessment." : "Current status is unknown."}</small>}</span></li>
       </ol>
     </section>
     <div hidden={section !== "all" && section !== "progress" && section !== "supervision"} className="conversation-supervision stack">      {snapshot.mainThreadId && snapshot.chatSupervision && <div className="stack">
@@ -921,6 +933,17 @@ export function ProjectSupervisorView({
 
 
 
+    <div hidden={section !== "all" && section !== "supervision"} className="panel stack">
+        {snapshot.monitoringStatus && <section className="stack" aria-labelledby="supervisor-monitoring-status-title">
+          <h4 id="supervisor-monitoring-status-title">Current monitoring status</h4>
+          <p><strong>Status:</strong> {snapshot.monitoringStatus.state}</p>
+          <p><strong>Pending activities:</strong> {snapshot.monitoringStatus.pendingItems}</p>
+          <p><strong>Next review:</strong> {formatMonitoringTime(snapshot.monitoringStatus.nextReviewAt)}</p>
+          <p><strong>Last notice:</strong> {formatMonitoringTime(snapshot.monitoringStatus.lastNoticeAt)}</p>
+          <p>{snapshot.monitoringStatus.message}</p>
+        </section>}
+    </div>
+
     <form hidden={section !== "all" && section !== "settings"} className="panel stack" onSubmit={onSubmit} aria-label="Supervisor settings">
       <fieldset disabled={fieldsDisabled} className="stack">
         <legend>Project model defaults</legend>
@@ -951,14 +974,6 @@ export function ProjectSupervisorView({
       <fieldset disabled={fieldsDisabled} className="stack">
         <legend>Ongoing monitoring</legend>
         <p className="muted">Monitoring wakes each main conversation’s own Supervisor chat when pending activity reaches its maximum age or the finalized activity threshold. Defaults apply to new task workflows; existing objective-only tasks are not reprocessed.</p>
-        {snapshot.monitoringStatus && <section className="stack" aria-labelledby="supervisor-monitoring-status-title">
-          <h4 id="supervisor-monitoring-status-title">Current monitoring status</h4>
-          <p><strong>Status:</strong> {snapshot.monitoringStatus.state}</p>
-          <p><strong>Pending activities:</strong> {snapshot.monitoringStatus.pendingItems}</p>
-          <p><strong>Next review:</strong> {formatMonitoringTime(snapshot.monitoringStatus.nextReviewAt)}</p>
-          <p><strong>Last notice:</strong> {formatMonitoringTime(snapshot.monitoringStatus.lastNoticeAt)}</p>
-          <p>{snapshot.monitoringStatus.message}</p>
-        </section>}
         <div className="stack">
           <label htmlFor="supervisor-monitoring-interval">Maximum pending activity age (minutes)</label>
           <input id="supervisor-monitoring-interval" name="intervalMinutes" type="number" min={1} max={60} step={1} required
@@ -1014,7 +1029,7 @@ export function ProjectSupervisorView({
       <WorkflowProposalView workflow={selectedTask.workflow} proposalId={selectedTask.workflowProposalId} agreement={selectedTask.agreement} definitionReview={selectedTask.definitionReview} />
     </section>}
     {!selectedTask && section === "plan" && <p className="panel muted">{!threadId ? "Select a main conversation to inspect its task and plan." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>}
-    <div hidden={section !== "all" && section !== "progress"}>{workflowProgress && <WorkflowProgressPanel mainThreadId={snapshot.mainThreadId} connected={connected} progress={workflowProgress}
+    <div hidden={section !== "all" && section !== "progress"}>{workflowProgress && <WorkflowProgressPanel mainThreadId={snapshot.mainThreadId} currentTask={selectedTask} connected={connected} progress={workflowProgress}
       onRefresh={onWorkflowProgressRefresh ?? (() => {})} onLoadMore={onWorkflowProgressLoadMore ?? (() => {})}/>}</div>
     <div hidden={section !== "all" && section !== "supervision"}><ProjectSupervisorTeamPanel team={snapshot.team} settings={readTeamSettings(snapshot)} mainThreadId={snapshot.mainThreadId}/></div>
   </div>;

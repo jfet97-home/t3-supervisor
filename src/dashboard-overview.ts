@@ -22,6 +22,7 @@ export const DashboardWork = Schema.Struct({
 export type DashboardWorkInfo = typeof DashboardWork.Type;
 export const DashboardOverview = Schema.Struct({
   observedAt: Schema.Number,
+  revision: Schema.String,
   available: Schema.Boolean,
   globallyEnabled: Schema.Boolean,
   offset: Schema.Number,
@@ -56,7 +57,8 @@ export function workAttention(input: {
   assessment?: {status: string; summary: string} | null;
 }): string[] {
   if (!input.enabled) return [];
-  const {task, monitoring, assessment} = input;
+  const {monitoring, assessment} = input;
+  const task = input.task && !["expired", "not_supervised"].includes(input.task.status) ? input.task : undefined;
   const attention: string[] = [];
   if (input.bindingState === "rejected") attention.push("Supervisor access was rejected.");
   if (input.bindingState === "missing") attention.push("The Supervisor conversation was deleted.");
@@ -73,6 +75,7 @@ export function workAttention(input: {
 
 /** Builds a bounded read model from retained state without native calls or operational effects. */
 export function buildDashboardOverview(input: {
+  fingerprint: (value: unknown) => string;
   observedAt: number; available: boolean; globallyEnabled: boolean;
   projects: readonly {project: {id: string; title: string}; available: boolean}[];
   threads: readonly ThreadInfo[]; bindings: readonly BindingRecord[];
@@ -113,8 +116,32 @@ export function buildDashboardOverview(input: {
   }
   work.sort((a, b) => Number(b.attention.length > 0) - Number(a.attention.length > 0) ||
     Number(b.nativeState === "active") - Number(a.nativeState === "active") || (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || a.mainThreadId.localeCompare(b.mainThreadId));
-  return {observedAt: input.observedAt, available: input.available, globallyEnabled: input.globallyEnabled,
+  const revision = input.fingerprint({available: input.available, globallyEnabled: input.globallyEnabled, projects, work});
+  return {revision, observedAt: input.observedAt, available: input.available, globallyEnabled: input.globallyEnabled,
     projects, offset: input.offset, limit: input.limit, total: work.length,
     attentionTotal: work.filter(item => item.attention.length > 0).length,
     hasMore: input.offset + input.limit < work.length, work: work.slice(input.offset, input.offset + input.limit)};
+}
+
+/** Reads a coherent fresh prefix, retaining the loaded range across polls and discarding reordered pages. */
+export async function readOverviewRange(read: (offset: number) => Promise<DashboardOverviewInfo>, count: number) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const first = await read(0);
+    if (first.offset !== 0) throw new Error("invalid_overview_page");
+    let latest = first;
+    const work = [...first.work];
+    let changed = false;
+    while (latest.hasMore && work.length < count) {
+      const offset = latest.offset + latest.work.length;
+      if (!latest.work.length) throw new Error("invalid_overview_page");
+      const next = await read(offset);
+      if (next.revision !== first.revision) {changed = true; break;}
+      if (next.offset !== offset || next.total !== first.total) throw new Error("invalid_overview_page");
+      work.push(...next.work); latest = next;
+    }
+    if (changed) continue;
+    if (new Set(work.map(item => item.mainThreadId)).size !== work.length) throw new Error("invalid_overview_page");
+    return {...first, work, hasMore: latest.hasMore};
+  }
+  throw new Error("overview_changed_during_read");
 }

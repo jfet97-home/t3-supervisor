@@ -1137,3 +1137,27 @@ test("a late chat-supervision response never replaces the view of a chat selecte
   assert.deepEqual(await confirmChatSupervisionChange(async () => {throw new Error("lost");}, async () => {throw new Error("down");}, startedFor("A")),
     {snapshot: null, message: "The change could not be confirmed and the saved state could not be read. Refresh Supervisor status."});
 });
+
+
+test("task-path assessments keep unknown reads distinct from absence and retain assessment attention", () => {
+  const task = {...snapshot.tasks[0]!, id: "task", sourceHash: "hash"};
+  const page = {...progressSnapshot, workflows: progressSnapshot.workflows.map(workflow => ({...workflow,
+    assessment: {taskId: "task", sourceHash: "hash", status: "needs_attention", summary: "Resolve the current review blocker.", updatedAt: 10}}))};
+  const render = (pages: WorkflowProgressSnapshot[], loading = false, error: string | null = null) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
+    ...viewDefaults, snapshot: {...snapshot, tasks: [task]}, selection, monitoring, threadId: task.threadId, section: "progress", attentionEnabled: true,
+    workflowProgress: {key: "k", pages, loading, error}, connected: true, saving: false, fieldsBusy: false, blocked: false, dirty: false,
+    canSave: false, shouldOfferRetry: false, retryButtonLabel: "Retry", canRetry: false,
+    onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+  }));
+  assert.match(render([], true), /Reading assessment…/);
+  assert.doesNotMatch(render([], true), /No current workflow record/);
+  assert.match(render([], false, "Read failed."), /Assessment unavailable/);
+  assert.doesNotMatch(render([], false, "Read failed."), /No current workflow record/);
+  assert.match(render([{...page, workflows: [], workflowHasMore: true}]), /Assessment coverage incomplete/);
+  assert.match(render([{...page, workflows: []}]), /No current workflow record/);
+  const current = render([page], false, "Refresh failed.");
+  assert.match(current, /Resolve the current review blocker/);
+  assert.match(current, /Showing the retained assessment/);
+  assert.match(current, /needs attention/);
+  assert.match(render([{...page, workflows: page.workflows.map(workflow => ({...workflow, assessment: {...workflow.assessment, taskId: "old-task"}}))}]), /Retained workflow; not linked to this task/);
+});

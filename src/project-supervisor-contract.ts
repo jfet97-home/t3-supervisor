@@ -301,6 +301,8 @@ export const MonitoringStatus = Schema.Struct({
 });
 export type SupervisorMonitoringStatus = typeof MonitoringStatus.Type;
 export const TaskInterpretation = Schema.Struct({
+  id: Schema.optionalKey(Schema.String),
+  sourceHash: Schema.optionalKey(Schema.String),
   threadId: Schema.String,
   projectId: Schema.String,
   sourceRunId: Schema.String,

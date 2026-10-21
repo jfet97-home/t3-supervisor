@@ -6,6 +6,8 @@ import { WorkflowExecutionStatus, WorkflowPlanGroupSchema, type WorkflowPlanGrou
 import { externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
   type WorkflowStateDocument, type WorkflowStateEvidence } from "./workflow-state-contract.js";
 
+import { WorkflowAssessment, workflowAssessment } from "./workflow-assessment.js";
+
 const NullableText = Schema.NullOr(Schema.String);
 
 export const WorkflowProgressObservationSchema = Schema.Struct({
@@ -55,6 +57,7 @@ export const WorkflowProgressWorkflowSchema = Schema.Struct({
   parentThreadId: NullableText,
   revision: Schema.Number,
   status: WorkflowExecutionStatus,
+  assessment: Schema.optionalKey(Schema.NullOr(WorkflowAssessment)),
   objective: NullableText,
   plan: Schema.NullOr(WorkflowPlanGroupSchema),
   updatedAt: Schema.Number,
@@ -205,6 +208,7 @@ const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences:
   parentThreadId: document.parentThreadId,
   revision: document.revision,
   status: document.status,
+  assessment: workflowAssessment(document),
   objective: document.objective,
   plan: document.plan,
   updatedAt: document.updatedAt,

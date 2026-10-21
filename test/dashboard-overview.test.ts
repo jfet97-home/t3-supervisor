@@ -4,7 +4,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import test from "node:test";
 import {Effect, Schema} from "effect";
-import {DashboardOverview, overviewPage, workAttention} from "../src/dashboard-overview.js";
+import {DashboardOverview, overviewPage, workAttention, readOverviewRange, type DashboardOverviewInfo} from "../src/dashboard-overview.js";
 import {GuidanceStore} from "../src/guidance-store.js";
 import {ProjectSupervisorStore, defaultSupervisorModel, type TaskRecord} from "../src/project-supervisor-store.js";
 import {ProjectSupervisor} from "../src/project-supervisor.js";
@@ -68,4 +68,25 @@ test("current attention explanations retain protocol repair and exclude intentio
   assert.equal(workAttention({enabled: true, bindingState: "ready", task}).length, 1);
   assert.deepEqual(workAttention({enabled: false, bindingState: "ready", task}), []);
   assert.deepEqual(workAttention({enabled: true, bindingState: "ready", task: {...task, workflowProtocolDiagnostic: null}}), []);
+});
+
+
+test("overview refresh preserves the loaded range and restarts a reordered prefix", async () => {
+  const row = (id: string) => ({projectId: "p", mainThreadId: id, title: id, supervisorThreadId: "s", nativeState: "quiet" as const,
+    supervision: "enabled" as const, objective: null, reason: "", taskStatus: null, planStatus: null, assessment: null, attention: [], updatedAt: null});
+  const all = Array.from({length: 230}, (_, i) => row(`work-${i}`));
+  const response = (offset: number, revision: string, rows = all): DashboardOverviewInfo => ({revision, observedAt: 1, available: true, globallyEnabled: true,
+    offset, limit: 100, total: rows.length, attentionTotal: 0, hasMore: offset + 100 < rows.length, projects: [], work: rows.slice(offset, offset + 100)});
+  const calls: number[] = [];
+  const retained = await readOverviewRange(async offset => {calls.push(offset); return response(offset, "one");}, 200);
+  assert.equal(retained.work.length, 200);
+  assert.equal(retained.work[150]?.mainThreadId, "work-150");
+  assert.deepEqual(calls, [0, 100]);
+  let count = 0;
+  const promoted = [all[220]!, ...all.filter(row => row.mainThreadId !== "work-220")];
+  const reordered = await readOverviewRange(async offset => response(offset, ++count === 1 ? "one" : "two", count === 1 ? all : promoted), 200);
+  assert.equal(count, 4, "a changed second page restarts the full prefix");
+  assert.equal(reordered.work[0]?.mainThreadId, "work-220");
+  assert.equal(new Set(reordered.work.map(row => row.mainThreadId)).size, 200);
+  await assert.rejects(readOverviewRange(async offset => response(offset, String(++count)), 200), /overview_changed_during_read/u);
 });

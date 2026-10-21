@@ -1,3 +1,4 @@
+import { assessmentForTask, workflowAssessment } from "../src/workflow-assessment.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Schema } from "effect";
@@ -326,4 +327,22 @@ test("workflow progress exposes bounded contributions with honest plan membershi
   ]);
   assert.equal(result.workflows[0]?.observations.some(item => item.id === "removed"), false);
   assert.deepEqual(Schema.decodeUnknownSync(WorkflowProgressSnapshotSchema)(result), result);
+});
+
+
+test("main assessment binds task identity and source while preserving its own reason", () => {
+  const base = document();
+  const bound: WorkflowStateDocument = {...base, status: "needs_attention", sourceBinding: base.acceptedAgreements[0]!.sourceBinding,
+    evidence: [{...base.evidence[0]!, kind: "status_changed", targetNodeId: null, statusTo: "needs_attention", note: "The current review found a blocker."},
+      {...base.evidence[1]!, kind: "status_changed", targetNodeId: "step", statusTo: "completed", note: "A step passed."},
+      {...base.evidence[2]!, kind: "contribution_recorded", note: "An external report arrived."}]};
+  const assessment = workflowAssessment(bound);
+  assert.equal(assessment?.summary, "The current review found a blocker.");
+  assert.equal(assessmentForTask(assessment, {id: "task", sourceHash: "source-hash", status: "inferred"}), assessment);
+  assert.equal(assessmentForTask(assessment, {id: "new-task-same-text", sourceHash: "source-hash", status: "inferred"}), null);
+  assert.equal(assessmentForTask(assessment, {id: "task", sourceHash: "changed", status: "inferred"}), null);
+  assert.equal(assessmentForTask(assessment, undefined), null, "replaced ownership without a current task does not inherit an assessment");
+  assert.equal(assessmentForTask(assessment, {id: "task", sourceHash: "source-hash", status: "expired"}), null);
+  assert.equal(workflowAssessment({...bound, sourceBinding: null}), null);
+  assert.equal(workflowAssessment({...bound, evidence: []})?.summary, "No explanation was recorded for this workflow assessment.");
 });

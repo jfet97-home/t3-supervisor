@@ -193,6 +193,7 @@ details[open] > summary { margin-bottom: 12px; }
 .task-path li:not(:last-child) { border-right: 1px solid var(--line); }
 .task-path strong { display: block; margin-bottom: 4px; font-size: 13px; }
 .task-path span { font-size: 13px; color: var(--quiet); }
+.task-path small { display: block; margin-top: 5px; }
 .workflow-plan-group { padding: 4px 0 4px 16px; border-left: 1px solid var(--line); }
 .workflow-plan-nodes { padding-left: 20px; margin: 4px 0 0; }
 .workflow-plan-node, .workflow-progress-document, .workflow-progress-thread, .supervisor-team-member { padding: 18px 0; border: 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }

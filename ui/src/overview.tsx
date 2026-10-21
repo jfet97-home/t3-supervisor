@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Schema } from "effect";
-import { DashboardOverview, type DashboardOverviewInfo, type DashboardWorkInfo } from "../../src/dashboard-overview.js";
+import { DashboardOverview, readOverviewRange, type DashboardOverviewInfo, type DashboardWorkInfo } from "../../src/dashboard-overview.js";
 import type { GuidanceSnapshot } from "../../src/guidance-contract.js";
 import { loadAccess, sessionHeaders } from "./access.js";
 import { directoryRoute, RouteLink, type Route } from "./navigation.js";
@@ -25,18 +25,17 @@ export function useOverview(active: boolean, connected: boolean) {
     const controller = new AbortController(); request.current = controller;
     setLoading(true); setError("");
     const previous = current.current;
-    const offset = more && previous ? previous.offset + previous.work.length : 0;
+    const count = Math.max(100, (previous?.work.length ?? 0) + (more ? 100 : 0));
     try {
-      const response = await fetch(`/api/guidance/dashboard-overview?offset=${offset}&limit=100`, {credentials: "omit", headers: sessionHeaders(), signal: controller.signal});
-      if (!response.ok) {
-        if (response.status === 401 || response.status === 403) await loadAccess();
-        throw new Error("The work overview could not be refreshed.");
-      }
-      const result = Schema.decodeUnknownSync(DashboardOverview)(await response.json());
-      if (controller.signal.aborted) return;
-      if (result.offset !== offset) throw new Error("The overview response belongs to another page.");
-      const work = more && previous ? [...new Map([...previous.work, ...result.work].map(item => [item.mainThreadId, item])).values()] : result.work;
-      setData({...result, offset: 0, work});
+      const result = await readOverviewRange(async offset => {
+        const response = await fetch(`/api/guidance/dashboard-overview?offset=${offset}&limit=100`, {credentials: "omit", headers: sessionHeaders(), signal: controller.signal});
+        if (!response.ok) {
+          if (response.status === 401 || response.status === 403) await loadAccess();
+          throw new Error("The work overview could not be refreshed.");
+        }
+        return Schema.decodeUnknownSync(DashboardOverview)(await response.json());
+      }, count);
+      if (!controller.signal.aborted) setData(result);
     } catch {
       if (!controller.signal.aborted) setError("The work overview could not be refreshed. The last successful read is kept; current state may have changed.");
     } finally {if (!controller.signal.aborted) setLoading(false);}
