@@ -242,6 +242,12 @@ more work. A reported result, its receipt and that assessment never complete the
 step by themselves; the step's status changes only through a separate Supervisor
 edit. See [connected workflow editing](workflow-mcp.md#external-contributions).
 
+Supervisor suggests giving a third party the whole workflow, relevant steps or an
+adapted plan derived from what the main would use locally. The brief
+includes needed instructions and sources, assigned roles, applicable constraints,
+expected evidence and completion rules. This does not automatically expose the
+external plan or its internal progress to Supervisor.
+
 Editing the original task message triggers fresh interpretation and negotiation.
 Earlier accepted plans remain history. A new proposal for unchanged task material
 cannot silently discard already accepted or live fixed commitments.

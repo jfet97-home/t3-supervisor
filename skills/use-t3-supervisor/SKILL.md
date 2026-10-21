@@ -76,6 +76,11 @@ does not complete a parent step automatically. Required inclusion can be recursi
 Matching complete native proposal/acceptance records establish agreement, not actual
 execution. Keep incomplete requirements and source issues visible.
 
+For third-party work, the main may send the whole workflow, relevant steps or an
+adapted plan based on the local workflow, with needed sources and clear roles,
+constraints, expected evidence and completion rules. Supervisor recommends this in
+its messages; the external plan's internal progress remains unobserved.
+
 External work for a main-workflow step (an outside agent, tool, service or person)
 is reported by the main with an exact `external-contribution` record: use
 `awaiting_result` while pending, or `result` directly when a result is available.

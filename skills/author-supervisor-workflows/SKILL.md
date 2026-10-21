@@ -61,6 +61,9 @@ revise the same design decision, not a competing record. Parallelize independent
 and order evidence and approval dependencies. Workflow references stay acyclic; parallel
 groups do not launch agents.
 
+For external assignments, allow the main to pass the workflow, selected steps or an
+adapted plan, preserving applicable commitments and explicit roles.
+
 Justify each definition and plausible merges and splits. Show lost coverage if the
 budget is too small; leave spare capacity when appropriate. Keep counts, properties and
 unresolved choices visible to the human maintainer.
