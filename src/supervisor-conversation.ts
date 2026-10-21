@@ -329,7 +329,9 @@ export const workflowIntroductionText = (task: TaskRecord, currentDefinitionRead
   const proposal = {taskId: task.id, proposalId, workspaceRoot: workflow.workspaceRoot, revision: workflow.revision, workflow: value};
   const snapshot = task.definitionSnapshot ?? task.definitionContext;
   const scope = snapshot?.globalOnly ? "This checkout uses shared definitions only." : `Checkout definitions are under ${workflow.workspaceRoot}/.t3-supervisor/ (project.yaml, steps/, workflows/).`;
-  const sourceText = snapshot?.sources.length ? `${snapshot.sources.length} definition source files were loaded.` : "No readable definition source files are available.";
+  const sharedConfigPaths = snapshot?.sources.filter(source => source.origin === "global" && source.path.endsWith("/project.yaml"))
+    .map(source => redact(source.path)) ?? [];
+  const sourceText = snapshot?.sources.length ? `${snapshot.sources.length} definition source files were loaded.${sharedConfigPaths.length ? ` Shared configuration: ${sharedConfigPaths.join(", ")}.` : ""}` : "No readable definition source files are available.";
   const requirementLines = workflow.requirements.map(item => `- ${item.kind}:${redact(item.id)} — ${item.state}: ${redact(item.reason)}`).join("\n");
   const requirements = workflow.requirementsKnown
     ? workflow.requirements.length ? requirementLines : "No required references are configured in the complete effective configuration."
@@ -753,7 +755,7 @@ export class SupervisorConversation {
       const completionMarker = `Supervisor definition check-in ${task.id}:${key.slice(0, 12)} completed`;
       const built = buildProjectDefinitionReviewRequest(task, approved, observed, agent, completionMarker);
       const prompt = built.text;
-      const completePrompt = prompt ? `${dialogueRole}${workflowChatRecordInstructions}\n${prompt}` : null;
+      const completePrompt = prompt ? `${dialogueRole}${workflowChatRecordInstructions}\nThis service check-in includes complete canonical authoring instructions and may publish the requested proposal.\n${prompt}` : null;
       if (!completePrompt || completePrompt.length > maxConversationTextLength) {
         const reason = completePrompt
           ? `Complete definition-recovery context exceeds its limit (${completePrompt.length}/${maxConversationTextLength} characters); no check-in was sent and changed definitions remain unapproved.`

@@ -68,8 +68,9 @@ that record using source metadata, without repeating the already-interpreted cat
 provisional initialization keeps complete source material. Initialization and definition
 recovery use a read/send dialogue role; full editing and team instructions arrive with
 scheduled monitoring. Monitoring shares task context across its child rows. Recovery
-sends complete source files once, with an identity index instead of duplicate parsed
-guidance, and references identical approved entries. Invalid reads retain both forms.
+keeps exact parsed guidance for authoring and complete changed, added or removed raw
+source bodies. Identical raw bodies use verified hashes instead of repeated text;
+identical approved entries reference the observed entry. Invalid reads retain both forms.
 Oversized requests stop before delivery with a visible reason in Progress and Plan;
 pending activity and uncertain delivery identities remain intact. Retry stays explicit.
 

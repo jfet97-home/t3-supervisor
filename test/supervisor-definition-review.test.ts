@@ -309,9 +309,12 @@ test("recovery shares only byte-identical approved entries while keeping changed
   for (const key of ["steps", "workflows", "sources"]) {
     const reconstructed = envelope.approved[key]!.map(entry => typeof entry === "object" && entry !== null && "unchangedFromObserved" in entry
       ? envelope.observed[key]![Number(entry.unchangedFromObserved)] : entry);
-    const expected = key === "sources" ? approved.sources : approved[key as "steps" | "workflows"].map(item =>
-      Object.fromEntries(Object.entries(item).filter(([field]) => !["description", "sequence", "parallel"].includes(field))));
-    assert.deepEqual(reconstructed, expected);
+    if (key === "sources") {
+      for (const [index, source] of reconstructed.entries()) {
+        const original = approved.sources[index]!;
+        assert.deepEqual(source, {path: original.path, origin: original.origin, unchangedContentHash: fingerprint(original.content)});
+      }
+    } else assert.deepEqual(reconstructed, approved[key as "steps" | "workflows"]);
   }
   const changed = definitions({revision: newRevision, sources: approved.sources.map(source => ({...source, content: `${source.content}\n# token=different-secret`}))});
   const changedRequest = buildProjectDefinitionReviewRequest(current, approved, changed, agentProjection(), "Changed marker").text;
