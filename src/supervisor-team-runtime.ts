@@ -37,6 +37,8 @@ type SupervisorTeamRuntimeOptions = {
   helperTransport?: SupervisorHelperDeliveryTransport;
   now?: () => number;
   projection: (threadId: string, signal: AbortSignal) => Promise<Projection>;
+  /** The durable per-chat stop of the owning main, rechecked immediately before every fresh helper delivery. */
+  supervisionStopped?: (mainThreadId: string) => boolean;
 };
 
 const terminal = new Set(["completed", "failed", "interrupted", "cancelled", "rolled_back"]);
@@ -143,6 +145,7 @@ export class SupervisorTeamRuntime {
   constructor(readonly options: SupervisorTeamRuntimeOptions) {}
 
   startCycle(binding: BindingRecord): void {this.readBudget.set(binding.threadId, 5);}
+  private stopped(binding: BindingRecord): boolean {return this.options.supervisionStopped?.(binding.mainThreadId) === true;}
 
   private consumeReadBudget(binding: BindingRecord): boolean {
     const remaining = this.readBudget.get(binding.threadId) ?? 5;
@@ -448,6 +451,8 @@ export class SupervisorTeamRuntime {
    * keeps its identity and remains unresolved.
    */
   async reconcileStopped(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
+    // each stopped cycle observes with its own bounded read budget, so a delayed native outcome is still seen later
+    this.startCycle(binding);
     let snapshot = this.options.teamStore.snapshot(binding);
     for (const member of snapshot.members) this.failNeverPostedRequests(binding, member);
     for (const member of snapshot.members.filter(value => value.state === "missing" || value.state === "retired"))
@@ -520,7 +525,7 @@ export class SupervisorTeamRuntime {
     const result: SupervisorHelperSendResult = await this.options.helperTransport.send(binding, {threadId: member.threadId, commandId: `supervisor-review:${request.id}`,
       messageId: request.messageId, text: request.text}, signal, () => {
       const current = this.options.teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
-      return current?.state === member.state && current.epoch === member.epoch;
+      return !this.stopped(binding) && current?.state === member.state && current.epoch === member.epoch;
     });
     if (result === "waiting") {
       const waiting = {...request, state: "waiting" as const, sentAt, error: null};
@@ -735,13 +740,14 @@ export class SupervisorTeamRuntime {
     if (!this.updateNotificationDelivery(binding, notification, "sending")) return;
     const result = await this.options.helperTransport.send(binding, {threadId: member.threadId,
       commandId: `supervisor-team-notice:${notification.id}:attempt:${notification.deliveryAttempt ?? 0}`,
-      messageId, text}, signal, eligible);
+      messageId, text}, signal, () => !this.stopped(binding) && eligible());
     this.options.requests.noticeSent(member.threadId, Date.now());
     if (result !== "waiting") {
       if (result === "rejected") {
         this.markNotificationRejected(binding, notification);
       } else if (result === "revoked") {
-        this.markNotificationRejected(binding, notification, neverPostedReason);
+        this.markNotificationRejected(binding, notification, this.stopped(binding)
+          ? "Supervision was stopped for this chat before this notice was posted; it was not posted." : neverPostedReason);
       } else {
         if (!this.updateNotificationDelivery(binding, notification, "uncertain")) return;
         if (this.notificationNeedsAttention(notification)) this.serviceNotificationAttention(binding, notification);
@@ -763,7 +769,7 @@ export class SupervisorTeamRuntime {
   }
 
   async runHelperBatch(binding: BindingRecord, threads: readonly ThreadInfo[], batches: readonly SupervisorTeamHelperBatch[], signal: AbortSignal): Promise<void> {
-    if (!this.options.helperTransport || !batches.length) return;
+    if (!this.options.helperTransport || !batches.length || this.stopped(binding)) return;
     const offset = this.helperOffset.get(binding.threadId) ?? 0;
     const ordered = [...batches.slice(offset % batches.length), ...batches.slice(0, offset % batches.length)];
     const eligible = ordered.filter(candidate => !this.hasUnacknowledgedFailure(binding, candidate.actorThreadId) &&
@@ -864,6 +870,8 @@ export class SupervisorTeamRuntime {
         `A one-target check-in, including the applicable notifications, exceeds the ${maxHelperCheckinRenderedLength}-code-unit rendered bound for ${renderedCount} assigned target(s) and the 64 KiB delivery body T3 records for proof for ${bodyCount}; ${missingThreadCount} target(s) lack a matching frozen monitor thread. No request was prepared for them, and their recorded monitor activity remains pending and unacknowledged. Root review is needed for: ${targetIds}${unprocessableTargets.length > 4 ? ", and others" : ""}.`);
     }
     if (!selectedReview) return unprocessableTargets.length ? "unfittable" : "stopped";
+    // a stop saved during the awaited helper read prepares no check-in
+    if (this.stopped(binding)) return "stopped";
     const request = this.options.store.store.transaction(() => {
       const value = this.options.requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: member.threadId,
         kind: "review", taskId: null, text: selectedReview!.text, batch: selectedReview!.batch, completionMarker,
@@ -893,7 +901,7 @@ export class SupervisorTeamRuntime {
     });
     const result = await this.options.helperTransport.send(binding, input, signal, () => {
       const current = this.options.teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
-      return current?.state === member.state && current.epoch === member.epoch;
+      return !this.stopped(binding) && current?.state === member.state && current.epoch === member.epoch;
     });
     if (result === "waiting") {
       const waiting = {...request, state: "waiting" as const, sentAt, error: null};

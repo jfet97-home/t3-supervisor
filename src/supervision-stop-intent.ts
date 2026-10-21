@@ -2,10 +2,10 @@
 // human asked for a stop; these checks only deny what cannot be one: quoted or pasted text, negated or unrelated
 // instructions, and messages that name a different or a second chat.
 
-// double, angle and single quoted spans. A span never contains its own opening mark, so every scan stops at the next one and
-// a long line costs linear time. A single quote opens only before a word and closes only after one, so "don't" and
-// "dell'utente" stay text
-const quotedSpan = /"[^"\n]*"|“[^“”\n]*”|„[^„“”\n]*[“”]|«[^«»\n]*»|»[^»«\n]*«|‹[^‹›\n]*›|›[^›‹\n]*‹|(?<![\p{L}\p{N}])'(?=\S)(?:[^'\n]|(?<=[\p{L}\p{N}])')*?(?<=\S)'(?![\p{L}\p{N}])|[‘‚](?:[^‘‚’\n]|’(?=[\p{L}\p{N}]))*?[‘’](?![\p{L}\p{N}])/gu;
+// double, angle and single quoted spans, also across line breaks. A span never contains its own opening mark, so every scan
+// stops at the next one and a long message costs linear time. A single quote opens only before a word and closes only after
+// one, so "don't" and "dell'utente" stay text
+const quotedSpan = /"[^"]*"|“[^“”]*”|„[^„“”]*[“”]|«[^«»]*»|»[^»«]*«|‹[^‹›]*›|›[^›‹]*‹|(?<![\p{L}\p{N}])'(?=\S)(?:[^']|(?<=[\p{L}\p{N}])')*?(?<=\S)'(?![\p{L}\p{N}])|[‘‚](?:[^‘‚’]|’(?=[\p{L}\p{N}]))*?[‘’](?![\p{L}\p{N}])/gu;
 
 /**
  * The human's own words in a native message. Fenced and indented code, quoted replies, inline code and quoted spans are
@@ -49,35 +49,48 @@ const notNoun = `(?<!${start}(?:the|an?|this|that|la|il|lo|una?|questa|questo|di
 const verbThenNoun = new RegExp(`${start}${notNoun}(?:${verbs})${end}${between(4)}\\s+${noun}`, "iu");
 const nounThenVerb = new RegExp(`${start}${noun}${between(5)}\\s+(?:${verbFinal})${end}`, "iu");
 // stopping, avoiding or preventing a stop asks to keep supervision: "stop interrupting the supervision", "smetti di
-// fermare la supervisione", "hör auf, die Supervision zu beenden"; such a sentence never counts
+// fermare la supervisione", "hör auf, die Supervision zu beenden"; such a sentence never counts. Two stop verbs joined by a
+// conjunction are one request, as in "stop and disable supervision"
+const conjunction = `(?:and|or|und|oder|e|ed|o)${end}`;
 const reversal = new RegExp(`${start}(?:(?:stop|quit|cease|avoid|prevent|refrain\\s+from|smett\\p{L}*\\s+di|basta\\s+con|evit\\p{L}*(?:\\s+di)?)${end}` +
-  `(?:\\s+[^\\s,]+){0,2}?\\s+|(?:hör\\p{L}*(?:\\s+\\S+)?\\s+auf|aufhören|aufzuhören|vermeid\\p{L}*|verhinder\\p{L}*)${end}(?:[\\s,]+[^\\s,]+){0,4}?[\\s,]+)` +
+  `(?:\\s+(?!${conjunction})[^\\s,]+){0,2}?\\s+|(?:hör\\p{L}*(?:\\s+\\S+)?\\s+auf|aufhören|aufzuhören|vermeid\\p{L}*|verhinder\\p{L}*)${end}(?:[\\s,]+[^\\s,]+){0,4}?[\\s,]+)` +
   `${stopWord}${end}`, "iu");
 const negationWords = `${start}(?:don['’]?t|do\\s+not|does\\s+not|doesn['’]?t|never|not|no\\s+need|no\\s+longer|without|instead\\s+of|rather\\s+than|` +
   `nicht|kein\\p{L}*|nie|statt|anstatt|non|mai|senza|nessun\\p{L}*|invece\\s+di|anziché|piuttosto\\s+che)${end}`;
+// a clause that ends in its negation, as in "Do not, under any circumstances, stop supervising", negates the rest of its sentence
+const danglingNegation = new RegExp(`${negationWords}(?:\\s+(?:ever|again|really|please|jemals|wirklich|bitte|mai|più|davvero|per\\s+favore))*\\s*$`, "iu");
+// Italian "mai più" is the one "no more" of "non supervisionare mai più", not a second negation
+const maiPiu = new RegExp(`${start}mai\\s+più${end}`, "giu");
 // Italian says "no more" with its one negation: "non supervisionare più questa chat", "non voglio più la supervisione",
 // "niente più supervisione"; such a clause counts only when it has no other negation, and "non voglio più" or "niente più"
 // only with supervision itself as the object, so "non voglio più interrompere la supervisione" never does
 const object = "(?:essere\\s+)?(?:(?:la|il|lo|l['’]|i|gli|le|un|una|alcun[ao]?|questa|questo|tua|tuo|sua|suo|vostra|vostro)\\s*){0,2}";
 const noMore = new RegExp(`${start}(?:non\\s+(?:(?:mi|ci|la|lo)\\s+)?supervision\\p{L}*${between(3)}\\s+più|` +
-  `(?:non\\s+(?:voglio|vogliamo)|niente)\\s+più\\s+${object}${noun})${end}`, "iu");
-// addressed to the Supervisor in its own conversation, a bare "stop", "stop yourself" or "fermati" asks it to stop supervising
-const bareStop = /^\s*(?:(?:per\s+favore|perfavore|please|bitte)\s+)?(?:stop(?:\s+yourself)?|stopp|fermati|fermatevi|basta(?:\s+così)?|smettila|halt|hör\s+auf)(?:\s+(?:per\s+favore|grazie|please|bitte|danke|thanks|subito|adesso|ora|now|jetzt))?\s*$/iu;
+  `(?:non\\s+(?:voglio|vogliamo)|niente)\\s+(?:mai\\s+)?più\\s+${object}${noun})${end}`, "iu");
+// addressed to the Supervisor in its own conversation, a bare "stop", "stop yourself", "stop it" or "fermati", optionally after
+// "Supervisor", asks it to stop supervising
+const bareStop = /^\s*(?:(?:per\s+favore|perfavore|please|bitte)\s+)?(?:supervisor[ei]?\s+)?(?:stop(?:\s+(?:yourself|it))?|stopp|fermati|fermatevi|basta(?:\s+così)?|smettila|halt|hör\s+auf)(?:\s+(?:per\s+favore|grazie|please|bitte|danke|thanks|subito|adesso|ora|now|jetzt))?\s*$/iu;
 
 /**
  * Whether the human's unquoted words affirmatively ask to stop supervision (English, German or Italian): a clause must pair a
- * stop verb with supervision. A clause with any negation fails closed, except an Italian "no more" form whose negation is its
- * only one, and a sentence that asks to stop or avoid a stop fails closed, so a negated, reversed or unrelated instruction,
- * such as cancelling a task, never does. In the Supervisor's own conversation
- * (`direct`) a bare "stop", "stop yourself" or "fermati" clause is addressed to the Supervisor and also counts.
+ * stop verb with supervision. A clause with any negation fails closed, including a negation left dangling by an earlier
+ * clause of its sentence, except an Italian "no more" form whose negation is its only one; a sentence that asks to stop or
+ * avoid a stop fails closed, so a negated, reversed or unrelated instruction, such as cancelling a task, never does. In the
+ * Supervisor's own conversation (`direct`) a bare "stop", "stop yourself", "stop it" or "fermati" clause is addressed to the
+ * Supervisor and also counts.
  */
 export const affirmsSupervisionStop = (text: string, context: {direct?: boolean} = {}): boolean =>
-  unquotedText(text).split(/[.!?;\n]+/u).some(sentence => !reversal.test(sentence) && sentence.split(/[:,]+/u).some(clause => {
-    const negations = clause.match(new RegExp(negationWords, "giu"))?.length ?? 0;
-    if (negations <= 1 && noMore.test(clause)) return true;
-    if (negations > 0) return false;
-    return verbThenNoun.test(clause) || nounThenVerb.test(clause) || context.direct === true && bareStop.test(clause);
-  }));
+  unquotedText(text).split(/[.!?;\n]+/u).some(sentence => {
+    if (reversal.test(sentence)) return false;
+    let carried = 0;
+    return sentence.split(/[:,]+/u).some(clause => {
+      const negations = (clause.replace(maiPiu, "più").match(new RegExp(negationWords, "giu"))?.length ?? 0) + carried;
+      if (danglingNegation.test(clause)) carried = 1;
+      if (negations <= 1 && noMore.test(clause)) return true;
+      if (negations > 0) return false;
+      return verbThenNoun.test(clause) || nounThenVerb.test(clause) || context.direct === true && bareStop.test(clause);
+    });
+  });
 
 // an exact whole-token mention of a chat ID; a prefix of a longer ID never names that chat
 export const namesThread = (text: string, threadId: string): boolean =>

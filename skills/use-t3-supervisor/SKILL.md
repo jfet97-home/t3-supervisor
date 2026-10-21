@@ -104,7 +104,8 @@ work stays unresolved; relevant activity reuses the same Supervisor identity.
   `supervision_stop` with your message ID.
 - Say it in your own words, for example "Stop supervising this chat." or "Ferma la supervisione di questa chat."; in
   the Supervisor conversation "Stop yourself." or "Fermati." is enough. Quoted or pasted text, a negated or reversed request, a task cancellation or a
-  message naming two chats does not stop supervision.
+  message naming two chats does not stop supervision; the assistant then says so, and the Stop supervision button always works.
+- Removing a chat from, or adding it to, the excluded chats in Settings is the same Enable or Stop.
 - A stop survives restarts, cancels unsent check-ins and settles only the Supervisor conversation, even if it was
   pinned or kept active before the stop. It does not stop or change the supervised chat, other chats or the project.
 

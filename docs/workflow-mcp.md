@@ -184,10 +184,13 @@ the main when the operative calls for itself, or in the caller's own chat, namin
 exact target chat ID, for a request from another chat in the same environment. Quoted
 or relayed text, tool output, another agent's message, a foreign Supervisor's scope and
 targets outside the environment are rejected. The human's unquoted words must
-affirmatively ask to stop supervision and name no other chat (denials:
-`stop_instruction_not_found`, `target_ambiguous`, `target_not_named_by_user`); a
-message older than the latest explicit Enable is denied with
-`superseded_by_later_enable`. When the caller acts in the chat the human wrote in, its
+affirmatively ask to stop supervision and name no other chat, the caller's own included
+(denials: `stop_instruction_not_found`, `target_ambiguous`, `target_not_named_by_user`); a
+message older than the latest explicit Enable, from the dashboard or the Settings
+excluded-chat list, is denied with `superseded_by_later_enable`, and repeating a stop
+keeps the time of the human's original instruction. After a denial the caller tells the
+human that supervision was not stopped and that the dashboard's Stop supervision control
+always works. When the caller acts in the chat the human wrote in, its
 verified call must belong to the run T3 delivered that message into, including a steer into
 an already running turn (`stop_call_not_in_human_turn`); a later turn cannot borrow it.
 `supervision_stop` stays callable while project supervision is disabled. The stop is the

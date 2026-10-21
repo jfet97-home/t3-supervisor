@@ -80,12 +80,36 @@ test("a request to stop, avoid or end a stop keeps supervision, and single-quote
     "Cosa significa 'ferma la supervisione'?",
     "Cosa vuol dire ‘disattiva la supervisione’?",
     "Was heißt ‚Supervision beenden‘?",
+    "Do not, under any circumstances, stop supervising this chat.",
+    "Never, ever, stop supervising this chat.",
+    "Non, per nessun motivo, fermare la supervisione.",
+    "Bitte nicht, unter keinen Umständen, die Supervision beenden.",
+    "Explain this quoted log only:\n\"Stop supervising this chat.\nThat was the log text.\"",
+    "Cosa vuol dire questo log?\n«Ferma la supervisione.\nFine del log.»",
+    "Explain:\n'Stop supervising this chat.\nEnd of log.'",
+    "Non voglio mai più interrompere la supervisione.",
+    "Non smettere mai più di supervisionare questa chat.",
+    "Non disattivare mai più la supervisione.",
+    "Non dire mai più di non supervisionare più questa chat.",
+    "Niente mai più interruzioni della supervisione.",
+    "Stop and stop interrupting the supervision.",
+    "Avoid and prevent disabling supervision.",
+    "Don't stop and disable supervision.",
+    "Stop and disable the build.",
   ]) {
     assert.equal(affirmsSupervisionStop(text), false, text);
     assert.equal(affirmsSupervisionStop(text, {direct: true}), false, `${text} (direct)`);
   }
   assert.equal(affirmsSupervisionStop("Cosa significa 'fermati'?", {direct: true}), false);
   for (const text of [
+    "Stop and disable supervision.",
+    "Please stop and disable supervision for this chat.",
+    "Stop supervising and disable supervision.",
+    "Ferma e disattiva la supervisione.",
+    "Non supervisionare mai più questa chat.",
+    "Non voglio mai più la supervisione.",
+    "Don't worry, stop supervising this chat.",
+    "I don't need it anymore, stop supervising this chat.",
     "Non voglio più essere supervisionato.",
     "Non voglio più la tua supervisione.",
     "Ferma la supervisione dell'operativo.",
@@ -101,12 +125,13 @@ test("a request to stop, avoid or end a stop keeps supervision, and single-quote
 });
 
 test("a bare stop counts only when addressed to the Supervisor in its own conversation", () => {
-  for (const text of ["Fermati.", "Stop!", "Basta, grazie.", "Per favore fermati", "Stop please.", "Stopp.", "stop yourself", "Please stop yourself now."])
+  for (const text of ["Fermati.", "Stop!", "Basta, grazie.", "Per favore fermati", "Stop please.", "Stopp.", "stop yourself", "Please stop yourself now.", "Stop it.",
+    "Supervisore fermati", "Supervisor stop"])
     assert.equal(affirmsSupervisionStop(text, {direct: true}), true, text);
   for (const text of ["Non fermarti.", "Fermati quando hai finito di leggere il log.", "> Fermati.", "Stop the build.", "Don't stop yourself.",
-    "What does 'stop yourself' mean?", "Stop yourself from cancelling the task."])
+    "What does 'stop yourself' mean?", "Stop yourself from cancelling the task.", "Don't stop it.", "Stop it from cancelling the task.", "Supervisore, non fermarti."])
     assert.equal(affirmsSupervisionStop(text, {direct: true}), false, text);
-  for (const text of ["Fermati.", "stop yourself", "Stop yourself!"])
+  for (const text of ["Fermati.", "stop yourself", "Stop yourself!", "Stop it.", "Supervisore fermati"])
     assert.equal(affirmsSupervisionStop(text, {direct: false}), false, `${text}: in the supervised chat or another chat a bare stop is not about supervision`);
 });
 
@@ -115,6 +140,9 @@ test("a long line of unclosed quotation marks is scanned in linear time", () => 
   const started = performance.now();
   for (const mark of ["„", "“", "«", "»", "‹", " 'x", "‘x", "‚x", "\"x"])
     assert.equal(affirmsSupervisionStop(`${mark.repeat(200_000 / mark.length)} stop supervising this chat`, {direct: true}), true, mark);
+  // a quoted span may cross line breaks, so unclosed marks on many lines must stay linear too
+  for (const mark of ["«\n", "„x\n", "\"x\n", " 'x\n", "‘x\n"])
+    assert.equal(affirmsSupervisionStop(`${mark.repeat(50_000 / mark.length)}stop supervising this chat`, {direct: true}), true, JSON.stringify(mark));
   assert.ok(performance.now() - started < 2_000, `${Math.round(performance.now() - started)} ms`);
 });
 

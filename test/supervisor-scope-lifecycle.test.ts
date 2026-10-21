@@ -184,7 +184,7 @@ test("queued requests cancelled before starting do not hide the completed execut
   assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, null);
 });
 
-test("a failed, cancelled-after-start or running executed main run still blocks settlement behind later unstarted cancellations", async t => {
+test("a failed, cancelled-after-start or interrupted executed main run, or a later queued request, still blocks settlement behind unstarted cancellations", async t => {
   for (const latestExecuted of [{status: "failed", startedAt: "2026-10-14T10:41:00Z"}, {status: "cancelled", startedAt: "2026-10-14T10:41:00Z"},
     {status: "interrupted", startedAt: "2026-10-14T10:41:00Z"}]) {
     const f = await fixture();t.after(f.cleanup);
@@ -195,7 +195,7 @@ test("a failed, cancelled-after-start or running executed main run still blocks 
   }
   const f = await fixture();t.after(f.cleanup);
   f.main.runs = [...executedRunHistory({status: "completed", startedAt: "2026-10-14T10:41:00Z"}),
-    {id: "run-9", ordinal: 9, status: "queued", requestedAt: "2026-10-14T09:20:00Z", startedAt: null, completedAt: null, rootNodeId: null}];
+    {id: "run-9", ordinal: 9, status: "queued", requestedAt: "2026-10-14T10:56:00Z", startedAt: null, completedAt: null, rootNodeId: null}];
   await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
   assert.equal(f.calls.length, 0, "a queued request is pending work, not an unstarted cancellation");
 });

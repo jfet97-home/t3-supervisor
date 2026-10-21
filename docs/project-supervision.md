@@ -263,24 +263,32 @@ supervision control, by telling its Supervisor directly, by asking the operative
 relay the request with the human's original message ID, or from another ordinary chat
 in the same environment whose genuine user message names the exact target chat ID.
 Only the human's own unquoted words count: they must affirmatively ask to stop
-supervision (English, German or Italian, such as "ferma la supervisione" or "non
-supervisionare più questa chat"), and they must not name another chat. In the
-Supervisor conversation itself a bare "stop", "stop yourself" or "fermati" is addressed to the Supervisor
-and also counts. Quoted, pasted
-or fenced text, a negated request, a request to stop or avoid a stop (such as "stop
-interrupting the supervision" or "non voglio più interrompere la supervisione") and an
-ordinary task cancellation never stop supervision. A stop instruction written before the latest explicit Enable supervision,
-including a replayed tool call, never reverses it.
-The stop is saved in the instance thread policy (the same list as the excluded chats),
+supervision (English, German or Italian, such as "stop and disable supervision", "ferma
+la supervisione" or "non supervisionare mai più questa chat"), and they must not name a
+second chat, the caller's own included. In the Supervisor conversation itself a bare
+"stop", "stop yourself", "stop it" or "fermati" is addressed to the Supervisor and also
+counts. Quoted, pasted or fenced text (a quotation may span lines), a negated request
+(also "Do not, under any circumstances, stop …"), a request to stop or avoid a stop (such
+as "stop interrupting the supervision" or "non voglio più interrompere la supervisione")
+and an ordinary task cancellation never stop supervision. When a stop is refused, the
+assistant tells the human that supervision was not stopped and that the dashboard's Stop
+supervision control always works. A stop dates from the human's instruction: a stop
+instruction written before the latest explicit Enable supervision, including a replayed
+tool call, never reverses it, and repeating an earlier stop never re-dates it.
+The stop is saved in the instance thread policy (the same list as the excluded chats;
+adding or removing a chat there is the same human Stop or Enable as the dashboard control),
 survives restarts, and only an explicit human Enable supervision resumes it. A stop
 cancels unsent check-ins, keeps sent and uncertain delivery identities, sends no new
 check-in, introduction or contact (rechecked immediately before every send), and
-settles the owned Supervisor once it is idle and every accepted delivery has a
-confirmed native outcome; reconciliation of those deliveries continues, without
-sending anything, even while project supervision is disabled. In a team the same
+settles the owned Supervisor once it is idle and every accepted delivery, the
+interpretation request included, has a confirmed native outcome; reconciliation of those
+deliveries continues, without sending anything, even while project supervision is
+disabled. A root check-in or interpretation whose delivery stays genuinely unknown keeps
+the Supervisor active; elapsed time never resolves it. In a team the same
 observation-only reconciliation matches accepted helper check-ins and notices to their
 native outcome, fences requests and notices that were never posted and closes guidance
-awaiting a fallback route as not sent; nothing is sent, retried or retired. The stop
+awaiting a fallback route as not sent; nothing is sent, retried or retired, and each
+service cycle observes with a fresh bounded read budget. The stop
 then waits only for a team effect whose delivery is still genuinely unknown (an
 unresolved team request, a notice being delivered, a helper request); review-only
 events are superseded by the stop. The stop supersedes earlier keep-active
@@ -297,9 +305,10 @@ standby after the quiet period when no known activity, attention issue or pendin
 input requires action. Unknown work stays unresolved. Background monitoring
 continues and relevant activity reuses the same Supervisor identity and binding;
 settlement is not deletion or agreement invalidation. A settled Supervisor is never
-woken, and its main never contacted, to repair old records, recover definitions or
-introduce historical work, for example after re-enabling a project or a deployment;
-new main activity, including a new human request, wakes it through monitoring.
+woken, and its main never contacted, to review backlog, repair old records, recover
+definitions or introduce historical work, for example after re-enabling a project or a
+chat, or a deployment. Agent and automated activity in the main stays pending; a genuine
+human message in the main after the settle wakes the same Supervisor through monitoring.
 
 ## Supervisor teams
 

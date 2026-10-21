@@ -120,7 +120,8 @@ export const startGuidanceUi = async (
         try: () => {
           const policy = runtime.config.threadPolicy;
           if (!policy) throw new Error("Chat settings unavailable.");
-          return policy.save(payload);
+          // each chat this editor adds or removes is a human Stop or Enable for that chat's supervision
+          return supervision ? supervision.saveThreadPolicy(payload) : policy.save(payload);
         },
         catch: (cause) => new UiError({ message: cause instanceof Error ? cause.message : "Chat settings invalid. Reload first." }),
       }),

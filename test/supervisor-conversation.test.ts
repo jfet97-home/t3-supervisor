@@ -4882,6 +4882,14 @@ test("a new full-format proposal record gets a compact-protocol diagnostic inste
   assert.equal(diagnostic?.proposalId, "legacy-full");
   assert.match(diagnostic?.expected ?? "", /compact draft/u);
   assert.equal(fixture.conversation.requests.agreementCandidate(task.id, "legacy-full"), null, "no compatibility path turns it into a candidate");
+  // a retained full-format candidate that was never accepted cannot be accepted any more, so republishing it is diagnosed too
+  const retained = appendAssistantTurn(fixture.supervisor, "legacy-retained-record", workflowFence("workflow-proposal", workflowRecord(task, "legacy-retained")), clock.now + 2);
+  fixture.conversation.requests.saveAgreementCandidate({taskId: task.id, projectId, proposalId: "legacy-retained", planHash: "legacy-plan-hash", workflow: task.workflow!,
+    supervisorMessageId: retained.message.id, supervisorRunId: retained.message.runId!, supervisorRunOrdinal: 1, supervisorTextHash: "legacy-text", proposedAt: clock.now});
+  await observeAgreement(fixture, clock.now + 61_000);
+  const retainedDiagnostic = fixture.projectStore.task(task.threadId)?.workflowProtocolDiagnostic;
+  assert.equal(retainedDiagnostic?.code, "legacy_record_format", "an unaccepted retained candidate gets the compact-protocol diagnostic");
+  assert.equal(retainedDiagnostic?.proposalId, "legacy-retained");
 });
 
 test("a proposal may restate the objective only from genuine cited user messages", async t => {
@@ -4908,4 +4916,213 @@ test("a proposal may restate the objective only from genuine cited user messages
   await observeAgreement(fixture, clock.now + 60_000);
   assert.ok(fixture.conversation.requests.agreementCandidate(task.id, "objective-human"));
   assert.equal(fixture.projectStore.task(task.threadId)?.objective, "Implement the export and change the retry policy", "the dashboard objective catches up");
+});
+
+test("a stop needs one chat chosen by the human in their own words: naming the caller too, a quotation across lines or a negation before a comma never stops", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const service = fixture.makeProjectSupervisor();
+  const scratch = makeProjection({...makeThread({id: "scratch-chat", title: "Scratch"}), projectId: "project-b"});
+  fixture.addChildProjection(scratch);
+  for (const [id, text, reason] of [
+    ["caller-or-target", `Stop supervision in either scratch-chat or ${operativeThreadId}; I have not decided which.`, "target_ambiguous"],
+    ["multiline-quote", `Explain this quoted log only:\n"Stop supervising ${operativeThreadId}.\nThat was the log text."`, "stop_instruction_not_found"],
+    ["multiline-guillemets", `Cosa vuol dire questo log?\n«Ferma la supervisione di ${operativeThreadId}.\nFine del log.»`, "stop_instruction_not_found"],
+    ["comma-negation", `Do not, under any circumstances, stop supervising ${operativeThreadId}.`, "stop_instruction_not_found"],
+    ["comma-negation-it", `Non, per nessun motivo, fermare la supervisione di ${operativeThreadId}.`, "stop_instruction_not_found"],
+  ] as const) {
+    const human = appendActualUserMessage(scratch, `human-${id}`, text, clock.now);
+    const args = {callerThreadId: scratch.thread.id, targetThreadId: operativeThreadId, userMessageId: human.id, operationId: `stop-${id}`};
+    const controller = nativeStopController(fixture, scratch, human, args, `call-${id}`, service);
+    assert.deepEqual(await controller.stop(args), {status: "denied", reason}, id);
+    assert.equal(controller.verified(), true, `${id}: the denial comes from the human's words, not missing call evidence`);
+  }
+  assert.deepEqual(fixture.threadPolicy.get().excludedThreadIds, []);
+  // the Supervisor's own ID is not a second target
+  const named = appendActualUserMessage(scratch, "human-names-supervisor", `Stop supervising ${operativeThreadId}; its Supervisor is ${fixture.binding.threadId}.`, clock.now);
+  const namedArgs = {callerThreadId: scratch.thread.id, targetThreadId: operativeThreadId, userMessageId: named.id, operationId: "stop-named"};
+  assert.equal((await nativeStopController(fixture, scratch, named, namedArgs, "call-named", service).stop(namedArgs)).status, "stopped");
+});
+
+test("an operative naming its own chat and another one cannot stop the other chat", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const service = fixture.makeProjectSupervisor();
+  fixture.addChildProjection(makeProjection(makeThread({id: "operative-sibling", title: "Sibling"})));
+  const human = appendActualUserMessage(fixture.operative, "human-two-mains", `Stop supervising ${operativeThreadId} and operative-sibling.`, clock.now);
+  const args = {callerThreadId: operativeThreadId, targetThreadId: "operative-sibling", userMessageId: human.id, operationId: "stop-sibling"};
+  assert.deepEqual(await service.stopSupervision(args, null, AbortSignal.timeout(5_000)), {status: "denied", reason: "target_ambiguous"});
+  assert.deepEqual(fixture.threadPolicy.get().excludedThreadIds, []);
+});
+
+test("clear coordinated and Italian never-again stops work through the verified native call", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const service = fixture.makeProjectSupervisor();
+  const signal = AbortSignal.timeout(5_000);
+  for (const [id, text] of [
+    ["coordinated", "Stop and disable supervision."],
+    ["never-again", "Non supervisionare mai più questa chat."],
+    ["stop-it", "Stop it."],
+    ["vocative", "Supervisore fermati"],
+  ] as const) {
+    const human = appendActualUserMessage(fixture.supervisor, `human-${id}`, text, clock.now);
+    const args = {callerThreadId: fixture.binding.threadId, targetThreadId: operativeThreadId, userMessageId: human.id, operationId: `stop-${id}`};
+    assert.equal((await nativeStopController(fixture, fixture.supervisor, human, args, `call-${id}`, service).stop(args)).status, "stopped", id);
+    clock.now += 1_000;
+    assert.equal((await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: true, policyGeneration: fixture.threadPolicy.get().generation}, signal)).status, "saved");
+    clock.now += 1_000;
+  }
+});
+
+test("a replayed stop keeps the human's instruction time: a pin made after it holds the Supervisor, and only a newer human stop settles it", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const service = fixture.makeProjectSupervisor();
+  const signal = AbortSignal.timeout(10_000);
+  const human = appendActualUserMessage(fixture.supervisor, "human-ordered-stop", "Stop supervising this chat.", clock.now);
+  const args = {callerThreadId: fixture.binding.threadId, targetThreadId: operativeThreadId, userMessageId: human.id, operationId: "ordered-stop"};
+  const controller = nativeStopController(fixture, fixture.supervisor, human, args, "ordered-call", service);
+  assert.equal((await controller.stop(args)).status, "stopped");
+  const stoppedAt = fixture.projectStore.binding(projectId, operativeThreadId)!.supervisionStop!.stoppedAt;
+  assert.equal(stoppedAt, Date.parse(human.createdAt), "the stop dates from the human's message");
+  clock.now += 1_000;fixture.supervisor.thread.pinnedAt = iso(clock.now);
+  clock.now += 1_000;
+  assert.equal((await controller.stop(args)).status, "stopped", "the identical call is idempotent");
+  assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)!.supervisionStop!.stoppedAt, stoppedAt, "a replay never re-stamps the stop");
+  const control = fixture.projectStore.control(projectId);fixture.projectStore.saveControl(projectId, control.generation, false);
+  await service.runOnce(signal);clock.now += 61_000;await service.runOnce(signal);
+  assert.equal(fixture.calls.filter(call => call.payload.type === "thread.settle").length, 0, "the later pin holds the stopped Supervisor");
+  clock.now += 1_000;
+  const again = appendActualUserMessage(fixture.supervisor, "human-newer-stop", "Stop supervising this chat now.", clock.now);
+  const newer = {...args, userMessageId: again.id, operationId: "newer-stop"};
+  assert.equal((await nativeStopController(fixture, fixture.supervisor, again, newer, "newer-call", service).stop(newer)).status, "stopped");
+  await service.runOnce(signal);clock.now += 61_000;await service.runOnce(signal);
+  assert.equal(fixture.calls.filter(call => call.payload.type === "thread.settle").length, 1, "a newer human stop supersedes the earlier pin");
+});
+
+test("an interpretation whose delivery is unknown holds a stopped Supervisor; once its native run ends the task closes unapplied", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const service = fixture.makeProjectSupervisor();
+  const signal = AbortSignal.timeout(10_000);
+  fixture.projectStore.saveTask({...fixture.task, status: "uncertain", requestText: "Interpret this task.", dispatchedAt: clock.now - 1_000, supervisorRunId: null});
+  assert.equal((await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: fixture.threadPolicy.get().generation}, signal)).status, "saved");
+  const control = fixture.projectStore.control(projectId);fixture.projectStore.saveControl(projectId, control.generation, false);
+  const sendsBefore = fixture.calls.filter(call => call.payload.type === "message.dispatch").length;
+  for (let cycle = 0; cycle < 3; cycle++) {await service.runOnce(signal);clock.now += 61_000;}
+  assert.equal(fixture.calls.filter(call => call.payload.type === "thread.settle").length, 0, "an accepted interpretation can still start a run");
+  assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)?.settlementBlockedBy, "stopped_interpretation_unresolved");
+  assert.equal(fixture.projectStore.task(operativeThreadId)?.status, "uncertain", "an unknown identity is retained, never timed out");
+  const task = fixture.projectStore.task(operativeThreadId)!;
+  appendRun({projection: fixture.supervisor, id: "late-interpretation-run", ordinal: fixture.supervisor.runs.length + 1, status: "completed",
+    messageId: task.messageId, text: task.requestText, now: clock.now});
+  await service.runOnce(signal);
+  assert.equal(fixture.projectStore.task(operativeThreadId)?.status, "unavailable", "the ended run closes the task without applying its result");
+  clock.now += 61_000;await service.runOnce(signal);clock.now += 61_000;await service.runOnce(signal);
+  const settles = fixture.calls.filter(call => call.payload.type === "thread.settle");
+  assert.ok(settles.length >= 1 && settles.every(call => call.payload.threadId === fixture.binding.threadId), "then only the stopped Supervisor settles");
+  assert.equal(fixture.calls.filter(call => call.payload.type === "message.dispatch").length, sendsBefore, "observation never resends the interpretation");
+});
+
+test("the Settings excluded-chat editor records the same Enable and Stop as the dashboard, so a replayed stop never reverses its Enable", async t => {
+  const clock = {now: baseTime};
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const service = fixture.makeProjectSupervisor();
+  const scratch = makeProjection({...makeThread({id: "scratch-chat", title: "Scratch"}), projectId: "project-b"});
+  fixture.addChildProjection(scratch);
+  const human = appendActualUserMessage(scratch, "human-editor-stop", `Stop supervising ${operativeThreadId}.`, clock.now);
+  const args = {callerThreadId: scratch.thread.id, targetThreadId: operativeThreadId, userMessageId: human.id, operationId: "editor-stop"};
+  const controller = nativeStopController(fixture, scratch, human, args, "editor-call", service);
+  assert.equal((await controller.stop(args)).status, "stopped");
+  clock.now += 1_000;
+  const policy = fixture.threadPolicy.get();
+  service.saveThreadPolicy({...policy, excludedThreadIds: policy.excludedThreadIds.filter(id => id !== operativeThreadId)});
+  assert.equal(service.supervisionStopped(operativeThreadId), false);
+  assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)?.supervisionStop, undefined, "the Enable clears the recorded stop");
+  clock.now += 1_000;
+  assert.deepEqual(await controller.stop(args), {status: "denied", reason: "superseded_by_later_enable"}, "the replayed call is older than the editor's Enable");
+  clock.now += 1_000;
+  const current = fixture.threadPolicy.get();
+  service.saveThreadPolicy({...current, excludedThreadIds: [...current.excludedThreadIds, operativeThreadId]});
+  assert.deepEqual(fixture.projectStore.binding(projectId, operativeThreadId)?.supervisionStop,
+    {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: clock.now}, "an editor exclusion is a fresh human stop");
+  assert.throws(() => service.saveThreadPolicy(current), /changed in another tab/u, "a stale editor save changes nothing");
+});
+
+test("a settled pair stays asleep through agent-only main activity, also after Stop and Enable, until a human writes in the main", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  const anchorRequest = prepareTaskContext(fixture, {text: "The historical task context.", completionMarker: "historical context completed"}, clock.now - 2);
+  const anchorRun = appendRun({projection: fixture.supervisor, id: "historical-context-run", ordinal: 1, status: "completed",
+    messageId: anchorRequest.messageId, text: anchorRequest.text, now: clock.now - 2});
+  completeRun(fixture.supervisor, anchorRun, anchorRequest.completionMarker, clock.now - 1);
+  fixture.conversation.requests.saveRequest({...anchorRequest, state: "completed", runId: anchorRun.id, sentAt: clock.now - 2, error: null});
+  appendNoticeToOperative(fixture);
+  const task = fixture.projectStore.task(fixture.task.threadId)!;
+  for (const run of fixture.operative.runs) if (!["completed", "failed", "interrupted", "cancelled"].includes(run.status)) {run.status = "completed";run.completedAt = iso(clock.now);}
+  fixture.operative.thread.activeRunId = null;
+  clock.now += 61_000;
+  await observeAgreement(fixture, clock.now);
+  await fixture.run();
+  const review = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.equal(review?.kind, "review", "the completed main's activity is reviewed once while the pair is active");
+  completeRun(fixture.supervisor, fixture.supervisor.runs.find(run => run.userMessageId === review!.messageId)!, `Reviewed. ${review!.completionMarker}`, clock.now);
+  await fixture.run();
+  // an old full-format record and a rejected draft leave an unrepaired diagnostic
+  appendAssistantTurn(fixture.supervisor, "historical-full-record", workflowFence("workflow-proposal", workflowRecord(task, "historical-full")), clock.now);
+  appendAssistantTurn(fixture.supervisor, "historical-rejected", workflowFence("workflow-proposal",
+    {...compactDraft(task, workflowRecord(task, "historical-bad")), revision: "stale-revision"}), clock.now + 1);
+  clock.now += 61_000;
+  await observeAgreement(fixture, clock.now);
+  assert.ok(fixture.projectStore.task(task.threadId)?.workflowProtocolDiagnostic);
+  const service = fixture.makeProjectSupervisor();
+  const signal = AbortSignal.timeout(5_000);
+  assert.equal((await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: fixture.threadPolicy.get().generation}, signal)).status, "saved");
+  // the stopped Supervisor settled once idle
+  fixture.supervisor.thread.settledAt = iso(clock.now);
+  fixture.supervisor.thread.settledOverride = "settled";
+  fixture.supervisor.thread.activeRunId = null;
+  const callsBefore = fixture.calls.length;
+  // the main's agent keeps working with no new human request, during the stop and after the human enables supervision again
+  const extra = appendRun({projection: fixture.operative, id: "agent-followup-run", ordinal: 90, status: "running", messageId: "agent-followup-input",
+    text: "Automated follow-up.", createdBy: "agent", creationSource: "mcp", now: clock.now + 1});
+  fixture.operative.thread.activeRunId = extra.id;
+  addCommandActivity(fixture.operative, "stopped-period-command", "npm run lint", clock.now + 2);
+  extra.status = "completed";extra.completedAt = iso(clock.now + 3);fixture.operative.thread.activeRunId = null;
+  clock.now += 61_000;
+  await observeAgreement(fixture, clock.now);
+  await fixture.run();
+  clock.now += 1_000;
+  assert.equal((await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: true, policyGeneration: fixture.threadPolicy.get().generation}, signal)).status, "saved");
+  const later = appendRun({projection: fixture.operative, id: "agent-after-enable-run", ordinal: 91, status: "running", messageId: "agent-after-enable-input",
+    text: "Automated check.", createdBy: "agent", creationSource: "mcp", now: clock.now + 1});
+  fixture.operative.thread.activeRunId = later.id;
+  addCommandActivity(fixture.operative, "after-enable-command", "npm test", clock.now + 2);
+  later.status = "completed";later.completedAt = iso(clock.now + 3);fixture.operative.thread.activeRunId = null;
+  for (let cycle = 0; cycle < 3; cycle++) {
+    clock.now += 61_000;
+    await observeAgreement(fixture, clock.now);
+    await fixture.run();
+  }
+  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId), null, "agent-only backlog never wakes a settled pair");
+  assert.equal(fixture.calls.length, callsBefore, "nothing is sent for historical work");
+  // a genuine human message in the main after the settle wakes the same binding
+  const request = appendActualUserMessage(fixture.operative, "human-after-settle", "Please also export the report as CSV.", clock.now + 1);
+  clock.now += 61_000;
+  await observeAgreement(fixture, clock.now);
+  await fixture.run();
+  const wake = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.equal(wake?.kind, "review");
+  assert.match(wake!.text, new RegExp(request.id, "u"));
 });

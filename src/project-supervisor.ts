@@ -13,6 +13,7 @@ import { ProjectSupervisorStore, isSupervisorThread, type BindingRecord, type Ta
 import { modelSelection, sameModel, supervisorModels, validModelSelection, SupervisorRpcError, type SupervisorRpc } from "./supervisor-native.js";
 import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome, ProjectSupervisorRetryInput, SupervisorModelSelection, WorkflowProposalInfo } from "./project-supervisor-contract.js";
 import type { SupervisionStopInput, SupervisionStopResult } from "./workflow-write-controller.js";
+import type { ThreadPolicySettings } from "./thread-policy-contract.js";
 import { interpretationPrompt, parseInterpretation, prepareWorkflowRequest, parseWorkflowInterpretation } from "./supervisor-workflow.js";
 import type { ProjectDefinitionLoader } from "./project-definitions.js";
 export { interpretationPrompt, parseInterpretation } from "./supervisor-workflow.js";
@@ -742,6 +743,7 @@ export class ProjectSupervisor {
     else if (input.callerThreadId === target.id) candidates = [{threadId: target.id, route: "relay"}];
     else candidates = [{threadId: input.callerThreadId, route: "chat"}];
     let route: "direct" | "relay" | "chat" | null = null;
+    let instructedAt = this.now();
     for (const candidate of candidates) {
       let projection: Projection;
       try {projection = candidate.threadId === input.callerThreadId ? caller : await this.projection(candidate.threadId, signal);}
@@ -752,9 +754,10 @@ export class ProjectSupervisor {
       if (!affirmsSupervisionStop(message.text, {direct: candidate.route === "direct"})) return {status: "denied", reason: "stop_instruction_not_found"};
       const words = unquotedText(message.text);
       // a human message that names another chat's ID authorizes only that chat, never the agent's choice of a different one,
-      // and naming two chats leaves the choice to the human
+      // and naming two chats, the caller's own included, leaves the choice to the human; Supervisor and subagent IDs are not targets
       const namesTarget = namesThread(words, target.id);
-      if (catalog.threads.some(thread => thread.id !== target.id && thread.id !== input.callerThreadId && namesThread(words, thread.id)))
+      if (catalog.threads.some(thread => thread.id !== target.id && thread.lineage?.relationshipToParent !== "subagent" &&
+        !isSupervisorThread(this.config, thread) && namesThread(words, thread.id)))
         return {status: "denied", reason: namesTarget ? "target_ambiguous" : "target_not_named_by_user"};
       // a request from another chat must name the exact target so the human, not the agent, selects the stopped scope
       if (candidate.route === "chat" && !namesTarget) return {status: "denied", reason: "target_not_named_by_user"};
@@ -765,13 +768,35 @@ export class ProjectSupervisor {
       const verifiedRunId = typeof evidence === "object" && evidence !== null && typeof (evidence as {runId?: unknown}).runId === "string" ? (evidence as {runId: string}).runId : null;
       if (verifiedRunId !== null && candidate.threadId === input.callerThreadId && verifiedRunId !== message.runId)
         return {status: "denied", reason: "stop_call_not_in_human_turn"};
-      route = candidate.route;break;
+      route = candidate.route;
+      if (Number.isFinite(Date.parse(message.createdAt))) instructedAt = Date.parse(message.createdAt);
+      break;
     }
     if (!route) return {status: "denied", reason: "user_message_not_genuine"};
+    const recorded = this.store.bindings().find(item => item.mainThreadId === target.id)?.supervisionStop;
     const written = this.writeChatPolicy(target.id, true);
     if (written.status !== "saved") return {status: "unavailable", reason: `thread_policy_${written.status}`, retryable: written.status === "conflict"};
-    this.applyChatStop(target.id, {route, callerThreadId: input.callerThreadId, userMessageId: input.userMessageId, stoppedAt: this.now()});
+    // the stop dates from the human's instruction; a replay or an older instruction keeps the recorded stop, so a keep-active
+    // the human chose after it still holds, while a newer human stop supersedes that choice
+    if (written.changed || !recorded || recorded.stoppedAt < instructedAt)
+      this.applyChatStop(target.id, {route, callerThreadId: input.callerThreadId, userMessageId: input.userMessageId, stoppedAt: instructedAt});
     return {status: "stopped", targetThreadId: target.id, route, alreadyStopped: !written.changed};
+  }
+  /**
+   * The Settings excluded-chat editor saves the same list as Stop supervision, so each chat it removes or adds gets the same
+   * explicit Enable or Stop record as the dashboard control: a replayed stop never reverses that Enable.
+   */
+  saveThreadPolicy(input: ThreadPolicySettings): ThreadPolicySettings {
+    const policy = this.config.threadPolicy;
+    if (!policy) throw new Error("Chat settings unavailable.");
+    const before = policy.get();
+    if (before.generation !== input.generation) throw new Error("Chat settings changed in another tab. Reload first.");
+    const saved = policy.save(input);
+    const now = this.now();
+    for (const id of before.excludedThreadIds.filter(id => !saved.excludedThreadIds.includes(id))) {this.store.recordChatEnable(id, now);this.applyChatStop(id, null);}
+    for (const id of saved.excludedThreadIds.filter(id => !before.excludedThreadIds.includes(id)))
+      this.applyChatStop(id, {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: now});
+    return saved;
   }
   /** The dashboard's explicit human Stop supervision / Enable supervision control for one selected chat. */
   async setChatSupervision(input: ProjectSupervisorChatSupervisionInput, signal: AbortSignal): Promise<ProjectSupervisorSaveOutcome> {
@@ -959,6 +984,7 @@ export class ProjectSupervisor {
           // reconciliation sends nothing; it confirms accepted root, helper and guidance deliveries before the owned Supervisor may settle
           try {
             if (this.store.scopeCompatible) {
+              await this.reconcileStoppedInterpretation(binding, deadline);
               await this.conversation.reconcileStopped(binding, catalog.threads, deadline);
               await this.conversation.teamRuntime?.reconcileStopped(binding, catalog.threads, deadline);
               await this.teamEffects?.reconcileStopped(binding, deadline);
@@ -1062,6 +1088,22 @@ export class ProjectSupervisor {
     } catch (cause) {
       if (cause instanceof SupervisorRpcError && cause.definiteRejection) this.complete(job, "unavailable", null, cause.providerDisabled ? "The Supervisor provider is disabled for this project in T3. Choose another model or enable the provider; other tasks can continue." : "T3 definitively rejected the interpretation request. Other tasks can continue.");
       else this.store.saveTask({...job, status: "uncertain", reason: "Interpretation dispatch is uncertain; retry native access to reconcile the original request identity.", updatedAt: Date.now()});
+    }
+  }
+  /**
+   * While a chat is stopped an accepted interpretation is only observed: once its native run has ended the task closes without
+   * applying the result. Nothing is resent, and an identity with no native outcome stays unresolved.
+   */
+  private async reconcileStoppedInterpretation(binding: BindingRecord, signal: AbortSignal): Promise<void> {
+    const jobs = this.store.tasksFor(binding).filter(job => ["dispatching", "waiting", "uncertain"].includes(job.status));
+    if (!jobs.length) return;
+    let projection: Projection;
+    try {projection = await this.projection(binding.threadId, signal);} catch {return;}
+    for (const job of jobs) {
+      const message = projection.messages.find(m => m.id === job.messageId && m.threadId === job.supervisorThreadId && m.text === job.requestText);
+      const run = message ? projection.runs.find(r => r.userMessageId === job.messageId && r.threadId === job.supervisorThreadId && r.id === message.runId) : undefined;
+      if (run && ["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(run.status))
+        this.complete({...job, supervisorRunId: run.id}, "unavailable", null, "Supervision was stopped for this chat; the interpretation result was not applied.");
     }
   }
   private currentSource(job: TaskRecord, projection: Projection): boolean {

@@ -1874,3 +1874,68 @@ test("a handover_release contradicted by a pre-existing frame is never failed, r
   assert.notEqual(current()?.state, "acknowledged");
   assert.equal(posts, 1);
 });
+
+test("a stopped team keeps observing across cycles: a check-in completed after earlier stopped cycles is confirmed and nothing is sent", async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const transport = webhookTransport();
+  let reads = 0;
+  const runtime = f.runtime(transport.transport, async id => { reads++; return f.projections.get(id)!; });
+  const member = readyMember(f.teamStore, f.binding, 'helper-delayed');
+  activate(f.teamStore, f.binding, member, 'branch');
+  const helper = helperProjection(member, f.binding.threadId);
+  f.projections.set(member.threadId, helper);
+  const coverage = f.teamStore.coverage(f.binding, 'branch', parents);
+  const id = 'team-review:delayed';
+  const prepared = f.requests.prepare({id, projectId, supervisorThreadId: member.threadId, kind: 'review', taskId: null,
+    text: 'Review this assigned activity.', batch: batchOf(['branch']), completionMarker: 'delayed review complete'}, time);
+  f.requests.saveRequest({...prepared, state: 'waiting', sentAt: time});
+  f.teamStore.recordRequest(f.binding, {requestId: id, memberThreadId: member.threadId, memberEpoch: member.epoch,
+    targets: [{targetThreadId: 'branch', assignmentRootThreadId: coverage.assignmentRootThreadId!, assignmentEpoch: coverage.assignmentEpoch!}], parentById: parents, now: time});
+  transport.sent.set(prepared.messageId, {threadId: member.threadId, commandId: `supervisor-review:${id}`, text: prepared.text, taskId: `scheduled-${member.threadId}`});
+  const signal = AbortSignal.timeout(10000);
+  // each stopped service cycle reconciles with its own read budget; three earlier cycles must not exhaust the fourth
+  await runtime.reconcileStopped(f.binding, f.threadList, signal);
+  await runtime.reconcileStopped(f.binding, f.threadList, signal);
+  await runtime.reconcileStopped(f.binding, f.threadList, signal);
+  const readsBefore = reads;
+  helper.runs.push({id: 'delayed-run', threadId: member.threadId, ordinal: 1, status: 'completed', requestedAt: iso(time + 1), startedAt: iso(time + 1),
+    completedAt: iso(time + 2), rootNodeId: null, userMessageId: prepared.messageId});
+  helper.messages.push({id: prepared.messageId, threadId: member.threadId, runId: 'delayed-run', nodeId: null, role: 'user', text: prepared.text, streaming: false,
+    createdAt: iso(time + 1), updatedAt: iso(time + 1), scheduledTaskId: `scheduled-${member.threadId}`, creationSource: 'server'},
+    {id: 'delayed-final', threadId: member.threadId, runId: 'delayed-run', nodeId: null, role: 'assistant', text: prepared.completionMarker,
+    streaming: false, createdAt: iso(time + 2), updatedAt: iso(time + 2), ordinal: 1});
+  await runtime.reconcileStopped(f.binding, f.threadList, signal);
+  const actual = f.requests.requests(projectId, member.threadId).find(item => item.id === id)?.state;
+  assert.ok(reads > readsBefore, "the later stopped cycle reads again");
+  assert.equal(actual, "completed");
+  assert.equal(runtime.hasInflightEffects(f.binding), false, "the confirmed check-in no longer holds the stopped root");
+  assert.equal(transport.attempts.length, 0, "observation sends nothing");
+});
+
+test("a stop saved while a helper is read posts no fresh team notice and closes it as never posted", async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const binding = {...f.binding, state: 'ready' as const}; f.store.setBinding(binding);
+  const member = readyMember(f.teamStore, binding, 'stop-race-helper');
+  activate(f.teamStore, binding, member, 'branch');
+  f.teamStore.release(binding, 'branch', parents);
+  f.projections.set(member.threadId, helperProjection(member, binding.threadId));
+  const transport = webhookTransport('waiting');
+  let stopped = false;
+  let finalAllowed: boolean | undefined;
+  const send = transport.transport.send;
+  transport.transport.send = async (owner, input, signal, authorized) => {
+    finalAllowed = authorized ? authorized() : true;
+    if (!finalAllowed) return 'revoked';
+    return send(owner, input, signal, authorized);
+  };
+  const conversation = new SupervisorConversation(f.store, null, async id => {
+    if (id === member.threadId) stopped = true;
+    return f.projections.get(id)!;
+  }, undefined, () => !stopped, () => true, undefined, undefined, f.teamStore, transport.transport);
+  conversation.supervisionStopped = () => stopped;
+  await conversation.run(binding, emptyProjection(makeThread(binding.threadId)), f.threadList, AbortSignal.timeout(10000));
+  assert.equal(stopped, true);
+  assert.equal(finalAllowed, false, "the final delivery authorization sees the stop saved during the read");
+  assert.equal(transport.attempts.length, 0, "no fresh notice is posted for a stopped parent");
+  assert.ok(f.teamStore.snapshot(binding).notifications.every(item => !['pending', 'sending', 'uncertain'].includes(item.state)), "the never-posted notice is closed");
+});

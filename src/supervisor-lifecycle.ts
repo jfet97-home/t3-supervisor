@@ -341,6 +341,8 @@ export class SupervisorLifecycle {
     if (this.store.modelState(binding).pending) return "model_change_pending";
     if (projectionNeedsAttention(supervisor)) return "supervisor_busy";
     if (this.conversation.teamRuntime?.hasInflightEffects(binding)) return "team_effect_unresolved";
+    // an interpretation T3 accepted, or may have accepted, can still start a Supervisor run
+    if (this.store.tasksFor(binding).some(task => ["dispatching", "waiting", "uncertain"].includes(task.status))) return "stopped_interpretation_unresolved";
     return null;
   }
   /**
