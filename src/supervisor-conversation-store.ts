@@ -57,6 +57,8 @@ export type WorkflowAgreementCandidate = {
   agentTextHash?: string;
   /** True when the Supervisor published the compact protocol; planHash is then the compact digest over the task revision. */
   compact?: boolean;
+  /** The proposal evidence is the Supervisor's own interpretation answer, re-derived to this digest. */
+  interpretation?: boolean;
   /** Objective the Supervisor restated from the cited genuine user messages when it published this proposal. */
   objective?: {text: string; sourceMessageIds: string[]} | null;
 };

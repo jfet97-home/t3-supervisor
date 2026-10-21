@@ -529,7 +529,10 @@ test("new workflow-reference wrappers keep null paths while their nested source 
   assert.ok(wrapper && wrapper.kind === "workflow" && wrapper.plan);
   assert.equal(wrapper.templatePath, null);
   assert.equal(wrapper.plan.templatePath, "workflow:reviewer/root");
-  assert.match(prepared.requestText, /For a newly added workflow-reference node, set its own templatePath to null/u);
+  // the service expands a workflow reference itself: the instruction asks only for the compact reference, never for template paths
+  const instruction = prepared.requestText.slice(0, prepared.requestText.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE"));
+  assert.match(instruction, /which the service expands and keeps intact/u);
+  assert.doesNotMatch(instruction, /templatePath|omissions/u);
   assert.ok(validateWorkflowPlan({requirements: [], plan}, prepared.context));
 
   const wrongWrapper = structuredClone(plan);

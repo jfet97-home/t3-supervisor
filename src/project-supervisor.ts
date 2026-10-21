@@ -46,6 +46,7 @@ export type ProjectSupervisorScopeSnapshotOptions = {
   limit?: number;
 };
 
+const enabledAgainReason = "Supervision was enabled again after this request; only a request written after the Enable is supervised.";
 const active = (projection: Projection) => projection.runs.some(r => ["preparing","queued","starting","running","waiting"].includes(r.status));
 const unavailable = (thread: ThreadInfo) => Boolean(thread.archivedAt || thread.deletedAt);
 const supervisorUnavailable = (thread: ThreadInfo) => Boolean(thread.archivedAt || thread.deletedAt);
@@ -963,6 +964,14 @@ export class ProjectSupervisor {
           if (!this.projectEnabled(project.id) || freshMain.thread.projectId !== project.id || !this.eligible(freshMain.thread, catalog.threads)) continue;
           const binding = await this.serial(supervisorScopeKey(project.id, thread.id), () => this.ensureBinding(project.id, thread.id, thread.title, signal));
           if (!this.projectEnabled(project.id)) continue;
+          // an earlier unresolved request carries forward only from the current supervision epoch: above the activation
+          // boundary and written after the chat's latest Enable
+          const enabledAt = this.store.chatEnabledAt(thread.id);
+          const carried = previous?.status === "needs_context" ? [...(previous.contextMessageIds ?? []), previous.sourceMessageId].filter(messageId => {
+            const message = projection.messages.find(item => item.id === messageId);
+            const run = message?.runId ? projection.runs.find(item => item.id === message.runId) : undefined;
+            return Boolean(message && run && run.ordinal > baseline && (enabledAt === null || (timestampMs(message.createdAt) ?? 0) > enabledAt));
+          }).slice(-5) : [];
           const id = randomUUID();const oversized = task.message.text.length > 24_000;
           this.store.saveTask({id, threadId: thread.id, projectId: project.id, sourceRunId: task.run.id, sourceMessageId: task.message.id,
             sourceOrdinal: task.run.ordinal, sourceHash: fingerprint(task.message.text), status: oversized ? "needs_context" : "queued", objective: null,
@@ -970,8 +979,7 @@ export class ProjectSupervisor {
             updatedAt: Date.now(), requestText: oversized ? "" : interpretationPrompt(thread.id, task.message.id, task.message.text), supervisorThreadId: binding.threadId,
             messageId: `supervisor-objective:${id}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0,
             // only an unresolved request carries forward; an answered not-needed request is complete and never merges into the next task
-            ...(previous?.status === "needs_context"
-              ? {contextMessageIds: [...(previous.contextMessageIds ?? []), previous.sourceMessageId].slice(-5)} : {})});
+            ...(carried.length ? {contextMessageIds: carried} : {})});
         } catch { /* Discovery failures are retried without producing model work. */ }
       }
     }
@@ -1048,7 +1056,7 @@ export class ProjectSupervisor {
         const message = projection.messages.find(m => m.id === inflight.messageId && m.threadId === inflight.supervisorThreadId && m.text === inflight.requestText);
         const run = message ? projection.runs.find(r => r.userMessageId === inflight.messageId && r.threadId === inflight.supervisorThreadId && r.id === message.runId) : undefined;
         if (run && ["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(run.status))
-          this.complete({...inflight, supervisorRunId: run.id}, "expired", null, "Supervision was enabled again after this request; only a request written after the Enable is supervised.");
+          this.complete({...inflight, supervisorRunId: run.id}, "expired", null, enabledAgainReason);
         return;
       }
       await this.reconcile(inflight, projection, signal);return;
@@ -1060,16 +1068,7 @@ export class ProjectSupervisor {
     const source = await this.projection(job.threadId, signal);
     if (!this.projectEnabled(binding.projectId)) return;
     if (!this.currentSource(job, source)) {this.complete(job, "unavailable", null, "The task source changed or became unavailable.");return;}
-    // a request at or before the project or global activation boundary is history, never interpreted
-    const floor = this.store.baselineOrdinal(job.threadId, source);
-    if (floor === null || job.sourceOrdinal <= floor) {
-      this.complete(job, "expired", null, "Supervision was enabled again after this request; only a request written after the Enable is supervised.");return;
-    }
-    // an explicit Enable supervises the chat's next request: a request queued before it is not interpreted afterwards
-    const enabledAt = this.store.chatEnabledAt(job.threadId), sourceMessageId = job.sourceMessageId;
-    if (enabledAt !== null && !((timestampMs(source.messages.find(item => item.id === sourceMessageId)?.createdAt) ?? 0) > enabledAt)) {
-      this.complete(job, "expired", null, "Supervision was enabled again after this request; only a request written after the Enable is supervised.");return;
-    }
+    if (this.beforeBoundary(job, source)) {this.complete(job, "expired", null, enabledAgainReason);return;}
     if (job.definitionContext == null) {
       let definitions: ProjectDefinitionSnapshot;
       try {
@@ -1092,16 +1091,21 @@ export class ProjectSupervisor {
         const run = earlier?.runId ? source.runs.find(item => item.id === earlier.runId) : undefined;
         return earlier && run && nativeUserMessageVisible(source, run, earlier) ? [{messageId: earlier.id, text: earlier.text}] : [];
       });
+      const reader = this.workflowEditingEnabled(job.projectId);
       const prepared = prepareWorkflowRequest(job.threadId, job.sourceMessageId, message.text, definitions, {earlierMessages,
-        ...(this.workflowEditingEnabled(job.projectId) ? {reader: {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation}} : {})});
-      job = {...job, requestText: prepared.requestText, definitionContext: prepared.context, workflow: prepared.workflow,
-        definitionSnapshot: prepared.context ? definitions : null};
+        ...(reader ? {reader: {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation}} : {})});
+      // the root's first message carries its concise standing role once, so no separate initialization turn is needed
+      const role = reader ? this.conversation.interpretationRole(binding) : null;
+      job = {...job, requestText: role ? `${role.text}\n${prepared.requestText}` : prepared.requestText, definitionContext: prepared.context, workflow: prepared.workflow,
+        definitionSnapshot: prepared.context ? definitions : null, ...(role ? {roleVersion: role.roleVersion} : {})};
       this.store.saveTask(job);
       if (!this.currentSource(job, await this.projection(job.threadId, signal))) {this.complete(job, "unavailable", null, "The task source changed while project definitions were being loaded.");return;}
     }
     if (!this.projectEnabled(binding.projectId)) return;
     const current = modelSelection((await this.projection(binding.threadId, signal)).thread.modelSelection);
     if (!current || !validModelSelection(current, await this.models(signal)) || !this.projectEnabled(binding.projectId)) return;
+    // rechecked after the final await: an Enable or re-enable saved meanwhile leaves this request uninterpreted
+    if (this.beforeBoundary(job, source)) {this.complete(job, "expired", null, enabledAgainReason);return;}
     const sending: TaskRecord = {...job, status: "dispatching", dispatchedAt: Date.now(), updatedAt: Date.now()};this.store.saveTask(sending);
     await this.dispatch(sending, signal);
   }
@@ -1138,6 +1142,12 @@ export class ProjectSupervisor {
         this.complete({...job, supervisorRunId: run.id}, "unavailable", null, "Supervision was stopped for this chat; the interpretation result was not applied.");
     }
   }
+  /** Whether the request is at or before the project/global activation boundary (unknown counts as before) or the chat's latest Enable. */
+  private beforeBoundary(job: TaskRecord, source: Projection): boolean {
+    const floor = this.store.baselineOrdinal(job.threadId, source), enabledAt = this.store.chatEnabledAt(job.threadId);
+    return floor === null || job.sourceOrdinal <= floor ||
+      enabledAt !== null && !((timestampMs(source.messages.find(item => item.id === job.sourceMessageId)?.createdAt) ?? 0) > enabledAt);
+  }
   private currentSource(job: TaskRecord, projection: Projection): boolean {
     const run = projection.runs.find(item => item.id === job.sourceRunId && item.ordinal === job.sourceOrdinal);
     const message = projection.messages.find(item => item.id === job.sourceMessageId && item.runId === job.sourceRunId);
@@ -1160,12 +1170,14 @@ export class ProjectSupervisor {
       return;
     }
     if (job.supervisorRunId !== run.id) {job = {...job, supervisorRunId: run.id};this.store.saveTask(job);}
+    if (run.status === "completed" && job.roleVersion) this.conversation.roleDelivered(job.supervisorThreadId, job.roleVersion);
     if (run.status !== "completed") {
       if (["failed","interrupted","cancelled","rolled_back"].includes(run.status)) this.complete(job, "unavailable", null, "The interpretation run did not complete successfully.");
       else if (run.status !== "queued" && run.status !== "preparing" && timestampMs(run.startedAt) !== null && Date.now() - timestampMs(run.startedAt)! > 300_000) this.complete(job, "unavailable", null, "The interpretation timed out or requires input. The service does not answer or interrupt Supervisor runs.");
       return;
     }
-    if (!this.currentSource(job, await this.projection(job.threadId, signal))) {this.complete(job, "unavailable", null, "The task source changed before the interpretation completed.");return;}
+    let source = await this.projection(job.threadId, signal);
+    if (!this.currentSource(job, source)) {this.complete(job, "unavailable", null, "The task source changed before the interpretation completed.");return;}
     const nodeFor = mainRunNodeReader(projection, run);
     const answers = projection.messages.filter(m => m.threadId === job.supervisorThreadId && m.runId === run.id && m.role === "assistant" && !m.streaming && m.nodeId && nodeFor(m.nodeId)?.kind === "assistant_message")
       .sort((a,b) => (timestampMs(a.createdAt) ?? 0) - (timestampMs(b.createdAt) ?? 0));
@@ -1187,8 +1199,11 @@ export class ProjectSupervisor {
         const staleWorkflow = currentDefinitions ? result.workflow : {...result.workflow, status: "stale" as const,
           message: "The definition source changed or could not be revalidated. This plan is retained as provisional history with its requirements and diagnostics."};
         job = {...job, workflow: staleWorkflow};
-        if (!this.currentSource(job, await this.projection(job.threadId, signal))) {this.complete(job, "unavailable", null, "The task source changed while the workflow was being revalidated.");return;}
+        source = await this.projection(job.threadId, signal);
+        if (!this.currentSource(job, source)) {this.complete(job, "unavailable", null, "The task source changed while the workflow was being revalidated.");return;}
       }
+      // rechecked after the final await: a result for a request before a boundary saved meanwhile closes unapplied
+      if (this.beforeBoundary(job, source)) {this.complete({...job, supervisorRunId: run.id}, "expired", null, enabledAgainReason);return;}
       this.complete(job, result.objective === null ? "needs_context" : result.supervision === "not_needed" ? "not_supervised" : "inferred", result.objective, result.reason);
     }
     catch {this.complete(job, "unavailable", null, "The Supervisor did not return a valid, source-linked interpretation.");}

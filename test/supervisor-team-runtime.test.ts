@@ -570,6 +570,9 @@ test("registration readiness uses a finite native check-in and exact member epoc
   assert.ok(request);
   if (!request) throw new Error("readiness_request_missing");
   assert.ok(request.id.startsWith("team-ready:"));
+  // the readiness check, which precedes every assignment, is the one helper message carrying the full helper role
+  assert.equal(request.text.split("Use link_child only when the assigned target has no workflow document").length - 1, 1);
+  assert.ok(request.text.length < 9_500, `readiness ${request.text.length}`);
   assert.ok(request.text.includes("t3-supervisor-workflows__supervision_team"));
   assert.ok(request.text.includes(`bindingGeneration=${f.binding.generation}`));
   assert.ok(request.text.includes(`memberEpoch=${member.epoch}`));
@@ -841,6 +844,9 @@ test("a stale completed helper check-in settles its request without acknowledgin
   assert.match(request.text, /only after fresh child evidence/u);
   assert.match(request.text, /a retry after uncertainty reuses the complete identical arguments/u);
   assert.doesNotMatch(request.text, /locatorBases|locator base/u);
+  // a monitor review carries the concise helper core, not a second copy of the full role
+  assert.match(request.text, /the full helper instructions from your readiness check still apply/u);
+  assert.doesNotMatch(request.text, /Use link_child only when the assigned target has no workflow document/u);
   const archivedToolInputs = archivedEnvelope.toolInputs as Record<string, {input: Record<string, unknown>}>;
   assert.deepEqual(Object.keys(archivedToolInputs), ["workflow_read"]);
   assert.equal(archivedEnvelope.workflowWriteEligibility, "target_archived_or_deleted");
@@ -1403,6 +1409,9 @@ const recoveryFixture = async () => {
     const runId = `native-run:${notice.id}:${notice.deliveryAttempt}`;
     const delivery = transport.sent.get(`supervisor-team-notice:${notice.id}:attempt:${notice.deliveryAttempt}`)!;
     assert.ok(delivery, "the notice must actually have been sent through the existing transport");
+    assert.match(delivery.text, /the full helper instructions from your readiness check still apply/u);
+    assert.doesNotMatch(delivery.text, /Use link_child only when the assigned target has no workflow document/u, "a notification never repeats the full helper role");
+    assert.ok(delivery.text.length < 5_000, `notification ${delivery.text.length}`);
     if (!projection.messages.some(value => value.id === messageId)) projection.messages.push({id: messageId, threadId: member.threadId, runId,
       nodeId: null, role: "user", text: delivery.text, streaming: false, createdAt: iso(time), updatedAt: iso(time),
       scheduledTaskId: delivery.taskId, creationSource: "server"});

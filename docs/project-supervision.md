@@ -275,10 +275,15 @@ tool call, never reverses it, and repeating an earlier stop never re-dates it.
 The stop is saved in the instance thread policy (the same list as the excluded chats;
 adding or removing a chat there is the same human Stop or Enable as the dashboard control),
 survives restarts, and only an explicit human Enable supervision resumes it. Enable
-supervises the chat's next request: a request written while supervision was stopped is not
-interpreted, an interpretation queued or sent before the Enable is closed unapplied, and the
-Supervisor reviews nothing until the human writes in the main again. A stop
-cancels unsent check-ins, keeps sent and uncertain delivery identities, sends no new
+supervises the chat's next request: a request written while supervision was stopped, or at
+or before a project or global activation boundary, is not interpreted; an interpretation queued
+before the Enable is closed unsent; one already sent is never applied or resent, and it closes
+only once its exactly matched native run has ended, while an absent or still active native
+outcome keeps its identity held (these boundaries are rechecked right before dispatch and
+before a result is applied); and the Supervisor reviews nothing until the human writes in the
+main again. Retry native access never resends a check-in for a stopped chat or one sent before
+the latest Enable; such an unknown delivery stays held and is only observed. A stop
+cancels never-sent check-ins, keeps sent and uncertain delivery identities, sends no new
 check-in, introduction or contact (rechecked immediately before every send), and
 settles the owned Supervisor once it is idle and every accepted delivery, the
 interpretation request included, has a confirmed native outcome; reconciliation of those

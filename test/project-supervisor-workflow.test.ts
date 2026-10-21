@@ -835,3 +835,102 @@ test("a queued request at or before the project activation boundary is never int
   assert.equal(fixture.task()!.status, "expired");
   assert.equal(fixture.dispatches().length, dispatched, "nothing is dispatched for a request before the boundary");
 });
+
+test("the interpretation request carries the concise standing role once, permits reader discovery wrappers and decides relevance before definitions", async (t) => {
+  const fixture = await makeFixture();
+  t.after(fixture.cleanup);
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  const task = fixture.task()!;
+  const text = String(fixture.dispatches()[0]?.payload.text);
+  assert.ok(task.roleVersion, "the root's first message carries the standing role");
+  const occurrences = (part: string) => text.split(part).length - 1;
+  assert.equal(occurrences("Never restate, relay or paraphrase a human message to the operative"), 1);
+  assert.equal(occurrences(`Standing instructions version ${task.roleVersion}.`), 1);
+  assert.match(text, /This turn is an interpretation request: follow only the interpretation instructions below/u);
+  const instruction = text.slice(0, text.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE"));
+  assert.match(instruction, /mcp__t3-supervisor-workflows__workflow_read; you may use MCPX discovery\/schema\/call tools or a code-mode wrapper solely to invoke it/u);
+  assert.match(instruction, /Decide first, from the request itself and before reading or assessing any definitions, whether it warrants supervision/u);
+  assert.match(instruction, /configured required references alone never make a task needed/u);
+  assert.match(instruction, /If you cannot invoke workflow_read, that says nothing about the project's definitions/u);
+  assert.doesNotMatch(instruction, /templatePath|omissions/u, "no obsolete expansion format");
+  // a genuine direct stop during interpretation may still be read freshly and applied: the only exception to the tool limit
+  assert.match(instruction, /The one exception to this tool limit: if a genuine human writes directly in this conversation asking to stop supervising this chat, freshly read your own thread with t3_thread_read and call t3-supervisor-workflows supervision_stop citing that latest message with a fresh operationId/u);
+  assert.match(text, /use no tool except the workflow_read reader they name, or the fresh own-thread read and supervision_stop call for a genuine direct human stop request/u);
+  assert.ok(text.length < 16_000, `interpretation request ${text.length} characters`);
+  const native = fixture.projections.get(fixture.binding()!.threadId)!;
+  completeSupervisorRequest(native, task.messageId, workflowResponse(sourceMessageId));
+  await supervisor.runOnce();
+  assert.equal(fixture.binding()!.deliveredRoleVersion, task.roleVersion, "the completed interpretation delivered the standing role");
+  assert.equal(supervisor.conversation.interpretationRole(fixture.binding()!), null, "later root messages carry no second copy");
+});
+
+test("an Enable or re-enable saved during the final awaits leaves the request undispatched and a finished result unapplied", async (t) => {
+  {
+    const fixture = await makeFixture();
+    t.after(fixture.cleanup);
+    const supervisor = fixture.makeSupervisor();
+    const internal = supervisor as unknown as {models(signal: AbortSignal): Promise<unknown>; store: {recordChatEnable(id: string, at: number): void}};
+    const models = internal.models.bind(supervisor);
+    // the Enable lands while the last read before dispatch is awaited, after the queued gate and definition preparation
+    internal.models = async signal => {
+      const value = await models(signal);
+      const queued = fixture.task();
+      if (queued?.status === "queued" && queued.definitionContext) internal.store.recordChatEnable(sourceThreadId, Date.now());
+      return value;
+    };
+    await supervisor.runOnce();
+    assert.equal(fixture.dispatches().length, 0, "a request written before the Enable is never dispatched");
+    assert.equal(fixture.task()!.status, "expired");
+  }
+  {
+    const fixture = await makeFixture();
+    t.after(fixture.cleanup);
+    const supervisor = fixture.makeSupervisor();
+    await supervisor.runOnce();
+    const first = fixture.task()!;
+    const native = fixture.projections.get(fixture.binding()!.threadId)!;
+    completeSupervisorRequest(native, first.messageId, workflowResponse(sourceMessageId));
+    const internal = supervisor as unknown as {definitions: {load: (...args: unknown[]) => Promise<unknown>}; store: {control(projectId: string): {generation: number};
+      saveControl(projectId: string, generation: number, enabled: boolean, baseline?: unknown): unknown}};
+    const load = internal.definitions.load.bind(internal.definitions);
+    // the project is disabled and re-enabled with its boundary at the request's run while the finished result is revalidated
+    internal.definitions.load = async (...args: unknown[]) => {
+      const value = await load(...args);
+      if (fixture.task()?.status === "waiting") {
+        internal.store.saveControl(projectId, internal.store.control(projectId).generation, false);
+        internal.store.saveControl(projectId, internal.store.control(projectId).generation, true, {snapshotSequence: 11, threads: [{id: sourceThreadId, latestRunId: first.sourceRunId}]});
+      }
+      return value;
+    };
+    await supervisor.runOnce();
+    assert.equal(fixture.task()!.status, "expired", "the result is never applied across the boundary");
+    assert.equal(fixture.task()!.objective, null);
+    assert.equal(fixture.dispatches().length, 1, "nothing is resent");
+  }
+});
+
+test("an earlier unresolved request carries forward only from the current supervision epoch", async (t) => {
+  const fixture = await makeFixture();
+  t.after(fixture.cleanup);
+  const source = fixture.projections.get(sourceThreadId)!;
+  source.messages[0]!.text = "https://issues.example/browse/PROJ-1";
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  const first = fixture.task()!;
+  const native = fixture.projections.get(fixture.binding()!.threadId)!;
+  completeSupervisorRequest(native, first.messageId, JSON.stringify({objective: null, reason: "Only an issue link was supplied.", sourceMessageIds: [],
+    supervision: "needed", workflow: null}));
+  await supervisor.runOnce();
+  assert.equal(fixture.task()?.status, "needs_context");
+  // the human stopped and enabled supervision again after the link; the next request starts a new epoch
+  const enabledAt = Date.parse(source.messages[0]!.createdAt) + 1_000;
+  (supervisor as unknown as {store: {recordChatEnable(id: string, at: number): void}}).store.recordChatEnable(sourceThreadId, enabledAt);
+  appendSourceMessage(source, "after-enable-message", 2, "Implement the export described in PROJ-1.");
+  source.messages.at(-1)!.createdAt = new Date(enabledAt + 1_000).toISOString();
+  await supervisor.runOnce();
+  const second = fixture.task()!;
+  assert.equal(second.sourceMessageId, "after-enable-message");
+  assert.equal(second.contextMessageIds, undefined, "a request from before the latest Enable never joins the new interpretation");
+  assert.doesNotMatch(String(fixture.dispatches().at(-1)?.payload.text), /issues\.example/u);
+});
