@@ -1028,7 +1028,8 @@ test("a manifest too large for one interpretation request keeps the reader and n
   const counted = prepareWorkflowRequest(threadId, sourceMessageId, "Implement the export.", wide as ProjectDefinitionSnapshot, {reader});
   const countedEnvelope = envelopeOf(counted.requestText);
   assert.ok(counted.requestText.length <= 120_000, `bounded: ${counted.requestText.length}`);
-  assert.deepEqual(countedEnvelope.reader, {tool: "t3-supervisor-workflows workflow_read", ...reader}, "the reader is kept rather than switching to the inline protocol");
+  assert.deepEqual(countedEnvelope.reader, {tool: "t3-supervisor-workflows workflow_read", ...reader,
+    toolInputs: {definitions: {...reader, view: "definitions", definitionIds: []}}}, "the reader and its ready arguments are kept rather than switching to the inline protocol");
   assert.match(counted.requestText, /workflow_read/u);
   assert.equal(countedEnvelope.definitions.workflows.length, 40);
   assert.equal(countedEnvelope.definitions.workflows[0].memberCount, 400);
@@ -1069,7 +1070,11 @@ test("reader-based interpretation carries a manifest, earlier unresolved request
   assert.match(prepared.requestText, /"supervision" \("needed"\|"not_needed"\)/u);
   const envelope = JSON.parse(prepared.requestText.split("UNTRUSTED_WORKFLOW_ENVELOPE\n")[1]!.split("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE")[0]!);
   assert.deepEqual(envelope.earlierMessages, [{messageId: "m0", text: "https://issues.example/browse/PROJ-1"}]);
-  assert.deepEqual(envelope.reader, {tool: "t3-supervisor-workflows workflow_read", supervisorThreadId: "supervisor-root:reader", bindingGeneration: 3});
+  // the reader carries its coordinates and the exact ready-to-copy workflow_read arguments for selected definitions
+  assert.deepEqual(envelope.reader, {tool: "t3-supervisor-workflows workflow_read", supervisorThreadId: "supervisor-root:reader", bindingGeneration: 3,
+    toolInputs: {definitions: {supervisorThreadId: "supervisor-root:reader", bindingGeneration: 3, view: "definitions", definitionIds: []}}});
+  assert.deepEqual(Object.keys(envelope.reader.toolInputs.definitions).sort(), ["bindingGeneration", "definitionIds", "supervisorThreadId", "view"],
+    "only advertised workflow_read fields");
   assert.deepEqual(envelope.definitions.workflows.find((item: {id: string}) => item.id === "review").members, ["step:correctness", "step:fit", "step:findings"]);
   assert.ok(envelope.definitions.steps.every((item: {summary: string}) => item.summary.length <= 260));
 });

@@ -1262,7 +1262,7 @@ test("older approval-required/plan Supervisor chats are blocked without mode upg
   assert.equal(fixture.supervisor.thread.interactionMode, "plan");
 });
 
-test("uncertain operative introduction is not replayed automatically; explicit retry reuses its identity and target", async t => {
+test("uncertain operative introduction is never replayed, also after explicit Retry, and keeps its identity and target", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);
   const fixture = await makeFixture(clock);
@@ -1293,17 +1293,23 @@ test("uncertain operative introduction is not replayed automatically; explicit r
   assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 1);
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "uncertain");
 
+  // Retry only re-observes: the unknown delivery keeps its identity and target and is never sent again
   fixture.conversation.retry(projectId, fixture.binding.threadId);
   await fixture.run();
-  const retries = fixture.calls.filter(call => call.payload.threadId === operativeThreadId);
-  assert.equal(retries.length, 2);
-  assert.equal(retries[1]?.payload.commandId, firstCall.payload.commandId);
-  assert.equal(retries[1]?.payload.messageId, firstCall.payload.messageId);
-  assert.deepEqual(retries[1]?.payload.dispatchMode, firstCall.payload.dispatchMode);
-  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "accepted");
+  await fixture.run();
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 1);
+  const held = fixture.conversation.requests.introduction(fixture.task.id);
+  assert.equal(held?.state, "uncertain");
+  assert.equal(held?.messageId, firstCall.payload.messageId);
+  assert.equal(held?.targetRunId, "operative-active-run");
+  // once the original message is natively visible, the same identity is confirmed as sent
+  appendMessageToRun(fixture.operative, fixture.operative.runs.find(run => run.id === "operative-active-run")!,
+    {id: String(firstCall.payload.messageId), role: "user", text: String(firstCall.payload.text), creationSource: "server", now: clock.now + 1});
+  await fixture.run();
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "sent");
 });
 
-test("an uncertain idle introduction preserves its queued dispatch mode when an active run appears before retry", async t => {
+test("an uncertain idle introduction keeps its queued dispatch mode when an active run appears, and Retry never resends it", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);
   const fixture = await makeFixture(clock, { operativeActive: false });
@@ -1345,15 +1351,14 @@ test("an uncertain idle introduction preserves its queued dispatch mode when an 
 
   fixture.conversation.retry(projectId, fixture.binding.threadId);
   await fixture.run();
-  const calls = fixture.calls.filter(call => call.payload.threadId === operativeThreadId);
-  assert.equal(calls.length, 2);
-  assert.equal(calls[1]?.payload.commandId, firstCall.payload.commandId);
-  assert.equal(calls[1]?.payload.messageId, firstCall.payload.messageId);
-  assert.deepEqual(calls[1]?.payload.dispatchMode, { type: "queue_after_active" });
-  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "accepted");
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 1, "Retry only re-observes");
+  const held = fixture.conversation.requests.introduction(fixture.task.id);
+  assert.equal(held?.state, "uncertain");
+  assert.deepEqual(held?.dispatchMode, { type: "queue_after_active" }, "the original queued mode is kept, not switched to steering");
+  assert.equal(held?.messageId, firstCall.payload.messageId);
 });
 
-test("an invalid native receipt makes introduction delivery uncertain without automatic replay", async t => {
+test("an invalid native receipt makes introduction delivery uncertain, never replayed by itself or by Retry", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);
   const fixture = await makeFixture(clock);
@@ -1383,12 +1388,9 @@ test("an invalid native receipt makes introduction delivery uncertain without au
 
   fixture.conversation.retry(projectId, fixture.binding.threadId);
   await fixture.run();
-  const calls = fixture.calls.filter(call => call.payload.threadId === operativeThreadId);
-  assert.equal(calls.length, 2);
-  assert.equal(calls[1]?.payload.commandId, firstCall.payload.commandId);
-  assert.equal(calls[1]?.payload.messageId, firstCall.payload.messageId);
-  assert.deepEqual(calls[1]?.payload.dispatchMode, firstCall.payload.dispatchMode);
-  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "accepted");
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 1, "Retry only re-observes");
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "uncertain");
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.messageId, firstCall.payload.messageId);
 });
 
 test("a still-invisible accepted introduction does not starve another operative chat's review", async t => {
@@ -1747,7 +1749,7 @@ test("a rejected queued fallback waits for explicit retry, then uses fresh queue
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.rejectedAttempts?.length, 2);
 });
 
-test("a pending owner request does not block reconciliation of an uncertain queued fallback", async t => {
+test("an uncertain queued fallback is only observed: neither a pending owner request nor Retry resends it", async t => {
   const clock = {now: baseTime};
   t.mock.method(Date, "now", () => clock.now);
   const fixture = await makeFixture(clock);
@@ -1784,11 +1786,11 @@ test("a pending owner request does not block reconciliation of an uncertain queu
   clock.now += 5_001;
   await fixture.run();
 
-  const attempts = fixture.calls.filter(call => call.payload.threadId === operativeThreadId);
-  assert.equal(attempts.length, 3);
-  assert.equal(attempts[2]?.payload.messageId, uncertainFallback.payload.messageId);
-  assert.equal(attempts[2]?.payload.commandId, uncertainFallback.payload.commandId);
-  assert.deepEqual(attempts[2]?.payload.dispatchMode, uncertainFallback.payload.dispatchMode);
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 2, "the uncertain fallback is never resent");
+  const held = fixture.conversation.requests.introduction(fixture.task.id);
+  assert.equal(held?.state, "uncertain");
+  assert.equal(held?.messageId, uncertainFallback.payload.messageId);
+  assert.deepEqual(held?.dispatchMode, uncertainFallback.payload.dispatchMode);
 });
 
 test("one review stays in flight while activity changes and acknowledges only its frozen batch", async t => {
@@ -2382,8 +2384,14 @@ test("prepared requests retain their native identity when monitoring settings ch
   assert.equal(dispatched?.id, request.id);
   assert.equal(dispatched?.messageId, request.messageId);
   assert.equal(dispatched?.state, "waiting");
-  assert.equal(fixture.calls.length, 1);
-  assert.equal(fixture.calls[0]?.payload.messageId, request.messageId);
+  // exactly one root dispatch, carrying the prepared request's original identity
+  const root = fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId);
+  assert.equal(root.length, 1);
+  assert.equal(root[0]?.payload.messageId, request.messageId);
+  assert.equal(root[0]?.payload.commandId, `supervisor-review:${request.id}`);
+  // the only other call is the task's introduction to the operative, which never waits behind the root request
+  assert.deepEqual(fixture.calls.filter(call => call.payload.threadId !== fixture.binding.threadId).map(call => [call.payload.threadId, call.payload.messageId]),
+    [[operativeThreadId, `supervisor-notice:workflow:${fixture.task.id}`]]);
 });
 
 test("monitoring-only API saves update the live threshold without losing pending activity", async t => {
@@ -5311,7 +5319,7 @@ test("agreement evidence from an interpretation answer goes stale when that answ
   assert.equal(fixture.projectStore.task(fixture.task.threadId)?.agreement?.status, "stale", "a changed interpretation answer is no longer evidence");
 });
 
-test("Retry native access keeps an unknown root delivery held for a stopped chat or one sent before the latest Enable, and a stop never calls a dispatched check-in unsent", async t => {
+test("Retry native access only re-observes unknown root check-ins and introductions, across Stop, Enable and activation boundaries", async t => {
   const clock = {now: baseTime};
   t.mock.method(Date, "now", () => clock.now);
   const fixture = await makeFixture(clock);
@@ -5319,37 +5327,130 @@ test("Retry native access keeps an unknown root delivery held for a stopped chat
   const service = fixture.makeProjectSupervisor();
   const signal = AbortSignal.timeout(5_000);
   const conversation = fixture.conversation;
-  // the Retry path runs only for an enabled project, so every assertion below exercises it
-  conversation.requests.saveRequest({...conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "review", taskId: null,
-    text: "probe", batch: null, completionMarker: "probe completed"}, clock.now), state: "uncertain", sentAt: Date.now() + 10_000_000});
-  conversation.retry(projectId, fixture.binding.threadId);
-  assert.equal(conversation.requests.pending(projectId, fixture.binding.threadId)?.state, "prepared", "Retry is active for this project");
-  for (const item of conversation.requests.requests(projectId, fixture.binding.threadId)) conversation.requests.saveRequest({...item, state: "completed"});
+  const pending = () => conversation.requests.pending(projectId, fixture.binding.threadId);
+  // the Retry path is active for this project: it acknowledges a failed check-in
+  const failed = conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "review", taskId: null,
+    text: "probe", batch: null, completionMarker: "probe completed"}, clock.now);
+  conversation.requests.saveRequest({...failed, state: "failed", error: "probe"});
   const sent = conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "review", taskId: fixture.task.id,
     text: "A check-in whose delivery is unknown.", batch: null, completionMarker: "unknown delivery completed"}, clock.now);
   conversation.requests.saveRequest({...sent, state: "uncertain", sentAt: clock.now, error: "Supervisor request delivery is uncertain."});
-  clock.now += 1_000;
-  assert.equal((await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: fixture.threadPolicy.get().generation}, signal)).status, "saved");
+  const introduction = {taskId: fixture.task.id, projectId, threadId: operativeThreadId, supervisorThreadId: fixture.binding.threadId, state: "uncertain" as const,
+    text: workflowIntroductionText(fixture.task), messageId: `supervisor-notice:workflow:${fixture.task.id}`, targetRunId: "operative-active-run",
+    dispatchMode: {type: "steer_active" as const, targetRunId: "operative-active-run"}, error: "Proposal delivery is uncertain."};
+  conversation.requests.saveIntroduction(introduction);
   conversation.retry(projectId, fixture.binding.threadId);
-  assert.equal(conversation.requests.pending(projectId, fixture.binding.threadId)?.state, "uncertain", "a stopped chat's unknown delivery is only observed");
-  // a dispatched check-in demoted by an earlier Retry keeps its identity as uncertain when the stop fences prepared requests
+  assert.equal(conversation.requests.requests(projectId, fixture.binding.threadId).find(item => item.id === failed.id)?.failureAcknowledged, true, "Retry ran");
+  assert.equal(pending()?.state, "uncertain", "a current unknown check-in is not made sendable");
+  assert.equal(conversation.requests.introduction(fixture.task.id)?.state, "uncertain", "an unknown introduction is not made sendable");
+  // across a stop, an Enable and a project re-enable the identities stay held, and nothing is sent
+  for (const step of ["stop", "enable", "project"] as const) {
+    clock.now += 1_000;
+    if (step === "project") {
+      fixture.projectStore.saveControl(projectId, fixture.projectStore.control(projectId).generation, false);
+      fixture.projectStore.saveControl(projectId, fixture.projectStore.control(projectId).generation, true, {snapshotSequence: 2, threads: []});
+    } else assert.equal((await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: step === "enable", policyGeneration: fixture.threadPolicy.get().generation}, signal)).status, "saved");
+    conversation.retry(projectId, fixture.binding.threadId);
+    assert.equal(pending()?.state, "uncertain", step);
+    assert.equal(conversation.requests.introduction(fixture.task.id)?.state, "uncertain", step);
+  }
+  const callsBefore = fixture.calls.length;
+  await fixture.run();
+  assert.equal(fixture.calls.length, callsBefore, "nothing is resent");
+  // records an earlier Retry made sendable are unknown deliveries too: they are observed, never sent again
+  conversation.requests.saveRequest({...sent, state: "prepared", sentAt: sent.createdAt, error: null});
+  conversation.requests.saveIntroduction({...introduction, state: "ready", definiteRejection: false, error: null});
+  // a genuine human message ends the post-Enable rest, so both identities are reached
+  appendActualUserMessage(fixture.operative, "human-after-enable", "Please continue.", clock.now + 1);
+  clock.now += 61_000;
+  await fixture.run();
+  await fixture.run();
+  assert.equal(fixture.calls.length, callsBefore, "a previously reopened identity is not resent");
+  assert.equal(conversation.requests.requests(projectId, fixture.binding.threadId).find(item => item.id === sent.id)?.state, "uncertain");
+  assert.notEqual(conversation.requests.introduction(fixture.task.id)?.state, "accepted");
+  // once the held check-in has a native outcome, the reopened introduction is reached and only observed
+  conversation.requests.saveRequest({...conversation.requests.requests(projectId, fixture.binding.threadId).find(item => item.id === sent.id)!, state: "completed", error: null});
+  await fixture.run();
+  assert.equal(conversation.requests.introduction(fixture.task.id)?.state, "uncertain");
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0, "the reopened introduction is never resent");
+  // the stop fence still never calls a dispatched check-in unsent
+  assert.equal((await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: fixture.threadPolicy.get().generation}, signal)).status, "saved");
   conversation.requests.saveRequest({...sent, state: "prepared", sentAt: sent.createdAt, error: null});
   conversation.fenceStoppedSupervision(fixture.binding);
   const fenced = conversation.requests.requests(projectId, fixture.binding.threadId).find(item => item.id === sent.id)!;
   assert.equal(fenced.state, "uncertain");
   assert.doesNotMatch(fenced.error ?? "", /it was not sent/u);
-  clock.now += 1_000;
-  assert.equal((await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: true, policyGeneration: fixture.threadPolicy.get().generation}, signal)).status, "saved");
-  conversation.retry(projectId, fixture.binding.threadId);
-  assert.equal(conversation.requests.pending(projectId, fixture.binding.threadId)?.state, "uncertain", "a check-in sent before the Enable is never resent");
-  // a check-in sent under current supervision is still reconciled by an identical resend
-  conversation.requests.saveRequest({...fenced, state: "completed", error: null});
-  clock.now += 1_000;
-  const current = conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "review", taskId: fixture.task.id,
-    text: "A current check-in whose delivery is unknown.", batch: null, completionMarker: "current unknown delivery completed"}, clock.now);
-  conversation.requests.saveRequest({...current, state: "uncertain", sentAt: fixture.projectStore.chatEnabledAt(operativeThreadId)! + 1, error: "Supervisor request delivery is uncertain."});
-  conversation.retry(projectId, fixture.binding.threadId);
-  assert.equal(conversation.requests.pending(projectId, fixture.binding.threadId)?.state, "prepared");
+});
+
+test("a deferred proposal is sent once owner input resolves, even while a root check-in is in flight", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  fixture.operative.runtimeRequests = [null as unknown as Record<string, unknown>];
+  await fixture.run();
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "ready", "deferred by owner input");
+  // a root check-in is in flight with an unknown outcome
+  const review = fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "review", taskId: fixture.task.id,
+    text: "A check-in in flight.", batch: null, completionMarker: "in flight completed"}, clock.now);
+  fixture.conversation.requests.saveRequest({...review, state: "uncertain", sentAt: clock.now, error: "Supervisor request delivery is uncertain."});
+  fixture.operative.runtimeRequests = [];
+  await fixture.run();
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 1, "the introduction does not wait behind the root check-in");
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "accepted");
+  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId)?.state, "uncertain", "the root check-in stays held");
+});
+
+test("a ready introduction is never sent after a later Enable or activation boundary, even before discovery reaches the chat", async t => {
+  for (const boundary of ["enable", "project"] as const) {
+    const clock = {now: baseTime};
+    t.mock.method(Date, "now", () => clock.now);
+    const fixture = await makeFixture(clock);
+    t.after(fixture.cleanup);
+    fixture.operative.runtimeRequests = [null as unknown as Record<string, unknown>];
+    await fixture.run();
+    assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "ready", `${boundary}: deferred`);
+    clock.now += 1_000;
+    if (boundary === "enable") fixture.projectStore.recordChatEnable(operativeThreadId, clock.now);
+    else {
+      const latest = [...fixture.operative.runs].sort((a, b) => b.ordinal - a.ordinal)[0]!;
+      fixture.projectStore.saveControl(projectId, fixture.projectStore.control(projectId).generation, false);
+      fixture.projectStore.saveControl(projectId, fixture.projectStore.control(projectId).generation, true, {snapshotSequence: 2, threads: [{id: operativeThreadId, latestRunId: latest.id}]});
+    }
+    // the human writes again, ending any rest, while the stale task is still the chat's current one
+    appendActualUserMessage(fixture.operative, `human-after-${boundary}`, "Please continue.", clock.now + 1);
+    fixture.operative.runtimeRequests = [];
+    clock.now += 61_000;
+    await fixture.run();
+    assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0, `${boundary}: the pre-boundary proposal is not sent`);
+    const introduction = fixture.conversation.requests.introduction(fixture.task.id);
+    assert.equal(introduction?.state, "blocked", boundary);
+    assert.match(introduction?.error ?? "", /next request is interpreted afresh/u, boundary);
+  }
+});
+
+test("a deferred proposal or a known-unsent queued fallback is sent only while the Supervisor's interpretation answer is unchanged", async t => {
+  for (const variant of ["removed", "changed", "streaming", "fallback"] as const) {
+    const clock = {now: baseTime};
+    const fixture = await makeFixture(clock);
+    t.after(fixture.cleanup);
+    if (variant === "fallback") fixture.rejectNextIntroduction(1);
+    else fixture.operative.runtimeRequests = [null as unknown as Record<string, unknown>];
+    await fixture.run();
+    assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "ready", `${variant}: deferred`);
+    if (variant === "fallback") {
+      assert.equal((fixture.calls.find(call => call.payload.threadId === operativeThreadId)?.payload.dispatchMode as {type?: string})?.type, "steer_active");
+      assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.dispatchMode?.type, "queue_after_active", "the definitely rejected steer left a queued fallback");
+    }
+    const answer = fixture.supervisor.messages.find(message => message.id === "supervisor-objective-run-answer")!;
+    if (variant === "removed") fixture.supervisor.messages.splice(fixture.supervisor.messages.indexOf(answer), 1);
+    if (variant === "changed" || variant === "fallback") answer.text = JSON.stringify({...JSON.parse(answer.text), workflow: requiredRawPlan("A plan the service never stored.")});
+    if (variant === "streaming") answer.streaming = true;
+    fixture.operative.runtimeRequests = [];
+    await fixture.run();
+    assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, variant === "fallback" ? 1 : 0, `${variant}: nothing further is sent`);
+    assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "blocked", variant);
+  }
 });
 
 test("an unresolved activation boundary never authorizes a wake, while a resolvable one admits only later human messages", async t => {

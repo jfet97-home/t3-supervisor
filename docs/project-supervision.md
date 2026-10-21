@@ -281,8 +281,14 @@ before the Enable is closed unsent; one already sent is never applied or resent,
 only once its exactly matched native run has ended, while an absent or still active native
 outcome keeps its identity held (these boundaries are rechecked right before dispatch and
 before a result is applied); and the Supervisor reviews nothing until the human writes in the
-main again. Retry native access never resends a check-in for a stopped chat or one sent before
-the latest Enable; such an unknown delivery stays held and is only observed. A stop
+main again. That next request is interpreted afresh even after an interpreted task, unless the
+task's introduction was attempted with an unknown outcome (sending, accepted, uncertain, or
+accepted but not found), which keeps the task held; a never-attempted draft or a fallback whose
+earlier attempts were definitely rejected is known unsent and does not hold it, and an earlier
+request's unsent introduction is never sent after that Enable or boundary. Retry native access never resends an uncertain root check-in or introduction: it
+only re-observes the retained identity, so a delivery whose native outcome stays unknown keeps
+its pair held, across any Stop, Enable or activation boundary, until that outcome appears or the
+Supervisor conversation is replaced. A stop
 cancels never-sent check-ins, keeps sent and uncertain delivery identities, sends no new
 check-in, introduction or contact (rechecked immediately before every send), and
 settles the owned Supervisor once it is idle and every accepted delivery, the
@@ -351,7 +357,8 @@ the assessment without granting write authority. Historical agreement snapshots
 remain plans, not execution receipts.
 
 Native creation/request identities and owned IDs are permanent recovery evidence.
-Retry native access reconciles the original uncertain action. A confirmed deleted
+Retry native access re-observes the original uncertain action; it never resends an uncertain
+root check-in or introduction. A confirmed deleted
 Supervisor exposes a distinct replacement action; an archived one is restored in
 T3. Stop/restart/provider failures do not erase user history; native rollback can
 invalidate source evidence. Unknown outcomes stop at the retained bounded retry

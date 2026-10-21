@@ -19,6 +19,7 @@ import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo,
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { parseWorkflowInterpretation, proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
 import { WebSocketServer } from "ws";
+import { createWorkflowMcpEndpoint } from "../src/workflow-mcp.js";
 import { makeSupervisorRpc, SupervisorRpcError } from "../src/supervisor-native.js";
 
 type Fixture = {
@@ -2923,4 +2924,33 @@ test("workflow_write advertises the root-only contribution assessment action", (
   assert.deepEqual(schema.oneOf.at(-1), {properties: {action: {const: "assess_contribution"}},
     required: ["operationId", "workflowId", "expectedRevision", "contributionId", "resultRevision", "decision", "note"]});
   assert.match(workflowWriteToolDefinition.description, /never changes any status/u);
+});
+
+test("workflow_read view definitions accepts nonempty definitionIds through the real controller and MCP endpoint", async () => {
+  const fixture = await makeFixture();
+  try {
+    const received: unknown[] = [];
+    const controller = new WorkflowWriteController({supervisors: fixture.supervisors, workflows: fixture.workflows, native: fixture.native,
+      isEnabled: id => fixture.supervisors.enabled(id), maxEvidenceWaitMs: 0,
+      contextViews: {readContextView: async (_binding: unknown, input: unknown) => {received.push(input);return {status: "ok", view: "definitions"};}} as never});
+    // the exact native shape recovered from the live root: a manifest read and a read of two selected definitions
+    const selected = {...locator(fixture), view: "definitions", definitionIds: ["check", "change"]};
+    assert.deepEqual(await controller.readTool({...locator(fixture), view: "definitions"}), {status: "ok", view: "definitions"});
+    assert.deepEqual(await controller.readTool(selected), {status: "ok", view: "definitions"}, "nonempty definitionIds are valid arguments");
+    assert.deepEqual(received.at(-1), {view: "definitions", definitionIds: ["check", "change"]});
+    assert.deepEqual(await controller.readTool({...locator(fixture), view: "definitions", definitionIds: [""]}), {status: "invalid", reason: "invalid_read_arguments"});
+    const endpoint = createWorkflowMcpEndpoint(controller);
+    const server = createServer((request, response) => {void endpoint.handle(request, response);});
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      const response = await fetch(`http://127.0.0.1:${address.port}/mcp/workflows`, {method: "POST",
+        headers: {"Content-Type": "application/json", Accept: "application/json, text/event-stream"},
+        body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: selected}})});
+      const body = await response.json() as {result?: {isError?: boolean; content?: Array<{text?: string}>}};
+      assert.notEqual(body.result?.isError, true);
+      assert.deepEqual(JSON.parse(body.result?.content?.[0]?.text ?? "null"), {status: "ok", view: "definitions"});
+    } finally {await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));endpoint.close?.();}
+  } finally {await closeFixture(fixture);}
 });

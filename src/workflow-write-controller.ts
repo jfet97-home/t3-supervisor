@@ -409,7 +409,7 @@ const parseReadPayload = (value: unknown): ParsedReadInput => {
   const locator = parseLocator(value);
   if (value.view !== undefined) {
     if (!locator || !["context", "definitions", "instructions", "check"].includes(String(value.view)) ||
-      value.definitionIds !== undefined && (!Array.isArray(value.definitionIds) || value.definitionIds.length > 50 || !value.definitionIds.every(isId)) ||
+      value.definitionIds !== undefined && (!Array.isArray(value.definitionIds) || value.definitionIds.length > 50 || !value.definitionIds.every(id => isId(id))) ||
       value.includeSources !== undefined && typeof value.includeSources !== "boolean" || value.view !== "check" && value.record !== undefined ||
       value.view === "check" && value.record === undefined || value.workflowId !== undefined || value.workflowOffset !== undefined ||
       value.lineageOffset !== undefined || value.limit !== undefined) return {ok: false, reason: "invalid_read_arguments"};

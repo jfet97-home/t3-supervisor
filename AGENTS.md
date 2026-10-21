@@ -8,6 +8,37 @@ globally through Skillshare; it must not depend on personal maintenance files.
 Skill/documentation-only batches use Git and Skillshare propagation; they do not
 require rebuilding or restarting the application.
 
+## Development discipline
+
+- Define the requested behavior and a small set of observable acceptance cases before
+  editing. Keep one owner and one findings ledger; distinguish blockers from optional
+  ideas. Fix demonstrated failures in the existing path. Remove superseded code and
+  instructions instead of layering workarounds, stores, parsers or compatibility on them.
+- Test the riskiest user journey early on the VM, before a long implementation or
+  review campaign. For negotiation and flooding, inspect actual rendered prompts,
+  total traffic, repeated messages, tool arguments and native event timestamps.
+  Permissive size ceilings and hundreds of passing unit tests do not prove these
+  behaviors. Exercise the real controller/transport boundary under test rather than
+  mocking it away. Include a trivial no-contact case and relevant failure/race cases.
+- Use an uncoached operative request for live proof. Do not seed agreement, delay the
+  operative, or teach the test agent the expected protocol to manufacture success.
+  Record the first edit, introduction and completed acceptance separately. Report
+  advisory timing honestly; unmodified T3 provides no pre-first-tool barrier.
+- When iterative review is requested, retain one ordinary conversation per reviewer
+  through supported, authorized APIs and reuse it for later rounds of the same work.
+  Pass the exact revision, delta, evidence and unresolved objections. A delegated
+  task's backing child thread is not a resumable ordinary reviewer conversation.
+  Replace reviewers only for a material scope/context change, explaining why.
+- Review a frozen candidate. Recheck fixes with the same reviewers, including shared
+  callers and real message output; do not restart broad reviews or full campaigns
+  for every small delta. Track every review to a terminal result. Approval is an
+  assessment, not proof that a behavioral acceptance case passed.
+- Discover the exact local/native tool and schema before live calls; a remote tool
+  with the same name may address another environment. Preserve unknown effect IDs
+  and reconcile them; Retry must not turn an unknown send into a fresh send.
+- Keep updates and maintained instructions concise. Give evidence-based estimates;
+  when a blocker invalidates an ETA, say so promptly rather than rolling it forward.
+
 ## Knowledge Base
 
 This project has an LLM-maintained knowledge base in `knowledge/` (git-ignored). Invoke `$knowledge` or `/knowledge` with the same subcommands and arguments.

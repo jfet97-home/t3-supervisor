@@ -941,8 +941,10 @@ export class ProjectSupervisor {
         if (signal.aborted) return;
         const project = catalog.projects.find(p => p.available && p.project.id === thread.projectId)?.project;if (!project || !this.projectEnabled(project.id)) continue;
         const previous = this.store.task(thread.id);
-        // an unresolved request or a temporary not-needed decision is reconsidered when the next genuine human request arrives
-        if (previous && !["needs_context", "not_supervised", "unavailable", "expired"].includes(previous.status)) continue;
+        // an unresolved request or a temporary not-needed decision is reconsidered when the next genuine human request arrives; an
+        // interpreted task is reconsidered only when the latest Enable or activation boundary came after it (checked below); queued
+        // or in-flight work is never replaced
+        if (previous && !["needs_context", "not_supervised", "unavailable", "expired", "inferred"].includes(previous.status)) continue;
         if (typeof thread.latestRunId === "string" && (thread.latestRunId === previous?.sourceRunId ||
           thread.latestRunId === this.store.baseline()?.threads.find(anchor => anchor.id === thread.id)?.latestRunId ||
           thread.latestRunId === this.examinedNonTasks.get(thread.id))) continue;
@@ -950,6 +952,18 @@ export class ProjectSupervisor {
           const projection = await this.projection(thread.id, signal);
           if (!this.eligible(projection.thread, catalog.threads) || projection.thread.projectId !== project.id) continue;
           const baseline = this.store.baselineOrdinal(thread.id, projection);if (baseline === null) continue;
+          // an explicit Enable or a new activation boundary supervises the chat's next request afresh, even after an agreed task
+          const enabledSince = this.store.chatEnabledAt(thread.id);
+          const prior = previous ? this.conversation.requests.introduction(previous.id) : null;
+          // only an attempted introduction whose outcome is unknown holds the task; a never-attempted draft or a fallback whose
+          // earlier attempts were definitely rejected is known unsent and does not strand the next request
+          const priorUnresolved = Boolean(prior && prior.state !== "sent" && (["sending", "accepted", "uncertain"].includes(prior.state) ||
+            prior.acceptedAt !== undefined || prior.definiteRejection === false));
+          if (previous?.status === "inferred" && (priorUnresolved || !(previous.sourceOrdinal <= baseline || enabledSince !== null && previous.dispatchedAt !== null && previous.dispatchedAt <= enabledSince))) {
+            if (this.examinedNonTasks.size >= 10_000) this.examinedNonTasks.clear();
+            if (typeof thread.latestRunId === "string") this.examinedNonTasks.set(thread.id, thread.latestRunId);
+            continue;
+          }
           // an explicit Enable supervises the chat's next request: a request written while supervision was stopped is not interpreted
           const task = taskSource(projection, Math.max(baseline, previous?.sourceOrdinal ?? 0), this.store.chatEnabledAt(thread.id));
           if (!task) {
@@ -1059,7 +1073,12 @@ export class ProjectSupervisor {
           this.complete({...inflight, supervisorRunId: run.id}, "expired", null, enabledAgainReason);
         return;
       }
-      await this.reconcile(inflight, projection, signal);return;
+      await this.reconcile(inflight, projection, signal);
+      // a proposal is introduced in the same cycle its interpretation completes, through the ordinary conversation path and its fences
+      const interpreted = this.store.task(inflight.threadId);
+      if (interpreted?.id === inflight.id && interpreted.status === "inferred" && this.projectEnabled(binding.projectId))
+        await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);
+      return;
     }
     if (this.conversation.hasInflight(binding.projectId, binding.threadId)) {if (this.projectEnabled(binding.projectId)) await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}
     if (active(projection)) {if (this.projectEnabled(binding.projectId)) await this.conversation.run(binding, projection, (await Effect.runPromise(this.source.catalog())).threads, signal);return;}

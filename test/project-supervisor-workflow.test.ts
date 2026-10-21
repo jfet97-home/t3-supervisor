@@ -10,6 +10,7 @@ import { ProjectSupervisorStore } from "../src/project-supervisor-store.js";
 import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import type { SupervisorModelSelection } from "../src/project-supervisor-contract.js";
+import type { WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
@@ -377,7 +378,9 @@ test("a correlated native result appears in the project DTO without repeating or
 
   await supervisor.runOnce();
   assert.equal(fixture.dispatches().length, 1);
-  assert.equal(fixture.definitionReads.length, 3, "preparation, completed-result revalidation and one bounded unsent-definition observation load definitions");
+  // the proposal is handled in its interpretation's completion cycle, so no unsent proposal waits for a separate definition observation
+  assert.ok(supervisor.conversation.requests.introduction(fixture.task()!.id), "the proposal was handled in its completion cycle");
+  assert.equal(fixture.definitionReads.length, 2, "only preparation and completed-result revalidation load definitions");
   assert.equal(fixture.store.task(binding.threadId), null, "the owned Supervisor conversation is not a new source task");
 });
 
@@ -502,7 +505,8 @@ test("a known unavailable completion read stales the proposal without redispatch
   assert.equal(stale?.workflow?.status, "stale");
   assert.ok(stale?.workflow?.plan?.nodes.length);
   assert.equal(fixture.dispatches().length, 1);
-  assert.equal(fixture.definitionReads.length, 3, "preparation, completion revalidation and one bounded conversation observation read definitions");
+  assert.ok(fixture.makeSupervisor().conversation.requests.introduction(fixture.task()!.id), "the stale proposal was handled in its completion cycle");
+  assert.equal(fixture.definitionReads.length, 2, "only preparation and completion revalidation read definitions");
 });
 
 test("three transient completion read failures stale only the proposal and preserve the objective", async (t) => {
@@ -539,7 +543,8 @@ test("three transient completion read failures stale only the proposal and prese
   assert.ok(stale?.workflow?.plan?.nodes.length);
   assert.match(stale?.workflow?.message ?? "", /could not be revalidated/u);
   assert.equal(fixture.dispatches().length, 1);
-  assert.equal(fixture.definitionReads.length, 5, "the separate unsent-definition observation does not change the three-attempt budget");
+  assert.ok(fixture.makeSupervisor().conversation.requests.introduction(fixture.task()!.id), "the stale proposal was handled in its completion cycle");
+  assert.equal(fixture.definitionReads.length, 4, "preparation plus exactly the three bounded revalidation attempts read definitions");
 });
 
 test("interrupted and definitively rejected requests clear pending workflow proposals", async (t) => {
@@ -854,8 +859,15 @@ test("the interpretation request carries the concise standing role once, permits
   assert.match(instruction, /configured required references alone never make a task needed/u);
   assert.match(instruction, /If you cannot invoke workflow_read, that says nothing about the project's definitions/u);
   assert.doesNotMatch(instruction, /templatePath|omissions/u, "no obsolete expansion format");
+  // the exact reader arguments are ready to copy, also through an MCPX call tool
+  const envelope = JSON.parse(text.slice(text.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE\n") + "UNTRUSTED_WORKFLOW_ENVELOPE\n".length, text.indexOf("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE")));
+  assert.deepEqual(envelope.reader.toolInputs.definitions, {supervisorThreadId: fixture.binding()!.threadId, bindingGeneration: fixture.binding()!.generation, view: "definitions", definitionIds: []});
+  assert.match(instruction, /Copy reader\.toolInputs\.definitions as the complete arguments and put the exact IDs you need in definitionIds; through an MCPX call tool, use name t3-supervisor-workflows__workflow_read with that object as arguments and no extra wrapper/u);
+  // T3 tools come from this environment's local t3-code server only
+  assert.match(text, /t3_thread_read and t3_thread_send of the local t3-code server only \(t3-code\.t3_thread_read or mcp__t3-code__t3_thread_read/u);
+  assert.match(text, /another server's T3 tools reach another environment, so on thread_not_found check the namespace first/u);
   // a genuine direct stop during interpretation may still be read freshly and applied: the only exception to the tool limit
-  assert.match(instruction, /The one exception to this tool limit: if a genuine human writes directly in this conversation asking to stop supervising this chat, freshly read your own thread with t3_thread_read and call t3-supervisor-workflows supervision_stop citing that latest message with a fresh operationId/u);
+  assert.match(instruction, /The one exception to this tool limit: if a genuine human writes directly in this conversation asking to stop supervising this chat, freshly read your own thread with the local t3-code server's t3_thread_read and call t3-supervisor-workflows supervision_stop citing that latest message with a fresh operationId/u);
   assert.match(text, /use no tool except the workflow_read reader they name, or the fresh own-thread read and supervision_stop call for a genuine direct human stop request/u);
   assert.ok(text.length < 16_000, `interpretation request ${text.length} characters`);
   const native = fixture.projections.get(fixture.binding()!.threadId)!;
@@ -933,4 +945,89 @@ test("an earlier unresolved request carries forward only from the current superv
   assert.equal(second.sourceMessageId, "after-enable-message");
   assert.equal(second.contextMessageIds, undefined, "a request from before the latest Enable never joins the new interpretation");
   assert.doesNotMatch(String(fixture.dispatches().at(-1)?.payload.text), /issues\.example/u);
+});
+
+test("after an Enable the chat's next request is interpreted afresh by the same Supervisor, even when an earlier task was interpreted", async (t) => {
+  const fixture = await makeFixture();
+  t.after(fixture.cleanup);
+  const source = fixture.projections.get(sourceThreadId)!;
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  const first = fixture.task()!;
+  const rootId = fixture.binding()!.threadId;
+  completeSupervisorRequest(fixture.projections.get(rootId)!, first.messageId, workflowResponse(sourceMessageId));
+  await supervisor.runOnce();
+  assert.equal(fixture.task()!.status, "inferred");
+  const interpretations = () => fixture.dispatches().filter(call => call.payload.threadId === rootId).length;
+  const before = interpretations();
+  // without an Enable, a follow-up in the same main stays part of the interpreted task
+  appendSourceMessage(source, "follow-up-message", 2, "Please also keep the old export working.");
+  await supervisor.runOnce();
+  assert.equal(fixture.task()!.id, first.id);
+  assert.equal(interpretations(), before);
+  // after the human stops and enables supervision again, the next request gets a fresh interpretation in the same Supervisor
+  const enabledAt = Date.now();
+  (supervisor as unknown as {store: {recordChatEnable(id: string, at: number): void}}).store.recordChatEnable(sourceThreadId, enabledAt);
+  appendSourceMessage(source, "after-enable-greeting", 3, "Hi, just checking in.");
+  source.messages.at(-1)!.createdAt = new Date(enabledAt + 1_000).toISOString();
+  await supervisor.runOnce();
+  const fresh = fixture.task()!;
+  assert.notEqual(fresh.id, first.id);
+  assert.equal(fresh.sourceMessageId, "after-enable-greeting");
+  assert.equal(fresh.supervisorThreadId, first.supervisorThreadId);
+  assert.equal(interpretations(), before + 1);
+  assert.match(String(fixture.dispatches().at(-1)?.payload.text), /Hi, just checking in\./u);
+});
+
+test("across an Enable only an attempted introduction with an unknown outcome keeps its task; a known-unsent fallback does not hold the next request", async (t) => {
+  const priors: Record<string, Pick<WorkflowIntroduction, "state" | "error"> & Partial<WorkflowIntroduction>> = {
+    uncertain: {state: "uncertain", dispatchMode: {type: "queue_after_active"}, definiteRejection: false, error: "Proposal delivery is uncertain."},
+    acceptedUnobserved: {state: "blocked", dispatchMode: {type: "queue_after_active"}, acceptedAt: 1, error: "T3 accepted this introduction, but it was not found unchanged."},
+    rejectedFallback: {state: "ready", dispatchMode: {type: "queue_after_active"}, error: null,
+      rejectedAttempts: [{messageId: "supervisor-notice:workflow:steer", commandId: "supervisor-workflow:steer", dispatchMode: {type: "steer_active", targetRunId: "run-1"}}]},
+  };
+  for (const [name, prior] of Object.entries(priors)) {
+    const fixture = await makeFixture();
+    t.after(fixture.cleanup);
+    const source = fixture.projections.get(sourceThreadId)!;
+    const supervisor = fixture.makeSupervisor();
+    await supervisor.runOnce();
+    const first = fixture.task()!;
+    completeSupervisorRequest(fixture.projections.get(fixture.binding()!.threadId)!, first.messageId, workflowResponse(sourceMessageId));
+    await supervisor.runOnce();
+    const fallbackId = `supervisor-notice:workflow:${first.id}:queue`;
+    supervisor.conversation.requests.saveIntroduction({taskId: first.id, projectId, threadId: sourceThreadId, supervisorThreadId: first.supervisorThreadId,
+      text: "Introduction of the earlier request.", messageId: fallbackId, commandId: `supervisor-workflow:${first.id}:queue`, targetRunId: null, ...prior});
+    const enabledAt = Date.now();
+    (supervisor as unknown as {store: {recordChatEnable(id: string, at: number): void}}).store.recordChatEnable(sourceThreadId, enabledAt);
+    appendSourceMessage(source, "after-enable-request", 2, "Hi, just checking in.");
+    source.messages.at(-1)!.createdAt = new Date(enabledAt + 1_000).toISOString();
+    await supervisor.runOnce();
+    if (name === "rejectedFallback") {
+      assert.notEqual(fixture.task()!.id, first.id, `${name}: the next request is interpreted afresh`);
+      assert.equal(fixture.task()!.sourceMessageId, "after-enable-request", name);
+    } else {
+      assert.equal(fixture.task()!.id, first.id, `${name}: the unresolved introduction keeps its task`);
+      assert.equal(supervisor.conversation.requests.introduction(first.id)?.state, prior.state, name);
+    }
+    assert.equal(fixture.dispatches().filter(call => call.payload.messageId === fallbackId).length, 0, `${name}: the earlier introduction is never sent after the Enable`);
+  }
+});
+
+test("the proposal is introduced in the same cycle its interpretation completes", async (t) => {
+  const fixture = await makeFixture();
+  t.after(fixture.cleanup);
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  const task = fixture.task()!;
+  // both conversations use native modes that permit Supervisor contact
+  for (const projection of [fixture.projections.get(sourceThreadId)!, fixture.projections.get(fixture.binding()!.threadId)!])
+    Object.assign(projection.thread, {runtimeMode: "full-access", interactionMode: "default"});
+  // and the operative has no pending owner question or approval
+  (fixture.projections.get(sourceThreadId)! as {runtimeRequests?: unknown[]}).runtimeRequests = [];
+  completeSupervisorRequest(fixture.projections.get(fixture.binding()!.threadId)!, task.messageId, workflowResponse(sourceMessageId));
+  await supervisor.runOnce();
+  assert.equal(fixture.task()!.status, "inferred");
+  const introduction = fixture.dispatches().find(call => call.payload.threadId === sourceThreadId);
+  assert.equal(introduction?.payload.messageId, `supervisor-notice:workflow:${task.id}`, "the introduction goes out in the completion cycle");
 });

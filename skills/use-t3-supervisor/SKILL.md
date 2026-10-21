@@ -76,10 +76,23 @@ does not complete a parent step automatically. Required inclusion can be recursi
 Matching complete native proposal/acceptance records establish agreement, not actual
 execution. Keep incomplete requirements and source issues visible.
 
+For work that needs supervision, negotiate the applicable workflow promptly before
+continuing substantive implementation. Inspect both conversations and Plan for the
+actual proposal and acceptance; a ready binding alone does not establish agreement.
+Guidance is asynchronous and T3 provides no pre-first-tool barrier. Trivial exchanges
+should stay quiet. Report repeated introductions, redundant steering or large repeated
+messages as defects rather than accepting them as necessary supervision.
+
 For third-party work, the main may send the whole workflow, relevant steps or an
 adapted plan based on the local workflow, with needed sources and clear roles,
 constraints, expected evidence and completion rules. Supervisor recommends this in
 its messages; the external plan's internal progress remains unobserved.
+
+For iterative external review, reuse the same authorized ordinary reviewer conversations
+for later rounds of that main's work. Send the changed artifact and responses to prior
+findings. Other mains own their reviewer conversations; a substantial scope change may
+justify fresh ones. A delegated task's backing thread cannot be continued as an ordinary
+review chat.
 
 External work for a main-workflow step (an outside agent, tool, service or person)
 is reported by the main with an exact `external-contribution` record: use

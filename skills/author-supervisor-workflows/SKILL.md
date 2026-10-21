@@ -63,8 +63,10 @@ When collaboration is authorized, assign independent passes a common goal and
 complementary evidence. Compare concise source-backed duties, omissions and proposed
 boundaries, exchange objections and agree on one proposal. Agreement or a majority is
 not evidence. Reuse conversations within the main's cycle through supported, authorized
-APIs. If the user prohibits another review, honor that and report the verification
-limit; do not claim another model confirmed unreviewed changes.
+APIs: retain ordinary reviewer chats for later rounds of the same work; delegated
+backing threads are not resumable ordinary conversations. Send the delta and prior
+findings/responses instead of restarting discovery. If the user prohibits another
+review, honor that and report the verification limit; do not claim another model confirmed unreviewed changes.
 
 ## Choose responsibilities and structure
 
