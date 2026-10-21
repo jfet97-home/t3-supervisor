@@ -14,6 +14,7 @@ import type { ProjectSupervisor } from "./project-supervisor.js";
 import type { WorkflowWriteController } from "./workflow-write-controller.js";
 import { parseWorkflowProgressPageQuery, readWorkflowProgressPage } from "./workflow-progress.js";
 import { createServiceAuth } from "./service-auth.js";
+import { overviewPage } from "./dashboard-overview.js";
 
 export type WorkflowMcpEndpoint = {
   handle: (request: IncomingMessage, response: ServerResponse) => Promise<void>;
@@ -54,6 +55,10 @@ export const startGuidanceUi = async (
   const handlers = HttpApiBuilder.group(SupervisorApi, "guidance", (h) =>
     h.handleAll({
       snapshot: () => Effect.promise(() => runtime.snapshot()),
+      dashboardOverview: ({query}) => Effect.tryPromise({
+        try: () => {if (!supervision) throw new Error("supervision_unavailable");return supervision.overview(overviewPage(query));},
+        catch: () => new UiError({message: "The work overview is unavailable. Refresh to try again."}),
+      }),
       supervisionControl: ({query}) => Effect.tryPromise({
         try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.control(query.projectId ?? null, signal);},
         catch: () => new UiError({message: "Supervision control is unavailable."}),
@@ -281,6 +286,7 @@ export const startGuidanceUi = async (
         ".js": "application/javascript",
         ".css": "text/css",
         ".svg": "image/svg+xml",
+        ".png": "image/png",
       };
       headers["Content-Type"] =
         type[extname(path)] ?? "application/octet-stream";

@@ -18,7 +18,9 @@ import {
   snapshotAtom,
 } from "./api.js";
 import "./style.css";
-import { directoryRoute, RouteLink, useNavigation, type Route } from "./navigation.js";
+import { directoryRoute, homeRoute, RouteLink, useNavigation, type Route } from "./navigation.js";
+import { Home, ReadTime, useOverview } from "./overview.js";
+import { Icon } from "./icons.js";
 import { ProjectDefinitionsPanel } from "./project-definitions.js";
 import { StepsAndWorkflowsGuide } from "./steps-and-workflows-guide.js";
 import { idleControlActivity, SupervisionControlPanel, GlobalDefinitionsControlPanel } from "./supervisor-control.js";
@@ -56,7 +58,7 @@ function History({
       <div className="toolbar">
         <div>
           <h1>{title}</h1>
-          <p className="muted">Recorded activity is retained as evidence.</p>
+          <p className="muted">A chronological record of supervision decisions and delivery. These are historical events, not an unresolved issue list.</p>
         </div>
         <label className="search">
           Filter activity
@@ -89,8 +91,8 @@ function History({
               <button onClick={() => inspect(item)}>Inspect</button>
             </article>
           ))}
-        {items.length === 0 && (
-          <p className="muted">No retained activity yet.</p>
+        {!items.some(item => JSON.stringify(item).toLowerCase().includes(filter.toLowerCase())) && (
+          <p className="muted">{items.length ? "No activity matches this filter." : "No retained activity yet."}</p>
         )}
       </div>
       <dialog ref={dialog} aria-labelledby="detail-title">
@@ -156,7 +158,7 @@ function Settings({data, active, onDirtyChange}: {data: GuidanceSnapshot; active
   const [masterActivity, setMasterActivity] = useState(idleControlActivity);
   const [definitionsActivity, setDefinitionsActivity] = useState(idleControlActivity);
   useEffect(() => onDirtyChange(chatDirty || masterActivity.busy || masterActivity.uncertain || definitionsActivity.busy || definitionsActivity.uncertain), [chatDirty, masterActivity, definitionsActivity, onDirtyChange]);
-  return <section className="stack"><div className="page-heading"><p className="kicker">Instance</p><h1>Settings</h1><p className="muted">Shared controls for this Supervisor installation.</p></div><SupervisionControlPanel active={active} onStateChange={setMasterActivity} onChanged={() => setControlRevision(value => value + 1)} /><GlobalDefinitionsControlPanel active={active} refreshKey={controlRevision} onStateChange={setDefinitionsActivity}/><ChatSettings data={data} onDirtyChange={setChatDirty}/>
+  return <section className="stack settings-workspace"><div className="page-heading"><h1>Instance settings</h1><p className="muted">Controls shared across this Supervisor installation. Project defaults live with each project.</p></div><SupervisionControlPanel active={active} onStateChange={setMasterActivity} onChanged={() => setControlRevision(value => value + 1)} /><GlobalDefinitionsControlPanel active={active} refreshKey={controlRevision} onStateChange={setDefinitionsActivity}/><ChatSettings data={data} onDirtyChange={setChatDirty}/>
     <div className="panel stack"><h2>T3 connection</h2><p>{data.connected ? "Connected" : "Disconnected"} · Build: {data.serverVersion ?? "Unavailable"}</p><p>{data.coverage}</p>
       <details><summary>Advanced connection and editing details</summary><div className="stack"><h3>Project configuration editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .t3-supervisor/project.yaml in the selected working directory. Step and workflow definitions are read-only in the dashboard.</p>
       <p>Native dialogue can record plan proposals and agreement; those records do not prove step execution.</p></div></details>
@@ -178,6 +180,7 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
   const previousConnection = useRef<boolean | null>(null);
   if (snapshot._tag === "Success") lastData.current = snapshot.value;
   const connected = snapshot._tag === "Success" && snapshot.value.connected;
+  const overview = useOverview(true, connected);
   useEffect(() => {
     if (snapshot._tag === "Failure") void loadAccess().catch(() => false);
   }, [snapshot._tag]);
@@ -215,23 +218,27 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#workspace" onClick={event => {event.preventDefault();document.getElementById("workspace")?.focus();}}>Skip to content</a>
-      <header className="app-header">
-        <RouteLink to={directoryRoute} navigate={navigate} className="app-name">Supervisor<span className="app-name-detail"> / Work console</span></RouteLink>
-        <div className="row"><span className="connection"><span className={`dot ${data.connected ? "online" : ""}`} />{data.connected ? "T3 connected" : "Disconnected"}</span><button disabled={dirty} aria-describedby={dirty ? "pending-changes" : undefined} title={dirty ? "Save drafts and resolve pending changes before signing out." : undefined} onClick={() => { void onSignOut().catch(() => setSignOutError("Could not sign out. Try again.")); }}>Sign out</button></div>
-      </header>
-      <nav className="app-nav" aria-label="Supervisor sections">
-        {(["projects", "activity", "settings", "guide"] as const).map(name => <RouteLink key={name} to={{...directoryRoute, page: name}} navigate={navigate} aria-current={view === name ? "page" : undefined}>{name[0]!.toUpperCase() + name.slice(1)}{name === "settings" && settingsDirty && <span className="draft-dot" aria-label="Unsaved changes" />}</RouteLink>)}
-      </nav>
+      <aside className="app-sidebar">
+        <RouteLink to={homeRoute} navigate={navigate} className="app-name"><img src="/app-icon.png" width="36" height="36" alt=""/><span>Supervisor<span className="app-name-detail">Keep work in view</span></span></RouteLink>
+        <nav className="app-nav" aria-label="Supervisor sections">
+          {(["home", "projects", "activity", "settings"] as const).map(name => <RouteLink key={name} to={{...directoryRoute, page: name}} navigate={navigate} aria-current={view === name ? "page" : undefined}><Icon name={name}/><span>{name[0]!.toUpperCase() + name.slice(1)}</span>{name === "settings" && settingsDirty && <span className="draft-dot" aria-label="Unsaved changes" />}{name === "home" && Boolean(overview.data?.attentionTotal) && <span className="nav-count">{overview.data!.attentionTotal}</span>}</RouteLink>)}
+        </nav>
+        <div className="sidebar-utility"><RouteLink to={{...directoryRoute, page: "guide"}} navigate={navigate} aria-current={view === "guide" ? "page" : undefined}><Icon name="guide"/>Guide &amp; definitions</RouteLink><p>Native work.<br/>Clearer supervision.</p></div>
+      </aside>
+      <div className="app-body">
+      <header className="app-header"><div className="environment-context"><span className="environment-label">Supervisor instance</span><span className="connection"><span className={`dot ${data.connected ? "online" : ""}`} />{data.connected ? "T3 connected" : "Disconnected"}</span>{overview.data && <span className="small muted">Supervision {overview.data.globallyEnabled ? "on" : "off globally"}</span>}</div><div className="row"><ReadTime value={data.lastCycleAt} prefix="Catalog"/><button className="quiet-button" disabled={dirty} aria-describedby={dirty ? "pending-changes" : undefined} title={dirty ? "Save drafts and resolve pending changes before signing out." : undefined} onClick={() => { void onSignOut().catch(() => setSignOutError("Could not sign out. Try again.")); }}>Sign out</button></div></header>
       <main id="workspace" tabIndex={-1}>
         {dirty && <p id="pending-changes" className="notice" role="status">Save drafts and resolve pending changes before signing out. {projectDirty && projectDraftTarget && <RouteLink to={projectDraftTarget} navigate={navigate}>Review project changes</RouteLink>}{projectDirty && settingsDirty && " · "}{settingsDirty && <RouteLink to={{...directoryRoute, page: "settings"}} navigate={navigate}>Review instance settings</RouteLink>}</p>}
         {signOutError && <p className="notice" role="alert">{signOutError}</p>}
         {snapshot._tag === "Failure" && <p className="notice" role="alert">Supervisor connection unavailable. Your drafts are kept.</p>}
-        <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} route={route} navigate={navigate} guard={guard} csrfToken={getCsrfToken()} onDirtyChange={setProjectDirty} onDraftTargetChange={setProjectDraftTarget}/></div>
+        {view === "home" && <Home data={data} overview={overview} navigate={navigate}/>}
+        <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} overview={overview} route={route} navigate={navigate} guard={guard} csrfToken={getCsrfToken()} onDirtyChange={setProjectDirty} onDraftTargetChange={setProjectDraftTarget}/></div>
         {view === "guide" && <StepsAndWorkflowsGuide />}
         {view === "activity" && <History items={data.activity} title="Supervision activity" />}
         {settingsOpened && <div hidden={view !== "settings"}><Settings data={data} active={view === "settings"} onDirtyChange={setSettingsDirty}/></div>}
       </main>
-      <footer>Plans are records. Agreement is not execution.</footer>
+      <footer><span>Supervisor</span><span>Native activity · agreed plans · assessed progress</span></footer>
+      </div>
     </div>
   );
 }
@@ -275,8 +282,8 @@ function App() {
   };
   return <>
     {opened && <div hidden={!ready}><Dashboard onSignOut={signOut} /></div>}
-    {!ready && <main className="connecting panel stack">
-      <h1>Supervisor</h1>
+    {!ready && <div className="sign-in-layout"><div className="sign-in-intro"><img src="/app-icon.png" width="76" height="76" alt=""/><h1>Keep work<br/>in view.</h1><p>Follow the task. Understand the plan. Know when to step in.</p><span>Supervisor</span></div><main className="connecting stack">
+      <h1>Open Supervisor</h1>
       {ready === null ? <p role="status">Opening Supervisor…</p> : <form className="stack" onSubmit={async event => {
         event.preventDefault(); setBusy(true); setError("");
         try {
@@ -301,7 +308,7 @@ function App() {
         <button className="primary" type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
         {error && <p role="alert">{error}</p>}
       </form>}
-    </main>}
+    </main></div>}
   </>;
 }
 const root = document.getElementById("root");

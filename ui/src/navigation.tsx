@@ -1,21 +1,22 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
-export type ProjectSection = "progress" | "plan" | "definitions" | "settings";
-export type Route = {page: "projects" | "activity" | "settings" | "guide"; projectId: string; main: string | null; section: ProjectSection};
+export type ProjectSection = "progress" | "plan" | "supervision" | "definitions" | "settings";
+export type Route = {page: "home" | "projects" | "activity" | "settings" | "guide"; projectId: string; main: string | null; section: ProjectSection};
 export const directoryRoute: Route = {page: "projects", projectId: "", main: null, section: "progress"};
-export const projectSections: readonly ProjectSection[] = ["progress", "plan", "definitions", "settings"];
+export const homeRoute: Route = {...directoryRoute, page: "home"};
+export const projectSections: readonly ProjectSection[] = ["progress", "plan", "supervision", "definitions", "settings"];
 export type NavigationGuard = (next: Route) => boolean;
 
 export function parseRoute(hash: string): Route {
   try {
-    const url = new URL(hash.replace(/^#/, "") || "/projects", "http://supervisor.local");
+    const url = new URL(hash.replace(/^#/, "") || "/home", "http://supervisor.local");
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     const page = parts[0];
     if (page === "projects") {
       const section = projectSections.find(value => value === parts[2]) ?? "progress";
       return {...directoryRoute, projectId: parts[1] ?? "", section, main: url.searchParams.get("main")};
     }
-    if (page === "activity" || page === "settings" || page === "guide") return {...directoryRoute, page};
+    if (page === "home" || page === "activity" || page === "settings" || page === "guide") return {...directoryRoute, page};
   } catch { /* Invalid addresses return to the project directory. */ }
   return directoryRoute;
 }

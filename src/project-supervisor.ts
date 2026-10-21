@@ -1,4 +1,5 @@
 import {SupervisorHelperTransport} from "./supervisor-helper-transport.js";
+import { buildDashboardOverview } from "./dashboard-overview.js";
 import {supervisorTeamView} from "./supervisor-team-view.js";
 import {SupervisorTeamStore} from "./supervisor-team-store.js";
 import { SupervisorLifecycle } from "./supervisor-lifecycle.js";
@@ -632,6 +633,26 @@ export class ProjectSupervisor {
       const control = input.projectId === null ? this.store.control(null) : this.effectiveControl(input.projectId);
       return {status: "saved" as const, message: input.enabled ? "Enabled. Existing scopes are retained; new task discovery starts from this enable boundary." : "Disabled. No new supervisory work will start; an already-running model turn may finish. Chats and history are retained.", control};
     } catch {return {status: "conflict" as const, message: "Supervision changed in another window. Reload before saving.", control: input.projectId === null ? this.store.control(null) : this.effectiveControl(input.projectId)};}
+  }
+  async overview(page: {offset: number; limit: number}) {
+    const catalog = await Effect.runPromise(this.source.catalog());
+    return buildDashboardOverview({...page, observedAt: this.now(),
+      available: this.store.scopeCompatible && Boolean(this.operateRpc), globallyEnabled: this.store.control(null).enabled,
+      projects: catalog.projects, threads: catalog.threads, bindings: this.store.scopeCompatible ? this.store.bindings() : [],
+      tasks: projectId => this.store.tasks(projectId),
+      control: projectId => {
+        const control = this.store.control(projectId);
+        const project = catalog.projects.find(item => item.project.id === projectId)?.project;
+        return {...control, effectiveEnabled: control.effectiveEnabled && Boolean(project &&
+          (!this.scratchProject(projectId, project.workspaceRoot) || this.store.useGlobalDefinitions(projectId)))};
+      },
+      monitoring: binding => this.conversation.status(binding.projectId, binding.threadId),
+      assessment: (binding, task) => {
+        const result = this.workflowStates.getState(binding.projectId, binding.mainThreadId);
+        if (result.status !== "found" || task && result.document.sourceBinding?.sourceHash !== task.sourceHash) return null;
+        return {status: result.document.status, summary: (result.document.evidence.at(-1)?.note ?? result.document.objective ?? "").slice(0, 800), updatedAt: result.document.updatedAt};
+      },
+      excluded: new Set(currentThreadPolicy(this.config).excludedThreadIds)});
   }
   async snapshot(projectId: string, signal: AbortSignal, mainThreadId: string | null = null): Promise<ProjectSupervisorInfo> {
     const {catalog} = await this.project(projectId);

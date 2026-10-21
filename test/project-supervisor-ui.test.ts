@@ -880,8 +880,8 @@ test("live progress separates the current workflow from agreement history and pr
   assert.match(html, />Underway<\/span>/);
   assert.doesNotMatch(html, /native driver.*verified|workflow updates.*verified/i);
   assert.match(html, /Native child/);
-  assert.match(html, /<strong>Native child<\/strong><span class="pill amber">Failed<\/span>/);
-  assert.match(html, /<strong>Delegated child<\/strong><span class="pill amber">Cancelled<\/span>/);
+  assert.match(html, /Native child<\/p><\/div><span class="pill amber">Failed<\/span>/);
+  assert.match(html, /Delegated child<\/p><\/div><span class="pill amber">Cancelled<\/span>/);
   assert.match(html, /<h5>Main workflow<\/h5><span class="pill blue">Underway<\/span>/);
   assert.match(html, /Lifecycle: Unknown/);
   assert.match(html, /idle thread mirror alone does not establish that its work is finished/);

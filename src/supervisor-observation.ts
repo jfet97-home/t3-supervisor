@@ -26,6 +26,7 @@ export type SupervisorScopeLifecycle = typeof SupervisorScopeLifecycle.Type;
 
 export const ProjectSupervisorScopeThreadSchema = Schema.Struct({
   threadId: Schema.String,
+  title: Schema.optionalKey(Schema.String),
   parentThreadId: Schema.NullOr(Schema.String),
   depth: Schema.Number,
   origin: SupervisorScopeOrigin,
@@ -182,6 +183,7 @@ export const observeScopeThread = (input: {
   } else if ((origin === "delegated_child" || origin === "main") && projection) current = delegatedLifecycle(thread, projection);
   return {
     threadId: thread.id,
+    title: thread.title,
     parentThreadId,
     depth: input.depth,
     origin,

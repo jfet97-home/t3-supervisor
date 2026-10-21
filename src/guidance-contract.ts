@@ -1,6 +1,7 @@
 import { ThreadPolicy } from "./thread-policy-contract.js";
 import { ProjectDefinitions, ProjectConfigSaveInput, ProjectConfigSaveResult } from "./project-definitions-contract.js";
 import { Schema } from "effect";
+import { DashboardOverview } from "./dashboard-overview.js";
 import { ProjectSupervisorSnapshot, ProjectSupervisorSave, ProjectSupervisorChatSupervision, ProjectSupervisorRetry, ProjectSupervisorSaveResult } from "./project-supervisor-contract.js";
 import { WorkflowProgressSnapshotSchema } from "./workflow-progress.js";
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/http-api";
@@ -95,6 +96,9 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
   HttpApiGroup.make("guidance")
     .add(
       HttpApiEndpoint.get("snapshot", "/snapshot", { success: Snapshot }),
+      HttpApiEndpoint.get("dashboardOverview", "/dashboard-overview", {
+        query: {offset: Schema.optional(Text), limit: Schema.optional(Text)}, success: DashboardOverview, error: UiError,
+      }),
       HttpApiEndpoint.get("supervisionControl", "/supervision-control", {
         query: {projectId: Schema.optional(Schema.String)}, success: SupervisionControl, error: UiError,
       }),

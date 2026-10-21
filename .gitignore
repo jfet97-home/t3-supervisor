@@ -14,3 +14,7 @@ secrets/
 *.db-*
 *.log
 .mypy_cache/
+
+.impeccable/review/
+.impeccable/mocks/
+.impeccable/build/
