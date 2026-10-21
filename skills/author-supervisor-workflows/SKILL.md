@@ -14,15 +14,19 @@ pattern. Dashboard work belongs to [use-t3-supervisor](../use-t3-supervisor/SKIL
 
 Write only the needed `project.yaml`, `steps/*.md` and `workflows/*.yaml` inside the
 target project's `.t3-supervisor/` folder by default. Keep execution rules in their
-descriptions and explain rationale in the response; do not generate extra documentation. Investigate existing instructions and skills
-as evidence; reading or referencing them does not authorize changing them.
+descriptions and explain rationale in the response. Additional documentation needs
+an explicit request or approval.
 
-At most propose changes outside that folder to the user, naming the files, concrete
-changes and effects on other users when Supervisor is absent or disabled. Apply only
-the specific changes the user explicitly approves. This covers AGENTS.md, CLAUDE.md,
-shared skills, routers, documentation and hooks. Authoring, commit/push,
-catalog adoption or enabling Supervisor does not itself approve those edits. Making
-an instruction conditional on Supervisor also does not authorize writing it.
+Investigate existing instructions, skills and routers to identify a suitable place for
+a useful tactical reference. When one would help, propose the concrete link or edit in
+AGENTS.md, CLAUDE.md or the most appropriate existing file, and ask the user whether to
+apply it. Explain its purpose and effects on other users when Supervisor is absent or
+disabled. Reading or referencing a file does not authorize changing it.
+
+Apply outside-folder changes only after the user explicitly approves those specific
+edits, including shared skills, routers, documentation and hooks. Authoring, commit/push,
+catalog adoption or enabling Supervisor does not itself approve them. Conditional
+wording is not a substitute for permission.
 
 ## Scope and evidence
 
