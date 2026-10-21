@@ -1350,7 +1350,7 @@ export class SupervisorConversation {
           const observed = await this.definitions?.load(task.projectId, task.threadId, signal);
           if (!this.enabled(binding.projectId)) return;
           if (observed) {
-            if (observed.status === "ready" && observed.complete)
+            if (observed.status !== "unavailable" && observed.status !== "permission_required")
               this.requests.saveIntroduction({...introduction, state: "context", error: null});
             const ready = await this.reviewDefinitions(task, observed, agent, supervisor, Date.now(), signal);
             if (!this.enabled(binding.projectId)) return;

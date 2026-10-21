@@ -3755,27 +3755,36 @@ test("blocked startup stays dormant across definition changes, restoration and s
 });
 
 test("definitions changed before the introduction get autonomous review and a restored unsent draft is renewed", async t => {
-  const clock = {now: baseTime};const fixture = await makeFixture(clock);t.after(fixture.cleanup);
-  t.mock.method(Date, "now", () => clock.now);
-  fixture.setDefinitions({...definitions(), revision: "changed-before-introduction"});
-  await observeAgreement(fixture, clock.now);
-  assert.equal(fixture.projectStore.task(operativeThreadId)?.definitionReview?.status, "checking");
-  await fixture.run();
-  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId)!;
-  assert.equal(request.kind, "review");
-  assert.match(request.text, /UNTRUSTED_PROJECT_DEFINITION_REVIEW_ENVELOPE/u);
-  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "context");
-  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
+  const snapshots = [
+    {...definitions(), revision: "changed-before-introduction"},
+    {...definitions(), status: "invalid" as const, revision: "invalid-before-introduction", projectConfig: null,
+      issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "Repair the configuration."}]},
+    {...definitions(), status: "missing" as const, revision: null, complete: false, projectConfig: null,
+      issues: [{path: ".t3-supervisor/project.yaml", code: "configuration_missing", message: "Restore the configuration."}]},
+  ];
+  for (const snapshot of snapshots) await t.test(snapshot.status, async t => {
+    const clock = {now: baseTime};const fixture = await makeFixture(clock);t.after(fixture.cleanup);
+    t.mock.method(Date, "now", () => clock.now);
+    fixture.setDefinitions(snapshot);
+    await observeAgreement(fixture, clock.now);
+    assert.equal(fixture.projectStore.task(operativeThreadId)?.definitionReview?.status, "checking");
+    await fixture.run();
+    const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId)!;
+    assert.equal(request.kind, "review");
+    assert.match(request.text, /UNTRUSTED_PROJECT_DEFINITION_REVIEW_ENVELOPE/u);
+    assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "context");
+    assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
 
-  clock.now += 30_000;fixture.setDefinitions(definitions());
-  await observeAgreement(fixture, clock.now);
-  const renewed = fixture.projectStore.task(operativeThreadId)!;
-  assert.equal(renewed.status, "queued");
-  assert.equal(renewed.definitionReview?.status, "restored");
-  assert.equal(renewed.supervisorThreadId, fixture.binding.threadId);
-  assert.notEqual(renewed.workflowProposalId, fixture.task.id);
-  assert.equal(fixture.conversation.requests.introduction(fixture.task.id), null);
-  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId)?.id, request.id);
+    clock.now += 30_000;fixture.setDefinitions(definitions());
+    await observeAgreement(fixture, clock.now);
+    const renewed = fixture.projectStore.task(operativeThreadId)!;
+    assert.equal(renewed.status, "queued");
+    assert.equal(renewed.definitionReview?.status, "restored");
+    assert.equal(renewed.supervisorThreadId, fixture.binding.threadId);
+    assert.notEqual(renewed.workflowProposalId, fixture.task.id);
+    assert.equal(fixture.conversation.requests.introduction(fixture.task.id), null);
+    assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId)?.id, request.id);
+  });
 });
 
 test("renewal never removes a possibly accepted introduction reservation", async t => {

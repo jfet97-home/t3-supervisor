@@ -73,8 +73,9 @@ source bodies. Identical raw bodies use verified hashes instead of repeated text
 identical approved entries reference the observed entry. Invalid reads retain both forms.
 Oversized requests stop before delivery with a visible reason in Progress and Plan;
 pending activity and uncertain delivery identities remain intact. Retry stays explicit.
-Blocked startup also stops automatic definition review and renewal until Retry. A fresh
-definition change during otherwise healthy startup remains pending context work.
+Blocked startup also stops automatic definition review and renewal until Retry. Readable
+definition changes during healthy startup, including invalid or missing definitions,
+remain pending context work.
 
 The service initializes the Supervisor's context before introducing a validated
 proposal. When the main is idle, queued delivery starts a normal new turn on the main. When
