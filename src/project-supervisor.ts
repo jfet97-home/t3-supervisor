@@ -22,6 +22,7 @@ import type { StoreShape } from "./store.js";
 import { T3TransportError, type T3ClientShape } from "./t3.js";
 import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "./types.js";
 import { SupervisorConversation } from "./supervisor-conversation.js";
+import { introductionOutcomeUnknown } from "./supervisor-conversation-store.js";
 import type { GlobalDefinitionsControlInput, SupervisionControlInput, SupervisionSetupInput } from "./supervisor-control-contract.js";
 import { WorkflowStateStore } from "./workflow-state-store.js";
 import { monitorActivityReference, observeScopeThread, SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS, SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
@@ -957,11 +958,13 @@ export class ProjectSupervisor {
           const prior = previous ? this.conversation.requests.introduction(previous.id) : null;
           // only an attempted introduction whose outcome is unknown holds the task; a never-attempted draft or a fallback whose
           // earlier attempts were definitely rejected is known unsent and does not strand the next request
-          const priorUnresolved = Boolean(prior && prior.state !== "sent" && (["sending", "accepted", "uncertain"].includes(prior.state) ||
-            prior.acceptedAt !== undefined || prior.definiteRejection === false));
+          const priorUnresolved = Boolean(prior && introductionOutcomeUnknown(prior));
           if (previous?.status === "inferred" && (priorUnresolved || !(previous.sourceOrdinal <= baseline || enabledSince !== null && previous.dispatchedAt !== null && previous.dispatchedAt <= enabledSince))) {
-            if (this.examinedNonTasks.size >= 10_000) this.examinedNonTasks.clear();
-            if (typeof thread.latestRunId === "string") this.examinedNonTasks.set(thread.id, thread.latestRunId);
+            // an unresolved introduction is a mutable hold, so the chat is examined again until its delivery outcome is known
+            if (!priorUnresolved) {
+              if (this.examinedNonTasks.size >= 10_000) this.examinedNonTasks.clear();
+              if (typeof thread.latestRunId === "string") this.examinedNonTasks.set(thread.id, thread.latestRunId);
+            }
             continue;
           }
           // an explicit Enable supervises the chat's next request: a request written while supervision was stopped is not interpreted

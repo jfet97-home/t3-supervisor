@@ -66,6 +66,9 @@ export type WorkflowAgreementCandidate = {
 /** Keeps native request identities and unacknowledged activity through restarts. */
 // the native message identity of a conversation request, also the batchId of its helper webhook delivery
 export const conversationRequestMessageId = (requestId: string): string => `supervisor-review:${requestId}`;
+/** An attempted introduction whose native outcome is unknown; a never-attempted draft or a definitely rejected one is known unsent. */
+export const introductionOutcomeUnknown = (introduction: WorkflowIntroduction): boolean => introduction.state !== "sent" &&
+  (["sending", "accepted", "uncertain"].includes(introduction.state) || introduction.acceptedAt !== undefined || introduction.definiteRejection === false);
 
 export class SupervisorConversationStore {
   constructor(readonly store: GuidanceStore) {

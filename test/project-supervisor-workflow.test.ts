@@ -1002,6 +1002,8 @@ test("across an Enable only an attempted introduction with an unknown outcome ke
     (supervisor as unknown as {store: {recordChatEnable(id: string, at: number): void}}).store.recordChatEnable(sourceThreadId, enabledAt);
     appendSourceMessage(source, "after-enable-request", 2, "Hi, just checking in.");
     source.messages.at(-1)!.createdAt = new Date(enabledAt + 1_000).toISOString();
+    // the catalog names the main's latest run, as T3's does
+    source.thread.latestRunId = "after-enable-request-run";
     await supervisor.runOnce();
     if (name === "rejectedFallback") {
       assert.notEqual(fixture.task()!.id, first.id, `${name}: the next request is interpreted afresh`);
@@ -1009,6 +1011,11 @@ test("across an Enable only an attempted introduction with an unknown outcome ke
     } else {
       assert.equal(fixture.task()!.id, first.id, `${name}: the unresolved introduction keeps its task`);
       assert.equal(supervisor.conversation.requests.introduction(first.id)?.state, prior.state, name);
+      // once the delivery is confirmed, the same pending request is interpreted, though the main has no newer run
+      supervisor.conversation.requests.saveIntroduction({...supervisor.conversation.requests.introduction(first.id)!, state: "sent", error: null});
+      await supervisor.runOnce();
+      assert.notEqual(fixture.task()!.id, first.id, `${name}: the held request is reconsidered after delivery is known`);
+      assert.equal(fixture.task()!.sourceMessageId, "after-enable-request", name);
     }
     assert.equal(fixture.dispatches().filter(call => call.payload.messageId === fallbackId).length, 0, `${name}: the earlier introduction is never sent after the Enable`);
   }

@@ -229,6 +229,57 @@ test("pending child monitor activity blocks standby before any descendant projec
   assert.equal(f.calls.length, 0);
 });
 
+test("a not-needed request's Supervisor settles over retained unreviewed scope activity, which a supervised task still waits for", async t => {
+  for (const status of ["not_supervised", "needs_context", "inferred"] as const) {
+    const f = await fixture();t.after(f.cleanup);
+    f.store.saveTask({...f.store.task("main")!, status});
+    // activity in the main's scope left unreviewed by an earlier supervised request
+    const child = {...thread("leftover-child", "main", "subagent", "main"), projectId: null, creationSource: "provider"};
+    f.threads.push(child);
+    const projection: Projection = {thread: child, runs: [], messages: [], subagents: [], turnItems: [{id: "leftover-command", threadId: child.id,
+      runId: null, type: "command_execution", status: "completed", ordinal: 1, completedAt: "2026-10-14T10:00:30Z", updatedAt: "2026-10-14T10:00:30Z"}]};
+    f.projections.set(child.id, projection);
+    f.conversation.monitor.observe({projectId: "p", threadId: child.id, sourceOrdinal: 1, projection, includeDetachedChildItems: true, now: 1});
+    assert.equal(f.conversation.status("p", f.binding.threadId).pendingItems, 0, `${status}: the dashboard counts no pending items`);
+    await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+    if (status === "inferred") {
+      assert.equal(f.calls.length, 0, "a supervised task waits for its activity to be reviewed");
+      assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, "pending_activity");
+    } else {
+      assert.deepEqual(f.calls.map(call => call.type), ["thread.settle"], status);
+    }
+    assert.equal(f.conversation.monitor.pending("p", child.id).length, 1, `${status}: the retained activity is not acknowledged or erased`);
+  }
+});
+
+test("a not-needed request's Supervisor ignores a replaced task's known-unsent draft but not an unknown or current introduction, and an incomplete scan stays closed", async t => {
+  const introduction = (taskId: string, extra: Record<string, unknown>) => ({taskId, projectId: "p", threadId: "main", text: "Earlier proposal.",
+    messageId: `supervisor-notice:workflow:${taskId}`, targetRunId: null, error: null, dispatchMode: {type: "queue_after_active" as const}, ...extra});
+  const cases = [
+    {name: "replaced blocked draft", intro: introduction("old-task", {state: "blocked"}), blockedBy: null},
+    {name: "replaced rejected fallback", intro: introduction("old-task", {state: "ready",
+      rejectedAttempts: [{messageId: "steer", commandId: "steer", dispatchMode: {type: "steer_active", targetRunId: "run"}}]}), blockedBy: null},
+    {name: "replaced uncertain delivery", intro: introduction("old-task", {state: "uncertain", definiteRejection: false}), blockedBy: "introduction_unsent"},
+    {name: "replaced accepted but unseen", intro: introduction("old-task", {state: "blocked", acceptedAt: 1}), blockedBy: "introduction_unsent"},
+    {name: "current task draft", intro: introduction("task", {state: "blocked"}), blockedBy: "introduction_unsent"},
+  ];
+  for (const item of cases) {
+    const f = await fixture();t.after(f.cleanup);
+    f.store.saveTask({...f.store.task("main")!, status: "not_supervised"});
+    f.conversation.requests.saveIntroduction({...item.intro, supervisorThreadId: f.binding.threadId} as never);
+    await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+    assert.equal(f.calls.length, item.blockedBy ? 0 : 1, item.name);
+    if (item.blockedBy) assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, item.blockedBy, item.name);
+    assert.ok(f.conversation.requests.introduction(item.intro.taskId), `${item.name}: the introduction record is kept`);
+  }
+  const f = await fixture();t.after(f.cleanup);
+  f.store.saveTask({...f.store.task("main")!, status: "not_supervised"});
+  t.mock.method(f.conversation.monitor, "hasPendingReviewableActivity", () => ({status: "incomplete"}));
+  await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(f.calls.length, 0, "an incomplete activity scan never permits settlement");
+  assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, "pending_activity");
+});
+
 test("archived mains absent from the active catalog set aside the same Supervisor and retain unfinished semantic records", async t => {
   const f = await fixture();t.after(f.cleanup);
   f.main.thread.archivedAt = "2026-10-14T10:02:00Z";f.main.thread.updatedAt = "2026-10-14T10:02:00Z";

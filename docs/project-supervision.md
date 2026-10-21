@@ -134,7 +134,9 @@ with the current value, never rebound. The service derives workspace, names,
 descriptions, sources and template paths from the trusted context and canonicalizes
 deterministically, so `workflow_read` view `check` returns the same digest before
 publication. A proposal ID is immutable: different content under the same ID is a
-conflict. `objective` restates the task from cited genuine user message IDs and
+conflict. An unchanged proposal is reused by its exact `{taskId, proposalId, digest}`
+from view `context`, never rebuilt (a rebuilt draft gets different node IDs); only a
+changed plan gets a fresh proposal ID. `objective` restates the task from cited genuine user message IDs and
 updates the dashboard objective. The initialization turn echoes the prepared proposal
 as a `{taskId, proposalId, digest}` reference.
 
@@ -311,6 +313,10 @@ Quiet completion/archive/deletion can settle the owned chat once children and
 pending work are quiet. A request cancelled before it started executed nothing, so the
 latest executed run decides whether the main finished. The binding records the first
 gate that keeps an owned Supervisor active as `settlementBlockedBy`, shown on Progress.
+A not-needed or unresolved request gets no check-ins, so unreviewed activity retained from
+an earlier request, or a replaced request's known-unsent draft, does not keep its Supervisor
+open; both stay as history. An incomplete activity scan or an introduction with an unknown
+outcome still does.
 An idle main's old lifecycle-unknown child can also permit
 standby after the quiet period when no known activity, attention issue or pending
 input requires action. Unknown work stays unresolved. Background monitoring

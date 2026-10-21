@@ -4627,6 +4627,29 @@ test("compact drafts bind the observed task and definition revisions, check dete
   assert.equal(fixture.projectStore.task(task.threadId)?.agreement?.proposalId, "fresh-proposal");
 });
 
+test("an unchanged interpreted proposal is reused by the exact reference view context shows, while changed content under its ID stays a strict conflict", async t => {
+  const clock = {now: baseTime};
+  t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  t.after(fixture.cleanup);
+  await fixture.run();
+  const introduction = fixture.conversation.requests.introduction(fixture.task.id)!;
+  assert.ok(["accepted", "sent"].includes(introduction.state), "the interpreted proposal was introduced");
+  const signal = AbortSignal.timeout(5_000);
+  const context = await fixture.conversation.readContextView(fixture.binding, {view: "context"}, signal);
+  const proposal = (context.task as {proposal: {proposalId: string; digest: string}}).proposal;
+  const reference = {taskId: fixture.task.id, proposalId: proposal.proposalId, digest: proposal.digest};
+  assert.ok(introduction.text.includes(proposal.digest), "the main was asked to accept exactly this reference");
+  const reused = await fixture.conversation.readContextView(fixture.binding, {view: "check", record: reference}, signal);
+  assert.deepEqual([reused.status, reused.proposalId, reused.digest], ["ok", proposal.proposalId, proposal.digest], "the exact reference checks unchanged");
+  const task = fixture.projectStore.task(fixture.task.threadId)!;
+  const changed = compactDraft(task, workflowRecord(task, proposal.proposalId, withLocalStep(task, "Different local step", "A different local step.")));
+  const conflict = await fixture.conversation.readContextView(fixture.binding, {view: "check", record: changed}, signal);
+  assert.equal(conflict.code, "proposal_id_conflict", "different content under the same ID stays a strict conflict");
+  const instructions = await fixture.conversation.readContextView(fixture.binding, {view: "instructions"}, signal);
+  assert.match(String(instructions.instructions), /Before any new proposal, view check the exact \{taskId, proposalId, digest\} that view context shows: while the plan is unchanged, reuse that reference and wait for the main's own acceptance; never rebuild its draft, which gets different node IDs\. Only a changed plan gets a fresh proposalId\./u);
+});
+
 test("re-enabling a settled, completed pair never wakes it to repair old records or set up historical work, but a new human request reuses it", async t => {
   const clock = {now: baseTime};
   t.mock.method(Date, "now", () => clock.now);

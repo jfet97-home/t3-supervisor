@@ -4,6 +4,7 @@ import { fingerprint } from "./guidance-store.js";
 import { record, SupervisorRpcError, type SupervisorRpc } from "./supervisor-native.js";
 import type { BindingRecord, ProjectSupervisorStore } from "./project-supervisor-store.js";
 import type { SupervisorConversation } from "./supervisor-conversation.js";
+import { introductionOutcomeUnknown } from "./supervisor-conversation-store.js";
 import { T3TransportError } from "./t3.js";
 import type { Projection, ThreadInfo } from "./types.js";
 import { resolveSupervisorScope, type SupervisorScopeResolution } from "./supervisor-scope.js";
@@ -98,6 +99,13 @@ export class SupervisorLifecycle {
     return {blocked: result.status !== "complete" || result.needsAttention, version: fingerprint(result)};
   }
 
+  // a not-needed or unresolved request gets no check-ins, so unreviewed activity retained for the next genuine request does not keep
+  // its Supervisor open (an incomplete scan still does); any other task still waits for that activity to be reviewed
+  private awaitsReview(binding: BindingRecord): boolean {
+    const task = this.store.task(binding.mainThreadId);
+    return !task || task.supervisorThreadId !== binding.threadId || !["not_supervised", "needs_context"].includes(task.status);
+  }
+
   /** Returns the first gate that keeps the main supervision active, or null when settlement may proceed. */
   private mainAttention(binding: BindingRecord, supervisor: Projection, main: Projection | null, closedMain: boolean, source?: ThreadInfo): string | null {
     if (binding.manualKeepActive || userKeepsSupervisorActive(supervisor.thread)) return "keep_active";
@@ -115,7 +123,11 @@ export class SupervisorLifecycle {
     // a temporary not-needed decision or an unresolved request leaves nothing to supervise until the next genuine request
     if (tasks.length === 0 || tasks.some(task => !["inferred", "not_supervised", "needs_context"].includes(task.status) || task.definitionReview?.status === "checking" ||
       task.definitionReview?.status === "revert_requested" || task.agreement?.status === "stale")) return "task_state";
-    if (this.conversation.requests.introductions(binding.projectId).some(intro => intro.supervisorThreadId === binding.threadId && intro.state !== "sent"))
+    // the current task's unsent introduction and any introduction with an unknown outcome hold the Supervisor; a known-unsent draft
+    // of a replaced task is history
+    const current = this.store.task(binding.mainThreadId);
+    if (this.conversation.requests.introductions(binding.projectId).some(intro => intro.supervisorThreadId === binding.threadId && intro.state !== "sent" &&
+      (intro.taskId === current?.id || introductionOutcomeUnknown(intro))))
       return "introduction_unsent";
     if (requests.some(request => ["prepared", "sending", "waiting", "uncertain"].includes(request.state) ||
       request.state === "failed" && request.kind === "review" && !request.failureAcknowledged)) return "request_open";
@@ -287,7 +299,7 @@ export class SupervisorLifecycle {
     const threadIds = scope ? [...scope.allowedIds] : [binding.mainThreadId];
     const monitorPending = this.conversation.monitor.hasPendingReviewableActivity(binding.projectId, threadIds);
     const workflowAttention = this.workflowAttention(binding, threadIds);
-    if (monitorPending.status !== "complete" || monitorPending.pending) {this.clearQuiet(binding, "pending_activity");return;}
+    if (monitorPending.status !== "complete" || this.awaitsReview(binding) && monitorPending.pending) {this.clearQuiet(binding, "pending_activity");return;}
     if (workflowAttention.blocked) {this.clearQuiet(binding, "workflow_attention");return;}
     let childScopes: {blocked: boolean; version: string; threadIds: string[]};
     try {childScopes = await this.relatedChildren(binding, main, threads, scope, signal);}
@@ -320,7 +332,7 @@ export class SupervisorLifecycle {
     const freshThreadIds = freshScope ? [...freshScope.allowedIds] : [binding.mainThreadId];
     const freshMonitorPending = this.conversation.monitor.hasPendingReviewableActivity(binding.projectId, freshThreadIds);
     const freshWorkflowAttention = this.workflowAttention(binding, freshThreadIds);
-    if (freshMonitorPending.status !== "complete" || freshMonitorPending.pending) {this.clearQuiet(binding, "pending_activity");return;}
+    if (freshMonitorPending.status !== "complete" || this.awaitsReview(binding) && freshMonitorPending.pending) {this.clearQuiet(binding, "pending_activity");return;}
     if (freshWorkflowAttention.blocked) {this.clearQuiet(binding, "workflow_attention");return;}
     let freshChildren: {blocked: boolean; version: string; threadIds: string[]};
     try {freshChildren = await this.relatedChildren(binding, freshMain, threads, freshScope, signal);}
