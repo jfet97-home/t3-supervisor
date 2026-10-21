@@ -3716,6 +3716,44 @@ test("a dashboard config save never approves unrelated catalog edits or an older
   assert.equal(fixture.projectStore.definitionUserSave(configOnly, configOnly, clock.now + 1), false);
 });
 
+test("blocked startup stays dormant across definition changes, restoration and service reopen until explicit retry", async t => {
+  for (const restored of [false, true]) await t.test(restored ? "restored definitions" : "changed definitions", async t => {
+    const clock = {now: baseTime};const fixture = await makeFixture(clock);t.after(fixture.cleanup);
+    t.mock.method(Date, "now", () => clock.now);
+    const introduction: WorkflowIntroduction = {taskId: fixture.task.id, projectId, threadId: operativeThreadId,
+      supervisorThreadId: fixture.binding.threadId, state: "blocked", text: workflowIntroductionText(fixture.task),
+      messageId: "blocked-startup-notice", targetRunId: null, error: "Complete supervision context exceeds its limit."};
+    fixture.conversation.requests.saveIntroduction(introduction);
+    const task = {...fixture.task, definitionReview: {status: "checking" as const, expectedRevision: revision,
+      observedRevision: "changed-before-retry", supervisorMessageId: null, userMessageIds: [],
+      message: "A prior definition check did not authorize the changed catalog.", updatedAt: clock.now}};
+    fixture.projectStore.saveTask(task);
+    fixture.setDefinitions(restored ? definitions() : {...definitions(), revision: "changed-before-retry"});
+    for (let index = 0; index < 3; index++) addCommandActivity(fixture.operative, `blocked-activity-${index}`, "Work continued", clock.now - 10_000 + index);
+    fixture.conversation.monitor.observe({projectId, threadId: operativeThreadId, sourceOrdinal: task.sourceOrdinal,
+      projection: fixture.operative, now: clock.now});
+    const pending = fixture.conversation.monitor.pending(projectId, operativeThreadId);
+    assert.ok(pending.length > 0);
+
+    await observeAgreement(fixture, clock.now);
+    await fixture.run();
+    clock.now += 65_000;
+    await fixture.makeRestartedConversation().observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
+    await fixture.run();
+    assert.equal(fixture.calls.length, 0, "blocked startup cannot dispatch a definition or activity check-in");
+    assert.deepEqual(fixture.projectStore.task(operativeThreadId), task, "definition restoration cannot renew the blocked task");
+    assert.deepEqual(fixture.conversation.requests.introduction(task.id), introduction);
+    assert.deepEqual(fixture.conversation.monitor.pending(projectId, operativeThreadId), pending);
+
+    fixture.conversation.retry(projectId, fixture.binding.threadId);
+    await observeAgreement(fixture, clock.now + 5_001);
+    await fixture.run();
+    if (restored) assert.equal(fixture.projectStore.task(operativeThreadId)?.status, "queued");
+    else assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId)?.kind, "review");
+    assert.equal(fixture.projectStore.task(operativeThreadId)?.supervisorThreadId, fixture.binding.threadId);
+  });
+});
+
 test("definitions changed before the introduction get autonomous review and a restored unsent draft is renewed", async t => {
   const clock = {now: baseTime};const fixture = await makeFixture(clock);t.after(fixture.cleanup);
   t.mock.method(Date, "now", () => clock.now);
@@ -3726,7 +3764,7 @@ test("definitions changed before the introduction get autonomous review and a re
   const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId)!;
   assert.equal(request.kind, "review");
   assert.match(request.text, /UNTRUSTED_PROJECT_DEFINITION_REVIEW_ENVELOPE/u);
-  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "blocked");
+  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "context");
   assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
 
   clock.now += 30_000;fixture.setDefinitions(definitions());

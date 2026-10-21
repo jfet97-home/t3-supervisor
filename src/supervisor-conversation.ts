@@ -581,7 +581,7 @@ export class SupervisorConversation {
   }
   private introductionUnsent(taskId: string): boolean {
     const intro = this.requests.introduction(taskId);
-    return !intro || ["context", "ready", "blocked"].includes(intro.state) && !intro.dispatchMode && !intro.acceptedAt && !intro.rejectedAttempts?.length;
+    return !intro || ["context", "ready"].includes(intro.state) && !intro.dispatchMode && !intro.acceptedAt && !intro.rejectedAttempts?.length;
   }
   private renewUnsentTask(task: TaskRecord, now: number): void {
     const current = this.store.task(task.threadId);
@@ -1289,7 +1289,7 @@ export class SupervisorConversation {
     if (!this.enabled(binding.projectId)) return;
     this.teamRuntime?.startCycle(binding);
     await this.teamRuntime?.reconcile(binding, threads, signal);
-    const tasks = this.store.tasks(binding.projectId).filter(task => task.status === "inferred" &&
+    const tasks = this.store.tasks(binding.projectId).filter(task => task.status === "inferred" && this.requests.introduction(task.id)?.state !== "blocked" &&
       (task.workflow?.status === "proposed" || task.workflow?.status === "provisional" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale") && task.supervisorThreadId === binding.threadId);
     const taskScopes = new Map<string, {task: TaskRecord; scope: ReturnType<typeof resolveSupervisorScope>}>();
     const eligibleThreadIds = new Set<string>();
@@ -1350,6 +1350,8 @@ export class SupervisorConversation {
           const observed = await this.definitions?.load(task.projectId, task.threadId, signal);
           if (!this.enabled(binding.projectId)) return;
           if (observed) {
+            if (observed.status === "ready" && observed.complete)
+              this.requests.saveIntroduction({...introduction, state: "context", error: null});
             const ready = await this.reviewDefinitions(task, observed, agent, supervisor, Date.now(), signal);
             if (!this.enabled(binding.projectId)) return;
             if (ready) this.renewUnsentTask(task, Date.now());
