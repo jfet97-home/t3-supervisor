@@ -16,6 +16,10 @@ const SUPERVISOR_LIFECYCLE_MAX_CACHE_REFRESHES = 20;
 const SUPERVISOR_LIFECYCLE_MAX_CACHE_ENTRIES = 10_000;
 const SUPERVISOR_LIFECYCLE_MAX_SCAN_OFFSETS = 256;
 export const userKeepsSupervisorActive = (thread: ThreadInfo): boolean => Boolean(thread.pinnedAt || thread.autoSettleDisabledAt || thread.settledOverride === "active");
+const laterThan = (value: unknown, since: number): boolean => typeof value === "string" && Date.parse(value) > since;
+/** A keep-active choice counts against a stop only when the human made it after the stop; an unstamped override predates it. */
+export const userKeepsSupervisorActiveSince = (thread: ThreadInfo, since: number): boolean =>
+  laterThan(thread.pinnedAt, since) || laterThan(thread.autoSettleDisabledAt, since) || thread.settledOverride === "active" && laterThan(thread.unsettledAt, since);
 const hasUnresolvedRuntimeRequestHint = (projection: Projection, value: unknown): boolean => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return value !== null && value !== undefined;
   const request = value as Record<string, unknown>;
@@ -94,21 +98,32 @@ export class SupervisorLifecycle {
     return {blocked: result.status !== "complete" || result.needsAttention, version: fingerprint(result)};
   }
 
-  private mainNeedsAttention(binding: BindingRecord, supervisor: Projection, main: Projection | null, closedMain: boolean, source?: ThreadInfo): boolean {
-    if (binding.manualKeepActive || userKeepsSupervisorActive(supervisor.thread) || this.store.modelState(binding).pending || projectionNeedsAttention(supervisor)) return true;
-    if (this.conversation.teamRuntime?.hasBlockingWork(binding)) return true;
-    if (closedMain) return Boolean(main && projectionNeedsAttention(main, source ?? main.thread));
+  /** Returns the first gate that keeps the main supervision active, or null when settlement may proceed. */
+  private mainAttention(binding: BindingRecord, supervisor: Projection, main: Projection | null, closedMain: boolean, source?: ThreadInfo): string | null {
+    if (binding.manualKeepActive || userKeepsSupervisorActive(supervisor.thread)) return "keep_active";
+    if (this.store.modelState(binding).pending) return "model_change_pending";
+    if (projectionNeedsAttention(supervisor)) return "supervisor_busy";
+    if (this.conversation.teamRuntime?.hasBlockingWork(binding)) return "team_work";
+    if (closedMain) return main && projectionNeedsAttention(main, source ?? main.thread) ? "main_busy" : null;
+    if (!source) return "main_not_cataloged";
     const tasks = this.store.tasksFor(binding);
     const requests = this.conversation.requests.requests(binding.projectId, binding.threadId);
     const status = this.conversation.status(binding.projectId, binding.threadId);
-    const blocked = !source || status.state !== "idle" || status.pendingItems > 0 || this.conversation.requests.reviewMisses(binding.threadId) > 0 ||
-      tasks.length === 0 || tasks.some(task => task.status !== "inferred" || task.definitionReview?.status === "checking" ||
-        task.definitionReview?.status === "revert_requested" || task.agreement?.status === "stale") ||
-      this.conversation.requests.introductions(binding.projectId).some(intro => intro.supervisorThreadId === binding.threadId && intro.state !== "sent") ||
-      requests.some(request => ["prepared", "sending", "waiting", "uncertain"].includes(request.state) ||
-        request.state === "failed" && request.kind === "review" && !request.failureAcknowledged);
-    const latest = main ? [...main.runs].sort((left, right) => right.ordinal - left.ordinal)[0] : undefined;
-    return blocked || !latest || latest.status !== "completed" || !main || projectionNeedsAttention(main, source ?? main.thread);
+    if (status.state !== "idle") return "monitoring_not_idle";
+    if (status.pendingItems > 0) return "pending_activity";
+    if (this.conversation.requests.reviewMisses(binding.threadId) > 0) return "review_misses";
+    // a temporary not-needed decision or an unresolved request leaves nothing to supervise until the next genuine request
+    if (tasks.length === 0 || tasks.some(task => !["inferred", "not_supervised", "needs_context"].includes(task.status) || task.definitionReview?.status === "checking" ||
+      task.definitionReview?.status === "revert_requested" || task.agreement?.status === "stale")) return "task_state";
+    if (this.conversation.requests.introductions(binding.projectId).some(intro => intro.supervisorThreadId === binding.threadId && intro.state !== "sent"))
+      return "introduction_unsent";
+    if (requests.some(request => ["prepared", "sending", "waiting", "uncertain"].includes(request.state) ||
+      request.state === "failed" && request.kind === "review" && !request.failureAcknowledged)) return "request_open";
+    // a queued request cancelled before it started executed nothing; the latest executed run decides completion
+    const latest = main ? [...main.runs].filter(run => !(run.status === "cancelled" && !run.startedAt))
+      .sort((left, right) => right.ordinal - left.ordinal)[0] : undefined;
+    if (!main || !latest || latest.status !== "completed") return "main_run_not_completed";
+    return projectionNeedsAttention(main, source ?? main.thread) ? "main_busy" : null;
   }
 
   private scopeFor(binding: BindingRecord, main: Projection | null, threads: readonly ThreadInfo[]): SupervisorScopeResolution | null {
@@ -242,34 +257,42 @@ export class SupervisorLifecycle {
     if (!binding || binding.threadId !== input.threadId || binding.state !== "ready" || !this.rpc) return;
     let supervisor: Projection;
     try {supervisor = await this.projection(binding.threadId, signal);}
-    catch {this.clearQuiet(binding);return;}
+    catch {this.clearQuiet(binding, "supervisor_unreadable");return;}
     if (supervisor.thread.id !== binding.threadId || supervisor.thread.projectId !== binding.projectId || supervisor.thread.archivedAt || supervisor.thread.deletedAt) return;
-    if (supervisor.thread.settledOverride === "active" && !binding.manualKeepActive) {
+    const stopped = this.conversation.supervisionStopped(binding.mainThreadId);
+    if (!stopped && binding.stopObservedAt !== undefined) {
+      binding = {...binding};delete binding.stopObservedAt;this.store.setBinding(binding);
+    }
+    if (!stopped && supervisor.thread.settledOverride === "active" && !binding.manualKeepActive) {
       binding = {...binding, manualKeepActive: true};this.store.setBinding(binding);
     }
     if (supervisor.thread.settledAt || supervisor.thread.settledOverride === "settled") {
       if (binding.settlement && binding.settlement.state !== "settled") this.store.setBinding({...binding, settlement: {...binding.settlement, state: "settled"}});
       return;
     }
-    if (this.mainNeedsAttention(binding, supervisor, null, true)) {this.clearQuiet(binding);return;}
+    if (stopped) {await this.settleStopped(binding, supervisor, signal, now);return;}
+    const supervisorAttention = this.mainAttention(binding, supervisor, null, true);
+    if (supervisorAttention) {this.clearQuiet(binding, supervisorAttention);return;}
     let main: Projection | null;
     try {main = await this.readMain(binding, signal);}
-    catch {this.clearQuiet(binding);return;}
+    catch {this.clearQuiet(binding, "main_unreadable");return;}
     const closedMain = !main || Boolean(main.thread.archivedAt || main.thread.deletedAt);
     const source = threads.find(thread => thread.id === input.mainThreadId && thread.projectId === input.projectId);
-    if (this.mainNeedsAttention(binding, supervisor, main, closedMain, source)) {this.clearQuiet(binding);return;}
+    const attention = this.mainAttention(binding, supervisor, main, closedMain, source);
+    if (attention) {this.clearQuiet(binding, attention);return;}
     const scope = this.scopeFor(binding, main, threads);
     if (main && !main.thread.deletedAt && (!scope || !scope.complete || !scope.main || !scope.allowedIds.has(scope.main.id))) {
-      this.clearQuiet(binding);return;
+      this.clearQuiet(binding, "scope_incomplete");return;
     }
     const threadIds = scope ? [...scope.allowedIds] : [binding.mainThreadId];
     const monitorPending = this.conversation.monitor.hasPendingReviewableActivity(binding.projectId, threadIds);
     const workflowAttention = this.workflowAttention(binding, threadIds);
-    if (monitorPending.status !== "complete" || monitorPending.pending || workflowAttention.blocked) {this.clearQuiet(binding);return;}
+    if (monitorPending.status !== "complete" || monitorPending.pending) {this.clearQuiet(binding, "pending_activity");return;}
+    if (workflowAttention.blocked) {this.clearQuiet(binding, "workflow_attention");return;}
     let childScopes: {blocked: boolean; version: string; threadIds: string[]};
     try {childScopes = await this.relatedChildren(binding, main, threads, scope, signal);}
-    catch {this.clearQuiet(binding);return;}
-    if (childScopes.blocked) {this.clearQuiet(binding);return;}
+    catch {this.clearQuiet(binding, "children_unreadable");return;}
+    if (childScopes.blocked) {this.clearQuiet(binding, "children_active");return;}
     const version = fingerprint({main: main ? activityVersion(main) : "missing", supervisor: activityVersion(supervisor), children: childScopes.version,
       workflows: workflowAttention.version});
     if (binding.settlement && ["pending", "uncertain"].includes(binding.settlement.state) && binding.settlement.activityVersion !== version) {
@@ -277,53 +300,98 @@ export class SupervisorLifecycle {
     }
     if (binding.settlement?.state === "uncertain" && ((binding.settlement.attempts ?? 0) >= 3 || now - binding.settlement.observedAt < SUPERVISOR_SETTLE_QUIET_MS)) return;
     if (binding.quietFingerprint !== version || binding.quietSince == null) {
-      this.store.setBinding({...binding, quietFingerprint: version, quietSince: now});return;
+      this.store.setBinding({...binding, quietFingerprint: version, quietSince: now, settlementBlockedBy: "quiet_window"});return;
     }
     if (now - binding.quietSince < SUPERVISOR_SETTLE_QUIET_MS) return;
     // recheck both chats immediately before the native effect; native settlement rejects busy Supervisors
     let freshMain: Projection | null;
     try {freshMain = await this.readMain(binding, signal);}
-    catch {this.clearQuiet(binding);return;}
+    catch {this.clearQuiet(binding, "main_unreadable");return;}
     try {supervisor = await this.projection(binding.threadId, signal);}
-    catch {this.clearQuiet(binding);return;}
-    if (supervisor.thread.id !== binding.threadId || supervisor.thread.projectId !== binding.projectId || supervisor.thread.archivedAt || supervisor.thread.deletedAt) {this.clearQuiet(binding);return;}
+    catch {this.clearQuiet(binding, "supervisor_unreadable");return;}
+    if (supervisor.thread.id !== binding.threadId || supervisor.thread.projectId !== binding.projectId || supervisor.thread.archivedAt || supervisor.thread.deletedAt) {this.clearQuiet(binding, "supervisor_unavailable");return;}
     const freshClosedMain = !freshMain || Boolean(freshMain.thread.archivedAt || freshMain.thread.deletedAt);
-    if (this.mainNeedsAttention(binding, supervisor, freshMain, freshClosedMain, source)) {this.clearQuiet(binding);return;}
+    const freshAttention = this.mainAttention(binding, supervisor, freshMain, freshClosedMain, source);
+    if (freshAttention) {this.clearQuiet(binding, freshAttention);return;}
     const freshScope = this.scopeFor(binding, freshMain, threads);
     if (freshMain && !freshMain.thread.deletedAt && (!freshScope || !freshScope.complete || !freshScope.main || !freshScope.allowedIds.has(freshScope.main.id))) {
-      this.clearQuiet(binding);return;
+      this.clearQuiet(binding, "scope_incomplete");return;
     }
     const freshThreadIds = freshScope ? [...freshScope.allowedIds] : [binding.mainThreadId];
     const freshMonitorPending = this.conversation.monitor.hasPendingReviewableActivity(binding.projectId, freshThreadIds);
     const freshWorkflowAttention = this.workflowAttention(binding, freshThreadIds);
-    if (freshMonitorPending.status !== "complete" || freshMonitorPending.pending || freshWorkflowAttention.blocked) {this.clearQuiet(binding);return;}
+    if (freshMonitorPending.status !== "complete" || freshMonitorPending.pending) {this.clearQuiet(binding, "pending_activity");return;}
+    if (freshWorkflowAttention.blocked) {this.clearQuiet(binding, "workflow_attention");return;}
     let freshChildren: {blocked: boolean; version: string; threadIds: string[]};
     try {freshChildren = await this.relatedChildren(binding, freshMain, threads, freshScope, signal);}
-    catch {this.clearQuiet(binding);return;}
+    catch {this.clearQuiet(binding, "children_unreadable");return;}
     if (freshClosedMain !== closedMain || freshChildren.blocked ||
       fingerprint({main: freshMain ? activityVersion(freshMain) : "missing", supervisor: activityVersion(supervisor), children: freshChildren.version,
         workflows: freshWorkflowAttention.version}) !== version ||
       freshMain && projectionNeedsAttention(freshMain, source ?? freshMain.thread)) {
-      this.clearQuiet(binding);return;
+      this.clearQuiet(binding, "activity_changed");return;
     }
     binding = this.store.binding(binding.projectId, binding.mainThreadId)!;
     if (!closedMain && this.conversation.hasInflight(binding.projectId, binding.threadId)) return;
+    await this.sendSettlement(binding, version, now, signal);
+  }
+  /** Gates that still hold a stopped chat's own Supervisor: only a keep-active choice made after the stop, and unreconciled native work. */
+  private stoppedAttention(binding: BindingRecord, supervisor: Projection, stoppedAt: number): string | null {
+    if (userKeepsSupervisorActiveSince(supervisor.thread, stoppedAt)) return "keep_active";
+    if (this.store.modelState(binding).pending) return "model_change_pending";
+    if (projectionNeedsAttention(supervisor)) return "supervisor_busy";
+    if (this.conversation.teamRuntime?.hasInflightEffects(binding)) return "team_effect_unresolved";
+    return null;
+  }
+  /**
+   * A chat whose supervision a human stopped: its owned Supervisor settles after the quiet window once idle and once every
+   * accepted request has a confirmed native outcome. The stop supersedes earlier keep-active choices for that Supervisor; a stop without a
+   * recorded time dates from its first observation. Uncertain identities are retained, and the operative main is never settled or interrupted.
+   */
+  private async settleStopped(binding: BindingRecord, supervisor: Projection, signal: AbortSignal, now: number): Promise<void> {
+    let stoppedAt = binding.supervisionStop?.stoppedAt ?? binding.stopObservedAt;
+    if (stoppedAt === undefined) {
+      stoppedAt = now;binding = {...binding, stopObservedAt: now};this.store.setBinding(binding);
+    }
+    const attention = this.stoppedAttention(binding, supervisor, stoppedAt);
+    if (attention) {this.clearQuiet(binding, attention);return;}
+    // an accepted delivery without a confirmed native outcome can still start a run, so it holds the Supervisor; elapsed time never resolves it
+    if (this.conversation.requests.pending(binding.projectId, binding.threadId)) {this.clearQuiet(binding, "stopped_request_unresolved");return;}
+    const version = fingerprint({stopped: true, supervisor: activityVersion(supervisor)});
+    if (binding.settlement && ["pending", "uncertain"].includes(binding.settlement.state) && binding.settlement.activityVersion !== version) {
+      this.store.setBinding({...binding, quietSince: null, settlement: {...binding.settlement, state: "superseded"}});return;
+    }
+    if (binding.settlement?.state === "uncertain" && ((binding.settlement.attempts ?? 0) >= 3 || now - binding.settlement.observedAt < SUPERVISOR_SETTLE_QUIET_MS)) return;
+    if (binding.quietFingerprint !== version || binding.quietSince == null) {
+      this.store.setBinding({...binding, quietFingerprint: version, quietSince: now, settlementBlockedBy: "quiet_window"});return;
+    }
+    if (now - binding.quietSince < SUPERVISOR_SETTLE_QUIET_MS) return;
+    let fresh: Projection;
+    try {fresh = await this.projection(binding.threadId, signal);} catch {this.clearQuiet(binding, "supervisor_unreadable");return;}
+    if (fresh.thread.id !== binding.threadId || fresh.thread.projectId !== binding.projectId || fresh.thread.archivedAt || fresh.thread.deletedAt) {this.clearQuiet(binding, "supervisor_unavailable");return;}
+    const freshAttention = this.stoppedAttention(binding, fresh, stoppedAt);
+    if (freshAttention) {this.clearQuiet(binding, freshAttention);return;}
+    if (fingerprint({stopped: true, supervisor: activityVersion(fresh)}) !== version) {this.clearQuiet(binding, "activity_changed");return;}
+    await this.sendSettlement(this.store.binding(binding.projectId, binding.mainThreadId)!, version, now, signal);
+  }
+  private async sendSettlement(binding: BindingRecord, version: string, now: number, signal: AbortSignal): Promise<void> {
+    if (!this.rpc) return;
     const settlement = binding.settlement && ["pending", "uncertain"].includes(binding.settlement.state) ? binding.settlement : {commandId: `supervisor-settle:${randomUUID()}`, state: "pending" as const, observedAt: now, activityVersion: version, attempts: 0};
     const sending = {...settlement, attempts: (settlement.attempts ?? 0) + 1, observedAt: now};
     this.store.setBinding({...binding, settlement: sending});
     try {
       const receipt = await this.rpc("orchestration.dispatchCommand", {type: "thread.settle", commandId: settlement.commandId, threadId: binding.threadId}, signal);
       if (!record(receipt) || !Number.isSafeInteger(receipt.sequence)) throw new SupervisorRpcError("uncertain");
-      this.store.setBinding({...binding, settlement: {...sending, state: "settled"}});
+      this.store.setBinding({...binding, settlementBlockedBy: null, settlement: {...sending, state: "settled"}});
       const current = await this.projection(binding.threadId, signal);
-      this.store.setBinding({...binding, settlement: {...sending, state: current.thread.settledAt || current.thread.settledOverride === "settled" ? "settled" : "superseded"}});
+      this.store.setBinding({...binding, settlementBlockedBy: null, settlement: {...sending, state: current.thread.settledAt || current.thread.settledOverride === "settled" ? "settled" : "superseded"}});
     } catch (cause) {
       if (cause instanceof SupervisorRpcError && cause.definiteRejection) this.store.setBinding({...binding, quietSince: null, settlement: {...sending, state: "superseded"}});
       else if (this.store.binding(binding.projectId, binding.mainThreadId)?.settlement?.state !== "settled") this.store.setBinding({...binding, settlement: {...sending, state: "uncertain"}});
     }
   }
-  private clearQuiet(binding: BindingRecord): void {
-    const next = {...binding, quietSince: null};delete next.quietFingerprint;
+  private clearQuiet(binding: BindingRecord, blockedBy: string): void {
+    const next = {...binding, quietSince: null, settlementBlockedBy: blockedBy};delete next.quietFingerprint;
     if (next.settlement?.state !== "uncertain") delete next.settlement;
     this.store.setBinding(next);
   }

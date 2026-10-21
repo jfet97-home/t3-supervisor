@@ -19,13 +19,14 @@ const postJson = async (url: string, body: unknown): Promise<Response> => fetch(
   body: JSON.stringify(body),
 });
 
-test("workflow MCP exposes only read/write tools and serves stateless JSON calls", async () => {
+test("workflow MCP exposes read, write and the scoped stop tool and serves stateless JSON calls", async () => {
   const invalidWrite = {status: "invalid", reason: "pinned_definition_context_mismatch", diagnostic: {
     code: "local_step_definition_id_required", path: "/input/plan/nodes/0/definitionId", expected: "definitionId: null",
   }};
   const controller = {
-    read: async (args: unknown) => ({status: "ok", received: args}),
+    readTool: async (args: unknown) => ({status: "ok", received: args}),
     write: async () => invalidWrite,
+    stopSupervision: async (args: unknown) => ({status: "denied", reason: "user_message_not_genuine", received: args}),
   } as unknown as WorkflowWriteController;
   const endpoint = createWorkflowMcpEndpoint(controller);
   const server = createServer((request, response) => {void endpoint.handle(request, response);});
@@ -51,7 +52,7 @@ test("workflow MCP exposes only read/write tools and serves stateless JSON calls
       $defs?: Record<string, unknown>;
       properties?: Record<string, WorkflowJsonSchema>;
     }}>}};
-    assert.deepEqual(listBody.result?.tools?.map(tool => tool.name), ["workflow_read", "workflow_write"]);
+    assert.deepEqual(listBody.result?.tools?.map(tool => tool.name), ["workflow_read", "workflow_write", "supervision_stop"]);
     const writeSchema = listBody.result?.tools?.find(tool => tool.name === "workflow_write")?.inputSchema;
     assert.deepEqual(writeSchema?.properties?.input?.required, ["operationId", "workflowId", "expectedRevision", "note"]);
     assert.ok(writeSchema?.$defs?.group, "recursive plan definitions are attached to the write schema root");

@@ -15,7 +15,7 @@ import type {
 } from "../../src/project-supervisor-contract.js";
 import type { WorkflowProgressContribution, WorkflowProgressCoverage, WorkflowProgressSnapshot, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
 import { defaultMonitoringSettings, defaultSupervisorTeamSettings } from "../../src/project-supervisor-contract.js";
-import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "./project-supervisor-api.js";
+import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor, setChatSupervision } from "./project-supervisor-api.js";
 import { idleControlActivity, SupervisionControlPanel } from "./supervisor-control.js";
 
 type MonitoringDraft = {
@@ -126,6 +126,31 @@ const withReasoningValue = (selection: SupervisorModelSelection, model: Supervis
     return existing ? [{...existing}] : [];
   }),
 });
+
+/**
+ * Runs one per-chat supervision change and returns the server-confirmed state to show. It returns null once the selected
+ * project or chat has changed, so a late response never replaces another chat's view; the next load shows that chat's state.
+ */
+export const confirmChatSupervisionChange = async (
+  change: () => Promise<{snapshot?: ProjectSupervisorInfo | null; message: string}>,
+  reload: () => Promise<ProjectSupervisorInfo>,
+  isCurrent: () => boolean,
+): Promise<{snapshot: ProjectSupervisorInfo | null; message: string} | null> => {
+  try {
+    const result = await change();
+    if (!isCurrent()) return null;
+    const confirmed = result.snapshot ?? await reload();
+    return isCurrent() ? {snapshot: confirmed, message: result.message} : null;
+  } catch {
+    if (!isCurrent()) return null;
+    try {
+      const saved = await reload();
+      return isCurrent() ? {snapshot: saved, message: "The change could not be confirmed. The saved state is shown."} : null;
+    } catch {
+      return isCurrent() ? {snapshot: null, message: "The change could not be confirmed and the saved state could not be read. Refresh Supervisor status."} : null;
+    }
+  }
+};
 
 export const shouldOfferNativeRetry = (snapshot: ProjectSupervisorInfo) => {
   const monitoringNeedsRetry = (snapshot.monitoringStatus?.state === "uncertain" || snapshot.monitoringStatus?.state === "unavailable") &&
@@ -778,7 +803,15 @@ export function ProjectSupervisorView({
   onDiscard,
   onRetry,
   onSubmit,
+  chatSupervisionBusy = false,
+  chatSupervisionLocked = false,
+  chatSupervisionMessage = null,
+  onChatSupervision = () => {},
 }: {
+  chatSupervisionBusy?: boolean;
+  chatSupervisionLocked?: boolean;
+  chatSupervisionMessage?: string | null;
+  onChatSupervision?: (enabled: boolean) => void;
   section?: "all" | "progress" | "plan" | "definitions" | "settings";
   snapshot: ProjectSupervisorInfo;
   selection: SupervisorModelSelection;
@@ -836,6 +869,7 @@ export function ProjectSupervisorView({
         : <p>{snapshot.mainThreadId ? "No Supervisor is bound to this main conversation yet." : "Select a main conversation to inspect its Supervisor."}</p>}
       <details><summary>Conversation and model details</summary><div className="stack"><p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses it when that main conversation resumes. Independent main conversations have separate Supervisors.</p>
       {snapshot.binding?.settlementState && <p>Automatic settlement: {snapshot.binding.settlementState}. Resumed work uses this same conversation.</p>}
+      {snapshot.binding?.settlementBlockedBy && !snapshot.binding.settlementState && <p className="muted">Automatic settlement is waiting on: {snapshot.binding.settlementBlockedBy.replaceAll("_", " ")}.</p>}
       {snapshot.binding?.keptActive && <p>Automatic settlement is held by a user keep-active choice.</p>}
       <p className="muted">Supervisor work runs in the project root. Role instructions limit it to reading and messaging through T3, but those instructions do not enforce tool restrictions.</p>
       <p><strong>Project default for new Supervisors:</strong> {formatModel(snapshot, snapshot.settings.modelSelection)}</p>
@@ -845,6 +879,16 @@ export function ProjectSupervisorView({
       </div></details>
       <p>{snapshot.message}</p>
       {!snapshot.available && <p role="status">Supervisor status is currently unavailable.</p>}
+      {snapshot.mainThreadId && snapshot.chatSupervision && <div className="stack">
+        <h4>Chat supervision</h4>
+        <p>{snapshot.chatSupervision.stopped
+          ? `Supervision is stopped for this chat${snapshot.chatSupervision.stoppedBy ? ` (${{direct: "asked directly in the Supervisor conversation", relay: "asked in this chat", chat: "asked from another chat", ui: "stopped here"}[snapshot.chatSupervision.stoppedBy]})` : ""}. It stays off until you enable it again; the chat itself is not changed.`
+          : "Allowed for this chat; project/global settings still apply."}</p>
+        <div><button type="button" disabled={!connected || chatSupervisionBusy || chatSupervisionLocked} aria-busy={chatSupervisionBusy || undefined}
+          onClick={() => onChatSupervision(snapshot.chatSupervision!.stopped)}>
+          {chatSupervisionBusy ? "Saving…" : snapshot.chatSupervision.stopped ? "Enable supervision" : "Stop supervision"}</button></div>
+        <p role="status">{chatSupervisionMessage ?? ""}</p>
+      </div>}
     </div>
 
 
@@ -972,6 +1016,10 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
   const activeScope = useRef(JSON.stringify([projectId, threadId || null]));
   const draftRef = useRef(drafts);
   const savingRef = useRef(false);
+  const chatSupervisionRef = useRef(false);
+  // the pending change and its result belong to the exact [project, chat] scope that started it
+  const [chatSupervisionPending, setChatSupervisionPending] = useState<string | null>(null);
+  const [chatSupervisionMessage, setChatSupervisionMessage] = useState<{scope: string; text: string} | null>(null);
   const activeLoadKey = useRef("");
   const completedLoadKey = useRef("");
   const workflowProgressStateRef = useRef(workflowProgressState);
@@ -1288,6 +1336,31 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
     }
   };
 
+  // one explicit per-chat change at a time; the server-confirmed snapshot is shown afterwards, including after conflicts,
+  // but only while the same project and chat are still selected
+  const changeChatSupervision = async (enabled: boolean) => {
+    const current = activeSnapshot;
+    if (chatSupervisionRef.current || !projectId || !current?.mainThreadId || !current.chatSupervision) return;
+    const targetProject = projectId;
+    const targetThread = current.mainThreadId;
+    const targetScope = activeScope.current;
+    const isCurrent = () => activeProject.current === targetProject && activeScope.current === targetScope;
+    chatSupervisionRef.current = true;
+    setChatSupervisionPending(targetScope);
+    setChatSupervisionMessage(null);
+    try {
+      const outcome = await confirmChatSupervisionChange(
+        () => setChatSupervision({projectId: targetProject, mainThreadId: targetThread, enabled, policyGeneration: current.chatSupervision!.policyGeneration}, csrfToken),
+        () => loadProjectSupervisor(targetProject, AbortSignal.timeout(10_000), targetThread),
+        isCurrent);
+      if (!outcome) return;
+      if (outcome.snapshot) setSnapshotState({projectId: targetProject, snapshot: outcome.snapshot});
+      setChatSupervisionMessage({scope: targetScope, text: outcome.message});
+    } finally {
+      chatSupervisionRef.current = false;
+      setChatSupervisionPending(null);
+    }
+  };
   const retryNativeAccess = async () => {
     if (savingRef.current || !canRetry || !activeDraft) return;
     const binding = activeSnapshot?.binding;
@@ -1390,6 +1463,10 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", co
       onTeamSettingsChange={updateTeamSettings}
       onDiscard={discardDraft}
       onRetry={() => {void retryNativeAccess();}}
+      chatSupervisionBusy={chatSupervisionPending === activeScope.current}
+      chatSupervisionLocked={chatSupervisionPending !== null}
+      chatSupervisionMessage={chatSupervisionMessage?.scope === activeScope.current ? chatSupervisionMessage.text : null}
+      onChatSupervision={enabled => {void changeChatSupervision(enabled);}}
       onSubmit={save}
     />}
     {projectId && connected && activeSnapshot && !activeDraft && isLoading && <p className="panel" role="status">Loading the selected project’s Supervisor status…</p>}

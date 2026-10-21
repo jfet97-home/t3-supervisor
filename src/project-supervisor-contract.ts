@@ -92,6 +92,8 @@ export const ProjectSupervisorBinding = Schema.Struct({
   state: Schema.Literals(["creating", "ready", "uncertain", "rejected", "missing"]),
   settlementState: Schema.optionalKey(Schema.NullOr(Schema.Literals(["pending", "uncertain", "settled", "superseded"]))),
   keptActive: Schema.optionalKey(Schema.Boolean),
+  /** First lifecycle gate that kept the service-owned Supervisor active at its latest check, or null. */
+  settlementBlockedBy: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export type SupervisorBinding = typeof ProjectSupervisorBinding.Type;
 export const WorkflowExecutionStatus = Schema.Literals(["planned", "underway", "completed", "needs_attention"]);
@@ -271,6 +273,12 @@ export const WorkflowProtocolDiagnosticSchema = Schema.Struct({
   messageId: Schema.String.check(Schema.isMaxLength(512)),
   code: Schema.String.check(Schema.isMaxLength(80)),
   observedAt: Schema.Finite,
+  /** Record path of the first failing field and its expected shape, for focused repair. */
+  path: Schema.optionalKey(Schema.NullOr(Schema.String.check(Schema.isMaxLength(512)))),
+  expected: Schema.optionalKey(Schema.NullOr(Schema.String.check(Schema.isMaxLength(300)))),
+  detail: Schema.optionalKey(Schema.NullOr(Schema.String.check(Schema.isMaxLength(80)))),
+  /** Consecutive rejected Supervisor proposals without an accepted repair. */
+  attempts: Schema.optionalKey(Schema.Finite),
 });
 export type WorkflowProtocolDiagnostic = typeof WorkflowProtocolDiagnosticSchema.Type;
 export const DefinitionReview = Schema.Struct({
@@ -297,7 +305,7 @@ export const TaskInterpretation = Schema.Struct({
   projectId: Schema.String,
   sourceRunId: Schema.String,
   sourceMessageId: Schema.String,
-  status: Schema.Literals(["queued", "dispatching", "waiting", "inferred", "needs_context", "unavailable", "uncertain", "expired"]),
+  status: Schema.Literals(["queued", "dispatching", "waiting", "inferred", "needs_context", "not_supervised", "unavailable", "uncertain", "expired"]),
   objective: Schema.NullOr(Schema.String),
   reason: Schema.String,
   updatedAt: Schema.Number,
@@ -321,8 +329,22 @@ export const ProjectSupervisorSnapshot = Schema.Struct({
   message: Schema.String,
   tasks: Schema.Array(TaskInterpretation),
   team: Schema.optionalKey(Schema.NullOr(ProjectSupervisorTeamSnapshot)),
+  /** Durable per-chat stop for the selected main, backed by the instance thread policy. */
+  chatSupervision: Schema.optionalKey(Schema.NullOr(Schema.Struct({
+    stopped: Schema.Boolean,
+    policyGeneration: Schema.Number,
+    stoppedBy: Schema.NullOr(Schema.Literals(["direct", "relay", "chat", "ui"])),
+    stoppedAt: Schema.NullOr(Schema.Number),
+  }))),
 });
 export type ProjectSupervisorInfo = typeof ProjectSupervisorSnapshot.Type;
+export const ProjectSupervisorChatSupervision = Schema.Struct({
+  projectId: Schema.String,
+  mainThreadId: Schema.String,
+  enabled: Schema.Boolean,
+  policyGeneration: Schema.Number,
+});
+export type ProjectSupervisorChatSupervisionInput = typeof ProjectSupervisorChatSupervision.Type;
 export const ProjectSupervisorSave = Schema.Struct({
   projectId: Schema.String,
   mainThreadId: Schema.optionalKey(Schema.String),

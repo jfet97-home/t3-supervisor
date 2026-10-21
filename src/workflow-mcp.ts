@@ -6,6 +6,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
   WorkflowWriteController,
+  supervisionStopToolDefinition,
   workflowReadToolDefinition,
   workflowWriteToolDefinition,
 } from "./workflow-write-controller.js";
@@ -38,7 +39,7 @@ export type WorkflowMcpEndpoint = {
 
 /** Creates one stateless MCP server and transport for each HTTP request. */
 export const createWorkflowMcpEndpoint = (controller: WorkflowWriteController, team?: SupervisorTeamController): WorkflowMcpEndpoint => {
-  const tools = [workflowReadToolDefinition, workflowWriteToolDefinition, ...(team ? [supervisionTeamToolDefinition, supervisionGuideToolDefinition] : [])] as unknown as Tool[];
+  const tools = [workflowReadToolDefinition, workflowWriteToolDefinition, supervisionStopToolDefinition, ...(team ? [supervisionTeamToolDefinition, supervisionGuideToolDefinition] : [])] as unknown as Tool[];
   let closed = false;
   const active = new Map<Server, AbortController>();
   return {
@@ -63,8 +64,9 @@ export const createWorkflowMcpEndpoint = (controller: WorkflowWriteController, t
       server.setRequestHandler(CallToolRequestSchema, async requestValue => {
         const {name, arguments: args} = requestValue.params;
         const signal = AbortSignal.any([requestController.signal, AbortSignal.timeout(callTimeoutMs)]);
-        if (name === "workflow_read") return toolResult(await controller.read(args, signal));
+        if (name === "workflow_read") return toolResult(await controller.readTool(args, signal));
         if (name === "workflow_write") return toolResult(await controller.write(args, signal));
+        if (name === "supervision_stop") return toolResult(await controller.stopSupervision(args, signal));
         if (name === "supervision_team" && team) return toolResult(await team.call(args, signal));
         if (name === "supervision_guide" && team) return toolResult(await team.guide(args, signal));
         return toolResult({status: "invalid", reason: "unknown_tool"});

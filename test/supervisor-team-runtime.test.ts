@@ -142,6 +142,69 @@ const helperProjection = (member: TeamMember, rootThreadId: string): Projection 
   ...makeThread(member.threadId, rootThreadId, "subagent"), lineage: {parentThreadId: rootThreadId, relationshipToParent: "subagent", rootThreadId},
 });
 
+test("a stopped chat's team work is reconciled by observation alone: proven outcomes release it and unknown deliveries stay fenced", async t => {
+  for (const scenario of ["completed", "never-posted", "rejected", "unknown", "sending"] as const) {
+    const f = await fixture();t.after(f.cleanup);
+    const transport = webhookTransport();
+    const runtime = f.runtime(transport.transport);
+    const member = readyMember(f.teamStore, f.binding, `helper-${scenario}`);
+    activate(f.teamStore, f.binding, member, "branch");
+    f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
+    const coverage = f.teamStore.coverage(f.binding, "branch", parents);
+    const id = `team-review:stopped-${scenario}`;
+    const prepared = f.requests.prepare({id, projectId, supervisorThreadId: member.threadId, kind: "review", taskId: null,
+      text: "Review this assigned activity.", batch: batchOf(["branch"]), completionMarker: "stopped review complete"}, time);
+    f.requests.saveRequest({...prepared, state: scenario === "never-posted" ? "prepared" : scenario === "sending" ? "sending" : "waiting", sentAt: time});
+    f.teamStore.recordRequest(f.binding, {requestId: id, memberThreadId: member.threadId, memberEpoch: member.epoch,
+      targets: [{targetThreadId: "branch", assignmentRootThreadId: coverage.assignmentRootThreadId!, assignmentEpoch: coverage.assignmentEpoch!}], parentById: parents, now: time});
+    if (scenario !== "never-posted") transport.sent.set(prepared.messageId, {threadId: member.threadId, commandId: `supervisor-review:${id}`, text: prepared.text, taskId: `scheduled-${member.threadId}`});
+    if (scenario === "rejected") transport.rejectedReceipts.add(prepared.messageId);
+    if (scenario === "completed") {
+      const helper = f.projections.get(member.threadId)!;
+      helper.runs.push({id: "stopped-review-run", threadId: member.threadId, ordinal: 1, status: "completed", requestedAt: iso(time + 1), startedAt: iso(time + 1),
+        completedAt: iso(time + 2), rootNodeId: null, userMessageId: prepared.messageId});
+      helper.messages.push({id: prepared.messageId, threadId: member.threadId, runId: "stopped-review-run", nodeId: null, role: "user", text: prepared.text, streaming: false,
+        createdAt: iso(time + 1), updatedAt: iso(time + 1), scheduledTaskId: `scheduled-${member.threadId}`, creationSource: "server"},
+      {id: "stopped-review-final", threadId: member.threadId, runId: "stopped-review-run", nodeId: null, role: "assistant",
+        text: `Reviewed the assigned scope. ${prepared.completionMarker}`, streaming: false, createdAt: iso(time + 2), updatedAt: iso(time + 2), ordinal: 1});
+    }
+    assert.equal(runtime.hasInflightEffects(f.binding), true, `${scenario}: in flight before reconciliation`);
+    runtime.startCycle(f.binding);
+    await runtime.reconcileStopped(f.binding, f.threadList, AbortSignal.timeout(5000));
+    const state = f.requests.requests(projectId, member.threadId).find(item => item.id === id)?.state;
+    const unresolved = f.teamStore.unresolvedRequests(f.binding).some(item => item.requestId === id);
+    assert.deepEqual(transport.attempts, [], `${scenario}: nothing is sent while stopped`);
+    assert.deepEqual(transport.retired, [], `${scenario}: nothing is retired while stopped`);
+    if (scenario === "unknown" || scenario === "sending") {
+      assert.ok(state === (scenario === "sending" ? "uncertain" : "waiting"), `${scenario}: a posted delivery without a native outcome keeps its identity (${state})`);
+      assert.equal(unresolved, true);
+      assert.equal(runtime.hasInflightEffects(f.binding), true, `${scenario}: a genuinely unknown effect still holds the stopped Supervisor`);
+    } else {
+      assert.equal(state, scenario === "completed" ? "completed" : "failed", scenario);
+      assert.equal(unresolved, false, `${scenario}: the proven outcome releases its fence`);
+      assert.equal(runtime.hasInflightEffects(f.binding), false, `${scenario}: nothing in flight remains`);
+    }
+  }
+});
+
+test("a stopped chat closes a handover notice that was never posted without sending it", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const transport = webhookTransport();
+  const runtime = f.runtime(transport.transport);
+  const member = readyMember(f.teamStore, f.binding, "helper-notice");
+  f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
+  f.teamStore.assign(f.binding, "branch", member.threadId, parents, time);
+  const notice = f.teamStore.snapshot(f.binding).notifications.find(item => item.recipientThreadId === member.threadId)!;
+  f.teamStore.updateNotificationDelivery(f.binding, f.binding.threadId, notice.id, "sending", time + 1);
+  assert.equal(runtime.hasInflightEffects(f.binding), true);
+  runtime.startCycle(f.binding);
+  await runtime.reconcileStopped(f.binding, f.threadList, AbortSignal.timeout(5000));
+  assert.deepEqual(transport.attempts, [], "a stop never posts the notice");
+  assert.equal(["sending", "uncertain"].includes(f.teamStore.snapshot(f.binding).notifications.find(item => item.id === notice.id)!.state), false,
+    "a notice without a delivery receipt was never posted and is closed by the stop");
+  assert.equal(runtime.hasInflightEffects(f.binding), false);
+});
+
 test("no helper leaves the existing root batch intact", async t => {
   const f = await fixture();t.after(f.cleanup);
   const runtime = f.runtime();

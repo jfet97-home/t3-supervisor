@@ -4,7 +4,7 @@ import {
   ProjectSupervisorSnapshot,
   ProjectSupervisorSaveResult,
   type ProjectSupervisorInfo,
-  type ProjectSupervisorRetryInput,
+  type ProjectSupervisorChatSupervisionInput, ProjectSupervisorRetryInput,
   type ProjectSupervisorSaveInput,
 } from "../../src/project-supervisor-contract.js";
 import { getCsrfToken, loadAccess, sessionHeaders } from "./access.js";
@@ -83,7 +83,7 @@ export const refreshWorkflowProgressPages = async (
   return refreshed;
 };
 
-const postProjectSupervisor = async (path: string, input: ProjectSupervisorSaveInput | ProjectSupervisorRetryInput, csrfToken: string) => {
+const postProjectSupervisor = async (path: string, input: ProjectSupervisorSaveInput | ProjectSupervisorRetryInput | ProjectSupervisorChatSupervisionInput, csrfToken: string) => {
   const response = await fetch(path, {
     method: "POST",
     credentials: "omit",
@@ -122,3 +122,7 @@ export const saveProjectSupervisor = (input: ProjectSupervisorSaveInput, csrfTok
 
 export const retryProjectSupervisor = (input: ProjectSupervisorRetryInput, csrfToken: string) =>
   postProjectSupervisor("/api/guidance/project-supervisor/retry", input, csrfToken);
+
+/** The dashboard's per-chat Stop supervision / Enable supervision control, backed by the instance thread policy. */
+export const setChatSupervision = (input: ProjectSupervisorChatSupervisionInput, csrfToken: string) =>
+  postProjectSupervisor("/api/guidance/project-supervisor/chat-supervision", input, csrfToken);

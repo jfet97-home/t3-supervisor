@@ -128,7 +128,8 @@ export class SupervisorTeamController {
     if (payload.action !== "read" && !bounded(payload.operationId, 128)) return {status: "invalid", reason: "operation_id_required"};
     const reviewInput = payload.action === "review_handover" ? parseHandoverReview(payload) : null;
     if (payload.action === "review_handover" && !reviewInput) return fail("supervisor_team_invalid_handover_review");
-    const binding = this.workflows.resolveBinding(payload, payload.action === "ready");
+    // reading the team stays possible after a human stop; every other action is an effect fenced by the stop
+    const binding = this.workflows.resolveBinding(payload, payload.action === "ready", payload.action === "read" ? "read" : "effect");
     if (!binding && payload.action === "ready" && typeof payload.memberEpoch === "number") {
       const current = this.workflows.resolveBinding({...payload, memberEpoch: payload.memberEpoch + 1});
       const member = current && this.team.snapshot(current).members.find(item => item.threadId === payload.supervisorThreadId);
@@ -242,7 +243,12 @@ export class SupervisorTeamController {
     }
   }
 
-  async reconcile(binding: BindingRecord, signal: AbortSignal, now = Date.now()): Promise<void> {
+  /**
+   * Guidance receipts of a stopped chat, observation only: a delivered steer settles, and a rejected attempt awaiting a fallback
+   * or escalation is closed as not sent because a stop never sends another route. An unknown send keeps its identities.
+   */
+  reconcileStopped(binding: BindingRecord, signal: AbortSignal): Promise<void> {return this.reconcile(binding, signal, Date.now(), true);}
+  async reconcile(binding: BindingRecord, signal: AbortSignal, now = Date.now(), stopped = false): Promise<void> {
     const members = this.team.snapshot(binding).members;
     const actors = new Set(members.map(member => member.threadId));
     const rows = this.workflows.options.supervisors.store.db.prepare("SELECT actor_thread_id,actor_epoch,operation_id,evidence_item_id,document FROM supervisor_team_tool_receipts WHERE owner_thread_id=? AND binding_generation=? AND json_extract(document,'$.requestId') LIKE 'guide:%' AND json_extract(document,'$.status') IN ('prepared','replaying','needs_fallback','needs_escalation','accepted','uncertain') ORDER BY rowid")
@@ -254,6 +260,14 @@ export class SupervisorTeamController {
       const value = JSON.parse(String(row.document)) as GuideRecord;
       try {
         const payload = this.guidePayload(value);
+        if (stopped && (value.status === "needs_fallback" || value.status === "needs_escalation")) {
+          this.atomic(() => {
+            this.workflows.options.supervisors.store.db.prepare("UPDATE supervisor_team_tool_receipts SET document=? WHERE owner_thread_id=? AND actor_thread_id=? AND binding_generation=? AND actor_epoch=? AND operation_id=?")
+              .run(JSON.stringify({...value, status: "not_sent"}), binding.threadId, String(row.actor_thread_id), binding.generation, Number(row.actor_epoch), String(row.operation_id));
+            if (this.team.unresolvedRequests(binding).some(item => item.requestId === value.requestId)) this.team.setRequestState(binding, binding.threadId, value.requestId, 0, "settled");
+          });
+          continue;
+        }
         if (value.status === "needs_fallback") {
           const result = await this.continueAfterDefiniteRejection(payload, binding, String(row.evidence_item_id), value, signal);
           if (result.status === "needs_fallback" && result.reason === "target_pending_owner_input") {

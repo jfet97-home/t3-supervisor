@@ -11,7 +11,8 @@ import { mainRunNodeReader, nativeUserMessageVisible, timestampMs } from "./doma
 import { currentThreadPolicy } from "./thread-policy.js";
 import { ProjectSupervisorStore, isSupervisorThread, type BindingRecord, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
 import { modelSelection, sameModel, supervisorModels, validModelSelection, SupervisorRpcError, type SupervisorRpc } from "./supervisor-native.js";
-import type { ProjectSupervisorInfo, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome, ProjectSupervisorRetryInput, SupervisorModelSelection, WorkflowProposalInfo } from "./project-supervisor-contract.js";
+import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome, ProjectSupervisorRetryInput, SupervisorModelSelection, WorkflowProposalInfo } from "./project-supervisor-contract.js";
+import type { SupervisionStopInput, SupervisionStopResult } from "./workflow-write-controller.js";
 import { interpretationPrompt, parseInterpretation, prepareWorkflowRequest, parseWorkflowInterpretation } from "./supervisor-workflow.js";
 import type { ProjectDefinitionLoader } from "./project-definitions.js";
 export { interpretationPrompt, parseInterpretation } from "./supervisor-workflow.js";
@@ -23,6 +24,7 @@ import { SupervisorConversation } from "./supervisor-conversation.js";
 import type { GlobalDefinitionsControlInput, SupervisionControlInput, SupervisionSetupInput } from "./supervisor-control-contract.js";
 import { WorkflowStateStore } from "./workflow-state-store.js";
 import { monitorActivityReference, observeScopeThread, SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS, SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
+import { affirmsSupervisionStop, namesThread, unquotedText } from "./supervision-stop-intent.js";
 
 type SetupCheckoutTarget = {origin: "project"; threadId: string | null; workspaceRoot: string; branch: string | null; isGitRepository: boolean};
 type SetupOutcome = {status: "created" | "committed" | "unchanged" | "stale" | "conflict" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string | null; branch: string | null; message: string};
@@ -83,7 +85,7 @@ export class ProjectSupervisor {
   private activationBoundaryInFlight: Promise<SupervisorBaseline> | null = null;
   private offset = 0;
   private bindingOffset = 0;
-  teamEffects: {reconcile(binding: BindingRecord, signal: AbortSignal): Promise<void>} | null = null;
+  teamEffects: {reconcile(binding: BindingRecord, signal: AbortSignal): Promise<void>; reconcileStopped(binding: BindingRecord, signal: AbortSignal): Promise<void>} | null = null;
   readonly team: SupervisorTeamStore;
   readonly helperTransport: SupervisorHelperTransport;
   readonly conversation: SupervisorConversation;
@@ -101,6 +103,7 @@ export class ProjectSupervisor {
         (thread, threads) => this.eligible(thread, threads), projectId => this.projectEnabled(projectId), this.workflowStates,
         thread => !isSupervisorThread(config, thread) && !thread.archivedAt && !thread.deletedAt, this.team,
         this.helperTransport, config.helperProviderInstanceId);
+      this.conversation.supervisionStopped = threadId => this.supervisionStopped(threadId);
       this.lifecycle = new SupervisorLifecycle(store, this.conversation, (id, signal) => this.projection(id, signal), operateRpc, this.workflowStates);
     }
   private async serial<A>(projectId: string, work: () => Promise<A>): Promise<A> {
@@ -626,7 +629,9 @@ export class ProjectSupervisor {
     const {catalog} = await this.project(projectId);
     if (mainThreadId !== null) {
       const selected = catalog.threads.find(thread => thread.id === mainThreadId && thread.projectId === projectId);
-      if (!selected || mainConversation(selected, catalog.threads)?.id !== mainThreadId || !this.eligible(selected, catalog.threads)) throw new Error("invalid_main_conversation");
+      // a chat whose supervision is stopped stays inspectable so its state and the Enable supervision control remain visible
+      if (!selected || mainConversation(selected, catalog.threads)?.id !== mainThreadId ||
+        !(this.eligible(selected, catalog.threads) || this.supervisionStopped(mainThreadId) && this.mainShape(selected))) throw new Error("invalid_main_conversation");
     }
     const binding = this.store.scopeCompatible && mainThreadId ? this.store.binding(projectId, mainThreadId) : null;
     let selection: SupervisorModelSelection | null = null;let available = Boolean(this.operateRpc && this.store.scopeCompatible);let message = binding ? "Supervisor conversation is being prepared." : "The Supervisor conversation will be created automatically for the first new task.";
@@ -662,7 +667,10 @@ export class ProjectSupervisor {
     if (binding?.state === "rejected" && binding.creationMessage) message = binding.creationMessage;
     if (!binding && models.length && !validModelSelection(current.modelSelection, models)) message = "Default Supervisor model unavailable. Choose an available T3 model; no fallback will run.";
     if (!this.projectEnabled(projectId)) message = "Supervision is disabled globally or for this project. Existing chats and history are retained. " + message;
-    return {projectId, mainThreadId, team: binding ? supervisorTeamView(this.team, binding, catalog.threads, this.conversation.requests, this.now()) : null, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring, teamSettings: current.teamSettings ?? {maxHelpersPerRoot: 5}}, monitoringStatus: this.conversation.status(projectId, binding?.threadId ?? null), binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models, available, message,
+    const policy = currentThreadPolicy(this.config);
+    const chatSupervision = mainThreadId ? {stopped: policy.excludedThreadIds.includes(mainThreadId), policyGeneration: policy.generation,
+      stoppedBy: binding?.supervisionStop?.route ?? null, stoppedAt: binding?.supervisionStop?.stoppedAt ?? null} : null;
+    return {projectId, mainThreadId, chatSupervision, team: binding ? supervisorTeamView(this.team, binding, catalog.threads, this.conversation.requests, this.now()) : null, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring, teamSettings: current.teamSettings ?? {maxHelpersPerRoot: 5}}, monitoringStatus: this.conversation.status(projectId, binding?.threadId ?? null), binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models, available, message,
       tasks: (binding ? this.store.tasksFor(binding) : []).slice(-200).reverse().map(({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview,workflowProtocolDiagnostic}) => ({threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow: workflow ?? null,
         ...(workflowProposalId ? {workflowProposalId} : {}), agreement: agreement ?? null, workflowProtocolDiagnostic: workflowProtocolDiagnostic ?? null,
         ...(definitionReview ? {definitionReview} : {})}))};
@@ -677,6 +685,103 @@ export class ProjectSupervisor {
       catch (cause) {if (cause instanceof Error && cause.message === "invalid_team_settings") return {status: "invalid", message: "Choose a whole-number helper limit from 0 to 20.", snapshot: null};return cause instanceof Error && cause.message === "invalid_monitoring_settings" ? {status: "invalid", message: "Use an interval of 1–60 minutes and an activity threshold of 3–100, both whole numbers.", snapshot: null} : {status: "conflict", message: "Project Supervisor settings changed. Refresh before saving again.", snapshot: null};}
       return {status: "saved", message: "Saved. Monitoring settings apply on the next service check without discarding pending activity; model defaults apply only to new Supervisor conversations. Edit existing models in T3.", snapshot: await this.snapshot(input.projectId, signal, input.mainThreadId ?? null)};
     });
+  }
+  /** Whether the instance thread policy stops supervision of this chat; the same control backs the dashboard and supervision_stop. */
+  supervisionStopped(threadId: string): boolean {return currentThreadPolicy(this.config).excludedThreadIds.includes(threadId);}
+  private writeChatPolicy(threadId: string, stopped: boolean, expectedGeneration?: number):
+    {status: "saved"; changed: boolean} | {status: "conflict" | "unavailable" | "full"} {
+    const policy = this.config.threadPolicy;
+    if (!policy) return {status: "unavailable"};
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const current = policy.get();
+      if (expectedGeneration !== undefined && current.generation !== expectedGeneration) return {status: "conflict"};
+      if (current.excludedThreadIds.includes(threadId) === stopped) return {status: "saved", changed: false};
+      if (stopped && current.excludedThreadIds.length >= 500) return {status: "full"};
+      try {
+        policy.save({...current, excludedThreadIds: stopped ? [...current.excludedThreadIds, threadId] : current.excludedThreadIds.filter(id => id !== threadId)});
+        return {status: "saved", changed: true};
+      } catch {if (expectedGeneration !== undefined) return {status: "conflict"};}
+    }
+    return {status: "conflict"};
+  }
+  // records attribution on every binding of the stopped main and fences its unsent check-ins; the operative main is never touched.
+  // a stop supersedes any earlier keep-active choice for the owned Supervisor, so its settlement is not vetoed by an older intent.
+  private applyChatStop(threadId: string, stop: NonNullable<BindingRecord["supervisionStop"]> | null): void {
+    for (const binding of this.store.bindings().filter(item => item.mainThreadId === threadId)) {
+      const next = {...binding};delete next.stopObservedAt;
+      if (stop) {next.supervisionStop = stop;delete next.manualKeepActive;} else delete next.supervisionStop;
+      this.store.setBinding(next);
+      if (stop) this.conversation.fenceStoppedSupervision(next);
+    }
+  }
+  private genuineUserMessage(projection: Projection, messageId: string): MessageInfo | null {
+    const message = projection.messages.find(item => item.id === messageId && item.threadId === projection.thread.id);
+    const run = message?.runId ? projection.runs.find(item => item.id === message.runId && item.threadId === projection.thread.id) : undefined;
+    return message && run && message.role === "user" && message.createdBy === "user" && !message.streaming &&
+      (message.creationSource === "web" || message.creationSource === "mobile") && !message.senderThreadId && !message.scheduledTaskId && !message.source &&
+      !message.id.startsWith("supervisor-notice:") && nativeUserMessageVisible(projection, run, message) ? message : null;
+  }
+  /**
+   * Applies a verified supervision_stop. The caller's own native tool call is already verified; this resolves the route from the
+   * caller's relation to the exact target and requires the human's original native message: in the bound root or its main (direct,
+   * relay), in the main itself (relay), or in another ordinary chat whose message names the exact target ID (chat).
+   */
+  async stopSupervision(input: SupervisionStopInput, evidence: unknown, signal: AbortSignal): Promise<SupervisionStopResult> {
+    const catalog = await Effect.runPromise(this.source.catalog());
+    const target = catalog.threads.find(thread => thread.id === input.targetThreadId);
+    if (!target || isSupervisorThread(this.config, target) || target.lineage.relationshipToParent === "subagent" ||
+      mainConversation(target, catalog.threads)?.id !== target.id) return {status: "denied", reason: "target_not_main_conversation"};
+    const binding = this.store.bindingForSupervisor(input.callerThreadId);
+    if (binding && (binding.mainThreadId !== target.id || binding.state !== "ready")) return {status: "denied", reason: "target_outside_supervisor_scope"};
+    let caller: Projection;
+    try {caller = await this.projection(input.callerThreadId, signal);} catch {return {status: "unavailable", reason: "caller_projection_unavailable", retryable: true};}
+    let candidates: Array<{threadId: string; route: "direct" | "relay" | "chat"}>;
+    if (binding) {
+      candidates = [{threadId: input.callerThreadId, route: "direct"}, {threadId: target.id, route: "relay"}];
+    } else if (isSupervisorThread(this.config, caller.thread)) return {status: "denied", reason: "supervisor_thread_not_bound_to_target"};
+    else if (input.callerThreadId === target.id) candidates = [{threadId: target.id, route: "relay"}];
+    else candidates = [{threadId: input.callerThreadId, route: "chat"}];
+    let route: "direct" | "relay" | "chat" | null = null;
+    for (const candidate of candidates) {
+      let projection: Projection;
+      try {projection = candidate.threadId === input.callerThreadId ? caller : await this.projection(candidate.threadId, signal);}
+      catch {return {status: "unavailable", reason: "evidence_projection_unavailable", retryable: true};}
+      const message = this.genuineUserMessage(projection, input.userMessageId);
+      if (!message) continue;
+      // only the human's own unquoted words count: they must ask to stop supervision, not merely quote, negate or cancel a task
+      if (!affirmsSupervisionStop(message.text, {direct: candidate.route === "direct"})) return {status: "denied", reason: "stop_instruction_not_found"};
+      const words = unquotedText(message.text);
+      // a human message that names another chat's ID authorizes only that chat, never the agent's choice of a different one,
+      // and naming two chats leaves the choice to the human
+      const namesTarget = namesThread(words, target.id);
+      if (catalog.threads.some(thread => thread.id !== target.id && thread.id !== input.callerThreadId && namesThread(words, thread.id)))
+        return {status: "denied", reason: namesTarget ? "target_ambiguous" : "target_not_named_by_user"};
+      // a request from another chat must name the exact target so the human, not the agent, selects the stopped scope
+      if (candidate.route === "chat" && !namesTarget) return {status: "denied", reason: "target_not_named_by_user"};
+      // a stop instruction older than the latest explicit Enable never reverses it, including a replayed tool call
+      const enabledAt = this.store.chatEnabledAt(target.id);
+      if (enabledAt !== null && !(Date.parse(message.createdAt) > enabledAt)) return {status: "denied", reason: "superseded_by_later_enable"};
+      // when the caller acts in the chat the human wrote in, its verified native call must answer that message, not a later unrelated turn
+      const verifiedRunId = typeof evidence === "object" && evidence !== null && typeof (evidence as {runId?: unknown}).runId === "string" ? (evidence as {runId: string}).runId : null;
+      if (verifiedRunId !== null && candidate.threadId === input.callerThreadId && verifiedRunId !== message.runId)
+        return {status: "denied", reason: "stop_call_not_in_human_turn"};
+      route = candidate.route;break;
+    }
+    if (!route) return {status: "denied", reason: "user_message_not_genuine"};
+    const written = this.writeChatPolicy(target.id, true);
+    if (written.status !== "saved") return {status: "unavailable", reason: `thread_policy_${written.status}`, retryable: written.status === "conflict"};
+    this.applyChatStop(target.id, {route, callerThreadId: input.callerThreadId, userMessageId: input.userMessageId, stoppedAt: this.now()});
+    return {status: "stopped", targetThreadId: target.id, route, alreadyStopped: !written.changed};
+  }
+  /** The dashboard's explicit human Stop supervision / Enable supervision control for one selected chat. */
+  async setChatSupervision(input: ProjectSupervisorChatSupervisionInput, signal: AbortSignal): Promise<ProjectSupervisorSaveOutcome> {
+    const written = this.writeChatPolicy(input.mainThreadId, !input.enabled, input.policyGeneration);
+    if (written.status === "conflict") return {status: "conflict", message: "Chat settings changed in another tab or by the Supervisor. The saved state is shown.", snapshot: await this.snapshot(input.projectId, signal, input.mainThreadId).catch(() => null)};
+    if (written.status !== "saved") return {status: "unavailable", message: written.status === "full" ? "The excluded chat list is full." : "Chat settings are unavailable.", snapshot: null};
+    if (input.enabled) this.store.recordChatEnable(input.mainThreadId, this.now());
+    this.applyChatStop(input.mainThreadId, input.enabled ? null : {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: this.now()});
+    return {status: "saved", message: input.enabled ? "Supervision is enabled for this chat; its next request is supervised by the same Supervisor."
+      : "Supervision is stopped for this chat. Its Supervisor conversation settles when idle; nothing in the chat itself is changed.", snapshot: await this.snapshot(input.projectId, signal, input.mainThreadId)};
   }
   async retry(input: ProjectSupervisorRetryInput, signal: AbortSignal): Promise<ProjectSupervisorSaveOutcome> {
     if (!this.store.scopeCompatible) return {status: "unavailable", message: "Supervisor state version is unsupported; no changes were made.", snapshot: null};
@@ -779,8 +884,11 @@ export class ProjectSupervisor {
     if (!current) throw new Error("supervisor_model_missing");
     const latest = this.store.binding(binding.projectId, binding.mainThreadId);
     if (!latest || latest.threadId !== binding.threadId) return;
-    if (projection.thread.settledOverride === "active") this.store.setBinding({...latest, manualKeepActive: true});
+    if (projection.thread.settledOverride === "active" && !this.supervisionStopped(binding.mainThreadId)) this.store.setBinding({...latest, manualKeepActive: true});
     this.store.observeModel(binding, current);
+  }
+  private mainShape(thread: ThreadInfo): boolean {
+    return !isSupervisorThread(this.config, thread) && !unavailable(thread) && thread.lineage.relationshipToParent !== "subagent";
   }
   private eligible(thread: ThreadInfo, threads: readonly ThreadInfo[]): boolean {
     if (isSupervisorThread(this.config, thread) || unavailable(thread) || thread.lineage.relationshipToParent === "subagent" || currentThreadPolicy(this.config).excludedThreadIds.includes(thread.id)) return false;
@@ -802,7 +910,8 @@ export class ProjectSupervisor {
         if (signal.aborted) return;
         const project = catalog.projects.find(p => p.available && p.project.id === thread.projectId)?.project;if (!project || !this.projectEnabled(project.id)) continue;
         const previous = this.store.task(thread.id);
-        if (previous && !["needs_context", "unavailable", "expired"].includes(previous.status)) continue;
+        // an unresolved request or a temporary not-needed decision is reconsidered when the next genuine human request arrives
+        if (previous && !["needs_context", "not_supervised", "unavailable", "expired"].includes(previous.status)) continue;
         if (typeof thread.latestRunId === "string" && (thread.latestRunId === previous?.sourceRunId ||
           thread.latestRunId === this.store.baseline()?.threads.find(anchor => anchor.id === thread.id)?.latestRunId ||
           thread.latestRunId === this.examinedNonTasks.get(thread.id))) continue;
@@ -828,7 +937,10 @@ export class ProjectSupervisor {
             sourceOrdinal: task.run.ordinal, sourceHash: fingerprint(task.message.text), status: oversized ? "needs_context" : "queued", objective: null,
             reason: oversized ? "The task message exceeds the interpretation limit; provide a shorter task." : "Waiting for the project Supervisor.",
             updatedAt: Date.now(), requestText: oversized ? "" : interpretationPrompt(thread.id, task.message.id, task.message.text), supervisorThreadId: binding.threadId,
-            messageId: `supervisor-objective:${id}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0});
+            messageId: `supervisor-objective:${id}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0,
+            // only an unresolved request carries forward; an answered not-needed request is complete and never merges into the next task
+            ...(previous?.status === "needs_context"
+              ? {contextMessageIds: [...(previous.contextMessageIds ?? []), previous.sourceMessageId].slice(-5)} : {})});
         } catch { /* Discovery failures are retried without producing model work. */ }
       }
     }
@@ -842,6 +954,17 @@ export class ProjectSupervisor {
       if (masterEnabled) await Promise.allSettled(batch.map(binding => this.resolveControl(binding.projectId, signal)));
       await Promise.allSettled(batch.map(binding => {
         const deadline = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+        // a human stop settles its owned Supervisor even while global or project supervision is disabled
+        if (this.supervisionStopped(binding.mainThreadId)) return this.serial(supervisorScopeKey(binding.projectId, binding.mainThreadId), async () => {
+          // reconciliation sends nothing; it confirms accepted root, helper and guidance deliveries before the owned Supervisor may settle
+          try {
+            if (this.store.scopeCompatible) {
+              await this.conversation.reconcileStopped(binding, catalog.threads, deadline);
+              await this.conversation.teamRuntime?.reconcileStopped(binding, catalog.threads, deadline);
+              await this.teamEffects?.reconcileStopped(binding, deadline);
+            }
+          } finally {if (!deadline.aborted) await this.lifecycle.check(binding, catalog.threads, deadline);}
+        });
         if (!masterEnabled || !this.projectEnabled(binding.projectId)) return this.checkClosedMainLifecycle(binding, catalog.threads, deadline);
         return this.serial(supervisorScopeKey(binding.projectId, binding.mainThreadId), async () => {
           try {await this.processProject(binding, deadline);}
@@ -904,7 +1027,15 @@ export class ProjectSupervisor {
         definitions = unavailableDefinitions(job);
       }
       const message = source.messages.find(item => item.id === job!.sourceMessageId)!;
-      const prepared = prepareWorkflowRequest(job.threadId, job.sourceMessageId, message.text, definitions);
+      // the earlier unresolved requests stay context; only genuine visible user messages of this main are carried
+      const earlierMessages = (job.contextMessageIds ?? []).flatMap(id => {
+        const earlier = source.messages.find(item => item.id === id && item.threadId === job!.threadId && item.role === "user" && item.createdBy === "user" &&
+          !item.streaming && (item.creationSource === "web" || item.creationSource === "mobile") && !item.senderThreadId && !item.scheduledTaskId && !item.source);
+        const run = earlier?.runId ? source.runs.find(item => item.id === earlier.runId) : undefined;
+        return earlier && run && nativeUserMessageVisible(source, run, earlier) ? [{messageId: earlier.id, text: earlier.text}] : [];
+      });
+      const prepared = prepareWorkflowRequest(job.threadId, job.sourceMessageId, message.text, definitions, {earlierMessages,
+        ...(this.workflowEditingEnabled(job.projectId) ? {reader: {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation}} : {})});
       job = {...job, requestText: prepared.requestText, definitionContext: prepared.context, workflow: prepared.workflow,
         definitionSnapshot: prepared.context ? definitions : null};
       this.store.saveTask(job);
@@ -917,9 +1048,11 @@ export class ProjectSupervisor {
     await this.dispatch(sending, signal);
   }
   private async dispatch(job: TaskRecord, signal: AbortSignal): Promise<void> {
-    if (!this.projectEnabled(job.projectId)) {
+    // checked immediately before the native effect, after every awaited read: a stop or disable saved meanwhile sends nothing
+    const stopped = this.supervisionStopped(job.threadId);
+    if (stopped || !this.projectEnabled(job.projectId)) {
       if (job.status === "dispatching") this.store.saveTask({...job, status: "queued", dispatchedAt: null,
-        reason: "Supervision was disabled before dispatch; this task identity remains queued.", updatedAt: Date.now()});
+        reason: stopped ? "Supervision was stopped for this chat before dispatch; this task identity remains unsent." : "Supervision was disabled before dispatch; this task identity remains queued.", updatedAt: Date.now()});
       return;
     }
     try {
@@ -963,7 +1096,7 @@ export class ProjectSupervisor {
     const answers = projection.messages.filter(m => m.threadId === job.supervisorThreadId && m.runId === run.id && m.role === "assistant" && !m.streaming && m.nodeId && nodeFor(m.nodeId)?.kind === "assistant_message")
       .sort((a,b) => (timestampMs(a.createdAt) ?? 0) - (timestampMs(b.createdAt) ?? 0));
     try {
-      const result: {objective: string | null; reason: string; workflow?: WorkflowProposalInfo} = job.definitionContext ? parseWorkflowInterpretation(answers.at(-1)?.text ?? "", job.sourceMessageId, job.definitionContext) : parseInterpretation(answers.at(-1)?.text ?? "", job.sourceMessageId);
+      const result: {objective: string | null; reason: string; workflow?: WorkflowProposalInfo; supervision?: "needed" | "not_needed"} = job.definitionContext ? parseWorkflowInterpretation(answers.at(-1)?.text ?? "", job.sourceMessageId, job.definitionContext) : parseInterpretation(answers.at(-1)?.text ?? "", job.sourceMessageId);
       if (result.workflow) {
         let currentDefinitions = false;
         let transientReadFailure = false;
@@ -982,7 +1115,7 @@ export class ProjectSupervisor {
         job = {...job, workflow: staleWorkflow};
         if (!this.currentSource(job, await this.projection(job.threadId, signal))) {this.complete(job, "unavailable", null, "The task source changed while the workflow was being revalidated.");return;}
       }
-      this.complete(job, result.objective === null ? "needs_context" : "inferred", result.objective, result.reason);
+      this.complete(job, result.objective === null ? "needs_context" : result.supervision === "not_needed" ? "not_supervised" : "inferred", result.objective, result.reason);
     }
     catch {this.complete(job, "unavailable", null, "The Supervisor did not return a valid, source-linked interpretation.");}
   }

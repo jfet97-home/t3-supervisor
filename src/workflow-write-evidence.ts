@@ -31,10 +31,14 @@ export const workflowToolNames = {
     direct: ["t3-supervisor-workflows.supervision_guide", "mcp__t3-supervisor-workflows__supervision_guide"],
     mcpxTarget: "t3-supervisor-workflows__supervision_guide",
   },
+  stop: {
+    direct: ["t3-supervisor-workflows.supervision_stop", "mcp__t3-supervisor-workflows__supervision_stop"],
+    mcpxTarget: "t3-supervisor-workflows__supervision_stop",
+  },
   mcpxCall: ["mcpx.mcpx_call_tool", "mcp__mcpx__mcpx_call_tool"],
 } as const;
 
-export type WorkflowEvidenceTool = "read" | "write" | "team" | "guide";
+export type WorkflowEvidenceTool = "read" | "write" | "team" | "guide" | "stop";
 
 export type WorkflowEvidenceMatch = {
   itemId: string;

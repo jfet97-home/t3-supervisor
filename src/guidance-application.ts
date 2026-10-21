@@ -81,7 +81,10 @@ export const runGuidanceApplication = (
       team: supervision.team,
       workflows: supervision.workflowStates,
       isEnabled: projectId => supervision.workflowEditingEnabled(projectId),
+      isChatStopped: threadId => supervision.supervisionStopped(threadId),
       loadDefinitions: (projectId, threadId, signal) => definitions.load(projectId, threadId, signal),
+      contextViews: supervision.conversation,
+      stops: {stop: (input, evidence, signal) => supervision.stopSupervision(input, evidence, signal)},
       native: {
         listThreads: readSupervisorThreads(config.t3Url, readToken.trim(), readRpc),
         projection: async (threadId, signal) => (await Effect.runPromise(t3.projection(threadId), {signal})).projection,

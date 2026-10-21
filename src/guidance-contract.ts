@@ -1,7 +1,7 @@
 import { ThreadPolicy } from "./thread-policy-contract.js";
 import { ProjectDefinitions, ProjectConfigSaveInput, ProjectConfigSaveResult } from "./project-definitions-contract.js";
 import { Schema } from "effect";
-import { ProjectSupervisorSnapshot, ProjectSupervisorSave, ProjectSupervisorRetry, ProjectSupervisorSaveResult } from "./project-supervisor-contract.js";
+import { ProjectSupervisorSnapshot, ProjectSupervisorSave, ProjectSupervisorChatSupervision, ProjectSupervisorRetry, ProjectSupervisorSaveResult } from "./project-supervisor-contract.js";
 import { WorkflowProgressSnapshotSchema } from "./workflow-progress.js";
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/http-api";
 import { SupervisionControl, SupervisionControlSave, SupervisionControlResult, SupervisionSetup, SupervisionSetupOptions, SupervisionSetupResult, GlobalDefinitionsControl, GlobalDefinitionsControlSave, GlobalDefinitionsControlResult } from "./supervisor-control-contract.js";
@@ -132,6 +132,9 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
       }),
       HttpApiEndpoint.post("retryProjectSupervisor", "/project-supervisor/retry", {
         payload: ProjectSupervisorRetry, success: ProjectSupervisorSaveResult, error: UiError,
+      }),
+      HttpApiEndpoint.post("chatSupervision", "/project-supervisor/chat-supervision", {
+        payload: ProjectSupervisorChatSupervision, success: ProjectSupervisorSaveResult, error: UiError,
       }),
       HttpApiEndpoint.get("projectConfiguration", "/project-configuration", {
         query: {projectId: Text, threadId: Schema.optional(Text)},

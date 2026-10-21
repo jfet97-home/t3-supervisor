@@ -95,6 +95,19 @@ assessments and source links. Refresh does not wake chats or write workflow stat
 Idle/no-AppRun mirrors do not prove completion. Quiet scopes may park while unresolved
 work stays unresolved; relevant activity reuses the same Supervisor identity.
 
+## Stopping supervision of one chat
+
+- Use the selected chat's Stop supervision button in Progress; Enable supervision resumes it.
+- In the Supervisor conversation, ask it to stop; it calls `supervision_stop` itself.
+- In the supervised chat, ask the assistant to tell its Supervisor; the Supervisor cites your original message.
+- From another chat in the same T3 environment, name the exact chat ID in your request; that chat's assistant calls
+  `supervision_stop` with your message ID.
+- Say it in your own words, for example "Stop supervising this chat." or "Ferma la supervisione di questa chat."; in
+  the Supervisor conversation "Fermati." is enough. Quoted or pasted text, a negated request, a task cancellation or a
+  message naming two chats does not stop supervision.
+- A stop survives restarts, cancels unsent check-ins and settles only the Supervisor conversation, even if it was
+  pinned or kept active before the stop. It does not stop or change the supervised chat, other chats or the project.
+
 ## Teams and native actions
 
 The team view distinguishes the root, direct helpers and operational children.

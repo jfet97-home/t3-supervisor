@@ -1394,8 +1394,9 @@ test("agreement snapshots preserve mixed plans through restart and mark replaced
   assert.equal(snapshot.tasks[0]?.workflow?.plan?.nodes[0]?.kind, "step");
   if (snapshot.tasks[0]?.workflow?.plan?.nodes[0]?.kind === "step") assert.equal(snapshot.tasks[0].workflow?.plan?.nodes[0]?.localId, "csv-export");
   const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null)!;
-  fixture.supervisorStore.setBinding({...binding, state: "missing"});
-  fixture.supervisorStore.replaceMissingBinding({...binding, state: "missing"}, defaultSupervisorModel);
+  fixture.supervisorStore.setBinding({...binding, state: "missing", deliveredRoleVersion: "delivered-to-old-root"});
+  const replaced = fixture.supervisorStore.replaceMissingBinding({...binding, state: "missing", deliveredRoleVersion: "delivered-to-old-root"}, defaultSupervisorModel);
+  assert.equal(replaced.deliveredRoleVersion, undefined, "a replacement conversation receives the full standing instructions again");
   const stale = fixture.supervisorStore.task("agreement-source")?.agreement;
   assert.equal(stale?.status, "stale");
   assert.equal(stale?.supervisorMessageId, "supervisor-proof");

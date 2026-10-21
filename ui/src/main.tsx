@@ -30,6 +30,7 @@ const labels: Record<string, string> = {
   observe_only: "Observe only",
   no_match: "No match",
   needs_context: "Needs context",
+  not_supervised: "Supervision not needed",
   uncertain: "Delivery uncertain",
   sent: "Confirmed sent",
   visible: "Visible in chat",

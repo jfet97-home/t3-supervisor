@@ -37,10 +37,11 @@ const fixture = async () => {
   const details = new Map<string, unknown>();
   const reads: string[] = [];
   let duringRead: (() => void) | undefined;
+  let stoppedMain: string | null = null;
   const native = {listThreads: async () => threads, getTurnItem: async ({itemId}: {itemId: string}) => ({item: details.get(itemId)}),
     projection: async (id: string) => {reads.push(id);if (id === member.threadId) duringRead?.();return projections.get(id)!;}};
   const workflows = new WorkflowWriteController({supervisors, team, workflows: new WorkflowStateStore(supervisors, () => true),
-    native, isEnabled: () => true, maxEvidenceWaitMs: 0});
+    native, isEnabled: () => true, isChatStopped: threadId => threadId === stoppedMain, maxEvidenceWaitMs: 0});
   const controller = new SupervisorTeamController(workflows, team, null);
   // create only the local durable receipt table. No native RPC/POST is used by this fixture.
   new SupervisorHelperTransport({store: supervisors, rpc: null, baseUrl: "http://unused.invalid", projection: native.projection});
@@ -82,6 +83,7 @@ const fixture = async () => {
   };
   return {guidance, supervisors, team, binding, member, original, assignment, projections, helper, controller, args, proof, marker, reads,
     duringRead: (callback: () => void) => {duringRead = callback;},
+    stopMain: (threadId: string | null) => {stoppedMain = threadId;},
     call: (input: Record<string, unknown> = args) => controller.call(input, AbortSignal.timeout(5000)) as Promise<{status: string; reason?: string; result?: unknown}>,
     cleanup: async () => {guidance.close();await rm(directory, {recursive: true, force: true});}};
 };
@@ -103,6 +105,45 @@ test("review_handover requires exact native root proof and offers no helper ackn
   f.proof(f.args);
   assert.equal((await f.call()).status, "ok");
   assert.ok(f.reads.includes(f.member.threadId), "the root action reads current native helper truth");
+});
+
+test("a human stop of the main fences every team and guidance effect at its first and final authority check, but not reads", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  const before = f.team.snapshot(f.binding);
+  f.proof(f.args);
+  f.stopMain("main");
+  assert.equal((await f.call()).reason, "actor_not_current_ready_enabled", "the first authority check reads the per-chat stop");
+  assert.equal(f.reads.length, 0, "nothing native is read for a fenced effect");
+  assert.equal((await f.call({supervisorThreadId: f.binding.threadId, bindingGeneration: f.binding.generation, action: "read"})).status, "ok",
+    "the stopped Supervisor can still read its team");
+  const guide = await f.controller.guide({supervisorThreadId: f.member.threadId, bindingGeneration: f.binding.generation, memberEpoch: f.member.epoch,
+    operationId: "stopped-guide", targetThreadId: "branch", text: "Continue."}, AbortSignal.timeout(5000)) as {status: string; reason?: string};
+  assert.equal(guide.reason, "actor_not_current_ready_enabled", "a helper of a stopped main cannot guide its assigned work");
+  f.stopMain("another-main");
+  f.duringRead(() => f.stopMain("main"));
+  const late = await f.call();
+  assert.ok(late.status !== "ok" && ["actor_changed", "actor_not_current_ready_enabled"].includes(late.reason ?? ""), `a stop saved during the native read is caught by the final check: ${JSON.stringify(late)}`);
+  assert.deepEqual(f.team.snapshot(f.binding), before, "no fenced effect changed the team");
+  f.stopMain("another-main");
+  f.duringRead(() => {});
+  assert.equal((await f.call()).status, "ok", "an unrelated chat's stop never fences this main");
+});
+
+test("a stopped chat closes guidance awaiting a fallback route as not sent instead of sending another route", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  for (const [operationId, status] of [["stopped-fallback", "needs_fallback"], ["stopped-escalation", "needs_escalation"]] as const) {
+    const record = {status, targetThreadId: "branch", supervisorThreadId: f.member.threadId, bindingGeneration: f.binding.generation, memberEpoch: f.member.epoch,
+      assignmentRootThreadId: "branch", assignmentEpoch: f.assignment.epoch, operationId, routedThreadId: "branch", commandId: `command-${operationId}`,
+      messageId: `message-${operationId}`, requestId: `guide:${operationId}`, targetRunId: "branch-run", text: "Continue.", attempts: []};
+    f.guidance.db.prepare("INSERT INTO supervisor_team_tool_receipts VALUES(?,?,?,?,?,?,?,?)").run(f.binding.threadId, f.member.threadId, f.binding.generation,
+      f.member.epoch, operationId, "hash", `evidence-${operationId}`, JSON.stringify(record));
+  }
+  const reads = f.reads.length;
+  await f.controller.reconcileStopped(f.binding, AbortSignal.timeout(5000));
+  const statuses = f.guidance.db.prepare("SELECT operation_id, json_extract(document,'$.status') AS status FROM supervisor_team_tool_receipts ORDER BY operation_id").all()
+    .map(row => [String(row.operation_id), String(row.status)]);
+  assert.deepEqual(statuses, [["stopped-escalation", "not_sent"], ["stopped-fallback", "not_sent"]], "no fallback or escalation route is sent after a stop");
+  assert.equal(f.reads.length, reads, "closing a definitely rejected attempt needs no native read or send");
 });
 
 test("review verification identifies an existing attempt by its stored sent bytes", async t => {

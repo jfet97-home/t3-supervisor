@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultMonitoringSettings, defaultSupervisorTeamSettings, ProjectSupervisorSave, ProjectSupervisorSnapshot, type DefinitionReviewInfo, type ProjectSupervisorInfo, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput, type ProjectSupervisorTeamInfo, type SupervisorModelSelection, type WorkflowAgreementInfo, type WorkflowPlanGroupInfo, type WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import type { WorkflowProgressSnapshot } from "../src/workflow-progress.js";
-import { ProjectSupervisorView, WorkflowProgressPanel, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
+import { confirmChatSupervisionChange, ProjectSupervisorView, WorkflowProgressPanel, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
 
 const selection: SupervisorModelSelection = {
@@ -1077,4 +1077,63 @@ test("an external contribution diagnostic explains the record without implying a
   assert.match(html, /Code:<\/strong> <code>contribution_revision_gap<\/code>/);
   assert.match(html, /<code>&lt;b&gt;main-message&lt;\/b&gt;<\/code>/);
   assert.doesNotMatch(html, /workflow acceptance was not recognized/);
+});
+
+test("the selected chat shows its saved supervision state with one native Stop supervision or Enable supervision button", () => {
+  const render = (stopped: boolean, busy = false, message: string | null = null) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
+    ...viewDefaults, section: "progress", snapshot: {...snapshot, chatSupervision: {stopped, policyGeneration: 4, stoppedBy: stopped ? "relay" : null, stoppedAt: stopped ? 1 : null}},
+    selection, monitoring, threadId: "task-thread", connected: true, saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false,
+    shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false, chatSupervisionBusy: busy, chatSupervisionMessage: message,
+    onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+  }));
+  const on = render(false);
+  assert.match(on, /Allowed for this chat; project\/global settings still apply\./u, "an allowed chat is not described as supervised while project or global settings may disable it");
+  assert.match(on, /<button type="button">Stop supervision<\/button>/u);
+  assert.equal(on.match(/role="status"/gu)?.length ?? 0, 1, "one status region reports the saved result or error");
+  const stopped = render(true, false, "Supervision is stopped for this chat.");
+  assert.match(stopped, /Supervision is stopped for this chat \(asked in this chat\)/u);
+  assert.match(stopped, /<button type="button">Enable supervision<\/button>/u);
+  assert.match(stopped, /<p role="status">Supervision is stopped for this chat\.<\/p>/u);
+  assert.match(render(true, true), /<button type="button" disabled="" aria-busy="true">Saving…<\/button>/u, "a pending change cannot be submitted twice");
+  const locked = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+    ...viewDefaults, section: "progress", snapshot: {...snapshot, chatSupervision: {stopped: false, policyGeneration: 4, stoppedBy: null, stoppedAt: null}},
+    selection, monitoring, threadId: "task-thread", connected: true, saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false,
+    shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false, chatSupervisionLocked: true,
+    onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+  }));
+  assert.match(locked, /<button type="button" disabled="">Stop supervision<\/button>/u, "another chat's pending change keeps this chat's button disabled without claiming it is saving");
+});
+
+test("a late chat-supervision response never replaces the view of a chat selected afterwards", async () => {
+  const deferred = <T,>() => {let resolve!: (value: T) => void;let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((ok, fail) => {resolve = ok;reject = fail;});return {promise, resolve, reject};};
+  const saved = {...snapshot, chatSupervision: {stopped: true, policyGeneration: 5, stoppedBy: "ui" as const, stoppedAt: 1}};
+  let selected = "A";
+  const startedFor = (scope: string) => () => selected === scope;
+
+  const lateSuccess = deferred<{snapshot?: typeof saved | null; message: string}>();let reloads = 0;
+  const pendingSuccess = confirmChatSupervisionChange(() => lateSuccess.promise, async () => {reloads++;return saved;}, startedFor("A"));
+  selected = "B";lateSuccess.resolve({snapshot: saved, message: "Supervision is stopped for this chat."});
+  assert.equal(await pendingSuccess, null, "a response that arrives after switching chats is dropped");
+
+  selected = "A";
+  const lateReload = deferred<typeof saved>();
+  const pendingReload = confirmChatSupervisionChange(async () => ({message: "Saved."}), () => lateReload.promise, startedFor("A"));
+  await Promise.resolve();selected = "B";lateReload.resolve(saved);
+  assert.equal(await pendingReload, null, "a confirming reload that completes after switching chats is dropped");
+
+  selected = "A";
+  const lateFailure = deferred<{message: string}>();
+  const pendingFailure = confirmChatSupervisionChange(() => lateFailure.promise, async () => {reloads++;return saved;}, startedFor("A"));
+  selected = "B";lateFailure.reject(new Error("lost response"));
+  assert.equal(await pendingFailure, null, "an unknown outcome after switching chats changes nothing");
+  assert.equal(reloads, 0, "no stale reload is started for a chat that is no longer selected");
+
+  selected = "A";
+  assert.deepEqual(await confirmChatSupervisionChange(async () => ({snapshot: saved, message: "Stopped."}), async () => saved, startedFor("A")),
+    {snapshot: saved, message: "Stopped."});
+  assert.deepEqual(await confirmChatSupervisionChange(async () => {throw new Error("conflict");}, async () => saved, startedFor("A")),
+    {snapshot: saved, message: "The change could not be confirmed. The saved state is shown."}, "an unknown outcome shows the server-confirmed state");
+  assert.deepEqual(await confirmChatSupervisionChange(async () => {throw new Error("lost");}, async () => {throw new Error("down");}, startedFor("A")),
+    {snapshot: null, message: "The change could not be confirmed and the saved state could not be read. Refresh Supervisor status."});
 });

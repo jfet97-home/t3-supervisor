@@ -39,6 +39,19 @@ provenance. Scheduled/imported/MCP-originated requests remain outside automatic
 initial interpretation. User/tool quotations, private reasoning and arbitrary
 agent-selected excerpts do not establish task authority.
 
+The Supervisor interprets the latest genuine request together with earlier unresolved
+requests in the same main, such as an issue link that did not yet establish an
+objective; a bootstrap, setup or recovery instruction is treated as a step toward
+that request, not its replacement. With the workflow MCP available, interpretation
+receives a short definition manifest and reads complete definitions on demand through
+`workflow_read`, so the catalog is not pushed into the prompt. A manifest too large for
+one request keeps the reader and shrinks to member counts, then to a prefix of IDs and
+names, stating what it omitted. Interpretation first
+decides whether supervision is needed: a short self-contained communication, lookup
+or status request is recorded as `not_supervised` with its reason, gets no proposal,
+introduction or check-ins, and the next genuine request is interpreted again. This
+semantic decision is temporary; it is unrelated to a human's durable stop.
+
 The Supervisor receives the task, source identity, readable step/workflow material,
 configuration and diagnostics. Valid definitions support a source-bound proposal.
 Malformed, cyclic, missing or incomplete material remains explicit; it does not
@@ -62,20 +75,20 @@ agent, schedules a task or proves successful execution.
 
 ## Dialogue and agreement
 
-Startup carries one complete canonical proposal per recipient. The operative gets
-a short outline rather than repeated descriptions. A valid initialization confirms
-that record using source metadata, without repeating the already-interpreted catalog;
-provisional initialization keeps complete source material. Initialization and definition
-recovery use a read/send dialogue role; full editing and team instructions arrive with
-scheduled monitoring. Monitoring shares task context across its child rows. Recovery
-keeps exact parsed guidance for authoring and complete changed, added or removed raw
-source bodies. Identical raw bodies use verified hashes instead of repeated text;
-identical approved entries reference the observed entry. Invalid reads retain both forms.
-Oversized requests stop before delivery with a visible reason in Progress and Plan;
-pending activity and uncertain delivery identities remain intact. Retry stays explicit.
-Blocked startup also stops automatic definition review and renewal until Retry. Readable
-definition changes during healthy startup, including invalid or missing definitions,
-remain pending context work.
+Startup is compact. The initialization turn only confirms the service-prepared
+proposal by echoing its exact reference `{taskId, proposalId, digest}`; definitions
+stay available through `workflow_read`. The operative introduction opens with the
+obligation to agree a task-relevant workflow before implementing (evidence gathering
+and bootstrap work may come first; the Supervisor cannot block tools), then an outline
+and the exact acceptance record. Wakes carry the full standing instructions once per
+version and afterwards a compact core with their version; full instructions, task
+context, definitions and dry-run checks are pulled on demand. Each wake row has one
+activity list and per-task context with revision pins, proposal identity and digest,
+agreement and repair state. Oversized requests stop before delivery with a visible
+reason in Progress and Plan; pending activity and uncertain delivery identities remain
+intact. Retry stays explicit. Blocked startup also stops automatic definition review
+and renewal until Retry. Readable definition changes during healthy startup, including
+invalid or missing definitions, remain pending context work.
 
 The service initializes the Supervisor's context before introducing a validated
 proposal. When the main is idle, queued delivery starts a normal new turn on the main. When
@@ -97,16 +110,11 @@ request identities.
 When an owner question or approval is pending, potentially interrupting guidance
 waits; the Supervisor never answers or resolves that native request.
 
-The two bound chats negotiate by native messages. A saved agreement requires
-matching structured proposal and full-plan acceptance in completed, source-linked
-main assistant messages. Casual assent, streaming text, tool quotations or a
-subagent's message cannot establish it. The structured record envelope has exactly
-`taskId`, `proposalId`, `workspaceRoot`, `revision` and `workflow`. Its workflow is
-the canonical plan value (definition status/completeness, requirement knowledge,
-requirements, issues and nested plan), without presentation fields. The combined
-revision binds global input too; globalRevision remains separate proposal/source
-metadata rather than a second top-level record field. Workspace and definition revision are
-rechecked. Formal agreement requires current, complete, valid definitions; invalid
+The two bound chats negotiate by native messages. A saved agreement requires a
+Supervisor proposal in its own completed message and the exact acceptance reference
+in a completed, source-linked main assistant message after the introduction. Casual
+assent, streaming text, quoted or nested records, tool output or a subagent's message
+cannot establish it. Workspace and definition revision are rechecked. Formal agreement requires current, complete, valid definitions; invalid
 or incomplete material supports provisional dialogue, not saved acceptance. Stale agreements remain history; changed candidates require new matching
 confirmation. An agreement proves agreement, not execution, delegation or compliance.
 An initial service-generated provisional record with no plan can initialize
@@ -114,47 +122,36 @@ repair dialogue only when its complete shape and current source context match
 exactly. It establishes no agreement or source-bound write authority; those require
 a later complete valid proposal.
 
-### Canonical dialogue records
+### Compact dialogue records
 
-Use the exact fenced `workflow-proposal` and `workflow-acceptance` records published
-for the current task. Both have exactly five top-level fields:
-`taskId`, `proposalId`, `workspaceRoot`, `revision` and `workflow`. The complete
-`workflow` value has `definitionsStatus`, `definitionsComplete`,
-`requirementsKnown`, `requirements`, `issues` and `plan`. Preserve the whole
-service-published value, including generated node IDs, canonical source metadata,
-contributor thread IDs, nested `templatePath` values, workflow omissions and other
-canonical plan fields. These values bind the record to the task, workspace,
-definition revision and exact candidate; do not regenerate, omit or summarize them.
-Object key order is insignificant, but field values, text and array order must match.
+Only top-level fences count; a record inside an enclosing code block, a blockquote or
+an indented block is inert. A Supervisor proposal is a `workflow-proposal` draft:
+`{taskId, taskRevision, proposalId, revision, draft}` with optional `objective`. The
+draft holds requirement applicability decisions and a plan of definition IDs, local
+steps and groups. `taskRevision` and `revision` are the task source and definition
+revisions the author observed; a draft authored against another revision is rejected
+with the current value, never rebound. The service derives workspace, names,
+descriptions, sources and template paths from the trusted context and canonicalizes
+deterministically, so `workflow_read` view `check` returns the same digest before
+publication. A proposal ID is immutable: different content under the same ID is a
+conflict. `objective` restates the task from cited genuine user message IDs and
+updates the dashboard objective. The initialization turn echoes the prepared proposal
+as a `{taskId, proposalId, digest}` reference.
 
-Raw proposal or MCP draft input, such as requirement applicability plus a plan,
-is only input for service canonicalization. It is not a native chat record and
-cannot substitute for the complete canonical proposal. While no candidate is
-recognized, the Supervisor's bounded input may include service-generated canonical
-authoring examples to show the record shape. Examples are guidance only: they are
-not proposals, agreement, requirement-applicability decisions or authority. Preserve
-explicit issues and omissions when definitions or obligations are incomplete;
-do not silently drop known requirements. Canonical node objects retain all fields,
-including `null` and empty-array values, and trusted source/provenance. New wrapper
-groups use `templatePath: null`; do not invent or derive paths.
+The operative accepts only with a `workflow-acceptance` fence of exactly
+`{taskId, proposalId, digest}` naming a stored, formal candidate; the digest covers
+the task revision, definition pins and the whole canonical plan. Short
+acknowledgements, prose acceptance, extra fields or a reduced object such as
+`{"taskId":"…","mainThreadId":"…","proposalId":"…","accepted":true}` do not
+establish agreement. Full canonical records published before the compact protocol
+remain valid evidence for their own retained agreements only.
 
-A valid `workflow-proposal` is a candidate for discussion, including when it is
-provisional. The operative
-main assistant can establish agreement only with a completed `workflow-acceptance`
-that echoes the same five-field envelope and the entire canonical workflow value.
-Short acknowledgements, partial copies, extra fields, or a reduced object such as
-`{"taskId":"…","mainThreadId":"…","proposalId":"…","accepted":true}`
-do not establish agreement. `mainThreadId` and `accepted` are not fields in the
-acceptance record.
-
-When a completed message's record cannot be used for the current proposal or
-acceptance, the task stores at most one current bounded `workflowProtocolDiagnostic`
-with its role, fixed diagnostic code, source message ID and observation time. A
-new diagnostic replaces the previous one instead of accumulating a separate
-history or queue. The dashboard explains that the task still needs dialogue
-correction. This diagnostic does not create or remove agreement history, authorize
-workflow edits or prove execution; it also does not trigger an automatic retry or
-wake a chat.
+When a completed message's record cannot be used, the task stores one bounded
+`workflowProtocolDiagnostic` with role, code, the failing path, the expected shape and
+a detail code. A rejected Supervisor proposal is repair work: a due wake carries it
+as `protocolRepair`, and without due activity the service sends one focused repair
+wake per rejection. After three consecutive rejections the Supervisor stops retrying
+and tells the operative once that agreement is blocked; nothing is marked agreed.
 
 Diagnostics follow native T3 order, not clock time. A Supervisor record counts
 for the current task source only from the native run of the prompt that gave the
@@ -261,12 +258,47 @@ sending to the child and notifies the parent when relevant; it does not cancel t
 turn automatically. These routing instructions are not a sandbox around the
 model's other native tools.
 
+A human can stop supervision of one chat: from the dashboard's selected-chat Stop
+supervision control, by telling its Supervisor directly, by asking the operative to
+relay the request with the human's original message ID, or from another ordinary chat
+in the same environment whose genuine user message names the exact target chat ID.
+Only the human's own unquoted words count: they must affirmatively ask to stop
+supervision (English, German or Italian, such as "ferma la supervisione" or "non
+supervisionare più questa chat"), and they must not name another chat. In the
+Supervisor conversation itself a bare "stop" or "fermati" is addressed to the Supervisor
+and also counts. Quoted, pasted
+or fenced text, a negated request and an ordinary task cancellation never stop
+supervision. A stop instruction written before the latest explicit Enable supervision,
+including a replayed tool call, never reverses it.
+The stop is saved in the instance thread policy (the same list as the excluded chats),
+survives restarts, and only an explicit human Enable supervision resumes it. A stop
+cancels unsent check-ins, keeps sent and uncertain delivery identities, sends no new
+check-in, introduction or contact (rechecked immediately before every send), and
+settles the owned Supervisor once it is idle and every accepted delivery has a
+confirmed native outcome; reconciliation of those deliveries continues, without
+sending anything, even while project supervision is disabled. In a team the same
+observation-only reconciliation matches accepted helper check-ins and notices to their
+native outcome, fences requests and notices that were never posted and closes guidance
+awaiting a fallback route as not sent; nothing is sent, retried or retired. The stop
+then waits only for a team effect whose delivery is still genuinely unknown (an
+unresolved team request, a notice being delivered, a helper request); review-only
+events are superseded by the stop. The stop supersedes earlier keep-active
+choices for that Supervisor (pin, disabled auto-settle, reactivation); only such a
+choice made after the stop holds it. The operative main is never settled or
+interrupted because supervision stopped, and other chats keep their supervision.
+
 Quiet completion/archive/deletion can settle the owned chat once children and
-pending work are quiet. An idle main's old lifecycle-unknown child can also permit
+pending work are quiet. A request cancelled before it started executed nothing, so the
+latest executed run decides whether the main finished. The binding records the first
+gate that keeps an owned Supervisor active as `settlementBlockedBy`, shown on Progress.
+An idle main's old lifecycle-unknown child can also permit
 standby after the quiet period when no known activity, attention issue or pending
 input requires action. Unknown work stays unresolved. Background monitoring
 continues and relevant activity reuses the same Supervisor identity and binding;
-settlement is not deletion or agreement invalidation.
+settlement is not deletion or agreement invalidation. A settled Supervisor is never
+woken, and its main never contacted, to repair old records, recover definitions or
+introduce historical work, for example after re-enabling a project or a deployment;
+new main activity, including a new human request, wakes it through monitoring.
 
 ## Supervisor teams
 

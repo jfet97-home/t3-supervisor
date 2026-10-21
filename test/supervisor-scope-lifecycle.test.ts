@@ -162,6 +162,44 @@ test("completion parks an owned Supervisor after the quiet window and retains id
   assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId);
 });
 
+const executedRunHistory = (latestExecuted: {status: string; startedAt: string | null}) => [
+  {id: "run-1", ordinal: 1, status: "failed", requestedAt: "2026-10-14T10:00:00Z", startedAt: null, completedAt: "2026-10-14T10:00:03Z", rootNodeId: null},
+  {id: "run-2", ordinal: 2, status: "interrupted", requestedAt: "2026-10-14T10:01:00Z", startedAt: "2026-10-14T10:01:00Z", completedAt: "2026-10-14T10:01:05Z", rootNodeId: null},
+  {id: "run-3", ordinal: 3, status: "failed", requestedAt: "2026-10-14T10:02:00Z", startedAt: "2026-10-14T10:02:00Z", completedAt: "2026-10-14T10:40:00Z", rootNodeId: null},
+  {id: "run-4", ordinal: 4, status: "cancelled", requestedAt: "2026-10-14T10:03:00Z", startedAt: null, completedAt: "2026-10-14T10:03:10Z", rootNodeId: null},
+  {id: "run-5", ordinal: 5, status: latestExecuted.status, requestedAt: "2026-10-14T10:41:00Z", startedAt: latestExecuted.startedAt,
+    completedAt: "2026-10-14T10:55:00Z", rootNodeId: "root"},
+  {id: "run-6", ordinal: 6, status: "cancelled", requestedAt: "2026-10-14T10:42:00Z", startedAt: null, completedAt: "2026-10-14T10:45:00Z", rootNodeId: null},
+  {id: "run-7", ordinal: 7, status: "cancelled", requestedAt: "2026-10-14T10:44:00Z", startedAt: null, completedAt: "2026-10-14T10:44:03Z", rootNodeId: null},
+  {id: "run-8", ordinal: 8, status: "cancelled", requestedAt: "2026-10-14T10:44:10Z", startedAt: null, completedAt: "2026-10-14T10:44:13Z", rootNodeId: null},
+];
+
+test("queued requests cancelled before starting do not hide the completed executed main run from settlement", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  f.main.runs = executedRunHistory({status: "completed", startedAt: "2026-10-14T10:41:00Z"});
+  await f.check(10);
+  assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, "quiet_window");
+  await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.deepEqual(f.calls.map(call => [call.type, call.threadId]), [["thread.settle", f.binding.threadId]], "only the service-owned root is settled");
+  assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, null);
+});
+
+test("a failed, cancelled-after-start or running executed main run still blocks settlement behind later unstarted cancellations", async t => {
+  for (const latestExecuted of [{status: "failed", startedAt: "2026-10-14T10:41:00Z"}, {status: "cancelled", startedAt: "2026-10-14T10:41:00Z"},
+    {status: "interrupted", startedAt: "2026-10-14T10:41:00Z"}]) {
+    const f = await fixture();t.after(f.cleanup);
+    f.main.runs = executedRunHistory(latestExecuted);
+    await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+    assert.equal(f.calls.length, 0, latestExecuted.status);
+    assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, "main_run_not_completed", latestExecuted.status);
+  }
+  const f = await fixture();t.after(f.cleanup);
+  f.main.runs = [...executedRunHistory({status: "completed", startedAt: "2026-10-14T10:41:00Z"}),
+    {id: "run-9", ordinal: 9, status: "queued", requestedAt: "2026-10-14T09:20:00Z", startedAt: null, completedAt: null, rootNodeId: null}];
+  await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(f.calls.length, 0, "a queued request is pending work, not an unstarted cancellation");
+});
+
 test("a busy main short-circuits child projection reads even with a large known descendant set", async t => {
   const f = await fixture();t.after(f.cleanup);
   f.main.runs[0]!.status = "running";
@@ -530,4 +568,84 @@ test("an unsent introduction blocks ordinary settlement while monitoring is idle
   f.conversation.requests.saveIntroduction({taskId: "task", projectId: "p", threadId: "main", supervisorThreadId: f.binding.threadId, state: "ready", text: "Intro", messageId: "intro", targetRunId: null, error: null});
   await f.check(1);await f.check(100_000);assert.equal(f.calls.length, 0, "the unsent introduction remains a blocker");
   assert.equal(f.conversation.requests.introduction("task")?.state, "ready");
+});
+
+test("a stopped chat settles only its owned Supervisor once idle, whatever the main or its supervision state is doing", async t => {
+  const f = await fixture();t.after(f.cleanup);
+  f.conversation.supervisionStopped = threadId => threadId === "main";
+  f.main.runs[0]!.status = "running";
+  f.main.thread.activeRunId = "run";
+  const task = f.store.task("main")!;
+  f.store.saveTask({...task, definitionReview: {status: "checking", message: "Definitions changed.", expectedRevision: "a", observedRevision: "b",
+    supervisorMessageId: null, userMessageIds: [], updatedAt: 1}});
+  await f.check(10);
+  assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, "quiet_window");
+  await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.deepEqual(f.calls.map(call => [call.type, call.threadId]), [["thread.settle", f.binding.threadId]],
+    "the stopped main keeps running untouched; only the service-owned Supervisor is settled");
+  assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId, "the same Supervisor identity is retained for a later explicit enable");
+});
+
+test("a stopped chat's Supervisor waits while it is busy, while any accepted delivery is unresolved, and while a later user choice keeps it active", async t => {
+  const busy = await fixture();t.after(busy.cleanup);
+  busy.conversation.supervisionStopped = threadId => threadId === "main";
+  busy.supervisor.runs.push({id: "root-run", ordinal: 1, status: "running", requestedAt: "2026-10-14T10:00:00Z", startedAt: "2026-10-14T10:00:00Z", completedAt: null, rootNodeId: "root"});
+  busy.supervisor.thread.activeRunId = "root-run";
+  await busy.check(10);await busy.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(busy.calls.length, 0, "a running Supervisor turn is never settled");
+
+  for (const state of ["sending", "waiting", "uncertain"] as const) {
+    const unresolved = await fixture();t.after(unresolved.cleanup);
+    unresolved.conversation.supervisionStopped = threadId => threadId === "main";
+    const request = unresolved.conversation.requests.prepare({projectId: "p", supervisorThreadId: unresolved.binding.threadId, kind: "review", taskId: null,
+      text: "check-in", batch: null, completionMarker: "check-in completed"}, 5);
+    unresolved.conversation.requests.saveRequest({...request, state, sentAt: 5});
+    for (const now of [10, 10 + SUPERVISOR_SETTLE_QUIET_MS, 10 + 10 * SUPERVISOR_SETTLE_QUIET_MS]) await unresolved.check(now);
+    assert.equal(unresolved.calls.length, 0, `an idle Supervisor with a ${state} delivery is never settled, however old the delivery is`);
+    assert.equal(unresolved.store.binding("p", "main")?.settlementBlockedBy, "stopped_request_unresolved");
+    assert.equal(unresolved.conversation.requests.requests("p", unresolved.binding.threadId).find(item => item.id === request.id)?.state, state,
+      "waiting never rewrites the unknown delivery identity");
+    unresolved.conversation.requests.saveRequest({...request, state: "completed", sentAt: 5});
+    await unresolved.check(20 * SUPERVISOR_SETTLE_QUIET_MS);await unresolved.check(21 * SUPERVISOR_SETTLE_QUIET_MS);
+    assert.deepEqual(unresolved.calls.map(call => call.threadId), [unresolved.binding.threadId], "a confirmed outcome releases the owned Supervisor");
+  }
+
+  const stoppedAt = Date.parse("2026-10-14T11:00:00Z");
+  const kept = await fixture();t.after(kept.cleanup);
+  kept.conversation.supervisionStopped = threadId => threadId === "main";
+  kept.store.setBinding({...kept.store.binding("p", "main")!, supervisionStop: {route: "direct", callerThreadId: kept.binding.threadId, userMessageId: "stop", stoppedAt}});
+  kept.supervisor.thread.pinnedAt = "2026-10-14T11:00:05Z";
+  await kept.check(10);await kept.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(kept.calls.length, 0, "a pin made after the stop is a newer human decision");
+  assert.equal(kept.store.binding("p", "main")?.settlementBlockedBy, "keep_active");
+
+  const reopened = await fixture();t.after(reopened.cleanup);
+  reopened.conversation.supervisionStopped = threadId => threadId === "main";
+  reopened.store.setBinding({...reopened.store.binding("p", "main")!, supervisionStop: {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt}});
+  Object.assign(reopened.supervisor.thread, {settledOverride: "active", unsettledAt: "2026-10-14T11:30:00Z"});
+  await reopened.check(10);await reopened.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(reopened.calls.length, 0, "a human who reactivates the settled Supervisor after the stop is never overridden");
+});
+
+test("a later human stop supersedes every earlier keep-active choice for the owned Supervisor, and the main stays untouched", async t => {
+  const stoppedAt = Date.parse("2026-10-14T11:00:00Z");
+  for (const earlier of [{pinnedAt: "2026-10-14T10:00:00Z"}, {autoSettleDisabledAt: "2026-10-14T10:00:00Z"},
+    {settledOverride: "active", unsettledAt: "2026-10-14T10:00:00Z"}, {settledOverride: "active", unsettledAt: null}]) {
+    const f = await fixture();t.after(f.cleanup);
+    f.conversation.supervisionStopped = threadId => threadId === "main";
+    Object.assign(f.supervisor.thread, earlier);
+    f.store.setBinding({...f.store.binding("p", "main")!, manualKeepActive: true,
+      supervisionStop: {route: "chat", callerThreadId: "other-chat", userMessageId: "stop", stoppedAt}});
+    await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+    assert.deepEqual(f.calls.map(call => [call.type, call.threadId]), [["thread.settle", f.binding.threadId]], `${JSON.stringify(earlier)} predates the stop`);
+  }
+
+  const observed = await fixture();t.after(observed.cleanup);
+  observed.conversation.supervisionStopped = threadId => threadId === "main";
+  observed.supervisor.thread.pinnedAt = "2026-10-14T10:00:00Z";
+  const firstSeen = Date.parse("2026-10-14T12:00:00Z");
+  await observed.check(firstSeen);
+  assert.equal(observed.store.binding("p", "main")?.stopObservedAt, firstSeen, "a stop without a recorded time dates from its first observation");
+  await observed.check(firstSeen + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.deepEqual(observed.calls.map(call => [call.type, call.threadId]), [["thread.settle", observed.binding.threadId]]);
 });

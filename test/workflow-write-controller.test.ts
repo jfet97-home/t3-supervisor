@@ -728,6 +728,36 @@ test("disabled and replaced bindings deny old owner locators", async () => {
   } finally {await closeFixture(fixture);}
 });
 
+test("a human stop of the main fences workflow_write at the first and the final commit check, while reads continue", async () => {
+  const fixture = await makeFixture();
+  try {
+    let stopped: string | null = fixture.mainThreadId;
+    const stopOnDetail = {active: false};
+    const native: WorkflowNativeAccess = {...fixture.native, getTurnItem: async input => {
+      if (stopOnDetail.active) stopped = fixture.mainThreadId;
+      return fixture.native.getTurnItem(input, AbortSignal.timeout(1000));
+    }};
+    const controller = new WorkflowWriteController({...fixture.controller.options, native, isChatStopped: threadId => threadId === stopped});
+    const args = ensureArgs(fixture, "stopped-op", "Create the main workflow.");
+    installEvidence(fixture, args);
+    const detailsBefore = fixture.detailCalls.length;
+    assert.deepEqual(await controller.write(args), {status: "denied", operationId: "stopped-op", reason: "owner_not_current_ready_enabled"});
+    assert.equal(fixture.detailCalls.length, detailsBefore, "a fenced write reads no native evidence");
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
+    assert.notEqual((await controller.read(locator(fixture))).status, "denied", "the stopped Supervisor can still read its workflows");
+
+    stopped = null;
+    stopOnDetail.active = true;
+    const late = await controller.write(args);
+    assert.equal(late.status, "denied", `a stop saved while the native call is verified is caught before commit: ${JSON.stringify(late)}`);
+    assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null);
+
+    stopped = "another-main";
+    stopOnDetail.active = false;
+    assert.equal((await controller.write(args)).status, "created", "another chat's stop never fences this main");
+  } finally {await closeFixture(fixture);}
+});
+
 test("an incompatible main-scope version disables the default controller without resetting ownership", async () => {
   const fixture = await makeFixture();
   try {

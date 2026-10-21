@@ -639,3 +639,67 @@ test("persisted objective-only records are not backfilled or replayed", async (t
   assert.equal(native.runs.length, 1, "reconciliation does not replay the prior native request");
   assert.equal(fixture.dispatches().length, 0, "the synthetic historical request is not dispatched again");
 });
+
+const appendSourceMessage = (projection: Projection, id: string, ordinal: number, text: string): void => {
+  const runId = `${id}-run`;
+  const rootId = `${id}-root`;
+  projection.runs.push({id: runId, threadId: sourceThreadId, ordinal, status: "completed", requestedAt: baseTime, startedAt: baseTime, completedAt: baseTime,
+    rootNodeId: rootId, userMessageId: id, providerThreadId: `${id}-provider`});
+  projection.messages.push({id, threadId: sourceThreadId, runId, nodeId: rootId, role: "user", text, streaming: false, createdAt: baseTime, updatedAt: baseTime,
+    createdBy: "user", creationSource: "web"});
+  (projection.nodes as Array<Record<string, unknown>>).push({id: rootId, threadId: sourceThreadId, runId, parentNodeId: null, rootNodeId: rootId,
+    kind: "root_turn", status: "completed", providerThreadId: `${id}-provider`});
+};
+
+test("a link-only request stays context for the next genuine request instead of being replaced by a bootstrap instruction", async (t) => {
+  const fixture = await makeFixture();
+  t.after(fixture.cleanup);
+  const source = fixture.projections.get(sourceThreadId)!;
+  source.messages[0]!.text = "https://issues.example/browse/PROJ-1";
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  const first = fixture.task()!;
+  const native = fixture.projections.get(fixture.binding()!.threadId)!;
+  completeSupervisorRequest(native, first.messageId, JSON.stringify({objective: null, reason: "Only an issue link was supplied.", sourceMessageIds: [],
+    supervision: "needed", workflow: null}));
+  await supervisor.runOnce();
+  assert.equal(fixture.task()?.status, "needs_context");
+
+  appendSourceMessage(source, "bootstrap-message", 2, "Recover the failed worktree manually with Nix, then continue.");
+  await supervisor.runOnce();
+  const second = fixture.task()!;
+  assert.equal(second.sourceMessageId, "bootstrap-message");
+  assert.deepEqual(second.contextMessageIds, [sourceMessageId], "the unresolved link stays part of the task");
+  const dispatched = String(fixture.dispatches().at(-1)?.payload.text);
+  assert.ok(dispatched.includes(JSON.stringify([{messageId: sourceMessageId, text: "https://issues.example/browse/PROJ-1"}])),
+    "the interpretation sees the original request beside the bootstrap instruction");
+  assert.match(dispatched, /a bootstrap, setup or recovery instruction is a step toward that earlier request, not a replacement for it/u);
+});
+
+test("a semantic not-needed decision is persisted without negotiation and the next genuine request is reconsidered", async (t) => {
+  const fixture = await makeFixture();
+  t.after(fixture.cleanup);
+  const source = fixture.projections.get(sourceThreadId)!;
+  source.messages[0]!.text = "Thank the colleague for the documents and ask for the missing one.";
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  const first = fixture.task()!;
+  const native = fixture.projections.get(fixture.binding()!.threadId)!;
+  completeSupervisorRequest(native, first.messageId, JSON.stringify({objective: "Thank the colleague and ask for the missing document",
+    reason: "A short self-contained message with no workflow obligations.", sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null}));
+  await supervisor.runOnce();
+  const decided = fixture.task()!;
+  assert.equal(decided.status, "not_supervised");
+  assert.equal(decided.objective, "Thank the colleague and ask for the missing document");
+  assert.equal(decided.workflow?.plan ?? null, null);
+  await supervisor.runOnce();
+  assert.equal(fixture.dispatches().length, 1, "a not-needed task gets no initialization, introduction or negotiation");
+
+  appendSourceMessage(source, "substantive-message", 2, "Now implement the export retry policy in the service.");
+  await supervisor.runOnce();
+  const next = fixture.task()!;
+  assert.equal(next.sourceMessageId, "substantive-message");
+  assert.equal(next.contextMessageIds, undefined, "an answered not-needed request is complete and never carried into the next task as unresolved");
+  assert.equal(fixture.dispatches().length, 2, "a later genuine request is interpreted again in the same Supervisor conversation");
+  assert.equal(fixture.dispatches().at(-1)?.payload.threadId, fixture.binding()!.threadId);
+});

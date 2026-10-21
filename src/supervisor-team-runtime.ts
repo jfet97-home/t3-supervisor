@@ -192,7 +192,7 @@ export class SupervisorTeamRuntime {
     } catch { /* retry a failed native channel retirement on a later cycle */ }
   }
 
-  private async loseMember(binding: BindingRecord, member: TeamMember, signal: AbortSignal, reason: string): Promise<void> {
+  private async loseMember(binding: BindingRecord, member: TeamMember, signal: AbortSignal, reason: string, retire = true): Promise<void> {
     const current = this.options.teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
     // quarantine is terminal for service handling: its requests and notices stay fenced and it never becomes missing
     if (current?.state === "quarantined") return;
@@ -208,7 +208,7 @@ export class SupervisorTeamRuntime {
     for (const request of this.options.teamStore.unresolvedRequests(binding).filter(value => value.memberThreadId === member.threadId &&
       (value.requestId.startsWith("team-review:") || value.requestId.startsWith("team-ready:"))))
       this.options.teamStore.settleRequest(binding, request.requestId);
-    await this.retireHelper(binding, member.threadId, signal);
+    if (retire) await this.retireHelper(binding, member.threadId, signal);
   }
 
   private async readMemberProjection(binding: BindingRecord, member: TeamMember, signal: AbortSignal, observeOnly = false): Promise<Projection | null> {
@@ -303,6 +303,17 @@ export class SupervisorTeamRuntime {
     for (const eventId of eventIds) this.options.teamStore.acknowledgeEvent(binding, binding.threadId, eventId);
   }
 
+  /**
+   * Team effects that are still in flight: an unresolved team request, a notification being delivered and any helper request.
+   * A human stop waits only for these. A transfer is bookkeeping whose native effects are exactly its notices and requests,
+   * and review-only events and undelivered notices are superseded by the stop.
+   */
+  hasInflightEffects(binding: BindingRecord): boolean {
+    const snapshot = this.options.teamStore.snapshot(binding);
+    return this.options.teamStore.unresolvedRequests(binding).length > 0 ||
+      snapshot.notifications.some(notification => !notificationClosed(notification) && ["sending", "uncertain"].includes(notification.state)) ||
+      snapshot.members.some(member => this.options.requests.pending(binding.projectId, member.threadId) !== null);
+  }
   hasBlockingWork(binding: BindingRecord): boolean {
     const snapshot = this.options.teamStore.snapshot(binding);
     const members = new Map(snapshot.members.map(member => [member.threadId, member]));
@@ -346,18 +357,19 @@ export class SupervisorTeamRuntime {
     });
   }
 
-  private async reconcileRequest(binding: BindingRecord, member: TeamMember, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
+  private async reconcileRequest(binding: BindingRecord, member: TeamMember, threads: readonly ThreadInfo[], signal: AbortSignal, observeOnly = false): Promise<void> {
     const request = this.helperRequest(binding, member);
     if (!request || request.id.startsWith("team-note:") || !request.id.startsWith("team-review:")) return;
     const teamRequest = this.currentRequest(binding, request.id);
     if (!teamRequest || teamRequest.memberThreadId !== member.threadId) return;
-    const projection = await this.readMemberProjection(binding, member, signal);
+    const projection = await this.readMemberProjection(binding, member, signal, observeOnly);
     if (!projection) return;
     if (!this.validHelper(member, binding, projection) || !this.options.teamStore.resolveActor(binding, member.threadId, teamRequest.memberEpoch)) return;
     const message = projection.messages.find(item => item.threadId === member.threadId && this.options.helperTransport?.matchesMessage(binding, request.messageId, request.text, item, projection.messages));
     const run = projection.runs.find(item => item.threadId === member.threadId && (item.id === message?.runId || item.id === request.runId || item.userMessageId === message?.id));
     if (!run) {
       if (this.unresolvedDeliveryTooLong(request)) this.serviceUnresolvedDelivery(binding, member.threadId, request);
+      if (observeOnly) {await this.observeUndeliveredRequest(binding, member, request, teamRequest.requestId, signal);return;}
       if (["prepared", "uncertain", "waiting"].includes(request.state)) await this.dispatchHelperRequest(binding, member, request, teamRequest, threads, signal);
       else if (request.state === "sending") this.options.requests.saveRequest({...request, state: "uncertain", error: "The helper request may have been accepted; its original native identity is retained."});
       return;
@@ -406,6 +418,51 @@ export class SupervisorTeamRuntime {
       });
       if (open) this.serviceAttention(binding, member.threadId, failed, "A quarantined helper's request was never posted. Pending activity is retained; its other fences remain.");
     }
+  }
+
+  /**
+   * A helper request with no matching native run during stopped reconciliation: nothing is resent. A durable or native rejection
+   * of its receipt proves it was not delivered, so it fails and releases its fence; otherwise its identity stays unresolved.
+   */
+  private async observeUndeliveredRequest(binding: BindingRecord, member: TeamMember, request: ConversationRequest, teamRequestId: string, signal: AbortSignal): Promise<void> {
+    if (request.state === "sending") {
+      request = {...request, state: "uncertain", error: "The helper request may have been accepted; its original native identity is retained."};
+      this.options.requests.saveRequest(request);
+    }
+    if (!this.options.helperTransport || !this.consumeReadBudget(binding)) return;
+    const input = {threadId: member.threadId, commandId: `supervisor-review:${request.id}`, messageId: request.messageId, text: request.text};
+    if (await this.options.helperTransport.reconcileDelivery(binding, input, signal) !== "rejected") return;
+    const failed = {...request, state: "failed" as const, failureAcknowledged: true,
+      error: "Supervision was stopped for this chat; the native delivery of this helper request was rejected, so it was not delivered."};
+    this.options.store.store.transaction(() => {
+      this.options.requests.saveRequest(failed);
+      if (this.options.teamStore.unresolvedRequests(binding).some(value => value.requestId === teamRequestId)) this.options.teamStore.settleRequest(binding, teamRequestId);
+    });
+  }
+
+  /**
+   * Observation-only reconciliation while a human has stopped supervision of this chat, also while supervision is disabled.
+   * Nothing is sent, retried or retired: requests and notices that were never posted are fenced, accepted helper check-ins
+   * and notices are matched to their native outcome, lost members close their work and finished transfers complete, so stop
+   * settlement never waits only because ordinary processing is skipped. An effect whose delivery cannot be proven either way
+   * keeps its identity and remains unresolved.
+   */
+  async reconcileStopped(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
+    let snapshot = this.options.teamStore.snapshot(binding);
+    for (const member of snapshot.members) this.failNeverPostedRequests(binding, member);
+    for (const member of snapshot.members.filter(value => value.state === "missing" || value.state === "retired"))
+      await this.loseMember(binding, member, signal, `The helper is already ${member.state}; its check-in was closed and pending operational effects remain fenced.`, false);
+    snapshot = this.options.teamStore.snapshot(binding);
+    for (let index = 0; index < snapshot.notifications.length && !signal.aborted; index++) await this.reconcileNotifications(binding, this.options.teamStore.snapshot(binding), signal, true);
+    for (const member of this.options.teamStore.snapshot(binding).members.filter(value => value.state === "ready" || value.state === "registering")) {
+      if (signal.aborted) return;
+      const request = this.helperRequest(binding, member);
+      if (!request) continue;
+      if (request.id.startsWith("team-ready:")) await this.reconcileReadiness(binding, member, request, signal, true);
+      else if (member.state === "ready") await this.reconcileRequest(binding, member, threads, signal, true);
+    }
+    const transfers = this.options.teamStore.snapshot(binding).assignments.filter(assignment => assignment.state === "transferring").length;
+    for (let index = 0; index < transfers; index++) this.completeTransfer(binding);
   }
 
   async reconcile(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
@@ -485,13 +542,14 @@ export class SupervisorTeamRuntime {
     }
   }
 
-  private async reconcileReadiness(binding: BindingRecord, member: TeamMember, request: ConversationRequest, signal: AbortSignal): Promise<void> {
-    const projection = await this.readMemberProjection(binding, member, signal);
+  private async reconcileReadiness(binding: BindingRecord, member: TeamMember, request: ConversationRequest, signal: AbortSignal, observeOnly = false): Promise<void> {
+    const projection = await this.readMemberProjection(binding, member, signal, observeOnly);
     if (!projection || !this.validHelper(member, binding, projection)) return;
     const message = projection.messages.find(item => item.threadId === member.threadId && this.options.helperTransport?.matchesMessage(binding, request.messageId, request.text, item, projection.messages));
     const run = projection.runs.find(item => item.threadId === member.threadId && (item.id === message?.runId || item.id === request.runId || item.userMessageId === message?.id));
     if (!run) {
       if (this.unresolvedDeliveryTooLong(request)) this.serviceUnresolvedDelivery(binding, member.threadId, request);
+      if (observeOnly) {await this.observeUndeliveredRequest(binding, member, request, request.id, signal);return;}
       if (["prepared", "uncertain", "waiting"].includes(request.state)) await this.dispatchReadiness(binding, member, request, signal);
       else if (request.state === "sending") this.options.requests.saveRequest({...request, state: "uncertain", error: "Helper readiness may have been accepted; its original native identity is retained."});
       return;
@@ -597,11 +655,12 @@ export class SupervisorTeamRuntime {
     return true;
   }
 
-  private async reconcileNotifications(binding: BindingRecord, snapshot: SupervisorTeamSnapshot, signal: AbortSignal): Promise<void> {
+  private async reconcileNotifications(binding: BindingRecord, snapshot: SupervisorTeamSnapshot, signal: AbortSignal, observeOnly = false): Promise<void> {
     if (!this.options.helperTransport) return;
+    // while stopped only notices already being delivered are observed; a notice not yet attempted is never sent
     const candidates = snapshot.notifications.filter(notification => notification.state !== "acknowledged" && notification.state !== "superseded" && notification.state !== "failed" &&
       snapshot.members.some(member => member.threadId === notification.recipientThreadId &&
-        (["sending", "uncertain", "delivered"].includes(notification.state) || member.state === "ready" && member.epoch === notification.memberEpoch)));
+        (["sending", "uncertain", "delivered"].includes(notification.state) || !observeOnly && member.state === "ready" && member.epoch === notification.memberEpoch)));
     if (!candidates.length) return;
     const offset = (this.notificationOffset.get(binding.threadId) ?? 0) % candidates.length;
     const notification = candidates[offset]!;
@@ -620,7 +679,7 @@ export class SupervisorTeamRuntime {
     const neverPosted = () => ["sending", "uncertain"].includes(notification.state) && this.options.helperTransport?.receiptText(binding, messageId) === null;
     const neverPostedReason = "The notice was never posted: no delivery receipt exists and its recipient is no longer eligible.";
     // a non-ready member is only observed here: a lost conversation must not turn quarantine into missing
-    const projection = await this.readMemberProjection(binding, member, signal, member.state !== "ready");
+    const projection = await this.readMemberProjection(binding, member, signal, observeOnly || member.state !== "ready");
     if (!projection || !this.validHelper(member, binding, projection)) {
       // a durable or native rejection of an attempted POST needs no helper read; reconcile it read-only so an
       // archived, deleted or no longer eligible helper cannot strand a definitely undelivered notice
@@ -662,6 +721,13 @@ export class SupervisorTeamRuntime {
     }
     if (!eligible()) {
       if (neverPosted()) this.markNotificationRejected(binding, notification, neverPostedReason);
+      return;
+    }
+    if (observeOnly) {
+      // a stop supersedes a notice that was never posted; an attempted one is only reconciled read-only from its receipt
+      if (neverPosted()) this.markNotificationRejected(binding, notification, "Supervision was stopped for this chat before this notice was posted; it was not posted.");
+      else if (attempted && this.consumeReadBudget(binding) &&
+        await this.options.helperTransport.reconcileDelivery(binding, message, signal) === "rejected") this.markNotificationRejected(binding, notification);
       return;
     }
     if (!this.consumeReadBudget(binding)) return;

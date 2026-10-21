@@ -101,6 +101,10 @@ export const startGuidanceUi = async (
         try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.retry(payload, signal);},
         catch: () => new UiError({message: "Native access retry could not be confirmed. Refresh to inspect the retained state."}),
       }),
+      chatSupervision: ({payload}) => Effect.tryPromise({
+        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.setChatSupervision(payload, signal);},
+        catch: () => new UiError({message: "The chat supervision change could not be confirmed. Refresh to inspect the saved state."}),
+      }),
       projectConfiguration: ({query}) => Effect.tryPromise({
         try: (signal) => {
           if (!definitions) throw new Error("Project definition access is not configured.");

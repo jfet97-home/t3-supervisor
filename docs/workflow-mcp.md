@@ -20,38 +20,32 @@ observation note proves execution.
 
 ## Native workflow proposal and acceptance records
 
-Native chat negotiation uses complete fenced `workflow-proposal` and
-`workflow-acceptance` records; these are separate from `workflow_write` arguments
-and receipts. Each chat record has exactly `taskId`, `proposalId`,
-`workspaceRoot`, `revision` and `workflow`. Preserve the entire canonical `workflow`
-value from the proposal, including its definition/requirement state, issues,
-canonical node IDs, source and contributor metadata, nested template paths and
-omissions. Service normalization derives canonical fields from the trusted task
-and current definitions. A raw draft such as requirement applicability decisions
-and a plan is only normalization input; it is not a proposal or acceptance record.
-When no candidate is recognized, bounded canonical authoring examples may appear
-in the Supervisor's input. Use them only as format guidance: they are not
-proposals, agreement, applicability decisions or edit authority. Incomplete
-definitions keep explicit issues and omissions visible; preserve every canonical
-field, including `null` and empty arrays, source provenance and `templatePath`
-values. New wrapper groups use `templatePath: null`; never invent a path. JSON
-object key order may vary, but values, text and array order remain significant.
+Native chat negotiation uses compact top-level fenced records; they are separate from
+`workflow_write` arguments and receipts, and a record quoted inside another block is
+inert. The Supervisor publishes a `workflow-proposal` draft with exactly `taskId`,
+`taskRevision`, `proposalId`, `revision` and `draft` (plus optional `objective`) in its
+own completed message. The draft contains requirement applicability decisions and a
+plan of definition IDs, local steps and groups. The service binds it to the observed
+task source and definition revisions, derives workspace, names, descriptions, sources
+and template paths from the trusted definitions, and canonicalizes it with
+deterministic node IDs. A changed plan needs a fresh proposal ID; reusing an ID for
+different content is rejected.
 
-The operative main assistant records agreement only in its own completed assistant
-message after the proposal introduction, by returning the exact same five-field
-envelope and full canonical workflow value inside `workflow-acceptance`. A short
-acknowledgement, a reduced `{taskId, mainThreadId, proposalId, accepted: true}`
-object, omitted canonical fields or extra fields do not establish agreement.
-MCP transport access and a successful `workflow_write` remain separate capabilities
-and cannot stand in for native-message agreement.
+The operative main assistant records agreement only in its own completed message
+after the introduction, with a `workflow-acceptance` fence of exactly
+`{taskId, proposalId, digest}` naming a stored formal candidate. The digest covers the
+task revision, definition pins and the whole canonical plan. A short acknowledgement,
+a reduced `{taskId, mainThreadId, proposalId, accepted: true}` object, prose or extra
+fields do not establish agreement. Full canonical records published before this
+protocol remain evidence for their own retained agreements only. MCP transport access
+and a successful `workflow_write` remain separate capabilities and cannot stand in for
+native-message agreement.
 
-The current task stores at most one bounded `workflowProtocolDiagnostic` when a
-completed message's record is not usable for the dialogue. A new diagnostic
-replaces the previous one; it does not build a separate history or queue. The
-dashboard identifies the message role and a fixed code without exposing the body.
-Treat it as information that the dialogue needs correction: it does not change
-agreement history, authorize an edit, prove execution, or schedule an automatic
-retry or new chat turn.
+The current task stores at most one bounded `workflowProtocolDiagnostic` with its role,
+code, failing path, expected shape and detail. A new diagnostic replaces the previous
+one. A rejected Supervisor proposal becomes focused repair work in the next wake and,
+after three consecutive rejections, a visible blocker; it never changes agreement
+history, authorizes an edit or proves execution.
 
 ## External contributions
 
@@ -168,6 +162,40 @@ behavior, not a positive workflow edit or complete configured-project dialogue.
 coordinates. It returns bounded workflow state and native main/descendant lineage,
 including child parent-step references and archive flags. Reads require the shared MCP transport token but are not
 actor-authenticated to a particular T3 conversation and grant no edit authority.
+With `view`, `workflow_read` returns bounded context for the verified binding instead of
+workflow documents:
+
+- `context`: the current task, its revision pins, objective, earlier unresolved request
+  IDs, proposal identity and digest, agreement and diagnostics.
+- `definitions`: a manifest of the task's pinned definitions, or with `definitionIds`
+  complete selected definitions and the exact templates of selected workflows; add
+  `includeSources` for raw definition files when diagnosing invalid definitions.
+- `instructions`: the full standing Supervisor instructions and their version.
+- `check`: a dry run of one compact `workflow-proposal` record, returning the outline,
+  formal state, digest and acceptance record, or the first failing code, path and
+  expected shape. It publishes nothing.
+
+`supervision_stop` durably stops supervision of one chat on a genuine human request.
+Its arguments are `callerThreadId`, `targetThreadId`, `userMessageId` and
+`operationId`. The service verifies the caller's own executed native tool call with
+exactly these arguments, then requires the human's original native user message: in the
+bound Supervisor conversation or its main when the caller is that chat's Supervisor, in
+the main when the operative calls for itself, or in the caller's own chat, naming the
+exact target chat ID, for a request from another chat in the same environment. Quoted
+or relayed text, tool output, another agent's message, a foreign Supervisor's scope and
+targets outside the environment are rejected. The human's unquoted words must
+affirmatively ask to stop supervision and name no other chat (denials:
+`stop_instruction_not_found`, `target_ambiguous`, `target_not_named_by_user`); a
+message older than the latest explicit Enable is denied with
+`superseded_by_later_enable`. When the caller acts in the chat the human wrote in, its
+verified call must belong to the run T3 delivered that message into, including a steer into
+an already running turn (`stop_call_not_in_human_turn`); a later turn cannot borrow it.
+`supervision_stop` stays callable while project supervision is disabled. The stop is the
+instance thread policy the dashboard's per-chat control also edits; only a human can
+enable supervision again. After a stop the chat's Supervisor and its helpers can still
+read, but `workflow_write`, `supervision_team` actions and `supervision_guide` are refused
+at their first and their final authority check.
+
 `workflow_write` supports four actions:
 
 - `ensure_main` creates an unaccepted main draft.
@@ -191,8 +219,8 @@ During initialization the root publishes the supplied initial record unchanged a
 does not contact the operative main. In later check-ins, if the current task has
 no valid source-bound plan, creating an empty draft does
 not repair the missing proposal and `apply` remains unavailable. The root repairs
-it with a fresh complete canonical chat proposal, publishes and sends the identical
-record, then finishes its check-in. It waits until the service exposes that valid
+it with a fresh compact draft proposal in its own message, sends that proposal to the
+operative main, then finishes its check-in. It waits until the service exposes that valid
 current proposal before retrying `apply`. Invalid definitions or unresolved
 requirements keep the proposal provisional; they do not authorize weaker edits.
 The controller supplies the current task's trusted canonical proposal and a fresh
