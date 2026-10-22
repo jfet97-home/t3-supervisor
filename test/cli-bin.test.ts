@@ -57,8 +57,10 @@ it("CT-MAIN-01: SIGTERM after readiness exits 130, closes the health, UI and MCP
   assert.deepEqual(await listenerStates(harness), { health: "open", ui: "open", mcp: "open" });
   const result = await signalAndWait(child, "SIGTERM");
   assert.deepEqual({ code: result.code, signal: result.signal }, interruptExit);
-  assert.equal(result.stderr, "");
-  assert.deepEqual(events(result.stdout), ["supervisor_started"]);
+  privately("SIGTERM output", [harness.token], () => {
+    assert.equal(result.stderr, "");
+    assert.deepEqual(events(result.stdout), ["supervisor_started"]);
+  });
   await assertReleased(harness, child.pid, readyFiles, readyDatabases);
 });
 
@@ -85,9 +87,11 @@ it("CT-MAIN-03: startup failures exit 1 without token bytes: missing token file 
       assert.deepEqual(leakedSecrets(missing.stdout + missing.stderr, [harness.token, ...canaries]), [], label);
       // baseline rendering: runMain's default logger reports the UnknownError on stdout, not stderr, with its ENOENT cause
       // naming the configured path (configuration, not a secret; BC-CLI-04 replaces it with a fixed message)
-      assert.equal(missing.stderr, "", label);
-      assert.match(missing.stdout, /^\[[\d:.]+\] ERROR \(#\d+\): UnknownError: An error occurred in Effect\.tryPromise$/mu, label);
-      assert.ok(missing.stdout.includes(`[cause]: Error: ENOENT: no such file or directory, open '${missingTokenFile}'`), label);
+      privately(label, [harness.token, ...canaries], () => {
+        assert.equal(missing.stderr, "");
+        assert.match(missing.stdout, /^\[[\d:.]+\] ERROR \(#\d+\): UnknownError: An error occurred in Effect\.tryPromise$/mu);
+        assert.ok(missing.stdout.includes(`[cause]: Error: ENOENT: no such file or directory, open '${missingTokenFile}'`));
+      });
 
       const invalidDataDirectory = join(harness.home, `invalid-${label.replace(/\W/gu, "-")}`);
       const invalid = await runProcess(process.execPath, ["--import", tsxLoader, ...entry], {
@@ -95,11 +99,13 @@ it("CT-MAIN-03: startup failures exit 1 without token bytes: missing token file 
         env: { ...harness.env, DATA_DIRECTORY: invalidDataDirectory, SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: "a b" },
       });
       assert.deepEqual({ code: invalid.code, signal: invalid.signal }, { code: 1, signal: null }, label);
-      assert.equal(invalid.stdout, "", label);
-      assert.deepEqual(leakedSecrets(invalid.stderr, [harness.token]), [], label);
+      assert.deepEqual(leakedSecrets(invalid.stdout + invalid.stderr, [harness.token]), [], label);
       // baseline: loadConfig throws at module top level, so node prints the uncaught error with its stack
-      assert.match(invalid.stderr, /^Error: invalid_helper_provider_instance_id$/mu, label);
-      assert.match(invalid.stderr, /^\s+at loadHelperProviderInstanceId \(/mu, label);
+      privately(label, [harness.token], () => {
+        assert.equal(invalid.stdout, "");
+        assert.match(invalid.stderr, /^Error: invalid_helper_provider_instance_id$/mu);
+        assert.match(invalid.stderr, /^\s+at loadHelperProviderInstanceId \(/mu);
+      });
       await assert.rejects(stat(invalidDataDirectory), { code: "ENOENT" }, "configuration fails before any store opens");
     }
   });
@@ -174,8 +180,10 @@ describe("built and installed bin", () => {
       assert.deepEqual(await listenerStates(harness), { health: "open", ui: "open", mcp: "open" });
       const result = await signalAndWait(child, signal);
       assert.deepEqual({ code: result.code, signal: result.signal }, interruptExit);
-      assert.equal(result.stderr, "");
-      assert.deepEqual(events(result.stdout), ["supervisor_started"]);
+      privately(`${signal} output`, [harness.token], () => {
+        assert.equal(result.stderr, "");
+        assert.deepEqual(events(result.stdout), ["supervisor_started"]);
+      });
       await assertReleased(harness, child.pid, readyFiles, readyDatabases);
     });
 
@@ -188,8 +196,10 @@ describe("built and installed bin", () => {
       assert.deepEqual(await listenerStates(harness), { health: "open", ui: "refused", mcp: "refused" });
       const result = await signalAndWait(child, signal);
       assert.deepEqual({ code: result.code, signal: result.signal }, interruptExit);
-      assert.equal(result.stderr, "");
-      assert.deepEqual(events(result.stdout), ["supervisor_started"]);
+      privately(`${signal} output`, [harness.token], () => {
+        assert.equal(result.stderr, "");
+        assert.deepEqual(events(result.stdout), ["supervisor_started"]);
+      });
       assert.deepEqual(harness.fake.traffic.requests, [], "no subscription before a descriptor");
       await assertReleased(harness, child.pid, ["catalog.sqlite3", "thread-settings.sqlite3"], ["catalog.sqlite3", "thread-settings.sqlite3"]);
     });
@@ -232,7 +242,8 @@ describe("built and installed bin", () => {
 
       holder.child.stdin?.write("commit\n");
       await holder.waitForStdout((stdout) => stdout === "locked\ncommitted\n", 15_000, "the holder commit");
-      assert.deepEqual(await holder.closed(exitTimeoutMs), { code: 0, signal: null, stdout: "locked\ncommitted\n", stderr: "" });
+      const held = await holder.closed(exitTimeoutMs);
+      privately("holder output", [workflowToken], () => assert.deepEqual(held, { code: 0, signal: null, stdout: "locked\ncommitted\n", stderr: "" }));
 
       assert.deepEqual((await readdir(join(state, "access"))).sort(), ["login.sqlite3", "workflow-mcp-token"], "no hot journal is left");
       const check = new DatabaseSync(database);

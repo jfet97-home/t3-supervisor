@@ -15,8 +15,10 @@ const unknownInStderr = token();
 const knownInStdout = token();
 const secretInMessage = token();
 const childOutput = token();
+const matchedStderr = token();
+const eventStdout = token();
 writeFileSync(join(process.env.HARNESS_MARKERS ?? "", "private-tokens.json"),
-  JSON.stringify([issued, unknownInStderr, knownInStdout, secretInMessage, childOutput]));
+  JSON.stringify([issued, unknownInStderr, knownInStdout, secretInMessage, childOutput, matchedStderr, eventStdout]));
 
 it("a repeated token fails as a boolean", () => {
   const forged = [issued, issued];
@@ -38,4 +40,13 @@ it("a secret inside an error message fails the message comparison", () => {
 it("a failed child process with a token in its output", async () => {
   await promisify(execFile)(process.execPath, ["-e", `process.stdout.write(${JSON.stringify(childOutput)}); process.exit(3)`])
     .catch((error: unknown) => { throw childFailure("auth forge child", error); });
+});
+
+it("a token in stderr fails the pattern match", () => {
+  privately("startup failure", [], () => assert.match(`Error: ${matchedStderr}\n`, /^Error: invalid_helper_provider_instance_id$/mu));
+});
+
+it("a token in a non-json stdout line fails the event parse", () => {
+  const events = (stdout: string): unknown[] => stdout.split("\n").filter(Boolean).map((line) => (JSON.parse(line) as { event?: unknown }).event);
+  privately("shutdown output", [], () => assert.deepEqual(events(`{"event":"supervisor_started"}\nbearer ${eventStdout}\n`), ["supervisor_started"]));
 });

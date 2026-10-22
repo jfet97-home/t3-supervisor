@@ -82,13 +82,17 @@ it("CT-PROBE-T3-02: a refused token prints the verified:false line and exits 1 w
     const unset: NodeJS.ProcessEnv = { ...harness.env };
     delete unset.T3_TOKEN_FILE;
     const missingVariable: ProcessResult = await harness.start(unset).closed(exitTimeoutMs);
-    assert.deepEqual({ code: missingVariable.code, signal: missingVariable.signal, stdout: missingVariable.stdout }, { code: 1, signal: null, stdout: "" });
-    assert.match(missingVariable.stderr, /^Error: Set T3_TOKEN_FILE to the private credential path$/mu);
-    assert.match(missingVariable.stderr, /^\s+at /mu);
+    privately("missing T3_TOKEN_FILE", [harness.token], () => {
+      assert.deepEqual({ code: missingVariable.code, signal: missingVariable.signal, stdout: missingVariable.stdout }, { code: 1, signal: null, stdout: "" });
+      assert.match(missingVariable.stderr, /^Error: Set T3_TOKEN_FILE to the private credential path$/mu);
+      assert.match(missingVariable.stderr, /^\s+at /mu);
+    });
     const missingFile = join(harness.temporary, "..", "missing-token");
     const absent: ProcessResult = await harness.start({ ...harness.env, T3_TOKEN_FILE: missingFile }).closed(exitTimeoutMs);
-    assert.deepEqual({ code: absent.code, signal: absent.signal, stdout: absent.stdout }, { code: 1, signal: null, stdout: "" });
-    assert.match(absent.stderr, /ENOENT: no such file or directory, open '[^']+missing-token'/u);
+    privately("missing token file", [harness.token], () => {
+      assert.deepEqual({ code: absent.code, signal: absent.signal, stdout: absent.stdout }, { code: 1, signal: null, stdout: "" });
+      assert.match(absent.stderr, /ENOENT: no such file or directory, open '[^']+missing-token'/u);
+    });
     assert.deepEqual(await harness.probeDirectories(), [], "the token is read before the temp directory is created");
     assert.deepEqual(harness.fake.traffic.http, ["GET /.well-known/t3/environment"], "neither failure contacts T3");
   });
@@ -100,7 +104,8 @@ it("CT-PROBE-T3-03: SIGINT during the watch ends the probe by the default signal
     // the active snapshot is ingested and acknowledged; the archive snapshot never comes
     await harness.fake.until((traffic) => traffic.acks.includes("1"), exitTimeoutMs, "the active snapshot ack");
     process.kill(child.pid, "SIGINT");
-    assert.deepEqual(await child.closed(exitTimeoutMs), { code: null, signal: "SIGINT", stdout: "", stderr: "" });
+    const interrupted = await child.closed(exitTimeoutMs);
+    privately("interrupted probe", [harness.token], () => assert.deepEqual(interrupted, { code: null, signal: "SIGINT", stdout: "", stderr: "" }));
     // baseline: nothing handles SIGINT, so the finally block never runs (BC-PROBE-02 removes it under runMain)
     const left = await harness.probeDirectories();
     assert.equal(left.length, 1);
@@ -110,7 +115,7 @@ it("CT-PROBE-T3-03: SIGINT during the watch ends the probe by the default signal
 it("CT-PROBE-T3-04: the probe issues only the descriptor read, the two shell subscriptions and an Ack", { timeout: 60_000 }, async (t) => {
   const harness = await probeHarness(t, { activeThreads: 1, archiveThreads: 1 });
   const result = await harness.start().closed(exitTimeoutMs);
-  assert.deepEqual(result, { code: 0, signal: null, stdout: verifiedLine(2), stderr: "" });
+  privately("verified probe", [harness.token], () => assert.deepEqual(result, { code: 0, signal: null, stdout: verifiedLine(2), stderr: "" }));
   // the archive chunk completes the probe inside its item handler, so only the active chunk is acknowledged
   assert.deepEqual(harness.fake.traffic, {
     http: ["GET /.well-known/t3/environment"],
@@ -128,7 +133,7 @@ it("CT-PROBE-T3-05: the fixed 30 s deadline ends a probe whose archive snapshot 
     const child = harness.start();
     const result = await child.closed(50_000);
     const elapsedMs = performance.now() - child.startedAt;
-    assert.deepEqual(result, { code: 1, signal: null, stdout: failedLine(true), stderr: "" });
+    privately("expired probe", [harness.token], () => assert.deepEqual(result, { code: 1, signal: null, stdout: failedLine(true), stderr: "" }));
     assert.ok(elapsedMs >= 30_000 && elapsedMs < 45_000, `the probe ended after ${Math.round(elapsedMs)} ms`);
     assert.deepEqual(await harness.probeDirectories(), []);
   });
