@@ -5534,6 +5534,8 @@ test("a direct stop cites the freshly read latest human message with its own ope
   const standing = String(view.instructions).split("\n\nDetailed reference:")[0]!;
   assert.match(standing, /freshly read your own local thread and cite the latest exact human message/u);
   assert.match(standing, /Never reuse an earlier Stop ID/u);
+  assert.match(standing, /Discover missing permitted tools with mcpx_search_tools, mcpx_get_tool_schema and mcpx_call_tool/u);
+  assert.match(standing, /Try discovery before claiming a reader or Stop control unavailable/u);
   assert.match(supervisionStopToolDefinition.description, /Cite the latest genuine human message that asks to stop, freshly read, with an operationId unique to it; never reuse an earlier stop's message ID or operationId/u);
 });
 
