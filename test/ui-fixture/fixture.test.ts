@@ -1,0 +1,491 @@
+import { describe, it } from "vitest";
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { request, type IncomingHttpHeaders } from "node:http";
+import net from "node:net";
+import { networkInterfaces, tmpdir } from "node:os";
+import { join } from "node:path";
+import { performance } from "node:perf_hooks";
+import { setTimeout as delay } from "node:timers/promises";
+import { Effect, Exit, Schema, Scope } from "effect";
+import { DashboardOverview } from "../../src/dashboard-overview.js";
+import { Snapshot } from "../../src/guidance-contract.js";
+import { ProjectConfigSaveResult, ProjectDefinitions, type ProjectConfigurationInfo } from "../../src/project-definitions-contract.js";
+import { ProjectSupervisorSaveResult, ProjectSupervisorSnapshot } from "../../src/project-supervisor-contract.js";
+import {
+  GlobalDefinitionsControl, GlobalDefinitionsControlResult, NoProjectControl, NoProjectControlResult, SupervisionCandidates, SupervisionControl,
+  SupervisionControlResult, SupervisionSetupOptions, SupervisionSetupResult, SupervisionStartStatus,
+} from "../../src/supervisor-control-contract.js";
+import { ThreadPolicy } from "../../src/thread-policy-contract.js";
+import { WorkflowProgressSnapshotSchema } from "../../src/workflow-progress.js";
+import { fixtureIds, fixtureToken } from "./scenarios.js";
+import { startUiFixture, type LogEntry, type UiFixture } from "./server.js";
+
+type Reply = {status: number; headers: IncomingHttpHeaders; body: Buffer; json: <T = unknown>() => T};
+type Call = {method?: string; path: string; headers?: Record<string, string>; body?: string};
+
+const A = fixtureIds.projectA;
+const B = fixtureIds.projectB;
+const paths = {
+  snapshot: "/api/guidance/snapshot",
+  noProject: "/api/guidance/no-project-control",
+  configuration: "/api/guidance/project-configuration",
+  setup: "/api/guidance/supervision-setup",
+  threadPolicy: "/api/guidance/thread-policy",
+};
+const sha256 = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+
+const call = (port: number, input: Call) => new Promise<Reply>((resolve, reject) => {
+  const outgoing = request({host: "127.0.0.1", port, path: input.path, method: input.method ?? "GET", agent: false, headers: input.headers ?? {}}, response => {
+    const chunks: Buffer[] = [];
+    response.on("data", (chunk: Buffer) => chunks.push(chunk));
+    response.on("error", reject);
+    response.on("end", () => {
+      const body = Buffer.concat(chunks);
+      resolve({status: response.statusCode ?? 0, headers: response.headers, body, json: <T = unknown>() => JSON.parse(body.toString("utf8")) as T});
+    });
+  });
+  outgoing.on("error", reject);
+  outgoing.end(input.body);
+});
+
+const connects = (host: string, port: number) => new Promise<boolean>(resolve => {
+  const socket = net.connect({host, port});
+  socket.once("connect", () => {socket.destroy();resolve(true);});
+  socket.once("error", () => resolve(false));
+});
+
+const open = async (assets: string) => {
+  const scope = Effect.runSync(Scope.make());
+  const fixture = await Effect.runPromise(startUiFixture({assets}).pipe(Scope.provide(scope)));
+  return {fixture, close: () => Effect.runPromise(Scope.close(scope, Exit.void))};
+};
+
+const withFixture = async (assets: string, use: (fixture: UiFixture) => Promise<void>) => {
+  const {fixture, close} = await open(assets);
+  try {await use(fixture);} finally {await close();}
+};
+
+const makeAssets = async () => {
+  const root = await mkdtemp(join(tmpdir(), "ui-fixture-test-"));
+  const dir = join(root, "assets-dir");
+  await mkdir(join(dir, "assets", "nested"), {recursive: true});
+  const files: Record<string, Buffer> = {
+    "index.html": Buffer.from("<!doctype html><html><head><script type=\"module\" crossorigin src=\"/assets/app.js\"></script><link rel=\"stylesheet\" href=\"/assets/app.css\"></head><body><div id=\"root\"></div></body></html>"),
+    "assets/app.js": Buffer.from("console.log(\"fixture asset\");\n"),
+    "assets/app.css": Buffer.from("body{color:#202944}\n"),
+    "assets/nested/mark.svg": Buffer.from("<svg xmlns=\"http://www.w3.org/2000/svg\"/>"),
+    "icon.png": Buffer.from(Array.from({length: 256}, (_, index) => index)),
+    "data.bin": Buffer.from([0, 255, 13, 10]),
+  };
+  for (const [path, bytes] of Object.entries(files)) await writeFile(join(dir, path), bytes);
+  await writeFile(join(root, "secret.txt"), "outside the asset directory");
+  return {dir, files, cleanup: () => rm(root, {recursive: true, force: true})};
+};
+
+const client = (fixture: UiFixture) => {
+  const origin = fixture.url.slice(0, -1);
+  let session = "";
+  let csrf = "";
+  return {
+    origin,
+    get session() {return session;},
+    get csrf() {return csrf;},
+    raw: (input: Call) => call(fixture.port, input),
+    control: (path: string, method = "POST") => call(fixture.port, {method, path}),
+    async signIn() {
+      const login = await call(fixture.port, {method: "POST", path: "/auth/login", headers: {origin, "content-type": "application/json"}, body: JSON.stringify({token: fixtureToken})});
+      assert.equal(login.status, 200);
+      session = login.json<{session: string}>().session;
+      const access = await call(fixture.port, {path: "/api/csrf", headers: {"x-supervisor-session": session}});
+      assert.equal(access.status, 200);
+      csrf = access.json<{csrf: string}>().csrf;
+    },
+    get: (path: string) => call(fixture.port, {path, headers: {"x-supervisor-session": session}}),
+    post: (path: string, payload: unknown) => call(fixture.port, {method: "POST", path, body: JSON.stringify(payload),
+      headers: {origin, "content-type": "application/json", "x-supervisor-session": session, "x-csrf-token": csrf}}),
+  };
+};
+type Client = ReturnType<typeof client>;
+
+const scenario = async (c: Client, name: string, query = "") => {
+  const reply = await c.control(`/__fixture/scenario/${name}${query}`);
+  assert.equal(reply.status, 200, `scenario ${name}`);
+};
+const definitionsOf = async (c: Client, projectId = A) => Schema.decodeUnknownSync(ProjectDefinitions)((await c.get(`${paths.configuration}?projectId=${projectId}`)).json());
+const noProjectOf = async (c: Client) => Schema.decodeUnknownSync(NoProjectControl)((await c.get(paths.noProject)).json());
+const editedConfig = (config: ProjectConfigurationInfo, summary: string): ProjectConfigurationInfo =>
+  ({...config, steps: config.steps.map((entry, index) => index === 0 ? {...entry, summary} : entry)});
+const outcomeOf = (promise: Promise<Reply>) => promise.then(reply => `answered-${reply.status}`, () => "connection-closed");
+
+// a scripted pass over every scenario; it returns only stable outcomes so two passes can be compared
+const scenarioScript = async (fixture: UiFixture) => {
+  const c = client(fixture);
+  const outcomes: string[] = [];
+  const note = (label: string, detail: string | number | boolean) => outcomes.push(`${label}:${detail}`);
+  await c.signIn();
+
+  for (const status of [401, 403, 409, 413]) {
+    await scenario(c, `save-${status}`);
+    const reply = await c.post(paths.noProject, {expectedGeneration: 1, mode: "automatic"});
+    note(`save-${status}`, `${reply.status}:${reply.json<{message: string}>().message}`);
+    if (status === 401) {
+      note("save-401-revoked", (await c.get(paths.snapshot)).status);
+      await c.signIn();
+    }
+  }
+  note("status-scenarios-not-applied", (await noProjectOf(c)).generation);
+
+  const before = await definitionsOf(c);
+  const save = (revision: string, summary: string) => c.post(paths.configuration, {projectId: A, threadId: null, expectedRevision: revision, config: editedConfig(before.projectConfig!, summary)});
+  await scenario(c, "editor-conflict");
+  note("editor-conflict", Schema.decodeUnknownSync(ProjectConfigSaveResult)((await save(before.revision!, "Fixture step: conflict draft.")).json()).status);
+  await scenario(c, "editor-uncertain");
+  note("editor-uncertain", Schema.decodeUnknownSync(ProjectConfigSaveResult)((await save(before.revision!, "Fixture step: uncertain draft.")).json()).status);
+  note("editor-uncertain-applied", (await definitionsOf(c)).revision !== before.revision);
+  await scenario(c, "editor-uncertain", "?apply=1");
+  note("editor-uncertain-apply", Schema.decodeUnknownSync(ProjectConfigSaveResult)((await save(before.revision!, "Fixture step: applied draft.")).json()).status);
+  note("editor-uncertain-apply-applied", (await definitionsOf(c)).revision !== before.revision);
+
+  await scenario(c, "session-expiry-next-call");
+  note("expiry-first", (await c.get(paths.snapshot)).status);
+  note("expiry-second", (await c.get(paths.snapshot)).status);
+  await c.signIn();
+  note("expiry-after-sign-in", (await c.get(paths.snapshot)).status);
+
+  const other = client(fixture);
+  await other.signIn();
+  await scenario(c, "signout-other-tab");
+  note("signout-this-tab", (await c.get(paths.snapshot)).status);
+  note("signout-other-tab", (await other.get(paths.snapshot)).status);
+  await c.signIn();
+
+  await scenario(c, "slow-reads", "?ms=300");
+  let started = performance.now();
+  note("slow-read", `${(await c.get(paths.snapshot)).status}:${performance.now() - started >= 290}`);
+  note("slow-read-again", `${(await c.get(paths.snapshot)).status}:${performance.now() - started >= 580}`);
+  await scenario(c, "baseline");
+  started = performance.now();
+  note("baseline-read", `${(await c.get(paths.snapshot)).status}:${performance.now() - started < 250}`);
+
+  const options = Schema.decodeUnknownSync(SupervisionSetupOptions)((await c.get(`${paths.setup}?projectId=${B}`)).json());
+  const checkout = options.checkouts[0]!;
+  await scenario(c, "setup-race", "?ms=400");
+  started = performance.now();
+  const setup = c.post(paths.setup, {projectId: B, expectedGeneration: options.generation, origin: "project", threadId: checkout.threadId,
+    expectedWorkspaceRoot: checkout.workspaceRoot, expectedBranch: checkout.branch, action: "create"});
+  await delay(100);
+  note("setup-read-during-race", Schema.decodeUnknownSync(SupervisionSetupOptions)((await c.get(`${paths.setup}?projectId=${B}`)).json()).checkouts[0]!.folderStatus);
+  const setupReply = await setup;
+  note("setup-race", `${Schema.decodeUnknownSync(SupervisionSetupResult)(setupReply.json()).status}:${performance.now() - started >= 390}`);
+
+  const generation = (await noProjectOf(c)).generation;
+  await scenario(c, "mutation-dropped", `?path=${paths.noProject}`);
+  note("dropped", await outcomeOf(c.post(paths.noProject, {expectedGeneration: generation, mode: "automatic"})));
+  note("dropped-generation-delta", (await noProjectOf(c)).generation - generation);
+  await scenario(c, "mutation-dropped", `?path=${paths.noProject}&apply=1`);
+  note("dropped-after-apply", await outcomeOf(c.post(paths.noProject, {expectedGeneration: generation, mode: "automatic"})));
+  note("dropped-after-apply-generation-delta", (await noProjectOf(c)).generation - generation);
+
+  await scenario(c, "mutation-never-answered", `?path=${paths.noProject}`);
+  let settled = false;
+  const held = c.post(paths.noProject, {expectedGeneration: generation + 1, mode: "off"}).finally(() => {settled = true;});
+  await delay(300);
+  note("held-still-pending", !settled);
+  note("held-count", (await c.control("/__fixture/state", "GET")).json<{held: unknown[]}>().held.length);
+  note("held-release", (await c.control("/__fixture/held/answer")).status);
+  note("held-answer", Schema.decodeUnknownSync(NoProjectControlResult)((await held).json()).status);
+  return outcomes;
+};
+
+describe("CT-UI-FIXTURE-01 ui baseline fixture", () => {
+  it("binds only 127.0.0.1 on an ephemeral port and serves the asset directory byte-identical", async () => {
+    const assets = await makeAssets();
+    try {
+      await withFixture(assets.dir, async fixture => {
+        await withFixture(assets.dir, async second => {
+          assert.notEqual(fixture.port, second.port);
+          assert.ok(fixture.port > 0 && second.port > 0);
+        });
+        assert.equal(fixture.url, `http://127.0.0.1:${fixture.port}/`);
+        assert.equal(await connects("127.0.0.1", fixture.port), true);
+        assert.equal(await connects("::1", fixture.port), false);
+        for (const address of Object.values(networkInterfaces()).flat())
+          if (address && !address.internal && address.family === "IPv4") assert.equal(await connects(address.address, fixture.port), false, address.address);
+
+        assert.deepEqual(fixture.assets.map(asset => [asset.path, asset.bytes, asset.sha256]),
+          Object.entries(assets.files).map(([path, bytes]) => [path, bytes.length, sha256(bytes)]).sort((left, right) => String(left[0]).localeCompare(String(right[0]))));
+        const types: Record<string, string> = {html: "text/html; charset=utf-8", js: "application/javascript", css: "text/css", svg: "image/svg+xml", png: "image/png", bin: "application/octet-stream"};
+        for (const [path, bytes] of Object.entries(assets.files)) {
+          const reply = await call(fixture.port, {path: `/${path}`});
+          assert.equal(reply.status, 200, path);
+          assert.ok(reply.body.equals(bytes), path);
+          assert.equal(reply.headers["content-type"], types[path.split(".").at(-1)!]);
+          assert.equal(reply.headers["cache-control"], "no-store");
+        }
+        const index = await call(fixture.port, {path: "/"});
+        assert.ok(index.body.equals(assets.files["index.html"]!));
+        assert.doesNotMatch(index.body.toString("utf8"), /nonce/u);
+        assert.match(String(index.headers["content-security-policy"]), /script-src 'self'/u);
+        for (const path of ["/missing.js", "/assets", "/..%2fsecret.txt", "/projects/fixture-project-a/definitions"])
+          assert.equal((await call(fixture.port, {path})).status, 404, path);
+        assert.equal((await call(fixture.port, {method: "POST", path: "/"})).status, 405);
+        assert.equal((await call(fixture.port, {path: "/api/unknown"})).status, 401);
+      });
+    } finally {await assets.cleanup();}
+  }, 20_000);
+
+  it("answers the API only from fixture data decoded through the SupervisorApi schemas and mirrors the baseline auth checks", async () => {
+    const assets = await makeAssets();
+    try {
+      await withFixture(assets.dir, async fixture => {
+        const c = client(fixture);
+        assert.equal((await c.get(paths.snapshot)).status, 401);
+        assert.equal((await c.raw({path: "/", headers: {host: `localhost:${fixture.port}`}})).status, 403);
+        assert.equal((await c.raw({path: "/", headers: {origin: "http://evil.example"}})).status, 403);
+        assert.equal((await c.raw({path: "/", headers: {"sec-fetch-site": "cross-site"}})).status, 403);
+        const login = (headers: Record<string, string>, token: string) => c.raw({method: "POST", path: "/auth/login", headers, body: JSON.stringify({token})});
+        assert.equal((await login({origin: c.origin, "content-type": "application/json"}, "wrong-token")).status, 401);
+        assert.equal((await login({"content-type": "application/json"}, fixtureToken)).status, 403);
+        assert.equal((await login({origin: c.origin, "content-type": "text/plain"}, fixtureToken)).status, 403);
+        assert.equal((await c.raw({method: "GET", path: "/auth/login"})).status, 404);
+        await c.signIn();
+        assert.match(c.session, /^[A-Za-z0-9_-]{43}$/u);
+        assert.deepEqual((await c.raw({path: "/auth/status", headers: {"x-supervisor-session": c.session}})).json(), {authenticated: true});
+
+        const snapshot = Schema.decodeUnknownSync(Snapshot)((await c.get(paths.snapshot)).json());
+        assert.ok(snapshot.projects.some(project => project.title === "Fixture project A"));
+        assert.ok([...snapshot.projects, ...snapshot.threads].every(item => item.title.startsWith("Fixture")));
+        const reads: Array<[string, Schema.Top]> = [
+          ["/api/guidance/dashboard-overview", DashboardOverview],
+          [paths.noProject, NoProjectControl],
+          ["/api/guidance/supervision-candidates?purpose=start", SupervisionCandidates],
+          [`/api/guidance/supervision-start?threadId=${fixtureIds.threadN1}&operationId=unknown`, SupervisionStartStatus],
+          ["/api/guidance/supervision-control", SupervisionControl],
+          [`/api/guidance/supervision-control?projectId=${A}`, SupervisionControl],
+          [`${paths.setup}?projectId=${B}`, SupervisionSetupOptions],
+          ["/api/guidance/global-definitions-control", GlobalDefinitionsControl],
+          [`/api/guidance/project-supervisor?projectId=${A}&mainThreadId=${fixtureIds.threadA1}`, ProjectSupervisorSnapshot],
+          [`/api/guidance/project-supervisor?projectId=${A}`, ProjectSupervisorSnapshot],
+          [`/api/guidance/workflow-progress?projectId=${A}&mainThreadId=${fixtureIds.threadA1}`, WorkflowProgressSnapshotSchema],
+          [`${paths.configuration}?projectId=${A}`, ProjectDefinitions],
+          [`${paths.configuration}?projectId=${A}&threadId=${fixtureIds.threadA1}`, ProjectDefinitions],
+        ];
+        for (const [path, schema] of reads) {
+          const reply = await c.get(path);
+          assert.equal(reply.status, 200, path);
+          Schema.decodeUnknownSync(schema as Schema.Codec<unknown, unknown>)(reply.json());
+        }
+        assert.equal((await c.get("/api/guidance/project-supervisor?projectId=unknown")).status, 400);
+
+        assert.equal((await c.raw({method: "POST", path: paths.noProject, body: "{}", headers: {origin: c.origin, "content-type": "application/json", "x-supervisor-session": c.session}})).status, 403);
+        assert.equal((await c.raw({method: "POST", path: paths.noProject, body: "{}", headers: {origin: c.origin, "content-type": "text/plain", "x-supervisor-session": c.session, "x-csrf-token": c.csrf}})).status, 415);
+        assert.equal((await c.post(paths.threadPolicy, {generation: 1, excludedThreadIds: ["x".repeat(65_000)]})).status, 413);
+
+        const decodeSaved = (schema: Schema.Codec<{readonly status: string}, unknown>, reply: Reply) => {
+          assert.equal(reply.status, 200);
+          return Schema.decodeUnknownSync(schema)(reply.json()).status;
+        };
+        assert.equal(decodeSaved(NoProjectControlResult, await c.post(paths.noProject, {expectedGeneration: 1, mode: "automatic"})), "saved");
+        const start = {threadId: fixtureIds.threadN1, operationId: "fixture-operation-1"};
+        assert.equal(decodeSaved(SupervisionStartStatus, await c.post("/api/guidance/supervision-start", start)), "active");
+        assert.equal(Schema.decodeUnknownSync(SupervisionStartStatus)((await c.get(`/api/guidance/supervision-start?threadId=${start.threadId}&operationId=${start.operationId}`)).json()).status, "active");
+        assert.equal(decodeSaved(SupervisionControlResult, await c.post("/api/guidance/supervision-control", {projectId: B, expectedGeneration: 1, enabled: true})), "setup_required");
+        const options = Schema.decodeUnknownSync(SupervisionSetupOptions)((await c.get(`${paths.setup}?projectId=${B}`)).json());
+        assert.equal(decodeSaved(SupervisionSetupResult, await c.post(paths.setup, {projectId: B, expectedGeneration: options.generation, origin: "project", threadId: null,
+          expectedWorkspaceRoot: "/fixture/project-b", expectedBranch: "main", action: "create"})), "saved");
+        assert.equal(Schema.decodeUnknownSync(SupervisionControl)((await c.get(`/api/guidance/supervision-control?projectId=${B}`)).json()).effectiveEnabled, true);
+        assert.equal(decodeSaved(GlobalDefinitionsControlResult, await c.post("/api/guidance/global-definitions-control", {expectedGeneration: 1, enabled: true})), "saved");
+        assert.equal(decodeSaved(ProjectSupervisorSaveResult, await c.post("/api/guidance/project-supervisor", {projectId: A, mainThreadId: fixtureIds.threadA1, expectedGeneration: 1,
+          modelSelection: {instanceId: "fixture-provider", model: "fixture-model-quick", options: [{id: "reasoningEffort", value: "high"}]},
+          monitoring: {intervalMinutes: 7, activityThreshold: 12}, teamSettings: {maxHelpersPerRoot: 3}})), "saved");
+        assert.equal(decodeSaved(ProjectSupervisorSaveResult, await c.post("/api/guidance/project-supervisor/retry", {projectId: A, mainThreadId: fixtureIds.threadA2,
+          expectedGeneration: 2, threadId: "fixture-supervisor-a2", bindingGeneration: 1, action: "retry"})), "saved");
+        const chat = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)((await c.get(`/api/guidance/project-supervisor?projectId=${A}&mainThreadId=${fixtureIds.threadA1}`)).json());
+        const stopped = await c.post("/api/guidance/project-supervisor/chat-supervision", {projectId: A, mainThreadId: fixtureIds.threadA1, enabled: false,
+          policyGeneration: chat.chatSupervision!.policyGeneration});
+        assert.equal(Schema.decodeUnknownSync(ProjectSupervisorSaveResult)(stopped.json()).snapshot?.chatSupervision?.stopped, true);
+        const definitions = await definitionsOf(c);
+        const saved = Schema.decodeUnknownSync(ProjectConfigSaveResult)((await c.post(paths.configuration, {projectId: A, threadId: null, expectedRevision: definitions.revision,
+          config: {...definitions.projectConfig!, steps: [...definitions.projectConfig!.steps, {path: "steps/fixture-unindexed.md", summary: "Fixture step: indexed by the test.", required: false}]}})).json());
+        assert.equal(saved.status, "saved");
+        assert.notEqual(saved.definitions?.revision, definitions.revision);
+        const policy = Schema.decodeUnknownSync(ThreadPolicy)((await c.post(paths.threadPolicy, {...snapshot.threadPolicy, generation: Schema.decodeUnknownSync(Snapshot)((await c.get(paths.snapshot)).json()).threadPolicy.generation, excludedThreadIds: []})).json());
+        assert.deepEqual(policy.excludedThreadIds, []);
+
+        assert.deepEqual((await c.raw({method: "POST", path: "/auth/logout", body: "{}", headers: {origin: c.origin, "content-type": "application/json", "x-supervisor-session": c.session}})).json(), {authenticated: false});
+        assert.equal((await c.get(paths.snapshot)).status, 401);
+      });
+    } finally {await assets.cleanup();}
+  }, 20_000);
+
+  it("never opens a connection to a non-loopback host", async () => {
+    const assets = await makeAssets();
+    const prototype = net.Socket.prototype as unknown as {connect: (...args: unknown[]) => unknown};
+    const connect = prototype.connect;
+    const originalFetch = globalThis.fetch;
+    const targets: string[] = [];
+    const fetches: string[] = [];
+    prototype.connect = function (this: unknown, ...args: unknown[]) {
+      const first: unknown = Array.isArray(args[0]) ? (args[0] as unknown[])[0] : args[0];
+      targets.push(typeof first === "object" && first !== null ? String((first as {host?: unknown; path?: unknown}).host ?? (first as {path?: unknown}).path ?? "localhost")
+        : typeof first === "number" ? String(args[1] ?? "localhost") : String(first));
+      return connect.apply(this, args);
+    };
+    globalThis.fetch = (input => {fetches.push(String(input));return Promise.reject(new Error("fetch is trapped in this test"));}) as typeof fetch;
+    try {
+      await withFixture(assets.dir, async fixture => {
+        const c = client(fixture);
+        await c.signIn();
+        for (const path of [paths.snapshot, "/api/guidance/dashboard-overview", `/api/guidance/project-supervisor?projectId=${A}&mainThreadId=${fixtureIds.threadA1}`, `${paths.configuration}?projectId=${A}`])
+          assert.equal((await c.get(path)).status, 200);
+        assert.equal((await c.post(paths.noProject, {expectedGeneration: 1, mode: "off"})).status, 200);
+        await scenario(c, "mutation-dropped");
+        assert.equal(await outcomeOf(c.post(paths.noProject, {expectedGeneration: 2, mode: "automatic"})), "connection-closed");
+        assert.equal((await c.raw({path: "/"})).status, 200);
+      });
+    } finally {
+      prototype.connect = connect;
+      globalThis.fetch = originalFetch;
+      await assets.cleanup();
+    }
+    assert.ok(targets.length > 0);
+    assert.deepEqual([...new Set(targets)], ["127.0.0.1"]);
+    assert.deepEqual(fetches, []);
+  }, 20_000);
+
+  it("labels every response with the active scenario", async () => {
+    const assets = await makeAssets();
+    try {
+      await withFixture(assets.dir, async fixture => {
+        const c = client(fixture);
+        const replies: Reply[] = [
+          await c.raw({path: "/"}), await c.raw({path: "/missing"}), await c.raw({method: "POST", path: "/"}), await c.get(paths.snapshot),
+          await c.raw({path: "/", headers: {host: "localhost"}}), await c.raw({path: "/auth/status"}), await c.raw({path: "/auth/unknown"}),
+          await c.control("/__fixture/scenario/unknown"), await c.control("/__fixture/scenario/baseline?ms=x"), await c.control("/__fixture/state", "GET"),
+        ];
+        await c.signIn();
+        replies.push(await c.get(paths.snapshot), await c.post(paths.noProject, {expectedGeneration: 99, mode: "off"}), await c.get("/api/guidance/project-supervisor?projectId=unknown"));
+        assert.deepEqual(new Set(replies.map(reply => reply.status)), new Set([200, 400, 401, 403, 404, 405]));
+        for (const reply of replies) assert.equal(reply.headers["x-supervisor-fixture"], "baseline");
+        await scenario(c, "reload");
+        for (const reply of [await c.raw({path: "/"}), await c.get(paths.snapshot), await c.raw({path: "/auth/status"})]) assert.equal(reply.headers["x-supervisor-fixture"], "reload");
+        await c.control("/__fixture/reset");
+        assert.equal((await c.raw({path: "/"})).headers["x-supervisor-fixture"], "baseline");
+      });
+    } finally {await assets.cleanup();}
+  }, 20_000);
+
+  it("applies every scenario deterministically and reset restores the initial fixture state", async () => {
+    const assets = await makeAssets();
+    try {
+      await withFixture(assets.dir, async fixture => {
+        const c = client(fixture);
+        await c.signIn();
+        const initial = await definitionsOf(c);
+        const first = await scenarioScript(fixture);
+        assert.equal((await c.control("/__fixture/reset")).status, 200);
+        const second = await scenarioScript(fixture);
+        assert.deepEqual(second, first);
+        assert.deepEqual(first, [
+          "save-401:401:Sign in to Supervisor.", "save-401-revoked:401",
+          "save-403:403:Refresh the local dashboard before changing settings.",
+          "save-409:409:Fixture: synthetic http 409; the baseline server never sends this status.",
+          "save-413:413:The request payload is too large. Reduce its size before retrying.",
+          "status-scenarios-not-applied:1",
+          "editor-conflict:conflict", "editor-uncertain:uncertain", "editor-uncertain-applied:false",
+          "editor-uncertain-apply:uncertain", "editor-uncertain-apply-applied:true",
+          "expiry-first:401", "expiry-second:401", "expiry-after-sign-in:200",
+          "signout-this-tab:401", "signout-other-tab:401",
+          "slow-read:200:true", "slow-read-again:200:true", "baseline-read:200:true",
+          "setup-read-during-race:present", "setup-race:saved:true",
+          "dropped:connection-closed", "dropped-generation-delta:0", "dropped-after-apply:connection-closed", "dropped-after-apply-generation-delta:1",
+          "held-still-pending:true", "held-count:1", "held-release:200", "held-answer:saved",
+        ]);
+        const reset = await c.control("/__fixture/reset");
+        assert.deepEqual(reset.json(), {reset: true, scenario: "baseline", armed: [], sessions: 0, held: []});
+        assert.equal((await c.get(paths.snapshot)).status, 401);
+        await c.signIn();
+        assert.equal((await definitionsOf(c)).revision, initial.revision);
+        assert.equal((await noProjectOf(c)).generation, 1);
+        assert.equal(Schema.decodeUnknownSync(SupervisionSetupOptions)((await c.get(`${paths.setup}?projectId=${B}`)).json()).checkouts[0]!.folderStatus, "missing");
+        const log = (await c.control("/__fixture/log", "GET")).json<{entries: LogEntry[]}>();
+        assert.equal(log.entries[0]!.path, "/__fixture/reset");
+      });
+    } finally {await assets.cleanup();}
+  }, 30_000);
+
+  it("logs each mutation post once with its body hash and never the raw body or secrets", async () => {
+    const assets = await makeAssets();
+    try {
+      await withFixture(assets.dir, async fixture => {
+        const c = client(fixture);
+        await c.signIn();
+        const sent: Array<{path: string; body: string}> = [{path: "/auth/login", body: JSON.stringify({token: fixtureToken})}];
+        const post = (path: string, payload: unknown) => {sent.push({path, body: JSON.stringify(payload)});return c.post(path, payload);};
+        for (let poll = 0; poll < 3; poll++) assert.equal((await c.get(paths.snapshot)).status, 200);
+        const marker = "Fixture raw body marker 7f3c";
+        const definitions = await definitionsOf(c);
+        assert.equal((await post(paths.configuration, {projectId: A, threadId: null, expectedRevision: definitions.revision, config: editedConfig(definitions.projectConfig!, marker)})).status, 200);
+        await scenario(c, "save-403");
+        assert.equal((await post(paths.threadPolicy, {generation: 1, excludedThreadIds: []})).status, 403);
+        await scenario(c, "mutation-dropped", `?path=${paths.noProject}`);
+        assert.equal(await outcomeOf(post(paths.noProject, {expectedGeneration: 1, mode: "off"})), "connection-closed");
+        await scenario(c, "mutation-never-answered", `?path=${paths.noProject}`);
+        const held = post(paths.noProject, {expectedGeneration: 1, mode: "automatic"});
+        let entries: LogEntry[] = [];
+        for (let attempt = 0; attempt < 50 && !entries.some(entry => entry.result === "held"); attempt++) {
+          await delay(20);
+          entries = (await c.control("/__fixture/log", "GET")).json<{entries: LogEntry[]}>().entries;
+        }
+        const heldEntry = entries.find(entry => entry.result === "held")!;
+        assert.equal(heldEntry.completedAt, null);
+        assert.equal(heldEntry.status, null);
+        assert.equal((await c.control(`/__fixture/held/answer?seq=${heldEntry.seq}`)).status, 200);
+        assert.equal((await held).status, 200);
+
+        const logReply = await c.control("/__fixture/log", "GET");
+        const log = logReply.json<{entries: LogEntry[]; mutations: Array<{path: string; bodySha256: string; count: number}>; polls: Array<{path: string; count: number; intervalsMs: number[]}>}>();
+        const mutations = log.entries.filter(entry => entry.mutation);
+        assert.deepEqual(mutations.map(entry => [entry.path, entry.bodySha256]), sent.map(item => [item.path, sha256(item.body)]));
+        assert.ok(log.mutations.every(group => group.count === 1));
+        assert.deepEqual(mutations.map(entry => [entry.result, entry.effect, entry.status]), [
+          ["answered", null, 200], ["answered", null, 200], ["answered", "status-403", 403], ["dropped", "dropped", null], ["answered", "held-then-answered", 200],
+        ]);
+        assert.ok(mutations.every(entry => entry.bodyBytes !== null && entry.at >= 0 && entry.completedAt !== null && entry.completedAt >= entry.at));
+        const snapshotPolls = log.polls.find(group => group.path === paths.snapshot)!;
+        assert.equal(snapshotPolls.count, 3);
+        assert.equal(snapshotPolls.intervalsMs.length, 2);
+        const text = logReply.body.toString("utf8");
+        for (const secret of [fixtureToken, c.session, c.csrf, marker]) assert.equal(text.includes(secret), false);
+      });
+    } finally {await assets.cleanup();}
+  }, 20_000);
+
+  it("releases the server, held requests and the log when its scope closes", async () => {
+    const assets = await makeAssets();
+    try {
+      const {fixture, close} = await open(assets.dir);
+      const c = client(fixture);
+      await c.signIn();
+      await scenario(c, "mutation-never-answered");
+      const held = outcomeOf(c.post(paths.noProject, {expectedGeneration: 1, mode: "off"}));
+      for (let attempt = 0; attempt < 50 && fixture.controller.held.size === 0; attempt++) await delay(20);
+      assert.equal(fixture.controller.held.size, 1);
+      const idle = net.connect({host: "127.0.0.1", port: fixture.port});
+      await new Promise(resolve => idle.once("connect", resolve));
+      assert.ok(fixture.controller.log.size > 0);
+      const started = performance.now();
+      await close();
+      assert.ok(performance.now() - started < 5_000);
+      assert.equal(await held, "connection-closed");
+      idle.destroy();
+      assert.equal(await connects("127.0.0.1", fixture.port), false);
+      assert.equal(fixture.controller.closed, true);
+      assert.equal(fixture.controller.log.size, 0);
+      assert.equal(fixture.controller.held.size, 0);
+      assert.equal(fixture.controller.sessionCount, 0);
+    } finally {await assets.cleanup();}
+  }, 20_000);
+});
