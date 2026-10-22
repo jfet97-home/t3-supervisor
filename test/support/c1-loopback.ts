@@ -12,19 +12,26 @@ export const freePort = (): Promise<number> => new Promise((resolve, reject) => 
   });
 });
 
+// captured at load, so deadlines stay on real time while a test fakes the global timers
+const realSetTimeout = globalThis.setTimeout;
+const realClearTimeout = globalThis.clearTimeout;
+
 // settles every promise it creates, so a met deadline leaves nothing pending
 export const withDeadline = async <A>(promise: Promise<A>, milliseconds: number, label: string): Promise<A> => {
   const expiry = Promise.withResolvers<"expired">();
-  const timer = setTimeout(() => expiry.resolve("expired"), milliseconds);
+  const timer = realSetTimeout(() => expiry.resolve("expired"), milliseconds);
   try {
     const winner = await Promise.race([promise.then((value) => ({ value })), expiry.promise]);
     if (winner === "expired") throw new Error(`${label}: no outcome within ${milliseconds} ms`);
     return winner.value;
   } finally {
-    clearTimeout(timer);
+    realClearTimeout(timer);
     expiry.resolve("expired");
   }
 };
+
+// one turn of the event loop, independent of faked timers
+export const turn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 export interface PlainResponse {
   readonly status: number;
