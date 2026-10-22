@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { it, type TestContext } from "vitest";
 import { createServiceAuth } from "../src/service-auth.js";
 import { leakedSecrets, nodePath, repositoryRoot, runProcess, tokenLineShape, tsxLoader, type ProcessResult } from "./support/cli-process.js";
+import { privately } from "./support/private-assert.js";
 import { after } from "./support/node-test.js";
 
 // the cli on its tsx source path in a real child process: exact usage bytes, exit codes and forge output
@@ -53,9 +54,10 @@ it("CT-CLI-03: forge succeeds with an invalid helper instance id and a missing T
       SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: "invalid helper id",
       T3_TOKEN_FILE: join(cwd, "missing-t3-token"),
     });
-    assert.deepEqual({ code: issued.code, signal: issued.signal, stderr: issued.stderr, stdout: tokenLineShape(issued.stdout) },
-      { code: 0, signal: null, stderr: "", stdout: tokenLine });
-    assert.equal(typeof auth.login(issued.stdout.trim()), "string", "the forged token signs in");
+    privately("forge output", [issued.stdout.trim()], () =>
+      assert.deepEqual({ code: issued.code, signal: issued.signal, stderr: issued.stderr, stdout: tokenLineShape(issued.stdout) },
+        { code: 0, signal: null, stderr: "", stdout: tokenLine }));
+    privately("the forged token signs in", [issued.stdout.trim()], () => assert.equal(typeof auth.login(issued.stdout.trim()), "string"));
   });
 
 it("CT-CLI-04: forge failure prints exactly the fixed sentence without path, stack or token; a successful token never reaches stderr",
@@ -66,9 +68,10 @@ it("CT-CLI-04: forge failure prints exactly the fixed sentence without path, sta
     after(t, () => auth.close());
     const workflowToken = await readFile(join(state, "access", "workflow-mcp-token"), "utf8");
     const success = await invoke(cwd, ["auth", "forge", "--data-dir", state]);
-    assert.deepEqual({ code: success.code, signal: success.signal, stderr: success.stderr, stdout: tokenLineShape(success.stdout) },
-      { code: 0, signal: null, stderr: "", stdout: tokenLine });
     const token = success.stdout.trim();
+    privately("forge output", [token, workflowToken], () =>
+      assert.deepEqual({ code: success.code, signal: success.signal, stderr: success.stderr, stdout: tokenLineShape(success.stdout) },
+        { code: 0, signal: null, stderr: "", stdout: tokenLine }));
 
     // missing service state, then the same instance after its login database lost a table
     const missing = await invoke(cwd, ["auth", "forge", "--data-dir", join(cwd, "uninitialized")]);
@@ -80,9 +83,9 @@ it("CT-CLI-04: forge failure prints exactly the fixed sentence without path, sta
     }
     const damaged = await invoke(cwd, ["auth", "forge", "--data-dir", state]);
     for (const [label, failure] of [["missing state", missing], ["damaged database", damaged]] as const) {
-      assert.deepEqual(failure, { code: 1, signal: null, stdout: "", stderr: forgeFailure }, label);
+      privately(label, [token, workflowToken], () => assert.deepEqual(failure, { code: 1, signal: null, stdout: "", stderr: forgeFailure }));
       assert.equal(failure.stderr.includes(cwd), false, `${label} names no path`);
-      assert.doesNotMatch(failure.stderr, /^\s+at /mu, `${label} prints no stack`);
+      assert.equal(/^\s+at /mu.test(failure.stderr), false, `${label} prints no stack`);
       assert.deepEqual(leakedSecrets(failure.stdout + failure.stderr, [token, workflowToken]), [], label);
     }
     assert.deepEqual(leakedSecrets(success.stderr, [token, workflowToken]), []);

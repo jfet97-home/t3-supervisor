@@ -11,6 +11,7 @@ import { it } from "vitest";
 import type { GuidanceRuntime } from "../src/guidance.js";
 import { startGuidanceUi } from "../src/guidance-ui.js";
 import { createServiceAuth, forgeDashboardToken } from "../src/service-auth.js";
+import { childFailure, privately } from "./support/private-assert.js";
 import type { SupervisorConfig } from "../src/types.js";
 
 const withTemporaryDirectory = async <A>(run: (directory: string) => Promise<A>): Promise<A> => {
@@ -46,9 +47,10 @@ const loader = fileURLToPath(new URL("../node_modules/tsx/dist/loader.mjs", impo
 const forgeInChild = async (directory: string): Promise<string> => {
   const { stdout, stderr } = await execute(process.execPath,
     ["--disable-warning=ExperimentalWarning", "--import", loader, command, "auth", "forge"],
-    { env: { ...process.env, DATA_DIRECTORY: directory }, cwd: tmpdir(), timeout: 30_000, maxBuffer: 4096 });
+    { env: { ...process.env, DATA_DIRECTORY: directory }, cwd: tmpdir(), timeout: 30_000, maxBuffer: 4096 })
+    .catch((error: unknown) => { throw childFailure("auth forge child", error); });
   assert.equal(tokenLine.test(stdout), true, `auth forge printed one token line (${stdout.length} bytes)`);
-  assert.equal(stderr, "");
+  privately("auth forge stderr", [stdout.trim()], () => assert.equal(stderr, ""));
   return stdout.trim();
 };
 
@@ -216,7 +218,7 @@ it("CT-AUTH-04: service open and forge failures never carry token, session or ha
     await failure("forge with an invalid clock", () => forgeDashboardToken(clock.directory, { now: () => Number.NaN }));
     await failure("forge without an access directory", () => forgeDashboardToken(join(root, "missing")));
 
-    assert.deepEqual(failures.map(([label, error]) => [label, error instanceof Error ? error.message : String(error)]), [
+    privately("failure messages", secrets, () => assert.deepEqual(failures.map(([label, error]) => [label, error instanceof Error ? error.message : String(error)]), [
       ["token file with the token and one more byte", "invalid service auth workflow-mcp-token file"],
       ["non-canonical token file", "invalid service auth workflow-mcp-token file"],
       ["session row with an uppercase hash", "invalid service auth database"],
@@ -226,7 +228,7 @@ it("CT-AUTH-04: service open and forge failures never carry token, session or ha
       ["forge on a database in wal mode", "invalid service auth login grant state"],
       ["forge with an invalid clock", "invalid service auth login grant state"],
       ["forge without an access directory", "invalid service auth access directory"],
-    ]);
+    ]));
     for (const [label, error] of failures) {
       const rendered = error instanceof Error ? [error.message, String(error), error.stack ?? "", JSON.stringify(error)] : [String(error)];
       const leaked = secrets.filter((secret) => rendered.some((text) => text.includes(secret)));

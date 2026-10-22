@@ -9,6 +9,7 @@ import { createServiceAuth } from "../src/service-auth.js";
 import { prepareInstalledBin, type InstalledBin } from "./support/cli-bin.js";
 import { groupAlive, leakedSecrets, nodePath, repositoryRoot, runProcess, startProcess, tokenLineShape, tsxLoader,
   type ProcessResult } from "./support/cli-process.js";
+import { privately } from "./support/private-assert.js";
 import { dataFiles, listenerStates, quickChecks, supervisorHarness, waitUntilDescriptorRetry, waitUntilReady,
   type SupervisorHarness } from "./support/cli-supervisor.js";
 import { after } from "./support/node-test.js";
@@ -147,19 +148,21 @@ describe("built and installed bin", () => {
       for (const row of table) {
         const result = await runProcess(command, [...prefix, ...row.argv], { env, cwd: home, timeoutMs: exitTimeoutMs });
         outputs.push(result.stdout, result.stderr);
-        assert.deepEqual(result, { ...row.expected, signal: null }, `${variant} ${row.argv.join(" ")}`);
+        privately(`${variant} ${row.argv.join(" ")}`, [workflowToken], () => assert.deepEqual(result, { ...row.expected, signal: null }));
       }
       const issued: string[] = [];
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const success = await runProcess(command, [...prefix, "auth", "forge", "--data-dir", state], { env, cwd: home, timeoutMs: exitTimeoutMs });
         outputs.push(success.stderr);
         // exactly one 43-character token line, empty stderr (so no ExperimentalWarning), compared by shape only
-        assert.deepEqual({ code: success.code, signal: success.signal, stderr: success.stderr, stdout: tokenLineShape(success.stdout) },
-          { code: 0, signal: null, stderr: "", stdout: tokenLine }, variant);
+        privately(variant, [workflowToken, success.stdout.trim(), ...issued], () =>
+          assert.deepEqual({ code: success.code, signal: success.signal, stderr: success.stderr, stdout: tokenLineShape(success.stdout) },
+            { code: 0, signal: null, stderr: "", stdout: tokenLine }));
         issued.push(success.stdout.trim());
       }
-      assert.notEqual(issued[0], issued[1], "every forge issues a new token");
-      for (const token of issued) assert.equal(typeof auth.login(token), "string", `${variant} token signs in`);
+      // compared as a boolean, so a repeated token never appears in the failure
+      assert.equal(issued[0] === issued[1], false, "every forge issues a new token");
+      for (const token of issued) privately(`${variant} token signs in`, issued, () => assert.equal(typeof auth.login(token), "string"));
       assert.deepEqual(leakedSecrets(outputs.join("\n"), [workflowToken, ...issued]), [], "no output other than the forge stdout carries a token");
     });
 
@@ -224,7 +227,7 @@ describe("built and installed bin", () => {
       const interrupted = await forge.closed(exitTimeoutMs);
       const exitMs = performance.now() - signalledAt;
       // baseline: forge installs no signal handler, so the default disposition ends it at once, well inside busy_timeout (5000 ms)
-      assert.deepEqual(interrupted, { code: null, signal: "SIGINT", stdout: "", stderr: "" });
+      privately("interrupted forge", [], () => assert.deepEqual(interrupted, { code: null, signal: "SIGINT", stdout: "", stderr: "" }));
       assert.ok(exitMs < 5_000, `exit took ${Math.round(exitMs)} ms`);
 
       holder.child.stdin?.write("commit\n");

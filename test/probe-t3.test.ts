@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { it, type TestContext } from "vitest";
 import { startFakeT3, type FakeT3, type FakeT3Options } from "./support/cli-fake-t3.js";
 import { leakedSecrets, nodePath, repositoryRoot, startProcess, tsxLoader, type ProcessResult, type RunningProcess } from "./support/cli-process.js";
+import { privately } from "./support/private-assert.js";
 import { after } from "./support/node-test.js";
 
 // scripts/probe-t3.ts in a real child process against a loopback fake T3; real providers are never configured
@@ -62,7 +63,7 @@ const exitTimeoutMs = 30_000;
 it("CT-PROBE-T3-01: a verified probe prints exactly one success line, exits 0 and removes its temp directory", { timeout: 60_000 }, async (t) => {
   const harness = await probeHarness(t, { activeThreads: 2, archiveThreads: 1 });
   const result = await harness.start().closed(exitTimeoutMs);
-  assert.deepEqual(result, { code: 0, signal: null, stdout: verifiedLine(3), stderr: "" });
+  privately("verified probe", [harness.token], () => assert.deepEqual(result, { code: 0, signal: null, stdout: verifiedLine(3), stderr: "" }));
   assert.deepEqual(await harness.probeDirectories(), []);
 });
 
@@ -70,8 +71,9 @@ it("CT-PROBE-T3-02: a refused token prints the verified:false line and exits 1 w
   { timeout: 60_000 }, async (t) => {
     const harness = await probeHarness(t, { serverToken: "a-different-token", activeThreads: 1, archiveThreads: 1 });
     const refused = await harness.start().closed(exitTimeoutMs);
-    assert.deepEqual(refused, { code: 1, signal: null, stdout: failedLine(false), stderr: "" });
+    // the fingerprint-only leak check runs before the exact output comparison, which fails without rendering a token
     assert.deepEqual(leakedSecrets(refused.stdout + refused.stderr, [harness.token]), []);
+    privately("refused probe", [harness.token], () => assert.deepEqual(refused, { code: 1, signal: null, stdout: failedLine(false), stderr: "" }));
     assert.deepEqual(harness.fake.traffic.http, ["GET /.well-known/t3/environment"]);
     assert.equal(harness.fake.traffic.unauthorized, 1);
     assert.deepEqual(await harness.probeDirectories(), []);
