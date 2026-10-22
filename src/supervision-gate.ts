@@ -1,4 +1,9 @@
+import { resolve } from "node:path";
 import { Context, Effect, Exit, Fiber, FiberMap, Layer, Option, Semaphore } from "effect";
+import { isSupervisorThread, type ProjectSupervisorStore, type SupervisionStartRecord } from "./project-supervisor-store.js";
+import { mainConversation } from "./supervisor-scope.js";
+import { currentThreadPolicy } from "./thread-policy.js";
+import type { SupervisorConfig, ThreadInfo } from "./types.js";
 
 // the admission section of plan 3.11 (CC-STOP-LIN): one process-wide Semaphore(1); Stop, Enable, thread-policy saves,
 // chat-supervision changes and Start activation, every fresh send's final guard + receipt commit + native initiation,
@@ -9,6 +14,64 @@ export interface GateGuard {
   readonly scopeEnabled: (projectId: string, mainThreadId?: string, purpose?: "effect" | "interpretation" | "reconcile") => boolean;
   readonly supervisionStopped: (threadId: string) => boolean;
   readonly workflowEditingEnabled: (projectId: string, mainThreadId?: string, purpose?: "effect" | "status" | "read") => boolean;
+}
+
+const unavailable = (thread: ThreadInfo) => Boolean(thread.archivedAt || thread.deletedAt);
+
+// the scope predicates (plan 3.9 dependency extraction, moved verbatim from ProjectSupervisor): synchronous reads over the
+// interim stores (B-02) and the scratch classification memory that every guard uses; lower objects read them here instead
+// of calling back into ProjectSupervisor
+export class SupervisionScope implements GateGuard {
+  private readonly scratchProjectIds = new Set<string>();
+  private catalogClassificationsReady = false;
+  constructor(readonly config: SupervisorConfig, readonly store: ProjectSupervisorStore, private readonly operateRpcAvailable: boolean) {}
+  rememberScratchProjects(projects: readonly {id: string; workspaceRoot: string}[]): void {
+    for (const project of projects) {
+      if (this.scratchProject(project.id, project.workspaceRoot)) this.scratchProjectIds.add(project.id);
+      else this.scratchProjectIds.delete(project.id);
+    }
+    this.catalogClassificationsReady = true;
+  }
+  scratchProject(projectId: string, workspaceRoot: string): boolean {
+    const classification = this.store.store.classification(projectId);
+    if (classification !== "unclassified") return classification === "scratch";
+    return Boolean(this.config.managedScratchRoot && resolve(workspaceRoot) === resolve(this.config.managedScratchRoot));
+  }
+  isNoProject(projectId: string): boolean {
+    const classification = this.store.store.classification(projectId);
+    return classification === "unclassified" ? this.scratchProjectIds.has(projectId) : classification === "scratch";
+  }
+  /** One scope predicate protects every effect; only a pending Start's interpretation can run before activation. */
+  scopeEnabled(projectId: string, mainThreadId?: string, purpose: "effect" | "interpretation" | "reconcile" = "effect"): boolean {
+    if (!this.isNoProject(projectId)) return this.store.enabled(projectId) && (purpose === "reconcile" || !mainThreadId || !this.supervisionStopped(mainThreadId));
+    const control = this.store.noProjectControl();
+    if (!control.globallyEnabled || control.mode === "off") return false;
+    if (!mainThreadId) return control.mode === "automatic";
+    const start = this.store.start(mainThreadId);
+    if (start?.status === "pending") return purpose !== "effect" && this.validPendingStart(start);
+    if (purpose !== "reconcile" && this.supervisionStopped(mainThreadId)) return false;
+    return control.mode === "automatic" || start?.status === "active";
+  }
+  validPendingStart(start: SupervisionStartRecord): boolean {
+    const mode = this.store.noProjectControl();
+    return start.status === "pending" && mode.globallyEnabled && mode.mode !== "off" && mode.generation === start.modeGeneration &&
+      this.store.control(null).generation === start.masterGeneration && (this.store.chatStop(start.threadId)?.stoppedAt ?? -1) < start.intentAt &&
+      (this.store.chatEnabledAt(start.threadId) ?? -1) <= start.intentAt;
+  }
+  projectEnabled(projectId: string, mainThreadId?: string): boolean {return this.scopeEnabled(projectId, mainThreadId, "interpretation");}
+  workflowEditingEnabled(projectId: string, mainThreadId?: string, purpose: "effect" | "status" | "read" = "effect"): boolean {
+    return this.catalogClassificationsReady && this.operateRpcAvailable && this.store.scopeCompatible && this.scopeEnabled(projectId, mainThreadId, purpose !== "effect" ? "interpretation" : "effect");
+  }
+  validPendingStartFor(threadId: string): boolean {const start = this.store.start(threadId);return Boolean(start && this.validPendingStart(start));}
+  /** Whether the instance thread policy stops supervision of this chat; the same control backs the dashboard and supervision_stop. */
+  supervisionStopped(threadId: string): boolean {return currentThreadPolicy(this.config).excludedThreadIds.includes(threadId);}
+  mainShape(thread: ThreadInfo): boolean {
+    return !isSupervisorThread(this.config, thread) && !unavailable(thread) && thread.lineage.relationshipToParent !== "subagent";
+  }
+  eligible(thread: ThreadInfo, threads: readonly ThreadInfo[]): boolean {
+    if (isSupervisorThread(this.config, thread) || unavailable(thread) || thread.lineage.relationshipToParent === "subagent" || currentThreadPolicy(this.config).excludedThreadIds.includes(thread.id) && !this.validPendingStartFor(thread.id)) return false;
+    return mainConversation(thread, threads)?.id === thread.id;
+  }
 }
 
 export interface SupervisionGateShape {
