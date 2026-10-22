@@ -9,6 +9,7 @@ import {GuidanceStore} from "../src/guidance-store.js";
 import {startGuidanceUi} from "../src/guidance-ui.js";
 import {forgeDashboardToken} from "../src/service-auth.js";
 import {ThreadPolicyStore} from "../src/thread-policy.js";
+import {released} from "./support/http.js";
 import type {SupervisorConfig, ThreadInfo} from "../src/types.js";
 
 const config = (directory: string): SupervisorConfig => ({
@@ -79,11 +80,12 @@ it("dashboard sessions retain authenticated snapshot and excluded-thread setting
       const address = ui.server.address();
       assert.ok(address && typeof address === "object");
       const origin = `http://127.0.0.1:${address.port}`;
-      assert.equal((await fetch(origin + "/api/guidance/snapshot")).status, 401);
+      assert.equal((await fetch(origin + "/api/guidance/snapshot").then(released)).status, 401);
       const session = await signIn(origin, directory);
       const headers = {"x-supervisor-session": session};
       const snapshot = await fetch(origin + "/api/guidance/snapshot", {headers});
       assert.equal(snapshot.status, 200);
+      await released(snapshot);
       const csrf = (await (await fetch(origin + "/api/csrf", {headers})).json() as {csrf: string}).csrf;
       const changed = await fetch(origin + "/api/guidance/thread-policy", {
         method: "POST",
@@ -91,6 +93,7 @@ it("dashboard sessions retain authenticated snapshot and excluded-thread setting
         body: JSON.stringify({generation: policy.get().generation, excludedThreadIds: ["excluded-thread"]}),
       });
       assert.equal(changed.status, 200);
+      await released(changed);
       assert.deepEqual(policy.get().excludedThreadIds, ["excluded-thread"]);
     } finally {await ui.close();}
   } finally {

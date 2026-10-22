@@ -5,6 +5,7 @@ import {join} from "node:path";
 import { it } from "vitest";
 import {WebSocketServer} from "ws";
 import {ProjectConfigEditor} from "../src/project-config-editor.js";
+import {released} from "./support/http.js";
 import type {ProjectConfigSave} from "../src/project-definitions-contract.js";
 import {ProjectFileError, makeProjectWriter} from "../src/project-files.js";
 import {forgeDashboardToken} from "../src/service-auth.js";
@@ -215,8 +216,8 @@ it("project-configuration endpoint keeps session, origin and CSRF checks", async
     const session = (await login.json() as {session: string}).session;
     const headers = {"x-supervisor-session": session};
     const path = "/api/guidance/project-configuration?projectId=project";
-    assert.equal((await fetch(origin + path)).status, 401);
-    assert.equal((await fetch(origin + path, {headers: {...headers, Origin: "https://foreign.invalid"}})).status, 403);
+    assert.equal((await fetch(origin + path).then(released)).status, 401);
+    assert.equal((await fetch(origin + path, {headers: {...headers, Origin: "https://foreign.invalid"}}).then(released)).status, 403);
     const observedResponse = await fetch(origin + path, {headers});
     assert.equal(observedResponse.status, 200);
     const observed = await observedResponse.json() as {status: string; revision: string; projectConfig: unknown};
@@ -232,6 +233,7 @@ it("project-configuration endpoint keeps session, origin and CSRF checks", async
       method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify(payload),
     });
     assert.equal(rejected.status, 403);
+    await released(rejected);
     assert.equal(f.writes.length, 0);
     const csrf = await fetch(origin + "/api/csrf", {headers}).then(response => response.json()) as {csrf: string};
     // legacy or unknown fields are rejected while decoding the request, before any normalization or write
@@ -242,6 +244,7 @@ it("project-configuration endpoint keeps session, origin and CSRF checks", async
         body: JSON.stringify({...payload, config}),
       });
       assert.notEqual(strict.status, 200, JSON.stringify(config));
+      await released(strict);
       assert.equal(f.writes.length, 0, "nothing is written for a request with an unknown field");
     }
     const saved = await fetch(origin + "/api/guidance/project-configuration", {

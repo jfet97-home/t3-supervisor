@@ -141,6 +141,8 @@ async function fakeT3(statusForCall: (index: number) => ProbeStatus, exitCode = 
     },
     get prematureHelperWrites() {return prematureHelperWrites;},
     async close() {
+      // tests that never exercise the echo handshake settle its promise here
+      resolveEchoAcked();
       for (const client of server.clients) client.terminate();
       await new Promise<void>(resolve => server.close(() => resolve()));
     },
