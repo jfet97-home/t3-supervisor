@@ -46,6 +46,7 @@ it("workflow MCP exposes read, write and the scoped stop tool and serves statele
       },
     });
     assert.equal(initialized.status, 200);
+    await initialized.body?.cancel();
     const tools = await postJson(url, {jsonrpc: "2.0", id: 2, method: "tools/list", params: {}});
     assert.equal(tools.status, 200);
     const listBody = await tools.json() as {result?: {tools?: Array<{name: string; inputSchema?: {
@@ -102,6 +103,7 @@ it("workflow MCP rejects requests above its HTTP body bound", async () => {
       jsonrpc: "2.0", id: 4, method: "tools/list", params: {}, padding: "x".repeat(1024 * 1024),
     });
     assert.ok(response.status === 413 || response.status === 400);
+    await response.body?.cancel();
   } finally {
     await endpoint.close();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
