@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { it } from "vitest";
+import { after } from "./support/node-test.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,8 +38,8 @@ const activate = (team: SupervisorTeamStore, binding: TeamBinding, subtreeRootTh
   return team.completeTransfer(binding, subtreeRootThreadId, assignment.epoch, now + 4);
 };
 
-test("root owns main and unassigned work; helpers gain subtree authority only after readiness and acknowledged handover", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("root owns main and unassigned work; helpers gain subtree authority only after readiness and acknowledged handover", async t => {
+  const f = await fixture();after(t, f.cleanup);
   assert.equal(f.team.coverage(f.binding, "main", parents).actorThreadId, f.binding.threadId);
   assert.equal(f.team.coverage(f.binding, "leaf-a", parents).state, "root");
   assert.equal(f.team.coverage(f.binding, "foreign", parents).state, "unavailable");
@@ -64,8 +65,8 @@ test("root owns main and unassigned work; helpers gain subtree authority only af
   }), false);
 });
 
-test("subtree overrides stay local and unrelated assignment changes do not stale work", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("subtree overrides stay local and unrelated assignment changes do not stale work", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const first = member(f.team, f.binding, "helper-one", 1);
   const second = member(f.team, f.binding, "helper-two", 10);
   activate(f.team, f.binding, "branch-a", first.threadId, 20);
@@ -89,8 +90,8 @@ test("subtree overrides stay local and unrelated assignment changes do not stale
   assert.throws(() => f.team.assign(f.binding, "foreign", second.threadId, parents), /supervisor_team_assignment_out_of_scope/u);
 });
 
-test("a more-specific handover notifies the inherited owner and drains only work inside that subtree", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a more-specific handover notifies the inherited owner and drains only work inside that subtree", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const first = member(f.team, f.binding, "helper-inherited", 1);
   const second = member(f.team, f.binding, "helper-override", 10);
   activate(f.team, f.binding, "branch-a", first.threadId, 20);
@@ -119,8 +120,8 @@ test("a more-specific handover notifies the inherited owner and drains only work
   assert.equal(f.team.coverage(f.binding, "leaf-deep", parents).actorThreadId, second.threadId);
 });
 
-test("handover retains uncertain effects and rejects stale owner authority until they settle", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("handover retains uncertain effects and rejects stale owner authority until they settle", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const first = member(f.team, f.binding, "helper-old", 1);
   const second = member(f.team, f.binding, "helper-new", 10);
   activate(f.team, f.binding, "branch-a", first.threadId, 20);
@@ -151,8 +152,8 @@ test("handover retains uncertain effects and rejects stale owner authority until
   }), true);
 });
 
-test("confirmed member loss releases coverage but fences targets with unresolved original effects", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("confirmed member loss releases coverage but fences targets with unresolved original effects", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const helper = member(f.team, f.binding, "helper-lost", 1);
   activate(f.team, f.binding, "branch-a", helper.threadId, 10);
   const coverage = f.team.coverage(f.binding, "leaf-a", parents);
@@ -171,8 +172,8 @@ test("confirmed member loss releases coverage but fences targets with unresolved
   f.team.acknowledgeEvent(f.binding, f.binding.threadId, missing.id, 24);
 });
 
-test("quarantine fences a present helper, preserves uncertain handovers and guide effects, then permits retirement", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("quarantine fences a present helper, preserves uncertain handovers and guide effects, then permits retirement", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const first = member(f.team, f.binding, "helper-quarantined", 1);
   const second = member(f.team, f.binding, "helper-next", 10);
   activate(f.team, f.binding, "branch-a", first.threadId, 20);
@@ -226,8 +227,8 @@ test("quarantine fences a present helper, preserves uncertain handovers and guid
   assert.equal(f.team.coverage(f.binding, "leaf-a", parents).actorThreadId, second.threadId);
 });
 
-test("definite notification failure is latched and only explicit retry creates a fresh attempt", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("definite notification failure is latched and only explicit retry creates a fresh attempt", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const helper = member(f.team, f.binding, "helper-notification-retry", 1);
   const assignment = f.team.assign(f.binding, "branch-a", helper.threadId, parents, 10);
   const receive = f.team.snapshot(f.binding).notifications.find(value => value.assignmentRootThreadId === "branch-a" &&
@@ -267,8 +268,8 @@ test("definite notification failure is latched and only explicit retry creates a
   assert.equal(f.team.coverage(f.binding, "leaf-a", parents).actorThreadId, helper.threadId);
 });
 
-test("helper limit uses project settings, permits zero, and retains idle reusable helpers", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("helper limit uses project settings, permits zero, and retains idle reusable helpers", async t => {
+  const f = await fixture();after(t, f.cleanup);
   assert.equal(f.team.settings(f.binding).maxHelpersPerRoot, 5);
   assert.equal(f.team.setMaxHelpersPerRoot(f.binding, 0, 1).maxHelpersPerRoot, 1);
   const helper = member(f.team, f.binding, "helper-reusable", 1);
@@ -288,7 +289,7 @@ test("helper limit uses project settings, permits zero, and retains idle reusabl
   assert.throws(() => f.team.setMaxHelpersPerRoot(f.binding, 2, 21), /supervisor_team_invalid_helper_limit/u);
 });
 
-test("members, assignments, and uncertain handover notifications survive database reopen", async () => {
+it("members, assignments, and uncertain handover notifications survive database reopen", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-team-reopen-"));
   let guidance = new GuidanceStore(directory);
   let supervisors = new ProjectSupervisorStore(guidance, new Set());
@@ -342,10 +343,10 @@ const interruptedHandover = async () => {
   return {...f, helper, transfer, original};
 };
 
-test("interrupted review chains close durably without acknowledging history or settling request effects", async t => {
+it("interrupted review chains close durably without acknowledging history or settling request effects", async t => {
   const f = await interruptedHandover();
   let guidance = f.guidance;
-  t.after(async () => {guidance.close();await rm(f.directory, {recursive: true, force: true});});
+  after(t, async () => {guidance.close();await rm(f.directory, {recursive: true, force: true});});
   const first = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "review-one"), 110));
   assert.throws(() => f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "incomplete-chain")), /supervisor_team_review_chain_conflict/u);
   const input = {...reviewInput(f.original, "review-two", [f.original, first]), note: "Inspect native effects; do not assume they failed."};
@@ -377,9 +378,9 @@ test("interrupted review chains close durably without acknowledging history or s
   assert.equal(restarted.hasBlockingWork(f.binding), false, "closed notice history is no longer work");
 });
 
-test("late original completion supersedes only pending reviews and sent reviews keep their own fence", async t => {
+it("late original completion supersedes only pending reviews and sent reviews keep their own fence", async t => {
   for (const state of ["pending", "sending", "uncertain", "delivered"] as const) {
-    const f = await interruptedHandover();t.after(f.cleanup);
+    const f = await interruptedHandover();after(t, f.cleanup);
     const review = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "late-review"));
     if (state !== "pending") f.team.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, "sending");
     if (state === "uncertain" || state === "delivered") f.team.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, state);
@@ -396,9 +397,9 @@ test("late original completion supersedes only pending reviews and sent reviews 
   }
 });
 
-test("epoch changes supersede pending reviews while sent reviews acknowledge only themselves", async t => {
+it("epoch changes supersede pending reviews while sent reviews acknowledge only themselves", async t => {
   for (const lifecycle of ["missing", "quarantine"] as const) for (const sent of [false, true]) {
-    const f = await interruptedHandover();t.after(f.cleanup);
+    const f = await interruptedHandover();after(t, f.cleanup);
     const review = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "epoch-review"));
     if (sent) interruptNotice(f.team, f.binding, review);
     if (lifecycle === "missing") f.team.markMissing(f.binding, f.helper.threadId);
@@ -419,8 +420,8 @@ test("epoch changes supersede pending reviews while sent reviews acknowledge onl
   }
 });
 
-test("review CAS and operation identities reject forged helper acknowledgements and reflect no input", async t => {
-  const f = await interruptedHandover();t.after(f.cleanup);
+it("review CAS and operation identities reject forged helper acknowledgements and reflect no input", async t => {
+  const f = await interruptedHandover();after(t, f.cleanup);
   const input = {...reviewInput(f.original, "sentinel-operation"), note: "sentinel-note"};
   const before = f.team.snapshot(f.binding);
   const denies = (call: () => unknown) => assert.throws(call, error => error instanceof Error &&
@@ -442,8 +443,8 @@ test("review CAS and operation identities reject forged helper acknowledgements 
   denies(() => f.team.acknowledgeNotificationRun(f.binding, f.helper.threadId, review.id, 0, "sentinel-forged"));
 });
 
-test("failed reviews retry only their still-open exact chain", async t => {
-  const f = await interruptedHandover();t.after(f.cleanup);
+it("failed reviews retry only their still-open exact chain", async t => {
+  const f = await interruptedHandover();after(t, f.cleanup);
   const review = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "failed-review"));
   f.team.markNotificationRejected(f.binding, f.binding.threadId, review.id, "Definite rejection", 0);
   assert.equal(f.team.retryFailedNotifications(f.binding, f.helper.threadId), 1);
@@ -462,9 +463,9 @@ test("failed reviews retry only their still-open exact chain", async t => {
   assert.equal(f.team.completeTransfer(f.binding, "branch-a", f.transfer.epoch).state, "active");
 });
 
-test("a rejected review never strands its chain, while an unknown review POST keeps its fence", async t => {
+it("a rejected review never strands its chain, while an unknown review POST keeps its fence", async t => {
   for (const state of ["failed", "uncertain"] as const) {
-    const f = await interruptedHandover();t.after(f.cleanup);
+    const f = await interruptedHandover();after(t, f.cleanup);
     const first = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "first-review")));
     const second = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "second-review", [f.original, first]));
     f.team.updateNotificationDelivery(f.binding, f.binding.threadId, second.id, "sending");
@@ -484,9 +485,9 @@ test("a rejected review never strands its chain, while an unknown review POST ke
   }
 });
 
-test("an unsent review retires when an exact attempt of its own chain closes, and only then", async t => {
+it("an unsent review retires when an exact attempt of its own chain closes, and only then", async t => {
   for (const state of ["pending", "failed"] as const) {
-    const f = await interruptedHandover();t.after(f.cleanup);
+    const f = await interruptedHandover();after(t, f.cleanup);
     const first = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, `first-${state}`)));
     f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, f.original.id, 0, "late-original");
     const second = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, `second-${state}`, [first]));
@@ -498,7 +499,7 @@ test("an unsent review retires when an exact attempt of its own chain closes, an
     f.team.settleRequest(f.binding, "guide:unresolved");
     f.team.completeTransfer(f.binding, "branch-a", f.transfer.epoch);
   }
-  const f = await interruptedHandover();t.after(f.cleanup);
+  const f = await interruptedHandover();after(t, f.cleanup);
   const first = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "closure-first")));
   const second = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "closure-second", [f.original, first])));
   f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, first.id, 0, "late-first", Date.now(), first.reviewChain);
@@ -509,8 +510,8 @@ test("an unsent review retires when an exact attempt of its own chain closes, an
     "an already-closed original gaining its own acknowledgement leaves a successor over the unchanged open set");
 });
 
-test("a definite rejection arriving after its chain or transfer epoch closed is retired immediately", async t => {
-  const f = await interruptedHandover();t.after(f.cleanup);
+it("a definite rejection arriving after its chain or transfer epoch closed is retired immediately", async t => {
+  const f = await interruptedHandover();after(t, f.cleanup);
   const review = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "in-flight-reject"));
   f.team.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, "sending");
   f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, f.original.id, 0, "late-original");
@@ -520,7 +521,7 @@ test("a definite rejection arriving after its chain or transfer epoch closed is 
   f.team.settleRequest(f.binding, "guide:unresolved");
   f.team.completeTransfer(f.binding, "branch-a", f.transfer.epoch);
 
-  const g = await fixture();t.after(g.cleanup);
+  const g = await fixture();after(t, g.cleanup);
   const from = member(g.team, g.binding, "late-from", 1), to = member(g.team, g.binding, "late-to", 2);
   activate(g.team, g.binding, "branch-a", from.threadId, 10);
   const transfer = g.team.assign(g.binding, "branch-a", to.threadId, parents, 20);
@@ -533,8 +534,8 @@ test("a definite rejection arriving after its chain or transfer epoch closed is 
   assert.equal(g.team.hasBlockingWork(g.binding), false);
 });
 
-test("review events identify no raw notification IDs", async t => {
-  const f = await interruptedHandover();t.after(f.cleanup);
+it("review events identify no raw notification IDs", async t => {
+  const f = await interruptedHandover();after(t, f.cleanup);
   const review = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "event-text")));
   f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, review.id, 0, "event-text-run");
   const summaries = f.team.snapshot(f.binding).events.filter(event => event.kind.startsWith("handover_review_")).map(event => event.summary);
@@ -542,8 +543,8 @@ test("review events identify no raw notification IDs", async t => {
   for (const summary of summaries) for (const id of [f.original.id, review.id, "event-text-run"]) assert.equal(summary.includes(id), false);
 });
 
-test("ending a transfer epoch retires definitely undelivered notices for a still-ready recipient", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("ending a transfer epoch retires definitely undelivered notices for a still-ready recipient", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const from = member(f.team, f.binding, "from-helper", 1);
   const to = member(f.team, f.binding, "to-helper", 2);
   activate(f.team, f.binding, "branch-a", from.threadId, 10);
@@ -559,8 +560,8 @@ test("ending a transfer epoch retires definitely undelivered notices for a still
   assert.equal(f.team.hasBlockingWork(f.binding), false);
 });
 
-test("an interrupted sent review remains reviewable after the original late acknowledgement", async t => {
-  const f = await interruptedHandover();t.after(f.cleanup);
+it("an interrupted sent review remains reviewable after the original late acknowledgement", async t => {
+  const f = await interruptedHandover();after(t, f.cleanup);
   const first = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "sent-before-original-completed")));
   f.team.acknowledgeNotificationRun(f.binding, f.binding.threadId, f.original.id, 0, "original-now-completed");
   const second = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "review-only-unresolved-effects", [first]));
@@ -571,9 +572,9 @@ test("an interrupted sent review remains reviewable after the original late ackn
   assert.equal(f.team.snapshot(f.binding).notifications.find(value => value.id === f.original.id)?.resolvedByReview, undefined);
 });
 
-test("reassignment and release cannot reuse an old review even when its recipient is still ready", async t => {
+it("reassignment and release cannot reuse an old review even when its recipient is still ready", async t => {
   for (const sent of [false, true]) {
-    const f = await fixture();t.after(f.cleanup);
+    const f = await fixture();after(t, f.cleanup);
     const first = member(f.team, f.binding, "old-owner", 1);
     const second = member(f.team, f.binding, "lost-recipient", 2);
     activate(f.team, f.binding, "branch-a", first.threadId, 10);

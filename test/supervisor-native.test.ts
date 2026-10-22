@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import test from "node:test";
+import { it } from "vitest";
+import { after } from "./support/node-test.js";
 import { WebSocketServer } from "ws";
 import {
   makeSupervisorRpc,
@@ -59,9 +60,9 @@ const validConfig = {
   }],
 };
 
-test("native RPC authenticates and uses the orchestration request and response frames", async (t) => {
+it("native RPC authenticates and uses the orchestration request and response frames", async (t) => {
   const { server, url } = await startServer();
-  t.after(() => closeServer(server));
+  after(t, () => closeServer(server));
   let authorization: string | undefined;
   let request: unknown;
   let pongSeen = false;
@@ -94,9 +95,9 @@ test("native RPC authenticates and uses the orchestration request and response f
   assert.equal(pongSeen, true);
 });
 
-test("malformed native RPC responses fail closed with a credential-free error", async (t) => {
+it("malformed native RPC responses fail closed with a credential-free error", async (t) => {
   const { server, url } = await startServer();
-  t.after(() => closeServer(server));
+  after(t, () => closeServer(server));
   server.on("connection", (socket) => socket.once("message", () => {
     socket.send(JSON.stringify({ _tag: "Exit", requestId: "supervisor", exit: "success" }));
   }));
@@ -107,9 +108,9 @@ test("malformed native RPC responses fail closed with a credential-free error", 
   );
 });
 
-test("native RPC marks a socket closed before open rejected without claiming a definite T3 rejection", async (t) => {
+it("native RPC marks a socket closed before open rejected without claiming a definite T3 rejection", async (t) => {
   const {server, url} = await startHttpServer(() => undefined);
-  t.after(() => closeHttpServer(server));
+  after(t, () => closeHttpServer(server));
   let requestFrameObserved = false;
   server.on("upgrade", (_request, socket) => {
     socket.on("data", data => {if (data.toString().includes('"_tag":"Request"')) requestFrameObserved = true;});
@@ -123,9 +124,9 @@ test("native RPC marks a socket closed before open rejected without claiming a d
   assert.equal(requestFrameObserved, false, "the socket never opened and no native request frame was sent");
 });
 
-test("native RPC rejects an already-aborted call without opening a socket or claiming a T3 rejection", async (t) => {
+it("native RPC rejects an already-aborted call without opening a socket or claiming a T3 rejection", async (t) => {
   const {server, url} = await startServer();
-  t.after(() => closeServer(server));
+  after(t, () => closeServer(server));
   let connections = 0;
   server.on("connection", () => {connections += 1;});
   const controller = new AbortController();
@@ -138,9 +139,9 @@ test("native RPC rejects an already-aborted call without opening a socket or cla
   assert.equal(connections, 0);
 });
 
-test("native RPC classifies a connection drop after sending as uncertain", async (t) => {
+it("native RPC classifies a connection drop after sending as uncertain", async (t) => {
   const {server, url} = await startServer();
-  t.after(() => closeServer(server));
+  after(t, () => closeServer(server));
   let requestReceived = false;
   server.on("connection", socket => socket.once("message", () => {
     requestReceived = true;
@@ -154,9 +155,9 @@ test("native RPC classifies a connection drop after sending as uncertain", async
   assert.equal(requestReceived, true);
 });
 
-test("native RPC preserves durable rejection identity through nested command failures", async (t) => {
+it("native RPC preserves durable rejection identity through nested command failures", async (t) => {
   const { server, url } = await startServer();
-  t.after(() => closeServer(server));
+  after(t, () => closeServer(server));
   server.on("connection", (socket) => socket.once("message", () => {
     socket.send(JSON.stringify({
       _tag: "Exit",
@@ -172,9 +173,9 @@ test("native RPC preserves durable rejection identity through nested command fai
   );
 });
 
-test("native RPC marks only the received dispatch-command failure for same-ID reconciliation", async (t) => {
+it("native RPC marks only the received dispatch-command failure for same-ID reconciliation", async (t) => {
   const { server, url } = await startServer();
-  t.after(() => closeServer(server));
+  after(t, () => closeServer(server));
   server.on("connection", (socket) => socket.once("message", (data) => {
     const request: unknown = JSON.parse(data.toString());
     assert.ok(typeof request === "object" && request !== null);
@@ -197,9 +198,9 @@ test("native RPC marks only the received dispatch-command failure for same-ID re
   );
 });
 
-test("native RPC identifies a provider-disabled rejection before receipt lookup", async (t) => {
+it("native RPC identifies a provider-disabled rejection before receipt lookup", async (t) => {
   const { server, url } = await startServer();
-  t.after(() => closeServer(server));
+  after(t, () => closeServer(server));
   server.on("connection", (socket) => socket.once("message", () => {
     socket.send(JSON.stringify({
       _tag: "Exit",
@@ -214,7 +215,7 @@ test("native RPC identifies a provider-disabled rejection before receipt lookup"
   );
 });
 
-test("shell activation baseline includes more than 128 active threads and archived run anchors", async (t) => {
+it("shell activation baseline includes more than 128 active threads and archived run anchors", async (t) => {
   const activeThreads = Array.from({ length: 129 }, (_, index) => ({
     id: "active-thread-" + index,
     latestRunId: index === 0 ? null : "active-run-" + index,
@@ -236,7 +237,7 @@ test("shell activation baseline includes more than 128 active threads and archiv
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ schemaVersion: 2, snapshotSequence: 161, threads: activeThreads, archivedThreads: [] }));
   });
-  t.after(() => closeHttpServer(server));
+  after(t, () => closeHttpServer(server));
 
   const archiveRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
     rpcCalls.push({ tag, payload });
@@ -255,7 +256,7 @@ test("shell activation baseline includes more than 128 active threads and archiv
   assert.deepEqual(rpcCalls, [{ tag: "orchestration.getArchivedShellSnapshot", payload: {} }]);
 });
 
-test("shell baseline rejects malformed or ambiguous thread anchors", async (t) => {
+it("shell baseline rejects malformed or ambiguous thread anchors", async (t) => {
   const { server, url } = await startHttpServer((_request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
@@ -265,7 +266,7 @@ test("shell baseline rejects malformed or ambiguous thread anchors", async (t) =
       archivedThreads: [{ id: "same-thread", latestRunId: "archived-run" }],
     }));
   });
-  t.after(() => closeHttpServer(server));
+  after(t, () => closeHttpServer(server));
 
   let archiveCalls = 0;
   await assert.rejects(
@@ -275,14 +276,14 @@ test("shell baseline rejects malformed or ambiguous thread anchors", async (t) =
   assert.equal(archiveCalls, 1, "the active and archived snapshot requests start concurrently");
 });
 
-test("active and archived shell snapshots must share a revision within three bounded reads", async (t) => {
+it("active and archived shell snapshots must share a revision within three bounded reads", async (t) => {
   let httpCalls = 0;
   const { server, url } = await startHttpServer((_request, response) => {
     httpCalls += 1;
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ schemaVersion: 2, snapshotSequence: 161, threads: [], archivedThreads: [] }));
   });
-  t.after(() => closeHttpServer(server));
+  after(t, () => closeHttpServer(server));
   let archiveCalls = 0;
   const archiveRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
     archiveCalls += 1;
@@ -299,7 +300,7 @@ test("active and archived shell snapshots must share a revision within three bou
   assert.equal(archiveCalls, 3);
 });
 
-test("active and archived baseline reads start concurrently for each revision pair", async (t) => {
+it("active and archived baseline reads start concurrently for each revision pair", async (t) => {
   let noteHttpStarted!: () => void;
   let noteRpcStarted!: () => void;
   const httpStarted = new Promise<void>((resolve) => { noteHttpStarted = resolve; });
@@ -311,7 +312,7 @@ test("active and archived baseline reads start concurrently for each revision pa
       response.end(JSON.stringify({ schemaVersion: 2, snapshotSequence: 161, threads: [], archivedThreads: [] }));
     });
   });
-  t.after(() => closeHttpServer(server));
+  after(t, () => closeHttpServer(server));
   const archiveRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
     noteRpcStarted();
     await httpStarted;
@@ -325,7 +326,7 @@ test("active and archived baseline reads start concurrently for each revision pa
   assert.deepEqual(baseline.threads, []);
 });
 
-test("overlapping active and archived thread identities fail closed after three pairs", async (t) => {
+it("overlapping active and archived thread identities fail closed after three pairs", async (t) => {
   let httpCalls = 0;
   const { server, url } = await startHttpServer((_request, response) => {
     httpCalls += 1;
@@ -337,7 +338,7 @@ test("overlapping active and archived thread identities fail closed after three 
       archivedThreads: [],
     }));
   });
-  t.after(() => closeHttpServer(server));
+  after(t, () => closeHttpServer(server));
   let archiveCalls = 0;
   const archiveRpc = async (): Promise<unknown> => {
     archiveCalls += 1;
@@ -352,7 +353,7 @@ test("overlapping active and archived thread identities fail closed after three 
   assert.equal(archiveCalls, 3);
 });
 
-test("native configuration rejects malformed or excessive input and enforces advertised model choices", () => {
+it("native configuration rejects malformed or excessive input and enforces advertised model choices", () => {
   const models = supervisorModels(validConfig);
   const valid = { instanceId: "codex", model: "gpt-6-luna", options: [{ id: "reasoningEffort", value: "high" }] };
   assert.equal(validModelSelection(valid, models), true);

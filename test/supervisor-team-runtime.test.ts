@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import test, { type TestContext } from "node:test";
+import { it, type TestContext } from "vitest";
+import { after, mockMethod } from "./support/node-test.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -142,9 +143,9 @@ const helperProjection = (member: TeamMember, rootThreadId: string): Projection 
   ...makeThread(member.threadId, rootThreadId, "subagent"), lineage: {parentThreadId: rootThreadId, relationshipToParent: "subagent", rootThreadId},
 });
 
-test("a stopped chat's team work is reconciled by observation alone: proven outcomes release it and unknown deliveries stay fenced", async t => {
+it("a stopped chat's team work is reconciled by observation alone: proven outcomes release it and unknown deliveries stay fenced", async t => {
   for (const scenario of ["completed", "never-posted", "rejected", "unknown", "sending"] as const) {
-    const f = await fixture();t.after(f.cleanup);
+    const f = await fixture();after(t, f.cleanup);
     const transport = webhookTransport();
     const runtime = f.runtime(transport.transport);
     const member = readyMember(f.teamStore, f.binding, `helper-${scenario}`);
@@ -187,8 +188,8 @@ test("a stopped chat's team work is reconciled by observation alone: proven outc
   }
 });
 
-test("a stopped chat closes a handover notice that was never posted without sending it", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a stopped chat closes a handover notice that was never posted without sending it", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const transport = webhookTransport();
   const runtime = f.runtime(transport.transport);
   const member = readyMember(f.teamStore, f.binding, "helper-notice");
@@ -205,8 +206,8 @@ test("a stopped chat closes a handover notice that was never posted without send
   assert.equal(runtime.hasInflightEffects(f.binding), false);
 });
 
-test("no helper leaves the existing root batch intact", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("no helper leaves the existing root batch intact", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const runtime = f.runtime();
   const batch = batchOf(["main", "branch", "other"]);
   const partition = runtime.partition(f.binding, f.threadList, batch);
@@ -216,8 +217,8 @@ test("no helper leaves the existing root batch intact", async t => {
   assert.equal(runtime.hasBlockingWork(f.binding), false);
 });
 
-test("helper observations run while a root-native check-in remains unresolved", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("helper observations run while a root-native check-in remains unresolved", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const member = readyMember(f.teamStore, f.binding, "helper-before-root-gate");
   activate(f.teamStore, f.binding, member, "branch");
   f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
@@ -252,8 +253,8 @@ test("helper observations run while a root-native check-in remains unresolved", 
   assert.equal(transport.attempts.length, 1);
 });
 
-test("root observes fenced coverage explicitly and does not acknowledge its activity", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("root observes fenced coverage explicitly and does not acknowledge its activity", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const member = readyMember(f.teamStore, f.binding, "helper-observe-only");
   activate(f.teamStore, f.binding, member, "branch");
   const assignment = f.teamStore.coverage(f.binding, "branch", parents);
@@ -352,8 +353,8 @@ test("root observes fenced coverage explicitly and does not acknowledge its acti
   assert.equal(f.monitor.pending(projectId, "branch").length, 1);
 });
 
-test("one helper receives its assigned subtree while transfer activity stays pending", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("one helper receives its assigned subtree while transfer activity stays pending", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const first = readyMember(f.teamStore, f.binding, "helper-one");
   const second = readyMember(f.teamStore, f.binding, "helper-two", time + 10);
   activate(f.teamStore, f.binding, first, "branch");
@@ -377,8 +378,8 @@ test("one helper receives its assigned subtree while transfer activity stays pen
   assert.equal(runtime.hasBlockingWork(f.binding), true);
 });
 
-test("a quarantined helper retires its channel, preserves unknown effects, and exposes only observe-only root coverage", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a quarantined helper retires its channel, preserves unknown effects, and exposes only observe-only root coverage", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const member = readyMember(f.teamStore, f.binding, "helper-quarantined");
   activate(f.teamStore, f.binding, member, "branch");
   const assignment = f.teamStore.coverage(f.binding, "branch", parents);
@@ -410,8 +411,8 @@ test("a quarantined helper retires its channel, preserves unknown effects, and e
   assert.deepEqual(transport.retired, [member.threadId]);
 });
 
-test("an unresolved helper review stays fenced and observe-only rows do not create a root wake alone", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("an unresolved helper review stays fenced and observe-only rows do not create a root wake alone", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const first = readyMember(f.teamStore, f.binding, "helper-review-handover");
   const second = readyMember(f.teamStore, f.binding, "helper-review-successor", time + 10);
   activate(f.teamStore, f.binding, first, "branch");
@@ -434,8 +435,8 @@ test("an unresolved helper review stays fenced and observe-only rows do not crea
   assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "transferring");
 });
 
-test("runtime completes a transfer only after both helpers finish their exact handover check-ins", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("runtime completes a transfer only after both helpers finish their exact handover check-ins", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const first = readyMember(f.teamStore, f.binding, "helper-transfer-from");
   const second = readyMember(f.teamStore, f.binding, "helper-transfer-to", time + 10);
   activate(f.teamStore, f.binding, first, "branch");
@@ -506,8 +507,8 @@ test("runtime completes a transfer only after both helpers finish their exact ha
   assert.ok(f.teamStore.snapshot(f.binding).events.some(item => item.kind === "assignment_handover_completed" && item.targetThreadId === "branch"));
 });
 
-test("only explicit retry creates a fresh rejected notification attempt and stale markers cannot acknowledge it", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("only explicit retry creates a fresh rejected notification attempt and stale markers cannot acknowledge it", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const member = readyMember(f.teamStore, f.binding, "helper-notice-retry");
   activate(f.teamStore, f.binding, member, "branch");
   const transfer = f.teamStore.assign(f.binding, "branch", null, parents, time + 10);
@@ -558,8 +559,8 @@ test("only explicit retry creates a fresh rejected notification attempt and stal
   assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "transferring");
 });
 
-test("registration readiness uses a finite native check-in and exact member epoch", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("registration readiness uses a finite native check-in and exact member epoch", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const member = f.teamStore.registerMember(f.binding, {threadId: "helper-ready", taskId: "bootstrap-task", bootstrapRunId: "bootstrap-run", now: time});
   f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
   const transport = webhookTransport();
@@ -598,8 +599,8 @@ test("registration readiness uses a finite native check-in and exact member epoc
   assert.equal(f.teamStore.snapshot(f.binding).members.find(item => item.threadId === member.threadId)?.state, "ready");
 });
 
-test("a readiness delivery revoked before its POST fails as never posted instead of waiting forever", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a readiness delivery revoked before its POST fails as never posted instead of waiting forever", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const member = f.teamStore.registerMember(f.binding, {threadId: "helper-revoked-ready", taskId: "bootstrap-task", bootstrapRunId: "bootstrap-run", now: time});
   f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
   const runtime = f.runtime(webhookTransport("revoked").transport);
@@ -609,8 +610,8 @@ test("a readiness delivery revoked before its POST fails as never posted instead
   assert.match(request.error ?? "", /nothing was posted/u);
 });
 
-test("failed readiness waits for the root retry acknowledgment before another attempt", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("failed readiness waits for the root retry acknowledgment before another attempt", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const member = f.teamStore.registerMember(f.binding, {threadId: "helper-ready-failed", taskId: "bootstrap-task", bootstrapRunId: "bootstrap-run", now: time});
   f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
   const transport = webhookTransport("rejected");
@@ -634,8 +635,8 @@ test("failed readiness waits for the root retry acknowledgment before another at
   assert.equal(f.requests.requests(projectId, member.threadId).filter(item => item.id.startsWith("team-ready:")).length, 2);
 });
 
-test("failed helper review blocks automatic replacement until the root acknowledges it", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("failed helper review blocks automatic replacement until the root acknowledges it", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const member = readyMember(f.teamStore, f.binding, "helper-review-failed");
   activate(f.teamStore, f.binding, member, "branch");
   f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
@@ -665,8 +666,8 @@ test("failed helper review blocks automatic replacement until the root acknowled
 });
 
 for (const lossMode of ["404", "archived", "deleted"] as const) {
-  test(`${lossMode === "archived" ? "an archived" : `a ${lossMode}`} helper fails only its own pending check-ins and retires once`, async t => {
-    const f = await fixture();t.after(f.cleanup);
+  it(`${lossMode === "archived" ? "an archived" : `a ${lossMode}`} helper fails only its own pending check-ins and retires once`, async t => {
+    const f = await fixture();after(t, f.cleanup);
     const member = readyMember(f.teamStore, f.binding, `helper-lost-${lossMode}`);
     activate(f.teamStore, f.binding, member, "branch");
     const coverage = f.teamStore.coverage(f.binding, "branch", parents);
@@ -718,8 +719,8 @@ for (const lossMode of ["404", "archived", "deleted"] as const) {
   });
 }
 
-test("a lost registering helper fails and settles its own readiness request", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a lost registering helper fails and settles its own readiness request", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const member = f.teamStore.registerMember(f.binding, {threadId: "helper-readiness-lost", taskId: "bootstrap-task", bootstrapRunId: "bootstrap-run", now: time});
   const request = f.requests.prepare({id: "team-ready:lost-registration", projectId, supervisorThreadId: member.threadId, kind: "review", taskId: null,
     text: "Confirm readiness.", batch: null, completionMarker: "ready complete", teamMemberEpoch: member.epoch}, time + 1);
@@ -737,8 +738,8 @@ test("a lost registering helper fails and settles its own readiness request", as
   assert.deepEqual(transport.retired, [member.threadId]);
 });
 
-test("a stale completed helper check-in settles its request without acknowledging reassigned activity", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a stale completed helper check-in settles its request without acknowledging reassigned activity", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const first = readyMember(f.teamStore, f.binding, "helper-stale");
   const second = readyMember(f.teamStore, f.binding, "helper-successor", time + 10);
   activate(f.teamStore, f.binding, first, "branch");
@@ -896,8 +897,8 @@ const checkinTargetIds = (text: string): string[] =>
 const largeHelperTeam = async (t: TestContext, count: number,
   toolItemIds: (targetIndex: number, taskSuffix: string) => string[] = (_index, taskSuffix) => [`turn-item:command%253A${taskSuffix}`.padEnd(200, "x")]) => {
   const clock = {now: time + 100};
-  t.mock.method(Date, "now", () => clock.now);
-  const f = await fixture();t.after(f.cleanup);
+  mockMethod(t, Date, "now", () => clock.now);
+  const f = await fixture();after(t, f.cleanup);
   const helperThreadId = "thread:delegated-task:command%3Amcp%3A7ad44b46-41f3-4133-8db5-6199fb9b109b%3Adelegate-task%3A508b27d1-3107-47bf-97cd-f1b522adb9ba-helper-bootstrap-64b376ad-ebc6-47f7-b37f-345d6f45583f";
   const assignmentRootId = "thread:delegated-task:command%3Amcp%3Afd38e33d-d163-4deb-8fd2-490fdb5e01e3%3Adelegate-task%3Ainvoice-delivery-receipt-parent-508b27d1-3107-47bf-97cd-f1b522adb9ba";
   const targetThreadIds = Array.from({length: count}, (_, index) =>
@@ -972,7 +973,7 @@ const largeHelperTeam = async (t: TestContext, count: number,
   return {f, clock, member, targetThreadIds, exactItemIds, transport, runtime, selectAll, deliverNextCheckin, completeHelperTurn};
 };
 
-test("an oversized helper batch is split into bounded check-ins that acknowledge only their own targets", async t => {
+it("an oversized helper batch is split into bounded check-ins that acknowledge only their own targets", async t => {
   const team = await largeHelperTeam(t, 25);
   const {f, clock, member, targetThreadIds, exactItemIds} = team;
   const completeBatch = team.selectAll(time + 11);
@@ -1030,7 +1031,7 @@ const deliverNote = (f: Awaited<ReturnType<typeof fixture>>, member: TeamMember,
   return f.teamStore.updateNotificationDelivery(f.binding, f.binding.threadId, note.id, "delivered", at + 2);
 };
 
-test("mentions T3 neutralizes count against the rendered check-in bound", async t => {
+it("mentions T3 neutralizes count against the rendered check-in bound", async t => {
   const team = await largeHelperTeam(t, 12);
   const {f, member} = team;
   // published T3 adds one U+2060 after each @, so this note renders at twice its logical length
@@ -1047,7 +1048,7 @@ test("mentions T3 neutralizes count against the rendered check-in bound", async 
   assert.ok(ids.length >= 1 && ids.length < 5, `the neutralized mentions leave room for fewer targets (${ids.length})`);
 });
 
-test("a check-in whose exact webhook body would exceed T3's 64 KiB delivery log is not built", async t => {
+it("a check-in whose exact webhook body would exceed T3's 64 KiB delivery log is not built", async t => {
   const team = await largeHelperTeam(t, 6);
   const {f, member} = team;
   // each CJK character is one code unit but three UTF-8 bytes in the posted body
@@ -1062,7 +1063,7 @@ test("a check-in whose exact webhook body would exceed T3's 64 KiB delivery log 
   assert.ok(ids.length >= 1 && ids.length < 3, `the body budget limits the packing (${ids.length})`);
 });
 
-test("a target too large on its own is neither sent nor acknowledged and raises a policy-specific attention event", async t => {
+it("a target too large on its own is neither sent nor acknowledged and raises a policy-specific attention event", async t => {
   // target 01 has twenty tool items whose IDs are control characters, each escaped to six characters in the envelope
   const team = await largeHelperTeam(t, 3, (index, taskSuffix) => index === 1
     ? Array.from({length: 20}, (_, item) => `${String.fromCharCode(1 + item)}`.repeat(200))
@@ -1116,7 +1117,7 @@ test("a target too large on its own is neither sent nor acknowledged and raises 
   assert.deepEqual(f.monitor.pending(projectId, oversized).map(item => item.id), pendingBefore);
 });
 
-test("open notes that leave no room for a single target block check-ins honestly until they close", async t => {
+it("open notes that leave no room for a single target block check-ins honestly until they close", async t => {
   const team = await largeHelperTeam(t, 2);
   const {f, member, targetThreadIds} = team;
   const notes = Array.from({length: 5}, (_, index) => deliverNote(f, member, `full-note-${index}`, `${index}`.repeat(8000), time + 5 + index * 3));
@@ -1142,8 +1143,8 @@ test("open notes that leave no room for a single target block check-ins honestly
   assert.deepEqual(checkinTargetIds(resumed.request.text), targetThreadIds);
 });
 
-test("each target's composed apply, guide and report arguments carry that target's own authority across assignment roots", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("each target's composed apply, guide and report arguments carry that target's own authority across assignment roots", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const member = readyMember(f.teamStore, f.binding, "helper-roots");
   const earlier = readyMember(f.teamStore, f.binding, "helper-earlier");
   activate(f.teamStore, f.binding, member, "branch");
@@ -1188,8 +1189,8 @@ test("each target's composed apply, guide and report arguments carry that target
   assert.equal(epochs.size, 2, "the two assignment roots carry distinct epochs");
 });
 
-test("a helper whose check-ins cannot fit does not stop another helper's check-in", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a helper whose check-ins cannot fit does not stop another helper's check-in", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const blocked = readyMember(f.teamStore, f.binding, "helper-blocked");
   const fitting = readyMember(f.teamStore, f.binding, "helper-fitting", time + 10);
   activate(f.teamStore, f.binding, blocked, "branch");
@@ -1215,7 +1216,7 @@ test("a helper whose check-ins cannot fit does not stop another helper's check-i
   assert.deepEqual(transport.attempts, [request.messageId]);
 });
 
-test("a check-in built under the earlier size bound keeps its exact text and delivery identity across restart", async t => {
+it("a check-in built under the earlier size bound keeps its exact text and delivery identity across restart", async t => {
   const team = await largeHelperTeam(t, 3);
   const {f, member, targetThreadIds} = team;
   const batch = team.selectAll(time + 11)!;
@@ -1252,9 +1253,9 @@ test("a check-in built under the earlier size bound keeps its exact text and del
   for (const id of targetThreadIds) assert.ok(f.monitor.pending(projectId, id).length > 0, "its frozen activity stays pending");
 });
 
-test("a parent-record native terminal event routes to its assigned helper and ACKs the frozen child row", async t => {
-  t.mock.method(Date, "now", () => time + 100);
-  const f = await fixture();t.after(f.cleanup);
+it("a parent-record native terminal event routes to its assigned helper and ACKs the frozen child row", async t => {
+  mockMethod(t, Date, "now", () => time + 100);
+  const f = await fixture();after(t, f.cleanup);
   const member = readyMember(f.teamStore, f.binding, "helper-native-terminal");
   activate(f.teamStore, f.binding, member, "branch");
   const parent = f.projections.get("main")!;
@@ -1302,8 +1303,8 @@ test("a parent-record native terminal event routes to its assigned helper and AC
   assert.equal(f.requests.requests(projectId, member.threadId).find(item => item.id === request.id)?.state, "completed");
 });
 
-test("a successful helper result creates an event-only root wake and is acknowledged after its marker", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a successful helper result creates an event-only root wake and is acknowledged after its marker", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const member = readyMember(f.teamStore, f.binding, "helper-result");
   activate(f.teamStore, f.binding, member, "branch");
   const coverage = f.teamStore.coverage(f.binding, "branch", parents);
@@ -1342,8 +1343,8 @@ test("a successful helper result creates an event-only root wake and is acknowle
   assert.equal(conversation.teamRuntime?.hasBlockingWork(f.binding), false);
 });
 
-test("a delivered handover notice whose native run was interrupted stays fenced, visible and unsent", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a delivered handover notice whose native run was interrupted stays fenced, visible and unsent", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const member = readyMember(f.teamStore, f.binding, "helper-interrupted-notice");
   activate(f.teamStore, f.binding, member, "branch");
   const transfer = f.teamStore.assign(f.binding, "branch", null, parents, time + 10);
@@ -1435,8 +1436,8 @@ const recoveryFixture = async () => {
     restart: () => {runtime = f.runtime(transport.transport);}, blocking: () => runtime.hasBlockingWork(f.binding)};
 };
 
-test("native review2 completion closes interrupted review1 and original across restart but preserves request fences", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("native review2 completion closes interrupted review1 and original across restart but preserves request fences", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   const first = f.review("native-review-one");
   await f.cycles();f.expose(first, "failed");await f.cycles();
   const firstInterrupted = f.current(first);
@@ -1473,8 +1474,8 @@ test("native review2 completion closes interrupted review1 and original across r
   assert.ok(!event.summary.includes(first.reviewNote!));
 });
 
-test("an uncertain review POST is never repeated and blocks another review until native reconciliation", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("an uncertain review POST is never repeated and blocks another review until native reconciliation", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   const review = f.review("unknown-post");
   await f.cycles();f.restart();await f.cycles();
   const logicalId = `supervisor-team-notice:${review.id}:attempt:0`;
@@ -1488,8 +1489,8 @@ test("an uncertain review POST is never repeated and blocks another review until
   assert.deepEqual(second.reviewChain, [f.original, f.current(review)].map(noticeAttempt));
 });
 
-test("native late original completion acknowledges the proven run while delivered reviews retain their fence", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("native late original completion acknowledges the proven run while delivered reviews retain their fence", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   const review = f.review("late-completion-review");
   await f.cycles();f.expose(review, "running");await f.cycles();
   // the native completion can be a later run of the same exact message. The stored
@@ -1510,8 +1511,8 @@ test("native late original completion acknowledges the proven run while delivere
   assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "root");
 });
 
-test("a stale epoch review completes natively without closing the original or hiding sent work", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("a stale epoch review completes natively without closing the original or hiding sent work", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   const review = f.review("epoch-review");
   await f.cycles();f.expose(review, "interrupted");await f.cycles();
   f.teamStore.quarantineMember(f.binding, f.member.threadId);
@@ -1525,8 +1526,8 @@ test("a stale epoch review completes natively without closing the original or hi
   assert.equal(f.teamStore.hasBlockingWork(f.binding), true);
 });
 
-test("review acknowledgement requires its own final native marker, not a helper check-in or another run", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("review acknowledgement requires its own final native marker, not a helper check-in or another run", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   const review = f.review("own-marker");
   await f.cycles();const run = f.expose(review, "completed");
   const final = f.projection.messages.find(value => value.runId === run.id && value.role === "assistant")!;
@@ -1543,8 +1544,8 @@ test("review acknowledgement requires its own final native marker, not a helper 
   assert.equal(f.current(review).state, "acknowledged");
 });
 
-test("native late original completion supersedes an unsent review before delivery", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("native late original completion supersedes an unsent review before delivery", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   const review = f.review("unsent-late-review");
   f.expose(f.original, "completed");f.restart();await f.cycles();
   assert.equal(f.current(f.original).state, "acknowledged");
@@ -1553,8 +1554,8 @@ test("native late original completion supersedes an unsent review before deliver
   assert.equal(f.teamStore.unresolvedRequests(f.binding).length, 1);
 });
 
-test("a completed review leaves an attempt fenced while a later run of its message is still running", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("a completed review leaves an attempt fenced while a later run of its message is still running", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   f.teamStore.settleRequest(f.binding, "guide:recovery-effect");
   const review = f.review("sibling-run-review");
   await f.cycles();
@@ -1574,8 +1575,8 @@ test("a completed review leaves an attempt fenced while a later run of its messa
   assert.equal(f.teamStore.coverage(f.binding, "branch", parents).state, "root");
 });
 
-test("an attempt sent with earlier wording is still matched and acknowledged by its own completed run", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("an attempt sent with earlier wording is still matched and acknowledged by its own completed run", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   const messageId = `supervisor-team-notice:${f.original.id}:attempt:0`;
   const earlier = `${f.transport.sent.get(messageId)!.text}\nEarlier role wording.`;
   f.transport.sent.set(messageId, {...f.transport.sent.get(messageId)!, text: earlier});
@@ -1587,8 +1588,8 @@ test("an attempt sent with earlier wording is still matched and acknowledged by 
   assert.equal(f.transport.attempts.filter(value => value === messageId).length, 1, "nothing is sent again");
 });
 
-test("a quarantine during an in-flight read stops the pending send and retires a never-posted notice", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a quarantine during an in-flight read stops the pending send and retires a never-posted notice", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const member = readyMember(f.teamStore, f.binding, "race-helper");
   activate(f.teamStore, f.binding, member, "branch");
   const transfer = f.teamStore.release(f.binding, "branch", parents);
@@ -1610,8 +1611,8 @@ test("a quarantine during an in-flight read stops the pending send and retires a
   assert.equal(f.teamStore.snapshot(f.binding).members.find(value => value.threadId === member.threadId)?.state, "quarantined");
 });
 
-test("review evidence includes a live run named only by the message and every copy of the receipt", async t => {
-  const named = await recoveryFixture();t.after(named.cleanup);
+it("review evidence includes a live run named only by the message and every copy of the receipt", async t => {
+  const named = await recoveryFixture();after(t, named.cleanup);
   const review = named.review("named-run-review");
   await named.cycles();
   const original = named.projection.messages.find(value => value.id === `native-message:${named.original.id}:0`)!;
@@ -1622,7 +1623,7 @@ test("review evidence includes a live run named only by the message and every co
   assert.equal(named.current(review).state, "acknowledged");
   assert.equal(named.current(named.original).resolvedByReview, undefined, "a run named by the message keeps its fence");
 
-  const copies = await recoveryFixture();t.after(copies.cleanup);
+  const copies = await recoveryFixture();after(t, copies.cleanup);
   const first = copies.projection.messages.find(value => value.id === `native-message:${copies.original.id}:0`)!;
   copies.projection.messages.push({...first, id: "native-message-copy", runId: "copy-run"});
   copies.projection.runs.push({id: "copy-run", threadId: copies.member.threadId, ordinal: 80, status: "completed", requestedAt: iso(time),
@@ -1635,8 +1636,8 @@ test("review evidence includes a live run named only by the message and every co
   assert.equal(copies.transport.attempts.filter(value => value.includes(copies.original.id)).length, 1, "nothing is posted again");
 });
 
-test("a marker-completed copy acknowledges nothing while another strongly linked run is live", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("a marker-completed copy acknowledges nothing while another strongly linked run is live", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   f.teamStore.settleRequest(f.binding, "guide:recovery-effect");
   const first = f.projection.messages.find(value => value.id === `native-message:${f.original.id}:0`)!;
   const firstRun = f.projection.runs.find(value => value.id === first.runId)!;
@@ -1652,7 +1653,7 @@ test("a marker-completed copy acknowledges nothing while another strongly linked
   assert.deepEqual({state: f.current(f.original).state, completedRunId: f.current(f.original).completedRunId}, {state: "acknowledged", completedRunId: "completed-copy-run"},
     "the retained completion acknowledges once every linked run is terminal");
 
-  const h = await recoveryFixture();t.after(h.cleanup);
+  const h = await recoveryFixture();after(t, h.cleanup);
   h.teamStore.settleRequest(h.binding, "guide:recovery-effect");
   const receipt = h.projection.messages.find(value => value.id === `native-message:${h.original.id}:0`)!;
   h.projection.runs.push({id: "live-only", threadId: h.member.threadId, ordinal: 81, status: "running", requestedAt: iso(time), startedAt: iso(time),
@@ -1666,7 +1667,7 @@ test("a marker-completed copy acknowledges nothing while another strongly linked
   assert.equal(h.current(h.original).state, "delivered", "a run named only by the message's runId also defers acknowledgement");
   assert.equal(h.teamStore.coverage(h.binding, "branch", parents).state, "transferring");
 
-  const g = await recoveryFixture();t.after(g.cleanup);
+  const g = await recoveryFixture();after(t, g.cleanup);
   const review = g.review("live-review-copy");await g.cycles();
   const completed = g.expose(review, "completed");
   const message = g.projection.messages.find(value => value.id === completed.userMessageId)!;
@@ -1679,8 +1680,8 @@ test("a marker-completed copy acknowledges nothing while another strongly linked
   assert.equal(g.teamStore.coverage(g.binding, "branch", parents).state, "transferring");
 });
 
-test("a quarantine during an in-flight helper read survives a late 404 with its request fence", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("a quarantine during an in-flight helper read survives a late 404 with its request fence", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   activate(f.teamStore, f.binding, f.member, "other");
   const coverage = f.teamStore.coverage(f.binding, "other", parents);
   f.teamStore.recordRequest(f.binding, {requestId: "team-review:quarantine-race", memberThreadId: f.member.threadId, memberEpoch: f.member.epoch,
@@ -1698,8 +1699,8 @@ test("a quarantine during an in-flight helper read survives a late 404 with its 
   assert.ok(f.teamStore.unresolvedRequests(f.binding).some(value => value.requestId === "team-review:quarantine-race"), "the uncertain check-in stays fenced");
 });
 
-test("observing a quarantined helper's remaining notice never turns quarantine into missing", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("observing a quarantined helper's remaining notice never turns quarantine into missing", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   f.teamStore.quarantineMember(f.binding, f.member.threadId);
   const runtime = f.runtime(f.transport.transport, async threadId => {
     if (threadId === f.member.threadId) throw new T3TransportError("helper deleted", 404);
@@ -1710,8 +1711,8 @@ test("observing a quarantined helper's remaining notice never turns quarantine i
   assert.equal(f.current(f.original).state, "delivered");
 });
 
-test("a durably rejected review receipt fails the review after a crash without posting again", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("a durably rejected review receipt fails the review after a crash without posting again", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   const review = f.review("crash-rejected-receipt");
   await f.cycles();
   const messageId = `supervisor-team-notice:${review.id}:attempt:0`;
@@ -1725,8 +1726,8 @@ test("a durably rejected review receipt fails the review after a crash without p
   assert.equal(f.teamStore.retryFailedNotifications(f.binding, f.member.threadId), 1, "its chain is still open, so the root can retry");
 });
 
-test("the team view states review progress and completion in words without the root note", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("the team view states review progress and completion in words without the root note", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   f.teamStore.settleRequest(f.binding, "guide:recovery-effect");
   const review = f.review("view-review");
   await f.cycles();
@@ -1738,15 +1739,15 @@ test("the team view states review progress and completion in words without the r
   assert.equal(JSON.stringify(during).includes(review.reviewNote!), false, "the untrusted root note is not displayed");
   f.teamStore.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, "delivered", Date.now(), 0);
   f.teamStore.acknowledgeNotificationRun(f.binding, f.binding.threadId, review.id, 0, "native-review-run", Date.now(), review.reviewChain);
-  const after = handovers();
-  assert.deepEqual(after.pendingHandovers.map(item => [item.review, item.runStatus]), [["completed", "interrupted"]]);
-  assert.doesNotMatch(after.currentState ?? "", /awaiting confirmation|ended before confirming/u);
+  const reviewed = handovers();
+  assert.deepEqual(reviewed.pendingHandovers.map(item => [item.review, item.runStatus]), [["completed", "interrupted"]]);
+  assert.doesNotMatch(reviewed.currentState ?? "", /awaiting confirmation|ended before confirming/u);
   f.teamStore.completeTransfer(f.binding, "branch", f.assignment.epoch);
   assert.deepEqual(handovers().pendingHandovers, [], "reviewed history leaves the pending list once its transfer ends");
 });
 
-test("the team view hides a superseded review and prints no raw notification IDs in issues", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("the team view hides a superseded review and prints no raw notification IDs in issues", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   f.teamStore.settleRequest(f.binding, "guide:recovery-effect");
   const review = f.review("superseded-view-review");
   f.teamStore.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, "sending");
@@ -1760,8 +1761,8 @@ test("the team view hides a superseded review and prints no raw notification IDs
   for (const id of [f.original.id, review.id, f.original.observedRun!.runId]) assert.equal(summaries.includes(id), false, "visible issue text carries no raw ID");
 });
 
-test("a notice closed by a completed review is not re-presented in later helper check-ins", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("a notice closed by a completed review is not re-presented in later helper check-ins", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   const review = f.review("closing-review");
   await f.cycles();f.expose(review, "completed");await f.cycles();
   assert.equal(f.current(f.original).resolvedByReview?.reviewNotificationId, review.id);
@@ -1780,8 +1781,8 @@ test("a notice closed by a completed review is not re-presented in later helper 
   assert.equal(f.current(f.original).state, "delivered");
 });
 
-test("a normal helper check-in cannot acknowledge handover IDs included in its request", async t => {
-  const f = await recoveryFixture();t.after(f.cleanup);
+it("a normal helper check-in cannot acknowledge handover IDs included in its request", async t => {
+  const f = await recoveryFixture();after(t, f.cleanup);
   const review = f.review("not-a-monitor-ack");
   await f.cycles();f.expose(review, "interrupted");await f.cycles();
   activate(f.teamStore, f.binding, f.member, "other");
@@ -1809,8 +1810,8 @@ test("a normal helper check-in cannot acknowledge handover IDs included in its r
   }
 });
 
-test("a handover_release contradicted by a pre-existing frame is never failed, retried or acknowledged", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a handover_release contradicted by a pre-existing frame is never failed, retried or acknowledged", async t => {
+  const f = await fixture();after(t, f.cleanup);
   f.guidance.db.prepare("INSERT INTO meta VALUES(?,?)").run(`supervisor_control:${JSON.stringify(projectId)}`, JSON.stringify({enabled: true, manual: true, generation: 1}));
   f.store.setBinding({...f.binding, state: "ready"});
   const member = readyMember(f.teamStore, f.binding, "helper-contradiction");
@@ -1884,8 +1885,8 @@ test("a handover_release contradicted by a pre-existing frame is never failed, r
   assert.equal(posts, 1);
 });
 
-test("a stopped team keeps observing across cycles: a check-in completed after earlier stopped cycles is confirmed and nothing is sent", async t => {
-  const f = await fixture(); t.after(f.cleanup);
+it("a stopped team keeps observing across cycles: a check-in completed after earlier stopped cycles is confirmed and nothing is sent", async t => {
+  const f = await fixture(); after(t, f.cleanup);
   const transport = webhookTransport();
   let reads = 0;
   const runtime = f.runtime(transport.transport, async id => { reads++; return f.projections.get(id)!; });
@@ -1921,8 +1922,8 @@ test("a stopped team keeps observing across cycles: a check-in completed after e
   assert.equal(transport.attempts.length, 0, "observation sends nothing");
 });
 
-test("a stop saved while a helper is read posts no fresh team notice and closes it as never posted", async t => {
-  const f = await fixture(); t.after(f.cleanup);
+it("a stop saved while a helper is read posts no fresh team notice and closes it as never posted", async t => {
+  const f = await fixture(); after(t, f.cleanup);
   const binding = {...f.binding, state: 'ready' as const}; f.store.setBinding(binding);
   const member = readyMember(f.teamStore, binding, 'stop-race-helper');
   activate(f.teamStore, binding, member, 'branch');

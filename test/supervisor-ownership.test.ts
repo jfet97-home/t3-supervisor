@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { it } from "vitest";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { defaultSupervisorModel, isSupervisorThread, loadSupervisorOwnership, ProjectSupervisorStore, SUPERVISOR_ROOT_THREAD_PREFIX } from "../src/project-supervisor-store.js";
 import type { SupervisorConfig } from "../src/types.js";
 
-test("new root reservations are identifiable and existing owned IDs remain unchanged", async () => {
+it("new root reservations are identifiable and existing owned IDs remain unchanged", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-ownership-"));
   let guidance = new GuidanceStore(directory);
   try {
@@ -36,7 +36,7 @@ test("new root reservations are identifiable and existing owned IDs remain uncha
   }
 });
 
-test("prefix and native lineage identify new roots and descendants before helper registration", () => {
+it("prefix and native lineage identify new roots and descendants before helper registration", () => {
   const config: SupervisorConfig = {
     dataDirectory: "/tmp/supervisor-ownership",
     t3Url: "http://unused",

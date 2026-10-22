@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { it } from "vitest";
 import { ThreadPolicyStore } from "../src/thread-policy.js";
 
-test("excluded-thread policy persists and uses compare-and-swap generations", async () => {
+it("excluded-thread policy persists and uses compare-and-swap generations", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-policy-"));
   let store = new ThreadPolicyStore(directory, {excludedThreadIds: ["excluded"]});
   try {

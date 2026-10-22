@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { it } from "vitest";
+import { after, mockMethod } from "./support/node-test.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +16,7 @@ import { WorkflowStateStore } from "../src/workflow-state-store.js";
 
 const thread = (id: string, parent: string | null = null, relationship: string | null = null, rootThreadId = parent === "main" || id === "main" ? "main" : parent ?? id): ThreadInfo => ({id, title: id, projectId: "p", lineage: {parentThreadId: parent, relationshipToParent: relationship, rootThreadId}});
 
-test("subagent ancestry shares the main scope while forks and separate launches keep their own", () => {
+it("subagent ancestry shares the main scope while forks and separate launches keep their own", () => {
   const main = thread("main");const child = thread("child", "main", "subagent");const nested = thread("nested", "child", "subagent");
   const fork = thread("fork", "child", "fork");const independent = thread("new");
   const threads = [main, child, nested, fork, independent];
@@ -26,7 +27,7 @@ test("subagent ancestry shares the main scope while forks and separate launches 
   assert.equal(mainConversation(thread("loop", "loop", "subagent"), [thread("loop", "loop", "subagent")]), null);
 });
 
-test("verified descendants with native published metadata attach across project mirrors and use their direct parent's lifecycle", () => {
+it("verified descendants with native published metadata attach across project mirrors and use their direct parent's lifecycle", () => {
   const mainThread = thread("main");
   const native = {...thread("native", "main", "subagent", "main"), projectId: null,
     creationSource: "provider", forkedFrom: {type: "node", nodeId: "node:provider:codex:native-item"}, latestRunId: null, activeRunId: null};
@@ -52,7 +53,7 @@ test("verified descendants with native published metadata attach across project 
   assert.equal(staleLineage.origin, "unknown_child");assert.equal(staleLineage.lifecycle, "unknown");assert.deepEqual(staleLineage.activityRefs, []);
 });
 
-test("steerable run resolution falls back only to one exact own run when activeRunId is omitted", () => {
+it("steerable run resolution falls back only to one exact own run when activeRunId is omitted", () => {
   const makeRun = (id: string, overrides: Record<string, unknown> = {}): Projection["runs"][number] => ({
     id, threadId: "child", ordinal: 1, status: "running", requestedAt: "2026-10-17T10:00:00Z",
     startedAt: null, completedAt: null, rootNodeId: `${id}-root`, activeAttemptId: `${id}-attempt`, ...overrides,
@@ -96,7 +97,7 @@ test("steerable run resolution falls back only to one exact own run when activeR
   for (const item of cases) assert.equal(resolveSteerableRun(item.projection), null, item.name);
 });
 
-test("an incomplete unrelated lineage retains verified sibling scope for read-only observation", () => {
+it("an incomplete unrelated lineage retains verified sibling scope for read-only observation", () => {
   const mainThread = thread("main");
   const sibling = thread("sibling", "main", "subagent", "main");
   const missingParent = thread("unknown-child", "missing-parent", "subagent", "main");
@@ -131,8 +132,8 @@ const fixture = async () => {
     cleanup: async () => {guidance.close();await rm(directory, {recursive: true, force: true});}};
 };
 
-test("requests, cooldowns, retry misses and model readback are isolated for two mains", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("requests, cooldowns, retry misses and model readback are isolated for two mains", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const second = f.store.reserve("p", "other", "Other", defaultSupervisorModel, 10, 2);
   const request = (id: string) => ({projectId: "p", supervisorThreadId: id, kind: "review" as const, taskId: null, text: "Review", batch: null, completionMarker: "done"});
   const a = f.conversation.requests.prepare(request(f.binding.threadId), 3);
@@ -150,8 +151,8 @@ test("requests, cooldowns, retry misses and model readback are isolated for two 
   assert.equal(f.store.settings("p").modelSelection.model, defaultSupervisorModel.model);
 });
 
-test("completion parks an owned Supervisor after the quiet window and retains identity", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("completion parks an owned Supervisor after the quiet window and retains identity", async t => {
+  const f = await fixture();after(t, f.cleanup);
   await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS - 1);assert.equal(f.calls.length, 0);
   await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
   assert.equal(f.calls.length, 1);assert.equal(f.calls[0]?.type, "thread.settle");assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId);
@@ -174,8 +175,8 @@ const executedRunHistory = (latestExecuted: {status: string; startedAt: string |
   {id: "run-8", ordinal: 8, status: "cancelled", requestedAt: "2026-10-14T10:44:10Z", startedAt: null, completedAt: "2026-10-14T10:44:13Z", rootNodeId: null},
 ];
 
-test("queued requests cancelled before starting do not hide the completed executed main run from settlement", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("queued requests cancelled before starting do not hide the completed executed main run from settlement", async t => {
+  const f = await fixture();after(t, f.cleanup);
   f.main.runs = executedRunHistory({status: "completed", startedAt: "2026-10-14T10:41:00Z"});
   await f.check(10);
   assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, "quiet_window");
@@ -184,24 +185,24 @@ test("queued requests cancelled before starting do not hide the completed execut
   assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, null);
 });
 
-test("a failed, cancelled-after-start or interrupted executed main run, or a later queued request, still blocks settlement behind unstarted cancellations", async t => {
+it("a failed, cancelled-after-start or interrupted executed main run, or a later queued request, still blocks settlement behind unstarted cancellations", async t => {
   for (const latestExecuted of [{status: "failed", startedAt: "2026-10-14T10:41:00Z"}, {status: "cancelled", startedAt: "2026-10-14T10:41:00Z"},
     {status: "interrupted", startedAt: "2026-10-14T10:41:00Z"}]) {
-    const f = await fixture();t.after(f.cleanup);
+    const f = await fixture();after(t, f.cleanup);
     f.main.runs = executedRunHistory(latestExecuted);
     await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
     assert.equal(f.calls.length, 0, latestExecuted.status);
     assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, "main_run_not_completed", latestExecuted.status);
   }
-  const f = await fixture();t.after(f.cleanup);
+  const f = await fixture();after(t, f.cleanup);
   f.main.runs = [...executedRunHistory({status: "completed", startedAt: "2026-10-14T10:41:00Z"}),
     {id: "run-9", ordinal: 9, status: "queued", requestedAt: "2026-10-14T10:56:00Z", startedAt: null, completedAt: null, rootNodeId: null}];
   await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
   assert.equal(f.calls.length, 0, "a queued request is pending work, not an unstarted cancellation");
 });
 
-test("a busy main short-circuits child projection reads even with a large known descendant set", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a busy main short-circuits child projection reads even with a large known descendant set", async t => {
+  const f = await fixture();after(t, f.cleanup);
   f.main.runs[0]!.status = "running";
   for (let index = 0; index < 100; index++) {
     const child = {...thread(`busy-child-${index}`, "main", "subagent", "main"), projectId: null, creationSource: "provider"};
@@ -214,8 +215,8 @@ test("a busy main short-circuits child projection reads even with a large known 
   assert.equal(f.calls.length, 0);
 });
 
-test("pending child monitor activity blocks standby before any descendant projection reads", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("pending child monitor activity blocks standby before any descendant projection reads", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const child = {...thread("pending-child", "main", "subagent", "main"), projectId: null, creationSource: "provider"};
   f.threads.push(child);
   const projection: Projection = {thread: child, runs: [], messages: [], subagents: [], turnItems: [{id: "pending-child-command", threadId: child.id,
@@ -229,9 +230,9 @@ test("pending child monitor activity blocks standby before any descendant projec
   assert.equal(f.calls.length, 0);
 });
 
-test("a not-needed request's Supervisor settles over retained unreviewed scope activity, which a supervised task still waits for", async t => {
+it("a not-needed request's Supervisor settles over retained unreviewed scope activity, which a supervised task still waits for", async t => {
   for (const status of ["not_supervised", "needs_context", "inferred"] as const) {
-    const f = await fixture();t.after(f.cleanup);
+    const f = await fixture();after(t, f.cleanup);
     f.store.saveTask({...f.store.task("main")!, status});
     // activity in the main's scope left unreviewed by an earlier supervised request
     const child = {...thread("leftover-child", "main", "subagent", "main"), projectId: null, creationSource: "provider"};
@@ -252,7 +253,7 @@ test("a not-needed request's Supervisor settles over retained unreviewed scope a
   }
 });
 
-test("a not-needed request's Supervisor ignores a replaced task's known-unsent draft but not an unknown or current introduction, and an incomplete scan stays closed", async t => {
+it("a not-needed request's Supervisor ignores a replaced task's known-unsent draft but not an unknown or current introduction, and an incomplete scan stays closed", async t => {
   const introduction = (taskId: string, extra: Record<string, unknown>) => ({taskId, projectId: "p", threadId: "main", text: "Earlier proposal.",
     messageId: `supervisor-notice:workflow:${taskId}`, targetRunId: null, error: null, dispatchMode: {type: "queue_after_active" as const}, ...extra});
   const cases = [
@@ -264,7 +265,7 @@ test("a not-needed request's Supervisor ignores a replaced task's known-unsent d
     {name: "current task draft", intro: introduction("task", {state: "blocked"}), blockedBy: "introduction_unsent"},
   ];
   for (const item of cases) {
-    const f = await fixture();t.after(f.cleanup);
+    const f = await fixture();after(t, f.cleanup);
     f.store.saveTask({...f.store.task("main")!, status: "not_supervised"});
     f.conversation.requests.saveIntroduction({...item.intro, supervisorThreadId: f.binding.threadId} as never);
     await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
@@ -272,16 +273,16 @@ test("a not-needed request's Supervisor ignores a replaced task's known-unsent d
     if (item.blockedBy) assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, item.blockedBy, item.name);
     assert.ok(f.conversation.requests.introduction(item.intro.taskId), `${item.name}: the introduction record is kept`);
   }
-  const f = await fixture();t.after(f.cleanup);
+  const f = await fixture();after(t, f.cleanup);
   f.store.saveTask({...f.store.task("main")!, status: "not_supervised"});
-  t.mock.method(f.conversation.monitor, "hasPendingReviewableActivity", () => ({status: "incomplete"}));
+  mockMethod(t, f.conversation.monitor, "hasPendingReviewableActivity", () => ({status: "incomplete"}));
   await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
   assert.equal(f.calls.length, 0, "an incomplete activity scan never permits settlement");
   assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, "pending_activity");
 });
 
-test("archived mains absent from the active catalog set aside the same Supervisor and retain unfinished semantic records", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("archived mains absent from the active catalog set aside the same Supervisor and retain unfinished semantic records", async t => {
+  const f = await fixture();after(t, f.cleanup);
   f.main.thread.archivedAt = "2026-10-14T10:02:00Z";f.main.thread.updatedAt = "2026-10-14T10:02:00Z";
   f.threads.splice(f.threads.findIndex(item => item.id === "main"), 1);
   f.store.saveTask({...f.store.task("main")!, status: "queued", objective: null, workflow: null, agreement: null});
@@ -296,8 +297,8 @@ test("archived mains absent from the active catalog set aside the same Superviso
   assert.equal(f.conversation.requests.introduction("task")?.state, "ready");assert.equal(f.store.task("main")?.status, "queued");
 });
 
-test("a confirmed missing main closes a runless native child whose parent projection is gone", async t => {
-  const f = await fixture();t.after(f.cleanup);f.setFailure("main", new T3TransportError("deleted", 404));
+it("a confirmed missing main closes a runless native child whose parent projection is gone", async t => {
+  const f = await fixture();after(t, f.cleanup);f.setFailure("main", new T3TransportError("deleted", 404));
   const child = thread("child", "main", "subagent", "main");f.threads.push(child);
   f.projections.set(child.id, {thread: child, runs: [], messages: [], subagents: []});
   assert.equal(await f.lifecycle.readMain(f.binding, AbortSignal.timeout(1000)), null);
@@ -305,24 +306,24 @@ test("a confirmed missing main closes a runless native child whose parent projec
   assert.equal(f.calls.length, 1);assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId);
 });
 
-test("readMain rejects projections whose thread or project identity does not match the binding", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("readMain rejects projections whose thread or project identity does not match the binding", async t => {
+  const f = await fixture();after(t, f.cleanup);
   f.main.thread.id = "other";await assert.rejects(f.lifecycle.readMain(f.binding, AbortSignal.timeout(1000)), /main_scope_mismatch/);
   f.main.thread.id = "main";f.main.thread.projectId = "other-project";
   await assert.rejects(f.lifecycle.readMain(f.binding, AbortSignal.timeout(1000)), /main_scope_mismatch/);
 });
 
-test("transient main reads clear the quiet epoch and fail closed", async t => {
-  const f = await fixture();t.after(f.cleanup);f.setFailure("main", new T3TransportError("unavailable", 503));
+it("transient main reads clear the quiet epoch and fail closed", async t => {
+  const f = await fixture();after(t, f.cleanup);f.setFailure("main", new T3TransportError("unavailable", 503));
   await assert.rejects(f.lifecycle.readMain(f.binding, AbortSignal.timeout(1000)), error => error instanceof T3TransportError && error.httpStatus === 503);
   await f.check(10);assert.equal(f.calls.length, 0);assert.equal(f.store.binding("p", "main")?.quietSince, null);
   f.setFailure("main", null);await f.check(100_000);assert.equal(f.calls.length, 0);
   await f.check(100_000 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 1);
 });
 
-test("archived mains stay active while a cataloged direct or nested descendant is busy", async t => {
+it("archived mains stay active while a cataloged direct or nested descendant is busy", async t => {
   for (const kind of ["running", "background"] as const) {
-    const f = await fixture();t.after(f.cleanup);
+    const f = await fixture();after(t, f.cleanup);
     f.main.thread.archivedAt = "2026-10-14T10:02:00Z";f.threads.splice(f.threads.findIndex(item => item.id === "main"), 1);
     const child = thread(kind === "running" ? "child" : "nested", kind === "running" ? "main" : "parent", "subagent", "main");
     f.threads.push(child);
@@ -337,8 +338,8 @@ test("archived mains stay active while a cataloged direct or nested descendant i
   }
 });
 
-test("more than one hundred quiet descendants become cache-validated instead of permanently blocking parking", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("more than one hundred quiet descendants become cache-validated instead of permanently blocking parking", async t => {
+  const f = await fixture();after(t, f.cleanup);
   f.main.subagents = [];
   for (let index = 0; index < 101; index++) {
     const child = {...thread(`quiet-child-${String(index).padStart(3, "0")}`, "main", "subagent", "main"), projectId: null, creationSource: "provider"};
@@ -352,8 +353,8 @@ test("more than one hundred quiet descendants become cache-validated instead of 
   assert.equal(f.calls.length, 1);
 });
 
-test("a live delegated child beyond the first lifecycle scan page still blocks parking when rotation reaches it", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a live delegated child beyond the first lifecycle scan page still blocks parking when rotation reaches it", async t => {
+  const f = await fixture();after(t, f.cleanup);
   f.main.subagents = [];
   for (let index = 0; index < 100; index++) {
     const child = {...thread(`quiet-child-${String(index).padStart(3, "0")}`, "main", "subagent", "main"), projectId: null, creationSource: "provider"};
@@ -373,8 +374,8 @@ test("a live delegated child beyond the first lifecycle scan page still blocks p
   assert.equal(f.store.binding("p", "main")?.quietSince, null);
 });
 
-test("nested descendants inherit historical roots but remain children of the bound main", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("nested descendants inherit historical roots but remain children of the bound main", async t => {
+  const f = await fixture();after(t, f.cleanup);
   f.main.thread.lineage.rootThreadId = "historical-root";f.main.thread.archivedAt = "2026-10-14T10:02:00Z";
   f.threads.splice(f.threads.findIndex(item => item.id === "main"), 1);
   const child = thread("child", "main", "subagent", "historical-root");
@@ -385,8 +386,8 @@ test("nested descendants inherit historical roots but remain children of the bou
   await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 0);
 });
 
-test("an active nested grandchild under an independent fork is outside the bound main scope", async t => {
-  const f = await fixture();t.after(f.cleanup);f.main.thread.lineage.rootThreadId = "historical-root";
+it("an active nested grandchild under an independent fork is outside the bound main scope", async t => {
+  const f = await fixture();after(t, f.cleanup);f.main.thread.lineage.rootThreadId = "historical-root";
   const forkMain = thread("fork-main", "main", "fork", "historical-root");
   const forkChild = thread("fork-child", "fork-main", "subagent", "historical-root");
   const forkGrandchild = thread("fork-grandchild", "fork-child", "subagent", "historical-root");
@@ -398,27 +399,27 @@ test("an active nested grandchild under an independent fork is outside the bound
   await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 1);
 });
 
-test("normal main settlement honors the active catalog shell's background work", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("normal main settlement honors the active catalog shell's background work", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const sourceShell = {...f.main.thread, pendingBackgroundTasks: [{kind: "task", id: "background"}]};
   f.threads.splice(f.threads.findIndex(item => item.id === "main"), 1, sourceShell);
   await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 0);
 });
 
-test("T3 deletion closes a still-running child scope after the main returns confirmed 404", async t => {
-  const f = await fixture();t.after(f.cleanup);f.setFailure("main", new T3TransportError("deleted", 404));
+it("T3 deletion closes a still-running child scope after the main returns confirmed 404", async t => {
+  const f = await fixture();after(t, f.cleanup);f.setFailure("main", new T3TransportError("deleted", 404));
   const child = thread("child", "main", "subagent", "main");f.threads.push(child);
   f.projections.set(child.id, {thread: child, runs: [{...f.main.runs[0]!, id: "child-run", status: "running"}], messages: [], subagents: []});
   await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 1);
 });
 
-test("an archived but natively busy main cannot be set aside", async t => {
-  const f = await fixture();t.after(f.cleanup);f.main.thread.archivedAt = "2026-10-14T10:02:00Z";f.main.runs[0]!.status = "running";
+it("an archived but natively busy main cannot be set aside", async t => {
+  const f = await fixture();after(t, f.cleanup);f.main.thread.archivedAt = "2026-10-14T10:02:00Z";f.main.runs[0]!.status = "running";
   await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 0);
 });
 
-test("an active native child blocks settlement through its direct parent despite an idle child mirror", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("an active native child blocks settlement through its direct parent despite an idle child mirror", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const child = {...thread("native-child", "main", "subagent", "main"), projectId: null,
     creationSource: "provider", latestRunId: null, activeRunId: null};
   f.threads.push(child);
@@ -433,8 +434,8 @@ test("an active native child blocks settlement through its direct parent despite
 });
 
 for (const requestStatus of ["resolved", "expired", "cancelled"] as const) {
-  test(`a matched ${requestStatus} child request clears stale detached waiting state`, async t => {
-    const f = await fixture();t.after(f.cleanup);
+  it(`a matched ${requestStatus} child request clears stale detached waiting state`, async t => {
+    const f = await fixture();after(t, f.cleanup);
     const child = {...thread(`native-request-${requestStatus}`, "main", "subagent", "main"), projectId: null,
       creationSource: "provider", latestRunId: null, activeRunId: null,
       pendingRuntimeRequest: {id: `request-${requestStatus}`, nodeId: `node-${requestStatus}`, kind: "user_input"}};
@@ -451,8 +452,8 @@ for (const requestStatus of ["resolved", "expired", "cancelled"] as const) {
   });
 }
 
-test("a fresh pending child request still blocks settlement", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a fresh pending child request still blocks settlement", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const child = {...thread("native-request-pending", "main", "subagent", "main"), projectId: null,
     creationSource: "provider", latestRunId: null, activeRunId: null,
     pendingRuntimeRequest: {id: "request-pending", nodeId: "node-pending", kind: "user_input"}};
@@ -468,8 +469,8 @@ test("a fresh pending child request still blocks settlement", async t => {
   assert.equal(f.calls.length, 0);
 });
 
-test("quiet children with unknown lifecycle do not prevent standby while ongoing T3 effects still do", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("quiet children with unknown lifecycle do not prevent standby while ongoing T3 effects still do", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const child = {...thread("old-child", "main", "subagent", "main"), projectId: null,
     creationSource: "provider", latestRunId: null, activeRunId: null};
   f.threads.push(child);
@@ -478,14 +479,14 @@ test("quiet children with unknown lifecycle do not prevent standby while ongoing
   await f.check(1);await f.check(1 + SUPERVISOR_SETTLE_QUIET_MS);
   assert.equal(f.calls.length, 1);
 
-  const busyFixture = await fixture();t.after(busyFixture.cleanup);
+  const busyFixture = await fixture();after(t, busyFixture.cleanup);
   busyFixture.main.subagents = [{childThreadId: "unresolved", status: "unknown", completionDelivery: {state: "pending"}}];
   await busyFixture.check(1);await busyFixture.check(1 + SUPERVISOR_SETTLE_QUIET_MS);
   assert.equal(busyFixture.calls.length, 0);
 });
 
-test("known workflow needs-attention status blocks standby even when all T3 chats are quiet", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("known workflow needs-attention status blocks standby even when all T3 chats are quiet", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const owner = {projectId: "p", mainThreadId: "main", supervisorThreadId: f.binding.threadId, bindingGeneration: f.binding.generation};
   const created = f.store.store.transaction(() => f.workflows.ensureMainInTransaction(owner, "workflow-attention-main", "Known issue", 1));
   assert.equal(created.status, "created");
@@ -496,21 +497,21 @@ test("known workflow needs-attention status blocks standby even when all T3 chat
   assert.equal(f.calls.length, 0);
 });
 
-test("unknown intermediate child ancestry blocks closed-main settlement", async t => {
-  const f = await fixture();t.after(f.cleanup);f.main.thread.archivedAt = "2026-10-14T10:02:00Z";
+it("unknown intermediate child ancestry blocks closed-main settlement", async t => {
+  const f = await fixture();after(t, f.cleanup);f.main.thread.archivedAt = "2026-10-14T10:02:00Z";
   f.threads.splice(f.threads.findIndex(item => item.id === "main"), 1);
   f.threads.push(thread("nested", "missing-parent", "subagent", "main"));
   await f.check(10);assert.equal(f.calls.length, 0);assert.equal(f.store.binding("p", "main")?.quietSince, null);
 });
 
-test("a confirmed missing ancestor terminates an unrelated orphan subagent chain", async t => {
-  const f = await fixture();t.after(f.cleanup);f.setFailure("deleted-parent", new T3TransportError("deleted", 404));
+it("a confirmed missing ancestor terminates an unrelated orphan subagent chain", async t => {
+  const f = await fixture();after(t, f.cleanup);f.setFailure("deleted-parent", new T3TransportError("deleted", 404));
   f.threads.push(thread("orphan", "deleted-parent", "subagent", "historical-root"));
   await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 1);
 });
 
-test("reopening the same main cancels its closed-source quiet epoch and retains binding identity", async t => {
-  const f = await fixture();t.after(f.cleanup);f.main.thread.archivedAt = "2026-10-14T10:02:00Z";f.threads.splice(f.threads.findIndex(item => item.id === "main"), 1);
+it("reopening the same main cancels its closed-source quiet epoch and retains binding identity", async t => {
+  const f = await fixture();after(t, f.cleanup);f.main.thread.archivedAt = "2026-10-14T10:02:00Z";f.threads.splice(f.threads.findIndex(item => item.id === "main"), 1);
   await f.check(10);assert.equal(f.store.binding("p", "main")?.quietSince, 10);
   delete f.main.thread.archivedAt;f.main.thread.updatedAt = "2026-10-14T10:03:00Z";f.threads.push(f.main.thread);
   await f.check(20);assert.equal(f.calls.length, 0);assert.equal(f.store.binding("p", "main")?.quietSince, 20);
@@ -518,8 +519,8 @@ test("reopening the same main cancels its closed-source quiet epoch and retains 
   await f.check(20 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 1);assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId);
 });
 
-test("a fresh main read that observes reopening cancels closed-source settlement", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a fresh main read that observes reopening cancels closed-source settlement", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const archived: Projection = {...f.main, thread: {...f.main.thread, archivedAt: "2026-10-14T10:02:00Z"}};
   const reopened: Projection = {...f.main, thread: {...f.main.thread, archivedAt: null, updatedAt: "2026-10-14T10:03:00Z"}};
   let mainReads = 0;
@@ -531,8 +532,8 @@ test("a fresh main read that observes reopening cancels closed-source settlement
 });
 
 for (const blocker of ["input", "main_running", "supervisor_queued", "child", "uncertain_request", "pin", "keep_active", "pending_review", "main_failed"] as const) {
-  test(`automatic settlement preserves ${blocker}`, async t => {
-    const f = await fixture();t.after(f.cleanup);await f.check(10);
+  it(`automatic settlement preserves ${blocker}`, async t => {
+    const f = await fixture();after(t, f.cleanup);await f.check(10);
     if (blocker === "input") f.supervisor.runtimeRequests = [{status: "pending", kind: "user_input"}];
     if (blocker === "main_running") f.main.runs[0]!.status = "running";
     if (blocker === "main_failed") f.main.runs[0]!.status = "failed";
@@ -547,8 +548,8 @@ for (const blocker of ["input", "main_running", "supervisor_queued", "child", "u
   });
 }
 
-test("unknown settlement reconciles visibility without deletion or repeated commands", async t => {
-  const f = await fixture();t.after(f.cleanup);f.setUncertain();await f.check(1);await f.check(100_000);
+it("unknown settlement reconciles visibility without deletion or repeated commands", async t => {
+  const f = await fixture();after(t, f.cleanup);f.setUncertain();await f.check(1);await f.check(100_000);
   assert.equal(f.store.binding("p", "main")?.settlement?.state, "uncertain");
   const id = f.store.binding("p", "main")?.settlement?.commandId;
   await f.check(200_000);assert.equal(f.calls.length, 2);assert.equal(f.calls[1]?.commandId, id);
@@ -556,8 +557,8 @@ test("unknown settlement reconciles visibility without deletion or repeated comm
   assert.equal(f.store.binding("p", "main")?.settlement?.state, "settled");assert.equal(f.store.binding("p", "main")?.settlement?.commandId, id);
 });
 
-test("the one-time disposable reset clears discovery together and preserves unrelated state", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("the one-time disposable reset clears discovery together and preserves unrelated state", async t => {
+  const f = await fixture();after(t, f.cleanup);
   f.store.saveSettings("p", 0, {...defaultSupervisorModel, model: "chosen-default"});
   const oldOwned = f.binding.threadId;
   f.guidance.db.exec("CREATE TABLE unrelated_delivery(id TEXT); INSERT INTO unrelated_delivery VALUES('retained'); CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL); INSERT INTO supervisor_project_bindings VALUES('p','{}'); DELETE FROM meta WHERE key='supervisor_scope_version'");
@@ -570,9 +571,9 @@ test("the one-time disposable reset clears discovery together and preserves unre
 });
 
 
-test("background provider work, completion delivery, goals and PR watches all prevent parking", async t => {
+it("background provider work, completion delivery, goals and PR watches all prevent parking", async t => {
   for (const kind of ["roster", "delivery", "goal", "watch"]) {
-    const f = await fixture();t.after(f.cleanup);await f.check(1);
+    const f = await fixture();after(t, f.cleanup);await f.check(1);
     if (kind === "roster") f.main.providerThreads = [{id: "provider", pendingBackgroundTasks: [{kind: "task", id: "background"}]}];
     if (kind === "delivery") f.main.subagents = [{status: "completed", completionDelivery: {state: "pending"}}];
     if (kind === "goal") f.main.providerThreads = [{id: "provider", goal: {status: "active"}}];
@@ -581,30 +582,30 @@ test("background provider work, completion delivery, goals and PR watches all pr
   }
 });
 
-test("new activity supersedes an unresolved parking epoch without replacing the Supervisor", async t => {
-  const f = await fixture();t.after(f.cleanup);f.setUncertain();await f.check(1);await f.check(100_000);
+it("new activity supersedes an unresolved parking epoch without replacing the Supervisor", async t => {
+  const f = await fixture();after(t, f.cleanup);f.setUncertain();await f.check(1);await f.check(100_000);
   f.supervisor.thread.updatedAt = "2026-10-14T11:00:00Z";
   await f.check(200_000);assert.equal(f.store.binding("p", "main")?.settlement?.state, "superseded");
   assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId);
 });
 
-test("an accepted settlement without a visible native settlement retains its uncertain identity", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("an accepted settlement without a visible native settlement retains its uncertain identity", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const lifecycle = new SupervisorLifecycle(f.store, f.conversation, async id => f.projections.get(id)!, async () => ({sequence: 20}));
   await lifecycle.check(f.binding, f.threads, AbortSignal.timeout(1000), 1);
   await lifecycle.check(f.binding, f.threads, AbortSignal.timeout(1000), 100_000);
   assert.equal(f.store.binding("p", "main")?.settlement?.state, "uncertain");
 });
 
-test("an unknown scope version disables supervision without resetting the private database", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("an unknown scope version disables supervision without resetting the private database", async t => {
+  const f = await fixture();after(t, f.cleanup);
   f.guidance.db.prepare("UPDATE meta SET value='future' WHERE key='supervisor_scope_version'").run();
   const incompatible = new ProjectSupervisorStore(f.guidance, new Set());
   assert.equal(incompatible.scopeCompatible, false);assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId);assert.equal(f.store.baseline()?.snapshotSequence, 10);
 });
 
-test("idle runless nested workers use their actual parent's native lifecycle records", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("idle runless nested workers use their actual parent's native lifecycle records", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const child = thread("z-child", "main", "subagent");const nested = thread("a-nested", "z-child", "subagent", "main");
   f.threads.push(nested, child);
   f.main.subagents = [{childThreadId: child.id, status: "idle"}];
@@ -614,15 +615,15 @@ test("idle runless nested workers use their actual parent's native lifecycle rec
 });
 
 
-test("an unsent introduction blocks ordinary settlement while monitoring is idle", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("an unsent introduction blocks ordinary settlement while monitoring is idle", async t => {
+  const f = await fixture();after(t, f.cleanup);
   f.conversation.requests.saveIntroduction({taskId: "task", projectId: "p", threadId: "main", supervisorThreadId: f.binding.threadId, state: "ready", text: "Intro", messageId: "intro", targetRunId: null, error: null});
   await f.check(1);await f.check(100_000);assert.equal(f.calls.length, 0, "the unsent introduction remains a blocker");
   assert.equal(f.conversation.requests.introduction("task")?.state, "ready");
 });
 
-test("a stopped chat settles only its owned Supervisor once idle, whatever the main or its supervision state is doing", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a stopped chat settles only its owned Supervisor once idle, whatever the main or its supervision state is doing", async t => {
+  const f = await fixture();after(t, f.cleanup);
   f.conversation.supervisionStopped = threadId => threadId === "main";
   f.main.runs[0]!.status = "running";
   f.main.thread.activeRunId = "run";
@@ -637,8 +638,8 @@ test("a stopped chat settles only its owned Supervisor once idle, whatever the m
   assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId, "the same Supervisor identity is retained for a later explicit enable");
 });
 
-test("a stopped chat's Supervisor waits while it is busy, while any accepted delivery is unresolved, and while a later user choice keeps it active", async t => {
-  const busy = await fixture();t.after(busy.cleanup);
+it("a stopped chat's Supervisor waits while it is busy, while any accepted delivery is unresolved, and while a later user choice keeps it active", async t => {
+  const busy = await fixture();after(t, busy.cleanup);
   busy.conversation.supervisionStopped = threadId => threadId === "main";
   busy.supervisor.runs.push({id: "root-run", ordinal: 1, status: "running", requestedAt: "2026-10-14T10:00:00Z", startedAt: "2026-10-14T10:00:00Z", completedAt: null, rootNodeId: "root"});
   busy.supervisor.thread.activeRunId = "root-run";
@@ -646,7 +647,7 @@ test("a stopped chat's Supervisor waits while it is busy, while any accepted del
   assert.equal(busy.calls.length, 0, "a running Supervisor turn is never settled");
 
   for (const state of ["sending", "waiting", "uncertain"] as const) {
-    const unresolved = await fixture();t.after(unresolved.cleanup);
+    const unresolved = await fixture();after(t, unresolved.cleanup);
     unresolved.conversation.supervisionStopped = threadId => threadId === "main";
     const request = unresolved.conversation.requests.prepare({projectId: "p", supervisorThreadId: unresolved.binding.threadId, kind: "review", taskId: null,
       text: "check-in", batch: null, completionMarker: "check-in completed"}, 5);
@@ -662,7 +663,7 @@ test("a stopped chat's Supervisor waits while it is busy, while any accepted del
   }
 
   const stoppedAt = Date.parse("2026-10-14T11:00:00Z");
-  const kept = await fixture();t.after(kept.cleanup);
+  const kept = await fixture();after(t, kept.cleanup);
   kept.conversation.supervisionStopped = threadId => threadId === "main";
   kept.store.setSupervisionStop(kept.binding, {route: "direct", callerThreadId: kept.binding.threadId, userMessageId: "stop", stoppedAt});
   kept.supervisor.thread.pinnedAt = "2026-10-14T11:00:05Z";
@@ -670,7 +671,7 @@ test("a stopped chat's Supervisor waits while it is busy, while any accepted del
   assert.equal(kept.calls.length, 0, "a pin made after the stop is a newer human decision");
   assert.equal(kept.store.binding("p", "main")?.settlementBlockedBy, "keep_active");
 
-  const reopened = await fixture();t.after(reopened.cleanup);
+  const reopened = await fixture();after(t, reopened.cleanup);
   reopened.conversation.supervisionStopped = threadId => threadId === "main";
   reopened.store.setSupervisionStop(reopened.binding, {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt});
   Object.assign(reopened.supervisor.thread, {settledOverride: "active", unsettledAt: "2026-10-14T11:30:00Z"});
@@ -678,11 +679,11 @@ test("a stopped chat's Supervisor waits while it is busy, while any accepted del
   assert.equal(reopened.calls.length, 0, "a human who reactivates the settled Supervisor after the stop is never overridden");
 });
 
-test("a later human stop supersedes every earlier keep-active choice for the owned Supervisor, and the main stays untouched", async t => {
+it("a later human stop supersedes every earlier keep-active choice for the owned Supervisor, and the main stays untouched", async t => {
   const stoppedAt = Date.parse("2026-10-14T11:00:00Z");
   for (const earlier of [{pinnedAt: "2026-10-14T10:00:00Z"}, {autoSettleDisabledAt: "2026-10-14T10:00:00Z"},
     {settledOverride: "active", unsettledAt: "2026-10-14T10:00:00Z"}, {settledOverride: "active", unsettledAt: null}]) {
-    const f = await fixture();t.after(f.cleanup);
+    const f = await fixture();after(t, f.cleanup);
     f.conversation.supervisionStopped = threadId => threadId === "main";
     Object.assign(f.supervisor.thread, earlier);
     f.store.setBinding({...f.store.binding("p", "main")!, manualKeepActive: true});
@@ -691,7 +692,7 @@ test("a later human stop supersedes every earlier keep-active choice for the own
     assert.deepEqual(f.calls.map(call => [call.type, call.threadId]), [["thread.settle", f.binding.threadId]], `${JSON.stringify(earlier)} predates the stop`);
   }
 
-  const observed = await fixture();t.after(observed.cleanup);
+  const observed = await fixture();after(t, observed.cleanup);
   observed.conversation.supervisionStopped = threadId => threadId === "main";
   observed.supervisor.thread.pinnedAt = "2026-10-14T10:00:00Z";
   const firstSeen = Date.parse("2026-10-14T12:00:00Z");

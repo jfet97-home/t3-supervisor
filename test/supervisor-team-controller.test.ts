@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import {it} from "vitest";
+import {after} from "./support/node-test.js";
 import {mkdtemp, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
@@ -88,8 +89,8 @@ const fixture = async () => {
     cleanup: async () => {guidance.close();await rm(directory, {recursive: true, force: true});}};
 };
 
-test("review_handover requires exact native root proof and offers no helper acknowledgement action", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("review_handover requires exact native root proof and offers no helper acknowledgement action", async t => {
+  const f = await fixture();after(t, f.cleanup);
   assert.ok(supervisionTeamToolDefinition.inputSchema.properties.action.enum.includes("review_handover"));
   const before = f.team.snapshot(f.binding);
   assert.equal((await f.call()).reason, "native_root_proof_required");
@@ -107,8 +108,8 @@ test("review_handover requires exact native root proof and offers no helper ackn
   assert.ok(f.reads.includes(f.member.threadId), "the root action reads current native helper truth");
 });
 
-test("a human stop of the main fences every team and guidance effect at its first and final authority check, but not reads", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a human stop of the main fences every team and guidance effect at its first and final authority check, but not reads", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const before = f.team.snapshot(f.binding);
   f.proof(f.args);
   f.stopMain("main");
@@ -129,8 +130,8 @@ test("a human stop of the main fences every team and guidance effect at its firs
   assert.equal((await f.call()).status, "ok", "an unrelated chat's stop never fences this main");
 });
 
-test("a stopped chat closes guidance awaiting a fallback route as not sent instead of sending another route", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a stopped chat closes guidance awaiting a fallback route as not sent instead of sending another route", async t => {
+  const f = await fixture();after(t, f.cleanup);
   for (const [operationId, status] of [["stopped-fallback", "needs_fallback"], ["stopped-escalation", "needs_escalation"]] as const) {
     const record = {status, targetThreadId: "branch", supervisorThreadId: f.member.threadId, bindingGeneration: f.binding.generation, memberEpoch: f.member.epoch,
       assignmentRootThreadId: "branch", assignmentEpoch: f.assignment.epoch, operationId, routedThreadId: "branch", commandId: `command-${operationId}`,
@@ -146,8 +147,8 @@ test("a stopped chat closes guidance awaiting a fallback route as not sent inste
   assert.equal(f.reads.length, reads, "closing a definitely rejected attempt needs no native read or send");
 });
 
-test("review verification identifies an existing attempt by its stored sent bytes", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("review verification identifies an existing attempt by its stored sent bytes", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const logicalId = `supervisor-team-notice:${f.original.id}:attempt:0`;
   const earlier = `${f.helper.messages[0]!.text}\nEarlier role wording.`;
   f.guidance.db.prepare("UPDATE supervisor_helper_deliveries SET document=? WHERE message_id=?").run(
@@ -157,10 +158,10 @@ test("review verification identifies an existing attempt by its stored sent byte
   assert.equal((await f.call()).status, "ok", "a wording change after sending does not orphan the attempt");
 });
 
-test("current native running completed missing or changed evidence refuses review without mutation", async t => {
+it("current native running completed missing or changed evidence refuses review without mutation", async t => {
   const variants = ["running", "completed", "missing-run", "missing-message", "different-text", "different-task", "changed-ended-status", "other-running-run", "other-completed-run", "marker-completed"] as const;
   for (const variant of variants) {
-    const f = await fixture();t.after(f.cleanup);f.proof(f.args);
+    const f = await fixture();after(t, f.cleanup);f.proof(f.args);
     const run = f.helper.runs[0]!;
     if (variant === "running" || variant === "completed") run.status = variant;
     if (variant === "missing-run") f.helper.runs = [];
@@ -184,8 +185,8 @@ test("current native running completed missing or changed evidence refuses revie
   }
 });
 
-test("review errors never reflect note identities or native exception text", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("review errors never reflect note identities or native exception text", async t => {
+  const f = await fixture();after(t, f.cleanup);
   for (const change of [{note: "sentinel".repeat(150)}, {note: "sentinel\u0000"}, {notificationId: "sentinel-notice"},
     {expectedRunId: "sentinel-run"}, {expectedChain: [{notificationId: "sentinel-chain", deliveryAttempt: 0, runId: "sentinel-run"}]}]) {
     const input = {...f.args, ...change};f.proof(input);
@@ -198,8 +199,8 @@ test("review errors never reflect note identities or native exception text", asy
   assert.equal(f.team.snapshot(f.binding).notifications.length, 1);
 });
 
-test("review operation replay is durable and concurrent distinct operations admit one exact chain", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("review operation replay is durable and concurrent distinct operations admit one exact chain", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const competing = {...f.args, operationId: "competing-operation"};
   f.proof(f.args);f.proof(competing);
   const results = await Promise.all([f.call(), f.call(competing)]);
@@ -216,16 +217,16 @@ test("review operation replay is durable and concurrent distinct operations admi
   assert.deepEqual(await f.call(changed), {status: "denied", reason: "operation_id_conflict"});
 });
 
-test("the store CAS rechecks member and assignment authority after the native read", async t => {
-  const f = await fixture();t.after(f.cleanup);f.proof(f.args);
+it("the store CAS rechecks member and assignment authority after the native read", async t => {
+  const f = await fixture();after(t, f.cleanup);f.proof(f.args);
   f.duringRead(() => {f.team.quarantineMember(f.binding, f.member.threadId);});
   assert.equal((await f.call()).reason, "supervisor_team_member_epoch_conflict");
   assert.equal(f.team.snapshot(f.binding).notifications.some(value => value.kind === "handover_review"), false);
   assert.equal(f.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_team_tool_receipts").get()?.n, 0);
 });
 
-test("native validation includes every earlier review in the expected chain", async t => {
-  const f = await fixture();t.after(f.cleanup);f.proof(f.args);
+it("native validation includes every earlier review in the expected chain", async t => {
+  const f = await fixture();after(t, f.cleanup);f.proof(f.args);
   const result = await f.call();assert.equal(result.status, "ok");
   const review = f.team.snapshot(f.binding).notifications.find(value => value.kind === "handover_review")!;
   f.team.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, "sending");
@@ -248,8 +249,8 @@ test("native validation includes every earlier review in the expected chain", as
   assert.equal((await f.call(input)).status, "ok");
 });
 
-test("an interrupted handover with an unbound frame and no delivery detail is reviewable through the shared predicate", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("an interrupted handover with an unbound frame and no delivery detail is reviewable through the shared predicate", async t => {
+  const f = await fixture();after(t, f.cleanup);
   const logicalId = `supervisor-team-notice:${f.original.id}:attempt:0`;
   const receipt = JSON.parse(String(f.guidance.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE message_id=?").get(logicalId)?.document)) as {
     state: string; text: string; threadId: string; taskId: string; renderedText?: unknown; nativeDeliveryId?: unknown};
@@ -263,8 +264,8 @@ test("an interrupted handover with an unbound frame and no delivery detail is re
   assert.equal((await f.call()).status, "ok");
 });
 
-test("a handover message created by a user is not review evidence", async t => {
-  const f = await fixture();t.after(f.cleanup);
+it("a handover message created by a user is not review evidence", async t => {
+  const f = await fixture();after(t, f.cleanup);
   f.helper.messages[0]!.createdBy = "user";
   f.proof(f.args);
   assert.equal((await f.call()).reason, "supervisor_team_review_native_changed");

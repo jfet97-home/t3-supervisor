@@ -3,7 +3,7 @@ import {mkdtemp, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {Effect, Fiber, Layer} from "effect";
-import test from "node:test";
+import {it} from "vitest";
 import {makeStore, Store} from "../src/store.js";
 import {createStatus, readiness, runSupervisor} from "../src/supervisor.js";
 import {T3Client, T3TransportError, type T3ClientShape} from "../src/t3.js";
@@ -17,7 +17,7 @@ const config = (directory: string): SupervisorConfig => ({
   healthPort: 0,
 });
 
-test("readiness depends on native T3 connection, activation, catalog health, and enabled supervision", () => {
+it("readiness depends on native T3 connection, activation, catalog health, and enabled supervision", () => {
   const settings = config("/tmp/supervisor-readiness");
   settings.uiPort = 9008;
   const status = createStatus(settings);
@@ -34,7 +34,7 @@ test("readiness depends on native T3 connection, activation, catalog health, and
   assert.equal(readiness(status, settings, now).ready, false);
 });
 
-test("native T3 events persist into the generic catalog and mark the service connected", async () => {
+it("native T3 events persist into the generic catalog and mark the service connected", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-loop-"));
   const settings = config(directory);
   const status = createStatus(settings);
