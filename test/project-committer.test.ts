@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { it } from "vitest";
+import { it } from "@effect/vitest";
+import {Effect, Layer} from "effect";
 import {WebSocketServer} from "ws";
-import {makeProjectCommitter, ProjectFileError} from "../src/project-files.js";
+import {cancelOnAbort, NativeEnvelope} from "../src/native-envelope.js";
+import {ProjectCommitter, ProjectFileError} from "../src/project-files.js";
 
 type Scenario = "success" | "failed" | "foreign_identity";
 
@@ -75,42 +77,37 @@ async function fakeGitServer(scenario: Scenario) {
   };
 }
 
-const commit = (server: Awaited<ReturnType<typeof fakeGitServer>>) =>
-  makeProjectCommitter(server.url, "commit-test-token").commitFiles(
-    "/workspace", [".t3-supervisor/rules.yaml"], "Create Supervisor definitions", "action-1", AbortSignal.timeout(5000),
+// the fake git server for the test's scope, closed when the test ends
+const gitServer = (scenario: Scenario) => Effect.acquireRelease(Effect.promise(() => fakeGitServer(scenario)), server => Effect.promise(() => server.close()));
+
+// the committer service over the fake, bounded by the same 5 s cancel signal as before
+const commit = (server: Awaited<ReturnType<typeof fakeGitServer>>) => Effect.scoped(Effect.gen(function* () {
+  const committer = yield* ProjectCommitter;
+  return yield* committer.commitFiles(
+    "/workspace", [".t3-supervisor/rules.yaml"], "Create Supervisor definitions", "action-1", yield* cancelOnAbort(AbortSignal.timeout(5000)),
   );
+})).pipe(Effect.provide(ProjectCommitter.layer({baseUrl: server.url, token: "commit-test-token"}).pipe(Layer.provide(NativeEnvelope.layer))));
 
-it("native commit ACKs each action chunk before accepting the next and reports the finished commit", async () => {
-  const server = await fakeGitServer("success");
-  try {
-    const result = await commit(server);
-    assert.deepEqual(result, {status: "committed", commitSha: "abc123"});
-    assert.deepEqual(server.eventOrder, ["ack:1", "action_started_acknowledged", "ack:2"]);
-    assert.equal(server.protocolViolation, false);
-    assert.equal(server.requests.length, 1);
-  } finally {
-    await server.close();
-  }
-});
+it.live("native commit ACKs each action chunk before accepting the next and reports the finished commit", () => Effect.gen(function* () {
+  const server = yield* gitServer("success");
+  const result = yield* commit(server);
+  assert.deepEqual(result, {status: "committed", commitSha: "abc123"});
+  assert.deepEqual(server.eventOrder, ["ack:1", "action_started_acknowledged", "ack:2"]);
+  assert.equal(server.protocolViolation, false);
+  assert.equal(server.requests.length, 1);
+}));
 
-it("matching action_failed events retain the uncertain result", async () => {
-  const server = await fakeGitServer("failed");
-  try {
-    assert.deepEqual(await commit(server), {status: "uncertain"});
-    assert.deepEqual(server.eventOrder, ["ack:1", "action_started_acknowledged", "ack:2"]);
-    assert.equal(server.protocolViolation, false);
-  } finally {
-    await server.close();
-  }
-});
+it.live("matching action_failed events retain the uncertain result", () => Effect.gen(function* () {
+  const server = yield* gitServer("failed");
+  assert.deepEqual(yield* commit(server), {status: "uncertain"});
+  assert.deepEqual(server.eventOrder, ["ack:1", "action_started_acknowledged", "ack:2"]);
+  assert.equal(server.protocolViolation, false);
+}));
 
-it("events from another action identity do not make a failed commit uncertain", async () => {
-  const server = await fakeGitServer("foreign_identity");
-  try {
-    await assert.rejects(commit(server), (error: unknown) => error instanceof ProjectFileError && error.code === "unavailable");
-    assert.deepEqual(server.eventOrder, ["ack:1", "action_started_acknowledged", "ack:2"]);
-    assert.equal(server.protocolViolation, false);
-  } finally {
-    await server.close();
-  }
-});
+it.live("events from another action identity do not make a failed commit uncertain", () => Effect.gen(function* () {
+  const server = yield* gitServer("foreign_identity");
+  const error = yield* Effect.flip(commit(server));
+  assert.ok(error instanceof ProjectFileError && error.code === "unavailable");
+  assert.deepEqual(server.eventOrder, ["ack:1", "action_started_acknowledged", "ack:2"]);
+  assert.equal(server.protocolViolation, false);
+}));

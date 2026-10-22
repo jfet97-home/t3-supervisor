@@ -1,43 +1,28 @@
-import { randomBytes, randomUUID } from "node:crypto";
-import WebSocket from "ws";
+import { Context, Crypto, Data, Deferred, Effect, Exit, Layer, Schema, Semaphore } from "effect";
 import { posix } from "node:path";
 import type { GuidanceStore } from "./guidance-store.js";
+import { NativeEnvelope, NativeFraming, nativeMaxPayload, NativeStep, type NativeEndpoint, type NativeEnvelopeError, type NativeExit } from "./native-envelope.js";
 import type { FreshGitInfo, GitOperationState } from "./project-files.js";
 
-const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_PROBE_OUTPUT_BYTES = 768 * 1024;
 const MAX_CHANGED_PATHS = 4096;
 const MAX_CHANGED_PATH_BYTES = 4096;
-const PROBE_TIMEOUT_MS = 15_000;
-const RPC_TIMEOUT_MS = 5_000;
-const CLEANUP_TIMEOUT_MS = 5_000;
+const PROBE_TIMEOUT = "15 seconds";
+const RPC_TIMEOUT = "5 seconds";
+const CLEANUP_TIMEOUT = "5 seconds";
 const PENDING_KEY = "native_git_probe_sessions";
 const PROBE_PREFIX = "T3_SUPERVISOR_GIT_PROBE";
 
 type SessionIds = {threadId: string; terminalId: string};
 type ProbeResult = FreshGitInfo;
-type RpcFrame = Record<string, unknown>;
-type StreamState = {
-  ready: Promise<Record<string, unknown>>;
-  helperReady(): Promise<void>;
-  result(): Promise<ProbeResult>;
-  close(): void;
-};
+type Cancel = Deferred.Deferred<void>;
 
-export class GitProbeError extends Error {
-  constructor(message = "A fresh native Git probe failed.") {super(message);}
+export class GitProbeError extends Data.TaggedError("GitProbeError")<{readonly message: string}> {
+  constructor(message = "A fresh native Git probe failed.") {super({message});}
 }
 
-const record = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const frameList = (value: unknown): unknown[] => Array.isArray(value) ? value.flat(4) : [value];
-
-const payloadBytes = (data: WebSocket.RawData): Buffer => {
-  if (Buffer.isBuffer(data)) return data;
-  if (Array.isArray(data)) return Buffer.concat(data.map(part => Buffer.from(part)));
-  return Buffer.from(data as ArrayBuffer);
-};
+const record = Schema.is(Schema.Record(Schema.String, Schema.Unknown));
+const decodeJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
 
 const shellQuote = (value: string): string => "'" + value.replaceAll("'", "'\\''") + "'";
 
@@ -189,79 +174,35 @@ except Exception:
     sys.exit(1)
 `;
 
+// the helper's result frame: the shape first, then its operation state, then its checkout path, each with its own fixed message
+const ChangedPath = Schema.String.check(Schema.makeFilter((path: string) => path.length > 0 && path.length <= MAX_CHANGED_PATH_BYTES && !path.includes("\0")));
+const ProbePacket = Schema.Struct({
+  ok: Schema.Literal(true),
+  workspaceRoot: Schema.String,
+  branch: Schema.NullOr(Schema.String),
+  isRepo: Schema.Boolean,
+  changedPaths: Schema.Array(ChangedPath).check(Schema.makeFilter((paths: ReadonlyArray<string>) => paths.length <= MAX_CHANGED_PATHS)),
+  operationState: Schema.Record(Schema.String, Schema.Unknown),
+});
+const Bounded = (max: number) => Schema.String.check(Schema.makeFilter((text: string) => text.length > 0 && text.length <= max));
+const ProbeOperationState = Schema.Union([
+  Schema.Struct({status: Schema.Literal("safe")}),
+  Schema.Struct({status: Schema.Literal("in_progress"), marker: Bounded(256)}),
+  Schema.Struct({status: Schema.Literal("unavailable"), message: Bounded(512)}),
+]);
+const isProbePacket = Schema.is(ProbePacket);
+const isProbeOperationState = Schema.is(ProbeOperationState);
+
 const validateResult = (value: unknown): FreshGitInfo => {
-  if (!record(value) || value.ok !== true || typeof value.workspaceRoot !== "string" ||
-    !(value.branch === null || typeof value.branch === "string") || typeof value.isRepo !== "boolean" ||
-    !Array.isArray(value.changedPaths) || value.changedPaths.length > MAX_CHANGED_PATHS ||
-    !value.changedPaths.every(path => typeof path === "string" && path.length > 0 && path.length <= MAX_CHANGED_PATH_BYTES && !path.includes("\0")) ||
-    !record(value.operationState)) throw new GitProbeError("The native Git probe returned an invalid result.");
+  if (!isProbePacket(value)) throw new GitProbeError("The native Git probe returned an invalid result.");
   const state = value.operationState;
-  let operationState: GitOperationState;
-  if (state.status === "safe") operationState = {status: "safe"};
-  else if (state.status === "in_progress" && typeof state.marker === "string" && state.marker.length > 0 && state.marker.length <= 256)
-    operationState = {status: "in_progress", marker: state.marker};
-  else if (state.status === "unavailable" && typeof state.message === "string" && state.message.length > 0 && state.message.length <= 512)
-    operationState = {status: "unavailable", message: state.message};
-  else throw new GitProbeError("The native Git probe returned an invalid operation state.");
+  if (!isProbeOperationState(state)) throw new GitProbeError("The native Git probe returned an invalid operation state.");
+  const operationState: GitOperationState = state.status === "safe" ? {status: "safe"}
+    : state.status === "in_progress" ? {status: "in_progress", marker: state.marker} : {status: "unavailable", message: state.message};
   if (!posix.isAbsolute(value.workspaceRoot) || value.workspaceRoot.length > 4096 || value.workspaceRoot.includes("\0"))
     throw new GitProbeError("The native Git probe returned an invalid checkout path.");
-  return {
-    workspaceRoot: value.workspaceRoot,
-    branch: value.branch as string | null,
-    isRepo: value.isRepo,
-    changedPaths: value.changedPaths as string[],
-    operationState,
-  };
+  return {workspaceRoot: value.workspaceRoot, branch: value.branch, isRepo: value.isRepo, changedPaths: [...value.changedPaths], operationState};
 };
-
-const parseFrame = (data: WebSocket.RawData, binary: boolean): RpcFrame[] => {
-  if (binary) throw new GitProbeError("T3 returned a binary terminal frame.");
-  const bytes = payloadBytes(data);
-  if (bytes.length > MAX_FRAME_BYTES) throw new GitProbeError("T3 returned an oversized terminal frame.");
-  let decoded: unknown;
-  try {decoded = JSON.parse(bytes.toString("utf8")) as unknown;}
-  catch {throw new GitProbeError("T3 returned malformed terminal data.");}
-  const frames = frameList(decoded);
-  if (frames.length > 256 || !frames.every(record)) throw new GitProbeError("T3 returned an invalid terminal frame.");
-  return frames as RpcFrame[];
-};
-
-const makeRpc = (baseUrl: string, token: string) => (tag: string, payload: Record<string, unknown>, signal: AbortSignal): Promise<unknown> =>
-  new Promise((resolve, reject) => {
-    if (signal.aborted) return reject(new GitProbeError("The Git probe was canceled."));
-    const url = new URL("/ws?orchestrationProtocol=2", baseUrl);
-    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    const requestId = "git-probe-" + randomUUID();
-    const socket = new WebSocket(url, {headers: {Authorization: "Bearer " + token}, handshakeTimeout: RPC_TIMEOUT_MS, maxPayload: MAX_FRAME_BYTES});
-    let settled = false;
-    const finish = (error?: Error, value?: unknown) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      signal.removeEventListener("abort", abort);
-      socket.terminate();
-      if (error) reject(error); else resolve(value);
-    };
-    const abort = () => finish(new GitProbeError("The Git probe RPC was canceled or timed out."));
-    const timer = setTimeout(abort, RPC_TIMEOUT_MS);
-    signal.addEventListener("abort", abort, {once: true});
-    socket.on("error", abort);
-    socket.on("close", abort);
-    socket.on("open", () => {
-      if (settled || signal.aborted) return abort();
-      socket.send(JSON.stringify({_tag: "Request", id: requestId, tag, payload, headers: []}), error => {if (error) abort();});
-    });
-    socket.on("message", (data, binary) => {
-      try {
-        for (const frame of parseFrame(data, binary)) {
-          if (frame._tag === "Ping") {socket.send(JSON.stringify({_tag: "Pong"}), error => {if (error) abort();});continue;}
-          if (frame._tag !== "Exit" || frame.requestId !== requestId || !record(frame.exit)) continue;
-          if (frame.exit._tag === "Success") finish(undefined, frame.exit.value);
-          else finish(new GitProbeError("T3 rejected a terminal Git probe request."));
-        }
-      } catch (error) {finish(error instanceof Error ? error : new GitProbeError());}
-    });
-  });
 
 const snapshotIsTarget = (snapshot: Record<string, unknown>, ids: SessionIds, root: string): boolean =>
   snapshot.threadId === ids.threadId && snapshot.terminalId === ids.terminalId && snapshot.cwd === root && snapshot.status === "running";
@@ -279,242 +220,267 @@ const makeBootstrap = (nonce: string): string => {
   return "stty -echo; printf '\\nT3_SUPERVISOR_GIT_READY:" + nonce + "\\n'; exec /usr/bin/env python3 -c " + shellQuote(pythonCommand) + "\n";
 };
 
-const startAttachStream = (baseUrl: string, token: string, ids: SessionIds, root: string, nonce: string, signal: AbortSignal): StreamState => {
-  const url = new URL("/ws?orchestrationProtocol=2", baseUrl);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  const requestId = "git-probe-stream-" + randomUUID();
-  const socket = new WebSocket(url, {headers: {Authorization: "Bearer " + token}, handshakeTimeout: RPC_TIMEOUT_MS, maxPayload: MAX_FRAME_BYTES});
-  let readyResolve!: (snapshot: Record<string, unknown>) => void;
-  let readyReject!: (error: Error) => void;
-  const ready = new Promise<Record<string, unknown>>((resolve, reject) => {readyResolve = resolve;readyReject = reject;});
-  let readySettled = false;
-  let helperReadyResolve!: () => void;
-  let helperReadyReject!: (error: Error) => void;
-  const helperReady = new Promise<void>((resolve, reject) => {helperReadyResolve = resolve;helperReadyReject = reject;});
-  let helperReadySettled = false;
-  let helperReadyObserved = false;
-  const helperReadyMarker = "T3_SUPERVISOR_GIT_READY:" + nonce;
-  let snapshotToResolve: Record<string, unknown> | undefined;
-  let capture = false;
-  let capturePromise: Promise<ProbeResult> | undefined;
-  let resolveCapture: ((result: ProbeResult) => void) | undefined;
-  let rejectCapture: ((error: Error) => void) | undefined;
-  let output = "";
-  let packet: ProbeResult | undefined;
-  let exit: {exitCode: number | null; exitSignal: number | null} | undefined;
-  let priorExit = false;
-  let streamFailure: Error | undefined;
-  let closed = false;
-  const fail = (error: Error) => {
-    streamFailure ??= error;
-    if (!readySettled) {readySettled = true;readyReject(error);}
-    if (!helperReadySettled) {helperReadySettled = true;helperReadyReject(error);}
-    rejectCapture?.(error);
-  };
-  const maybeFinish = () => {
-    if (streamFailure) return rejectCapture?.(streamFailure);
-    if (!packet || !exit) return;
-    if (exit.exitCode !== 0 || exit.exitSignal !== null && exit.exitSignal !== 0) return fail(new GitProbeError("The Git probe process did not exit successfully."));
-    resolveCapture?.(packet);
-  };
-  const acceptPacketLine = (line: string) => {
-    const prefix = PROBE_PREFIX + ":" + nonce + ":";
-    if (!line.startsWith(prefix)) return;
-    const encoded = line.slice(prefix.length);
-    if (!encoded || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return fail(new GitProbeError("The Git probe returned a malformed result frame."));
-    const decoded = Buffer.from(encoded, "base64");
-    if (decoded.toString("base64") !== encoded || decoded.length > MAX_PROBE_OUTPUT_BYTES) return fail(new GitProbeError("The Git probe returned an invalid result frame."));
-    let value: unknown;
-    try {value = JSON.parse(decoded.toString("utf8")) as unknown;}
-    catch {return fail(new GitProbeError("The Git probe returned malformed result data."));}
-    if (packet) return fail(new GitProbeError("The Git probe returned duplicate result frames."));
-    try {packet = validateResult(value);}
-    catch (error) {return fail(error instanceof Error ? error : new GitProbeError());}
-  };
-  const consumeOutput = (data: string) => {
-    output += data;
-    if (Buffer.byteLength(output, "utf8") > MAX_PROBE_OUTPUT_BYTES) return fail(new GitProbeError("The Git probe output exceeded its limit."));
-    const lines = output.split(/\r?\n/);
-    output = lines.pop() ?? "";
-    for (const line of lines) {
-      const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
-      if (!helperReadySettled && normalized === helperReadyMarker) helperReadyObserved = true;
-      if (capture) acceptPacketLine(normalized);
-    }
-  };
-  const abort = () => fail(new GitProbeError("The terminal Git probe was canceled or disconnected."));
-  const timer = setTimeout(abort, PROBE_TIMEOUT_MS);
-  const close = () => {
-    if (closed) return;
-    closed = true;
-    clearTimeout(timer);
-    signal.removeEventListener("abort", abort);
-    socket.terminate();
-  };
-  signal.addEventListener("abort", abort, {once: true});
-  socket.on("error", abort);
-  socket.on("close", () => {if (!closed && (!packet || !exit)) abort();});
-  socket.on("open", () => {
-    if (signal.aborted) return abort();
-    socket.send(JSON.stringify({_tag: "Request", id: requestId, tag: "terminal.attach", payload: {
-      threadId: ids.threadId, terminalId: ids.terminalId, cwd: root, worktreePath: null, restartIfNotRunning: false,
-    }, headers: []}), error => {if (error) abort();});
-  });
-  socket.on("message", (data, binary) => {
-    try {
-      for (const frame of parseFrame(data, binary)) {
-        if (frame._tag === "Ping") {socket.send(JSON.stringify({_tag: "Pong"}), error => {if (error) abort();});continue;}
-        if (frame._tag === "Exit" && frame.requestId === requestId) {
-          if (!record(frame.exit) || frame.exit._tag !== "Success") fail(new GitProbeError("T3 rejected the terminal attach request."));
-          else if (!packet) abort();
-          continue;
-        }
-        if (frame._tag !== "Chunk" || frame.requestId !== requestId || !Array.isArray(frame.values)) continue;
-        for (const event of frame.values) {
-          if (!record(event)) return abort();
-          if (event.type === "snapshot" && record(event.snapshot)) {
-            if (!snapshotIsTarget(event.snapshot, ids, root)) return fail(new GitProbeError("T3 attached the probe to an unexpected terminal."));
-            if (!readySettled) snapshotToResolve = event.snapshot;
-            continue;
-          }
-          if (event.threadId !== ids.threadId || event.terminalId !== ids.terminalId) continue;
-          if (event.type === "output" && typeof event.data === "string") consumeOutput(event.data);
-          else if (event.type === "exited" && (event.exitCode === null || Number.isInteger(event.exitCode)) &&
-            (event.exitSignal === null || Number.isInteger(event.exitSignal))) {
-            if (capture) exit = {exitCode: event.exitCode as number | null, exitSignal: event.exitSignal as number | null};
-            else priorExit = true;
-          } else if (event.type === "error") fail(new GitProbeError("The terminal Git probe reported an error."));
-        }
-        if (!closed && !streamFailure) {
-          socket.send(JSON.stringify({_tag: "Ack", requestId}), error => {
-            if (error) return abort();
-            if (snapshotToResolve && !readySettled) {readySettled = true;readyResolve(snapshotToResolve);snapshotToResolve = undefined;}
-            if (helperReadyObserved && !helperReadySettled) {helperReadySettled = true;helperReadyResolve();}
-            maybeFinish();
-          });
-        }
-      }
-    } catch (error) {fail(error instanceof Error ? error : new GitProbeError());}
-  });
-  return {
-    ready,
-    helperReady: () => helperReady,
-    result() {
-      if (capturePromise) return capturePromise;
-      capture = true;
-      capturePromise = new Promise<ProbeResult>((resolve, reject) => {resolveCapture = resolve;rejectCapture = reject;});
-      if (priorExit) rejectCapture?.(new GitProbeError("The probe terminal exited before the Git check started."));
-      else if (streamFailure) rejectCapture?.(streamFailure);
-      else maybeFinish();
-      return capturePromise;
-    },
-    close,
-  };
-};
+const validateRoot = (root: string): Effect.Effect<void, GitProbeError> =>
+  !posix.isAbsolute(root) || root.length > 4096 || root.includes("\0") || root.includes("\\") || /[\r\n]/.test(root)
+    ? Effect.fail(new GitProbeError("The selected checkout path is invalid.")) : Effect.void;
 
-const validateRoot = (root: string): void => {
-  if (!posix.isAbsolute(root) || root.length > 4096 || root.includes("\0") || root.includes("\\") || /[\r\n]/.test(root))
-    throw new GitProbeError("The selected checkout path is invalid.");
-};
+// the pending probe sessions in the guidance metadata: at most 128 entries of generated ids
+const GeneratedId = Schema.String.check(Schema.isPattern(/^t3-supervisor-git-probe-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/));
+const PendingSessions = Schema.Array(Schema.Struct({threadId: GeneratedId, terminalId: GeneratedId}))
+  .check(Schema.makeFilter((sessions: ReadonlyArray<unknown>) => sessions.length <= 128));
+const isPendingSessions = Schema.is(PendingSessions);
 
+// the stored entries themselves, so a rewrite keeps every stored byte of the remaining entries
 const parsePending = (value: unknown): SessionIds[] => {
   if (value === undefined) return [];
-  let parsed: unknown;
-  try {parsed = JSON.parse(String(value)) as unknown;}
-  catch {throw new GitProbeError("Pending native Git probe cleanup state is invalid.");}
-  const generatedId = (id: unknown): id is string => typeof id === "string" &&
-    /^t3-supervisor-git-probe-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id);
-  if (!Array.isArray(parsed) || parsed.length > 128 || !parsed.every(item => record(item) &&
-    generatedId(item.threadId) && generatedId(item.terminalId)))
-    throw new GitProbeError("Pending native Git probe cleanup state is invalid.");
-  return parsed as SessionIds[];
+  const parsed = decodeJson(String(value));
+  if (parsed._tag === "None" || !isPendingSessions(parsed.value)) throw new GitProbeError("Pending native Git probe cleanup state is invalid.");
+  return parsed.value as SessionIds[];
 };
 
-export const makeGitProbe = (baseUrl: string, token: string, store: GuidanceStore) => {
-  const rpc = makeRpc(baseUrl, token);
-  let queue = Promise.resolve();
-  const serialize = <A>(work: () => Promise<A>): Promise<A> => {
-    const next = queue.then(work, work);
-    queue = next.then(() => undefined, () => undefined);
-    return next;
-  };
-  const pending = (): SessionIds[] =>
-    parsePending(store.db.prepare("SELECT value FROM meta WHERE key=?").get(PENDING_KEY)?.value);
+// envelope failures of a terminal rpc, with the baseline's fixed messages
+const rpcFailure = (error: NativeEnvelopeError): GitProbeError => new GitProbeError(
+  error.reason === "binary_frame" ? "T3 returned a binary terminal frame."
+    : error.reason === "malformed_json" ? "T3 returned malformed terminal data."
+      : error.reason === "invalid_frame" ? "T3 returned an invalid terminal frame." : "The Git probe RPC was canceled or timed out.");
+
+interface AttachStream {
+  // the attach snapshot, settled once its chunk was acknowledged
+  readonly ready: Deferred.Deferred<Record<string, unknown>, GitProbeError>;
+  // the standalone readiness line, settled once its chunk was acknowledged
+  readonly helperReady: Deferred.Deferred<void, GitProbeError>;
+  // starts capturing the helper's result frame and exit; result settles with the validated result of a successful exit
+  readonly capture: Effect.Effect<void>;
+  readonly result: Deferred.Deferred<ProbeResult, GitProbeError>;
+}
+
+const makeGitProbe = Effect.fnUntraced(function* (endpoint: NativeEndpoint, store: GuidanceStore) {
+  const native = yield* NativeEnvelope;
+  const crypto = yield* Crypto.Crypto;
+  // v4 generation never fails; its signature only shares the platform error of randomBytes
+  const uuid = Effect.orDie(crypto.randomUUIDv4());
+  const nonce = Effect.map(Effect.orDie(crypto.randomBytes(16)), bytes => Buffer.from(bytes).toString("hex"));
+  const lock = yield* Semaphore.make(1);
+
+  const rpc = (tag: string, payload: Record<string, unknown>, cancel: Cancel | undefined): Effect.Effect<unknown, GitProbeError> => Effect.gen(function* () {
+    if (cancel !== undefined && (yield* Deferred.isDone(cancel))) return yield* new GitProbeError("The Git probe was canceled.");
+    const requestId = "git-probe-" + (yield* uuid);
+    return yield* native.call({endpoint, request: {id: requestId, tag, payload}, maxPayload: nativeMaxPayload.probe, handshakeTimeout: RPC_TIMEOUT,
+      timeout: RPC_TIMEOUT, framing: NativeFraming.flatChecked(4, 256), cancel,
+      onExit: (exit: NativeExit) => exit._tag === "Malformed" ? Effect.succeed(NativeStep.continue)
+        : exit._tag === "Success" ? Effect.succeed(NativeStep.done(exit.value)) : Effect.fail(new GitProbeError("T3 rejected a terminal Git probe request.")),
+    }).pipe(Effect.catchTag("NativeEnvelopeError", error => Effect.fail(rpcFailure(error))));
+  });
+
+  // the attach stream runs in the caller's scope until the probe ends it; its chunks are handled in order, each in one synchronous step
+  const attach = (ids: SessionIds, root: string, streamNonce: string, cancel: Cancel) => Effect.gen(function* () {
+    const requestId = "git-probe-stream-" + (yield* uuid);
+    const ready = yield* Deferred.make<Record<string, unknown>, GitProbeError>();
+    const helperReady = yield* Deferred.make<void, GitProbeError>();
+    const result = yield* Deferred.make<ProbeResult, GitProbeError>();
+    const helperReadyMarker = "T3_SUPERVISOR_GIT_READY:" + streamNonce;
+    let snapshotToResolve: Record<string, unknown> | undefined;
+    let helperReadyObserved = false;
+    let capturing = false;
+    let output = "";
+    let packet: ProbeResult | undefined;
+    let exit: {exitCode: number | null; exitSignal: number | null} | undefined;
+    let priorExit = false;
+    let streamFailure: GitProbeError | undefined;
+    const fail = (error: GitProbeError) => {
+      streamFailure ??= error;
+      Deferred.doneUnsafe(ready, Effect.fail(error));
+      Deferred.doneUnsafe(helperReady, Effect.fail(error));
+      if (capturing) Deferred.doneUnsafe(result, Effect.fail(error));
+    };
+    const abort = () => fail(new GitProbeError("The terminal Git probe was canceled or disconnected."));
+    const maybeFinish = () => {
+      if (streamFailure) {
+        if (capturing) Deferred.doneUnsafe(result, Effect.fail(streamFailure));
+        return;
+      }
+      if (!packet || !exit) return;
+      if (exit.exitCode !== 0 || exit.exitSignal !== null && exit.exitSignal !== 0) return fail(new GitProbeError("The Git probe process did not exit successfully."));
+      if (capturing) Deferred.doneUnsafe(result, Effect.succeed(packet));
+    };
+    const acceptPacketLine = (line: string) => {
+      const prefix = PROBE_PREFIX + ":" + streamNonce + ":";
+      if (!line.startsWith(prefix)) return;
+      const encoded = line.slice(prefix.length);
+      if (!encoded || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return fail(new GitProbeError("The Git probe returned a malformed result frame."));
+      const decoded = Buffer.from(encoded, "base64");
+      if (decoded.toString("base64") !== encoded || decoded.length > MAX_PROBE_OUTPUT_BYTES) return fail(new GitProbeError("The Git probe returned an invalid result frame."));
+      const value = decodeJson(decoded.toString("utf8"));
+      if (value._tag === "None") return fail(new GitProbeError("The Git probe returned malformed result data."));
+      if (packet) return fail(new GitProbeError("The Git probe returned duplicate result frames."));
+      try {packet = validateResult(value.value);}
+      catch (error) {return fail(error instanceof GitProbeError ? error : new GitProbeError());}
+    };
+    const consumeOutput = (data: string) => {
+      output += data;
+      if (Buffer.byteLength(output, "utf8") > MAX_PROBE_OUTPUT_BYTES) return fail(new GitProbeError("The Git probe output exceeded its limit."));
+      const lines = output.split(/\r?\n/);
+      output = lines.pop() ?? "";
+      for (const line of lines) {
+        const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
+        if (!Deferred.isDoneUnsafe(helperReady) && normalized === helperReadyMarker) helperReadyObserved = true;
+        if (capturing) acceptPacketLine(normalized);
+      }
+    };
+    // readiness settles only after the chunk that carried it was acknowledged
+    const acknowledged = Effect.sync(() => {
+      if (snapshotToResolve && !Deferred.isDoneUnsafe(ready)) {
+        Deferred.doneUnsafe(ready, Effect.succeed(snapshotToResolve));
+        snapshotToResolve = undefined;
+      }
+      if (helperReadyObserved) Deferred.doneUnsafe(helperReady, Effect.void);
+      maybeFinish();
+    });
+    const onChunk = (values: ReadonlyArray<unknown>) => Effect.sync(() => {
+      for (const event of values) {
+        if (!record(event)) {
+          abort();
+          return NativeStep.continue;
+        }
+        if (event.type === "snapshot" && record(event.snapshot)) {
+          if (!snapshotIsTarget(event.snapshot, ids, root)) {
+            fail(new GitProbeError("T3 attached the probe to an unexpected terminal."));
+            return NativeStep.continue;
+          }
+          if (!Deferred.isDoneUnsafe(ready)) snapshotToResolve = event.snapshot;
+          continue;
+        }
+        if (event.threadId !== ids.threadId || event.terminalId !== ids.terminalId) continue;
+        if (event.type === "output" && typeof event.data === "string") consumeOutput(event.data);
+        else if (event.type === "exited" && (event.exitCode === null || Number.isInteger(event.exitCode)) &&
+          (event.exitSignal === null || Number.isInteger(event.exitSignal))) {
+          if (capturing) exit = {exitCode: event.exitCode as number | null, exitSignal: event.exitSignal as number | null};
+          else priorExit = true;
+        } else if (event.type === "error") fail(new GitProbeError("The terminal Git probe reported an error."));
+      }
+      return streamFailure ? NativeStep.continue : NativeStep.ack(acknowledged);
+    });
+    const onExit = (attachExit: NativeExit) => Effect.sync(() => {
+      if (attachExit._tag !== "Success") fail(new GitProbeError("T3 rejected the terminal attach request."));
+      else if (!packet) abort();
+      return NativeStep.continue;
+    });
+    const stream = native.call({endpoint, request: {id: requestId, tag: "terminal.attach", payload: {
+      threadId: ids.threadId, terminalId: ids.terminalId, cwd: root, worktreePath: null, restartIfNotRunning: false,
+    }}, maxPayload: nativeMaxPayload.probe, handshakeTimeout: RPC_TIMEOUT, timeout: PROBE_TIMEOUT, framing: NativeFraming.flatChecked(4, 256), cancel, onChunk, onExit}).pipe(
+      Effect.catch((error: NativeEnvelopeError) => Effect.sync(() => {
+        if (error.reason === "binary_frame") fail(new GitProbeError("T3 returned a binary terminal frame."));
+        else if (error.reason === "malformed_json") fail(new GitProbeError("T3 returned malformed terminal data."));
+        else if (error.reason === "invalid_frame") fail(new GitProbeError("T3 returned an invalid terminal frame."));
+        else if (error.reason !== "socket_closed" || !packet || !exit) abort();
+      })));
+    yield* Effect.forkScoped(stream);
+    const capture = Effect.sync(() => {
+      if (capturing) return;
+      capturing = true;
+      if (priorExit) Deferred.doneUnsafe(result, Effect.fail(new GitProbeError("The probe terminal exited before the Git check started.")));
+      else if (streamFailure) Deferred.doneUnsafe(result, Effect.fail(streamFailure));
+      else maybeFinish();
+    });
+    return {ready, helperReady, capture, result} satisfies AttachStream;
+  });
+
+  const pending = Effect.try({try: () => parsePending(store.db.prepare("SELECT value FROM meta WHERE key=?").get(PENDING_KEY)?.value),
+    catch: error => error instanceof GitProbeError ? error : new GitProbeError()});
   const savePending = (sessions: SessionIds[]): void => {
     store.db.prepare("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
       .run(PENDING_KEY, JSON.stringify(sessions));
   };
-  const addPending = (session: SessionIds): void => savePending([...pending(), session]);
-  const removePending = (session: SessionIds): void =>
-    savePending(pending().filter(item => item.threadId !== session.threadId || item.terminalId !== session.terminalId));
-  const closeSession = async (session: SessionIds, signal: AbortSignal): Promise<void> => {
-    await rpc("terminal.close", {threadId: session.threadId, terminalId: session.terminalId, deleteHistory: true}, signal);
-    removePending(session);
-  };
-  const cleanupPending = async (signal: AbortSignal): Promise<void> => {
-    const sessions = pending();
-    let failed = false;
-    for (const session of sessions) {
-      try {await closeSession(session, signal);}
-      catch {failed = true;}
-    }
-    if (failed) throw new GitProbeError("T3 could not clean up a previous Git probe terminal.");
-  };
-  const cleanup = (): Promise<void> => serialize(() => cleanupPending(AbortSignal.timeout(CLEANUP_TIMEOUT_MS)));
-  const probe = (root: string, parentSignal: AbortSignal): Promise<FreshGitInfo> => serialize(async () => {
-    if (parentSignal.aborted) throw new GitProbeError("The Git probe was canceled.");
-    validateRoot(root);
-    const deadline = AbortSignal.any([AbortSignal.timeout(PROBE_TIMEOUT_MS), parentSignal]);
-    await cleanupPending(AbortSignal.timeout(CLEANUP_TIMEOUT_MS));
-    const ids: SessionIds = {
-      threadId: "t3-supervisor-git-probe-" + randomUUID(),
-      terminalId: "t3-supervisor-git-probe-" + randomUUID(),
-    };
-    addPending(ids);
-    let stream: StreamState | undefined;
-    let result: FreshGitInfo | undefined;
-    let failure: unknown;
-    try {
-      const opened = await rpc("terminal.open", {
-        threadId: ids.threadId,
-        terminalId: ids.terminalId,
-        cwd: root,
-        worktreePath: null,
-        cols: 1000,
-        rows: 40,
-        env: {HISTFILE: "/dev/null", TERM: "dumb", ZDOTDIR: "/nonexistent"},
-      }, deadline);
-      if (!record(opened) || !snapshotIsTarget(opened, ids, root)) throw new GitProbeError("T3 did not start the Git probe terminal in the selected checkout.");
-      const nonce = randomBytes(16).toString("hex");
-      stream = startAttachStream(baseUrl, token, ids, root, nonce, deadline);
-      const attached = await stream.ready;
-      if (!snapshotIsTarget(attached, ids, root)) throw new GitProbeError("T3 attached the Git probe to an unexpected terminal.");
-      const bootstrap = makeBootstrap(nonce);
-      if (bootstrap.length > 256) throw new GitProbeError("The Git probe bootstrap exceeded its input limit.");
-      await rpc("terminal.write", {threadId: ids.threadId, terminalId: ids.terminalId, data: bootstrap}, deadline);
-      await stream.helperReady();
-      const completed = stream.result().then(
-        value => ({ok: true as const, value}),
-        error => ({ok: false as const, error}),
-      );
-      const helper = makePythonSource(root, nonce) + "\n\x04";
-      if (helper.length > 32_000) throw new GitProbeError("The Git probe helper exceeded its input limit.");
-      await rpc("terminal.write", {threadId: ids.threadId, terminalId: ids.terminalId, data: helper}, deadline);
-      const completion = await completed;
-      if (!completion.ok) throw completion.error;
-      const probeResult = completion.value;
-      if (probeResult.workspaceRoot !== posix.normalize(root)) throw new GitProbeError("The Git probe resolved a different checkout.");
-      result = probeResult;
-    } catch (error) {
-      failure = error;
-    } finally {
-      stream?.close();
-      try {await closeSession(ids, AbortSignal.timeout(CLEANUP_TIMEOUT_MS));}
-      catch (error) {failure ??= error;}
-    }
-    if (failure !== undefined) throw failure instanceof GitProbeError ? failure : new GitProbeError();
-    if (!result) throw new GitProbeError();
-    return result;
+  // read, change and write the pending list in one synchronous step over the interim guidance store (b-02)
+  const updatePending = (change: (sessions: SessionIds[]) => SessionIds[]) => Effect.try({
+    try: () => savePending(change(parsePending(store.db.prepare("SELECT value FROM meta WHERE key=?").get(PENDING_KEY)?.value))),
+    catch: error => error instanceof GitProbeError ? error : new GitProbeError(),
   });
-  return {probe, cleanup};
-};
+  const addPending = (session: SessionIds) => updatePending(sessions => [...sessions, session]);
+  const removePending = (session: SessionIds) =>
+    updatePending(sessions => sessions.filter(item => item.threadId !== session.threadId || item.terminalId !== session.terminalId));
+  const closeSession = (session: SessionIds, cancel: Cancel | undefined) =>
+    rpc("terminal.close", {threadId: session.threadId, terminalId: session.terminalId, deleteHistory: true}, cancel).pipe(Effect.andThen(removePending(session)));
+  // a cancel trigger completed after the duration or once the parent cancel completes, released with the caller's scope
+  const deadline = (duration: typeof PROBE_TIMEOUT | typeof CLEANUP_TIMEOUT, parent?: Cancel) => Effect.gen(function* () {
+    const expired = yield* Deferred.make<void>();
+    const elapsed = parent === undefined ? Effect.sleep(duration) : Effect.raceFirst(Effect.sleep(duration), Deferred.await(parent));
+    yield* Effect.forkScoped(Effect.andThen(elapsed, Deferred.succeed(expired, undefined)));
+    return expired;
+  });
+  // every pending session is closed under one shared 5 s budget; any failure fails the cleanup after all were tried
+  const cleanupPending = Effect.scoped(Effect.gen(function* () {
+    const budget = yield* deadline(CLEANUP_TIMEOUT);
+    const sessions = yield* pending;
+    let failed = false;
+    for (const session of sessions) if ((yield* Effect.result(closeSession(session, budget)))._tag === "Failure") failed = true;
+    if (failed) return yield* new GitProbeError("T3 could not clean up a previous Git probe terminal.");
+  }));
+
+  const session = (ids: SessionIds, root: string, cancel: Cancel) => Effect.scoped(Effect.gen(function* () {
+    const opened = yield* rpc("terminal.open", {
+      threadId: ids.threadId,
+      terminalId: ids.terminalId,
+      cwd: root,
+      worktreePath: null,
+      cols: 1000,
+      rows: 40,
+      env: {HISTFILE: "/dev/null", TERM: "dumb", ZDOTDIR: "/nonexistent"},
+    }, cancel);
+    if (!record(opened) || !snapshotIsTarget(opened, ids, root)) return yield* new GitProbeError("T3 did not start the Git probe terminal in the selected checkout.");
+    const streamNonce = yield* nonce;
+    // the attach stream lives in this scope, so it ends before the session is closed
+    const stream = yield* attach(ids, root, streamNonce, cancel);
+    const attached = yield* Deferred.await(stream.ready);
+    if (!snapshotIsTarget(attached, ids, root)) return yield* new GitProbeError("T3 attached the Git probe to an unexpected terminal.");
+    const bootstrap = makeBootstrap(streamNonce);
+    if (bootstrap.length > 256) return yield* new GitProbeError("The Git probe bootstrap exceeded its input limit.");
+    yield* rpc("terminal.write", {threadId: ids.threadId, terminalId: ids.terminalId, data: bootstrap}, cancel);
+    yield* Deferred.await(stream.helperReady);
+    yield* stream.capture;
+    const helper = makePythonSource(root, streamNonce) + "\n\x04";
+    if (helper.length > 32_000) return yield* new GitProbeError("The Git probe helper exceeded its input limit.");
+    yield* rpc("terminal.write", {threadId: ids.threadId, terminalId: ids.terminalId, data: helper}, cancel);
+    const probeResult = yield* Deferred.await(stream.result);
+    if (probeResult.workspaceRoot !== posix.normalize(root)) return yield* new GitProbeError("The Git probe resolved a different checkout.");
+    return probeResult;
+  }));
+
+  const probeOnce = (root: string, parent: Cancel | undefined) => Effect.scoped(Effect.gen(function* () {
+    if (parent !== undefined && (yield* Deferred.isDone(parent))) return yield* new GitProbeError("The Git probe was canceled.");
+    yield* validateRoot(root);
+    const probeDeadline = yield* deadline(PROBE_TIMEOUT, parent);
+    yield* cleanupPending;
+    const ids: SessionIds = {threadId: "t3-supervisor-git-probe-" + (yield* uuid), terminalId: "t3-supervisor-git-probe-" + (yield* uuid)};
+    // the session is pending before T3 opens it and leaves the list only after T3 closed it with its history, even when the probe is interrupted
+    return yield* Effect.uninterruptibleMask(restore => Effect.gen(function* () {
+      yield* addPending(ids);
+      const outcome = yield* Effect.exit(restore(session(ids, root, probeDeadline)));
+      const closed = yield* Effect.exit(closeSession(ids, undefined));
+      // the session's own failure is reported first; a failed close discards the result
+      if (Exit.isFailure(outcome)) return yield* outcome;
+      if (Exit.isFailure(closed)) return yield* Effect.failCause(closed.cause);
+      return outcome.value;
+    }));
+  }));
+
+  return GitProbe.of({
+    probe: (root, cancel) => lock.withPermit(probeOnce(root, cancel)),
+    cleanup: lock.withPermit(cleanupPending),
+  });
+});
+
+// fresh git status from a disposable native T3 terminal running a python helper; probes and cleanups run one at a time
+export class GitProbe extends Context.Service<GitProbe, {
+  // closes pending sessions first; 15 s deadline; a completed cancel ends the probe as a failure after its terminal was closed
+  readonly probe: (root: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<FreshGitInfo, GitProbeError>;
+  // closes every pending session left by an earlier process
+  readonly cleanup: Effect.Effect<void, GitProbeError>;
+}>()("t3-supervisor/GitProbe") {
+  static readonly make: (endpoint: NativeEndpoint, store: GuidanceStore) => Effect.Effect<GitProbe["Service"], never, NativeEnvelope | Crypto.Crypto> = makeGitProbe;
+  static readonly layer = (endpoint: NativeEndpoint, store: GuidanceStore): Layer.Layer<GitProbe, never, NativeEnvelope | Crypto.Crypto> =>
+    Layer.effect(GitProbe, makeGitProbe(endpoint, store));
+}
+
+// the probe call shape the definitions take
+export type FreshGitProbe = GitProbe["Service"]["probe"];

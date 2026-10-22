@@ -3,7 +3,8 @@ import { it } from "@effect/vitest";
 import {Effect} from "effect";
 import {WebSocketServer} from "ws";
 import {ProjectDefinitions} from "../src/project-definitions.js";
-import {makeProjectFiles, ProjectFileError, type GitOperationState, type ProjectFiles} from "../src/project-files.js";
+import {ProjectFileError, type GitOperationState} from "../src/project-files.js";
+import {asLoaderOptions, asProjectFiles, makeProjectFiles, type ProjectFiles} from "./support/native-files-promise.js";
 
 function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: string | null; worktreeBranchAfterFirstWrite?: string | null;
   initialChangedPaths?: string[]; unexpectedPathAfterSecondWrite?: string; extraSetupFileAfterSecondWrite?: string;
@@ -64,7 +65,7 @@ function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: 
     thread: {id: threadId, projectId: "project", title: "Main", lineage: {parentThreadId: null, relationshipToParent: null}, worktreePath: options.worktree ?? "/worktrees/feature"},
     runs: [], messages: [],
   }})};
-  const layer = ProjectDefinitions.layer({source, t3, files, options: {
+  const layer = ProjectDefinitions.layer({source, t3, files: asProjectFiles(files), options: asLoaderOptions({
     globalRoot: "~",
     useGlobalDefinitions: () => false,
     isScratchProject: () => false,
@@ -105,7 +106,7 @@ function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: 
         return {status: "committed", commitSha: "commit-123"};
       },
     },
-  }});
+  })});
   return {layer, files, trees, directories, writes, commits, addFile, freshProbeSnapshots, vcsSnapshots};
 }
 

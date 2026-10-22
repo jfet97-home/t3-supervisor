@@ -1,8 +1,9 @@
 import { Context, Effect, Layer, Scope } from "effect";
-import { ProjectDefinitions, type ProjectDefinitionLoaderOptions, type ProjectDefinitionSources } from "../src/project-definitions.js";
+import { ProjectDefinitions, type ProjectDefinitionSources } from "../src/project-definitions.js";
 import { ProjectConfigEditorService, type DefinitionSaveRecorder, type ProjectConfigDefinitions } from "../src/project-config-editor.js";
 import { projectConfigEditorFacade, projectDefinitionsFacade } from "../src/guidance-application.js";
-import { ProjectFileError, type ProjectFiles, type ProjectWriter } from "../src/project-files.js";
+import { ProjectFileError } from "../src/project-files.js";
+import { asLoaderOptions, asProjectFiles, asProjectWriter, type ProjectDefinitionLoaderOptions, type ProjectFiles, type ProjectWriter } from "./support/native-files-promise.js";
 import { stringify } from "yaml";
 import { definitionCatalogPath, type DefinitionCatalogKind, type DefinitionReference, type EffectiveConfigurationInfo, type ProjectConfigurationInfo } from "../src/project-definitions-contract.js";
 
@@ -137,7 +138,7 @@ export function makeDefinitionFixture(options: {
   const run = Effect.runPromiseWith(Context.empty());
   const scope = Effect.runSync(Scope.make());
   const definitionsWith = (replaced: {files?: ProjectFiles; options?: ProjectDefinitionLoaderOptions; t3?: ProjectDefinitionSources["t3"]} = {}) =>
-    Effect.runSync(Scope.provide(scope)(ProjectDefinitions.make({source, t3: replaced.t3 ?? t3, files: replaced.files ?? files, options: replaced.options ?? loaderOptions})));
+    Effect.runSync(Scope.provide(scope)(ProjectDefinitions.make({source, t3: replaced.t3 ?? t3, files: asProjectFiles(replaced.files ?? files), options: asLoaderOptions(replaced.options ?? loaderOptions)})));
   const definitions = definitionsWith();
   const loader = projectDefinitionsFacade(run, definitions);
   // the facade over definitions with replaced native files and options
@@ -162,11 +163,11 @@ export function makeDefinitionFixture(options: {
     addFile(targetRoot, ".t3-supervisor/project.yaml", indexSource({...options, steps: present("steps", "md"), workflows: present("workflows", "yaml")}));
   };
   // the same in-memory files, catalog, projection and setup writer as services: the definitions, and the config editor over a project writer
-  const layer = ProjectDefinitions.layer({source, t3, files, options: loaderOptions});
+  const layer = ProjectDefinitions.layer({source, t3, files: asProjectFiles(files), options: asLoaderOptions(loaderOptions)});
   const editorLayer = (configWriter: ProjectWriter = writer, onSaved?: DefinitionSaveRecorder) =>
-    ProjectConfigEditorService.layer(configWriter, onSaved).pipe(Layer.provideMerge(layer));
+    ProjectConfigEditorService.layer(asProjectWriter(configWriter), onSaved).pipe(Layer.provideMerge(layer));
   // the config editor's promise facade over a project writer and the fixture's (or the given) definitions service
   const editor = (configWriter: ProjectWriter = writer, over: ProjectConfigDefinitions = definitions) =>
-    projectConfigEditorFacade(run, Effect.runSync(Scope.provide(scope)(ProjectConfigEditorService.make({definitions: over, writer: configWriter}))));
+    projectConfigEditorFacade(run, Effect.runSync(Scope.provide(scope)(ProjectConfigEditorService.make({definitions: over, writer: asProjectWriter(configWriter)}))));
   return {loader, loaderWith, definitions, definitionsWith, editor, run, source, t3, loaderOptions, layer, editorLayer, files, writer, trees, directories, failures, truncatedPaths, truncatedFiles, calls, writes, addFile, addDirectory, writeIndex, root, projectId, globalRoot, threadRoot};
 }

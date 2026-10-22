@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import type { IncomingMessage } from "node:http";
 import { it, type TestContext } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
-import { makeProjectCommitter, makeProjectFiles, makeProjectWriter, ProjectFileError } from "../src/project-files.js";
+import { ProjectFileError } from "../src/project-files.js";
+import { makeProjectCommitter, makeProjectFiles, makeProjectWriter } from "./support/native-files-promise.js";
 import { defer, deferred, within } from "./support/c3b-http.js";
 
 type Frame = {_tag?: string; id?: string; tag?: string; payload?: Record<string, unknown>};

@@ -1,11 +1,13 @@
-import { Context, Data, Duration, Effect, Exit, Layer, RcMap, Result, Schema, SchemaIssue, SchemaParser, SchemaTransformation, Scope, Semaphore } from "effect";
+import { Context, Data, Deferred, Duration, Effect, Exit, Layer, RcMap, Result, Schema, SchemaIssue, SchemaParser, SchemaTransformation, Scope, Semaphore } from "effect";
 import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import { parseDocument } from "yaml";
 import { definitionReferenceFields, definitionReferenceProblem, describeDefinitionReferenceProblem } from "./definition-references.js";
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
-import { ProjectFileError, type FileFailure, type FreshGitProbe, type ProjectCommitter, type ProjectFiles } from "./project-files.js";
+import type { FreshGitProbe } from "./git-probe.js";
+import { cancelOnAbort } from "./native-envelope.js";
+import { ProjectFileError, type FileFailure, type ProjectCommitter, type ProjectFiles, type ProjectWriter, type ReadFileResult } from "./project-files.js";
 import {catalogEntryId, DefinitionNode, definitionIdPattern, normalizeProjectConfiguration, projectConfigurationError, ProjectConfigurationInfo, workflowDefinitionExpansionLimits,
   type DefinitionCatalogEntry, type DefinitionFileInfo, type DefinitionStepInfo, type DefinitionWorkflowInfo, type EffectiveConfigurationInfo,
   type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
@@ -25,11 +27,11 @@ export type DefinitionCheckoutTarget = {origin: "project"; threadId: string | nu
 export type ProjectDefinitionSetupInput = {origin: "project"; action: "create" | "create_and_commit"; expectedWorkspaceRoot: string; expectedBranch: string | null};
 export type ProjectDefinitionSetupOutcome = {status: "created" | "committed" | "unchanged" | "conflict" | "stale" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string | null; branch: string | null; path: string; message: string};
 export type ProjectDefinitionGlobalSetupOutcome = {status: "created" | "unchanged" | "conflict" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string; branch: null; path: string; message: string};
-export type DefinitionFileRead = Awaited<ReturnType<ProjectFiles["read"]>>;
+export type DefinitionFileRead = ReadFileResult;
 type CommitSafetyCheck = {status: "safe"; branch: string | null} | {status: "stale" | "conflict" | "unavailable"; branch: string | null; message: string};
 export interface ProjectDefinitionSetupWriter {
-  writeFile(root: string, path: string, contents: string, signal: AbortSignal): Promise<void>;
-  commitFiles?: ProjectCommitter["commitFiles"];
+  readonly writeFile: ProjectWriter["Service"]["writeFile"];
+  readonly commitFiles?: ProjectCommitter["Service"]["commitFiles"] | undefined;
 }
 export interface ProjectDefinitionLoaderOptions {
   globalRoot?: string | null;
@@ -39,11 +41,11 @@ export interface ProjectDefinitionLoaderOptions {
   setupWriter?: ProjectDefinitionSetupWriter;
   gitProbe?: FreshGitProbe;
 }
-// what the loader reads: the catalog, the native projection and the native file adapters, with the scope and setup options
+// what the loader reads: the catalog, the native projection and the native file client, with the scope and setup options
 export interface ProjectDefinitionSources {
   readonly source: Pick<StoreShape, "catalog">;
   readonly t3: Pick<T3ClientShape, "projection">;
-  readonly files: ProjectFiles;
+  readonly files: ProjectFiles["Service"];
   readonly options?: ProjectDefinitionLoaderOptions;
 }
 interface DefinitionScopeRead extends MutableScopeSnapshot {
@@ -83,12 +85,11 @@ export const definitionsOperation = (cancel: AbortSignal | undefined, deadline?:
 export const definitionsSignal: Effect.Effect<AbortSignal | undefined> = OperationSignal;
 // whether the running operation was cancelled or ran past its deadline, checked where the baseline checked signal.aborted
 export const definitionsCanceled: Effect.Effect<boolean> = Effect.map(OperationSignal, signal => signal?.aborted === true);
-// interim promise adapter over today's native clients, removed at s4 integration; the call gets the operation's signal, also aborted on interruption
-export const nativeDefinitionsCall = <A>(call: (signal: AbortSignal) => Promise<A>): Effect.Effect<A, DefinitionSourceFailure> =>
-  Effect.flatMap(OperationSignal, operation => Effect.tryPromise({
-    try: interrupted => call(operation ? AbortSignal.any([operation, interrupted]) : interrupted),
-    catch: error => new DefinitionSourceFailure({error}),
-  }));
+// a native client call under the running operation: its signal becomes the call's cancel trigger, so an aborted signal ends the call
+// with the client's own outcome (unavailable, or an uncertain commit) and an already aborted one never connects; interruption ends it too
+export const withOperationCancel = <A, E>(call: (cancel: Deferred.Deferred<void> | undefined) => Effect.Effect<A, E>): Effect.Effect<A, DefinitionSourceFailure> =>
+  Effect.flatMap(OperationSignal, signal => signal === undefined ? call(undefined) : Effect.scoped(Effect.flatMap(cancelOnAbort(signal), call))).pipe(
+    Effect.mapError(error => new DefinitionSourceFailure({error})));
 // a catalog or projection read ends when the operation's signal aborts, as the baseline's signal-bound read did
 const abortedBy = (signal: AbortSignal) => Effect.callback<never, DefinitionSourceFailure>(resume => {
   const abort = () => resume(Effect.fail(new DefinitionSourceFailure({error: signal.reason})));
@@ -476,11 +477,11 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
   const setupLocks = yield* RcMap.make({lookup: (_key: string) => Semaphore.make(1)});
   const serialSetup = <A, E>(key: string, work: Effect.Effect<A, E>) => Effect.scoped(Effect.flatMap(RcMap.get(setupLocks, key), lock => lock.withPermit(work)));
 
-  // methods are read on every call, so a replaced adapter method takes effect as it did in the baseline
-  const directoryExists = (root: string) => nativeDefinitionsCall(signal => files.directoryExists(root, signal));
-  const list = (root: string, path: string) => nativeDefinitionsCall(signal => files.list(root, path, signal));
-  const read = (root: string, path: string) => nativeDefinitionsCall(signal => files.read(root, path, signal));
-  const vcsInfo = (root: string) => nativeDefinitionsCall(signal => files.vcsInfo!(root, signal));
+  // methods are read on every call, so a replaced client method takes effect as it did in the baseline
+  const directoryExists = (root: string) => withOperationCancel(cancel => files.directoryExists(root, cancel));
+  const list = (root: string, path: string) => withOperationCancel(cancel => files.list(root, path, cancel));
+  const read = (root: string, path: string) => withOperationCancel(cancel => files.read(root, path, cancel));
+  const vcsInfo = (root: string) => withOperationCancel(cancel => files.vcsInfo!(root, cancel));
   const readCatalog = boundedRead(() => source.catalog());
   const readProjection = (threadId: string) => boundedRead(() => t3.projection(threadId));
 
@@ -790,7 +791,7 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
   const checkCommitSafety = Effect.fnUntraced(function* (projectId: string, threadId: string | null, root: string, expectedBranch: string | null,
     expectedPaths: readonly string[]): Effect.fn.Return<CommitSafetyCheck> {
     if (!files.gitOperationState || !files.vcsInfo || !options.gitProbe) return {status: "unavailable", branch: null, message: "A fresh local Git status probe is required to commit safely."};
-    const operation = yield* Effect.result(nativeDefinitionsCall(signal => files.gitOperationState!(root, signal)));
+    const operation = yield* Effect.result(withOperationCancel(cancel => files.gitOperationState!(root, cancel)));
     if (Result.isFailure(operation)) return {status: "unavailable", branch: null, message: "T3 could not verify the checkout's Git operation state."};
     const operationState = operation.success;
     if (operationState.status === "in_progress") return {status: "conflict", branch: expectedBranch, message: `Create + commit is unavailable while Git operation ${operationState.marker} is in progress.`};
@@ -800,7 +801,7 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
     const [currentRoot, currentVcs] = current.success;
     if (currentRoot !== root || currentVcs.branch !== expectedBranch) return {status: "stale", branch: currentVcs.branch, message: "The selected checkout or branch changed; reload the setup choices."};
     if (!currentVcs.isRepo) return {status: "unavailable", branch: currentVcs.branch, message: "Create + commit requires a Git repository."};
-    const probed = yield* Effect.result(nativeDefinitionsCall(signal => options.gitProbe!(root, signal)));
+    const probed = yield* Effect.result(withOperationCancel(cancel => options.gitProbe!(root, cancel)));
     if (Result.isFailure(probed)) return {status: "unavailable", branch: currentVcs.branch, message: "T3 could not obtain a fresh local Git status; no commit was attempted."};
     const fresh = probed.success;
     if (fresh.workspaceRoot !== root) return {status: "stale", branch: fresh.branch, message: "The fresh Git probe resolved a different checkout; reload the setup choices."};
@@ -887,7 +888,7 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
         if (currentRoot !== root || currentVcs.branch !== expectedBranch) return "stale";
       }
       if (yield* definitionsCanceled) return "stale";
-      yield* nativeDefinitionsCall(signal => setupWriter.writeFile(root, filePath, contents, signal));
+      yield* withOperationCancel(cancel => setupWriter.writeFile(root, filePath, contents, cancel));
       const readback = yield* read(root, filePath);
       if (readback.truncated || readback.contents !== contents) return "uncertain";
       written.add(filePath);
@@ -932,7 +933,7 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
     if (yield* definitionsCanceled) return setupOutcome("stale", root, expectedBranch ?? null, "Setup was canceled; the files were left uncommitted.", path);
     const actionId = `supervisor-setup-${createHash("sha256").update(JSON.stringify([origin, root, expectedBranch, configContents])).digest("hex").slice(0, 32)}`;
     // the commit result is inspected as the baseline did inside its catch, so a malformed result is uncertain rather than a failure
-    return yield* nativeDefinitionsCall(signal => setupWriter.commitFiles!(root, filesToCreate, "Initialize T3 Supervisor definitions", actionId, signal)).pipe(
+    return yield* withOperationCancel(cancel => setupWriter.commitFiles!(root, filesToCreate, "Initialize T3 Supervisor definitions", actionId, cancel)).pipe(
       Effect.flatMap(commit => attempt(() => {
         if (commit.status === "uncertain") return setupOutcome("uncertain", root, expectedBranch ?? null, "The commit result is uncertain. The setup paths were submitted and may remain staged; inspect the checkout and commit history before retrying.", path);
         if (!commit.commitSha) return setupOutcome("uncertain", root, expectedBranch ?? null, "The commit result could not be verified. Refresh the checkout before retrying.", path);

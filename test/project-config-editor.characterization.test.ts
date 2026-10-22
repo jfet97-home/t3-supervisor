@@ -3,7 +3,7 @@ import { it } from "vitest";
 import { Effect } from "effect";
 import type { ProjectDefinitions } from "../src/project-definitions.js";
 import type { ProjectConfigSave } from "../src/project-definitions-contract.js";
-import type { ProjectWriter } from "../src/project-files.js";
+import type { ProjectWriter } from "./support/native-files-promise.js";
 import { deferred, loopTurn, within } from "./support/c3b-http.js";
 import { makeDefinitionFixture } from "./project-definitions-fixture.js";
 

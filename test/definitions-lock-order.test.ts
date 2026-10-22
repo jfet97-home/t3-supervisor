@@ -5,7 +5,7 @@ import { projectDefinitionsFacade } from "../src/guidance-application.js";
 import { ProjectConfigEditorService, type ProjectConfigDefinitions } from "../src/project-config-editor.js";
 import { ProjectDefinitions, type ProjectDefinitionSetupInput } from "../src/project-definitions.js";
 import type { ProjectConfigSave } from "../src/project-definitions-contract.js";
-import type { ProjectFiles, ProjectWriter } from "../src/project-files.js";
+import { asLoaderOptions, asProjectFiles, asProjectWriter, type ProjectFiles, type ProjectWriter } from "./support/native-files-promise.js";
 import { deferred, loopTurn, within } from "./support/c3b-http.js";
 import { makeDefinitionFixture } from "./project-definitions-fixture.js";
 
@@ -139,7 +139,7 @@ it.effect("TR-ORDER-03: queued saves of one checkout run in arrival order around
   const f = indexedCheckout();
   const {events, record, recorded} = eventLog();
   const {writer, firstWrite, release} = heldWriter(f, record);
-  const editor = yield* ProjectConfigEditorService.make({writer, definitions: recordingDefinitions(f, record)});
+  const editor = yield* ProjectConfigEditorService.make({writer: asProjectWriter(writer), definitions: recordingDefinitions(f, record)});
   const revisions = new Map<string, string>();
   for (const thread of ["a", ...queued]) revisions.set(thread, (yield* f.definitions.load("project", thread)).revision!);
   const first = yield* Effect.forkChild(editor.save(save("a", revisions.get("a")!)));
@@ -164,7 +164,7 @@ it.effect("TR-ORDER-04: queued setups of one checkout run in arrival order aroun
   const f = makeDefinitionFixture({threadRoot: null});
   const {events, record, recorded} = eventLog();
   const {files, entered, release} = numberedBranches(f, record);
-  const definitions = yield* ProjectDefinitions.make({source: f.source, t3: recordingProjection(f, record), files, options: f.loaderOptions});
+  const definitions = yield* ProjectDefinitions.make({source: f.source, t3: recordingProjection(f, record), files: asProjectFiles(files), options: asLoaderOptions(f.loaderOptions)});
   const first = yield* Effect.forkChild(definitions.initialize("project", "a", setup));
   yield* Effect.promise(() => entered);
   const fibers = new Map<string, Fiber.Fiber<unknown, unknown>>();

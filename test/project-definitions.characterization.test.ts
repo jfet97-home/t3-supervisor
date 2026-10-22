@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { it } from "vitest";
 import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
-import { ProjectFileError, type FreshGitInfo, type ProjectFiles } from "../src/project-files.js";
+import { ProjectFileError, type FreshGitInfo } from "../src/project-files.js";
+import type { ProjectFiles } from "./support/native-files-promise.js";
 import { deferred, loopTurn, within } from "./support/c3b-http.js";
 import { makeDefinitionFixture } from "./project-definitions-fixture.js";
 

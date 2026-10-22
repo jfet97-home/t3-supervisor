@@ -1,8 +1,8 @@
 import { Context, Effect, Layer, RcMap, Result, Scope, Semaphore } from "effect";
 import { isMap, isSeq, parseDocument, stringify } from "yaml";
 import { posix } from "node:path";
-import {decodeDefinitionSource, definitionsCanceled, definitionsOperation, definitionsSignal, DefinitionSourceFailure, DefinitionSourceInvalid, nativeDefinitionsCall,
-  parseProjectConfiguration, ProjectConfigurationSource, ProjectDefinitions} from "./project-definitions.js";
+import {decodeDefinitionSource, definitionsCanceled, definitionsOperation, definitionsSignal, DefinitionSourceFailure, DefinitionSourceInvalid,
+  parseProjectConfiguration, ProjectConfigurationSource, ProjectDefinitions, withOperationCancel} from "./project-definitions.js";
 import { ProjectFileError, type ProjectWriter } from "./project-files.js";
 import { type DefinitionCatalogEntry, type ProjectConfigSave, type ProjectConfigSaveOutcome, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 
@@ -50,7 +50,9 @@ const serializeConfig = (config: ProjectConfigurationInfo, previous?: string): s
 export type ProjectConfigDefinitions = Pick<ProjectDefinitions["Service"], "load" | "currentWorkspace" | "readProjectConfig">;
 // retains the user authorization of a verified save; a throw makes the save uncertain
 export type DefinitionSaveRecorder = (definitions: ProjectDefinitionSnapshot, expectedRevision: string) => void;
-type EditorOptions = {readonly definitions: ProjectConfigDefinitions; readonly writer: ProjectWriter; readonly onSaved?: DefinitionSaveRecorder | undefined};
+// what saving needs from the native writer: the target check and the fixed project.yaml write
+export type ProjectConfigWriter = Pick<ProjectWriter["Service"], "checkProjectConfigFile" | "writeProjectConfig">;
+type EditorOptions = {readonly definitions: ProjectConfigDefinitions; readonly writer: ProjectConfigWriter; readonly onSaved?: DefinitionSaveRecorder | undefined};
 
 const makeProjectConfigEditor = Effect.fnUntraced(function* ({definitions, writer, onSaved}: EditorOptions) {
   // saves of one checkout run one after another; each save leases its root's lock and releases it when it ends
@@ -96,7 +98,7 @@ const makeProjectConfigEditor = Effect.fnUntraced(function* ({definitions, write
       const contents = serializeConfig(intended, previousContents);
       if (Buffer.byteLength(contents, "utf8") > 64 * 1024)
         return outcome("invalid", "The serialized project.yaml exceeds the 64 KiB source limit.", fresh);
-      const checkTarget = nativeDefinitionsCall(signal => checkProjectConfigFile(root, signal));
+      const checkTarget = withOperationCancel(cancel => checkProjectConfigFile(root, cancel));
       const target = yield* Effect.result(checkTarget);
       if (Result.isFailure(target)) return outcome(target.failure.error instanceof ProjectFileError && target.failure.error.code === "permission_required" ? "permission_required" : "unavailable",
         "Could not verify the project.yaml write target with the native filesystem:read permission.", fresh);
@@ -105,7 +107,7 @@ const makeProjectConfigEditor = Effect.fnUntraced(function* ({definitions, write
         return outcome("conflict", "The selected checkout changed before writing. Refresh before saving again.");
       if (yield* definitionsCanceled) return outcome("unavailable", "The save expired before writing. Refresh the project configuration.");
       // a write failure other than a definite permission refusal is uncertain and never retried
-      const wrote = yield* Effect.result(nativeDefinitionsCall(signal => writeProjectConfig(root, contents, signal)));
+      const wrote = yield* Effect.result(withOperationCancel(cancel => writeProjectConfig(root, contents, cancel)));
       if (Result.isFailure(wrote)) {
         const error = wrote.failure.error;
         if (error instanceof ProjectFileError && error.code === "permission_required") return outcome("permission_required", error.message, fresh);
@@ -139,7 +141,7 @@ export class ProjectConfigEditorService extends Context.Service<ProjectConfigEdi
   readonly save: (input: ProjectConfigSave, cancel?: AbortSignal) => Effect.Effect<ProjectConfigSaveOutcome, DefinitionSourceFailure>;
 }>()("t3-supervisor/ProjectConfigEditor") {
   static readonly make: (options: EditorOptions) => Effect.Effect<ProjectConfigEditorService["Service"], never, Scope.Scope> = makeProjectConfigEditor;
-  static readonly layer = (writer: ProjectWriter, onSaved?: DefinitionSaveRecorder): Layer.Layer<ProjectConfigEditorService, never, ProjectDefinitions> =>
+  static readonly layer = (writer: ProjectConfigWriter, onSaved?: DefinitionSaveRecorder): Layer.Layer<ProjectConfigEditorService, never, ProjectDefinitions> =>
     Layer.effect(ProjectConfigEditorService, Effect.gen(function* () {
       return yield* makeProjectConfigEditor({definitions: yield* ProjectDefinitions, writer, onSaved});
     }));

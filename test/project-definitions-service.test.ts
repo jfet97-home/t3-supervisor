@@ -3,9 +3,9 @@ import { it } from "@effect/vitest";
 import { Context, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect";
 import { TestClock } from "effect/testing";
 import { ProjectConfigEditorService } from "../src/project-config-editor.js";
-import { decodeDefinitionSource, definitionStepSource, definitionWorkflowSource, ProjectConfigurationSource, ProjectDefinitions,
-  type ProjectDefinitionLoaderOptions } from "../src/project-definitions.js";
-import { ProjectFileError, type FreshGitInfo, type ProjectFiles, type ProjectWriter } from "../src/project-files.js";
+import { decodeDefinitionSource, definitionStepSource, definitionWorkflowSource, ProjectConfigurationSource, ProjectDefinitions } from "../src/project-definitions.js";
+import { ProjectFileError, type FreshGitInfo } from "../src/project-files.js";
+import { asLoaderOptions, asProjectFiles, asProjectWriter, type ProjectDefinitionLoaderOptions, type ProjectFiles, type ProjectWriter } from "./support/native-files-promise.js";
 import type { ProjectConfigSave } from "../src/project-definitions-contract.js";
 import { makeDefinitionFixture } from "./project-definitions-fixture.js";
 
@@ -14,7 +14,7 @@ import { makeDefinitionFixture } from "./project-definitions-fixture.js";
 type Fixture = ReturnType<typeof makeDefinitionFixture>;
 // the definitions service over the fixture's catalog and projection with replaced files or options
 const definitionsLayer = (f: Fixture, replaced: {files?: ProjectFiles; options?: ProjectDefinitionLoaderOptions} = {}) =>
-  ProjectDefinitions.layer({source: f.source, t3: f.t3, files: replaced.files ?? f.files, options: replaced.options ?? f.loaderOptions});
+  ProjectDefinitions.layer({source: f.source, t3: f.t3, files: asProjectFiles(replaced.files ?? f.files), options: asLoaderOptions(replaced.options ?? f.loaderOptions)});
 const serviceOf = <I, S>(layer: Layer.Layer<I>, tag: Context.Key<I, S>) => Effect.map(Layer.build(layer), context => Context.get(context, tag));
 
 const seedCheck = (f: Fixture) => {
@@ -111,7 +111,7 @@ it.effect("TR-EDITOR-01: an interrupted save queued behind another leaves the qu
   // the editor's loads are counted so the test knows when the second save has its snapshot and waits for the lock
   const loaded = yield* Deferred.make<void>();
   let loads = 0;
-  const editor = yield* ProjectConfigEditorService.make({writer, definitions: {...definitions,
+  const editor = yield* ProjectConfigEditorService.make({writer: asProjectWriter(writer), definitions: {...definitions,
     load: (...args) => definitions.load(...args).pipe(Effect.tap(() => ++loads === 3 ? Deferred.succeed(loaded, undefined) : Effect.void))}});
   const input = (revision: string, summary: string): ProjectConfigSave => ({projectId: "project", threadId: null, expectedRevision: revision, config: {
     workflows: [{path: "workflows/local-flow.yaml", summary: "Run the local flow.", required: false}],
@@ -178,7 +178,7 @@ it.effect("TR-EDITOR-02: a save whose cancel signal aborts while it is queued wa
   const definitions = yield* serviceOf(definitionsLayer(f), ProjectDefinitions);
   const loaded = yield* Deferred.make<void>();
   let loads = 0;
-  const editor = yield* ProjectConfigEditorService.make({writer, definitions: {...definitions,
+  const editor = yield* ProjectConfigEditorService.make({writer: asProjectWriter(writer), definitions: {...definitions,
     load: (...args) => definitions.load(...args).pipe(Effect.tap(() => ++loads === 3 ? Deferred.succeed(loaded, undefined) : Effect.void))}});
   const input = (revision: string, summary: string): ProjectConfigSave => ({projectId: "project", threadId: null, expectedRevision: revision, config: {
     workflows: [{path: "workflows/local-flow.yaml", summary: "Run the local flow.", required: false}],
