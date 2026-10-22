@@ -158,7 +158,7 @@ it("review verification identifies an existing attempt by its stored sent bytes"
   assert.equal((await f.call()).status, "ok", "a wording change after sending does not orphan the attempt");
 });
 
-it("current native running completed missing or changed evidence refuses review without mutation", async t => {
+it("current native running completed missing or changed evidence refuses review without mutation", { timeout: 60_000 }, async t => {
   const variants = ["running", "completed", "missing-run", "missing-message", "different-text", "different-task", "changed-ended-status", "other-running-run", "other-completed-run", "marker-completed"] as const;
   for (const variant of variants) {
     const f = await fixture();after(t, f.cleanup);f.proof(f.args);

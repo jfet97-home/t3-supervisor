@@ -13,11 +13,11 @@ export default defineConfig({
     environment: "node",
     pool: "forks",
     isolate: true,
-    // both files belong to the slow-integration class (test/support/slow-tests.ts); unlisted tests keep 10 s
-    testTimeout: 60_000,
+    // 10 s per test as in the main phase; their slow baseline tests carry an explicit per-test { timeout: 60_000 }
+    testTimeout: 10_000,
     hookTimeout: 30_000,
     teardownTimeout: 30_000,
-    setupFiles: ["test/support/handle-gate.ts", "test/support/slow-class.ts"],
+    setupFiles: ["test/support/handle-gate.ts"],
     reporters: ["default"],
   },
 });

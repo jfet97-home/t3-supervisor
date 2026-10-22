@@ -505,7 +505,7 @@ it("unchanged inspected detail is cached throughout the pending window", async (
   } finally {await closeFixture(fixture);}
 });
 
-it("rolled-back runs, roots, and tool nodes cannot authorize an old matching tool item", async () => {
+it("rolled-back runs, roots, and tool nodes cannot authorize an old matching tool item", { timeout: 60_000 }, async () => {
   for (const [label, state] of [
     ["run", {runStatus: "rolled_back"}],
     ["root", {rootNodeStatus: "rolled_back"}],
@@ -550,7 +550,7 @@ it("Claude-shaped and future native tool records pass the shared exact proof", a
   assert.match(workflowWriteToolDefinition.description, /On rejection, read the reason, code, and path\./u);
 });
 
-it("provider-neutral records retain strong native identity and main-run quality gates", async () => {
+it("provider-neutral records retain strong native identity and main-run quality gates", { timeout: 60_000 }, async () => {
   for (const [label, mutate, expectedReason] of [
     ["weak-ref", (detail: Record<string, unknown>) => {
       (detail.nativeItemRef as Record<string, unknown>).strength = "weak";
@@ -2081,7 +2081,7 @@ it("team registration requires a completed app-owned bootstrap and readiness req
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
 });
 
-it("opt-in helper provider isolation accepts only a distinct configured instance and owned provider sessions", async () => {
+it("opt-in helper provider isolation accepts only a distinct configured instance and owned provider sessions", { timeout: 60_000 }, async () => {
   const configuredInstanceId = "supervisor-helpers-20348";
   const register = async (variant: "isolated" | "wrong-instance" | "same-instance" | "shared-session" | "missing-session" | "missing-owner") => {
     const f = await makeFixture();

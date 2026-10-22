@@ -378,7 +378,7 @@ it("interrupted review chains close durably without acknowledging history or set
   assert.equal(restarted.hasBlockingWork(f.binding), false, "closed notice history is no longer work");
 });
 
-it("late original completion supersedes only pending reviews and sent reviews keep their own fence", async t => {
+it("late original completion supersedes only pending reviews and sent reviews keep their own fence", { timeout: 60_000 }, async t => {
   for (const state of ["pending", "sending", "uncertain", "delivered"] as const) {
     const f = await interruptedHandover();after(t, f.cleanup);
     const review = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "late-review"));
@@ -397,7 +397,7 @@ it("late original completion supersedes only pending reviews and sent reviews ke
   }
 });
 
-it("epoch changes supersede pending reviews while sent reviews acknowledge only themselves", async t => {
+it("epoch changes supersede pending reviews while sent reviews acknowledge only themselves", { timeout: 60_000 }, async t => {
   for (const lifecycle of ["missing", "quarantine"] as const) for (const sent of [false, true]) {
     const f = await interruptedHandover();after(t, f.cleanup);
     const review = f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "epoch-review"));
@@ -463,7 +463,7 @@ it("failed reviews retry only their still-open exact chain", async t => {
   assert.equal(f.team.completeTransfer(f.binding, "branch-a", f.transfer.epoch).state, "active");
 });
 
-it("a rejected review never strands its chain, while an unknown review POST keeps its fence", async t => {
+it("a rejected review never strands its chain, while an unknown review POST keeps its fence", { timeout: 60_000 }, async t => {
   for (const state of ["failed", "uncertain"] as const) {
     const f = await interruptedHandover();after(t, f.cleanup);
     const first = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, "first-review")));
@@ -485,7 +485,7 @@ it("a rejected review never strands its chain, while an unknown review POST keep
   }
 });
 
-it("an unsent review retires when an exact attempt of its own chain closes, and only then", async t => {
+it("an unsent review retires when an exact attempt of its own chain closes, and only then", { timeout: 60_000 }, async t => {
   for (const state of ["pending", "failed"] as const) {
     const f = await interruptedHandover();after(t, f.cleanup);
     const first = interruptNotice(f.team, f.binding, f.team.reviewHandover(f.binding, f.binding.threadId, reviewInput(f.original, `first-${state}`)));

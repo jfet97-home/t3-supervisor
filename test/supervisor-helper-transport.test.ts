@@ -224,7 +224,7 @@ it("the published webhook wrapper is matched through the proven rendered prompt 
   } finally {await f.cleanup();}
 });
 
-it("hostile or incomplete native delivery detail never binds a rendering nor changes the receipt", async () => {
+it("hostile or incomplete native delivery detail never binds a rendering nor changes the receipt", { timeout: 60_000 }, async () => {
   const hostile: Record<string, (detail: Record<string, unknown>) => void> = {
     other_task: detail => {detail.taskId = "foreign-task";},
     other_delivery: detail => {detail.id = "other-delivery";},
@@ -340,7 +340,7 @@ it("a late POST reply keeps a rendering proven while the POST was in flight", as
   } finally {release.resolve();await f.cleanup();}
 });
 
-it("a lost-reply delivery is recovered by its exact body and binds its published rendering", async () => {
+it("a lost-reply delivery is recovered by its exact body and binds its published rendering", { timeout: 60_000 }, async () => {
   // a delivery can be marked dispatch_failed after its message was created, so only that visible message proves
   // delivery and a projection without it stays uncertain, never rejected
   const cases = [["accepted", false, "waiting"], ["dispatch_failed", true, "waiting"], ["dispatch_failed", false, "uncertain"]] as const;
@@ -931,7 +931,7 @@ it("a released check-in with a native dispatch failure keeps the handover open w
   } finally {await f.cleanup();}
 });
 
-it("a pre-render native rejection is recoverable from its exact body receipt", async () => {
+it("a pre-render native rejection is recoverable from its exact body receipt", { timeout: 60_000 }, async () => {
   for (const outcome of ["disabled", "rejected_signature", "rate_limited", "expired"]) {
     const f = await fixture();
     try {
@@ -953,7 +953,7 @@ it("a pre-render native rejection is recoverable from its exact body receipt", a
   }
 });
 
-it("wrong or ambiguous webhook bodies do not recover an unknown delivery identity", async () => {
+it("wrong or ambiguous webhook bodies do not recover an unknown delivery identity", { timeout: 60_000 }, async () => {
   for (const mode of ["wrong_body", "truncated_body", "missing_fields", "empty_rendered_prompt", "ambiguous_body"] as const) {
     const f = await fixture();
     try {
@@ -993,7 +993,7 @@ it("wrong or ambiguous webhook bodies do not recover an unknown delivery identit
   }
 });
 
-it("team runtime retains a lost webhook reply as uncertain and raises bounded root attention without reposting", async () => {
+it("team runtime retains a lost webhook reply as uncertain and raises bounded root attention without reposting", { timeout: 60_000 }, async () => {
   const f = await fixture();
   try {
     f.state.emitMessage = false;f.state.loseReply = true;
@@ -1802,7 +1802,7 @@ it("a refused send of a contradicted receipt is uncertain and posts nothing", as
   } finally {await f.cleanup();}
 });
 
-it("the matcher refuses a contradicted receipt, so a check-in and a readiness request are never failed or completed", async () => {
+it("the matcher refuses a contradicted receipt, so a check-in and a readiness request are never failed or completed", { timeout: 60_000 }, async () => {
   const direct = await fixture();
   try {
     const transport = new SupervisorHelperTransport({...direct.options, fetch: async (_url, options) => {

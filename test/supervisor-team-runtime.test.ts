@@ -143,7 +143,7 @@ const helperProjection = (member: TeamMember, rootThreadId: string): Projection 
   ...makeThread(member.threadId, rootThreadId, "subagent"), lineage: {parentThreadId: rootThreadId, relationshipToParent: "subagent", rootThreadId},
 });
 
-it("a stopped chat's team work is reconciled by observation alone: proven outcomes release it and unknown deliveries stay fenced", async t => {
+it("a stopped chat's team work is reconciled by observation alone: proven outcomes release it and unknown deliveries stay fenced", { timeout: 60_000 }, async t => {
   for (const scenario of ["completed", "never-posted", "rejected", "unknown", "sending"] as const) {
     const f = await fixture();after(t, f.cleanup);
     const transport = webhookTransport();
@@ -1636,7 +1636,7 @@ it("review evidence includes a live run named only by the message and every copy
   assert.equal(copies.transport.attempts.filter(value => value.includes(copies.original.id)).length, 1, "nothing is posted again");
 });
 
-it("a marker-completed copy acknowledges nothing while another strongly linked run is live", async t => {
+it("a marker-completed copy acknowledges nothing while another strongly linked run is live", { timeout: 60_000 }, async t => {
   const f = await recoveryFixture();after(t, f.cleanup);
   f.teamStore.settleRequest(f.binding, "guide:recovery-effect");
   const first = f.projection.messages.find(value => value.id === `native-message:${f.original.id}:0`)!;

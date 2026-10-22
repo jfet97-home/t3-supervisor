@@ -390,7 +390,7 @@ it("grant and session tables share one database", async () => {
   });
 });
 
-it("failed login rolls back grant consumption, expiry pruning and session eviction", async () => {
+it("failed login rolls back grant consumption, expiry pruning and session eviction", { timeout: 60_000 }, async () => {
   await withTemporaryDirectory(async (directory) => {
     const sessionTtl = 30 * 24 * 60 * 60 * 1_000;
     const currentTime = 50_000_000;
@@ -462,7 +462,7 @@ it("failed login rolls back grant consumption, expiry pruning and session evicti
   });
 });
 
-it("logout revokes across open instances and durable sessions keep a global stable cap", async () => {
+it("logout revokes across open instances and durable sessions keep a global stable cap", { timeout: 60_000 }, async () => {
   await withTemporaryDirectory(async (directory) => {
     let currentTime = 2_000;
     const auth = await createServiceAuth(directory, {now: () => currentTime});
@@ -564,7 +564,7 @@ it("pending dashboard grants are isolated between service state directories", as
   });
 });
 
-it("grant issuance prunes expired rows and fails closed at the pending-grant limit", async () => {
+it("grant issuance prunes expired rows and fails closed at the pending-grant limit", { timeout: 60_000 }, async () => {
   await withTemporaryDirectory(async (directory) => {
     let currentTime = 10_000;
     const auth = await createServiceAuth(directory, {now: () => currentTime});
@@ -754,7 +754,7 @@ describe("unexpected session table schemas and row caps fail closed", () => {
     });
   });
 
-  it("more than 32 persisted sessions fail closed", async () => {
+  it("more than 32 persisted sessions fail closed", { timeout: 60_000 }, async () => {
     await withTemporaryDirectory(async (directory) => {
       const auth = await createServiceAuth(directory);
       auth.close();

@@ -185,7 +185,7 @@ it("queued requests cancelled before starting do not hide the completed executed
   assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, null);
 });
 
-it("a failed, cancelled-after-start or interrupted executed main run, or a later queued request, still blocks settlement behind unstarted cancellations", async t => {
+it("a failed, cancelled-after-start or interrupted executed main run, or a later queued request, still blocks settlement behind unstarted cancellations", { timeout: 60_000 }, async t => {
   for (const latestExecuted of [{status: "failed", startedAt: "2026-10-14T10:41:00Z"}, {status: "cancelled", startedAt: "2026-10-14T10:41:00Z"},
     {status: "interrupted", startedAt: "2026-10-14T10:41:00Z"}]) {
     const f = await fixture();after(t, f.cleanup);
@@ -230,7 +230,7 @@ it("pending child monitor activity blocks standby before any descendant projecti
   assert.equal(f.calls.length, 0);
 });
 
-it("a not-needed request's Supervisor settles over retained unreviewed scope activity, which a supervised task still waits for", async t => {
+it("a not-needed request's Supervisor settles over retained unreviewed scope activity, which a supervised task still waits for", { timeout: 60_000 }, async t => {
   for (const status of ["not_supervised", "needs_context", "inferred"] as const) {
     const f = await fixture();after(t, f.cleanup);
     f.store.saveTask({...f.store.task("main")!, status});
@@ -253,7 +253,7 @@ it("a not-needed request's Supervisor settles over retained unreviewed scope act
   }
 });
 
-it("a not-needed request's Supervisor ignores a replaced task's known-unsent draft but not an unknown or current introduction, and an incomplete scan stays closed", async t => {
+it("a not-needed request's Supervisor ignores a replaced task's known-unsent draft but not an unknown or current introduction, and an incomplete scan stays closed", { timeout: 60_000 }, async t => {
   const introduction = (taskId: string, extra: Record<string, unknown>) => ({taskId, projectId: "p", threadId: "main", text: "Earlier proposal.",
     messageId: `supervisor-notice:workflow:${taskId}`, targetRunId: null, error: null, dispatchMode: {type: "queue_after_active" as const}, ...extra});
   const cases = [
@@ -571,7 +571,7 @@ it("the one-time disposable reset clears discovery together and preserves unrela
 });
 
 
-it("background provider work, completion delivery, goals and PR watches all prevent parking", async t => {
+it("background provider work, completion delivery, goals and PR watches all prevent parking", { timeout: 60_000 }, async t => {
   for (const kind of ["roster", "delivery", "goal", "watch"]) {
     const f = await fixture();after(t, f.cleanup);await f.check(1);
     if (kind === "roster") f.main.providerThreads = [{id: "provider", pendingBackgroundTasks: [{kind: "task", id: "background"}]}];
@@ -638,7 +638,7 @@ it("a stopped chat settles only its owned Supervisor once idle, whatever the mai
   assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId, "the same Supervisor identity is retained for a later explicit enable");
 });
 
-it("a stopped chat's Supervisor waits while it is busy, while any accepted delivery is unresolved, and while a later user choice keeps it active", async t => {
+it("a stopped chat's Supervisor waits while it is busy, while any accepted delivery is unresolved, and while a later user choice keeps it active", { timeout: 60_000 }, async t => {
   const busy = await fixture();after(t, busy.cleanup);
   busy.conversation.supervisionStopped = threadId => threadId === "main";
   busy.supervisor.runs.push({id: "root-run", ordinal: 1, status: "running", requestedAt: "2026-10-14T10:00:00Z", startedAt: "2026-10-14T10:00:00Z", completedAt: null, rootNodeId: "root"});
@@ -679,7 +679,7 @@ it("a stopped chat's Supervisor waits while it is busy, while any accepted deliv
   assert.equal(reopened.calls.length, 0, "a human who reactivates the settled Supervisor after the stop is never overridden");
 });
 
-it("a later human stop supersedes every earlier keep-active choice for the owned Supervisor, and the main stays untouched", async t => {
+it("a later human stop supersedes every earlier keep-active choice for the owned Supervisor, and the main stays untouched", { timeout: 60_000 }, async t => {
   const stoppedAt = Date.parse("2026-10-14T11:00:00Z");
   for (const earlier of [{pinnedAt: "2026-10-14T10:00:00Z"}, {autoSettleDisabledAt: "2026-10-14T10:00:00Z"},
     {settledOverride: "active", unsettledAt: "2026-10-14T10:00:00Z"}, {settledOverride: "active", unsettledAt: null}]) {

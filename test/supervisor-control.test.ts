@@ -402,7 +402,7 @@ it("global definitions stay off by default until explicitly enabled, even when t
   });
 });
 
-it("global definitions effectiveEnabled follows the master and definitions truth table", async () => {
+it("global definitions effectiveEnabled follows the master and definitions truth table", { timeout: 60_000 }, async () => {
   const cases = [
     {master: false, definitions: false, effective: false},
     {master: false, definitions: true, effective: false},

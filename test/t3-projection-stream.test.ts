@@ -48,7 +48,7 @@ const expectedView = (body: ReturnType<typeof snapshotBody>) => {
   return {...body, projection};
 };
 
-it("a streamed snapshot equals JSON.parse of the whole body minus unread arrays, for every chunk split", async () => {
+it("a streamed snapshot equals JSON.parse of the whole body minus unread arrays, for every chunk split", { timeout: 60_000 }, async () => {
   const body = snapshotBody();
   const bytes = encoder.encode(JSON.stringify(body));
   const expected = expectedView(JSON.parse(JSON.stringify(body)) as ReturnType<typeof snapshotBody>);
@@ -68,7 +68,7 @@ it("a user or assistant turn item shares its message text only when the value is
   assert.equal(projection.turnItems[1]!.text, "a different text", "a differing turn item text is kept as sent");
 });
 
-it("unread arrays do not count toward the retained budget, but retained records do", async () => {
+it("unread arrays do not count toward the retained budget, but retained records do", { timeout: 60_000 }, async () => {
   const body = snapshotBody();
   // many small unread rows: their total far exceeds the retained budget, while each stays within the per-record bound
   body.projection.plans = [{id: "plan", markdown: "x".repeat(200)}];
@@ -150,7 +150,7 @@ it("a byte order mark before a retained or unread value is rejected as JSON.pars
   }
 });
 
-it("chunks that arrive back to back still meet the deadline and let timers run", async () => {
+it("chunks that arrive back to back still meet the deadline and let timers run", { timeout: 60_000 }, async () => {
   const tiny = encoder.encode(`{"snapshotSequence":1,"projection":{"thread":{"id":"t"},"runs":[],"messages":[],"plans":[${Array(200_000).fill("null").join(",")}]}}`);
   const immediate = () => {
     let offset = 0;
@@ -209,7 +209,7 @@ it("retained keys are charged, an oversized key is invalid, and a failing body i
     (error: unknown) => error instanceof ProjectionStreamError && error.code === "unreadable");
 });
 
-it("one huge chunk of tiny values is still scanned in slices that meet the deadline and let timers run", async () => {
+it("one huge chunk of tiny values is still scanned in slices that meet the deadline and let timers run", { timeout: 60_000 }, async () => {
   const tiny = encoder.encode(`{"snapshotSequence":1,"projection":{"thread":{"id":"t"},"runs":[],"messages":[],"plans":[${Array(400_000).fill("null").join(",")}]}}`);
   const single = () => new ReadableStream<Uint8Array>({start(controller) {controller.enqueue(tiny);controller.close();}});
   let clock = 0;

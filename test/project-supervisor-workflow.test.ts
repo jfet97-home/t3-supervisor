@@ -389,7 +389,7 @@ it("a correlated native result appears in the project DTO without repeating or s
   assert.equal(fixture.store.task(binding.threadId), null, "the owned Supervisor conversation is not a new source task");
 });
 
-it("changed or non-ready definitions stale the workflow while preserving the inferred objective", async (t) => {
+it("changed or non-ready definitions stale the workflow while preserving the inferred objective", { timeout: 60_000 }, async (t) => {
   const variants: Array<{ name: string; snapshot: ProjectDefinitionSnapshot }> = [
     { name: "revision", snapshot: definitionSnapshot({ revision: "revision-2" }) },
     { name: "worktree", snapshot: definitionSnapshot({ workspaceRoot: "/work/project/worktrees/other" }) },
@@ -551,7 +551,7 @@ it("three transient completion read failures stale only the proposal and preserv
   assert.equal(fixture.definitionReads.length, 4, "preparation plus exactly the three bounded revalidation attempts read definitions");
 });
 
-it("interrupted and definitively rejected requests clear pending workflow proposals", async (t) => {
+it("interrupted and definitively rejected requests clear pending workflow proposals", { timeout: 60_000 }, async (t) => {
   const interruptedFixture = await makeFixture();
   after(t, interruptedFixture.cleanup);
   const interruptedSupervisor = interruptedFixture.makeSupervisor();
@@ -874,7 +874,7 @@ it("the interpretation request carries the concise standing role once, permits r
   assert.equal(supervisor.conversation.interpretationRole(fixture.binding()!), null, "later root messages carry no second copy");
 });
 
-it("an Enable or re-enable saved during the final awaits leaves the request undispatched and a finished result unapplied", async (t) => {
+it("an Enable or re-enable saved during the final awaits leaves the request undispatched and a finished result unapplied", { timeout: 60_000 }, async (t) => {
   {
     const fixture = await makeFixture();
     after(t, fixture.cleanup);
@@ -976,7 +976,7 @@ it("after an Enable the chat's next request is interpreted afresh by the same Su
   assert.match(String(fixture.dispatches().at(-1)?.payload.text), /Hi, just checking in\./u);
 });
 
-it("across an Enable only an attempted introduction with an unknown outcome keeps its task; a known-unsent fallback does not hold the next request", async (t) => {
+it("across an Enable only an attempted introduction with an unknown outcome keeps its task; a known-unsent fallback does not hold the next request", { timeout: 60_000 }, async (t) => {
   const priors: Record<string, Pick<WorkflowIntroduction, "state" | "error"> & Partial<WorkflowIntroduction>> = {
     uncertain: {state: "uncertain", dispatchMode: {type: "queue_after_active"}, definiteRejection: false, error: "Proposal delivery is uncertain."},
     acceptedUnobserved: {state: "blocked", dispatchMode: {type: "queue_after_active"}, acceptedAt: 1, error: "T3 accepted this introduction, but it was not found unchanged."},

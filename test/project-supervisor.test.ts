@@ -1011,7 +1011,7 @@ it("workflow editing waits for classification and keeps No Project activation in
   assert.equal(supervisor.workflowEditingEnabled("project-a"), false);
 });
 
-it("global or project off still parks closed idle bindings without semantic work", async t => {
+it("global or project off still parks closed idle bindings without semantic work", { timeout: 60_000 }, async t => {
   const clock = {now: Date.parse(baseTime)};
   mockMethod(t, Date, "now", () => clock.now);
   for (const disabledScope of ["global", "project"] as const) {
@@ -1507,7 +1507,7 @@ it("repeated short passes rotate past a hung Supervisor and keep later mains pro
   assert.equal(touched.size, 9, "the same slow first binding must not permanently hide tail mains");
 });
 
-it("a main conversation over the buffered cap is discovered and interpreted from its exact old source", async (t) => {
+it("a main conversation over the buffered cap is discovered and interpreted from its exact old source", { timeout: 60_000 }, async (t) => {
   const turns: Turn[] = [{ id: "before-activation", sequence: 5, text: "Earlier unrelated request" },
     { id: "old-task", sequence: 11, text: "Build the invoice export" },
     ...Array.from({ length: 12 }, (_, index) => ({ id: `later-${index}`, sequence: 12 + index, text: `Follow-up request ${index}` }))];
@@ -1606,7 +1606,7 @@ it("native Start runs one intent interpretation, grants only that chat and survi
   } finally {await f.cleanup();}
 });
 
-it("negative Start intent and later Stop fence interpretation without operative contact", async () => {
+it("negative Start intent and later Stop fence interpretation without operative contact", { timeout: 60_000 }, async () => {
   for (const outcome of ["negative", "stop", "mode", "edited"] as const) {
     const f = await noProjectFixture();
     try {
@@ -1640,7 +1640,7 @@ it("dashboard Start grants next-request permission when current work is already 
   } finally {await f.cleanup();}
 });
 
-it("Start intake requires exact native own-run proof before reserving permission", async () => {
+it("Start intake requires exact native own-run proof before reserving permission", { timeout: 60_000 }, async () => {
   for (const variant of ["direct", "mcpx", "forged", "foreign", "rollback", "wrong_tool"] as const) {
     const f = await noProjectFixture();
     try {

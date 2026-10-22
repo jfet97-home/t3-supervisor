@@ -91,7 +91,7 @@ it("workflow MCP exposes read, write and the scoped stop tool and serves statele
   }
 });
 
-it("workflow MCP rejects requests above its HTTP body bound", async () => {
+it("workflow MCP rejects requests above its HTTP body bound", { timeout: 60_000 }, async () => {
   const controller = {read: async () => ({status: "ok"}), write: async () => ({status: "created"})} as unknown as WorkflowWriteController;
   const endpoint = createWorkflowMcpEndpoint(controller);
   const server = createServer((request, response) => {void endpoint.handle(request, response);});

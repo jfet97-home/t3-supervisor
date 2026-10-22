@@ -1076,7 +1076,7 @@ const appendOperativeAcceptance = (fixture: Awaited<ReturnType<typeof makeFixtur
 const observeAgreement = (fixture: Awaited<ReturnType<typeof makeFixture>>, now: number) =>
   fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), now);
 
-it("helper provider isolation is opt-in in root roles and uses the current native selection", async t => {
+it("helper provider isolation is opt-in in root roles and uses the current native selection", { timeout: 60_000 }, async t => {
   const clock = {now: baseTime};
   const standard = await makeFixture(clock);
   after(t, standard.cleanup);
@@ -1463,7 +1463,7 @@ it("a deleted operative introduction is blocked while another operative chat sti
   assert.ok(supervisorRequestCall(fixture, "review"));
 });
 
-it("an unreadable introduced chat does not stop a healthy chat review or acknowledge unread activity", async t => {
+it("an unreadable introduced chat does not stop a healthy chat review or acknowledge unread activity", { timeout: 60_000 }, async t => {
   const clock = { now: baseTime };
   mockMethod(t, Date, "now", () => clock.now);
   const projectionFailures: Array<{ label: string; error: Error }> = [
@@ -1504,7 +1504,7 @@ it("an unreadable introduced chat does not stop a healthy chat review or acknowl
   }
 });
 
-it("preparing, starting, and waiting operative runs keep the initial proposal ready without latching a mode", async t => {
+it("preparing, starting, and waiting operative runs keep the initial proposal ready without latching a mode", { timeout: 60_000 }, async t => {
   const clock = { now: baseTime };
   mockMethod(t, Date, "now", () => clock.now);
   for (const status of ["preparing", "starting", "waiting"] as const) {
@@ -1587,7 +1587,7 @@ it("a running main without matching provider-turn evidence waits, then targets t
   assert.deepEqual(call.payload.dispatchMode, {type: "steer_active", targetRunId: activeRun.id});
 });
 
-it("an omitted active run ID still steers one verified running provider turn, while explicit null and ambiguous runs wait", async t => {
+it("an omitted active run ID still steers one verified running provider turn, while explicit null and ambiguous runs wait", { timeout: 60_000 }, async t => {
   for (const variant of ["omitted", "null", "ambiguous"] as const) {
     const clock = {now: baseTime};
     const restore = mockMethod(t, Date, "now", () => clock.now);
@@ -2313,7 +2313,7 @@ it("terminal child AppRuns are not duplicated when their parent completion arriv
   }
 });
 
-it("completed history is bounded to the latest 100 while ancient uncertain work remains durable and does not consume capacity", async t => {
+it("completed history is bounded to the latest 100 while ancient uncertain work remains durable and does not consume capacity", { timeout: 60_000 }, async t => {
   const clock = { now: baseTime };
   const fixture = await makeFixture(clock);
   after(t, fixture.cleanup);
@@ -2937,7 +2937,7 @@ it("quoted, foreign, tool, streaming, and unbound malformed fences do not become
   assert.equal(fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id), null);
 });
 
-it("protocol diagnostics keep their current-task attribution after the context request is pruned", async () => {
+it("protocol diagnostics keep their current-task attribution after the context request is pruned", { timeout: 60_000 }, async () => {
   for (const pruning of ["age", "count"] as const) {
     const clock = {now: baseTime};
     const fixture = await makeFixture(clock);
@@ -2994,7 +2994,7 @@ const reinterpretEditedSource = async (f: Awaited<ReturnType<typeof makeFixture>
 };
 const editedSourceText = "Implement a separate import flow with a revised goal.";
 
-it("a source edit clears the current diagnostic and native order alone attributes root and main records across clocks and pruning", async t => {
+it("a source edit clears the current diagnostic and native order alone attributes root and main records across clocks and pruning", { timeout: 60_000 }, async t => {
   // every T3 timestamp is the service time plus one skew: ahead, old records look newer than the edit; behind, fresh records look older
   for (const existing of ["supervisor", "operative"] as const) for (const pruned of [false, true]) for (const skew of [0, 2, 10_003, -20_001, -60_000]) {
     const variant = `${existing} diagnostic, ${pruned ? "pruned" : "retained"} context, T3 skew ${skew}`;
@@ -3487,7 +3487,7 @@ it("a fixed workflow mentioned only by an unaccepted draft remains negotiable", 
   assert.equal(agreed?.agentMessageId, acceptance.id);
 });
 
-it("editing the operative task requeues interpretation and releases fixed commitments for its new source hash", async t => {
+it("editing the operative task requeues interpretation and releases fixed commitments for its new source hash", { timeout: 60_000 }, async t => {
   for (const [index, includeReviewer] of [true, false].entries()) {
     const clock = {now: baseTime + index * 1_000_000};
     const fixture = await makeFixture(clock);
@@ -3569,7 +3569,7 @@ it("editing the operative task requeues interpretation and releases fixed commit
   }
 });
 
-it("source or definitions changes and edited native evidence make an agreement stale", async t => {
+it("source or definitions changes and edited native evidence make an agreement stale", { timeout: 60_000 }, async t => {
   const scenarios = ["source", "definitions", "supervisor", "operative"] as const;
   for (const [index, scenario] of scenarios.entries()) {
     const clock = {now: baseTime + index * 1_000_000};
@@ -5323,7 +5323,7 @@ it("a project re-enabled with a new boundary never revives a settled pair for a 
   assert.match(wake!.text, new RegExp(request.id, "u"));
 });
 
-it("the proposal goes out only on the Supervisor's own completed interpretation answer: absent, mismatched or streaming answers and pending owner input send nothing", async t => {
+it("the proposal goes out only on the Supervisor's own completed interpretation answer: absent, mismatched or streaming answers and pending owner input send nothing", { timeout: 60_000 }, async t => {
   for (const variant of ["absent", "mismatched", "streaming"] as const) {
     const clock = {now: baseTime};
     const fixture = await makeFixture(clock);
@@ -5487,7 +5487,7 @@ it("a ready introduction is never sent after a later Enable or activation bounda
   }
 });
 
-it("a deferred proposal or a known-unsent queued fallback is sent only while the Supervisor's interpretation answer is unchanged", async t => {
+it("a deferred proposal or a known-unsent queued fallback is sent only while the Supervisor's interpretation answer is unchanged", { timeout: 60_000 }, async t => {
   for (const variant of ["removed", "changed", "streaming", "fallback"] as const) {
     const clock = {now: baseTime};
     const fixture = await makeFixture(clock);
@@ -5566,7 +5566,7 @@ it("every rendered root and operative payload stays bounded and carries no catal
 });
 
 
-it("Stop sends one concise operative notice and settles the idle root without a quiet-minute delay", async t => {
+it("Stop sends one concise operative notice and settles the idle root without a quiet-minute delay", { timeout: 60_000 }, async t => {
   for (const route of ["direct", "ui", "settings"] as const) {
     const clock = {now: baseTime};mockMethod(t, Date, "now", () => clock.now);
     const fixture = await makeFixture(clock);after(t, fixture.cleanup);

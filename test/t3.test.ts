@@ -394,7 +394,7 @@ it("a projection body whose content hides under __proto__ fails validation throu
   }
 });
 
-it("a snapshot read that stalls mid-body times out without being memoized", async () => {
+it("a snapshot read that stalls mid-body times out without being memoized", { timeout: 60_000 }, async () => {
   let reads = 0;
   const text = JSON.stringify(paddedSnapshot("thread-1", 1000));
   const server = await startMockServer((_request, response) => {
@@ -451,7 +451,7 @@ it("the stream deadline and a broken body map to retryable timeout and unreadabl
   }
 });
 
-it("a timed-out snapshot read is not memoized as oversized", async () => {
+it("a timed-out snapshot read is not memoized as oversized", { timeout: 60_000 }, async () => {
   let reads = 0;
   let slow = true;
   const server = await startMockServer((_request, response) => {
@@ -501,7 +501,7 @@ it("a gzip snapshot counts decompressed bytes toward the transfer budget, and a 
   }
 });
 
-it("a full snapshot over 32 MiB on the wire is read with the default budgets when what is kept fits", async () => {
+it("a full snapshot over 32 MiB on the wire is read with the default budgets when what is kept fits", { timeout: 60_000 }, async () => {
   const threadId = "large-thread";
   const body = paddedSnapshot(threadId, 36 * 1024 * 1024);
   const text = JSON.stringify(body);
