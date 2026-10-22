@@ -26,3 +26,8 @@ test("Stop auditing exposes escaped source/caller/time and a named scoped Enable
   assert.match(html, /<time dateTime="1970-01-01T00:00:00.001Z"/u);
   assert.match(html, /aria-label="Enable supervision for Work"/u);
 });
+
+test("the Home audit action's accessible name includes its visible Review and enable label", () => {
+  const html = renderToStaticMarkup(createElement(StopNotice, {audit: {route: "relay", callerThreadId: "caller", userMessageId: "source", stoppedAt: 1}, title: "Work", enableLabel: "Review and enable", onEnable: () => {}}));
+  assert.match(html, /aria-label="Review and enable for Work">Review and enable<\/button>/u);
+});

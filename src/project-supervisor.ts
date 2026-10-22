@@ -691,7 +691,7 @@ export class ProjectSupervisor {
       ? this.store.noProjectControl().mode !== "off" && (this.store.noProjectControl().mode === "automatic" || this.store.start(threadId)?.status === "active")
       : this.store.enabled(projectId));
     const exceptions = currentThreadPolicy(this.config).excludedThreadIds.filter(id => {
-      const thread = catalog.threads.find(item => item.id === id);return thread?.projectId && relevant(thread.projectId, id);
+      const thread = catalog.threads.find(item => item.id === id);return thread?.projectId && !unavailable(thread) && relevant(thread.projectId, id);
     });
     const rows = catalog.threads.filter(thread => {
       if (!thread.projectId || !this.mainShape(thread) || mainConversation(thread, catalog.threads)?.id !== thread.id ||

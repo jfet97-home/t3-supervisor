@@ -1772,3 +1772,15 @@ test("Off pauses an active No Project permission without Stop-style fencing of p
     assert.equal(f.fixture.operations.length, 0);
   } finally {await f.cleanup();}
 });
+
+test("archived exclusions disappear from the relevant editor without dropping the saved policy", async () => {
+  const f = await noProjectFixture();
+  try {
+    await f.supervisor.dashboardStart("manual", "exclusion-visibility", AbortSignal.timeout(1000));
+    await f.supervisor.setChatSupervision({projectId: "project-a", mainThreadId: "manual", policyGeneration: f.policy.get().generation, enabled: false}, AbortSignal.timeout(1000));
+    assert.ok((await f.supervisor.candidates("", "exclude")).exceptions.includes("manual"));
+    f.fixture.projections.get("manual")!.thread.archivedAt = new Date().toISOString();
+    assert.equal((await f.supervisor.candidates("", "exclude")).exceptions.includes("manual"), false);
+    assert.ok(f.policy.get().excludedThreadIds.includes("manual"));
+  } finally {await f.cleanup();}
+});
