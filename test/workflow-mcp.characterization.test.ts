@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import {createServer, request as httpRequest, type IncomingMessage, type ServerResponse} from "node:http";
+import {fileURLToPath} from "node:url";
 import {it, type TestContext} from "vitest";
 import {createWorkflowMcpEndpoint, type WorkflowMcpEndpoint} from "../src/workflow-mcp.js";
 import type {SupervisorTeamController} from "../src/supervisor-team-controller.js";
 import type {WorkflowWriteController} from "../src/workflow-write-controller.js";
+import {nodePath, repositoryRoot, startProcess} from "./support/cli-process.js";
 import {after} from "./support/node-test.js";
 
 type Served = {url: string; port: number; handled: Set<Promise<void>>};
@@ -184,6 +186,60 @@ it("CT-MCP-04: after endpoint.close() every POST is answered 503 workflow_mcp_cl
   assert.equal(calls, 1);
   await deadline(Promise.all([...handled]), 5_000, "handler settlement");
   assert.equal(handled.size, 0);
+});
+
+type RunnerEvent = {event: string} & Record<string, unknown>;
+
+// real-process case: the never-settling handle() is confined to the runner process, which must still exit by itself
+it("CT-MCP-04 (in-flight, baseline): close() aborts the controller signal but the pending call gets no response until the server drops the connection", {timeout: 60_000}, async t => {
+  const runnerPath = fileURLToPath(new URL("./support/gaps-mcp-inflight-close.ts", import.meta.url));
+  const runner = startProcess(process.execPath, ["--import", "tsx", runnerPath], {cwd: repositoryRoot, env: {PATH: nodePath()}, stdin: "pipe"});
+  after(t, () => runner.dispose());
+  const events = (): RunnerEvent[] => runner.stdout().split("\n").filter(line => line.length > 0).map(line => JSON.parse(line) as RunnerEvent);
+  const event = async (name: string, ms: number): Promise<RunnerEvent> => {
+    await runner.waitForStdout(() => events().some(value => value.event === name), ms, `runner ${name}`);
+    return events().find(value => value.event === name)!;
+  };
+
+  // runner startup compiles the endpoint and the sdk through tsx
+  const {port} = await event("listening", 20_000);
+  assert.ok(typeof port === "number" && port > 0);
+  const body = JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
+  const client = httpRequest({host: "127.0.0.1", port, path: "/mcp/workflows", method: "POST", headers: {
+    "Content-Type": "application/json", Accept: "application/json, text/event-stream", "Content-Length": Buffer.byteLength(body),
+  }});
+  after(t, () => client.destroy());
+  let responded = false;
+  let connectionEnded = false;
+  client.once("response", () => {responded = true;});
+  const clientClosed = new Promise<string | undefined>(resolve => {
+    let code: string | undefined;
+    client.on("error", (error: NodeJS.ErrnoException) => {code = error.code;});
+    client.once("close", () => {
+      connectionEnded = true;
+      resolve(code);
+    });
+  });
+  client.end(body);
+
+  const entered = await event("entered", 5_000);
+  assert.equal(entered.aborted, false);
+  runner.child.stdin!.write("close-endpoint\n");
+  // the abort reaches the tool, which returns its result, yet handle() stays pending
+  assert.deepEqual(await event("endpoint-closed", 5_000),
+    {event: "endpoint-closed", aborted: true, reason: "AbortError", toolReturned: true, handleSettled: false});
+
+  // a bounded absence window: the sdk transport close discarded the pending json response
+  await new Promise<void>(resolve => setTimeout(resolve, 1_000));
+  assert.equal(responded, false);
+  assert.equal(connectionEnded, false);
+
+  runner.child.stdin!.end("close-server\n");
+  assert.deepEqual(await event("server-closed", 5_000), {event: "server-closed", error: null, handles: 1, handleSettled: false});
+  assert.equal(await deadline(clientClosed, 5_000, "connection end"), "ECONNRESET");
+  assert.equal(responded, false);
+  const exit = await runner.closed(10_000);
+  assert.deepEqual({code: exit.code, signal: exit.signal, stderr: exit.stderr}, {code: 0, signal: null, stderr: ""});
 });
 
 it("CT-MCP-05: with a team the tool list has six tools in fixed order and an unknown tool is an isError unknown_tool result", {timeout: 10_000}, async t => {

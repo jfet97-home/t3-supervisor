@@ -102,8 +102,10 @@ it("CT-T3-02: nine frames in one TCP write trip the buffered-frame limit and an 
     try {
       const client = await getClient(peer.baseUrl);
       const sequences: unknown[] = [];
-      const fiber = Effect.runFork(client.watch(undefined, (item) => Effect.callback<void>(() => {
+      const releases: Array<() => void> = [];
+      const fiber = Effect.runFork(client.watch(undefined, (item) => Effect.callback<void>((resume) => {
         sequences.push(item.item.sequence);
+        releases.push(() => resume(Effect.void));
       })));
       try {
         const connection = await within(peer.connection, 2500, "websocket upgrade");
@@ -113,7 +115,17 @@ it("CT-T3-02: nine frames in one TCP write trip the buffered-frame limit and an 
         assert.deepEqual(sequences, [1]);
         assert.deepEqual(connection.frames.map((frame) => JSON.parse(frame.payload.toString("utf8")) as JsonRecord)
           .map((frame) => [frame._tag, frame.id]), [["Request", "1"], ["Request", "2"]]);
-        // the watch reports nothing until onItem returns; that later error differs from the registry expectation and stays unpinned
+        // a bounded absence window: while onItem is blocked the watch reports nothing
+        await new Promise<void>((resolve) => setTimeout(resolve, 250));
+        assert.equal(fiber.pollUnsafe(), undefined);
+
+        // once onItem returns, the ACK finds the terminated socket and the watch fails with that send error
+        releases[0]!();
+        const failure = failureOf(await within(Effect.runPromise(Fiber.await(fiber)), 2500, "watch failure"));
+        assert.ok(failure instanceof T3TransportError);
+        assert.equal(failure.message, "T3 websocket is not open");
+        assert.deepEqual(sequences, [1]);
+        assert.equal(connection.frames.length, 2);
       } finally {
         await Effect.runPromise(Fiber.interrupt(fiber));
       }
