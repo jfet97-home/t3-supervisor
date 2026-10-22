@@ -23,6 +23,8 @@
   leaked interval and an open server, passes a closed server and fails closed without
   `process.getActiveResourcesInfo`.
 - `node-test.test.ts`: the node:test cleanup-order shim of `test/support/node-test.ts`.
+- `lint-guards.test.ts`: the SQLite driver (barrel, subpath or re-export) is rejected outside
+  `src/db.ts`, extension loading is rejected, and suites cannot import `node:test`.
 - `phases.test.ts`: `npm test` is one watchdog over the main and cpu-bound phases; over two
   fixture phases (`fixtures/vitest.phase-{a,b}.config.ts`) a filter runs only the phases that
   select files, a location filter reaches only its file's phase, an empty selection fails as

@@ -1,11 +1,10 @@
 import tseslint from "typescript-eslint";
 
 // only src/db.ts opens SQLite clients (plan 3.2); suites run on vitest
+// the package barrel and every subpath (for example @effect/sql-sqlite-node/SqliteClient)
 const restrictedImports = (sqlite) => ["error", {
-  paths: [
-    { name: "node:test", message: "the suites run on vitest" },
-    ...(sqlite ? [{ name: "@effect/sql-sqlite-node", message: "only src/db.ts opens SQLite clients (plan 3.2)" }] : []),
-  ],
+  paths: [{ name: "node:test", message: "the suites run on vitest" }],
+  patterns: sqlite ? [{ group: ["@effect/sql-sqlite-node", "@effect/sql-sqlite-node/*"], message: "only src/db.ts opens SQLite clients (plan 3.2)" }] : [],
 }];
 
 export default tseslint.config(

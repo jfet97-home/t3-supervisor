@@ -1,9 +1,10 @@
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { SqliteClient } from "@effect/sql-sqlite-node";
-import { Context, Data, Effect, Layer, type Scope } from "effect";
+import { Context, Data, Effect, FileSystem, Layer, type PlatformError as Platform, type Scope } from "effect";
 import { Reactivity } from "effect/reactivity";
 import type { SqlClient } from "effect/sql";
+
+type PlatformError = Platform.PlatformError;
 
 // one client per database file, each behind its own named service, so a generic SqlClient never shadows another
 // file's client; only this module opens SQLite clients (lint rule)
@@ -34,39 +35,58 @@ interface DatabaseFile {
 
 const sidecars = (path: string): ReadonlyArray<string> => [path, `${path}-wal`, `${path}-shm`];
 
+// a sidecar may disappear between the check and the change (sqlite removes -wal/-shm on the last close)
+const ignoreMissing = <R>(effect: Effect.Effect<void, PlatformError, R>): Effect.Effect<void, PlatformError, R> =>
+  Effect.catch(effect, (error) => error.reason._tag === "NotFound" ? Effect.void : Effect.fail(error));
+
+/** Restores 0600 on a database file and its -wal/-shm sidecars (after commits and on close, as the baseline store does). */
+export const securePrivateFiles = (path: string): Effect.Effect<void, PlatformError, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    for (const file of sidecars(path)) if (yield* fs.exists(file)) yield* fs.chmod(file, 0o600).pipe(ignoreMissing);
+  });
+
 // the client switches to WAL inside make, so the directory and the file are private before it opens them
-const preparePrivateFile = (directory: string, path: string): void => {
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  chmodSync(directory, 0o700);
-  if (!existsSync(path)) closeSync(openSync(path, "a", 0o600));
-  chmodSync(path, 0o600);
-};
+const preparePrivateFile = (directory: string, path: string): Effect.Effect<void, PlatformError, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 });
+    yield* fs.chmod(directory, 0o700);
+    // created empty with 0600 and closed again; an existing file is not opened, so its bytes and times stay as they are
+    if (!(yield* fs.exists(path))) yield* Effect.scoped(fs.open(path, { flag: "a", mode: 0o600 }));
+    yield* fs.chmod(path, 0o600);
+  });
 
-const securePrivateFiles = (path: string): void => {
-  for (const file of sidecars(path)) if (existsSync(file)) chmodSync(file, 0o600);
-};
+/**
+ * Runs database work with tracing disabled. effect/sql opens a span per statement and per transaction carrying the
+ * query text and the transaction exit, neither of which is a sanitized telemetry field (plan 3.10, CT-REDACT-01);
+ * every service built on these clients wraps its operations with it.
+ */
+export const untracedSql: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R> = Effect.withTracerEnabled(false);
 
-const openDatabase = (options: DatabaseFile): Effect.Effect<SqlClient.SqlClient, DatabaseOpenError, Scope.Scope> => {
+const openDatabase = (options: DatabaseFile): Effect.Effect<SqlClient.SqlClient, DatabaseOpenError, Scope.Scope | FileSystem.FileSystem> => {
   const directory = resolve(options.directory);
   const path = join(directory, options.file);
   const failed = (cause: unknown) => new DatabaseOpenError({ file: options.file, cause });
   return Effect.gen(function* () {
-    yield* Effect.try({ try: () => preparePrivateFile(directory, path), catch: failed });
-    // sidecar modes are restored when the client closes, as the baseline close does
-    yield* Effect.addFinalizer(() => Effect.sync(() => securePrivateFiles(path)));
+    yield* preparePrivateFile(directory, path).pipe(Effect.mapError(failed));
+    // sidecar modes are restored when the client closes, as the baseline close does; registered before the client,
+    // so it runs after the client's own finalizer has closed the connection
+    const fs = yield* FileSystem.FileSystem;
+    yield* Effect.addFinalizer(() => securePrivateFiles(path).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.orDie));
     const client = yield* SqliteClient.make({
       filename: path,
       disableWAL: options.journal === "delete",
       busyTimeout: "5 seconds",
     }).pipe(Effect.provide(Reactivity.layer), Effect.mapError(failed));
     for (const pragma of options.pragmas) yield* client.unsafe(`PRAGMA ${pragma}`).pipe(Effect.mapError(failed));
-    yield* Effect.try({ try: () => securePrivateFiles(path), catch: failed });
+    yield* securePrivateFiles(path).pipe(Effect.mapError(failed));
     return client;
-  });
+  }).pipe(untracedSql);
 };
 
 /** The catalog file with the baseline pragmas of `store.ts`; the store owns its schema. */
-export const catalogDbLayer = (dataDirectory: string): Layer.Layer<CatalogDb, DatabaseOpenError> =>
+export const catalogDbLayer = (dataDirectory: string): Layer.Layer<CatalogDb, DatabaseOpenError, FileSystem.FileSystem> =>
   Layer.effect(CatalogDb, openDatabase({
     directory: dataDirectory,
     file: "catalog.sqlite3",
