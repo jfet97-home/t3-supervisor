@@ -6,8 +6,8 @@ import { TestClock } from "effect/testing";
 import { makeT3Client, T3Client, T3TransportError, type T3ClientOptions } from "../src/t3.js";
 import { ProjectionStreamError, readProjectionSnapshot } from "../src/t3-projection-stream.js";
 import type { JsonRecord, SourceItem } from "../src/types.js";
-import { deferred, startMockT3 } from "./support/c3a-fake-t3.js";
-import { barrier, envelopePeer, type PeerFrame } from "./support/envelope-peer.js";
+import { deferred, startMockT3, within } from "./support/c3a-fake-t3.js";
+import { barrier, envelopePeer, hungPeer, type PeerFrame } from "./support/envelope-peer.js";
 
 // target regressions of the effect port of src/t3.ts and src/t3-projection-stream.ts: exact watch wire frames, the
 // heartbeat on the effect clock, monotonic deadlines under wall-clock jumps (CT-CLOCK-01) and interruption of a read
@@ -268,5 +268,96 @@ describe("read interruption (CT-T3-06, effect form)", () => {
     assert.equal(pullsAtCancel, pulls, "the reader cancelled the source");
     yield* Effect.callback<void>((resume) => {setImmediate(() => resume(Effect.void));});
     assert.equal(pulls, pullsAtCancel, "nothing pulls after the cancel");
+  }), { timeout: 10_000 });
+});
+
+// GATE-CPU revisit: test/t3.test.ts runs without the async leak detector for its cpu-bound deadlines, so its watch and
+// read failure paths are repeated here, where the detector fails the file for any fiber or promise left behind; each
+// case also observes that its socket or request was ended
+describe("watch and read cleanup under the full detector", () => {
+  it.live("T3-PORT-09: a websocket handshake that never completes fails at its bound and ends the connection", () => Effect.gen(function*() {
+    const peer = yield* hungPeer;
+    const client = yield* clientOf(peer.baseUrl, { webSocketHandshakeTimeoutMs: 100 });
+    const failure = yield* failureOf(client.watch(undefined, () => Effect.void));
+    assert.ok(failure instanceof T3TransportError);
+    assert.match(failure.message, /handshake timed out/);
+    yield* peer.accepted;
+    yield* peer.gone;
+    assert.equal(peer.received(), "", "nothing is written on an unanswered upgrade");
+  }), { timeout: 10_000 });
+
+  it.live("T3-PORT-10: subscription Exit and Defect frames fail the watch closed without their detail and end the socket", () => Effect.gen(function*() {
+    for (const terminal of [
+      { _tag: "Exit", requestId: "1", exit: { _tag: "Success", value: null } },
+      { _tag: "Defect", requestId: "2", defect: { message: "private server detail" } },
+    ]) {
+      yield* Effect.scoped(Effect.gen(function*() {
+        const peer = yield* envelopePeer((socket, frame) => {if (frame._tag === "Request" && frame.id === "2") socket.send(JSON.stringify(terminal));});
+        const client = yield* clientOf(peer.baseUrl);
+        const failure = yield* failureOf(client.watch(undefined, () => Effect.void));
+        assert.ok(failure instanceof T3TransportError);
+        assert.equal(failure.message.includes("private server detail"), false);
+        yield* peer.closed;
+        assert.deepEqual(peer.texts(), [subscribeShell({}), subscribeArchive], terminal._tag);
+      }));
+    }
+  }), { timeout: 10_000 });
+
+  it.live("T3-PORT-11: a shell snapshot with an unsupported schema version fails the watch without an Ack and ends the socket", () => Effect.gen(function*() {
+    const peer = yield* envelopePeer((socket, frame) => {
+      if (frame._tag === "Request" && frame.id === "2") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "1",
+        values: [{ kind: "snapshot", snapshot: { schemaVersion: 3, snapshotSequence: 2, projects: [], threads: [], archivedThreads: [] } }] }));
+    });
+    const client = yield* clientOf(peer.baseUrl);
+    const failure = yield* failureOf(client.watch(undefined, () => Effect.void));
+    assert.ok(failure instanceof T3TransportError);
+    yield* peer.closed;
+    assert.deepEqual(peer.texts(), [subscribeShell({}), subscribeArchive]);
+  }), { timeout: 10_000 });
+
+  it.live("T3-PORT-12: an ingestion failure fails the watch without acknowledging its chunk and ends the socket", () => Effect.gen(function*() {
+    const peer = yield* envelopePeer((socket, frame) => {
+      if (frame._tag === "Request" && frame.id === "2") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "1",
+        values: [{ kind: "thread.removed", sequence: 2, threadId: "thread-1" }] }));
+    });
+    const client = yield* clientOf(peer.baseUrl);
+    const failure = yield* failureOf(client.watch(undefined, () => Effect.fail(new Error("durable store unavailable"))));
+    assert.match(String(failure), /durable store unavailable/);
+    yield* peer.closed;
+    assert.deepEqual(peer.texts(), [subscribeShell({}), subscribeArchive]);
+  }), { timeout: 10_000 });
+
+  it.live("T3-PORT-13: a descriptor request past its timeout fails and aborts the request", () => Effect.gen(function*() {
+    const ended = deferred<boolean>();
+    // never answered: only the client's abort ends the response
+    const server = yield* mockT3((_url, response) => {response.once("close", () => ended.resolve(response.writableEnded));});
+    const client = yield* clientOf(server.baseUrl, { httpTimeoutMs: 25 });
+    const failure = yield* failureOf(client.descriptor());
+    assert.ok(failure instanceof T3TransportError);
+    assert.match(failure.message, /timed out/);
+    assert.equal(yield* Effect.promise(() => within(ended.promise, 2500, "the aborted request")), false, "the request was aborted, not answered");
+  }), { timeout: 10_000 });
+
+  it.live("T3-PORT-14: a read that stalls mid-body times out, aborts its response and is not memoized", () => Effect.gen(function*() {
+    let reads = 0;
+    const text = projectionBody("thread-1", 10_000);
+    const stalled = deferred<boolean>();
+    const server = yield* mockT3((_url, response) => {
+      reads++;
+      response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
+      if (reads > 1) {
+        response.end(text);
+        return;
+      }
+      response.once("close", () => stalled.resolve(response.writableEnded));
+      response.write(text.slice(0, 200));
+    });
+    const client = yield* clientOf(server.baseUrl, { httpTimeoutMs: 100 });
+    const failure = yield* failureOf(client.projection("thread-1"));
+    assert.ok(failure instanceof T3TransportError && failure.code === undefined);
+    assert.match(failure.message, /timed out/);
+    assert.equal(yield* Effect.promise(() => within(stalled.promise, 2500, "the stalled response")), false, "the stalled body was aborted");
+    assert.equal((yield* client.projection("thread-1")).projection.thread.id, "thread-1");
+    assert.equal(reads, 2, "a timeout is not remembered as an oversized snapshot");
   }), { timeout: 10_000 });
 });

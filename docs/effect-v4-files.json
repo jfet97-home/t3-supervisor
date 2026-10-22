@@ -23959,8 +23959,8 @@
    "id": "GATE-CPU",
    "source": "Coordinator (S0)",
    "requirement": "the unchanged CPU-bound deadline tests cannot run under Vitest's global async hook",
-   "response": "plan 5.3 rule 3 exception: test/t3.test.ts and test/t3-projection-stream.test.ts run in a separate invocation (vitest.cpu-bound.config.ts) with the fatal native-resource gate test/support/handle-gate.ts; it does not cover pending promises or Effect fibers (none started by the exercised code); deadlines and assertions unchanged",
-   "status": "resolved (S0)"
+   "response": "plan 5.3 rule 3 exception: test/t3.test.ts and test/t3-projection-stream.test.ts run in a separate invocation (vitest.cpu-bound.config.ts) with the fatal native-resource gate test/support/handle-gate.ts; it does not cover pending promises or Effect fibers; since S4 the exercised code runs on fibers, so fiber and promise cleanup of watch, read, heartbeat and reader-cancel is proven in the main phase under the full detector (test/t3-client-port.test.ts T3-PORT-01..14, test/t3.characterization.test.ts, test/t3-projection-stream.characterization.test.ts, test/native-envelope.test.ts); deadlines and assertions unchanged",
+   "status": "resolved (S0), revised (S4)"
   },
   {
    "id": "UI-STORY-03-BASELINE",

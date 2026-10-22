@@ -1175,11 +1175,18 @@ timeouts (`run.BPv-BBRv.js:3270-3271`). Policy:
    count per kind against the file's start, after two loop turns so already closed handles
    finish) and fails closed without `process.getActiveResourcesInfo`; self-tests prove a
    leaked interval and an open server fail and a closed server passes. It does **not** see
-   pending promises or Effect fibers: the code these files exercise (`src/t3.ts`,
-   `src/t3-projection-stream.ts`) starts no fibers, and their own abort, timeout and
-   cleanup assertions (aborted and timed-out reads, unread bodies, closed servers) remain
-   the evidence for promise settlement. When the owning slice ports these modules (S4),
-   their Effect tests return to the full detector or record why not.
+   pending promises or Effect fibers. Since S4 the code these files exercise (`src/t3.ts`,
+   `src/t3-projection-stream.ts`) runs on Effect fibers, so the cpu-bound phase is no
+   evidence for fiber or promise cleanup (revised at S4): it keeps only the deadline-bound
+   tests (the 5 s parser bounds, now an Effect timeout on the live clock, and the two
+   `t3.test.ts` reads), and every watch, read, heartbeat, reader-cancel and fiber cleanup
+   path runs in the main phase under the full detector: `test/t3-client-port.test.ts`
+   T3-PORT-01..14 (wire order, Ack after ingestion, heartbeat on the Effect clock, monotonic
+   deadlines, read interruption, unanswered handshake, Exit/Defect fail-closed, unsupported
+   schema, ingestion failure, aborted HTTP timeout, stalled read not memoized),
+   `test/t3.characterization.test.ts`, `test/t3-projection-stream.characterization.test.ts`
+   and `test/native-envelope.test.ts`. The per-promise hook is not re-enabled for the
+   cpu-bound files, since it distorts their deadlines.
 4. **Outer watchdog (tooling adapter, O-03).** `npm test` runs `scripts/run-tests.ts` once, an
    Effect program (`effect/process` `ChildProcess` with `NodeChildProcessSpawner`) that runs
    the declared phases in order (`--watchdog-phase=main:vitest.config.ts` and
@@ -1733,7 +1740,7 @@ reopens it on the frozen revision. Manifest rows carry the IDs that affect them 
 | SOL-PREC | Sol (run 3 precision notes) | CT-ISUB-14 validation spans; CT-APP-02 slice wording; CT-PSS-02/CT-TSTORE-02 reuse/observation fields; per-panel browser behaviour | CT-ISUB-14; registry fixes; section 7 UI note | resolved in v2.1 |
 | RUN4-PREC | Sol and Astra (run 4 consistency notes) | `reconcileStopNotice` is asynchronous (T-03); `reconcileStopped` returns a Promise (call shapes); per-file S6e prose uses `attemptId`, the current-attempt pointer and the namespaced receipt; B2 ordering; stale "fork" wording in 3.11 | 3.9 T-03; `temporaryBoundaries.callShapes`; manifest S6e rows for `project-supervisor.ts`, `project-supervisor-store.ts`, `supervisor-conversation-store.ts`; 3.12 B2; 3.11 item 1 | resolved in v2.2 |
 | UPGRADE-406 | User (via coordinator, 19:08Z) | use the latest v4: the matching 4.0.6 set is published under `latest` | section 2: exact 4.0.6 pins with provenance; transition evidence (typecheck, 869/869 baseline, harness, 8-case probe identical); S1c goes 4.0.1 -> 4.0.6; S0 4.0.1 parity unchanged | resolved |
-| GATE-CPU | Coordinator (S0) | the unchanged CPU-bound deadline tests cannot run under Vitest's global async hook | 5.3 rule 3 exception: `t3.test.ts` and `t3-projection-stream.test.ts` in a separate invocation with the fatal native-resource gate; coverage excludes pending promises and fibers (none started by the exercised code); deadlines and assertions unchanged | resolved (S0) |
+| GATE-CPU | Coordinator (S0; revised at S4) | the unchanged CPU-bound deadline tests cannot run under Vitest's global async hook | 5.3 rule 3 exception: `t3.test.ts` and `t3-projection-stream.test.ts` in a separate invocation with the fatal native-resource gate; coverage excludes pending promises and fibers; since S4 the exercised code runs on fibers, so fiber and promise cleanup of watch/read/heartbeat/reader-cancel is proven in the main phase under the full detector (T3-PORT-01..14, the t3 and projection-stream characterizations, native-envelope); deadlines and assertions unchanged | resolved (S0), revised (S4) |
 | UI-STORY-03-BASELINE | Coordinator (UI baseline, fixture `1e09d57`) | session revoked while a Save POST is held: the dropped POST was followed by a second POST to the same path (rejected 401 before body read) before manual re-authentication; the API helper has one `fetch` and no write replay, so the source (likely browser transport retry) is unverified | recorded as a baseline qualification for S7 and real-HTTP semantics: S7 must not add an application-level replay; whether one user action can produce two wire POSTs after a dropped connection is observed again on the S7 build; evidence `story-03-save-log.json`, `story-03-observations.json` (coordinator) | recorded |
 | S0-RUN-ORCH | Sol and Astra (round 8, A-S0-R01/R02, SOL-S0-RUN-01) | `npm test` chained two watchdogs with `&&`: each got its own 20-minute deadline, and npm forwarded filters, configuration, reporters and the deadline only to the second | 5.3 rule 4: one runner owns both phases under one whole-run deadline and routes caller arguments once (configuration, file and location filters, per-phase and combined reports); runner self-tests `test/harness/phases.test.ts` | fixed (S0), recheck pending |
 | SQL-406 | Astra (round 9) | exact 4.0.6 cancels a queued transaction before the holder releases (real CatalogDb probe 0.33 ms); 3.2 rule 6 and CT-SQL-01 described 4.0.5 | 3.2 rule 6 and CT-SQL-01 state the 4.0.6 behaviour (immediate return, body never runs, holder unaffected); no masking recreates the older delay; CT-SQL-01..04 are committed with S3 before catalog activation | resolved |
