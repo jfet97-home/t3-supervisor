@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {test} from "node:test";
+import { it } from "vitest";
 import {Schema} from "effect";
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
@@ -16,7 +16,7 @@ const step = (references?: unknown) => `---\nid: review\nname: Review\ndescripti
 const workflow = (references?: unknown, localReferences?: unknown) => `name: Delivery\ndescription: Deliver the change.\nfixed: true\n${references === undefined ? "" : `references: ${JSON.stringify(references)}\n`}sequence:\n  - step: review\n  - step:\n      id: local\n      name: Local check\n      description: Check the local code.\n${localReferences === undefined ? "" : `      references: ${JSON.stringify(localReferences)}\n`}`;
 const paths = ["docs/review.md", "skills/use-project/SKILL.md", "src/example.ts"];
 
-test("steps, workflows and inline local steps support omitted, empty, single and multiple file references", () => {
+it("steps, workflows and inline local steps support omitted, empty, single and multiple file references", () => {
   for (const references of [undefined, [], [paths[0]!], paths]) {
     assert.deepEqual(parseDefinitionStep("review", step(references)).references, references);
     const parsed = parseDefinitionWorkflow("delivery", workflow(references, references));
@@ -27,7 +27,7 @@ test("steps, workflows and inline local steps support omitted, empty, single and
   }
 });
 
-test("file references reject malformed lists, absolute paths and URLs consistently", () => {
+it("file references reject malformed lists, absolute paths and URLs consistently", () => {
   for (const references of [null, "docs/review.md", {}, [1], [""], [" docs/a.md"], ["/tmp/a.md"], ["~/a.md"], ["C:/a.md"],
     ["https://example.com/a.md"], ["docs\\a.md"], ["docs/a\n.md"], ["docs/a\u0085.md"], ["docs/a\u2028.md"], ["docs/a\u202e.md"],
     ["notes/token=example.md"], ["docs/ghp_" + "A".repeat(32) + ".md"], ["x".repeat(4097)], Array.from({length: 101}, () => "a.md")]) {
@@ -52,7 +52,7 @@ const fixture = async (global = false) => {
   return {f, definitions: await f.loader.load(f.projectId, "thread")};
 };
 
-test("definition loading and API schemas preserve references without reading their targets, including shared definitions", async () => {
+it("definition loading and API schemas preserve references without reading their targets, including shared definitions", async () => {
   const {f, definitions} = await fixture(true);
   assert.equal(definitions.status, "ready");
   const decoded = Schema.decodeUnknownSync(ProjectDefinitions)(definitions);
@@ -67,7 +67,7 @@ test("definition loading and API schemas preserve references without reading the
   assert(f.calls.every(call => call.path.startsWith(".t3-supervisor")), "no referenced file is opened or probed");
 });
 
-test("reference lists survive model context, canonical plans and strict record schemas; forged reusable paths are rejected", async () => {
+it("reference lists survive model context, canonical plans and strict record schemas; forged reusable paths are rejected", async () => {
   const {definitions} = await fixture();
   const prepared = prepareWorkflowRequest("thread", "message", "Deliver the change", definitions);
   assert(prepared.context);
@@ -118,7 +118,7 @@ test("reference lists survive model context, canonical plans and strict record s
   }
 });
 
-test("read-only references escape text and appear on reusable, workflow and local definition views", async () => {
+it("read-only references escape text and appear on reusable, workflow and local definition views", async () => {
   const {definitions} = await fixture();
   const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions}));
   for (const path of [...paths, "docs/delivery.md", "src/local.ts"]) assert(html.includes(path));
@@ -129,7 +129,7 @@ test("read-only references escape text and appear on reusable, workflow and loca
   assert.equal(renderToStaticMarkup(createElement(DefinitionReferences, {references: []})), "");
 });
 
-test("rejected references report a fixed reason and position without repeating the submitted path", async () => {
+it("rejected references report a fixed reason and position without repeating the submitted path", async () => {
   const {definitionReferenceProblem, describeDefinitionReferenceProblem} = await import("../src/definition-references.js");
   const secret = "ghp_" + "B".repeat(32);
   const cases: Array<[unknown, string, number | null]> = [

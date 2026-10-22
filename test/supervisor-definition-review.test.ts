@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { it } from "vitest";
 import { nativeUserMessageVisible } from "../src/domain.js";
 import { fingerprint } from "../src/guidance-store.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
@@ -120,7 +120,7 @@ const parseEnvelope = (request: string): Record<string, unknown> => {
   return JSON.parse(request.slice(start, end)) as Record<string, unknown>;
 };
 
-test("approved definitions require the stored complete snapshot and do not use a legacy fallback", () => {
+it("approved definitions require the stored complete snapshot and do not use a legacy fallback", () => {
   const current = task();
   assert.deepEqual(extractApprovedProjectDefinitions(current), definitions());
 
@@ -131,7 +131,7 @@ test("approved definitions require the stored complete snapshot and do not use a
   assert.equal(extractApprovedProjectDefinitions(task({definitionSnapshot: null, workflow: {...current.workflow!, revision: newRevision}})), null);
 });
 
-test("approved snapshots retain reusable, workflow and inline file references and reject malformed lists", () => {
+it("approved snapshots retain reusable, workflow and inline file references and reject malformed lists", () => {
   const approved = definitions({steps: definitions().steps.map(step => ({...step, references: ["docs/verify.md"]})),
     workflows: [{id: "delivery", name: "Delivery", description: "Deliver the change.", summary: testSummary("delivery"), fixed: false, references: ["docs/delivery.md"],
       sequence: [{step: {id: "local", name: "Local", description: "Check local behavior.", references: ["src/local.ts"]}}]}]});
@@ -143,7 +143,7 @@ test("approved snapshots retain reusable, workflow and inline file references an
   assert.equal(extractApprovedProjectDefinitions(task({definitionSnapshot: malformed})), null);
 });
 
-test("decision fences are exact and bounded by message and record caps", () => {
+it("decision fences are exact and bounded by message and record caps", () => {
   const content = ["```project-definition-decision", JSON.stringify(decisionRecord()), "```", "```workflow-acceptance", "{}", "```"].join("\n");
   assert.deepEqual(extractProjectDefinitionDecisionRecords(content), [decisionRecord()]);
   assert.deepEqual(extractProjectDefinitionDecisionRecords("yes"), []);
@@ -152,7 +152,7 @@ test("decision fences are exact and bounded by message and record caps", () => {
   assert.equal(extractProjectDefinitionDecisionRecords(tooMany).length, 20);
 });
 
-test("authorized decisions require exact revisions and native main-root external user messages", () => {
+it("authorized decisions require exact revisions and native main-root external user messages", () => {
   const current = task();
   const agent = agentProjection();
   const parsed = parseProjectDefinitionDecisionRecord(decisionRecord(), current, definitions({revision: newRevision}), agent);
@@ -172,7 +172,7 @@ test("authorized decisions require exact revisions and native main-root external
     issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "Invalid configuration."}]}), agent), null);
 });
 
-test("native primary user messages use the running root_turn node", () => {
+it("native primary user messages use the running root_turn node", () => {
   const projection = agentProjection([{id: "user-1", text: userText, runStatus: "waiting", rootStatus: "starting"}], "running");
   const source = projection.messages[0]!;
   const sourceRun = projection.runs.find(run => run.id === source.runId)!;
@@ -183,7 +183,7 @@ test("native primary user messages use the running root_turn node", () => {
   assert.equal(buildProjectDefinitionReviewRequest(task(), definitions(), definitions({revision: newRevision}), projection, "Running marker").text !== null, true);
 });
 
-test("restart_active preserves source and citation messages on interrupted historical roots", () => {
+it("restart_active preserves source and citation messages on interrupted historical roots", () => {
   const projection = agentProjection([{id: "user-1", text: userText, runStatus: "running", historicalRoot: true}], "running", true);
   const source = projection.messages[0]!;
   const sourceRun = projection.runs.find(run => run.id === source.runId)!;
@@ -210,7 +210,7 @@ test("restart_active preserves source and citation messages on interrupted histo
   assert.equal(parseProjectDefinitionDecisionRecord(decisionRecord(), current, observed, rolledBack), null);
 });
 
-test("forwarded, scheduled, source-tagged, streaming, rolled-back and non-root user messages cannot authorize definitions", () => {
+it("forwarded, scheduled, source-tagged, streaming, rolled-back and non-root user messages cannot authorize definitions", () => {
   const current = task();
   const observed = definitions({revision: newRevision});
   const rejected: UserFixture[] = [
@@ -229,7 +229,7 @@ test("forwarded, scheduled, source-tagged, streaming, rolled-back and non-root u
   }
 });
 
-test("stopped, failed and cancelled runs retain their real user request and authorization history", () => {
+it("stopped, failed and cancelled runs retain their real user request and authorization history", () => {
   for (const status of ["interrupted", "failed", "cancelled"]) {
     const projection = agentProjection([{id: "user-1", text: userText, runStatus: status}], status);
     const source = projection.messages[0]!;const sourceRun = projection.runs.find(run => run.id === source.runId)!;
@@ -239,7 +239,7 @@ test("stopped, failed and cancelled runs retain their real user request and auth
   }
 });
 
-test("revert decisions may cite no users and retain a null observed revision for missing definitions", () => {
+it("revert decisions may cite no users and retain a null observed revision for missing definitions", () => {
   const current = task();
   const missing = definitions({status: "missing", revision: null, projectConfig: null, config: effectiveIndex({steps: [], workflows: []}), steps: [], workflows: [], complete: false,
     sources: [], issues: [{path: ".t3-supervisor/project.yaml", code: "configuration_missing", message: "Missing."}]});
@@ -253,7 +253,7 @@ test("revert decisions may cite no users and retain a null observed revision for
     current, missing, agentProjection()), null);
 });
 
-test("decision reasons and review envelopes redact credentials and preserve complete definition snapshots", () => {
+it("decision reasons and review envelopes redact credentials and preserve complete definition snapshots", () => {
   const current = task();
   const observed = definitions({revision: newRevision,
     steps: [{id: "verify", name: "secret=step-token", description: "Keep token=step-secret private.", summary: testSummary("verify"), origin: "project",
@@ -281,7 +281,7 @@ test("decision reasons and review envelopes redact credentials and preserve comp
   assert.equal(envelope.proposalTemplate !== null, true);
 });
 
-test("review requests handle invalid snapshots and refresh proposals after restore or authorization", () => {
+it("review requests handle invalid snapshots and refresh proposals after restore or authorization", () => {
   const current = task();
   const invalid = definitions({status: "invalid", revision: null, projectConfig: null, config: effectiveIndex({steps: [], workflows: []}), steps: [], workflows: [], complete: false,
     sources: [], issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "The configuration is invalid."}]});
@@ -306,7 +306,7 @@ test("review requests handle invalid snapshots and refresh proposals after resto
   assert.equal(buildProjectDefinitionReviewRequest(current, definitions(), authorized, staleSource, "Stale source").text, null);
 });
 
-test("recovery shares only byte-identical approved entries while keeping changed, removed and invalid sources complete", () => {
+it("recovery shares only byte-identical approved entries while keeping changed, removed and invalid sources complete", () => {
   const approved = definitions();
   const current = task();
   const observed = definitions({revision: newRevision});
@@ -341,7 +341,7 @@ test("recovery shares only byte-identical approved entries while keeping changed
   assert.deepEqual((parseEnvelope(invalidRequest).approved as {sources: unknown[]}).sources, approved.sources);
 });
 
-test("recovery retains effective parsed global guidance and rewritten references", () => {
+it("recovery retains effective parsed global guidance and rewritten references", () => {
   const base = definitions();
   const step = {...base.steps[0]!, id: "g123_verify", origin: "global" as const};
   const workflow = {id: "g123_review", name: "Global review", description: "Keep the effective global contract.", summary: testSummary("review"), fixed: true,

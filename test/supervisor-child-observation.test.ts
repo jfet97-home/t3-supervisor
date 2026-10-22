@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -156,7 +156,7 @@ const withMonitor = async <A>(
   }
 };
 
-test("Mac3145 native child activity stays detached, child-scoped, and traceable under the main scope", async () => {
+it("Mac3145 native child activity stays detached, child-scoped, and traceable under the main scope", async () => {
   const childProjection = makeDetachedChildProjection(nativeChild, [
     {id: "native-command", type: "command_execution"},
     {id: "native-answer", type: "assistant_message", messageId: "native-answer-message"},
@@ -202,7 +202,7 @@ test("Mac3145 native child activity stays detached, child-scoped, and traceable 
   });
 });
 
-test("a 3190-style duplicated parent lifecycle record resolves to one exact deterministic record", () => {
+it("a 3190-style duplicated parent lifecycle record resolves to one exact deterministic record", () => {
   const childThreadId = "native-child-3190-shape";
   const nativeRecordId = "node:provider:codex:native-item:call_fixture:child";
   const parentRunId = "parent-run-ordinal-10";
@@ -246,7 +246,7 @@ test("a 3190-style duplicated parent lifecycle record resolves to one exact dete
   assert.equal(directParentChildLifecycle(ambiguous, childThreadId), null);
 });
 
-test("native and delegated child activity joins one main-scoped batch", async () => {
+it("native and delegated child activity joins one main-scoped batch", async () => {
   await withMonitor(monitor => {
     const threads = [mainThread, nativeChild, delegatedChild];
     const scope = resolveSupervisorScope(threads, projectId, mainThread.id);
@@ -268,7 +268,7 @@ test("native and delegated child activity joins one main-scoped batch", async ()
   });
 });
 
-test("a saturated child is skipped by the frozen batch bound so a sibling remains visible", async () => {
+it("a saturated child is skipped by the frozen batch bound so a sibling remains visible", async () => {
   await withMonitor(async monitor => {
     const noisy = makeThread("noisy-child", mainThread.id, "subagent", null, {creationSource: "provider"});
     const sibling = makeThread("sibling-child", mainThread.id, "subagent", null, {creationSource: "provider"});
@@ -289,7 +289,7 @@ test("a saturated child is skipped by the frozen batch bound so a sibling remain
   }, 2);
 });
 
-test("acknowledged detached child history survives restart without waking or duplicating", async () => {
+it("acknowledged detached child history survives restart without waking or duplicating", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-child-observation-restart-"));
   let store = new GuidanceStore(directory);
   try {

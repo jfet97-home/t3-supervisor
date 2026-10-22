@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -217,7 +217,7 @@ const collect = (
 ): SupervisorMonitorActivity[] =>
   collectSupervisorActivity(makeProjection({ events, runStatus, runtimeRequests }), ordinal, at);
 
-test("monitor extraction deduplicates messages, excludes old/reasoning/child activity, and records streaming versions", () => {
+it("monitor extraction deduplicates messages, excludes old/reasoning/child activity, and records streaming versions", () => {
   const projection = makeProjection({
     events: [
       { ...event("old"), runOrdinal: 0 },
@@ -249,7 +249,7 @@ test("monitor extraction deduplicates messages, excludes old/reasoning/child act
   assert.equal(collectSupervisorActivity(sourceInput, 1, now)[0]?.priority, null);
 });
 
-test("ten finalized activities or one priority event wakes a chat, while cooldown and unchanged acknowledgements stay quiet", async () => {
+it("ten finalized activities or one priority event wakes a chat, while cooldown and unchanged acknowledgements stay quiet", async () => {
   await withStore((monitor) => {
     const ten = makeProjection({ events: Array.from({ length: 10 }, (_, index) => event(`count-${index}`)) });
     monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: ten, now });
@@ -275,7 +275,7 @@ test("ten finalized activities or one priority event wakes a chat, while cooldow
   });
 });
 
-test("a sparse finalized activity becomes due after five minutes, and waiting input coalesces as priority", () => {
+it("a sparse finalized activity becomes due after five minutes, and waiting input coalesces as priority", () => {
   const sparse = collect([event("sparse", now - SUPERVISOR_MONITOR_AGE_MS - 1)]);
   const age = evaluateSupervisorMonitoring(sparse, { ...defaultMonitoringSettings, activityThreshold: 10 }, now, null);
   assert.equal(age.due, true);
@@ -306,7 +306,7 @@ test("a sparse finalized activity becomes due after five minutes, and waiting in
   assert.deepEqual(decision.priorityKinds.sort(), ["user_instruction", "waiting_input"]);
 });
 
-test("completed, failed, interrupted and cancelled runs are immediate priorities while rolled-back roots are ignored", () => {
+it("completed, failed, interrupted and cancelled runs are immediate priorities while rolled-back roots are ignored", () => {
   const completed = collect([], "completed");
   const failed = collect([], "failed");
   const interrupted = collect([], "interrupted");
@@ -323,7 +323,7 @@ test("completed, failed, interrupted and cancelled runs are immediate priorities
   assert.deepEqual(collectSupervisorActivity(rolledBack, 1, now), []);
 });
 
-test("pending native runtime requests need an eligible main-graph node and ignore the thread summary", () => {
+it("pending native runtime requests need an eligible main-graph node and ignore the thread summary", () => {
   const projection = makeProjection({
     events: [{ id: "question", type: "user_input_request", requestId: "request-1", status: "waiting" }],
     runtimeRequests: [{
@@ -353,7 +353,7 @@ test("pending native runtime requests need an eligible main-graph node and ignor
 });
 
 for (const terminalStatus of ["resolved", "expired", "cancelled"] as const) {
-  test(`a matched ${terminalStatus} native request clears stale turn-item waiting priority and remains acknowledgeable`, async () => {
+  it(`a matched ${terminalStatus} native request clears stale turn-item waiting priority and remains acknowledgeable`, async () => {
     await withStore((monitor) => {
       const projection = makeProjection({
         events: [{id: "question", type: "user_input_request", requestId: "request-1", status: "waiting", nodeKind: "tool_call"}],
@@ -380,7 +380,7 @@ for (const terminalStatus of ["resolved", "expired", "cancelled"] as const) {
   });
 }
 
-test("a terminal run does not clear an exactly matched pending native request", () => {
+it("a terminal run does not clear an exactly matched pending native request", () => {
   const projection = makeProjection({
     runStatus: "completed",
     events: [{id: "question", type: "user_input_request", requestId: "request-1", status: "waiting", nodeKind: "tool_call"}],
@@ -391,7 +391,7 @@ test("a terminal run does not clear an exactly matched pending native request", 
   assert.equal(request?.priority, "waiting_input");
 });
 
-test("a terminal request with mismatched node identity cannot clear a waiting turn item", () => {
+it("a terminal request with mismatched node identity cannot clear a waiting turn item", () => {
   const projection = makeProjection({
     events: [{id: "question", type: "user_input_request", requestId: "request-1", status: "waiting", nodeKind: "tool_call"}],
     runtimeRequests: [{id: "request-1", nodeId: "different-node", kind: "user_input", status: "expired", createdAt: new Date(now - 1_000).toISOString()}],
@@ -401,7 +401,7 @@ test("a terminal request with mismatched node identity cannot clear a waiting tu
   assert.equal(request?.priority, "waiting_input");
 });
 
-test("native child terminal evidence is deterministic, priority-ranked and versioned from its direct parent", () => {
+it("native child terminal evidence is deterministic, priority-ranked and versioned from its direct parent", () => {
   const child = makeProjection({threadId: "native-child"});
   child.runs = [];
   child.thread.lineage = {parentThreadId: "operative-parent", relationshipToParent: "subagent", rootThreadId: "operative-parent"};
@@ -435,7 +435,7 @@ test("native child terminal evidence is deterministic, priority-ranked and versi
     {...evidence, completedAt: null, updatedAt: null}).some(item => item.type === "native_child_lifecycle"), false);
 });
 
-test("native child terminal monitor checkpoints survive restart and ACK only their frozen version", async () => {
+it("native child terminal monitor checkpoints survive restart and ACK only their frozen version", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-native-terminal-test-"));
   let store = new GuidanceStore(directory);
   try {
@@ -488,7 +488,7 @@ test("native child terminal monitor checkpoints survive restart and ACK only the
   }
 });
 
-test("native child ACKs stay out of detached source-floor advancement across repeats, resume and a new completion", async () => {
+it("native child ACKs stay out of detached source-floor advancement across repeats, resume and a new completion", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-native-floor-test-"));
   let store = new GuidanceStore(directory);
   try {
@@ -589,7 +589,7 @@ test("native child ACKs stay out of detached source-floor advancement across rep
   }
 });
 
-test("direct peer tool sends are excluded from the activity count", () => {
+it("direct peer tool sends are excluded from the activity count", () => {
   const activity = collect([
     { id: "peer-send", type: "dynamic_tool", status: "completed", toolName: "mcp__t3__thread_send" },
     { id: "normal-tool", type: "dynamic_tool", status: "completed", toolName: "exec_command" },
@@ -597,7 +597,7 @@ test("direct peer tool sends are excluded from the activity count", () => {
   assert.deepEqual(activity.map((item) => item.id), ["turn-item-normal-tool"]);
 });
 
-test("a tracked item that completes in place is emitted as a new revision", async () => {
+it("a tracked item that completes in place is emitted as a new revision", async () => {
   await withStore((monitor) => {
     const running = makeProjection({
       events: [{ id: "operation", type: "dynamic_tool", status: "running", updatedAt: now - 20_000 }],
@@ -614,7 +614,7 @@ test("a tracked item that completes in place is emitted as a new revision", asyn
   });
 });
 
-test("items rolled out of the current main graph stop triggering and restore without acknowledgement", async () => {
+it("items rolled out of the current main graph stop triggering and restore without acknowledgement", async () => {
   await withStore((monitor) => {
     const current = makeProjection({ events: [event("rollback-candidate")] });
     monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: current, now });
@@ -635,7 +635,7 @@ test("items rolled out of the current main graph stop triggering and restore wit
   });
 });
 
-test("a frozen batch acknowledges only matching revisions and keeps arrivals during review", async () => {
+it("a frozen batch acknowledges only matching revisions and keeps arrivals during review", async () => {
   await withStore((monitor) => {
     const initial = makeProjection({ events: Array.from({ length: 10 }, (_, index) => event(`work-${index}`)) });
     monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: initial, now });
@@ -655,7 +655,7 @@ test("a frozen batch acknowledges only matching revisions and keeps arrivals dur
   });
 });
 
-test("completed message and command revisions changed during review remain pending", async () => {
+it("completed message and command revisions changed during review remain pending", async () => {
   await withStore((monitor) => {
     const initial = makeProjection({
       events: [
@@ -681,7 +681,7 @@ test("completed message and command revisions changed during review remain pendi
   });
 });
 
-test("monitor metadata survives a store restart without persisting activity bodies", async () => {
+it("monitor metadata survives a store restart without persisting activity bodies", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-monitor-restart-"));
   let store = new GuidanceStore(directory);
   try {
@@ -708,7 +708,7 @@ test("monitor metadata survives a store restart without persisting activity bodi
   }
 });
 
-test("batch selection interleaves due chats under a global cap and reports explicit saturation", async () => {
+it("batch selection interleaves due chats under a global cap and reports explicit saturation", async () => {
   await withStore((monitor) => {
     const settings = { ...defaultMonitoringSettings, activityThreshold: 1 };
     for (const id of ["chat-a", "chat-b"])
@@ -762,7 +762,7 @@ test("batch selection interleaves due chats under a global cap and reports expli
   });
 });
 
-test("acknowledged closed runs advance the source floor and release per-thread history capacity", async () => {
+it("acknowledged closed runs advance the source floor and release per-thread history capacity", async () => {
   await withStore((monitor, store) => {
     const bounded = new ProjectSupervisorMonitorStore(store, 4);
     let events: EventInput[] = [];
@@ -799,7 +799,7 @@ test("acknowledged closed runs advance the source floor and release per-thread h
   });
 });
 
-test("a rollback before review releases obsolete metadata and does not pin later closed runs", async () => {
+it("a rollback before review releases obsolete metadata and does not pin later closed runs", async () => {
   await withStore((monitor, store) => {
     const bounded = new ProjectSupervisorMonitorStore(store, 100);
     const thread = "rollback-lifetime";
@@ -887,7 +887,7 @@ test("a rollback before review releases obsolete metadata and does not pin later
   });
 });
 
-test("a later unfinished run blocks floor advancement until its same item completes", async () => {
+it("a later unfinished run blocks floor advancement until its same item completes", async () => {
   await withStore((monitor) => {
     const first = makeProjection({ events: [{ ...event("first-reply"), runOrdinal: 1 }] });
     first.runs[0]!.status = "completed";
@@ -920,7 +920,7 @@ test("a later unfinished run blocks floor advancement until its same item comple
   });
 });
 
-test("pending and changed revisions of a closed run hold the source floor until acknowledged", async () => {
+it("pending and changed revisions of a closed run hold the source floor until acknowledged", async () => {
   await withStore((monitor) => {
     const projection = makeProjection({ events: [event("closed-editable-reply")] });
     projection.runs[0]!.status = "completed";
@@ -956,7 +956,7 @@ test("pending and changed revisions of a closed run hold the source floor until 
   });
 });
 
-test("a live current-graph restart of a pruned run rewinds only to its activation floor", async () => {
+it("a live current-graph restart of a pruned run rewinds only to its activation floor", async () => {
   await withStore((monitor) => {
     const completed = makeProjection({ events: [event("before-restart")] });
     completed.runs[0]!.status = "completed";
@@ -1010,7 +1010,7 @@ test("a live current-graph restart of a pruned run rewinds only to its activatio
   });
 });
 
-test("an old frozen batch cannot acknowledge a restored item under a changed root", async () => {
+it("an old frozen batch cannot acknowledge a restored item under a changed root", async () => {
   await withStore((monitor) => {
     const events = [event("same-root-item")];
     const completed = makeProjection({ events });
@@ -1050,7 +1050,7 @@ test("an old frozen batch cannot acknowledge a restored item under a changed roo
   });
 });
 
-test("a hundred-command burst freezes all revisions and previews only a bounded sample", async () => {
+it("a hundred-command burst freezes all revisions and previews only a bounded sample", async () => {
   await withStore((monitor, store) => {
     const initialEvents = Array.from({ length: 100 }, (_, index) => ({
       id: `command-${index}`,
@@ -1085,7 +1085,7 @@ test("a hundred-command burst freezes all revisions and previews only a bounded 
   });
 });
 
-test("rollback cleanup restores complete current coverage and clears saturation", async () => {
+it("rollback cleanup restores complete current coverage and clears saturation", async () => {
   await withStore((monitor, store) => {
     const bounded = new ProjectSupervisorMonitorStore(store, 2);
     const initialEvents = [
@@ -1128,7 +1128,7 @@ test("rollback cleanup restores complete current coverage and clears saturation"
   });
 });
 
-test("an over-cap active run reports saturation and blocks its closed-run floor", async () => {
+it("an over-cap active run reports saturation and blocks its closed-run floor", async () => {
   await withStore((monitor, store) => {
     const bounded = new ProjectSupervisorMonitorStore(store, 1);
     const projection = makeProjection({ events: [
