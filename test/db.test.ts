@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, FileSystem } from "effect";
-import { CatalogDb, catalogDbLayer } from "../src/db.js";
+import { AccessDb, accessDbLayer, CatalogDb, catalogDbLayer } from "../src/db.js";
 
 const pragmaValue = (rows: ReadonlyArray<unknown>): unknown => Object.values(rows[0] as object)[0];
 
@@ -43,4 +43,24 @@ describe("CatalogDb", () => {
       assert.equal(observed.modes["/"], "700");
       for (const [path, mode] of Object.entries(observed.modes)) if (path !== "/") assert.equal(mode, "600", path);
     }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 10_000 });
+
+  it.live("opens an existing access database with the delete journal and the access pragmas, creating no sidecar", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-access-db-" });
+      const path = join(directory, "login.sqlite3");
+      // the service creates and validates the file before any client opens it; here an empty private file stands in
+      yield* Effect.scoped(fs.open(path, { flag: "a", mode: 0o600 }));
+      const observed = yield* Effect.scoped(Effect.gen(function* () {
+        const db = yield* AccessDb;
+        const pragmas: Record<string, unknown> = {};
+        for (const name of ["journal_mode", "synchronous", "busy_timeout", "max_page_count"]) pragmas[name] = pragmaValue(yield* db.unsafe(`PRAGMA ${name}`));
+        yield* db.withTransaction(db.unsafe("CREATE TABLE grants (hash TEXT PRIMARY KEY) STRICT"));
+        return { pragmas, files: (yield* fs.readDirectory(directory)).sort() };
+      }).pipe(Effect.provide(accessDbLayer(path))));
+      assert.deepEqual(observed.pragmas, { journal_mode: "delete", synchronous: 2, busy_timeout: 5000, max_page_count: 256 });
+      assert.deepEqual(observed.files, ["login.sqlite3"]);
+      assert.equal(((yield* fs.stat(path)).mode & 0o777).toString(8), "600");
+    }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 10_000 });
 });
+

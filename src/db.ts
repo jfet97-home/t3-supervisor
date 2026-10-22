@@ -93,3 +93,20 @@ export const catalogDbLayer = (dataDirectory: string): Layer.Layer<CatalogDb, Da
     journal: "wal",
     pragmas: ["synchronous=FULL", "foreign_keys=ON", "wal_autocheckpoint=256", "secure_delete=ON", `max_page_count=${maxCatalogPages}`],
   }));
+
+/**
+ * The access database (access/login.sqlite3) on a file the caller already validated: DELETE journal, synchronous=FULL,
+ * busy_timeout 5000 and max_page_count=256 (plan 3.2). It neither creates, secures nor bootstraps the file: only the
+ * service initializes a missing database through its own temp-file-and-link procedure, the forge never does, and
+ * service-auth keeps the identity checks before and after the open and the schema validation (a file replaced in
+ * between fails that validation, as at baseline). Provide it once per dashboard server lifetime or per forge operation;
+ * never two clients in one process.
+ */
+export const accessDbLayer = (path: string): Layer.Layer<AccessDb, DatabaseOpenError> =>
+  Layer.effect(AccessDb, Effect.gen(function* () {
+    const failed = (cause: unknown) => new DatabaseOpenError({ file: "login.sqlite3", cause });
+    const client = yield* SqliteClient.make({ filename: path, disableWAL: true, busyTimeout: "5 seconds" }).pipe(
+      Effect.provide(Reactivity.layer), Effect.mapError(failed));
+    for (const pragma of ["synchronous=FULL", "max_page_count=256"]) yield* client.unsafe(`PRAGMA ${pragma}`).pipe(Effect.mapError(failed));
+    return client;
+  }).pipe(untracedSql));
