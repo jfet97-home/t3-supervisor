@@ -213,8 +213,11 @@ const make = Effect.gen(function* () {
     Effect.map((info) => Number(info.size)),
     Effect.catch((error) => error.reason._tag === "NotFound" ? Effect.succeed(0) : Effect.fail(error)));
 
-  // transactions hold sql only; each committed write re-secures the files afterwards, as every baseline commit did
-  const write = <A, E>(body: Effect.Effect<A, E>) => sql.withTransaction(body).pipe(Effect.tap(() => secureFiles));
+  // every write re-secures the database files before its transaction begins: a permission failure fails the write before
+  // any SQL runs, so rows, revisions and cursors stay as they were, as the baseline's rollback left them; the transaction
+  // holds SQL only (plan 3.2 rule 3) and nothing follows its COMMIT, so a failed write never leaves committed state;
+  // the files it re-secures exist for the client's lifetime (WAL and SHM are created and secured when it opens)
+  const write = <A, E>(body: Effect.Effect<A, E>) => secureFiles.pipe(Effect.andThen(sql.withTransaction(body)));
 
   const count = (statement: Effect.Effect<ReadonlyArray<unknown>, SqlError.SqlError>) =>
     statement.pipe(Effect.flatMap(([row]) => decodeCountRow(row)), Effect.map((row) => row.count));
