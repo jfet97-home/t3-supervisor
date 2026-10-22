@@ -25,10 +25,12 @@ describe("lint guards", () => {
     expect(await lint("src/db.ts", code)).not.toContain(sqliteOwner);
   });
 
-  it("rejects ws in src outside the native envelope, the unported clients and the test peers", { timeout: 30_000 }, async () => {
+  it("rejects ws in src outside the native envelope and the test peers", { timeout: 30_000 }, async () => {
     const code = `import WebSocket from "ws";\nexport const open = (url: string) => new WebSocket(url);\n`;
     expect(await lint("src/lint-guard-probe.ts", code)).toContain(wsOwner);
     expect(await lint("src/db.ts", code)).toContain(wsOwner);
+    // every native client is ported onto the envelope (S4), so none keeps an exemption
+    for (const client of ["src/t3.ts", "src/supervisor-native.ts", "src/project-files.ts", "src/git-probe.ts"]) expect(await lint(client, code)).toContain(wsOwner);
     expect(await lint("src/native-envelope.ts", code)).not.toContain(wsOwner);
     expect(await lint("test/support/lint-guard-peer.ts", code)).not.toContain(wsOwner);
   });
