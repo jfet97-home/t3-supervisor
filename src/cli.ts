@@ -26,8 +26,9 @@ const forgeFailure = "Could not issue a sign-in token. Run as the account that r
 const start = Command.make("start", { dataDirectory }, ({ dataDirectory }) => Effect.gen(function* () {
   // the server program reads DATA_DIRECTORY from the process environment when it starts
   if (Option.isSome(dataDirectory)) yield* Effect.sync(() => { process.env.DATA_DIRECTORY = dataDirectory.value; });
-  // main.ts runs the server program under its own runMain until it gains the import.meta.main entry guard
-  yield* Effect.promise(() => import("./main.js"));
+  // the server program runs under this cli's runMain; main.ts runs it itself only as the process entry
+  const { server } = yield* Effect.promise(() => import("./main.js"));
+  yield* server;
 })).pipe(Command.withDescription("Run the supervisor service"));
 
 const forge = Command.make("forge", { dataDirectory }, ({ dataDirectory }) => Effect.gen(function* () {
