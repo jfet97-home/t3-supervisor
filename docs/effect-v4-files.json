@@ -77,15 +77,16 @@
   }
  },
  "target": {
-  "effect": "4.0.5",
-  "@effect/platform-node": "4.0.5",
-  "@effect/platform-node-shared": "4.0.5",
-  "@effect/atom-react": "4.0.5",
-  "@effect/vitest": "4.0.5",
-  "@effect/sql-sqlite-node": "4.0.5",
-  "@effect/platform-browser": "4.0.5 (only if S7 adopts BrowserKeyValueStore)",
+  "effect": "4.0.6",
+  "@effect/platform-node": "4.0.6",
+  "@effect/platform-node-shared": "4.0.6",
+  "@effect/atom-react": "4.0.6",
+  "@effect/vitest": "4.0.6",
+  "@effect/sql-sqlite-node": "4.0.6",
+  "@effect/platform-browser": "4.0.6 (only if S7 adopts BrowserKeyValueStore)",
   "vitest": "5.0.5",
-  "pinPolicy": "exact versions, no caret"
+  "pinPolicy": "exact versions, no caret",
+  "upgrade": "UPGRADE-406: 4.0.5 -> 4.0.6 by user decision (registry latest 2026-10-22 19:08Z); every other 4.0.5 reference means the exact pinned version"
  },
  "inventory": {
   "W0-owner": {
@@ -23945,6 +23946,13 @@
    "requirement": "unchanged VM, archived fixture `54c7e18a-ca52-498f-8467-f63c689656ff`, root `supervisor-root:9b20f073-bfdd-4d01-9dc9-7926d079de0d`, no new chat or project, model and settings unchanged. Genuine bare Start passed (source-pinned MCPX `supervision_start`, run 16; one reconciliation repeat of the stable operation; root run 6 `startRequested: true`, `objective: null`; UI active, `effectiveEnabled: true`, same root). Greeting (\"Hi! Hope your day is going well.\", `earlierMessages: []`): the reused root (run 7, Luna HIGH) resurrected an older CSV request from its own history and answered `needed` (Luna MAX did the same; Sol 6.1 LOW answered `not_needed` correctly); the interpretation was **rejected** (task `18f2a960` `unavailable`, `objective: null`, `agreement: null`, \"The Supervisor did not return a valid, source-linked interpretation\"); no introduction or contact was authorized or observed. An uncoached coding request's interpretation also carried stale CSV context and was rejected; native operative coding continued independently",
    "response": "two separate results: (a) the **no-contact effect boundary passed** by failing closed and stays a preserved effect invariant (A-09); (b) the **semantic `not_needed` verdict failed / is unproven** on a reused root with prior history, a model and proof limit recorded as baseline evidence, not relabelled correct, not fixed, coached or retried in this batch; the same fixture class is rerun after S6a/S6b and after S6e and compared on both (a) and (b); no positive negotiation is claimed at baseline",
    "status": "(a) baseline pass; (b) recorded baseline limit (coordinator evidence)"
+  },
+  {
+   "id": "UPGRADE-406",
+   "source": "User (via coordinator, 19:08Z)",
+   "requirement": "use the latest v4: the matching 4.0.6 set is published under latest",
+   "response": "plan section 2: exact 4.0.6 pins with provenance and transition evidence; S1c goes 4.0.1 -> 4.0.6; S0 4.0.1 parity unchanged",
+   "status": "resolved"
   }
  ]
 }

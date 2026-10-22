@@ -1,6 +1,6 @@
 # Effect v4 migration plan
 
-Status: **plan v2.2**, a narrow follow-up to frozen v2.1 `d986e7ee` (after v2 `059e4a82` and
+Status: **plan v2.2 (pins: exact 4.0.6, UPGRADE-406)**, a narrow follow-up to frozen v2.1 `d986e7ee` (after v2 `059e4a82` and
 v1 `14b4a875`). It closes the run-4 findings only: the native in-flight lookup, resource
 ownership and cancellation owner of 3.11 (SOL-PLAN-02, A-P03), the candidate-free
 interpretation cut-over of 3.12 (SOL-ISUB-02) and the consistency notes (RUN4-PREC). All
@@ -26,48 +26,50 @@ The manifest records each file's leaf test names in file order under `testNames`
 
 ## 2. Effect version decision and provenance
 
-**Target: `effect` 4.0.5 and every Effect companion at exactly 4.0.5 (exact pins, no caret).**
-Verified on 2026-10-22 (UTC) against the npm registry, GitHub releases and the installed
-4.0.5 source. The coordinator registry check on the same day agrees (`latest` = 4.0.5), and
-Astra's final recheck at about 17:03 UTC still reports `latest` 4.0.5 for all seven Effect
-packages and 5.0.5 for Vitest.
+**Target: `effect` 4.0.6 and every Effect companion at exactly 4.0.6 (exact pins, no caret);
+Vitest 5.0.5 unchanged.** Upgraded from the reviewed 4.0.5 target by the user's explicit
+"use latest v4" decision once the matching 4.0.6 set was published (UPGRADE-406, section
+13). Verified on 2026-10-22 at about 19:10 UTC against registry.npmjs.org (coordinator
+evidence at 19:08Z, owner recheck): `latest` is 4.0.6 for all seven Effect packages and
+5.0.5 for Vitest; every companion declares `effect ^4.0.6`, `@effect/vitest` declares
+`vitest >=5.0.0 <6.0.0`.
 
-| Package | Version | npm publish (UTC) | GitHub release (UTC) | npm integrity (sha512, prefix) | Use |
-| --- | --- | --- | --- | --- | --- |
-| `effect` | 4.0.5 | 2026-10-15 01:27:07 | `effect@4.0.5` 01:03:10 (tag commit `7f524e25`) | `BY4/28NlpOd99yzm…` | core, http, http-api, sql, cli, reactivity, socket, process, testing |
-| `@effect/platform-node` | 4.0.5 | 2026-10-15 01:03:23 | 01:04:34 | `v4KD5fWvEUa4QmWF…` | NodeRuntime, NodeServices, NodeHttpServer, NodeSocket, NodeFileSystem |
-| `@effect/platform-node-shared` | 4.0.5 (override) | 2026-10-15 01:03:16 | — | `a8rCdEkfZBGe9C6b…` | transitive (keeps the existing override) |
-| `@effect/atom-react` | 4.0.5 | 2026-10-15 01:03:08 | 01:03:31 | `tqTSiy0rWBitej7k…` | React bindings |
-| `@effect/sql-sqlite-node` | 4.0.5 | 2026-10-15 01:04:13 | 01:04:13 | `SHza5qNwiI4dRtUk…` | SqliteClient over `node:sqlite` (added in S3) |
-| `@effect/vitest` | 4.0.5 | 2026-10-15 01:03:47 | 01:04:25 | `q64paZ/i4V2NiRhT…` | test harness (peer `vitest >=5 <6`) |
-| `@effect/platform-browser` | 4.0.5 | 2026-10-15 01:03:35 | 01:03:43 | `o3H75xA91nkgIWOc…` | only if S7 adopts `BrowserKeyValueStore` |
-| `vitest` | 5.0.5 | npm `latest` | — | — | runner required by `@effect/vitest` 4.0.5 |
+| Package | Version | npm publish (UTC) | npm integrity (sha512, prefix) | Use |
+| --- | --- | --- | --- | --- |
+| `effect` | 4.0.6 | 2026-10-22 17:47:13 | `Tc3mkzuLR6t6P9dh…` | core, http, http-api, sql, cli, reactivity, socket, process, testing |
+| `@effect/platform-node` | 4.0.6 | 2026-10-22 18:30:12 | `gXvGHAy0/8PZbWvM…` | NodeRuntime, NodeServices, NodeHttpServer, NodeSocket, NodeFileSystem |
+| `@effect/platform-node-shared` | 4.0.6 (override) | 2026-10-22 03:23:26 | `0PhyC4uG30xGtsaj…` | transitive (keeps the existing override) |
+| `@effect/atom-react` | 4.0.6 | 2026-10-22 03:26:10 | `DpbuEdaJl+2/GW4K…` | React bindings |
+| `@effect/sql-sqlite-node` | 4.0.6 | 2026-10-22 03:24:50 | `mYWr1Ppoz3/XrY+Z…` | SqliteClient over `node:sqlite` (added in S3) |
+| `@effect/vitest` | 4.0.6 | 2026-10-22 03:25:07 | `oKNbtyUHK5+0o730…` | test harness (peer `vitest >=5 <6`) |
+| `@effect/platform-browser` | 4.0.6 | 2026-10-22 03:23:15 | `i4bf1+FlUnZypqK0…` | only if S7 adopts `BrowserKeyValueStore` |
+| `vitest` | 5.0.5 | npm `latest` | — | runner required by `@effect/vitest` |
 
-- npm dist-tags for `effect`: `latest` 4.0.5, `staging` 4.0.5, `rc` 4.0.0-rc.118, `beta`
+- npm dist-tags for `effect`: `latest` 4.0.6, `staging` 4.0.6, `rc` 4.0.0-rc.118, `beta`
   4.0.0-beta.107, `prev` 3.22.3. Prereleases and v3 are excluded.
-- **4.0.6 is not adoptable.** GitHub has `effect@4.0.6` (2026-10-22 03:27:53Z) and several
-  companions are on npm as 4.0.6 under the `staging` tag, but `effect@4.0.6` and
-  `@effect/platform-node@4.0.6` return 404 on npm. A matching set does not exist. S0
-  re-checks the registry; moving to 4.0.6 later needs all companions under `latest` and a
-  ledger entry.
-- Official guidance used, pinned to the 4.0.5 tag commit `7f524e25cfb4`: `MIGRATION.md`,
-  `LLMS.md`, `migration/{services,layer-memoization,error-handling,runtime,scope,forking}.md`
-  and the `ai-docs/src` examples for layer composition, `NodeRuntime.runMain`,
-  `@effect/vitest` (`it.effect`, `it.live`, `layer`), SQL, HttpApi server/testing and CLI.
-  No v3 or beta examples are used; v3 shapes (`Context.Tag`, `Effect.Service`, `Either`,
-  `Effect.catchAll`, `effect/unstable/*` paths, `@effect/platform`, `@effect/sql`) are banned.
-- Relevant 4.0.2–4.0.5 release notes: every export now declares `@stability` (#8770);
-  `Effect.retry` no longer retries defects/interruptions (#8799); `Cache.get` interruption
-  race fixed (#8837); `FileSystem.open({noFollow})` (#8900); MCP HTTP fixes (#8888, #8890,
-  #8924, #9151); `Path.resolveWithin` (#9127); `FileSystem.File.Info` 64-bit fields are now
-  `bigint` (#9112); SQLite statements borrow the shared connection under the semaphore with
-  failed-COMMIT recovery (#9134); HTTP spans redact sensitive query values and URL
-  credentials (#9136); `Redacted` URL params (#9160); infinite atom rebuild fix (#9105).
-- 4.0.6 fixes that 4.0.5 lacks and the plan must guard explicitly: effect atoms can drop
-  the latest exposed success when an async run fails (#9607); replacing an atom runtime
-  layer through registry initial values drops Reactivity/global layers (#9313);
-  `Effect.callback` retains completed suspension state until GC (#9499);
-  `cachedInvalidateWithTTL` can cache a stale result (#9617, not used by this plan).
+- **Transition evidence for 4.0.6 (owner, before any pin is applied):** the unchanged
+  `3b8129a` source typechecks (server and UI) and passes the node:test baseline 869/869 on
+  the exact 4.0.6 set; the S0 harness self-tests pass on it; the 3.11 admission probe
+  (`docs/effect-v4-admission-probe.mjs`) gives results identical to 4.0.5 in all 8 cases.
+  The APIs this plan cites exist with the same semantics; source line numbers quoted below
+  as `…ts:N` refer to 4.0.5 and shift slightly in 4.0.6 (for example `FiberMap.get` 800,
+  the `onlyIfMissing` sentinel 1375, `FiberMap.run`'s fork 1377, `internal/effect.ts`
+  `forkUnsafe` 5557; `Semaphore.withPermits` 462 and `Clock.monotonicTimeNanos` 333 are
+  unchanged). The one FiberMap change in 4.0.6 also interrupts replaced fibers that are
+  still interrupting when the map closes; `get`, `run` and `onlyIfMissing` are unchanged.
+  Every other "4.0.5" in this plan means the exact pinned version, now 4.0.6.
+- The 4.0.6 fixes that 4.0.5 lacked are now included: atoms keep the latest exposed
+  success when an async run fails (#9607); replacing an atom runtime layer through
+  registry initial values keeps Reactivity/global layers (#9313); `Effect.callback`
+  releases completed suspension state (#9499); `cachedInvalidateWithTTL` (#9617, not
+  used). S7 still tests the atom behaviours it relies on.
+- The S0 parity step ran on the baseline 4.0.1 and stays as recorded. S1c moves directly
+  from 4.0.1 to exactly 4.0.6 and reruns the S1 characterizations and the
+  `s1c-transition-golden` outputs unchanged as the transition proof.
+- Official guidance used: `MIGRATION.md`, `LLMS.md`, the `migration/*.md` guides and the
+  `ai-docs/src` examples shipped with the pinned package. No v3 or beta examples are used;
+  v3 shapes (`Context.Tag`, `Effect.Service`, `Either`, `Effect.catchAll`,
+  `effect/unstable/*` paths, `@effect/platform`, `@effect/sql`) are banned.
 
 ### Module stability and pin policy
 
@@ -1694,6 +1696,7 @@ reopens it on the frozen revision. Manifest rows carry the IDs that affect them 
 | D-26-ACCEPT | Sol and Astra (run 3) | D-26 accepted: delete the unused GuidanceStore notice-pipeline methods with call-graph proof; keep constructor recovery, stored rows and fixture `classify`; retire CT-GDB-03..05 | section 12 D-26; registry CT-GDB-03..05 `retired` | resolved |
 | SOL-PREC | Sol (run 3 precision notes) | CT-ISUB-14 validation spans; CT-APP-02 slice wording; CT-PSS-02/CT-TSTORE-02 reuse/observation fields; per-panel browser behaviour | CT-ISUB-14; registry fixes; section 7 UI note | resolved in v2.1 |
 | RUN4-PREC | Sol and Astra (run 4 consistency notes) | `reconcileStopNotice` is asynchronous (T-03); `reconcileStopped` returns a Promise (call shapes); per-file S6e prose uses `attemptId`, the current-attempt pointer and the namespaced receipt; B2 ordering; stale "fork" wording in 3.11 | 3.9 T-03; `temporaryBoundaries.callShapes`; manifest S6e rows for `project-supervisor.ts`, `project-supervisor-store.ts`, `supervisor-conversation-store.ts`; 3.12 B2; 3.11 item 1 | resolved in v2.2 |
+| UPGRADE-406 | User (via coordinator, 19:08Z) | use the latest v4: the matching 4.0.6 set is published under `latest` | section 2: exact 4.0.6 pins with provenance; transition evidence (typecheck, 869/869 baseline, harness, 8-case probe identical); S1c goes 4.0.1 -> 4.0.6; S0 4.0.1 parity unchanged | resolved |
 | SOL-FILES | Sol | 34 per-file rows reference SOL-PLAN-01..09 | each row carries the IDs in `reviewFindings` and its row change; validation lists 34/34 | resolved in v2 |
 | ASTRA-FILES | Astra | 113 per-file rows reference A-P01..A-P08 and O-03 | each row carries the IDs in `reviewFindings`; slices, phases, Schema boundaries, clock domains and test phases normalized; validation lists 113/113 | resolved in v2 |
 | L-01 | W4 | helper channel `scheduledTasks.upsert` is sent after awaits without a recheck (`supervisor-helper-transport.ts:235-244`) | preserved exactly; repair is a separate decision | open decision (not blocking) |
