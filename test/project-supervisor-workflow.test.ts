@@ -855,7 +855,7 @@ test("the interpretation request carries the concise standing role once, permits
   const occurrences = (part: string) => text.split(part).length - 1;
   assert.equal(occurrences("Never restate a human request"), 1);
   assert.equal(occurrences(`Standing instructions version ${task.roleVersion}.`), 1);
-  assert.match(text, /Only local t3-code thread readers\/senders/u);
+  assert.match(text, /Only local t3-code t3_thread_read\/t3_thread_send/u);
   assert.match(text, /MCPX wrappers may invoke them/u);
   assert.match(text, /Decide relevance before definitions/u);
   assert.match(text, /freshly read your own local thread and cite the latest exact human message/u);

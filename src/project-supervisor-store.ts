@@ -17,9 +17,15 @@ export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "co
 export const SUPERVISOR_ROOT_THREAD_PREFIX = "supervisor-root:";
 export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; teamSettings?: {maxHelpersPerRoot: number}; applyAttempts?: number; applicationMessage?: string | null};
 export type SupervisorStopNotice = {messageId: string; commandId: string; stoppedAt: number; enabledAt: number | null;
-  state: "ready" | "uncertain" | "accepted" | "sent" | "blocked" | "superseded";
+  state: "ready" | "uncertain" | "accepted" | "sent" | "blocked" | "unconfirmed" | "superseded";
+  text: string; visibilityMisses?: number; nextObserveAt?: number;
   dispatchMode?: {type: "steer_active"; targetRunId: string} | {type: "queue_after_active"}; rejectedAttempts?: Array<{messageId: string; commandId: string}>; error?: string | null};
 export type BindingRecord = SupervisorBinding & {stopNotice?: SupervisorStopNotice;mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string; deliveredRoleVersion?: string; stopObservedAt?: number; supervisionStop?: {route: "direct" | "relay" | "chat" | "ui"; callerThreadId: string | null; userMessageId: string | null; stoppedAt: number}};
+/** One immutable notice body and native identity for an explicit Stop period. */
+export const prepareStopNotice = (binding: Pick<BindingRecord, "threadId">, stoppedAt: number, enabledAt: number | null): SupervisorStopNotice => ({
+  messageId: `supervisor-notice:stop:${randomUUID()}`, commandId: `supervisor-stop-notice:${randomUUID()}`, stoppedAt, enabledAt, state: "ready",
+  text: `Supervision was stopped for this conversation at ${new Date(stoppedAt).toISOString()}. Stop sending updates, findings and workflow acceptances to Supervisor ${binding.threadId}. This does not change your task or the user's instructions; a later explicit Enable takes precedence. Do not reply to this notice.`,
+});
 export type SupervisorBaseline = {version?: 2; snapshotSequence: number; threads: Array<{id: string; latestRunId: string | null}>};
 export type SupervisionFolderPresence = {status: "present" | "missing" | "unavailable"; message?: string};
 /** Native positions from which workflow protocol records belong to a task source revision: the service prompt that gave the

@@ -11,7 +11,7 @@ import { Effect } from "effect";
 import { fingerprint } from "./guidance-store.js";
 import { mainRunNodeReader, nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { currentThreadPolicy } from "./thread-policy.js";
-import { ProjectSupervisorStore, isSupervisorThread, type BindingRecord, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
+import { ProjectSupervisorStore, prepareStopNotice, isSupervisorThread, type BindingRecord, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
 import { modelSelection, sameModel, supervisorModels, validModelSelection, SupervisorRpcError, type SupervisorRpc } from "./supervisor-native.js";
 import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome, ProjectSupervisorRetryInput, SupervisorModelSelection, WorkflowProposalInfo } from "./project-supervisor-contract.js";
 import type { SupervisionStopInput, SupervisionStopResult } from "./workflow-write-controller.js";
@@ -691,7 +691,7 @@ export class ProjectSupervisor {
     if (application?.applicationMessage) message = `${message} ${application.applicationMessage}`;
     if (current.pending && models.length && !validModelSelection(current.modelSelection, models)) message = "The saved Supervisor model is unavailable. Choose an available T3 model; no fallback will run.";
     if (binding?.settlement?.state === "uncertain") message += " Automatic settlement could not be confirmed. Retry native access reconciles the retained settlement command; supervision can continue in the same chat.";
-    if (binding?.stopNotice && ["uncertain", "accepted", "blocked", "ready"].includes(binding.stopNotice.state))
+    if (binding?.stopNotice && ["uncertain", "accepted", "blocked", "unconfirmed", "ready"].includes(binding.stopNotice.state))
       message += ` Operative Stop notice: ${binding.stopNotice.state}${binding.stopNotice.error ? ` (${binding.stopNotice.error})` : "."}`;
     if (binding?.manualKeepActive) message += " Automatic settlement is held by an observed user keep-active choice.";
     if (!this.store.scopeCompatible) {available = false;message = "Supervisor state has an unsupported scope version. Supervision is disabled without resetting state; other service integrations remain available.";}
@@ -744,8 +744,8 @@ export class ProjectSupervisor {
         const notice = binding.stopNotice;
         const enabledAt = this.store.chatEnabledAt(threadId);
         if (stop && (!notice || notice.enabledAt !== enabledAt && ["sent", "blocked", "superseded"].includes(notice.state)))
-          this.store.setStopNotice(binding, notice?.messageId ?? null, {messageId: `supervisor-notice:stop:${randomUUID()}`,
-            commandId: `supervisor-stop-notice:${randomUUID()}`, stoppedAt: stop.stoppedAt, enabledAt, state: "ready"});
+          this.store.setStopNotice(binding, notice?.messageId ?? null, prepareStopNotice(binding, stop.stoppedAt, enabledAt));
+        else if (stop && notice?.state === "unconfirmed") this.store.setStopNotice(binding, notice.messageId, {...notice, state: "uncertain", visibilityMisses: 0, nextObserveAt: this.now()});
         else if (!stop && notice?.state === "ready") this.store.setStopNotice(binding, notice.messageId, {...notice, state: "superseded"});
       });
       if (stop) this.conversation.fenceStoppedSupervision(this.store.binding(binding.projectId, binding.mainThreadId)!);
@@ -1039,7 +1039,7 @@ export class ProjectSupervisor {
       if (masterEnabled) await Promise.allSettled(batch.map(binding => this.resolveControl(binding.projectId, signal)));
       await Promise.allSettled(batch.map(async binding => {
         const deadline = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
-        await this.serial(supervisorScopeKey(binding.projectId, binding.mainThreadId), () => this.conversation.reconcileStopNotice(binding, deadline));
+        if (this.store.scopeCompatible) await this.serial(supervisorScopeKey(binding.projectId, binding.mainThreadId), () => this.conversation.reconcileStopNotice(binding, deadline));
         // a human stop settles its owned Supervisor even while global or project supervision is disabled
         if (this.supervisionStopped(binding.mainThreadId)) return this.serial(supervisorScopeKey(binding.projectId, binding.mainThreadId), async () => {
           // reconciliation sends nothing; it confirms accepted root, helper and guidance deliveries before the owned Supervisor may settle

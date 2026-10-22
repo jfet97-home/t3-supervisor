@@ -1942,6 +1942,7 @@ test("a 100-item monitor burst freezes and acknowledges all activity while showi
     pendingItemCount: number; taskContext?: {protocolRepair: (typeof diagnostic & {blocked: boolean}) | null}; canonicalAuthoringMaterial?: unknown }> };
   const preview = envelope.threads[0]?.items ?? [];
   assert.equal(preview.length, 2, "the model receives a bounded preview rather than every frozen activity ID");
+  assert.ok(preview.some(item => item.readItemId === "burst-command-99"), "the latest frozen activity is navigable rather than an older preview-tail item");
   const frozenReadIds = new Set(request.batch.threads[0]?.items.map(item => item.readItemId).filter(Boolean));
   assert.ok(preview.every(item => item.readItemId === null || frozenReadIds.has(item.readItemId)), "preview read handles belong to the frozen batch");
   assert.equal(envelope.threads[0]?.pendingItemCount, frozenIds.size, "the preview retains the complete frozen count");
@@ -5580,7 +5581,7 @@ test("Stop sends one concise operative notice and settles the idle root without 
     assert.equal(notices().length, 1, route);
     const notice = notices()[0]!.payload;
     assert.match(String(notice.text), /Stop sending updates, findings and workflow acceptances/u);
-    assert.match(String(notice.text), /Continue the user's task without supervision/u);
+    assert.match(String(notice.text), /This does not change your task or the user's instructions/u);
     assert.match(String(notice.text), /Do not reply/u);
     assert.ok(String(notice.text).length < 500);
     assert.equal(clock.now, before);
@@ -5655,4 +5656,43 @@ test("a definitely rejected Stop steer queues once with retained rejected IDs", 
   assert.equal(fixture.calls.length, 2);
   assert.equal((fixture.calls[1]!.payload.dispatchMode as {type: string}).type, "queue_after_active");
   assert.equal(fixture.calls[1]!.payload.messageId, fallback.messageId);
+});
+
+
+test("unknown Stop-notice visibility is bounded and explicit Retry only re-observes its retained identity", async t => {
+  const clock = {now: baseTime};t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);t.after(fixture.cleanup);appendNoticeForTask(fixture, fixture.task, fixture.operative);
+  const service = fixture.makeProjectSupervisor();const signal = AbortSignal.timeout(10000);
+  await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: fixture.threadPolicy.get().generation}, signal);
+  fixture.failNextIntroduction();await fixture.conversation.reconcileStopNotice(fixture.binding, signal);
+  const notice = fixture.projectStore.binding(projectId, operativeThreadId)!.stopNotice!;
+  const reads = t.mock.method(fixture.conversation, "projection");
+  for (let index = 0; index < 3; index++) {clock.now += 61_000;await fixture.conversation.reconcileStopNotice(fixture.binding, signal);}
+  assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)?.stopNotice?.state, "unconfirmed");
+  assert.equal(reads.mock.callCount(), 3);
+  for (let index = 0; index < 10; index++) {clock.now += 61_000;await fixture.conversation.reconcileStopNotice(fixture.binding, signal);}
+  assert.equal(reads.mock.callCount(), 3, "a retained unconfirmed notice does not poll the main forever");
+  fixture.conversation.retry(projectId, fixture.binding.threadId);
+  await fixture.conversation.reconcileStopNotice(fixture.binding, signal);
+  assert.equal(reads.mock.callCount(), 4);
+  assert.equal(fixture.calls.length, 1, "Retry never posts an unknown notice again");
+  assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)?.stopNotice?.messageId, notice.messageId);
+});
+
+test("an uncertain Stop notice keeps its exact body through root replacement and can be confirmed", async t => {
+  const clock = {now: baseTime};t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);t.after(fixture.cleanup);appendNoticeForTask(fixture, fixture.task, fixture.operative);
+  const service = fixture.makeProjectSupervisor();const signal = AbortSignal.timeout(10000);
+  await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: fixture.threadPolicy.get().generation}, signal);
+  fixture.failNextIntroduction();await fixture.conversation.reconcileStopNotice(fixture.binding, signal);
+  const prior = fixture.projectStore.binding(projectId, operativeThreadId)!;const notice = prior.stopNotice!;
+  fixture.projectStore.setBinding({...prior, state: "missing"});
+  const replacement = fixture.projectStore.replaceMissingBinding(fixture.projectStore.binding(projectId, operativeThreadId)!, defaultSupervisorModel);
+  assert.notEqual(replacement.threadId, fixture.binding.threadId);
+  const run = fixture.operative.runs.find(run => run.status === "running")!;
+  appendMessageToRun(fixture.operative, run, {id: notice.messageId, role: "user", text: notice.text, createdBy: "system", creationSource: "server", now: clock.now});
+  clock.now += 61_000;await fixture.conversation.reconcileStopNotice(replacement, signal);
+  assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)?.stopNotice?.state, "sent");
+  assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)?.stopNotice?.text, notice.text);
+  assert.equal(fixture.calls.length, 1, "root replacement does not create a second unknown notice");
 });

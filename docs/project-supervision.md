@@ -302,6 +302,9 @@ check-in or introduction. An explicit Stop schedules one concise operative notic
 Enable period, only if supervision previously contacted that main. The notice says to
 stop replying to the Supervisor while continuing the task; it never asks for a reply.
 Unsent notices are fenced by Enable; accepted or uncertain identities are only observed.
+Three visibility misses at least a minute apart park the notice as unconfirmed with
+its exact body and IDs. Retry rechecks it without replay; known-unsent blocked notices
+can be retried explicitly. Notice wording never asks the operative to resume work.
 Historical exclusions are not backfilled. A crash between the separate policy save and
 notice reservation can leave a stopped chat without a notice; Stop remains effective.
 Notice delivery also runs while supervision is disabled and does not hold settlement.
