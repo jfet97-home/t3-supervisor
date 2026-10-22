@@ -23,6 +23,8 @@ export interface RunningProcess {
   readonly startedAt: number;
   stdout(): string;
   stderr(): string;
+  // resolves as soon as the collected stdout satisfies `predicate`
+  waitForStdout(predicate: (stdout: string) => boolean, timeoutMs: number, label: string): Promise<void>;
   // resolves once the process exited and its stdio closed
   closed(timeoutMs: number): Promise<ProcessResult>;
   // SIGKILL to the whole group if anything is still alive, then waits for close
@@ -43,7 +45,11 @@ export const startProcess = (command: string, args: ReadonlyArray<string>, optio
   if (pid === undefined) throw new Error(`could not start ${command}`);
   let stdout = "";
   let stderr = "";
-  child.stdout?.setEncoding("utf8").on("data", (chunk: string) => { if (stdout.length < outputLimit) stdout += chunk; });
+  const stdoutWaiters = new Set<() => void>();
+  child.stdout?.setEncoding("utf8").on("data", (chunk: string) => {
+    if (stdout.length < outputLimit) stdout += chunk;
+    for (const waiter of stdoutWaiters) waiter();
+  });
   child.stderr?.setEncoding("utf8").on("data", (chunk: string) => { if (stderr.length < outputLimit) stderr += chunk; });
   let result: ProcessResult | undefined;
   const done = new Promise<ProcessResult>((resolve) => {
@@ -66,6 +72,22 @@ export const startProcess = (command: string, args: ReadonlyArray<string>, optio
     child, pid, startedAt: performance.now(),
     stdout: () => stdout,
     stderr: () => stderr,
+    waitForStdout: (predicate, timeoutMs, label) => new Promise<void>((resolve, reject) => {
+      const check = () => {
+        if (predicate(stdout)) finish(undefined);
+        else if (result !== undefined) finish(new Error(`process ${pid} exited before ${label}`));
+      };
+      const finish = (error: Error | undefined) => {
+        clearTimeout(timer);
+        stdoutWaiters.delete(check);
+        if (error) reject(error);
+        else resolve();
+      };
+      const timer = setTimeout(() => finish(new Error(`no ${label} from process ${pid} within ${timeoutMs} ms`)), timeoutMs);
+      stdoutWaiters.add(check);
+      void done.then(check);
+      check();
+    }),
     closed,
     dispose: async () => {
       if (groupAlive(pid)) process.kill(-pid, "SIGKILL");
