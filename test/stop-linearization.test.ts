@@ -5,9 +5,9 @@ import type { TaskRecord } from "../src/project-supervisor-store.js";
 import type { ConversationRequest } from "../src/supervisor-conversation-store.js";
 import { helperDeliveryBody } from "../src/supervisor-helper-transport.js";
 import { SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
-import { workflowToolNames } from "../src/workflow-write-evidence.js";
+import { workflowRequestHash, workflowToolNames } from "../src/workflow-write-evidence.js";
 import { addDispatchedMessage, addTurn, baseTime, dashboard, helperBatch, helperReceipt, installToolCall, mainThreadId, nativeWrites, once, projectId,
-  publishedWrapper, rpcRequests, seedIntroduction, seedTeam, sendJson, startLinFixture, within, type Entry, type LinFixture, type LinOptions } from "./support/lin-fixture.js";
+  publishedWrapper, rpcRequests, seedIntroduction, seedTeam, sendJson, startLinFixture, teamEventRows, within, type Entry, type LinFixture, type LinOptions } from "./support/lin-fixture.js";
 
 // stop/enable publication and send admission on the unchanged baseline: production controllers and stores on temp files, loopback T3 peer
 
@@ -128,6 +128,60 @@ it("CT-LIN-01: guide: a Stop committed during the ancestor read is denied by the
   assert.deepEqual(f.core.guidance.db.prepare("SELECT * FROM supervisor_team_tool_receipts").all(), []);
   assert.deepEqual(f.core.supervision.team.unresolvedRequests(binding), []);
   assert.deepEqual(f.core.supervision.team.snapshot(binding).events, events);
+  assert.deepEqual(writes(f), []);
+  assert.deepEqual(f.peer.unexpected, []);
+});
+
+// known baseline defect, target S6b: no durable write after a committed Stop
+it("CT-LIN-01: guide (known baseline defect, target S6b): a Stop committed during the ancestor read of a guide whose target is directly under the main still writes the escalation event after the Stop", {timeout: 10_000}, async t => {
+  const f = await fixture(t);
+  const binding = f.bindSupervisor();
+  // the target's parent is the main, so the main read is the walk's last await and the walk then ends without a route (supervisor-team-controller.ts:407, :414)
+  const {helper, member, assignment} = seedTeam(f);
+  const payload = {supervisorThreadId: helper.thread.id, bindingGeneration: binding.generation, memberEpoch: member.epoch, assignmentRootThreadId: "branch",
+    assignmentEpoch: assignment.epoch, operationId: "lin-guide-direct-stop", targetThreadId: "branch", text: "Continue with the plan."};
+  installToolCall(f, helper, workflowToolNames.guide.direct[0], payload);
+  const before = teamEventRows(f);
+  const order: Array<{step: string; stopped: boolean}> = [];
+  let targetRead = false;
+  const stopOnParentRead = once((threadId: string) => threadId === mainThreadId && targetRead, () => {
+    f.stop();
+    order.push({step: "stop", stopped: f.stopped()});
+  });
+  f.peer.onProjection = threadId => {
+    if (threadId === "branch") targetRead = true;
+    stopOnParentRead(threadId);
+  };
+  // records when the escalation write starts (supervisor-team-controller.ts:632-636)
+  const team = f.core.supervision.team;
+  const escalate = team.escalate.bind(team);
+  team.escalate = (...args) => {
+    order.push({step: "escalation", stopped: f.stopped()});
+    return escalate(...args);
+  };
+  const result = await within(f.endpoint.teamController.guide(payload, deadline()), 9_000, "guide");
+  assert.equal(f.stopped(), true);
+  assert.deepEqual(f.peer.log.filter(entry => entry.kind === "http").map(label).slice(-2),
+    ["GET /api/orchestration/threads/branch", "GET /api/orchestration/threads/main"], "the Stop landed during the main read");
+  assert.deepEqual(result, {status: "denied", reason: "no_contactable_ancestor_in_assignment_escalated"});
+  assert.deepEqual(order, [{step: "stop", stopped: true}, {step: "escalation", stopped: true}], "the escalation write starts after the committed Stop");
+  const rows = teamEventRows(f);
+  assert.deepEqual(rows.slice(0, before.length), before);
+  const written = rows.slice(before.length);
+  assert.equal(written.length, 1, "exactly one new team event row");
+  const event = written[0]!;
+  const summary = `Guidance needs root attention for branch: ${payload.text}`;
+  const id = `guide-escalation:${workflowRequestHash(payload)}`;
+  assert.deepEqual(event, {rowid: event.rowid, id, createdAt: event.createdAt, acknowledgedAt: null, document: {id, kind: "escalation", actorThreadId: "helper",
+    memberThreadId: "helper", targetThreadId: "branch", assignmentRootThreadId: "branch", summary, severity: "attention", createdAt: event.createdAt,
+    acknowledgedAt: null}});
+  const stop = f.binding().supervisionStop!;
+  assert.equal(stop.route, "ui");
+  assert.ok(event.createdAt >= stop.stoppedAt, "the stored event time is not before the stored Stop time");
+  assert.equal(f.core.supervision.team.snapshot(binding).members.find(value => value.threadId === "helper")?.lastAssessment, summary,
+    "the escalation also records the helper's last assessment");
+  assert.deepEqual(f.core.guidance.db.prepare("SELECT * FROM supervisor_team_tool_receipts").all(), []);
+  assert.deepEqual(f.core.supervision.team.unresolvedRequests(binding), []);
   assert.deepEqual(writes(f), []);
   assert.deepEqual(f.peer.unexpected, []);
 });

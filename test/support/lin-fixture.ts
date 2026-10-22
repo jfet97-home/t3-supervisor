@@ -442,6 +442,16 @@ export const helperReceipt = (f: LinFixture): Record<string, unknown> | null => 
   return row ? JSON.parse(String(row.document)) as Record<string, unknown> : null;
 };
 
+export type TeamEventRow = {rowid: number; id: string; createdAt: number; acknowledgedAt: unknown; document: Record<string, unknown>};
+
+// the stored team event rows of the bound Supervisor in insertion order
+export const teamEventRows = (f: LinFixture): TeamEventRow[] => {
+  const binding = f.binding();
+  return f.core.guidance.db.prepare("SELECT rowid,id,created_at,acknowledged_at,document FROM supervisor_team_events WHERE owner_thread_id=? AND owner_generation=? ORDER BY rowid")
+    .all(binding.threadId, binding.generation).map(row => ({rowid: Number(row.rowid), id: String(row.id), createdAt: Number(row.created_at),
+      acknowledgedAt: row.acknowledged_at, document: JSON.parse(String(row.document)) as Record<string, unknown>}));
+};
+
 export type Dashboard = {post(path: string, payload: unknown): Promise<{status: number; body: unknown}>};
 
 // an authenticated dashboard session on the production UI server (sign-in of test/guidance.test.ts:34-46, csrf of :88-93)
