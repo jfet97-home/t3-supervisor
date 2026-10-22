@@ -7,7 +7,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { it } from "vitest";
 import { fingerprint, GuidanceStore } from "../src/guidance-store.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
@@ -340,7 +340,7 @@ const replaceCurrentProposal = (fixture: Fixture, proposalId: string, definition
   };
 };
 
-test("unverified JSON stays pending without reserving an operation and a verified retry applies", async () => {
+it("unverified JSON stays pending without reserving an operation and a verified retry applies", async () => {
   const fixture = await makeFixture();
   try {
     const args = ensureArgs(fixture, "forged-op", "Create a main workflow.");
@@ -357,7 +357,7 @@ test("unverified JSON stays pending without reserving an operation and a verifie
   } finally {await closeFixture(fixture);}
 });
 
-test("workflow_read exposes the main task's bounded workflow protocol diagnostic", async () => {
+it("workflow_read exposes the main task's bounded workflow protocol diagnostic", async () => {
   const fixture = await makeFixture();
   try {
     const diagnostic = {role: "operative" as const, proposalId: "proposal-current", messageId: "compact-acceptance",
@@ -370,7 +370,7 @@ test("workflow_read exposes the main task's bounded workflow protocol diagnostic
   } finally {await closeFixture(fixture);}
 });
 
-test("MCPX input unwrap is exact and the verified native item is stored with the mutation", async () => {
+it("MCPX input unwrap is exact and the verified native item is stored with the mutation", async () => {
   const fixture = await makeFixture();
   try {
     const args = ensureArgs(fixture, "mcpx-op", "Create through MCPX.");
@@ -388,7 +388,7 @@ test("MCPX input unwrap is exact and the verified native item is stored with the
   } finally {await closeFixture(fixture);}
 });
 
-test("AppRun order selects new-provider evidence ahead of older provider item ordinals", async () => {
+it("AppRun order selects new-provider evidence ahead of older provider item ordinals", async () => {
   const fixture = await makeFixture();
   try {
     const args = ensureArgs(fixture, "new-provider-evidence", "Use the current provider run.");
@@ -407,7 +407,7 @@ test("AppRun order selects new-provider evidence ahead of older provider item or
   } finally {await closeFixture(fixture);}
 });
 
-test("complete snapshot inputs filter unrelated tools before detail RPCs", async () => {
+it("complete snapshot inputs filter unrelated tools before detail RPCs", async () => {
   const fixture = await makeFixture();
   try {
     const args = ensureArgs(fixture, "snapshot-prefilter", "Read only plausible native evidence.");
@@ -423,7 +423,7 @@ test("complete snapshot inputs filter unrelated tools before detail RPCs", async
   } finally {await closeFixture(fixture);}
 });
 
-test("an oversized getTurnItem detail remains pending even when its snapshot arguments match", async () => {
+it("an oversized getTurnItem detail remains pending even when its snapshot arguments match", async () => {
   const fixture = await makeFixture();
   try {
     const args = ensureArgs(fixture, "oversized-detail", "Do not authorize an oversized native detail.");
@@ -436,7 +436,7 @@ test("an oversized getTurnItem detail remains pending even when its snapshot arg
   } finally {await closeFixture(fixture);}
 });
 
-test("a history of unrelated complete tool inputs causes no detail RPCs", async () => {
+it("a history of unrelated complete tool inputs causes no detail RPCs", async () => {
   const fixture = await makeFixture();
   try {
     const wanted = ensureArgs(fixture, "no-matching-snapshot", "Wait for a matching tool record.");
@@ -453,7 +453,7 @@ test("a history of unrelated complete tool inputs causes no detail RPCs", async 
   } finally {await closeFixture(fixture);}
 });
 
-test("unrelated empty and rolled-back snapshot placeholders stay pending without detail lookups", async () => {
+it("unrelated empty and rolled-back snapshot placeholders stay pending without detail lookups", async () => {
   const fixture = await makeFixture();
   try {
     const args = ensureArgs(fixture, "wanted-current-evidence", "Only this exact call can authorize the write.");
@@ -473,7 +473,7 @@ test("unrelated empty and rolled-back snapshot placeholders stay pending without
   } finally {await closeFixture(fixture);}
 });
 
-test("a delayed current record becomes verifiable after fresh projection polling", async () => {
+it("a delayed current record becomes verifiable after fresh projection polling", async () => {
   const fixture = await makeFixture();
   try {
     const args = ensureArgs(fixture, "delayed-current-record", "Wait for this current native record.");
@@ -492,7 +492,7 @@ test("a delayed current record becomes verifiable after fresh projection polling
   } finally {await closeFixture(fixture);}
 });
 
-test("unchanged inspected detail is cached throughout the pending window", async () => {
+it("unchanged inspected detail is cached throughout the pending window", async () => {
   const fixture = await makeFixture();
   try {
     const requested = ensureArgs(fixture, "pending-current", "Wait for matching evidence.");
@@ -505,7 +505,7 @@ test("unchanged inspected detail is cached throughout the pending window", async
   } finally {await closeFixture(fixture);}
 });
 
-test("rolled-back runs, roots, and tool nodes cannot authorize an old matching tool item", async () => {
+it("rolled-back runs, roots, and tool nodes cannot authorize an old matching tool item", async () => {
   for (const [label, state] of [
     ["run", {runStatus: "rolled_back"}],
     ["root", {rootNodeStatus: "rolled_back"}],
@@ -525,7 +525,7 @@ test("rolled-back runs, roots, and tool nodes cannot authorize an old matching t
   }
 });
 
-test("Claude-shaped and future native tool records pass the shared exact proof", async () => {
+it("Claude-shaped and future native tool records pass the shared exact proof", async () => {
   for (const [driver, nodeKind] of [["claudeAgent", "tool_call"], ["future-provider", "tool_call"]] as const) {
     const fixture = await makeFixture();
     try {
@@ -550,7 +550,7 @@ test("Claude-shaped and future native tool records pass the shared exact proof",
   assert.match(workflowWriteToolDefinition.description, /On rejection, read the reason, code, and path\./u);
 });
 
-test("provider-neutral records retain strong native identity and main-run quality gates", async () => {
+it("provider-neutral records retain strong native identity and main-run quality gates", async () => {
   for (const [label, mutate, expectedReason] of [
     ["weak-ref", (detail: Record<string, unknown>) => {
       (detail.nativeItemRef as Record<string, unknown>).strength = "weak";
@@ -580,7 +580,7 @@ test("provider-neutral records retain strong native identity and main-run qualit
   }
 });
 
-test("an exact strong own-main record with an unrecognized tool name is explicitly denied", async () => {
+it("an exact strong own-main record with an unrecognized tool name is explicitly denied", async () => {
   const fixture = await makeFixture();
   try {
     const args = ensureArgs(fixture, "unknown-native-tool-name", "Do not infer authority from an unknown tool name.");
@@ -612,7 +612,7 @@ test("an exact strong own-main record with an unrecognized tool name is explicit
   } finally {await closeFixture(fixture);}
 });
 
-test("an unrecognized name is reported only after all native ownership gates and stays bounded", async () => {
+it("an unrecognized name is reported only after all native ownership gates and stays bounded", async () => {
   for (const [label, options] of [
     ["weak", {refStrength: "weak"}],
     ["nested", {parentItemId: "parent-item"}],
@@ -653,7 +653,7 @@ test("an unrecognized name is reported only after all native ownership gates and
   } finally {await closeFixture(fixture);}
 });
 
-test("a child-thread tool record cannot authorize a write for the bound Supervisor", async () => {
+it("a child-thread tool record cannot authorize a write for the bound Supervisor", async () => {
   const fixture = await makeFixture();
   try {
     const childId = "helper-thread";
@@ -667,7 +667,7 @@ test("a child-thread tool record cannot authorize a write for the bound Supervis
   } finally {await closeFixture(fixture);}
 });
 
-test("empty and truncated detail inputs stay pending without authorizing a write", async () => {
+it("empty and truncated detail inputs stay pending without authorizing a write", async () => {
   for (const input of ["truncated native input", {}]) {
     const fixture = await makeFixture();
     try {
@@ -681,7 +681,7 @@ test("empty and truncated detail inputs stay pending without authorizing a write
   }
 });
 
-test("write arguments above the inline-input bound are rejected before native reads", async () => {
+it("write arguments above the inline-input bound are rejected before native reads", async () => {
   const fixture = await makeFixture();
   try {
     const input = {
@@ -702,7 +702,7 @@ test("write arguments above the inline-input bound are rejected before native re
   } finally {await closeFixture(fixture);}
 });
 
-test("credential-like file references are rejected at the MCP boundary before native reads", async () => {
+it("credential-like file references are rejected at the MCP boundary before native reads", async () => {
   const fixture = await makeFixture();
   try {
     const secret = "ghp_" + "A".repeat(32);
@@ -719,7 +719,7 @@ test("credential-like file references are rejected at the MCP boundary before na
   } finally {await closeFixture(fixture);}
 });
 
-test("disabled and replaced bindings deny old owner locators", async () => {
+it("disabled and replaced bindings deny old owner locators", async () => {
   const fixture = await makeFixture();
   try {
     const disabledArgs = ensureArgs(fixture, "disabled-op", "Do not write while disabled.");
@@ -738,7 +738,7 @@ test("disabled and replaced bindings deny old owner locators", async () => {
   } finally {await closeFixture(fixture);}
 });
 
-test("a human stop of the main fences workflow_write at the first and the final commit check, while reads continue", async () => {
+it("a human stop of the main fences workflow_write at the first and the final commit check, while reads continue", async () => {
   const fixture = await makeFixture();
   try {
     let stopped: string | null = fixture.mainThreadId;
@@ -768,7 +768,7 @@ test("a human stop of the main fences workflow_write at the first and the final 
   } finally {await closeFixture(fixture);}
 });
 
-test("an incompatible main-scope version disables the default controller without resetting ownership", async () => {
+it("an incompatible main-scope version disables the default controller without resetting ownership", async () => {
   const fixture = await makeFixture();
   try {
     Object.defineProperty(fixture.supervisors, "scopeCompatible", {value: false});
@@ -789,7 +789,7 @@ test("an incompatible main-scope version disables the default controller without
   } finally {await closeFixture(fixture);}
 });
 
-test("an independent child with no verified path to the main cannot be linked", async () => {
+it("an independent child with no verified path to the main cannot be linked", async () => {
   const fixture = await makeFixture();
   try {
     const child = thread("independent-child", "project-workflows", "independent-root", "subagent", "independent-root");
@@ -804,7 +804,7 @@ test("an independent child with no verified path to the main cannot be linked", 
   } finally {await closeFixture(fixture);}
 });
 
-test("a verified descendant stays in scope when its native project ID differs", async () => {
+it("a verified descendant stays in scope when its native project ID differs", async () => {
   const fixture = await makeFixture();
   try {
     const child = thread("foreign-project-child", "project-foreign", fixture.mainThreadId, "subagent", fixture.mainThreadId);
@@ -821,7 +821,7 @@ test("a verified descendant stays in scope when its native project ID differs", 
   } finally {await closeFixture(fixture);}
 });
 
-test("a fork can own a workflow and subagent descendants in its own logical scope", async () => {
+it("a fork can own a workflow and subagent descendants in its own logical scope", async () => {
   const projectId = "project-workflows";
   const ancestor = thread("ancestor-main", projectId);
   const forkMain = thread("fork-main", projectId, ancestor.id, "fork", ancestor.id);
@@ -848,7 +848,7 @@ test("a fork can own a workflow and subagent descendants in its own logical scop
   } finally {await closeFixture(fixture);}
 });
 
-test("an ancestor owner cannot link a fork's subagent descendant", async () => {
+it("an ancestor owner cannot link a fork's subagent descendant", async () => {
   const fixture = await makeFixture();
   try {
     const forkMain = thread("independent-fork", fixture.projectId, fixture.mainThreadId, "fork", fixture.mainThreadId);
@@ -864,7 +864,7 @@ test("an ancestor owner cannot link a fork's subagent descendant", async () => {
   } finally {await closeFixture(fixture);}
 });
 
-test("successful exact replays survive projection windowing and operation ID reuse conflicts", async () => {
+it("successful exact replays survive projection windowing and operation ID reuse conflicts", async () => {
   const fixture = await makeFixture();
   try {
     const args = ensureArgs(fixture, "replay-op", "Create once.");
@@ -880,7 +880,7 @@ test("successful exact replays survive projection windowing and operation ID reu
   } finally {await closeFixture(fixture);}
 });
 
-test("the same edit operation ID is isolated across Supervisor owners", async () => {
+it("the same edit operation ID is isolated across Supervisor owners", async () => {
   const fixture = await makeFixture();
   try {
     const firstArgs = ensureArgs(fixture, "shared-edit-id", "Create the first owner's draft.");
@@ -914,7 +914,7 @@ test("the same edit operation ID is isolated across Supervisor owners", async ()
   } finally {await closeFixture(fixture);}
 });
 
-test("apply uses owner-scoped lookup and revision CAS without dropping contributors", async () => {
+it("apply uses owner-scoped lookup and revision CAS without dropping contributors", async () => {
   const fixture = await makeFixture();
   try {
     const mainArgs = ensureArgs(fixture, "cas-create", "Create a workflow before editing.");
@@ -948,7 +948,7 @@ test("apply uses owner-scoped lookup and revision CAS without dropping contribut
   } finally {await closeFixture(fixture);}
 });
 
-test("apply requires a fresh definition pin that still matches the current task proposal", async () => {
+it("apply requires a fresh definition pin that still matches the current task proposal", async () => {
   const fixture = await makeFixture();
   try {
     const ensure = ensureArgs(fixture, "pin-create", "Create a draft before applying a pinned plan.");
@@ -985,7 +985,7 @@ test("apply requires a fresh definition pin that still matches the current task 
   } finally {await closeFixture(fixture);}
 });
 
-test("apply denies a null-plan provisional current task before reading or changing the draft", async () => {
+it("apply denies a null-plan provisional current task before reading or changing the draft", async () => {
   const fixture = await makeFixture();
   try {
     const ensure = ensureArgs(fixture, "null-plan-provisional-create", "Create a draft before checking its current proposal.");
@@ -1015,7 +1015,7 @@ test("apply denies a null-plan provisional current task before reading or changi
   } finally {await closeFixture(fixture);}
 });
 
-test("an unaccepted proposal can omit an optional fixed workflow on its first live apply", async () => {
+it("an unaccepted proposal can omit an optional fixed workflow on its first live apply", async () => {
   const fixture = await makeFixture();
   try {
     const definitions = snapshotWith(fixture.definitionReader.current,
@@ -1049,7 +1049,7 @@ test("an unaccepted proposal can omit an optional fixed workflow on its first li
   } finally {await closeFixture(fixture);}
 });
 
-test("an unchanged-source accepted fixed workflow survives when the mutable plan has diverged", async () => {
+it("an unchanged-source accepted fixed workflow survives when the mutable plan has diverged", async () => {
   const fixture = await makeFixture();
   try {
     const definitions = snapshotWith(fixture.definitionReader.current,
@@ -1124,7 +1124,7 @@ test("an unchanged-source accepted fixed workflow survives when the mutable plan
   } finally {await closeFixture(fixture);}
 });
 
-test("a same-source accepted TaskRecord plan is protected when live agreement import is absent", async () => {
+it("a same-source accepted TaskRecord plan is protected when live agreement import is absent", async () => {
   const fixture = await makeFixture();
   try {
     const definitions = snapshotWith(fixture.definitionReader.current,
@@ -1187,7 +1187,7 @@ test("a same-source accepted TaskRecord plan is protected when live agreement im
   } finally {await closeFixture(fixture);}
 });
 
-test("same task and definition pin preserve added fixed workflows across proposal IDs but permit an adopted new pin", async () => {
+it("same task and definition pin preserve added fixed workflows across proposal IDs but permit an adopted new pin", async () => {
   const fixture = await makeFixture();
   try {
     const firstDefinitions = snapshotWith(fixture.definitionReader.current,
@@ -1258,7 +1258,7 @@ test("same task and definition pin preserve added fixed workflows across proposa
   } finally {await closeFixture(fixture);}
 });
 
-test("a reinterpreted source hash releases fixed commitments from the prior task source", async () => {
+it("a reinterpreted source hash releases fixed commitments from the prior task source", async () => {
   const fixture = await makeFixture();
   try {
     const definitions = snapshotWith(fixture.definitionReader.current,
@@ -1303,7 +1303,7 @@ test("a reinterpreted source hash releases fixed commitments from the prior task
   } finally {await closeFixture(fixture);}
 });
 
-test("child fixed workflows survive a new same-pin main proposal without inheriting main requirements", async () => {
+it("child fixed workflows survive a new same-pin main proposal without inheriting main requirements", async () => {
   const fixture = await makeFixture();
   try {
     const definitions = snapshotWith(fixture.definitionReader.current,
@@ -1358,7 +1358,7 @@ test("child fixed workflows survive a new same-pin main proposal without inherit
   } finally {await closeFixture(fixture);}
 });
 
-test("exact apply receipt replay survives a later definition revision change", async () => {
+it("exact apply receipt replay survives a later definition revision change", async () => {
   const fixture = await makeFixture();
   try {
     const ensure = ensureArgs(fixture, "pin-replay-create", "Create a draft before applying a pinned plan.");
@@ -1388,7 +1388,7 @@ test("exact apply receipt replay survives a later definition revision change", a
   } finally {await closeFixture(fixture);}
 });
 
-test("a partial apply keeps every omitted plan field from the current CAS revision", async () => {
+it("a partial apply keeps every omitted plan field from the current CAS revision", async () => {
   const fixture = await makeFixture();
   try {
     const ensure = ensureArgs(fixture, "partial-create", "Create a draft before a partial edit.");
@@ -1424,7 +1424,7 @@ test("a partial apply keeps every omitted plan field from the current CAS revisi
   } finally {await closeFixture(fixture);}
 });
 
-test("a nested plan larger than 185 KiB remains editable within the native tool bounds", async () => {
+it("a nested plan larger than 185 KiB remains editable within the native tool bounds", async () => {
   const fixture = await makeFixture();
   try {
     const ensure = ensureArgs(fixture, "large-plan-create", "Create a draft for the imported plan.");
@@ -1462,7 +1462,7 @@ test("a nested plan larger than 185 KiB remains editable within the native tool 
   } finally {await closeFixture(fixture);}
 });
 
-test("workflow read exposes bounded live lineage and every shared parent-step reference", async () => {
+it("workflow read exposes bounded live lineage and every shared parent-step reference", async () => {
   const fixture = await makeFixture();
   try {
     const childA = thread("child-a", fixture.projectId, fixture.mainThreadId, "subagent", fixture.mainThreadId);
@@ -1527,7 +1527,7 @@ test("workflow read exposes bounded live lineage and every shared parent-step re
   } finally {await closeFixture(fixture);}
 });
 
-test("workflow read reports an incompatible stored document instead of omitting or rewriting it", async () => {
+it("workflow read reports an incompatible stored document instead of omitting or rewriting it", async () => {
   const fixture = await makeFixture();
   try {
     const args = ensureArgs(fixture, "oversized-read-create", "Create a main workflow.");
@@ -1548,7 +1548,7 @@ test("workflow read reports an incompatible stored document instead of omitting 
   } finally {await closeFixture(fixture);}
 });
 
-test("archived descendants stay owned for reads and semantic edits but cannot gain new work", async () => {
+it("archived descendants stay owned for reads and semantic edits but cannot gain new work", async () => {
   const fixture = await makeFixture();
   try {
     const archivedChild = thread("archived-child", fixture.projectId, fixture.mainThreadId, "subagent", fixture.mainThreadId);
@@ -1680,7 +1680,7 @@ test("archived descendants stay owned for reads and semantic edits but cannot ga
   } finally {await closeFixture(fixture);}
 });
 
-test("partial status edits retain contributors whose child is no longer in the current thread inventory", async () => {
+it("partial status edits retain contributors whose child is no longer in the current thread inventory", async () => {
   const fixture = await makeFixture();
   try {
     const child = thread("deleted-contributor", fixture.projectId, fixture.mainThreadId, "subagent", fixture.mainThreadId);
@@ -1712,7 +1712,7 @@ test("partial status edits retain contributors whose child is no longer in the c
   } finally {await closeFixture(fixture);}
 });
 
-test("activity references are scoped and stored as navigation evidence without proving success", async () => {
+it("activity references are scoped and stored as navigation evidence without proving success", async () => {
   const fixture = await makeFixture();
   try {
     const create = ensureArgs(fixture, "source-evidence-create", "Create a workflow.");
@@ -1752,7 +1752,7 @@ test("activity references are scoped and stored as navigation evidence without p
   } finally {await closeFixture(fixture);}
 });
 
-test("activity references fail closed when their workflow target is absent", async () => {
+it("activity references fail closed when their workflow target is absent", async () => {
   const fixture = await makeFixture();
   try {
     const apply = applyArgs(fixture, {operationId: "reference-target-missing", workflowId: "missing-workflow",
@@ -1767,7 +1767,7 @@ test("activity references fail closed when their workflow target is absent", asy
   } finally {await closeFixture(fixture);}
 });
 
-test("an exact successful apply replay precedes new activity-reference target validation", async () => {
+it("an exact successful apply replay precedes new activity-reference target validation", async () => {
   const fixture = await makeFixture();
   try {
     const create = ensureArgs(fixture, "reference-replay-create", "Create the workflow target.");
@@ -1792,7 +1792,7 @@ test("an exact successful apply replay precedes new activity-reference target va
   } finally {await closeFixture(fixture);}
 });
 
-test("activity references must resolve exactly and agree on their native run", async () => {
+it("activity references must resolve exactly and agree on their native run", async () => {
   const fixture = await makeFixture();
   try {
     const create = ensureArgs(fixture, "source-run-create", "Create a workflow.");
@@ -1838,7 +1838,7 @@ test("activity references must resolve exactly and agree on their native run", a
   } finally {await closeFixture(fixture);}
 });
 
-test("activity references cannot relabel inherited projection records as local activity", async () => {
+it("activity references cannot relabel inherited projection records as local activity", async () => {
   const fixture = await makeFixture();
   try {
     const create = ensureArgs(fixture, "inherited-activity-create", "Create a workflow.");
@@ -1875,7 +1875,7 @@ test("activity references cannot relabel inherited projection records as local a
 });
 
 
-test("a ready helper links and plans a completed unarchived assigned child using its own exact main-run evidence", async () => {
+it("a ready helper links and plans a completed unarchived assigned child using its own exact main-run evidence", async () => {
   const f = await makeFixture();
   try {
     const team = new SupervisorTeamStore(f.supervisors);
@@ -2048,7 +2048,7 @@ test("a ready helper links and plans a completed unarchived assigned child using
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
 });
 
-test("team registration requires a completed app-owned bootstrap and readiness requires helper-own proof", async () => {
+it("team registration requires a completed app-owned bootstrap and readiness requires helper-own proof", async () => {
   const f = await makeFixture();
   try {
     const team = new SupervisorTeamStore(f.supervisors);
@@ -2081,7 +2081,7 @@ test("team registration requires a completed app-owned bootstrap and readiness r
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
 });
 
-test("opt-in helper provider isolation accepts only a distinct configured instance and owned provider sessions", async () => {
+it("opt-in helper provider isolation accepts only a distinct configured instance and owned provider sessions", async () => {
   const configuredInstanceId = "supervisor-helpers-20348";
   const register = async (variant: "isolated" | "wrong-instance" | "same-instance" | "shared-session" | "missing-session" | "missing-owner") => {
     const f = await makeFixture();
@@ -2143,7 +2143,7 @@ test("opt-in helper provider isolation accepts only a distinct configured instan
   }
 });
 
-test("helper guidance resolves an omitted activeRunId and retains uncertain identity across a handover", async () => {
+it("helper guidance resolves an omitted activeRunId and retains uncertain identity across a handover", async () => {
   const f = await makeFixture();
   try {
     const team = new SupervisorTeamStore(f.supervisors);
@@ -2227,7 +2227,7 @@ test("helper guidance resolves an omitted activeRunId and retains uncertain iden
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
 });
 
-test("helper guidance defers on target owner input without routing to an eligible ancestor", async () => {
+it("helper guidance defers on target owner input without routing to an eligible ancestor", async () => {
   const f = await makeFixture();
   try {
     const team = new SupervisorTeamStore(f.supervisors);
@@ -2306,7 +2306,7 @@ test("helper guidance defers on target owner input without routing to an eligibl
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
 });
 
-test("deferred owner guidance raises one stable attention after grace and routes only after resolution", async () => {
+it("deferred owner guidance raises one stable attention after grace and routes only after resolution", async () => {
   const f = await makeFixture();
   try {
     const team = new SupervisorTeamStore(f.supervisors);
@@ -2412,7 +2412,7 @@ test("deferred owner guidance raises one stable attention after grace and routes
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
 });
 
-test("helper guidance records a pre-open transport refusal as not sent without ancestor fallback or a pending-effect fence", async () => {
+it("helper guidance records a pre-open transport refusal as not sent without ancestor fallback or a pending-effect fence", async () => {
   const f = await makeFixture();
   const server = createServer();
   let upgrades = 0;
@@ -2492,7 +2492,7 @@ test("helper guidance records a pre-open transport refusal as not sent without a
   }
 });
 
-test("helper guidance replays a received dispatch failure with the exact command before steering its nearest same-assignment ancestor", async () => {
+it("helper guidance replays a received dispatch failure with the exact command before steering its nearest same-assignment ancestor", async () => {
   const f = await makeFixture();
   const server = new WebSocketServer({port: 0});
   await new Promise<void>(resolve => server.once("listening", resolve));
@@ -2588,7 +2588,7 @@ test("helper guidance replays a received dispatch failure with the exact command
   }
 });
 
-test("root quarantine uses native team proof and preserves unresolved requests while fencing helper authority", async () => {
+it("root quarantine uses native team proof and preserves unresolved requests while fencing helper authority", async () => {
   assert.ok((supervisionTeamToolDefinition.inputSchema.properties.action.enum as readonly string[]).includes("quarantine"));
   const f = await makeFixture();
   try {
@@ -2626,7 +2626,7 @@ test("root quarantine uses native team proof and preserves unresolved requests w
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
 });
 
-test("root team retry restarts a definitely rejected note without changing an unknown guide effect", async () => {
+it("root team retry restarts a definitely rejected note without changing an unknown guide effect", async () => {
   const f = await makeFixture();
   try {
     const team = new SupervisorTeamStore(f.supervisors);
@@ -2681,7 +2681,7 @@ test("root team retry restarts a definitely rejected note without changing an un
   } finally {f.guidance.close();await rm(f.directory, {recursive: true, force: true});}
 });
 
-test("workflow_write tool output reports new_node_must_start_planned with the structural path and no submitted text", async () => {
+it("workflow_write tool output reports new_node_must_start_planned with the structural path and no submitted text", async () => {
   const fixture = await makeFixture();
   try {
     const sentinel = "zzsentinelplannedfirst9f3c";
@@ -2744,7 +2744,7 @@ test("workflow_write tool output reports new_node_must_start_planned with the st
   } finally {await closeFixture(fixture);}
 });
 
-test("planned-first and status-evidence pointers address the submitted arguments, including nested groups", async () => {
+it("planned-first and status-evidence pointers address the submitted arguments, including nested groups", async () => {
   const fixture = await makeFixture();
   try {
     const ensure = ensureArgs(fixture, "nested-pointer-create", "Create a draft before nested inserts.");
@@ -2777,7 +2777,7 @@ test("planned-first and status-evidence pointers address the submitted arguments
   } finally {await closeFixture(fixture);}
 });
 
-test("a pointer inside a service-expanded workflow maps to the nearest submitted node", () => {
+it("a pointer inside a service-expanded workflow maps to the nearest submitted node", () => {
   const submitted = {kind: "sequence", nodes: [{kind: "step"},
     {kind: "workflow", definitionId: "review", status: "planned"},
     {kind: "workflow", definitionId: "review", plan: {kind: "sequence", nodes: [{kind: "step", status: "completed"}]}}]};
@@ -2814,7 +2814,7 @@ const assessArgs = (f: Fixture, workflowId: string, overrides: Record<string, un
     decision: "accepted", note: "The external review satisfies the step.", ...overrides};
 };
 
-test("only the root assesses a main contribution, through verified native proof with replay and stale-result checks", async () => {
+it("only the root assesses a main contribution, through verified native proof with replay and stale-result checks", async () => {
   const f = await makeFixture();
   try {
     const {workflowId, node} = await seedContributionMain(f);
@@ -2869,7 +2869,7 @@ test("only the root assesses a main contribution, through verified native proof 
   } finally {await closeFixture(f);}
 });
 
-test("a main contribution import and Supervisor writes race only through revision CAS and edits keep contributions", async () => {
+it("a main contribution import and Supervisor writes race only through revision CAS and edits keep contributions", async () => {
   const f = await makeFixture();
   try {
     const {workflowId, node} = await seedContributionMain(f);
@@ -2910,7 +2910,7 @@ test("a main contribution import and Supervisor writes race only through revisio
   } finally {await closeFixture(f);}
 });
 
-test("workflow_write advertises the root-only contribution assessment action", () => {
+it("workflow_write advertises the root-only contribution assessment action", () => {
   const schema = workflowWriteToolDefinition.inputSchema;
   assert.ok(schema.properties.action.enum.includes("assess_contribution"));
   assert.deepEqual(schema.oneOf.at(-1), {properties: {action: {const: "assess_contribution"}},
@@ -2918,7 +2918,7 @@ test("workflow_write advertises the root-only contribution assessment action", (
   assert.match(workflowWriteToolDefinition.description, /never changes any status/u);
 });
 
-test("workflow_read view definitions accepts nonempty definitionIds through the real controller and MCP endpoint", async () => {
+it("workflow_read view definitions accepts nonempty definitionIds through the real controller and MCP endpoint", async () => {
   const fixture = await makeFixture();
   try {
     const received: unknown[] = [];

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { it } from "vitest";
+import { after } from "./support/node-test.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -327,9 +328,9 @@ const makeFixture = async (initialDefinitions: ProjectDefinitionSnapshot = defin
   };
 };
 
-test("dispatch uses complete definitions from the operative source worktree", async (t) => {
+it("dispatch uses complete definitions from the operative source worktree", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
 
@@ -352,9 +353,9 @@ test("dispatch uses complete definitions from the operative source worktree", as
 
 });
 
-test("a correlated native result appears in the project DTO without repeating or self-triggering work", async (t) => {
+it("a correlated native result appears in the project DTO without repeating or self-triggering work", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const task = fixture.task();
@@ -388,7 +389,7 @@ test("a correlated native result appears in the project DTO without repeating or
   assert.equal(fixture.store.task(binding.threadId), null, "the owned Supervisor conversation is not a new source task");
 });
 
-test("changed or non-ready definitions stale the workflow while preserving the inferred objective", async (t) => {
+it("changed or non-ready definitions stale the workflow while preserving the inferred objective", async (t) => {
   const variants: Array<{ name: string; snapshot: ProjectDefinitionSnapshot }> = [
     { name: "revision", snapshot: definitionSnapshot({ revision: "revision-2" }) },
     { name: "worktree", snapshot: definitionSnapshot({ workspaceRoot: "/work/project/worktrees/other" }) },
@@ -398,7 +399,7 @@ test("changed or non-ready definitions stale the workflow while preserving the i
 
   for (const variant of variants) {
     const fixture = await makeFixture();
-    t.after(fixture.cleanup);
+    after(t, fixture.cleanup);
     const supervisor = fixture.makeSupervisor();
     await supervisor.runOnce();
     const task = fixture.task();
@@ -419,9 +420,9 @@ test("changed or non-ready definitions stale the workflow while preserving the i
   }
 });
 
-test("a transient preparation read failure recovers across Supervisor instances and dispatches once", async (t) => {
+it("a transient preparation read failure recovers across Supervisor instances and dispatches once", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.setDefinitionReadOutcomes([new Error("temporary filesystem read failure"), definitionSnapshot()]);
 
   await fixture.makeSupervisor().runOnce();
@@ -443,9 +444,9 @@ test("a transient preparation read failure recovers across Supervisor instances 
   assert.equal(fixture.dispatches().length, 1, "preparation retry must not create duplicate native requests");
 });
 
-test("bounded unavailable preparation reads still dispatch a provisional workflow with unknown requirements", async (t) => {
+it("bounded unavailable preparation reads still dispatch a provisional workflow with unknown requirements", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.setDefinitionReadOutcomes([
     unavailableDefinitionSnapshot(),
     new Error("second temporary read failure"),
@@ -488,9 +489,9 @@ test("bounded unavailable preparation reads still dispatch a provisional workflo
   assert.equal(fixture.dispatches().length, 1);
 });
 
-test("a known unavailable completion read stales the proposal without redispatch", async (t) => {
+it("a known unavailable completion read stales the proposal without redispatch", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   await fixture.makeSupervisor().runOnce();
   const task = fixture.task();
   const binding = fixture.binding();
@@ -512,9 +513,9 @@ test("a known unavailable completion read stales the proposal without redispatch
   assert.equal(fixture.definitionReads.length, 2, "only preparation and completion revalidation read definitions");
 });
 
-test("three transient completion read failures stale only the proposal and preserve the objective", async (t) => {
+it("three transient completion read failures stale only the proposal and preserve the objective", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   await fixture.makeSupervisor().runOnce();
   const task = fixture.task();
   const binding = fixture.binding();
@@ -550,9 +551,9 @@ test("three transient completion read failures stale only the proposal and prese
   assert.equal(fixture.definitionReads.length, 4, "preparation plus exactly the three bounded revalidation attempts read definitions");
 });
 
-test("interrupted and definitively rejected requests clear pending workflow proposals", async (t) => {
+it("interrupted and definitively rejected requests clear pending workflow proposals", async (t) => {
   const interruptedFixture = await makeFixture();
-  t.after(interruptedFixture.cleanup);
+  after(t, interruptedFixture.cleanup);
   const interruptedSupervisor = interruptedFixture.makeSupervisor();
   await interruptedSupervisor.runOnce();
   const interruptedTask = interruptedFixture.task();
@@ -571,7 +572,7 @@ test("interrupted and definitively rejected requests clear pending workflow prop
   assert.equal(interrupted?.workflow?.plan, null);
 
   const rejectedFixture = await makeFixture();
-  t.after(rejectedFixture.cleanup);
+  after(t, rejectedFixture.cleanup);
   rejectedFixture.setDispatchFailure("rejected");
   await rejectedFixture.makeSupervisor().runOnce();
   const rejected = rejectedFixture.task();
@@ -581,9 +582,9 @@ test("interrupted and definitively rejected requests clear pending workflow prop
   assert.match(rejected?.workflow?.message ?? "", /definitively rejected/u);
 });
 
-test("unknown dispatch retry reuses the persisted request and definition context", async (t) => {
+it("unknown dispatch retry reuses the persisted request and definition context", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.setDispatchFailure("unknown");
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
@@ -615,9 +616,9 @@ test("unknown dispatch retry reuses the persisted request and definition context
   assert.equal(fixture.definitionReads.length, 1, "retry must not reread mutated project definitions");
 });
 
-test("persisted objective-only records are not backfilled or replayed", async (t) => {
+it("persisted objective-only records are not backfilled or replayed", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   await fixture.makeSupervisor(false).runOnce();
   const queued = fixture.task();
   const binding = fixture.binding();
@@ -659,9 +660,9 @@ const appendSourceMessage = (projection: Projection, id: string, ordinal: number
     kind: "root_turn", status: "completed", providerThreadId: `${id}-provider`});
 };
 
-test("a link-only request stays context for the next genuine request instead of being replaced by a bootstrap instruction", async (t) => {
+it("a link-only request stays context for the next genuine request instead of being replaced by a bootstrap instruction", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const source = fixture.projections.get(sourceThreadId)!;
   source.messages[0]!.text = "https://issues.example/browse/PROJ-1";
   const supervisor = fixture.makeSupervisor();
@@ -684,9 +685,9 @@ test("a link-only request stays context for the next genuine request instead of 
   assert.match(dispatched, /Earlier unresolved requests remain part of the task/u);
 });
 
-test("a semantic not-needed decision is persisted without negotiation and the next genuine request is reconsidered", async (t) => {
+it("a semantic not-needed decision is persisted without negotiation and the next genuine request is reconsidered", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const source = fixture.projections.get(sourceThreadId)!;
   source.messages[0]!.text = "Thank the colleague for the documents and ask for the missing one.";
   const supervisor = fixture.makeSupervisor();
@@ -712,9 +713,9 @@ test("a semantic not-needed decision is persisted without negotiation and the ne
   assert.equal(fixture.dispatches().at(-1)?.payload.threadId, fixture.binding()!.threadId);
 });
 
-test("after an explicit Enable only a request written after it is interpreted", async (t) => {
+it("after an explicit Enable only a request written after it is interpreted", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const source = fixture.projections.get(sourceThreadId)!;
   source.messages[0]!.text = "Thank the colleague for the documents and ask for the missing one.";
   const supervisor = fixture.makeSupervisor();
@@ -739,9 +740,9 @@ test("after an explicit Enable only a request written after it is interpreted", 
   assert.equal(fixture.dispatches().length, 2);
 });
 
-test("a request queued or sent before an explicit Enable is never interpreted after it", async (t) => {
+it("a request queued or sent before an explicit Enable is never interpreted after it", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const source = fixture.projections.get(sourceThreadId)!;
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
@@ -765,9 +766,9 @@ test("a request queued or sent before an explicit Enable is never interpreted af
   assert.equal(fixture.dispatches().length, dispatched, "a pre-Enable interpretation is never resent");
 });
 
-test("an interpretation sent before an explicit Enable with no native outcome keeps its identity and is never closed, replayed or applied", async (t) => {
+it("an interpretation sent before an explicit Enable with no native outcome keeps its identity and is never closed, replayed or applied", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const source = fixture.projections.get(sourceThreadId)!;
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
@@ -794,9 +795,9 @@ test("an interpretation sent before an explicit Enable with no native outcome ke
   assert.equal(fixture.dispatches().length, dispatched);
 });
 
-test("an interpretation in flight across a project re-enable boundary at its source is never applied or resent", async (t) => {
+it("an interpretation in flight across a project re-enable boundary at its source is never applied or resent", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const first = fixture.task()!;
@@ -823,9 +824,9 @@ test("an interpretation in flight across a project re-enable boundary at its sou
   assert.equal(fixture.dispatches().length, dispatched);
 });
 
-test("a queued request at or before the project activation boundary is never interpreted", async (t) => {
+it("a queued request at or before the project activation boundary is never interpreted", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const first = fixture.task()!;
@@ -844,9 +845,9 @@ test("a queued request at or before the project activation boundary is never int
   assert.equal(fixture.dispatches().length, dispatched, "nothing is dispatched for a request before the boundary");
 });
 
-test("the interpretation request carries the concise standing role once, permits reader discovery wrappers and decides relevance before definitions", async (t) => {
+it("the interpretation request carries the concise standing role once, permits reader discovery wrappers and decides relevance before definitions", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const task = fixture.task()!;
@@ -873,10 +874,10 @@ test("the interpretation request carries the concise standing role once, permits
   assert.equal(supervisor.conversation.interpretationRole(fixture.binding()!), null, "later root messages carry no second copy");
 });
 
-test("an Enable or re-enable saved during the final awaits leaves the request undispatched and a finished result unapplied", async (t) => {
+it("an Enable or re-enable saved during the final awaits leaves the request undispatched and a finished result unapplied", async (t) => {
   {
     const fixture = await makeFixture();
-    t.after(fixture.cleanup);
+    after(t, fixture.cleanup);
     const supervisor = fixture.makeSupervisor();
     const internal = supervisor as unknown as {models(signal: AbortSignal): Promise<unknown>; store: {recordChatEnable(id: string, at: number): void}};
     const models = internal.models.bind(supervisor);
@@ -893,7 +894,7 @@ test("an Enable or re-enable saved during the final awaits leaves the request un
   }
   {
     const fixture = await makeFixture();
-    t.after(fixture.cleanup);
+    after(t, fixture.cleanup);
     const supervisor = fixture.makeSupervisor();
     await supervisor.runOnce();
     const first = fixture.task()!;
@@ -918,9 +919,9 @@ test("an Enable or re-enable saved during the final awaits leaves the request un
   }
 });
 
-test("an earlier unresolved request carries forward only from the current supervision epoch", async (t) => {
+it("an earlier unresolved request carries forward only from the current supervision epoch", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const source = fixture.projections.get(sourceThreadId)!;
   source.messages[0]!.text = "https://issues.example/browse/PROJ-1";
   const supervisor = fixture.makeSupervisor();
@@ -943,9 +944,9 @@ test("an earlier unresolved request carries forward only from the current superv
   assert.doesNotMatch(String(fixture.dispatches().at(-1)?.payload.text), /issues\.example/u);
 });
 
-test("after an Enable the chat's next request is interpreted afresh by the same Supervisor, even when an earlier task was interpreted", async (t) => {
+it("after an Enable the chat's next request is interpreted afresh by the same Supervisor, even when an earlier task was interpreted", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const source = fixture.projections.get(sourceThreadId)!;
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
@@ -975,7 +976,7 @@ test("after an Enable the chat's next request is interpreted afresh by the same 
   assert.match(String(fixture.dispatches().at(-1)?.payload.text), /Hi, just checking in\./u);
 });
 
-test("across an Enable only an attempted introduction with an unknown outcome keeps its task; a known-unsent fallback does not hold the next request", async (t) => {
+it("across an Enable only an attempted introduction with an unknown outcome keeps its task; a known-unsent fallback does not hold the next request", async (t) => {
   const priors: Record<string, Pick<WorkflowIntroduction, "state" | "error"> & Partial<WorkflowIntroduction>> = {
     uncertain: {state: "uncertain", dispatchMode: {type: "queue_after_active"}, definiteRejection: false, error: "Proposal delivery is uncertain."},
     acceptedUnobserved: {state: "blocked", dispatchMode: {type: "queue_after_active"}, acceptedAt: 1, error: "T3 accepted this introduction, but it was not found unchanged."},
@@ -984,7 +985,7 @@ test("across an Enable only an attempted introduction with an unknown outcome ke
   };
   for (const [name, prior] of Object.entries(priors)) {
     const fixture = await makeFixture();
-    t.after(fixture.cleanup);
+    after(t, fixture.cleanup);
     const source = fixture.projections.get(sourceThreadId)!;
     const supervisor = fixture.makeSupervisor();
     await supervisor.runOnce();
@@ -1017,9 +1018,9 @@ test("across an Enable only an attempted introduction with an unknown outcome ke
   }
 });
 
-test("the proposal is introduced in the same cycle its interpretation completes", async (t) => {
+it("the proposal is introduced in the same cycle its interpretation completes", async (t) => {
   const fixture = await makeFixture();
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const task = fixture.task()!;

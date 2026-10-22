@@ -3,7 +3,7 @@ import {mkdtemp, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {randomUUID} from "node:crypto";
-import {test} from "node:test";
+import { it } from "vitest";
 import {fingerprint, GuidanceStore} from "../src/guidance-store.js";
 import {defaultSupervisorModel, ProjectSupervisorStore} from "../src/project-supervisor-store.js";
 import {proposalContextFromDefinitions, validateWorkflowApplyAgainstPinnedContext, validateWorkflowPlan} from "../src/supervisor-workflow.js";
@@ -109,7 +109,7 @@ const closeFixture = async (fixture: Fixture) => {
   await rm(fixture.directory, {recursive: true, force: true});
 };
 
-test("file references survive agreement import, apply, restart and defensive state copies", async () => {
+it("file references survive agreement import, apply, restart and defensive state copies", async () => {
   const fixture = await makeFixture();
   try {
     fixture.definitions = {...fixture.definitions,
@@ -228,7 +228,7 @@ const reverseObjectKeys = (value: unknown): unknown => {
   return Object.fromEntries(Object.keys(record).reverse().map(key => [key, reverseObjectKeys(record[key])]));
 };
 
-test("nested agreement imports preserve reusable occurrence IDs and exact history", async () => {
+it("nested agreement imports preserve reusable occurrence IDs and exact history", async () => {
   const fixture = await makeFixture();
   try {
     const source = acceptedAgreement(fixture.proposal);
@@ -267,7 +267,7 @@ test("nested agreement imports preserve reusable occurrence IDs and exact histor
   } finally {await closeFixture(fixture);}
 });
 
-test("nested moves and insertions preserve occurrence status and contributor identity with CAS receipts", async () => {
+it("nested moves and insertions preserve occurrence status and contributor identity with CAS receipts", async () => {
   const fixture = await makeFixture([], false);
   try {
     const source = acceptedAgreement(fixture.proposal);
@@ -338,7 +338,7 @@ test("nested moves and insertions preserve occurrence status and contributor ide
   } finally {await closeFixture(fixture);}
 });
 
-test("a child can work a subset of main requirements without weakening its own fixed commitments", async () => {
+it("a child can work a subset of main requirements without weakening its own fixed commitments", async () => {
   const fixture = await makeFixture([], false);
   try {
     const mainAgreement = acceptedAgreement(fixture.proposal);
@@ -364,7 +364,7 @@ test("a child can work a subset of main requirements without weakening its own f
   } finally {await closeFixture(fixture);}
 });
 
-test("a fixed workflow added after the original proposal remains pinned in main state", async () => {
+it("a fixed workflow added after the original proposal remains pinned in main state", async () => {
   const fixture = await makeFixture([], false);
   try {
     const source = acceptedAgreement(fixture.proposal);
@@ -382,7 +382,7 @@ test("a fixed workflow added after the original proposal remains pinned in main 
   } finally {await closeFixture(fixture);}
 });
 
-test("workflow needs-attention lookup is scoped, bounded, and reports incomplete scans", async () => {
+it("workflow needs-attention lookup is scoped, bounded, and reports incomplete scans", async () => {
   const fixture = await makeFixture();
   try {
     const main = fixture.supervisors.store.transaction(() => fixture.workflows.ensureMainInTransaction(
@@ -425,7 +425,7 @@ test("workflow needs-attention lookup is scoped, bounded, and reports incomplete
   } finally {await closeFixture(fixture);}
 });
 
-test("agreement size bounds reject without creating a row or reserving a receipt", async () => {
+it("agreement size bounds reject without creating a row or reserving a receipt", async () => {
   const fixture = await makeFixture();
   try {
     const source = acceptedAgreement(fixture.proposal);
@@ -439,7 +439,7 @@ test("agreement size bounds reject without creating a row or reserving a receipt
   } finally {await closeFixture(fixture);}
 });
 
-test("unversioned flat documents and receipts are reported incompatible and retained raw", async () => {
+it("unversioned flat documents and receipts are reported incompatible and retained raw", async () => {
   const fixture = await makeFixture();
   try {
     const workflowId = "legacy-workflow";
@@ -482,7 +482,7 @@ test("unversioned flat documents and receipts are reported incompatible and reta
   } finally {await closeFixture(fixture);}
 });
 
-test("missing pinned context and incompatible supervisor scope fail closed without reserving operations", async () => {
+it("missing pinned context and incompatible supervisor scope fail closed without reserving operations", async () => {
   const fixture = await makeFixture();
   let guidance: GuidanceStore | null = fixture.guidance;
   try {
@@ -539,7 +539,7 @@ const seedLocalWorkflow = async () => {
   return {fixture, current};
 };
 
-test("a new live node inserted underway, completed, or needs_attention is rejected with new_node_must_start_planned and a structural status pointer", async () => {
+it("a new live node inserted underway, completed, or needs_attention is rejected with new_node_must_start_planned and a structural status pointer", async () => {
   const {fixture, current} = await seedLocalWorkflow();
   try {
     const index = current.plan!.nodes.length;
@@ -573,7 +573,7 @@ test("a new live node inserted underway, completed, or needs_attention is reject
   } finally {await closeFixture(fixture);}
 });
 
-test("planned-first rejection does not echo the submitted node name, description, or id", async () => {
+it("planned-first rejection does not echo the submitted node name, description, or id", async () => {
   const {fixture, current} = await seedLocalWorkflow();
   try {
     const plan = appendNodes(current.plan!, [liveStep(plannedFirstSentinel, "completed", plannedFirstSentinel)]);
@@ -592,7 +592,7 @@ test("planned-first rejection does not echo the submitted node name, description
   } finally {await closeFixture(fixture);}
 });
 
-test("a new planned node becomes underway or completed only in a separate apply with status_changed evidence", async () => {
+it("a new planned node becomes underway or completed only in a separate apply with status_changed evidence", async () => {
   const {fixture, current} = await seedLocalWorkflow();
   try {
     const inserted = fixture.workflows.apply(fixture.owner, applyInput(fixture, current, appendNodes(current.plan!, [liveStep("third", "planned")]), "insert-planned"), validationFor(fixture));
@@ -623,7 +623,7 @@ test("a new planned node becomes underway or completed only in a separate apply 
   } finally {await closeFixture(fixture);}
 });
 
-test("document status changes still require untargeted status_changed evidence and unknown evidence targets stay generic", async () => {
+it("document status changes still require untargeted status_changed evidence and unknown evidence targets stay generic", async () => {
   const {fixture, current} = await seedLocalWorkflow();
   try {
     const first = current.plan!.nodes[0];
@@ -683,7 +683,7 @@ const statusSnapshot = (fixture: Fixture) => {
   return {status: document.status, nodes: planEntities(document.plan).map(node => [node.nodeId, node.status, [...node.contributorThreadIds]])};
 };
 
-test("external-contribution records parse only with every exact field, type and cap", () => {
+it("external-contribution records parse only with every exact field, type and cap", () => {
   const parsed = parseExternalContributionRecord(contributionRecord());
   assert.deepEqual(parsed, contributionRecord());
   assert.deepEqual(parseExternalContributionRecord(contributionRecord({references: [], externalRef: null, summary: ""}))?.references, []);
@@ -720,7 +720,7 @@ test("external-contribution records parse only with every exact field, type and 
   for (const [label, value] of rejected) assert.equal(parseExternalContributionRecord(value), null, label);
 });
 
-test("contribution revisions start at one, grow by one, replay as no-ops and end at withdrawn", async () => {
+it("contribution revisions start at one, grow by one, replay as no-ops and end at withdrawn", async () => {
   const fixture = await makeFixture([], false);
   try {
     const {first} = seedLocalMain(fixture);
@@ -756,7 +756,7 @@ test("contribution revisions start at one, grow by one, replay as no-ops and end
   } finally {await closeFixture(fixture);}
 });
 
-test("contributions need a current main-plan node and keep their history when the node is removed", async () => {
+it("contributions need a current main-plan node and keep their history when the node is removed", async () => {
   const fixture = await makeFixture([], false);
   try {
     assert.deepEqual(record(fixture, contribution(randomUUID())), {status: "rejected", code: "contribution_node_unknown"}, "no main workflow yet");
@@ -780,7 +780,7 @@ test("contributions need a current main-plan node and keep their history when th
   } finally {await closeFixture(fixture);}
 });
 
-test("a contribution assessment covers one exact result revision, never changes status and is cleared by a later main revision", async () => {
+it("a contribution assessment covers one exact result revision, never changes status and is cleared by a later main revision", async () => {
   const fixture = await makeFixture([], false);
   try {
     const {first} = seedLocalMain(fixture);
@@ -823,7 +823,7 @@ test("a contribution assessment covers one exact result revision, never changes 
   } finally {await closeFixture(fixture);}
 });
 
-test("contributions persist across reopen and a stored document without the field still loads as empty", async () => {
+it("contributions persist across reopen and a stored document without the field still loads as empty", async () => {
   const fixture = await makeFixture([], false);
   try {
     const {first} = seedLocalMain(fixture);
@@ -844,7 +844,7 @@ test("contributions persist across reopen and a stored document without the fiel
   } finally {await rm(fixture.directory, {recursive: true, force: true});}
 });
 
-test("contribution capacity is bounded per document and by the evidence history cap", async () => {
+it("contribution capacity is bounded per document and by the evidence history cap", async () => {
   const fixture = await makeFixture([], false);
   try {
     const {first} = seedLocalMain(fixture);

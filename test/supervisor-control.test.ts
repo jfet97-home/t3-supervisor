@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,7 +66,7 @@ const scopedDefinitionSnapshot = async (globalEnabled: boolean, scratch = false,
   return fixture.loader.load(projectId, "thread", AbortSignal.timeout(2000));
 };
 
-test("global master starts on while project auto-detection persists the first known folder result", async () => {
+it("global master starts on while project auto-detection persists the first known folder result", async () => {
   await withStore(async (store, directory) => {
     assert.equal(store.control(null).enabled, true);
     assert.equal(store.control("project-a").enabled, false);
@@ -106,7 +106,7 @@ test("global master starts on while project auto-detection persists the first kn
   });
 });
 
-test("auto-enable stays unavailable and retries when the native activation boundary cannot be captured", async () => {
+it("auto-enable stays unavailable and retries when the native activation boundary cannot be captured", async () => {
   await withStore(async store => {
     let failBoundary = true;
     let calls = 0;
@@ -131,7 +131,7 @@ test("auto-enable stays unavailable and retries when the native activation bound
   });
 });
 
-test("unavailable folder checks back off for a minute without rewriting their durable marker", async () => {
+it("unavailable folder checks back off for a minute without rewriting their durable marker", async () => {
   await withStore(async store => {
     let now = 1_000_000;
     let presenceCalls = 0;
@@ -164,7 +164,7 @@ test("unavailable folder checks back off for a minute without rewriting their du
   });
 });
 
-test("an auto-present record without a project boundary stays off until a fresh boundary is saved", async () => {
+it("an auto-present record without a project boundary stays off until a fresh boundary is saved", async () => {
   await withStore(async store => {
     store.store.db.prepare("INSERT INTO meta VALUES(?,?)").run(`supervisor_control_auto:${JSON.stringify("project-a")}`, JSON.stringify({status: "present", enabled: true, checkedAt: 1}));
     assert.equal(store.autoControlInitialized("project-a"), false);
@@ -179,7 +179,7 @@ test("an auto-present record without a project boundary stays off until a fresh 
   });
 });
 
-test("manual project choice survives restart and global master off remains independent", async () => {
+it("manual project choice survives restart and global master off remains independent", async () => {
   await withStore((store, directory) => {
     store.recordFolderPresence("project-a", {status: "present"});
     store.saveControl("project-a", 0, false);
@@ -202,7 +202,7 @@ test("manual project choice survives restart and global master off remains indep
   });
 });
 
-test("explicit project enable asks for checkout setup when the folder is missing", async () => {
+it("explicit project enable asks for checkout setup when the folder is missing", async () => {
   await withStore(async store => {
     const supervisor = makeProjectSupervisor(store, {presence: async () => ({status: "missing"})});
     const signal = AbortSignal.timeout(2000);
@@ -214,7 +214,7 @@ test("explicit project enable asks for checkout setup when the folder is missing
   });
 });
 
-test("project setup captures the native enable boundary before writing and retains it", async () => {
+it("project setup captures the native enable boundary before writing and retains it", async () => {
   await withStore(async store => {
     const events: string[] = [];
     const supervisor = makeProjectSupervisor(store, {
@@ -238,7 +238,7 @@ test("project setup captures the native enable boundary before writing and retai
   });
 });
 
-test("enable_existing adopts a present checkout without running the project initializer", async () => {
+it("enable_existing adopts a present checkout without running the project initializer", async () => {
   await withStore(async store => {
     const events: string[] = [];
     let initializeCalls = 0;
@@ -267,7 +267,7 @@ test("enable_existing adopts a present checkout without running the project init
   });
 });
 
-test("enable_existing rechecks folder presence after capturing its boundary", async () => {
+it("enable_existing rechecks folder presence after capturing its boundary", async () => {
   await withStore(async store => {
     let checkoutPresenceChecks = 0;
     let boundaryCaptures = 0;
@@ -291,7 +291,7 @@ test("enable_existing rechecks folder presence after capturing its boundary", as
   });
 });
 
-test("enable_existing rejects a worktree whose selected branch changed during setup", async () => {
+it("enable_existing rejects a worktree whose selected branch changed during setup", async () => {
   await withStore(async store => {
     const project: ProjectInfo = {id: "project-a", title: "Project A", workspaceRoot: "/work/project-a"};
     const main: ThreadInfo = {id: "main", title: "Main", projectId: "project-a", lineage: {parentThreadId: null, relationshipToParent: null}};
@@ -324,7 +324,7 @@ test("enable_existing rejects a worktree whose selected branch changed during se
   });
 });
 
-test("enable_existing requires a present folder and create still rejects existing folders", async () => {
+it("enable_existing requires a present folder and create still rejects existing folders", async () => {
   await withStore(async store => {
     let folderStatus: SupervisionFolderPresence["status"] = "missing";
     let initialized = 0;
@@ -356,7 +356,7 @@ test("enable_existing requires a present folder and create still rejects existin
   });
 });
 
-test("unreadable project detection is not saved as an opt-out and another project can resolve", async () => {
+it("unreadable project detection is not saved as an opt-out and another project can resolve", async () => {
   await withStore(async store => {
     let failure = true;
     const supervisor = makeProjectSupervisor(store, {presence: async projectId => projectId === "project-a" && failure
@@ -377,7 +377,7 @@ test("unreadable project detection is not saved as an opt-out and another projec
   });
 });
 
-test("global definitions stay off by default until explicitly enabled, even when the folder exists", async () => {
+it("global definitions stay off by default until explicitly enabled, even when the folder exists", async () => {
   await withStore(async (store, directory) => {
     const events: string[] = [];
     const supervisor = makeProjectSupervisor(store, {
@@ -402,7 +402,7 @@ test("global definitions stay off by default until explicitly enabled, even when
   });
 });
 
-test("global definitions effectiveEnabled follows the master and definitions truth table", async () => {
+it("global definitions effectiveEnabled follows the master and definitions truth table", async () => {
   const cases = [
     {master: false, definitions: false, effective: false},
     {master: false, definitions: true, effective: false},
@@ -419,7 +419,7 @@ test("global definitions effectiveEnabled follows the master and definitions tru
   });
 });
 
-test("first explicit global definitions enable initializes a missing server-home folder before switching on", async () => {
+it("first explicit global definitions enable initializes a missing server-home folder before switching on", async () => {
   await withStore(async store => {
     const events: string[] = [];
     const settings = store.store.settings();
@@ -443,7 +443,7 @@ test("first explicit global definitions enable initializes a missing server-home
   });
 });
 
-test("No Project mode controls activation independently of shared definitions", async () => {
+it("No Project mode controls activation independently of shared definitions", async () => {
   await withStore(async store => {
     const settings = store.store.settings();
     store.store.classify("project-a", "scratch", settings.generation);
@@ -463,7 +463,7 @@ test("No Project mode controls activation independently of shared definitions", 
   });
 });
 
-test("a global-definition toggle authorizes only that input scope and unchanged local catalogs", async () => {
+it("a global-definition toggle authorizes only that input scope and unchanged local catalogs", async () => {
   const approved = await scopedDefinitionSnapshot(true);
   const disabled = await scopedDefinitionSnapshot(false);
   assert.equal(approved.status, "ready");
@@ -482,7 +482,7 @@ test("a global-definition toggle authorizes only that input scope and unchanged 
   });
 });
 
-test("Scratch workflow introductions point to shared definitions and omit a project-local folder", async () => {
+it("Scratch workflow introductions point to shared definitions and omit a project-local folder", async () => {
   const definitionSnapshot = await scopedDefinitionSnapshot(true, true, "scratch-project", "/scratch");
   assert.equal(definitionSnapshot.globalOnly, true);
   assert.equal(definitionSnapshot.status, "ready");

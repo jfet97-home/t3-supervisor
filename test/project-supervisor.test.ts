@@ -1,7 +1,8 @@
 import {WorkflowWriteController} from "../src/workflow-write-controller.js";
 import { ThreadPolicyStore } from "../src/thread-policy.js";
 import assert from "node:assert/strict";
-import test from "node:test";
+import { it } from "vitest";
+import { after, mockMethod } from "./support/node-test.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -453,9 +454,9 @@ const addPendingHelperCheckin = (supervisor: ProjectSupervisor, binding: ReturnT
   return pending;
 };
 
-test("scopeSnapshot returns current binding coordinates and verified descendant lineage across project mirrors", async t => {
+it("scopeSnapshot returns current binding coordinates and verified descendant lineage across project mirrors", async t => {
   const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const binding = reserveReadyBinding(fixture);
   const main = fixture.projections.get("source-thread");assert.ok(main);
   const child = makeSourceProjection("native-child", "other-project", []);
@@ -489,9 +490,9 @@ test("scopeSnapshot returns current binding coordinates and verified descendant 
     "the snapshot reads only the requested child and its parent, plus the owning Supervisor");
 });
 
-test("an unbound scopeSnapshot returns only the requested lineage page without Supervisor reads", async t => {
+it("an unbound scopeSnapshot returns only the requested lineage page without Supervisor reads", async t => {
   const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   for (const id of ["child-one", "child-two"]) {
     const child = makeSourceProjection(id, "other-project", []);
     child.thread.projectId = null;
@@ -508,7 +509,7 @@ test("an unbound scopeSnapshot returns only the requested lineage page without S
   assert.deepEqual(fixture.projectionReads.slice(readsBefore), ["child-one", "source-thread"]);
 });
 
-test("activation baseline excludes existing runs and gives independent mains separate Supervisors", async (t) => {
+it("activation baseline excludes existing runs and gives independent mains separate Supervisors", async (t) => {
   const fixture = await makeFixture([
     { threadId: "old-thread", projectId: "project-a", turns: [{ id: "old-task", sequence: 9, text: "Old work" }] },
     { threadId: "current-thread", projectId: "project-a", turns: [
@@ -517,7 +518,7 @@ test("activation baseline excludes existing runs and gives independent mains sep
     ] },
     { threadId: "archived-history", projectId: "project-a", turns: [{ id: "archived-task", sequence: 8, text: "Archived work" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.projections.get("archived-history")!.thread.archivedAt = baseTime;
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
@@ -570,11 +571,11 @@ test("activation baseline excludes existing runs and gives independent mains sep
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 2);
 });
 
-test("a newly registered project reuses startup history bounds and auto-enables before its next prompt", async t => {
+it("a newly registered project reuses startup history bounds and auto-enables before its next prompt", async t => {
   const fixture = await makeFixture([{threadId: "new-main", projectId: "project-new", turns: [
     {id: "preexisting-history", sequence: 9, text: "A task that predates the service startup boundary"},
   ]}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const definitions = {
     load: async (projectId: string, threadId: string | null) => missingDefinitions(projectId, threadId, "/work/new"),
     presence: async (projectId: string) => ({status: projectId === "project-new" ? "present" as const : "missing" as const}),
@@ -596,9 +597,9 @@ test("a newly registered project reuses startup history bounds and auto-enables 
   assert.equal(fixture.baselineReads, 1, "auto-detection does not move the boundary past the first subsequent task");
 });
 
-test("a project added with its first human task between polls supervises that task", async t => {
+it("a project added with its first human task between polls supervises that task", async t => {
   const fixture = await makeFixture([{threadId: "existing-thread", projectId: "project-a", turns: []}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const definitions = {
     load: async (projectId: string, threadId: string | null) => missingDefinitions(projectId, threadId, "/work/new"),
     presence: async (projectId: string) => ({status: projectId === "project-new" ? "present" as const : "missing" as const}),
@@ -617,9 +618,9 @@ test("a project added with its first human task between polls supervises that ta
   assert.equal(fixture.baselineReads, 1, "the post-startup task is not absorbed by a late first-seen snapshot");
 });
 
-test("a project that was unreadable recaptures its boundary before resuming discovery", async t => {
+it("a project that was unreadable recaptures its boundary before resuming discovery", async t => {
   const fixture = await makeFixture([{threadId: "existing-thread", projectId: "project-a", turns: []}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   let folderStatus: "present" | "unavailable" = "unavailable";
   const definitions = {
     load: async (projectId: string, threadId: string | null) => missingDefinitions(projectId, threadId, "/work/new"),
@@ -648,7 +649,7 @@ test("a project that was unreadable recaptures its boundary before resuming disc
   assert.equal(fixture.supervisorStore.task("new-main")?.status, "waiting");
 });
 
-test("a web-originated message with non-user authorship is not treated as a task", async (t) => {
+it("a web-originated message with non-user authorship is not treated as a task", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{
       id: "non-user-source",
@@ -658,7 +659,7 @@ test("a web-originated message with non-user authorship is not treated as a task
       createdBy: "assistant",
     }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   await fixture.makeSupervisor().runOnce();
 
   assert.equal(fixture.supervisorStore.task("source-thread"), null);
@@ -666,11 +667,11 @@ test("a web-originated message with non-user authorship is not treated as a task
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 0);
 });
 
-test("a missing baseline run anchor fails closed instead of interpreting later projection history", async (t) => {
+it("a missing baseline run anchor fails closed instead of interpreting later projection history", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "baseline-anchor", sequence: 9, text: "Historical request" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   assert.equal(fixture.supervisorStore.baselineOrdinal("source-thread", fixture.projections.get("source-thread")!), 1);
@@ -685,14 +686,14 @@ test("a missing baseline run anchor fails closed instead of interpreting later p
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 0);
 });
 
-test("an unversioned activation baseline is replaced by a conservative version 2 capture", async (t) => {
+it("an unversioned activation baseline is replaced by a conservative version 2 capture", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [
       { id: "legacy-history", sequence: 9, text: "Do not backfill this old task" },
       { id: "post-activation-task", sequence: 11, text: "Review the next change" },
     ] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.setLegacyBaseline({ snapshotSequence: 9, threads: [] });
   assert.equal(fixture.supervisorStore.baseline(), null);
 
@@ -707,9 +708,9 @@ test("an unversioned activation baseline is replaced by a conservative version 2
   assert.equal(fixture.supervisorStore.task("source-thread")?.status, "waiting");
 });
 
-test("model choices are checked against T3 and saved per project with generation CAS", async (t) => {
+it("model choices are checked against T3 and saved per project with generation CAS", async (t) => {
   const fixture = await makeFixture([]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   const signal = AbortSignal.timeout(1000);
   const invalid = await supervisor.save({
@@ -744,9 +745,9 @@ test("model choices are checked against T3 and saved per project with generation
   assert.equal(fixture.supervisorStore.settings("project-b").generation, 1);
 });
 
-test("model defaults affect new Supervisors while independent T3 selections remain authoritative", async t => {
+it("model defaults affect new Supervisors while independent T3 selections remain authoritative", async t => {
   const fixture = await makeFixture([{threadId: "first", projectId: "project-a", turns: [{id: "first-task", sequence: 11, text: "Implement first"}]}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const first = fixture.supervisorStore.binding("project-a", "first")!;
@@ -768,11 +769,11 @@ test("model defaults affect new Supervisors while independent T3 selections rema
   assert.equal(noSelection.binding, null);assert.equal(noSelection.modelSelection, null);assert.deepEqual(noSelection.tasks, []);
 });
 
-test("unknown dispatch survives restart and retention with the original native identities", async (t) => {
+it("unknown dispatch survives restart and retention with the original native identities", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "source-task", sequence: 11, text: "Create a migration plan" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.setUnknownDispatches(1);
   await fixture.makeSupervisor().runOnce();
   const uncertain = fixture.supervisorStore.task("source-thread");
@@ -802,11 +803,11 @@ test("unknown dispatch survives restart and retention with the original native i
   assert.equal(fixture.operations.some((call) => ["runtime-request.respond", "thread.interrupt", "runtime-request.interrupt"].includes(String(call.payload.type))), false);
 });
 
-test("accepted requests without native runs stop after two replays and remain available for explicit retry", async (t) => {
+it("accepted requests without native runs stop after two replays and remain available for explicit retry", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "source-task", sequence: 11, text: "Create a migration plan" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.setAcceptedDispatchesWithoutRun(3);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
@@ -833,11 +834,11 @@ test("accepted requests without native runs stop after two replays and remain av
   assert.equal(retried[3]?.payload.messageId, retried[0]?.payload.messageId);
 });
 
-test("a transient Supervisor projection failure is not treated as proof the thread is missing", async (t) => {
+it("a transient Supervisor projection failure is not treated as proof the thread is missing", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "source-task", sequence: 11, text: "Create a migration plan" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.setNextMissingProjectionFailure(new T3TransportError("projection unavailable", 503));
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
@@ -854,11 +855,11 @@ test("a transient Supervisor projection failure is not treated as proof the thre
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 1);
 });
 
-test("creation attempts stop after three failures until explicit retry reuses the original command identity", async (t) => {
+it("creation attempts stop after three failures until explicit retry reuses the original command identity", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "source-task", sequence: 11, text: "Create a migration plan" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.setLaunchFailuresBeforeCreate(3);
   const supervisor = fixture.makeSupervisor();
   for (let attempt = 0; attempt < 4; attempt += 1) await supervisor.runOnce();
@@ -883,11 +884,11 @@ test("creation attempts stop after three failures until explicit retry reuses th
   assert.equal(fixture.supervisorStore.ownedIds.size, 1);
 });
 
-test("durable creation rejection requires explicit retry and advances only the native command generation", async (t) => {
+it("durable creation rejection requires explicit retry and advances only the native command generation", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "source-task", sequence: 11, text: "Create a migration plan" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.setDurableLaunchRejections(1);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
@@ -912,11 +913,11 @@ test("durable creation rejection requires explicit retry and advances only the n
   assert.equal(fixture.supervisorStore.task("source-thread")?.status, "waiting");
 });
 
-test("a provider-disabled initial creation is durably rejected without automatic relaunch", async (t) => {
+it("a provider-disabled initial creation is durably rejected without automatic relaunch", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "source-task", sequence: 11, text: "Create a migration plan" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.setProviderDisabledLaunchRejections(1);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
@@ -927,21 +928,21 @@ test("a provider-disabled initial creation is durably rejected without automatic
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 1);
 });
 
-test("a provider-disabled objective does not block another main in the same project", async t => {
+it("a provider-disabled objective does not block another main in the same project", async t => {
   const fixture = await makeFixture([{threadId: "first-thread", projectId: "project-a", turns: [{id: "first-task", sequence: 11, text: "Implement first"}]},
     {threadId: "second-thread", projectId: "project-a", turns: [{id: "second-task", sequence: 12, text: "Implement second"}]}]);
-  t.after(fixture.cleanup);fixture.setProviderDisabledDispatches(1);
+  after(t, fixture.cleanup);fixture.setProviderDisabledDispatches(1);
   await fixture.makeSupervisor().runOnce();
   assert.equal(fixture.supervisorStore.task("first-thread")?.status, "unavailable");
   assert.equal(fixture.supervisorStore.task("second-thread")?.status, "waiting");
   assert.notEqual(fixture.supervisorStore.task("first-thread")?.supervisorThreadId, fixture.supervisorStore.task("second-thread")?.supervisorThreadId);
 });
 
-test("a lost launch response recovers the native-created Supervisor without duplicate launch or ownership", async (t) => {
+it("a lost launch response recovers the native-created Supervisor without duplicate launch or ownership", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "source-task", sequence: 11, text: "Create a migration plan" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.setUnknownLaunchResponses(1);
   await fixture.makeSupervisor().runOnce();
 
@@ -962,11 +963,11 @@ test("a lost launch response recovers the native-created Supervisor without dupl
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 1);
 });
 
-test("an archived reserved binding is retained and never launched again", async (t) => {
+it("an archived reserved binding is retained and never launched again", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "source-task", sequence: 11, text: "Create a migration plan" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.setUnknownLaunchResponses(1);
   await fixture.makeSupervisor().runOnce();
   const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
@@ -983,9 +984,9 @@ test("an archived reserved binding is retained and never launched again", async 
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 1);
 });
 
-test("workflow editing waits for classification and keeps No Project activation independent of definitions", async t => {
+it("workflow editing waits for classification and keeps No Project activation independent of definitions", async t => {
   const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   reserveReadyBinding(fixture);
   const supervisor = fixture.makeSupervisor();
   assert.equal(supervisor.workflowEditingEnabled("project-a"), false, "startup cannot bypass unknown Scratch classification");
@@ -1010,12 +1011,12 @@ test("workflow editing waits for classification and keeps No Project activation 
   assert.equal(supervisor.workflowEditingEnabled("project-a"), false);
 });
 
-test("global or project off still parks closed idle bindings without semantic work", async t => {
+it("global or project off still parks closed idle bindings without semantic work", async t => {
   const clock = {now: Date.parse(baseTime)};
-  t.mock.method(Date, "now", () => clock.now);
+  mockMethod(t, Date, "now", () => clock.now);
   for (const disabledScope of ["global", "project"] as const) {
     const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
-    t.after(fixture.cleanup);
+    after(t, fixture.cleanup);
     const binding = reserveReadyBinding(fixture);
     fixture.projections.get("source-thread")!.thread.archivedAt = baseTime;
     if (disabledScope === "global") fixture.supervisorStore.saveControl(null, 0, false);
@@ -1034,9 +1035,9 @@ test("global or project off still parks closed idle bindings without semantic wo
   }
 });
 
-test("disabled supervision never settles a closed main with an active Supervisor run", async t => {
+it("disabled supervision never settles a closed main with an active Supervisor run", async t => {
   const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const binding = reserveReadyBinding(fixture);
   fixture.projections.get("source-thread")!.thread.archivedAt = baseTime;
   const supervisorProjection = fixture.projections.get(binding.threadId)!;
@@ -1050,9 +1051,9 @@ test("disabled supervision never settles a closed main with an active Supervisor
   assert.equal(fixture.supervisorStore.binding("project-a", "source-thread")?.settlement, undefined);
 });
 
-test("missing-root replacement terminalizes helper check-ins after confirming active and previously missing helpers", async t => {
+it("missing-root replacement terminalizes helper check-ins after confirming active and previously missing helpers", async t => {
   const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const binding = reserveReadyBinding(fixture);
   const supervisor = fixture.makeSupervisor();
   const reviewHelper = registerReadyHelper(fixture, supervisor, binding, "helper-review-missing");
@@ -1101,9 +1102,9 @@ test("missing-root replacement terminalizes helper check-ins after confirming ac
   assert.equal(fixture.supervisorStore.ownedIds.has(registering.threadId), true);
 });
 
-test("explicit root replacement confirms missing helpers, retires owned webhook jobs, and retains team history", async t => {
+it("explicit root replacement confirms missing helpers, retires owned webhook jobs, and retains team history", async t => {
   const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const binding = reserveReadyBinding(fixture);
   const supervisor = fixture.makeSupervisor();
   const deletedHelper = registerReadyHelper(fixture, supervisor, binding, "helper-deleted");
@@ -1140,9 +1141,9 @@ test("explicit root replacement confirms missing helpers, retires owned webhook 
     .get(binding.threadId, binding.generation)?.n, 2);
 });
 
-test("missing-root replacement refuses a still-present helper without retiring or relabeling it", async t => {
+it("missing-root replacement refuses a still-present helper without retiring or relabeling it", async t => {
   const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const binding = reserveReadyBinding(fixture);
   const supervisor = fixture.makeSupervisor();
   const helper = registerReadyHelper(fixture, supervisor, binding, "helper-still-present");
@@ -1159,9 +1160,9 @@ test("missing-root replacement refuses a still-present helper without retiring o
   assert.equal(fixture.operations.some(call => call.tag === "scheduledTasks.delete" || call.tag === "orchestration.launchThread"), false);
 });
 
-test("missing-root replacement fails closed when a known helper lookup is uncertain", async t => {
+it("missing-root replacement fails closed when a known helper lookup is uncertain", async t => {
   const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const binding = reserveReadyBinding(fixture);
   const supervisor = fixture.makeSupervisor();
   const helper = registerReadyHelper(fixture, supervisor, binding, "helper-lookup-unknown");
@@ -1179,9 +1180,9 @@ test("missing-root replacement fails closed when a known helper lookup is uncert
   assert.equal(fixture.operations.some(call => call.tag === "scheduledTasks.delete" || call.tag === "orchestration.launchThread"), false);
 });
 
-test("missing-root replacement preserves and remains blocked by an uncertain helper effect", async t => {
+it("missing-root replacement preserves and remains blocked by an uncertain helper effect", async t => {
   const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const binding = reserveReadyBinding(fixture);
   const supervisor = fixture.makeSupervisor();
   const helper = registerReadyHelper(fixture, supervisor, binding, "helper-uncertain-effect");
@@ -1226,11 +1227,11 @@ test("missing-root replacement preserves and remains blocked by an uncertain hel
   assert.equal(fixture.operations.some(call => call.tag === "orchestration.launchThread"), false);
 });
 
-test("a stale retry intent cannot replace a missing binding; explicit replacement retains old ownership", async (t) => {
+it("a stale retry intent cannot replace a missing binding; explicit replacement retains old ownership", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "source-task", sequence: 11, text: "Create a migration plan" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const original = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
@@ -1262,11 +1263,11 @@ test("a stale retry intent cannot replace a missing binding; explicit replacemen
   assert.equal(retained?.messageId, originalTask.messageId);
 });
 
-test("a changed source invalidates a completed Supervisor result without an operational reply", async (t) => {
+it("a changed source invalidates a completed Supervisor result without an operational reply", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "source-task", sequence: 11, text: "Deploy the release" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const task = fixture.supervisorStore.task("source-thread");
@@ -1288,11 +1289,11 @@ test("a changed source invalidates a completed Supervisor result without an oper
   assert.equal(fixture.operations.some((call) => ["runtime-request.respond", "thread.interrupt"].includes(String(call.payload.type))), false);
 });
 
-test("a completed interpretation with unrelated source IDs is rejected", async (t) => {
+it("a completed interpretation with unrelated source IDs is rejected", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "source-task", sequence: 11, text: "Create a release checklist" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const task = fixture.supervisorStore.task("source-thread");
@@ -1311,11 +1312,11 @@ test("a completed interpretation with unrelated source IDs is rejected", async (
   assert.match(rejected?.reason ?? "", /valid, source-linked interpretation/u);
 });
 
-test("interrupted and stalled Supervisor runs become unavailable without answers or interruption commands", async (t) => {
+it("interrupted and stalled Supervisor runs become unavailable without answers or interruption commands", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "first-task", sequence: 11, text: "Review the release" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
@@ -1348,11 +1349,11 @@ test("interrupted and stalled Supervisor runs become unavailable without answers
   assert.equal(fixture.projections.get("source-thread")?.messages.length, 2);
 });
 
-test("queued and not-yet-started Supervisor runs do not time out from stale dispatch time", async (t) => {
+it("queued and not-yet-started Supervisor runs do not time out from stale dispatch time", async (t) => {
   const fixture = await makeFixture([
     { threadId: "source-thread", projectId: "project-a", turns: [{ id: "first-task", sequence: 11, text: "Review the release" }] },
   ]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const binding = (fixture.supervisorStore.bindings().find(binding => binding.projectId === "project-a") ?? null);
@@ -1378,9 +1379,9 @@ test("queued and not-yet-started Supervisor runs do not time out from stale disp
   assert.equal(fixture.supervisorStore.task("source-thread")?.status, "unavailable");
 });
 
-test("agreement snapshots preserve mixed plans through restart and mark replaced ownership stale", async (t) => {
+it("agreement snapshots preserve mixed plans through restart and mark replaced ownership stale", async (t) => {
   const fixture = await makeFixture([{threadId: "agreement-source", projectId: "project-a", turns: [{id: "agreement-task", sequence: 11, text: "Add CSV export"}]}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const task = fixture.supervisorStore.task("agreement-source")!;
@@ -1408,9 +1409,9 @@ test("agreement snapshots preserve mixed plans through restart and mark replaced
   assert.deepEqual(stale?.workflow, workflow);
 });
 
-test("task payload expiry clears retained agreement plans and current proposal identity", async (t) => {
+it("task payload expiry clears retained agreement plans and current proposal identity", async (t) => {
   const fixture = await makeFixture([{threadId: "expiry-source", projectId: "project-a", turns: [{id: "expiry-task", sequence: 11, text: "Add CSV export"}]}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   await fixture.makeSupervisor().runOnce();
   const task = fixture.supervisorStore.task("expiry-source")!;
   const workflow = workflowSnapshot(false);
@@ -1428,8 +1429,8 @@ test("task payload expiry clears retained agreement plans and current proposal i
   assert.equal(expired?.workflowProposalId, undefined);
 });
 
-test("explicit editor authorization binds exact complete definition contents and workspace", async t => {
-  const fixture = await makeFixture([]);t.after(fixture.cleanup);
+it("explicit editor authorization binds exact complete definition contents and workspace", async t => {
+  const fixture = await makeFixture([]);after(t, fixture.cleanup);
   const source = makeDefinitionFixture({projectId: "project-a", root: "/work/a", threadRoot: "/work/a"});
   source.addFile("/work/a", ".t3-supervisor/steps/verify.md", stepSource("verify", "Check the changed behavior."));
   source.addDirectory("/work/a", ".t3-supervisor/workflows");
@@ -1452,10 +1453,10 @@ test("explicit editor authorization binds exact complete definition contents and
   assert.equal(fixture.supervisorStore.definitionUserSave(approved, approved, 0), true);
 });
 
-test("parallel main worktrees retain distinct ownership and scoped recovery through restart", async t => {
+it("parallel main worktrees retain distinct ownership and scoped recovery through restart", async t => {
   const fixture = await makeFixture([{threadId: "tree-a", projectId: "project-a", turns: [{id: "a-task", sequence: 11, text: "Implement in tree A"}]},
     {threadId: "tree-b", projectId: "project-a", turns: [{id: "b-task", sequence: 12, text: "Implement in tree B"}]}]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   fixture.projections.get("tree-a")!.thread.worktreePath = "/work/a/tree-a";fixture.projections.get("tree-b")!.thread.worktreePath = "/work/a/tree-b";
   fixture.setUnknownDispatches(1);await fixture.makeSupervisor().runOnce();
   const a = fixture.supervisorStore.binding("project-a", "tree-a")!;const b = fixture.supervisorStore.binding("project-a", "tree-b")!;
@@ -1469,9 +1470,9 @@ test("parallel main worktrees retain distinct ownership and scoped recovery thro
   assert.ok(fixture.operations.filter(call => call.tag === "orchestration.launchThread").every(call => (call.payload.workspaceStrategy as {type: string}).type === "root"));
 });
 
-test("a native keep-active choice does not restore stale binding creation state", async t => {
+it("a native keep-active choice does not restore stale binding creation state", async t => {
   const fixture = await makeFixture([{threadId: "pinned-source", projectId: "project-a", turns: [{id: "pin-task", sequence: 11, text: "Implement a task"}]}]);
-  t.after(fixture.cleanup);const supervisor = fixture.makeSupervisor();await supervisor.runOnce();
+  after(t, fixture.cleanup);const supervisor = fixture.makeSupervisor();await supervisor.runOnce();
   const binding = fixture.supervisorStore.binding("project-a", "pinned-source")!;
   fixture.supervisorStore.setBinding({...binding, state: "uncertain"});
   fixture.projections.get(binding.threadId)!.thread.settledOverride = "active";
@@ -1481,16 +1482,16 @@ test("a native keep-active choice does not restore stale binding creation state"
 });
 
 
-test("an independent fork remains eligible when its old parent is absent from the active catalog", async t => {
+it("an independent fork remains eligible when its old parent is absent from the active catalog", async t => {
   const fixture = await makeFixture([{threadId: "fork-main", projectId: "project-a", turns: [{id: "fork-task", sequence: 11, text: "Implement separately"}]}]);
-  t.after(fixture.cleanup);fixture.projections.get("fork-main")!.thread.lineage = {parentThreadId: "archived-parent", relationshipToParent: "fork", rootThreadId: "historical-root"};
+  after(t, fixture.cleanup);fixture.projections.get("fork-main")!.thread.lineage = {parentThreadId: "archived-parent", relationshipToParent: "fork", rootThreadId: "historical-root"};
   await fixture.makeSupervisor().runOnce();assert.equal(fixture.supervisorStore.task("fork-main")?.status, "waiting");
   assert.ok(fixture.supervisorStore.binding("project-a", "fork-main"));
 });
 
-test("repeated short passes rotate past a hung Supervisor and keep later mains progressing", async t => {
+it("repeated short passes rotate past a hung Supervisor and keep later mains progressing", async t => {
   const initial = Array.from({length: 9}, (_, index) => ({threadId: `main-${index}`, projectId: "project-a", turns: [{id: `old-${index}`, sequence: 9, text: "Old task"}]}));
-  const fixture = await makeFixture(initial);t.after(fixture.cleanup);
+  const fixture = await makeFixture(initial);after(t, fixture.cleanup);
   const ids = new Map<string, string>();const touched = new Set<string>();
   for (const item of initial) {
     const binding = {...fixture.supervisorStore.reserve("project-a", item.threadId, item.threadId, defaultSupervisorModel, 10, Date.now()), state: "ready" as const};
@@ -1498,7 +1499,7 @@ test("repeated short passes rotate past a hung Supervisor and keep later mains p
     fixture.projections.set(binding.threadId, emptySupervisorProjection(binding.threadId, "project-a", defaultSupervisorModel));
   }
   const supervisor = fixture.makeSupervisor();const original = supervisor.t3.projection;
-  t.mock.method(supervisor.t3, "projection", (id: string) => {
+  mockMethod(t, supervisor.t3, "projection", (id: string) => {
     const main = ids.get(id);if (main) touched.add(main);
     return main === "main-0" ? Effect.never : original(id);
   });
@@ -1506,12 +1507,12 @@ test("repeated short passes rotate past a hung Supervisor and keep later mains p
   assert.equal(touched.size, 9, "the same slow first binding must not permanently hide tail mains");
 });
 
-test("a main conversation over the buffered cap is discovered and interpreted from its exact old source", async (t) => {
+it("a main conversation over the buffered cap is discovered and interpreted from its exact old source", async (t) => {
   const turns: Turn[] = [{ id: "before-activation", sequence: 5, text: "Earlier unrelated request" },
     { id: "old-task", sequence: 11, text: "Build the invoice export" },
     ...Array.from({ length: 12 }, (_, index) => ({ id: `later-${index}`, sequence: 12 + index, text: `Follow-up request ${index}` }))];
   const fixture = await makeFixture([{ threadId: "huge-main", projectId: "project-a", turns }]);
-  t.after(fixture.cleanup);
+  after(t, fixture.cleanup);
   // every native read is served in full over HTTP, padded with arrays the Supervisor never reads
   const retainedBudget = 96 * 1024;
   const padding = Array.from({ length: 300 }, (_, index) => ({ position: index, visibility: "local", sourceThreadId: "huge-main",
@@ -1526,7 +1527,7 @@ test("a main conversation over the buffered cap is discovered and interpreted fr
     response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }).end(body);
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  after(t, () => new Promise<void>(resolve => server.close(() => resolve())));
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const client = await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
@@ -1565,7 +1566,7 @@ const noProjectFixture = async () => {
   return {fixture, supervisor, policy, cleanup: async () => {policy.close();await fixture.cleanup();}};
 };
 
-test("No Project defaults to On request and shared definitions never activate a chat", async () => {
+it("No Project defaults to On request and shared definitions never activate a chat", async () => {
   const f = await noProjectFixture();
   try {
     assert.equal(f.supervisor.noProjectControl().mode, "on_request");
@@ -1578,7 +1579,7 @@ test("No Project defaults to On request and shared definitions never activate a 
   } finally {await f.cleanup();}
 });
 
-test("native Start runs one intent interpretation, grants only that chat and survives restart", async () => {
+it("native Start runs one intent interpretation, grants only that chat and survives restart", async () => {
   const f = await noProjectFixture();
   try {
     const args = {callerThreadId: "manual", userMessageId: "request-start", operationId: "own-start"};
@@ -1605,7 +1606,7 @@ test("native Start runs one intent interpretation, grants only that chat and sur
   } finally {await f.cleanup();}
 });
 
-test("negative Start intent and later Stop fence interpretation without operative contact", async () => {
+it("negative Start intent and later Stop fence interpretation without operative contact", async () => {
   for (const outcome of ["negative", "stop", "mode", "edited"] as const) {
     const f = await noProjectFixture();
     try {
@@ -1623,7 +1624,7 @@ test("negative Start intent and later Stop fence interpretation without operativ
   }
 });
 
-test("dashboard Start grants next-request permission when current work is already finished", async () => {
+it("dashboard Start grants next-request permission when current work is already finished", async () => {
   const f = await noProjectFixture();
   try {
     assert.equal((await f.supervisor.dashboardStart("manual", "dashboard", AbortSignal.timeout(1000))).status, "active");
@@ -1639,7 +1640,7 @@ test("dashboard Start grants next-request permission when current work is alread
   } finally {await f.cleanup();}
 });
 
-test("Start intake requires exact native own-run proof before reserving permission", async () => {
+it("Start intake requires exact native own-run proof before reserving permission", async () => {
   for (const variant of ["direct", "mcpx", "forged", "foreign", "rollback", "wrong_tool"] as const) {
     const f = await noProjectFixture();
     try {
@@ -1663,7 +1664,7 @@ test("Start intake requires exact native own-run proof before reserving permissi
   }
 });
 
-test("Start rejects nonhuman, wrong-turn, project and stale sources, and keeps duplicate operation identity", async () => {
+it("Start rejects nonhuman, wrong-turn, project and stale sources, and keeps duplicate operation identity", async () => {
   const f = await noProjectFixture();
   try {
     const args = {callerThreadId: "manual", userMessageId: "request-start", operationId: "identity"};
@@ -1680,7 +1681,7 @@ test("Start rejects nonhuman, wrong-turn, project and stale sources, and keeps d
   } finally {await f.cleanup();}
 });
 
-test("Retry reaches a started No Project chat and still reconciles Stop notice/settlement in ordinary projects", async () => {
+it("Retry reaches a started No Project chat and still reconciles Stop notice/settlement in ordinary projects", async () => {
   for (const noProject of [false, true]) {
     const f = await noProjectFixture();
     try {
@@ -1705,7 +1706,7 @@ test("Retry reaches a started No Project chat and still reconciles Stop notice/s
   }
 });
 
-test("an inactive rejected Start parks its root without a human Stop or losing source history", async () => {
+it("an inactive rejected Start parks its root without a human Stop or losing source history", async () => {
   const f = await noProjectFixture();
   try {
     await f.supervisor.startSupervision({callerThreadId: "manual", userMessageId: "request-start", operationId: "reject-and-park"}, {runId: "run-request-start"}, AbortSignal.timeout(1000));
@@ -1720,7 +1721,7 @@ test("an inactive rejected Start parks its root without a human Stop or losing s
   } finally {await f.cleanup();}
 });
 
-test("a Stop before any root exists still exposes its original caller/source/time without creating a conversation", async () => {
+it("a Stop before any root exists still exposes its original caller/source/time without creating a conversation", async () => {
   const f = await noProjectFixture();
   try {
     f.fixture.addTurn("manual", "project-a", {id: "stop-without-root", sequence: 21, text: "Stop supervision for this chat."});
@@ -1736,7 +1737,7 @@ test("a Stop before any root exists still exposes its original caller/source/tim
   } finally {await f.cleanup();}
 });
 
-test("a later human task survives repeated discovery and restart without recreating the Start interpretation", async () => {
+it("a later human task survives repeated discovery and restart without recreating the Start interpretation", async () => {
   const f = await noProjectFixture();
   try {
     await f.supervisor.startSupervision({callerThreadId: "manual", userMessageId: "request-start", operationId: "start-handoff"}, {runId: "run-request-start"}, AbortSignal.timeout(1000));await f.supervisor.runOnce();
@@ -1757,7 +1758,7 @@ test("a later human task survives repeated discovery and restart without recreat
   } finally {await f.cleanup();}
 });
 
-test("Off pauses an active No Project permission without Stop-style fencing of prepared team/context work", async () => {
+it("Off pauses an active No Project permission without Stop-style fencing of prepared team/context work", async () => {
   const f = await noProjectFixture();
   try {
     await f.supervisor.dashboardStart("manual", "pause-grant", AbortSignal.timeout(1000));
@@ -1773,7 +1774,7 @@ test("Off pauses an active No Project permission without Stop-style fencing of p
   } finally {await f.cleanup();}
 });
 
-test("archived exclusions disappear from the relevant editor without dropping the saved policy", async () => {
+it("archived exclusions disappear from the relevant editor without dropping the saved policy", async () => {
   const f = await noProjectFixture();
   try {
     await f.supervisor.dashboardStart("manual", "exclusion-visibility", AbortSignal.timeout(1000));

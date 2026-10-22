@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {mkdtemp, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import test from "node:test";
+import { it } from "vitest";
 import {Effect, Schema} from "effect";
 import {DashboardOverview, overviewPage, workAttention, readOverviewRange, type DashboardOverviewInfo} from "../src/dashboard-overview.js";
 import {GuidanceStore} from "../src/guidance-store.js";
@@ -13,7 +13,7 @@ import type {ThreadInfo, SupervisorConfig} from "../src/types.js";
 const nativeThread = (id: string): ThreadInfo => ({id, title: `Work ${id}`, projectId: "project", activeRunId: id === "active" ? "run" : null,
   lineage: {parentThreadId: null, relationshipToParent: null}});
 
-test("the overview reads retained supervision state without native calls, writes, or invented completion", async () => {
+it("the overview reads retained supervision state without native calls, writes, or invented completion", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-overview-"));
   const guidance = new GuidanceStore(directory);
   const store = new ProjectSupervisorStore(guidance, new Set());
@@ -53,7 +53,7 @@ test("the overview reads retained supervision state without native calls, writes
   } finally {guidance.close(); await rm(directory, {recursive: true, force: true});}
 });
 
-test("overview pagination rejects malformed and excessive pages", () => {
+it("overview pagination rejects malformed and excessive pages", () => {
   assert.deepEqual(overviewPage({}), {offset: 0, limit: 100});
   assert.deepEqual(overviewPage({offset: "100", limit: "200"}), {offset: 100, limit: 200});
   for (const query of [{offset: "-1"}, {offset: "1.2"}, {offset: "100001"}, {limit: "0"}, {limit: "201"}, {limit: "Infinity"}])
@@ -61,7 +61,7 @@ test("overview pagination rejects malformed and excessive pages", () => {
 });
 
 
-test("current attention explanations retain protocol repair and exclude intentionally stopped work", () => {
+it("current attention explanations retain protocol repair and exclude intentionally stopped work", () => {
   const task = {threadId: "main", projectId: "project", sourceRunId: "run", sourceMessageId: "message", status: "waiting" as const,
     objective: "Update tracking", reason: "Awaiting a response.", updatedAt: 1,
     workflowProtocolDiagnostic: {role: "operative" as const, proposalId: null, messageId: "bad-record", code: "invalid_proposal", observedAt: 1}};
@@ -71,7 +71,7 @@ test("current attention explanations retain protocol repair and exclude intentio
 });
 
 
-test("overview refresh preserves the loaded range and restarts a reordered prefix", async () => {
+it("overview refresh preserves the loaded range and restarts a reordered prefix", async () => {
   const row = (id: string) => ({projectId: "p", mainThreadId: id, title: id, supervisorThreadId: "s", nativeState: "quiet" as const,
     supervision: "enabled" as const, objective: null, reason: "", taskStatus: null, planStatus: null, assessment: null, attention: [], updatedAt: null});
   const all = Array.from({length: 230}, (_, i) => row(`work-${i}`));

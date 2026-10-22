@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { it } from "vitest";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { defaultMonitoringSettings, type SupervisorMonitoringSettings } from "../src/project-supervisor-contract.js";
 import { defaultSupervisorModel, ProjectSupervisorStore } from "../src/project-supervisor-store.js";
@@ -18,7 +18,7 @@ const setStoredSettings = (supervisor: ProjectSupervisorStore, value: Record<str
   supervisor.store.db.prepare("INSERT INTO supervisor_project_settings VALUES(?,?)").run(String(value.projectId), JSON.stringify(value));
 };
 
-test("new and legacy project settings receive the monitoring defaults", async () => {
+it("new and legacy project settings receive the monitoring defaults", async () => {
   await withStore(supervisor => {
     assert.deepEqual(supervisor.settings("new-project").monitoring, {intervalMinutes: 5, activityThreshold: 10});
     assert.equal(supervisor.settings("new-project").modelMutationGeneration, 0);
@@ -38,7 +38,7 @@ test("new and legacy project settings receive the monitoring defaults", async ()
   });
 });
 
-test("monitoring-only saves preserve model attempts and legacy saves keep current monitoring", async () => {
+it("monitoring-only saves preserve model attempts and legacy saves keep current monitoring", async () => {
   await withStore(supervisor => {
     const currentMonitoring: SupervisorMonitoringSettings = {intervalMinutes: 8, activityThreshold: 24};
     setStoredSettings(supervisor, {
@@ -69,7 +69,7 @@ test("monitoring-only saves preserve model attempts and legacy saves keep curren
   });
 });
 
-test("only a changed model selection starts a new native model mutation", async () => {
+it("only a changed model selection starts a new native model mutation", async () => {
   await withStore(supervisor => {
     setStoredSettings(supervisor, {
       projectId: "project",
@@ -92,7 +92,7 @@ test("only a changed model selection starts a new native model mutation", async 
   });
 });
 
-test("native model readback changes only its binding and preserves project defaults", async () => {
+it("native model readback changes only its binding and preserves project defaults", async () => {
   await withStore(supervisor => {
     const requested = {...defaultSupervisorModel, options: [{id: "reasoningEffort", value: "low"}]};
     supervisor.saveSettings("project", 0, requested);
@@ -105,7 +105,7 @@ test("native model readback changes only its binding and preserves project defau
   });
 });
 
-test("monitoring intervals and thresholds are range checked as integers", async () => {
+it("monitoring intervals and thresholds are range checked as integers", async () => {
   await withStore(supervisor => {
     const invalidValues: SupervisorMonitoringSettings[] = [
       {...defaultMonitoringSettings, intervalMinutes: 0},

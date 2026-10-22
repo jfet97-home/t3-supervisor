@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
-import {test} from "node:test";
+import { it } from "vitest";
 import {createWorkflowMcpEndpoint} from "../src/workflow-mcp.js";
 import type {WorkflowWriteController} from "../src/workflow-write-controller.js";
 
@@ -19,7 +19,7 @@ const postJson = async (url: string, body: unknown): Promise<Response> => fetch(
   body: JSON.stringify(body),
 });
 
-test("workflow MCP exposes read, write and the scoped stop tool and serves stateless JSON calls", async () => {
+it("workflow MCP exposes read, write and the scoped stop tool and serves stateless JSON calls", async () => {
   const invalidWrite = {status: "invalid", reason: "pinned_definition_context_mismatch", diagnostic: {
     code: "local_step_definition_id_required", path: "/input/plan/nodes/0/definitionId", expected: "definitionId: null",
   }};
@@ -90,7 +90,7 @@ test("workflow MCP exposes read, write and the scoped stop tool and serves state
   }
 });
 
-test("workflow MCP rejects requests above its HTTP body bound", async () => {
+it("workflow MCP rejects requests above its HTTP body bound", async () => {
   const controller = {read: async () => ({status: "ok"}), write: async () => ({status: "created"})} as unknown as WorkflowWriteController;
   const endpoint = createWorkflowMcpEndpoint(controller);
   const server = createServer((request, response) => {void endpoint.handle(request, response);});

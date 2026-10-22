@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import test from "node:test";
+import { it } from "vitest";
+import { after } from "./support/node-test.js";
 import { readSupervisorThreads, SupervisorRpcError } from "../src/supervisor-native.js";
 import type { ThreadInfo } from "../src/types.js";
 
@@ -9,7 +10,7 @@ const thread = (id: string, parentThreadId: string | null = null): ThreadInfo =>
   lineage: {parentThreadId, relationshipToParent: parentThreadId ? "subagent" : null},
 });
 
-test("workflow native inventory retries inconsistent views and retains archived ancestry", async t => {
+it("workflow native inventory retries inconsistent views and retains archived ancestry", async t => {
   let activeReads = 0;
   let archiveReads = 0;
   const active = thread("main-a");
@@ -22,7 +23,7 @@ test("workflow native inventory retries inconsistent views and retains archived 
     response.end(JSON.stringify({schemaVersion: 2, snapshotSequence: activeReads, threads: [active], archivedThreads: []}));
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise<void>(resolve => {server.close(() => resolve()); server.closeAllConnections();}));
+  after(t, () => new Promise<void>(resolve => {server.close(() => resolve()); server.closeAllConnections();}));
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const read = readSupervisorThreads(`http://127.0.0.1:${address.port}`, "fixture-token", async tag => {
@@ -35,14 +36,14 @@ test("workflow native inventory retries inconsistent views and retains archived 
   assert.equal(archiveReads, 2);
 });
 
-test("workflow native inventory rejects malformed lineage and never merges overlapping views", async t => {
+it("workflow native inventory rejects malformed lineage and never merges overlapping views", async t => {
   const active = thread("main-a");
   const server = createServer((_request, response) => {
     response.writeHead(200, {"Content-Type": "application/json"});
     response.end(JSON.stringify({schemaVersion: 2, snapshotSequence: 5, threads: [active], archivedThreads: []}));
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise<void>(resolve => {server.close(() => resolve()); server.closeAllConnections();}));
+  after(t, () => new Promise<void>(resolve => {server.close(() => resolve()); server.closeAllConnections();}));
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const baseUrl = `http://127.0.0.1:${address.port}`;

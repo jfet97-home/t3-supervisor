@@ -1,6 +1,6 @@
 import { assessmentForTask, workflowAssessment } from "../src/workflow-assessment.js";
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { it } from "vitest";
 import { Schema } from "effect";
 import type { ProjectSupervisor } from "../src/project-supervisor.js";
 import type { ProjectSupervisorScopeSnapshot } from "../src/supervisor-observation.js";
@@ -100,7 +100,7 @@ const readerResult = (): Extract<WorkflowReadResult, {status: "ok"}> => ({
   lineageHasMore: true,
 });
 
-test("workflow progress paging validates independent bounded offsets", () => {
+it("workflow progress paging validates independent bounded offsets", () => {
   assert.deepEqual(parseWorkflowProgressPageQuery({projectId: "project", mainThreadId: "main-thread"}), {
     projectId: "project", mainThreadId: "main-thread", workflowOffset: 0, lineageOffset: 0, limit: 20,
   });
@@ -112,7 +112,7 @@ test("workflow progress paging validates independent bounded offsets", () => {
   assert.equal(parseWorkflowProgressPageQuery({projectId: "project", mainThreadId: "main-thread", lineageOffset: "1.5"}), null);
 });
 
-test("workflow progress reuses the owner-bound reader and returns only current status and the newest twenty observations", async () => {
+it("workflow progress reuses the owner-bound reader and returns only current status and the newest twenty observations", async () => {
   const scope = scopeSnapshot();
   let readArguments: unknown;
   const scopeOptions: unknown[] = [];
@@ -143,7 +143,7 @@ test("workflow progress reuses the owner-bound reader and returns only current s
   assert.deepEqual(Schema.decodeUnknownSync(WorkflowProgressSnapshotSchema)(result), result);
 });
 
-test("workflow progress keeps root identity visible for observe-only coverage without turning other unavailable owners into root", async () => {
+it("workflow progress keeps root identity visible for observe-only coverage without turning other unavailable owners into root", async () => {
   const base = readerResult();
   const workflowReader = {read: async () => ({...base, coverage: [
     {threadId: "child-thread", actorThreadId: "supervisor-thread", actorTitle: "Root Supervisor", state: "unavailable" as const,
@@ -168,7 +168,7 @@ test("workflow progress keeps root identity visible for observe-only coverage wi
   assert.deepEqual(Schema.decodeUnknownSync(WorkflowProgressSnapshotSchema)(result), result);
 });
 
-test("workflow progress preserves scope limitations when the binding is missing or changes during the read", async () => {
+it("workflow progress preserves scope limitations when the binding is missing or changes during the read", async () => {
   let readerCalls = 0;
   const query = {projectId: "project", mainThreadId: "main-thread", workflowOffset: 0, lineageOffset: 0, limit: 20};
   const noBinding = {...scopeSnapshot(), supervisorThreadId: null, bindingGeneration: null};
@@ -210,7 +210,7 @@ test("workflow progress preserves scope limitations when the binding is missing 
   assert.match(changesAfterReader.message ?? "", /binding changed/);
 });
 
-test("an oversized combined progress response returns a small explicit error without partial data or load-more loops", async () => {
+it("an oversized combined progress response returns a small explicit error without partial data or load-more loops", async () => {
   const baseScope = scopeSnapshot();
   const refs = Array.from({length: 20}, (_, index) => ({sourceThreadId: `thread-${index}`, sourceRunId: "r".repeat(512),
     sourceMessageId: "m".repeat(512), sourceItemId: "i".repeat(512), kind: "activity", observedAt: index, label: "large activity label ".repeat(1000)}));
@@ -242,7 +242,7 @@ test("an oversized combined progress response returns a small explicit error wit
   assert.ok(new TextEncoder().encode(JSON.stringify(result)).length < 10_000);
 });
 
-test("multi-page progress observes only the requested child rows instead of rereading every descendant", async () => {
+it("multi-page progress observes only the requested child rows instead of rereading every descendant", async () => {
   const totalThreads = 150;
   const allThreads = Array.from({length: totalThreads}, (_, index) => ({
     threadId: index === 0 ? "main-thread" : `child-${index}`,
@@ -292,7 +292,7 @@ test("multi-page progress observes only the requested child rows instead of rere
   assert.deepEqual(observedIds.slice(100), allThreads.slice(100).map(thread => thread.threadId));
 });
 
-test("workflow progress exposes bounded contributions with honest plan membership and the current assessment only", async () => {
+it("workflow progress exposes bounded contributions with honest plan membership and the current assessment only", async () => {
   const nodeId = "3f0c4b8e-2f2d-4c39-9a51-1df1b6a8a001";
   const removedId = "3f0c4b8e-2f2d-4c39-9a51-1df1b6a8a002";
   const step = {kind: "step" as const, nodeId, definitionId: null, localId: "review", templatePath: null, name: "External review", description: "Review it.",
@@ -330,7 +330,7 @@ test("workflow progress exposes bounded contributions with honest plan membershi
 });
 
 
-test("main assessment binds task identity and source while preserving its own reason", () => {
+it("main assessment binds task identity and source while preserving its own reason", () => {
   const base = document();
   const bound: WorkflowStateDocument = {...base, status: "needs_attention", sourceBinding: base.acceptedAgreements[0]!.sourceBinding,
     evidence: [{...base.evidence[0]!, kind: "status_changed", targetNodeId: null, statusTo: "needs_attention", note: "The current review found a blocker."},
