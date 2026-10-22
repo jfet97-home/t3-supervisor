@@ -6,6 +6,7 @@ import { Clock, Context, Effect, Fiber, Layer } from "effect";
 import type { TestContext } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { runGuidanceApplication } from "../../src/guidance-application.js";
+import { NativeTransportLive } from "../../src/supervisor.js";
 import type { StoreShape } from "../../src/store.js";
 import { makeT3Client, T3Client, type T3ClientShape } from "../../src/t3.js";
 import type { ProjectInfo, SupervisorConfig, ThreadInfo } from "../../src/types.js";
@@ -125,7 +126,7 @@ export const runApp = (t: TestContext, config: SupervisorConfig, t3: T3ClientSha
       return clock.sleep(duration);
     }),
   };
-  const application = Effect.scoped(runGuidanceApplication(config, source, t3, () => ready.resolve()));
+  const application = Effect.scoped(runGuidanceApplication(config, source, t3, () => ready.resolve())).pipe(Effect.provide(NativeTransportLive));
   const fiber = Effect.runFork(observed ? Effect.provideService(application, Clock.Clock, observed) : application);
   root.id = fiber.id;
   fiber.addObserver((exit) => { if (exit._tag === "Failure") ready.reject(new Error("the application stopped before it was ready")); });

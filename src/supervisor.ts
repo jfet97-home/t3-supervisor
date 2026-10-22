@@ -1,6 +1,6 @@
-import { NodeFileSystem, NodeHttpServer } from "@effect/platform-node";
-import { Cause, Clock, Context, Deferred, Effect, FileSystem, Layer, Redacted, Schedule, Schema, SubscriptionRef } from "effect";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
+import { NodeCrypto, NodeFileSystem, NodeHttpServer } from "@effect/platform-node";
+import { Cause, Clock, Context, Crypto, Deferred, Effect, FileSystem, Layer, Redacted, Schedule, Schema, SubscriptionRef } from "effect";
+import { FetchHttpClient, HttpClient, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { createServer } from "node:http";
 import { SupervisorConfig } from "./config.js";
 import { failureReason, T3TokenUnavailable } from "./errors.js";
@@ -8,7 +8,8 @@ import { runGuidanceApplication } from "./guidance-application.js";
 import { logEvent } from "./logging.js";
 import { SupervisorOwnership } from "./project-supervisor-store.js";
 import { makeStore, Store, type StoreStats } from "./store.js";
-import { makeT3Client, T3Client } from "./t3.js";
+import { NativeEnvelope } from "./native-envelope.js";
+import { T3Client } from "./t3.js";
 import { ThreadPolicy } from "./thread-policy.js";
 import type { SupervisorSettings } from "./types.js";
 
@@ -154,17 +155,23 @@ const readT3Token = (path: string) => FileSystem.FileSystem.use((files) => files
 const t3Client = Layer.unwrap(Effect.gen(function* () {
   const config = yield* SupervisorConfig;
   const token = yield* readT3Token(config.t3TokenFile);
-  return makeT3Client({ baseUrl: config.t3Url, token: Redacted.value(token) });
+  return T3Client.layer({ baseUrl: config.t3Url, token: Redacted.value(token) });
 }));
+
+// the native transport, built once for the process: the shared websocket envelope, the platform crypto and the fetch
+// client; the T3 client and every native client of the guidance application run on these instances
+export const NativeTransportLive = Layer.mergeAll(NativeEnvelope.layer, NodeCrypto.layer, FetchHttpClient.layer);
+export type NativeTransport = NativeEnvelope | Crypto.Crypto | HttpClient.HttpClient;
 
 const catalog = Layer.unwrap(SupervisorConfig.useSync((config) => makeStore(config.dataDirectory)));
 
-export type SupervisorServices = SupervisorConfig | SupervisorStatusRef | Store | T3Client | ThreadPolicy | SupervisorOwnership;
+export type SupervisorServices = SupervisorConfig | SupervisorStatusRef | Store | T3Client | ThreadPolicy | SupervisorOwnership | NativeTransport;
 
-// the root services over the configuration, acquired in today's order: ownership, thread policy, the T3 client over the
-// read token, then the catalog and the status; they release in reverse
+// the root services over the configuration, acquired in today's order: ownership, thread policy, the native transport and
+// the T3 client over the read token, then the catalog and the status; they release in reverse
 export const SupervisorServicesLive = Layer.mergeAll(catalog, SupervisorStatusRef.layer).pipe(
   Layer.provideMerge(t3Client),
+  Layer.provideMerge(NativeTransportLive),
   Layer.provideMerge(ThreadPolicy.layer),
   Layer.provideMerge(SupervisorOwnership.layer),
 );

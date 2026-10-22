@@ -8,7 +8,7 @@ import {it, vi, type TestContext} from "vitest";
 import {SupervisorConfig as Configuration} from "../src/config.js";
 import {SupervisorOwnership} from "../src/project-supervisor-store.js";
 import {makeStore} from "../src/store.js";
-import {createStatus, supervise, SupervisorStatusRef, type SupervisorStatus} from "../src/supervisor.js";
+import {createStatus, NativeTransportLive, supervise, SupervisorStatusRef, type SupervisorStatus} from "../src/supervisor.js";
 import {ThreadPolicy} from "../src/thread-policy.js";
 import {T3Client, T3TransportError, type T3ClientShape, type T3EnvironmentDescriptor} from "../src/t3.js";
 import type {ProjectInfo, SupervisorConfig} from "../src/types.js";
@@ -63,7 +63,7 @@ const liveStatus = (settings: SupervisorConfig): SupervisorStatus => {
 // the services of the run: the catalog, the fake T3 client, the status and the root thread-policy and ownership services
 const layers = (settings: SupervisorConfig, status: SupervisorStatus, client: T3ClientShape) => Layer.mergeAll(
   makeStore(settings.dataDirectory), Layer.succeed(T3Client, client), Layer.succeed(SupervisorStatusRef, statusRefs.get(status)!),
-  ThreadPolicy.layer, SupervisorOwnership.layer,
+  ThreadPolicy.layer, SupervisorOwnership.layer, NativeTransportLive,
 ).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)));
 
 const startReal = (t: TestContext, settings: SupervisorConfig, status: SupervisorStatus, client: T3ClientShape, settle: () => void) => {

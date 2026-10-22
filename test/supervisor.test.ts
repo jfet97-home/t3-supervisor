@@ -7,7 +7,7 @@ import {Clock, Effect, Fiber, Layer, Option, Stream, SubscriptionRef} from "effe
 import {SupervisorConfig as Configuration} from "../src/config.js";
 import {SupervisorOwnership} from "../src/project-supervisor-store.js";
 import {makeStore, Store} from "../src/store.js";
-import {createStatus, readiness, supervise, SupervisorStatusRef} from "../src/supervisor.js";
+import {createStatus, NativeTransportLive, readiness, supervise, SupervisorStatusRef} from "../src/supervisor.js";
 import {T3Client, T3TransportError, type T3ClientShape} from "../src/t3.js";
 import {ThreadPolicy} from "../src/thread-policy.js";
 import type {ProjectInfo, SupervisorConfig} from "../src/types.js";
@@ -51,6 +51,7 @@ it.live("native T3 events persist into the generic catalog and mark the service 
   };
   const fiber = yield* Effect.forkScoped(supervise(Layer.mergeAll(
     makeStore(directory), Layer.succeed(T3Client, fake), Layer.succeed(SupervisorStatusRef, statusRef), ThreadPolicy.layer, SupervisorOwnership.layer,
+    NativeTransportLive,
   ).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)))));
   // the first status in which the stored item marked the service connected after activation
   const status = Option.getOrThrow(yield* SubscriptionRef.changes(statusRef).pipe(

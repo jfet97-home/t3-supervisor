@@ -1,6 +1,5 @@
 import {SupervisorTeamController} from "./supervisor-team-controller.js";
-import { NodeCrypto } from "@effect/platform-node";
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 import { GuidanceStore } from "./guidance-store.js";
 import { GuidanceRuntime } from "./guidance.js";
 import { startGuidanceUi } from "./guidance-ui.js";
@@ -9,7 +8,8 @@ import type { T3ClientShape } from "./t3.js";
 import type { SupervisorConfig } from "./types.js";
 import { readFile } from "node:fs/promises";
 import { posix } from "node:path";
-import { cancelOnAbort, NativeEnvelope } from "./native-envelope.js";
+import { cancelOnAbort } from "./native-envelope.js";
+import type { NativeTransport } from "./supervisor.js";
 import { ProjectCommitter, ProjectFiles, ProjectWriter } from "./project-files.js";
 import { ProjectDefinitions, type DefinitionCheckoutUnavailable, type DefinitionSourceFailure, type ProjectDefinitionLoader } from "./project-definitions.js";
 import { ProjectConfigEditorService, type ProjectConfigEditor } from "./project-config-editor.js";
@@ -17,7 +17,6 @@ import { existsSync } from "node:fs";
 import { ProjectSupervisorStore, loadSupervisorOwnership } from "./project-supervisor-store.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
 import { NativeRpc, NativeShell, record, type NativeRpcShape, type SupervisorRpc } from "./supervisor-native.js";
-import { FetchHttpClient } from "effect/http";
 import { GitProbe } from "./git-probe.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
 import { createWorkflowMcpEndpoint } from "./workflow-mcp.js";
@@ -76,8 +75,9 @@ export const runGuidanceApplication = (
     const commitToken = commitPath && existsSync(commitPath) ? yield* Effect.tryPromise(() => readFile(commitPath, "utf8")) : "";
     const probePath = config.gitProbeTokenFile;
     const probeToken = probePath && existsSync(probePath) ? yield* Effect.tryPromise(() => readFile(probePath, "utf8")) : "";
-    // the native file, writer, commit and git probe clients share the one native envelope (d-08); the probe draws its ids from the platform crypto
-    const nativeClients = yield* Layer.build(Layer.merge(NativeEnvelope.layer, NodeCrypto.layer));
+    // the native file, writer, commit, probe and rpc clients run on the root native transport (one envelope, crypto and fetch
+    // client per process, d-08); the probe draws its ids from the platform crypto
+    const nativeClients = yield* Effect.context<NativeTransport>();
     const endpoint = (token: string) => ({baseUrl: config.t3Url, token});
     const gitProbe = probeToken.trim() ? yield* Effect.provide(GitProbe.make(endpoint(probeToken.trim()), store), nativeClients) : undefined;
     const cleanupGitProbe = gitProbe ? gitProbe.cleanup.pipe(
@@ -116,7 +116,7 @@ export const runGuidanceApplication = (
       run(Effect.scoped(Effect.flatMap(cancelOnAbort(signal), cancel => rpc.call(tag, payload, cancel))));
     const nativeRead = yield* nativeClient(readToken.trim());
     const nativeShell = yield* NativeShell.make({baseUrl: config.t3Url, token: readToken.trim()}).pipe(
-      Effect.provideService(NativeRpc, nativeRead), Effect.provide(FetchHttpClient.layer));
+      Effect.provideService(NativeRpc, nativeRead), Effect.provide(nativeClients));
     const readRpc = rpcFacade(nativeRead);
     const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, readRpc,
       operateToken.trim() ? rpcFacade(yield* nativeClient(operateToken.trim())) : null, signal => run(nativeShell.baseline, {signal}), definitions);

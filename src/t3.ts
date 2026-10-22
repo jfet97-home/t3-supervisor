@@ -427,5 +427,6 @@ export class T3Client extends Context.Service<T3Client, T3ClientShape>()("T3Clie
     Layer.effect(T3Client, make(options));
 }
 
+// a self-contained client for a standalone entry (the probe), with its own transport; the server uses the root transport
 export const makeT3Client = (options: T3ClientOptions): Layer.Layer<T3Client> =>
   T3Client.layer(options).pipe(Layer.provide(Layer.mergeAll(FetchHttpClient.layer, NativeEnvelope.layer)));

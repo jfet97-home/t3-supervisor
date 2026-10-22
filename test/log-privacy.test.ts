@@ -12,7 +12,7 @@ import { createServiceAuth, forgeDashboardToken } from "../src/service-auth.js";
 import { makeStore, type Store } from "../src/store.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { makeSupervisorRpc } from "./support/supervisor-native-client.js";
-import { createStatus, readiness, supervise, SupervisorStatusRef, type SupervisorStatus } from "../src/supervisor.js";
+import { createStatus, NativeTransportLive, readiness, supervise, SupervisorStatusRef, type SupervisorStatus } from "../src/supervisor.js";
 import { makeT3Client, T3Client, T3TransportError, type T3ClientShape } from "../src/t3.js";
 import { ThreadPolicy } from "../src/thread-policy.js";
 import type { SupervisorConfig } from "../src/types.js";
@@ -130,7 +130,7 @@ const liveStatus = (settings: SupervisorConfig): SupervisorStatus => {
 
 // the services of the run: the given catalog and T3 client, the status and the root thread-policy and ownership services
 const services = (settings: SupervisorConfig, status: SupervisorStatus, base: Layer.Layer<Store | T3Client, unknown>) => Layer.mergeAll(
-  base, Layer.succeed(SupervisorStatusRef, statusRefs.get(status)!), ThreadPolicy.layer, SupervisorOwnership.layer,
+  base, Layer.succeed(SupervisorStatusRef, statusRefs.get(status)!), ThreadPolicy.layer, SupervisorOwnership.layer, NativeTransportLive,
 ).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)));
 
 // the /health body the status would serve at the given time
