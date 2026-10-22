@@ -159,3 +159,28 @@ it.live("TR-PROBE-03: a terminal frame one byte above 2 MiB closes the socket an
   assert.deepEqual(t3.requests.map(request => request.tag), ["terminal.open", "terminal.close"]);
   assert.deepEqual(pendingSessions(store), []);
 }), {timeout: 10_000});
+
+it.live("TR-PROBE-04: a non-record attach event fails the probe with its own message; nothing after it in the message is answered or acknowledged and the terminal is closed", () => Effect.gen(function* () {
+  // one websocket message carries the invalid chunk, then a valid exit chunk and a Ping; only frames sent after it are recorded.
+  // the attach handler ends the call on the invalid event (done), so the rest of the message is never handled by construction
+  const after: string[] = [];
+  const t3 = yield* peer((socket, frame) => {
+    const payload = frame.payload ?? {};
+    if (frame.tag === "terminal.open") return success(socket, frame, {threadId: payload.threadId, terminalId: payload.terminalId, cwd: payload.cwd, status: "running"});
+    if (frame.tag !== "terminal.attach") return success(socket, frame, null);
+    socket.on("message", data => {after.push(String(JSON.parse(data.toString())._tag));});
+    socket.send(JSON.stringify([
+      {_tag: "Chunk", requestId: frame.id, values: ["not a record"]},
+      {_tag: "Chunk", requestId: frame.id, values: [{threadId: payload.threadId, terminalId: payload.terminalId, type: "exited", exitCode: 0, exitSignal: null}]},
+      {_tag: "Ping"},
+    ]));
+  });
+  const {store} = yield* guidanceStore;
+  const probe = yield* Effect.provide(GitProbe.make({baseUrl: t3.url, token: "terminal-operate-test-token"}, store), probeClients);
+  const error = yield* Effect.flip(probe.probe(root));
+  assert.ok(error instanceof GitProbeError);
+  assert.equal(error.message, "The terminal Git probe was canceled or disconnected.");
+  assert.deepEqual(after, [], "nothing after the invalid event was answered or acknowledged");
+  assert.deepEqual(t3.requests.map(request => request.tag), ["terminal.open", "terminal.attach", "terminal.close"]);
+  assert.deepEqual(pendingSessions(store), []);
+}), {timeout: 10_000});

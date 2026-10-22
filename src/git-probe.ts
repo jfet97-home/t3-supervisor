@@ -336,16 +336,18 @@ const makeGitProbe = Effect.fnUntraced(function* (endpoint: NativeEndpoint, stor
       if (helperReadyObserved) Deferred.doneUnsafe(helperReady, Effect.void);
       maybeFinish();
     });
+    // a non-record event or a foreign snapshot ends the attach stream at once, as the baseline stopped reading the message:
+    // no later frame of it is handled, no Ack or Pong is written and no later exit can replace this first failure
     const onChunk = (values: ReadonlyArray<unknown>) => Effect.sync(() => {
       for (const event of values) {
         if (!record(event)) {
           abort();
-          return NativeStep.continue;
+          return NativeStep.done(undefined);
         }
         if (event.type === "snapshot" && record(event.snapshot)) {
           if (!snapshotIsTarget(event.snapshot, ids, root)) {
             fail(new GitProbeError("T3 attached the probe to an unexpected terminal."));
-            return NativeStep.continue;
+            return NativeStep.done(undefined);
           }
           if (!Deferred.isDoneUnsafe(ready)) snapshotToResolve = event.snapshot;
           continue;
