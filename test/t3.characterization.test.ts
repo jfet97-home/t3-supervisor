@@ -270,7 +270,7 @@ it("CT-T3-05: the oversized projection memo evicts the oldest thread after 512 d
     response.end("x".repeat(2048));
   });
   try {
-    const client = await getClient(server.baseUrl, { maxResponseBytes: 1024, maxProjectionTransferBytes: 1024, now: () => 1_000_000 });
+    const client = await getClient(server.baseUrl, { maxResponseBytes: 1024, maxProjectionTransferBytes: 1024 });
     const tooLarge = async (threadId: string) => {
       const failure = failureOf(await Effect.runPromiseExit(client.projection(threadId)));
       assert.ok(failure instanceof T3TransportError && failure.code === "response_too_large");

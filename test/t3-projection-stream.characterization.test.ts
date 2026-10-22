@@ -39,7 +39,7 @@ it("CT-T3-06: interrupting an in-flight read cancels the body reader, stops pull
   });
   let value: unknown;
   let failure: unknown;
-  await readProjectionSnapshot(body, budget, controller.signal).then((result) => {value = result;}, (error: unknown) => {failure = error;});
+  await Effect.runPromise(readProjectionSnapshot(body, budget, controller.signal)).then((result) => {value = result;}, (error: unknown) => {failure = error;});
   assert.equal(value, undefined);
   assert.ok(failure instanceof ProjectionStreamError);
   assert.equal(failure.code, "interrupted");
