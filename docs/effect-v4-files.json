@@ -5770,7 +5770,7 @@
   "CT-SQL-01": {
    "kind": "interruption",
    "boundary": "real @effect/sql-sqlite-node driver on temp files",
-   "description": "an interrupted waiter for the connection completes only after the current holder releases, and its transaction body never runs",
+   "description": "an interrupted waiter for the connection returns while the current holder still holds it (exact 4.0.6), its transaction body never runs and the holder commits unaffected",
    "ownerFile": "test/sql-semantics.test.ts",
    "referencedBy": [
     "src/store.ts",
@@ -5788,9 +5788,10 @@
    "disposition": "keep",
    "consolidateInto": null,
    "reuses": null,
-   "newObservation": "an interrupted waiter for the connection completes only after the current holder releases, and its transaction body never runs",
+   "newObservation": "an interrupted waiter for the connection returns while the current holder still holds it (exact 4.0.6), its transaction body never runs and the holder commits unaffected",
    "findings": [
-    "SOL-PLAN-03"
+    "SOL-PLAN-03",
+    "SQL-406"
    ],
    "suite": "test/sql-semantics.test.ts"
   },
@@ -23974,6 +23975,13 @@
    "requirement": "npm test chained two watchdog runs with &&: each had its own 20-minute deadline, and npm forwarded filters, configuration, reporters and the deadline only to the second",
    "response": "plan 5.3 rule 4: one runner owns the main and cpu-bound phases under one whole-run deadline and routes caller arguments once (configuration, file and location filters, per-phase and combined reports); self-tests test/harness/phases.test.ts",
    "status": "fixed (S0), recheck pending"
+  },
+  {
+   "id": "SQL-406",
+   "source": "Astra (round 9)",
+   "requirement": "exact 4.0.6 cancels a queued transaction before the holder releases; plan 3.2 rule 6 and CT-SQL-01 described 4.0.5",
+   "response": "3.2 rule 6 and CT-SQL-01 state the 4.0.6 behaviour (immediate return, body never runs, holder unaffected); no masking recreates the older delay; CT-SQL-01..04 are committed with S3 before catalog activation",
+   "status": "resolved"
   }
  ]
 }

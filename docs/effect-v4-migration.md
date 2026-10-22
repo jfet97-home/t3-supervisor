@@ -184,16 +184,18 @@ statement, so sequences outside a transaction can interleave. Rules:
 5. `busy_timeout` waits still block the event loop (`node:sqlite` is synchronous). This
    known limitation is preserved, not erased (O-05): the plan only proves that the port
    adds no new in-process self-contention, using a measured single-client workload.
-6. Acquisition is protected (`SqlClient.ts:417-449`, `uninterruptibleMask`): interrupting a
-   fiber that waits for the connection completes only after the current holder releases,
-   and its body never runs. Cancellation is bounded by a short local holder, not immediate,
-   which is why transactions stay short and contain SQL only.
+6. Acquisition is interruptible in the pinned 4.0.6 (`SqlClient.ts:288` and `:433-438`
+   restore interruption around the connection acquisition and the semaphore wait):
+   interrupting a fiber that waits for the connection returns at once, its body never
+   runs and the current holder is unaffected. Transactions still stay short and contain
+   SQL only, because every waiter queues behind the holder. (4.0.5 completed the
+   interruption only after the holder released; SQL-406.)
 7. A failed COMMIT is rolled back under the semaphore before the connection is reused;
    nested `withTransaction` failures roll back to their SAVEPOINT.
 
 Target-regression SQL tests on the real driver (S3 for CatalogDb, S6c for AccessDb, S6d
-for GuidanceDb/PolicyDb): **CT-SQL-01** an interrupted waiter completes only after the holder
-releases and its body never runs; **CT-SQL-02** interruption inside a body rolls back and
+for GuidanceDb/PolicyDb): **CT-SQL-01** an interrupted waiter returns while the holder still
+holds the connection, its body never runs and the holder commits unaffected; **CT-SQL-02** interruption inside a body rolls back and
 the connection is reusable; **CT-SQL-03** a failed COMMIT is cleaned up and the next
 transaction succeeds; **CT-SQL-04** two independent clients on one file in different
 processes keep CAS (`UPDATE … AND revision=?`) and grant consumption correct under
@@ -1730,6 +1732,7 @@ reopens it on the frozen revision. Manifest rows carry the IDs that affect them 
 | GATE-CPU | Coordinator (S0) | the unchanged CPU-bound deadline tests cannot run under Vitest's global async hook | 5.3 rule 3 exception: `t3.test.ts` and `t3-projection-stream.test.ts` in a separate invocation with the fatal native-resource gate; coverage excludes pending promises and fibers (none started by the exercised code); deadlines and assertions unchanged | resolved (S0) |
 | UI-STORY-03-BASELINE | Coordinator (UI baseline, fixture `1e09d57`) | session revoked while a Save POST is held: the dropped POST was followed by a second POST to the same path (rejected 401 before body read) before manual re-authentication; the API helper has one `fetch` and no write replay, so the source (likely browser transport retry) is unverified | recorded as a baseline qualification for S7 and real-HTTP semantics: S7 must not add an application-level replay; whether one user action can produce two wire POSTs after a dropped connection is observed again on the S7 build; evidence `story-03-save-log.json`, `story-03-observations.json` (coordinator) | recorded |
 | S0-RUN-ORCH | Sol and Astra (round 8, A-S0-R01/R02, SOL-S0-RUN-01) | `npm test` chained two watchdogs with `&&`: each got its own 20-minute deadline, and npm forwarded filters, configuration, reporters and the deadline only to the second | 5.3 rule 4: one runner owns both phases under one whole-run deadline and routes caller arguments once (configuration, file and location filters, per-phase and combined reports); runner self-tests `test/harness/phases.test.ts` | fixed (S0), recheck pending |
+| SQL-406 | Astra (round 9) | exact 4.0.6 cancels a queued transaction before the holder releases (real CatalogDb probe 0.33 ms); 3.2 rule 6 and CT-SQL-01 described 4.0.5 | 3.2 rule 6 and CT-SQL-01 state the 4.0.6 behaviour (immediate return, body never runs, holder unaffected); no masking recreates the older delay; CT-SQL-01..04 are committed with S3 before catalog activation | resolved |
 | SOL-FILES | Sol | 34 per-file rows reference SOL-PLAN-01..09 | each row carries the IDs in `reviewFindings` and its row change; validation lists 34/34 | resolved in v2 |
 | ASTRA-FILES | Astra | 113 per-file rows reference A-P01..A-P08 and O-03 | each row carries the IDs in `reviewFindings`; slices, phases, Schema boundaries, clock domains and test phases normalized; validation lists 113/113 | resolved in v2 |
 | L-01 | W4 | helper channel `scheduledTasks.upsert` is sent after awaits without a recheck (`supervisor-helper-transport.ts:235-244`) | preserved exactly; repair is a separate decision | open decision (not blocking) |
