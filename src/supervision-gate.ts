@@ -45,7 +45,8 @@ export type SendPreparation<A> =
 
 export interface AdmittedSend<Id, A, E, R> {
   readonly identity: Id;
-  // the transport's service-lifetime in-flight map (closing its scope interrupts each operation and runs its release)
+  // the transport's service-lifetime in-flight map (closing its scope interrupts each operation and runs its release;
+  // once closed, no send is admitted)
   readonly inFlight: FiberMap.FiberMap<Id, A>;
   // inside the section, after the in-flight lookup found nothing: reads the receipt and the guard, then answers or
   // commits the receipt and returns the initiation
@@ -55,10 +56,12 @@ export interface AdmittedSend<Id, A, E, R> {
 }
 
 // one send under the admission contract (plan 3.11 items 1-3, CT-LIN-05): a live operation for the identity is joined
-// as a duplicate and nothing is initiated; otherwise prepare runs in the section and an initiation is registered in the
-// in-flight map before the section ends; the caller that initiated is the only cancellation owner (its interruption,
-// in the section or while awaiting the reply, interrupts the registered operation and waits for its release); a
-// duplicate's interruption only ends its own wait; the reply is awaited outside the section
+// as a duplicate and nothing is initiated; a closed transport admits nothing (no receipt, no initiation) and the send
+// ends interrupted, as one interrupted before the permit; otherwise prepare runs in the section, the native initiation
+// happens in the section and its operation is registered in the in-flight map before the section ends; the caller that
+// initiated is the only cancellation owner (its interruption, in the section or while awaiting the reply, interrupts the
+// registered operation and waits for its release); a duplicate's interruption only ends its own wait; the reply is
+// awaited outside the section
 export const admitSend = <Id, A, E, R>(gate: SupervisionGateShape, send: AdmittedSend<Id, A, E, R>): Effect.Effect<A, E, R> =>
   Effect.suspend(() => {
     let owned: Fiber.Fiber<A> | undefined;
@@ -66,11 +69,15 @@ export const admitSend = <Id, A, E, R>(gate: SupervisionGateShape, send: Admitte
       const decision = yield* gate.admit((guard) => Effect.gen(function* () {
         const existing = yield* FiberMap.get(send.inFlight, send.identity);
         if (Option.isSome(existing)) return { _tag: "Join" as const, fiber: existing.value };
+        if (send.inFlight.state._tag === "Closed") return yield* Effect.interrupt;
         const prepared = yield* send.prepare(guard);
         if (prepared._tag === "Answer") return prepared;
         const inFlight = yield* prepared.initiate;
-        // registered in the same masked body as the initiation, so cleanup ownership exists before the section ends
-        owned = yield* FiberMap.run(send.inFlight, send.identity, inFlight.result.pipe(Effect.ensuring(inFlight.release)));
+        // the operation starts at once, so its classification and release are installed before it is registered; a
+        // transport that closed since the check above interrupts it on registration, which still classifies and releases
+        // the initiated request, and the caller reconciles
+        owned = yield* Effect.forkDetach(inFlight.result.pipe(Effect.ensuring(inFlight.release)), { startImmediately: true });
+        yield* FiberMap.set(send.inFlight, send.identity, owned);
         return { _tag: "Join" as const, fiber: owned };
       }));
       if (decision._tag === "Answer") return decision.value;

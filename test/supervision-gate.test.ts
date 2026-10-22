@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 import { Cause, Deferred, Effect, Exit, Fiber, FiberMap, Scope } from "effect";
-import { admitSend, makeSupervisionGate, type AdmittedInFlight, type GateGuard } from "../src/supervision-gate.js";
+import { NativeEnvelope, NativeStep } from "../src/native-envelope.js";
+import { admitSend, makeSupervisionGate, type AdmittedInFlight, type GateGuard, type SendPreparation } from "../src/supervision-gate.js";
+import { envelopePeer } from "./support/envelope-peer.js";
 
 // CT-LIN-05, the executable admission contract (plan 3.11), against a fake transport whose initiate is a synchronous
-// handoff (an optional barrier only lets a test deliver an interruption inside the section) and whose reply waits on a
-// Deferred; Stop is a section that commits the policy and then the bookkeeping
+// handoff (an optional step after it lets a test deliver an interruption or a transport shutdown inside the section) and
+// whose reply waits on a Deferred; Stop is a section that commits the policy and then the bookkeeping
 
 type Outcome = { readonly _tag: "sent"; readonly reply: string } | { readonly _tag: "denied" } | { readonly _tag: "reconcile"; readonly state: string };
 
@@ -20,7 +22,7 @@ const harness = Effect.gen(function* () {
   const transportScope = yield* Scope.make();
   const inFlight = yield* FiberMap.make<string, Outcome>().pipe(Scope.provide(transportScope));
 
-  const initiate = (id: string, barrier?: Deferred.Deferred<void>) => Effect.gen(function* () {
+  const initiate = (id: string, during?: Effect.Effect<void>) => Effect.gen(function* () {
     log.push(`initiate:${id}`);
     const reply = yield* Deferred.make<string>();
     replies.set(id, reply);
@@ -31,7 +33,7 @@ const harness = Effect.gen(function* () {
       releases.set(id, (releases.get(id) ?? 0) + 1);
       log.push(`release:${id}`);
     });
-    if (barrier) yield* Deferred.await(barrier);
+    if (during) yield* during;
     const result = Deferred.await(reply).pipe(
       Effect.map((value): Outcome => { receipts.set(id, "sent"); return { _tag: "sent", reply: value }; }),
       Effect.onInterrupt(() => Effect.sync(() => { if (receipts.get(id) === "admitted") receipts.set(id, "uncertain"); })),
@@ -40,7 +42,7 @@ const harness = Effect.gen(function* () {
   });
 
   const fromReceipt = (id: string): Outcome => ({ _tag: "reconcile", state: receipts.get(id) ?? "none" });
-  const send = (id: string, barrier?: Deferred.Deferred<void>) => admitSend(gate, {
+  const send = (id: string, during?: Effect.Effect<void>) => admitSend(gate, {
     identity: id,
     inFlight,
     prepare: (current) => Effect.sync(() => {
@@ -48,7 +50,7 @@ const harness = Effect.gen(function* () {
       if (current.supervisionStopped("main-chat")) return { _tag: "Answer" as const, value: { _tag: "denied" } as Outcome };
       receipts.set(id, "admitted");
       log.push(`receipt:${id}`);
-      return { _tag: "Initiate" as const, initiate: initiate(id, barrier) };
+      return { _tag: "Initiate" as const, initiate: initiate(id, during) };
     }),
     reconcile: Effect.sync(() => fromReceipt(id)),
   });
@@ -58,10 +60,13 @@ const harness = Effect.gen(function* () {
     if (barrier) yield* Deferred.await(barrier);
     log.push("bookkeeping");
   }));
+  // a section that holds the permit until released, entered once it runs
+  const hold = (entered: Deferred.Deferred<void>, release: Deferred.Deferred<void>) =>
+    gate.admit(() => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))));
   const reply = (id: string, value: string) => Deferred.succeed(replies.get(id)!, value);
   const until = (condition: () => boolean) => Effect.gen(function* () { while (!condition()) yield* Effect.yieldNow; });
   const initiates = () => log.filter((entry) => entry.startsWith("initiate")).length;
-  return { log, receipts, releases, send, stop, reply, until, initiates, transportScope };
+  return { log, receipts, releases, send, stop, hold, reply, until, initiates, transportScope };
 });
 
 describe("CT-LIN-05 admission section", () => {
@@ -116,7 +121,7 @@ describe("CT-LIN-05 admission section", () => {
     Effect.gen(function* () {
       const h = yield* harness;
       const barrier = yield* Deferred.make<void>();
-      const owner = yield* Effect.forkChild(h.send("m1", barrier));
+      const owner = yield* Effect.forkChild(h.send("m1", Deferred.await(barrier)));
       yield* h.until(() => h.log.includes("initiate:m1"));
       const interrupting = yield* Effect.forkChild(Fiber.interrupt(owner));
       yield* Effect.yieldNow;
@@ -155,6 +160,171 @@ describe("CT-LIN-05 admission section", () => {
       assert.equal(h.releases.get("m1"), 1);
       assert.equal(h.receipts.get("m1"), "uncertain");
     }), { timeout: 10_000 });
+
+  it.effect("8: a send queued behind the section when the transport scope closes admits nothing: no receipt, no initiation, interrupted; a later send initiates nothing", () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const holding = yield* Effect.forkChild(h.hold(entered, release));
+      yield* Deferred.await(entered);
+      const queued = yield* Effect.forkChild(h.send("m1"));
+      yield* Effect.yieldNow;
+      yield* Scope.close(h.transportScope, Exit.void);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(holding);
+      const exit = yield* Fiber.await(queued);
+      assert.equal(h.initiates(), 0);
+      assert.deepEqual([...h.receipts.keys()], []);
+      assert.ok(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause));
+      const later = yield* Effect.exit(h.send("m1"));
+      assert.ok(Exit.isFailure(later) && Cause.hasInterruptsOnly(later.cause));
+      assert.equal(h.initiates(), 0);
+      assert.deepEqual([...h.receipts.keys()], []);
+      assert.deepEqual([...h.releases.keys()], []);
+    }), { timeout: 10_000 });
+
+  it.effect("9: the transport scope closing between the initiation and its registration still owns the request: release once, receipt uncertain, the caller reconciles and nothing is sent again", () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      const outcome = yield* Effect.exit(h.send("m1", Scope.close(h.transportScope, Exit.void)));
+      assert.equal(h.releases.get("m1"), 1);
+      assert.equal(h.receipts.get("m1"), "uncertain");
+      assert.deepEqual(outcome, Exit.succeed({ _tag: "reconcile", state: "uncertain" }));
+      const later = yield* Effect.exit(h.send("m1"));
+      assert.ok(Exit.isFailure(later) && Cause.hasInterruptsOnly(later.cause));
+      assert.equal(h.initiates(), 1);
+      assert.equal(h.releases.get("m1"), 1);
+    }), { timeout: 10_000 });
+});
+
+// the same ownership over the real native adapter and a loopback T3 peer that never answers unless told to: the receipt
+// is classified from the adapter's sent boundary, release counts wrap the adapter's socket release, and the peer
+// observes every Request frame and the socket's end
+const nativeHarness = (answer = false) => Effect.gen(function* () {
+  const peer = yield* envelopePeer((socket, frame) => {
+    if (answer && frame._tag === "Request") socket.send(JSON.stringify({ _tag: "Exit", requestId: frame.id, exit: { _tag: "Success", value: "ok" } }));
+  });
+  const envelope = yield* NativeEnvelope;
+  const gate = yield* makeSupervisionGate({ scopeEnabled: () => true, supervisionStopped: () => false, workflowEditingEnabled: () => true });
+  const transportScope = yield* Scope.make();
+  const inFlight = yield* FiberMap.make<string, string>().pipe(Scope.provide(transportScope));
+  const receipts = new Map<string, "admitted" | "uncertain" | "unsent">();
+  const releases = new Map<string, number>();
+  let initiations = 0;
+  const send = (id: string, during: Effect.Effect<void> = Effect.void) => admitSend(gate, {
+    identity: id,
+    inFlight,
+    prepare: () => Effect.sync((): SendPreparation<string> => {
+      const receipt = receipts.get(id);
+      if (receipt !== undefined) return { _tag: "Answer", value: `reconcile:${receipt}` };
+      receipts.set(id, "admitted");
+      return { _tag: "Initiate", initiate: envelope.initiate({
+        endpoint: { baseUrl: peer.baseUrl, token: "fixture-token" },
+        request: { id, tag: "fixture.action", payload: {} },
+        maxPayload: 1024,
+        handshakeTimeout: "5 seconds",
+        onExit: () => Effect.succeed(NativeStep.done("replied")),
+      }).pipe(
+        Effect.map((flight): AdmittedInFlight<string> => {
+          initiations++;
+          return {
+            // interrupted, the request is uncertain once its frame was handed to ws and unsent before
+            result: flight.result.pipe(Effect.orElseSucceed(() => "failed"), Effect.onInterrupt(() =>
+              Effect.flatMap(flight.sent, (sent) => Effect.sync(() => { receipts.set(id, sent ? "uncertain" : "unsent"); })))),
+            release: Effect.sync(() => { releases.set(id, (releases.get(id) ?? 0) + 1); }).pipe(Effect.andThen(flight.release)),
+          };
+        }),
+        Effect.tap(() => during)) };
+    }),
+    reconcile: Effect.sync(() => `reconcile:${receipts.get(id) ?? "none"}`),
+  });
+  const requested = peer.frame((frame) => frame.frame._tag === "Request").pipe(Effect.asVoid);
+  return { peer, gate, send, receipts, releases, initiations: () => initiations, requested, transportScope };
+});
+
+describe("CT-LIN-05 ownership over the real native adapter", () => {
+  it.live("a send queued behind the section when the transport scope closes opens no socket and writes no Request; a later send neither", () =>
+    Effect.gen(function* () {
+      const h = yield* nativeHarness();
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const holding = yield* Effect.forkChild(h.gate.admit(() => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))));
+      yield* Deferred.await(entered);
+      const queued = yield* Effect.forkChild(h.send("m1"));
+      yield* Effect.yieldNow;
+      yield* Scope.close(h.transportScope, Exit.void);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(holding);
+      const exit = yield* Fiber.await(queued);
+      assert.equal(h.initiations(), 0);
+      assert.deepEqual([...h.receipts.keys()], []);
+      assert.ok(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause));
+      const later = yield* Effect.exit(h.send("m1"));
+      assert.ok(Exit.isFailure(later) && Cause.hasInterruptsOnly(later.cause));
+      assert.equal(h.initiations(), 0);
+      assert.deepEqual([...h.receipts.keys()], []);
+      assert.deepEqual([...h.releases.keys()], []);
+      assert.deepEqual(h.peer.texts(), []);
+      assert.equal(h.peer.tcpConnections(), 0);
+    }).pipe(Effect.provide(NativeEnvelope.layer)), { timeout: 10_000 });
+
+  it.live("the transport scope closing after the Request reached T3 but before its registration releases that socket; the caller reconciles uncertain and nothing is sent again", () =>
+    Effect.gen(function* () {
+      const h = yield* nativeHarness();
+      const outcome = yield* Effect.exit(h.send("m1", h.requested.pipe(Effect.andThen(Scope.close(h.transportScope, Exit.void)))));
+      assert.equal(h.releases.get("m1"), 1);
+      assert.equal(h.receipts.get("m1"), "uncertain");
+      assert.deepEqual(outcome, Exit.succeed("reconcile:uncertain"));
+      yield* h.peer.closed;
+      const later = yield* Effect.exit(h.send("m1"));
+      assert.ok(Exit.isFailure(later) && Cause.hasInterruptsOnly(later.cause));
+      assert.equal(h.initiations(), 1);
+      assert.equal(h.peer.texts().length, 1);
+      assert.equal(h.releases.get("m1"), 1);
+    }).pipe(Effect.provide(NativeEnvelope.layer)), { timeout: 10_000 });
+
+  it.live("closing the transport scope with a registered send awaiting its reply releases the socket and the caller reconciles uncertain", () =>
+    Effect.gen(function* () {
+      const h = yield* nativeHarness();
+      const owner = yield* Effect.forkChild(h.send("m1"));
+      yield* h.requested;
+      yield* Scope.close(h.transportScope, Exit.void);
+      assert.equal(yield* Fiber.join(owner), "reconcile:uncertain");
+      assert.equal(h.releases.get("m1"), 1);
+      yield* h.peer.closed;
+      assert.equal(h.peer.texts().length, 1);
+    }).pipe(Effect.provide(NativeEnvelope.layer)), { timeout: 10_000 });
+
+  it.live("interrupting the owner while it awaits the reply releases the socket; its duplicate and a later send reconcile without another Request", () =>
+    Effect.gen(function* () {
+      const h = yield* nativeHarness();
+      const owner = yield* Effect.forkChild(h.send("m1"));
+      yield* h.requested;
+      const duplicate = yield* Effect.forkChild(h.send("m1"));
+      yield* Effect.yieldNow;
+      yield* Fiber.interrupt(owner);
+      assert.equal(h.releases.get("m1"), 1);
+      assert.equal(yield* Fiber.join(duplicate), "reconcile:uncertain");
+      yield* h.peer.closed;
+      assert.equal(yield* h.send("m1"), "reconcile:uncertain");
+      assert.equal(h.initiations(), 1);
+      assert.equal(h.peer.texts().length, 1);
+    }).pipe(Effect.provide(NativeEnvelope.layer)), { timeout: 10_000 });
+
+  it.live("a reply completes the owner and its duplicate with one Request; the socket is released once", () =>
+    Effect.gen(function* () {
+      const h = yield* nativeHarness(true);
+      const owner = yield* Effect.forkChild(h.send("m1"));
+      const duplicate = yield* Effect.forkChild(h.send("m1"));
+      assert.equal(yield* Fiber.join(owner), "replied");
+      assert.equal(yield* Fiber.join(duplicate), "replied");
+      assert.equal(h.releases.get("m1"), 1);
+      yield* h.peer.closed;
+      assert.equal(h.initiations(), 1);
+      assert.equal(h.peer.texts().length, 1);
+      assert.equal(h.receipts.get("m1"), "admitted");
+    }).pipe(Effect.provide(NativeEnvelope.layer)), { timeout: 10_000 });
 });
 
 // the section never runs two bodies at once
