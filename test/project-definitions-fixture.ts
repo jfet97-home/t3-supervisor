@@ -1,5 +1,6 @@
-import { Effect } from "effect";
-import { ProjectDefinitionLoader } from "../src/project-definitions.js";
+import { Effect, Layer } from "effect";
+import { ProjectDefinitionLoader, ProjectDefinitions, type ProjectDefinitionLoaderOptions } from "../src/project-definitions.js";
+import { ProjectConfigEditorService, type DefinitionSaveRecorder } from "../src/project-config-editor.js";
 import { ProjectFileError, type ProjectFiles, type ProjectWriter } from "../src/project-files.js";
 import { stringify } from "yaml";
 import { definitionCatalogPath, type DefinitionCatalogKind, type DefinitionReference, type EffectiveConfigurationInfo, type ProjectConfigurationInfo } from "../src/project-definitions-contract.js";
@@ -125,12 +126,13 @@ export function makeDefinitionFixture(options: {
     },
     commitFiles: async (_targetRoot: string, paths: readonly string[]) => ({status: "committed" as const, commitSha: paths.join("-")}),
   };
-  const loader = new ProjectDefinitionLoader(source, t3, files, {
+  const loaderOptions: ProjectDefinitionLoaderOptions = {
     globalRoot,
     useGlobalDefinitions: () => options.globalEnabled ?? false,
     isScratchProject: (_id, registeredRoot) => options.scratch === true && registeredRoot === root,
     setupWriter,
-  });
+  };
+  const loader = new ProjectDefinitionLoader(source, t3, files, loaderOptions);
   const writer: ProjectWriter = {
     checkProjectConfigFile: async (targetRoot, signal) => {
       const folder = await files.list(targetRoot, ".t3-supervisor", signal);
@@ -149,5 +151,9 @@ export function makeDefinitionFixture(options: {
       .filter(id => !(options.omit ?? []).includes(id)).sort();
     addFile(targetRoot, ".t3-supervisor/project.yaml", indexSource({...options, steps: present("steps", "md"), workflows: present("workflows", "yaml")}));
   };
-  return {loader, files, writer, trees, directories, failures, truncatedPaths, truncatedFiles, calls, writes, addFile, addDirectory, writeIndex, root, projectId, globalRoot, threadRoot};
+  // the same in-memory files, catalog, projection and setup writer as services: the definitions, and the config editor over a project writer
+  const layer = ProjectDefinitions.layer({source, t3, files, options: loaderOptions});
+  const editorLayer = (configWriter: ProjectWriter = writer, onSaved?: DefinitionSaveRecorder) =>
+    ProjectConfigEditorService.layer(configWriter, onSaved).pipe(Layer.provideMerge(layer));
+  return {loader, layer, editorLayer, files, writer, trees, directories, failures, truncatedPaths, truncatedFiles, calls, writes, addFile, addDirectory, writeIndex, root, projectId, globalRoot, threadRoot};
 }

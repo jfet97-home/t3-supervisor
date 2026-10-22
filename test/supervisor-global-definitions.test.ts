@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
-import { it } from "vitest";
+import { it } from "@effect/vitest";
+import {Effect} from "effect";
+import {ProjectDefinitions} from "../src/project-definitions.js";
 import {ProjectFileError} from "../src/project-files.js";
 import {proposalContextFromDefinitions} from "../src/supervisor-workflow.js";
 import {requiredReferences} from "../src/project-definitions-contract.js";
 import {indexSource, makeDefinitionFixture, projectIndex, stepSource, workflowSource} from "./project-definitions-fixture.js";
 
-it("merges global and project definitions with separate identities and editable local configuration", async () => {
+// one definitions operation over the fixture's in-memory sources
+const withDefinitions = <A>(f: ReturnType<typeof makeDefinitionFixture>, use: (definitions: ProjectDefinitions["Service"]) => Effect.Effect<A>) =>
+  Effect.gen(function* () {return yield* use(yield* ProjectDefinitions);}).pipe(Effect.provide(f.layer));
+
+it.effect("merges global and project definitions with separate identities and editable local configuration", () => Effect.gen(function* () {
   const f = makeDefinitionFixture({globalEnabled: true});
   const indexOptions = {steps: ["review"], workflows: ["delivery", "reviewer"], required: [{step: "review"}, {workflow: "delivery"}], default_workflow: "delivery"};
   const globalConfig = indexSource(indexOptions);
@@ -19,7 +25,7 @@ it("merges global and project definitions with separate identities and editable 
   f.addFile(f.root, ".t3-supervisor/workflows/reviewer.yaml", workflowSource("Project reviewer", "  - step: review\n"));
   f.addFile(f.root, ".t3-supervisor/workflows/delivery.yaml", workflowSource("Project delivery", "  - workflow: reviewer\n"));
 
-  const snapshot = await f.loader.load(f.projectId);
+  const snapshot = yield* withDefinitions(f, definitions => definitions.load(f.projectId));
   assert.equal(snapshot.status, "ready");
   assert.equal(snapshot.complete, true);
   assert.equal(snapshot.globalOnly, false);
@@ -49,10 +55,10 @@ it("merges global and project definitions with separate identities and editable 
   assert.deepEqual(globalDelivery.sequence, [{workflow: snapshot.workflows.find(workflow => workflow.origin === "global" && workflow.sourceId === "reviewer")!.id}]);
   assert.deepEqual(projectDelivery.sequence, [{workflow: "reviewer"}]);
   assert.deepEqual(snapshot.sources.map(source => source.origin), ["global", "global", "global", "global", "project", "project", "project", "project"]);
-  assert.equal(snapshot.globalRevision, await f.loader.globalFingerprint(AbortSignal.timeout(5000)));
-});
+  assert.equal(snapshot.globalRevision, yield* withDefinitions(f, definitions => definitions.globalFingerprint));
+}));
 
-it("uses enabled global definitions alone for Scratch and never reads the scratch checkout", async () => {
+it.effect("uses enabled global definitions alone for Scratch and never reads the scratch checkout", () => Effect.gen(function* () {
   let globalEnabled = true;
   const f = makeDefinitionFixture({projectId: "scratch", root: "/scratch", scratch: true, globalEnabled});
   f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", indexSource({steps: ["shared"], workflows: ["shared"], required: [{workflow: "shared"}], default_workflow: "shared"}));
@@ -60,7 +66,7 @@ it("uses enabled global definitions alone for Scratch and never reads the scratc
   f.addFile(f.globalRoot, ".t3-supervisor/workflows/shared.yaml", workflowSource("Shared", "  - step: shared\n"));
   f.addFile("/scratch", ".t3-supervisor/project.yaml", indexSource());
   f.addFile("/scratch", ".t3-supervisor/steps/local.md", stepSource("local"));
-  const active = await f.loader.load("scratch", "thread");
+  const active = yield* withDefinitions(f, definitions => definitions.load("scratch", "thread"));
   assert.equal(active.status, "ready");
   assert.equal(active.globalOnly, true);
   assert.equal(active.workspaceRoot, "/worktrees/feature");
@@ -71,7 +77,7 @@ it("uses enabled global definitions alone for Scratch and never reads the scratc
   globalEnabled = false;
   const disabledFixture = makeDefinitionFixture({projectId: "scratch", root: "/scratch", scratch: true, globalEnabled});
   disabledFixture.addFile(disabledFixture.globalRoot, ".t3-supervisor/project.yaml", indexSource());
-  const disabled = await disabledFixture.loader.load("scratch", "thread");
+  const disabled = yield* withDefinitions(disabledFixture, definitions => definitions.load("scratch", "thread"));
   assert.equal(disabled.status, "ready");
   assert.equal(disabled.globalOnly, true);
   assert.equal(disabled.globalRevision, null);
@@ -79,42 +85,42 @@ it("uses enabled global definitions alone for Scratch and never reads the scratc
   assert.deepEqual(disabled.config, {workflows: [], steps: []});
   assert.equal(disabled.complete, true);
   assert.ok(disabledFixture.calls.every(call => call.root !== disabledFixture.globalRoot && call.root !== "/worktrees/feature"));
-});
+}));
 
-it("an unreadable enabled global scope cannot become an empty ready collection", async () => {
+it.effect("an unreadable enabled global scope cannot become an empty ready collection", () => Effect.gen(function* () {
   const f = makeDefinitionFixture({globalEnabled: true});
   f.addFile(f.root, ".t3-supervisor/project.yaml", indexSource());
   f.addDirectory(f.root, ".t3-supervisor/steps");
   f.addDirectory(f.root, ".t3-supervisor/workflows");
   f.failures.set(`${f.globalRoot}|.t3-supervisor`, new ProjectFileError("permission_required"));
-  const snapshot = await f.loader.load(f.projectId);
+  const snapshot = yield* withDefinitions(f, definitions => definitions.load(f.projectId));
   assert.equal(snapshot.status, "permission_required");
   assert.equal(snapshot.complete, false);
   assert.equal(snapshot.revision, null);
   assert.equal(snapshot.globalRevision, null);
   assert.deepEqual(snapshot.sources.map(source => source.origin), ["project"]);
-});
+}));
 
-it("keeps enabled global requirements visible when the project folder is missing", async () => {
+it.effect("keeps enabled global requirements visible when the project folder is missing", () => Effect.gen(function* () {
   const f = makeDefinitionFixture({globalEnabled: true});
   f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", indexSource({steps: ["shared"], required: [{step: "shared"}]}));
   f.addFile(f.globalRoot, ".t3-supervisor/steps/shared.md", stepSource("shared"));
   f.addDirectory(f.globalRoot, ".t3-supervisor/workflows");
-  const snapshot = await f.loader.load(f.projectId);
+  const snapshot = yield* withDefinitions(f, definitions => definitions.load(f.projectId));
   assert.equal(snapshot.status, "missing");
   assert.equal(snapshot.complete, true);
   assert.ok(snapshot.revision);
   assert.equal(requiredReferences(snapshot.config).length, 1);
   assert.equal("step" in requiredReferences(snapshot.config)[0]!, true);
   assert.equal(snapshot.steps[0]?.origin, "global");
-});
+}));
 
-it("missing enabled global definitions remain explicit and global fingerprints track later sources", async () => {
+it.effect("missing enabled global definitions remain explicit and global fingerprints track later sources", () => Effect.gen(function* () {
   const f = makeDefinitionFixture({globalEnabled: true});
   f.addFile(f.root, ".t3-supervisor/project.yaml", indexSource());
   f.addDirectory(f.root, ".t3-supervisor/steps");
   f.addDirectory(f.root, ".t3-supervisor/workflows");
-  const localOnly = await f.loader.load(f.projectId);
+  const localOnly = yield* withDefinitions(f, definitions => definitions.load(f.projectId));
   assert.equal(localOnly.status, "missing");
   assert.equal(localOnly.complete, true);
   assert.ok(localOnly.revision);
@@ -125,10 +131,10 @@ it("missing enabled global definitions remain explicit and global fingerprints t
   const malformed = "workflows: [\n";
   f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", malformed);
   f.addFile(f.globalRoot, ".t3-supervisor/steps/not-a-step.md", "invalid but readable\n");
-  const invalid = await f.loader.load(f.projectId);
+  const invalid = yield* withDefinitions(f, definitions => definitions.load(f.projectId));
   assert.equal(invalid.status, "invalid");
   assert.equal(invalid.complete, true);
   assert.ok(invalid.revision);
   assert.notEqual(invalid.globalRevision, localOnly.globalRevision);
   assert.ok(invalid.sources.some(source => source.origin === "global" && source.content === malformed));
-});
+}));

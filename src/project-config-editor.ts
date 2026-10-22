@@ -1,8 +1,12 @@
+import { Context, Effect, Layer, RcMap, Result, Scope, Semaphore } from "effect";
 import { isMap, isSeq, parseDocument, stringify } from "yaml";
 import { posix } from "node:path";
-import { ProjectDefinitionLoader, parseProjectConfiguration } from "./project-definitions.js";
+import {decodeDefinitionSource, definitionsCanceled, DefinitionSourceFailure, DefinitionSourceInvalid, nativeDefinitionsCall, parseProjectConfiguration,
+  ProjectConfigurationSource, ProjectDefinitions, runDefinitionsFacade, withDefinitionsDeadline, type ProjectDefinitionLoader} from "./project-definitions.js";
 import { ProjectFileError, type ProjectWriter } from "./project-files.js";
 import { type DefinitionCatalogEntry, type ProjectConfigSave, type ProjectConfigSaveOutcome, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
+
+const projectConfigPath = ".t3-supervisor/project.yaml";
 
 // the saved index is compact: a required entry says required: true and every other entry omits the flag
 const entryDocument = (entry: DefinitionCatalogEntry) => ({path: entry.path, summary: entry.summary, ...(entry.required ? {required: true} : {})});
@@ -42,42 +46,41 @@ const serializeConfig = (config: ProjectConfigurationInfo, previous?: string): s
   } catch {return intended;}
 };
 
-/** Saves only the checkout-local project.yaml through the trusted native writer. */
-export class ProjectConfigEditor {
-  private readonly active = new Map<string, Promise<void>>();
-  constructor(readonly loader: ProjectDefinitionLoader, readonly writer: ProjectWriter,
-    readonly onSaved?: (definitions: ProjectDefinitionSnapshot, expectedRevision: string) => void) {}
+// what saving needs from the definitions: fresh snapshots, the operative checkout and the native readback of project.yaml
+export type ProjectConfigDefinitions = Pick<ProjectDefinitions["Service"], "load" | "currentWorkspace" | "readProjectConfig">;
+// retains the user authorization of a verified save; a throw makes the save uncertain
+export type DefinitionSaveRecorder = (definitions: ProjectDefinitionSnapshot, expectedRevision: string) => void;
+type EditorOptions = {readonly definitions: ProjectConfigDefinitions; readonly writer: ProjectWriter; readonly onSaved?: DefinitionSaveRecorder | undefined};
 
-  async save(input: ProjectConfigSave, parentSignal?: AbortSignal): Promise<ProjectConfigSaveOutcome> {
-    const signal = parentSignal ? AbortSignal.any([parentSignal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000);
-    const outcome = (status: ProjectConfigSaveOutcome["status"], message: string, definitions: ProjectDefinitionSnapshot | null = null): ProjectConfigSaveOutcome =>
-      ({status, message, definitions: definitions ? {...definitions, editingAvailable: true} : null});
-    const checkProjectConfigFile = this.writer.checkProjectConfigFile;
-    const writeProjectConfig = this.writer.writeProjectConfig;
+const makeProjectConfigEditor = Effect.fnUntraced(function* ({definitions, writer, onSaved}: EditorOptions) {
+  // saves of one checkout run one after another; each save leases its root's lock and releases it when it ends
+  const saveLocks = yield* RcMap.make({lookup: (_root: string) => Semaphore.make(1)});
+
+  const save = (input: ProjectConfigSave): Effect.Effect<ProjectConfigSaveOutcome, DefinitionSourceFailure> => Effect.gen(function* () {
+    const outcome = (status: ProjectConfigSaveOutcome["status"], message: string, snapshot: ProjectDefinitionSnapshot | null = null): ProjectConfigSaveOutcome =>
+      ({status, message, definitions: snapshot ? {...snapshot, editingAvailable: true} : null});
+    // the writer's methods are read for every save, as the baseline read them
+    const checkProjectConfigFile = writer.checkProjectConfigFile;
+    const writeProjectConfig = writer.writeProjectConfig;
     if (!checkProjectConfigFile || !writeProjectConfig) return outcome("permission_required", "Project configuration editing needs the trusted native filesystem writer.");
-    let intended: ReturnType<typeof parseProjectConfiguration>;
-    try {
-      // the submitted object is parsed as written, so a legacy or unknown field is rejected rather than dropped
-      intended = parseProjectConfiguration(stringify(input.config, {lineWidth: 0}));
-    } catch (error) {return outcome("invalid", error instanceof Error ? error.message : "Check the project.yaml index entries.");}
+    // the submitted object is decoded as written, so a legacy or unknown field is rejected rather than dropped
+    const submitted = yield* Effect.result(Effect.try({try: () => stringify(input.config, {lineWidth: 0}),
+      catch: error => new DefinitionSourceInvalid({problem: error instanceof Error ? error.message : undefined})}).pipe(
+      Effect.flatMap(text => decodeDefinitionSource(ProjectConfigurationSource, text))));
+    if (Result.isFailure(submitted)) return outcome("invalid", submitted.failure.problem ?? "Check the project.yaml index entries.");
+    const intended = submitted.success;
     if (Buffer.byteLength(stringify(configDocument(intended), {lineWidth: 0}), "utf8") > 64 * 1024 || !/^[a-f0-9]{64}$/.test(input.expectedRevision))
       return outcome("invalid", "Check the 64 KiB project.yaml limit and refresh the definitions.");
 
-    const initial = await this.loader.load(input.projectId, input.threadId, signal);
+    const initial = yield* definitions.load(input.projectId, input.threadId);
     if (initial.globalOnly) return outcome("unavailable", "Shared global configuration is read-only in project settings.", initial);
     if (!initial.complete || !initial.revision) return outcome(initial.status === "permission_required" ? "permission_required" : "unavailable",
       "Project configuration cannot be edited until the selected definition collection is fully readable.", initial);
     const root = initial.workspaceRoot;
     if (!posix.isAbsolute(root)) return outcome("unavailable", "The selected project checkout has no safe native write root.", initial);
-    const previousSave = this.active.get(root) ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>(resolve => {release = resolve;});
-    const queued = previousSave.then(() => current);
-    this.active.set(root, queued);
-    try {
-      await previousSave;
-      if (signal.aborted) return outcome("unavailable", "The save expired before writing. Refresh the project configuration.");
-      const fresh = await this.loader.load(input.projectId, input.threadId, signal);
+    return yield* Effect.scoped(Effect.flatMap(RcMap.get(saveLocks, root), lock => lock.withPermit(Effect.gen(function* () {
+      if (yield* definitionsCanceled) return outcome("unavailable", "The save expired before writing. Refresh the project configuration.");
+      const fresh = yield* definitions.load(input.projectId, input.threadId);
       if (!fresh.complete || !fresh.revision || fresh.workspaceRoot !== root || fresh.revision !== input.expectedRevision)
         return outcome("conflict", "The checkout or definition sources changed. Your draft was kept; refresh before saving again.", fresh);
       if (fresh.globalOnly) return outcome("conflict", "The selected definition scope changed. Refresh before saving.", fresh);
@@ -87,42 +90,75 @@ export class ProjectConfigEditor {
         const missing = intended[kind].find(entry => !files.has(`${kind}:${entry.path}`));
         if (missing) return outcome("invalid", `Indexed ${missing.path} needs an existing .t3-supervisor/${missing.path}; add the file to the repository or remove the row.`, fresh);
       }
-      const target = ".t3-supervisor/project.yaml";
-      const previousContents = fresh.sources.find(source => source.origin === "project" && source.path === target)?.content;
+      const previousContents = fresh.sources.find(source => source.origin === "project" && source.path === projectConfigPath)?.content;
       const contents = serializeConfig(intended, previousContents);
       if (Buffer.byteLength(contents, "utf8") > 64 * 1024)
         return outcome("invalid", "The serialized project.yaml exceeds the 64 KiB source limit.", fresh);
-      const checkTarget = () => checkProjectConfigFile(root, signal);
-      try {
-        if (!await checkTarget()) return outcome("unavailable", "Editing requires an existing .t3-supervisor directory and a regular project.yaml file.", fresh);
-      } catch (error) {
-        return outcome(error instanceof ProjectFileError && error.code === "permission_required" ? "permission_required" : "unavailable",
-          "Could not verify the project.yaml write target with the native filesystem:read permission.", fresh);
-      }
-      if (await this.loader.currentWorkspace(input.projectId, input.threadId, signal) !== root)
+      const checkTarget = nativeDefinitionsCall(signal => checkProjectConfigFile(root, signal));
+      const target = yield* Effect.result(checkTarget);
+      if (Result.isFailure(target)) return outcome(target.failure.error instanceof ProjectFileError && target.failure.error.code === "permission_required" ? "permission_required" : "unavailable",
+        "Could not verify the project.yaml write target with the native filesystem:read permission.", fresh);
+      if (!target.success) return outcome("unavailable", "Editing requires an existing .t3-supervisor directory and a regular project.yaml file.", fresh);
+      if ((yield* definitions.currentWorkspace(input.projectId, input.threadId)) !== root)
         return outcome("conflict", "The selected checkout changed before writing. Refresh before saving again.");
-      if (signal.aborted) return outcome("unavailable", "The save expired before writing. Refresh the project configuration.");
-      try {await writeProjectConfig(root, contents, signal);}
-      catch (error) {
-        if (error instanceof ProjectFileError && error.code === "permission_required")
-          return outcome("permission_required", error.message, fresh);
+      if (yield* definitionsCanceled) return outcome("unavailable", "The save expired before writing. Refresh the project configuration.");
+      // a write failure other than a definite permission refusal is uncertain and never retried
+      const wrote = yield* Effect.result(nativeDefinitionsCall(signal => writeProjectConfig(root, contents, signal)));
+      if (Result.isFailure(wrote)) {
+        const error = wrote.failure.error;
+        if (error instanceof ProjectFileError && error.code === "permission_required") return outcome("permission_required", error.message, fresh);
         return outcome("uncertain", "The write outcome could not be confirmed. Your draft was kept. Refresh and inspect project.yaml before retrying.");
       }
-      const verified = await this.loader.load(input.projectId, input.threadId, signal);
-      try {
-        const bytes = await this.loader.files.read(root, target, signal);
-        if (!await checkTarget() || bytes.truncated || bytes.contents !== contents || bytes.byteLength !== Buffer.byteLength(contents, "utf8"))
-          return outcome("uncertain", "The project.yaml write could not be confirmed exactly. Refresh and inspect the file before retrying.", verified);
-      } catch {return outcome("uncertain", "The write was accepted, but native readback could not confirm project.yaml. Refresh before retrying.", verified);}
+      const verified = yield* definitions.load(input.projectId, input.threadId);
+      const readback = yield* Effect.result(Effect.gen(function* () {
+        const bytes = yield* definitions.readProjectConfig(root);
+        const regular = yield* checkTarget;
+        return yield* Effect.try({try: () => regular && !bytes.truncated && bytes.contents === contents && bytes.byteLength === Buffer.byteLength(contents, "utf8"),
+          catch: error => new DefinitionSourceFailure({error})});
+      }));
+      if (Result.isFailure(readback)) return outcome("uncertain", "The write was accepted, but native readback could not confirm project.yaml. Refresh before retrying.", verified);
+      if (!readback.success) return outcome("uncertain", "The project.yaml write could not be confirmed exactly. Refresh and inspect the file before retrying.", verified);
       if (!verified.complete || verified.workspaceRoot !== root || !verified.revision || !verified.projectConfig ||
         JSON.stringify(verified.projectConfig) !== JSON.stringify(intended))
         return outcome("uncertain", "T3 accepted the write, but the refreshed project configuration could not confirm it. Refresh and inspect project.yaml before retrying.", verified);
-      try {this.onSaved?.(verified, input.expectedRevision);}
-      catch {return outcome("uncertain", "The file was saved, but its user-authorization record could not be retained. Refresh before retrying.", verified);}
+      const recorded = yield* Effect.result(Effect.try({try: () => onSaved?.(verified, input.expectedRevision), catch: error => new DefinitionSourceFailure({error})}));
+      if (Result.isFailure(recorded)) return outcome("uncertain", "The file was saved, but its user-authorization record could not be retained. Refresh before retrying.", verified);
       return outcome("saved", "Saved .t3-supervisor/project.yaml. Required flags remain visible to the Supervisor for semantic review.", verified);
-    } finally {
-      release();
-      if (this.active.get(root) === queued) this.active.delete(root);
-    }
+    }))));
+  }).pipe(withDefinitionsDeadline("30 seconds"));
+
+  return {save};
+});
+
+/** Saves only the checkout-local project.yaml through the trusted native writer. */
+export class ProjectConfigEditorService extends Context.Service<ProjectConfigEditorService, {
+  // saves of one checkout are serialized; a stale revision, a missing file or an unconfirmed write is never reported saved (30 s deadline)
+  readonly save: (input: ProjectConfigSave) => Effect.Effect<ProjectConfigSaveOutcome, DefinitionSourceFailure>;
+}>()("t3-supervisor/ProjectConfigEditor") {
+  static readonly make: (options: EditorOptions) => Effect.Effect<ProjectConfigEditorService["Service"], never, Scope.Scope> = makeProjectConfigEditor;
+  static readonly layer = (writer: ProjectWriter, onSaved?: DefinitionSaveRecorder): Layer.Layer<ProjectConfigEditorService, never, ProjectDefinitions> =>
+    Layer.effect(ProjectConfigEditorService, Effect.gen(function* () {
+      return yield* makeProjectConfigEditor({definitions: yield* ProjectDefinitions, writer, onSaved});
+    }));
+}
+
+// the Promise loader seen as the editor's definitions; its methods are read on every call, so a wrapped loader observes each load
+const promiseDefinitions = (loader: ProjectDefinitionLoader): ProjectConfigDefinitions => ({
+  // a loader rejection rejects the save with the same value, as the baseline's await did
+  load: (projectId, threadId = null) => nativeDefinitionsCall(signal => loader.load(projectId, threadId, signal)).pipe(Effect.catch(failure => Effect.die(failure.error))),
+  currentWorkspace: (projectId, threadId) => nativeDefinitionsCall(signal => loader.currentWorkspace(projectId, threadId, signal)),
+  readProjectConfig: root => nativeDefinitionsCall(signal => loader.files.read(root, projectConfigPath, signal)),
+});
+
+// promise facade (plan 3.9 b-03) over the editor and a promise loader for unported callers; it belongs in the composition root and goes with its last caller (s6c)
+export class ProjectConfigEditor {
+  private readonly editor: ProjectConfigEditorService["Service"];
+  constructor(readonly loader: ProjectDefinitionLoader, readonly writer: ProjectWriter, readonly onSaved?: DefinitionSaveRecorder) {
+    // the save locks live as long as this object, as the baseline queue map did
+    this.editor = Effect.runSync(Scope.provide(Scope.makeUnsafe())(makeProjectConfigEditor({definitions: promiseDefinitions(loader), writer, onSaved})));
+  }
+
+  save(input: ProjectConfigSave, parentSignal?: AbortSignal): Promise<ProjectConfigSaveOutcome> {
+    return runDefinitionsFacade(this.editor.save(input), parentSignal);
   }
 }
