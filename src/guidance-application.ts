@@ -14,7 +14,9 @@ import { ProjectConfigEditorService, type ProjectConfigEditor } from "./project-
 import { existsSync } from "node:fs";
 import { ProjectSupervisorStore, loadSupervisorOwnership } from "./project-supervisor-store.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
-import { makeSupervisorRpc, readSupervisorBaseline, readSupervisorThreads, record } from "./supervisor-native.js";
+import { NativeRpc, NativeShell, record, type NativeRpcShape, type SupervisorRpc } from "./supervisor-native.js";
+import { cancelOnAbort, NativeEnvelope } from "./native-envelope.js";
+import { FetchHttpClient } from "effect/http";
 import { makeGitProbe } from "./git-probe.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
 import { createWorkflowMcpEndpoint } from "./workflow-mcp.js";
@@ -104,9 +106,16 @@ export const runGuidanceApplication = (
     const editor = projectWriter ? projectConfigEditorFacade(run, yield* ProjectConfigEditorService.make({definitions: definitionsService, writer: projectWriter,
       onSaved: (snapshot, expectedRevision) => supervisionStore.recordDefinitionUserSave(snapshot, expectedRevision)})) : undefined;
     const operateToken = config.guidanceTokenFile && existsSync(config.guidanceTokenFile) ? yield* Effect.tryPromise(() => readFile(config.guidanceTokenFile!, "utf8")) : "";
-    const readRpc = makeSupervisorRpc(config.t3Url, readToken.trim());
+    // b-03: one native client per credential and the shell reads on the read client, handed over in their baseline promise shapes
+    const nativeClient = (token: string) => NativeRpc.make({baseUrl: config.t3Url, token}).pipe(Effect.provide(NativeEnvelope.layer));
+    const rpcFacade = (rpc: NativeRpcShape): SupervisorRpc => (tag, payload, signal) =>
+      run(Effect.scoped(Effect.flatMap(cancelOnAbort(signal), cancel => rpc.call(tag, payload, cancel))));
+    const nativeRead = yield* nativeClient(readToken.trim());
+    const nativeShell = yield* NativeShell.make({baseUrl: config.t3Url, token: readToken.trim()}).pipe(
+      Effect.provideService(NativeRpc, nativeRead), Effect.provide(FetchHttpClient.layer));
+    const readRpc = rpcFacade(nativeRead);
     const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, readRpc,
-      operateToken.trim() ? makeSupervisorRpc(config.t3Url, operateToken.trim()) : null, readSupervisorBaseline(config.t3Url, readToken.trim()), definitions);
+      operateToken.trim() ? rpcFacade(yield* nativeClient(operateToken.trim())) : null, signal => run(nativeShell.baseline, {signal}), definitions);
     const workflowReader = new WorkflowWriteController({
       supervisors: supervisionStore,
       ...(config.helperProviderInstanceId ? {helperProviderInstanceId: config.helperProviderInstanceId} : {}),
@@ -119,7 +128,7 @@ export const runGuidanceApplication = (
       starts: {start: (input, evidence, signal) => supervision.startSupervision(input, evidence, signal)},
       stops: {stop: (input, evidence, signal) => supervision.stopSupervision(input, evidence, signal)},
       native: {
-        listThreads: readSupervisorThreads(config.t3Url, readToken.trim(), readRpc),
+        listThreads: signal => run(nativeShell.threads, {signal}),
         projection: async (threadId, signal) => (await run(t3.projection(threadId), {signal})).projection,
         getTurnItem: async (input, signal) => {
           const result = await readRpc("orchestration.getTurnItem", input, signal);

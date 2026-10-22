@@ -21,7 +21,8 @@ import { effectiveIndex, projectIndex, testSummary } from "./project-definitions
 import { parseWorkflowInterpretation, proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
 import { WebSocketServer } from "ws";
 import { createWorkflowMcpEndpoint } from "../src/workflow-mcp.js";
-import { makeSupervisorRpc, SupervisorRpcError } from "../src/supervisor-native.js";
+import { SupervisorRpcError } from "../src/supervisor-native.js";
+import { makeSupervisorRpc } from "./support/supervisor-native-client.js";
 
 type Fixture = {
   directory: string;

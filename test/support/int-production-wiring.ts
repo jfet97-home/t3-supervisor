@@ -9,7 +9,8 @@ import { ProjectSupervisorStore, loadSupervisorOwnership } from "../../src/proje
 import { ProjectSupervisor } from "../../src/project-supervisor.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import type { StoreShape } from "../../src/store.js";
-import { makeSupervisorRpc, readSupervisorBaseline, readSupervisorThreads, record, type SupervisorRpc } from "../../src/supervisor-native.js";
+import { record, type SupervisorRpc } from "../../src/supervisor-native.js";
+import { makeSupervisorRpc, readSupervisorBaseline, readSupervisorThreads } from "./supervisor-native-client.js";
 import { SupervisorTeamController } from "../../src/supervisor-team-controller.js";
 import { makeT3Client, T3Client, type T3ClientShape } from "../../src/t3.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
