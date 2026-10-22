@@ -1189,11 +1189,14 @@ timeouts (`run.BPv-BBRv.js:3270-3271`). Policy:
    after 10 s, no later phase starts and the run exits 124. A failing phase stops the run
    with its exit code; signals are forwarded to the active group (128 + n). Caller
    arguments are parsed once with Vitest's own parser: `--config` runs that configuration
-   once with them; file filters select phases by Vitest's own matching (`vitest list
-   --filesOnly`), a location filter goes only to the phase owning its file, and a selection
-   no phase matches fails as Vitest does; over several phases each report goes to its own
-   `<name>.<phase>.<ext>` file and `--reporter=json` combines them into the requested file
-   with a per-phase status. CI adds `timeout-minutes: 30`. It is deliberately a separate process
+   once with them; file filters and the selection options (`--exclude`, `--dir`, `--root`,
+   `--changed`) select phases by Vitest's own matching (`vitest list --filesOnly` with the
+   same options), a location filter goes only to the phase owning its file, and a selection
+   no phase matches or a location no selected phase owns fails as Vitest does; over several
+   phases each report goes to its own `<name>.<phase>.<ext>` file resolved against the
+   effective root, earlier reports at those paths are removed first, and `--reporter=json`
+   combines this run's reports into the requested file with a per-phase status, also after
+   an expiry or a signal; a completed phase without its report fails the run. CI adds `timeout-minutes: 30`. It is deliberately a separate process
    independent of the tested runtime; it is the emergency backstop, not the normal test
    bound (rule 2 is).
 5. **Self-tests:** `npm run test:harness` (separate config, excluded from parity, run in

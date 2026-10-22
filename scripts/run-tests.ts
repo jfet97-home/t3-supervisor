@@ -32,7 +32,7 @@ type Outcome =
   | { readonly _tag: "Expired" }
   | { readonly _tag: "Usage"; readonly message: string };
 
-type PhaseStatus = "passed" | "failed" | "crashed" | "signalled" | "expired" | "not run";
+type PhaseStatus = "passed" | "failed" | "crashed" | "signalled" | "expired" | "interrupted" | "not run";
 
 interface PhaseRecord {
   readonly phase: string;
@@ -40,6 +40,8 @@ interface PhaseRecord {
   status: PhaseStatus;
   exitCode?: number;
   readonly report: string | undefined;
+  // a phase that completed without a valid json report of this run fails the combined result
+  reportMissing?: true;
 }
 
 // read by the teardown, because an interrupted program has no success value to carry the exit code
@@ -101,6 +103,7 @@ const locationFilter = /^(.*):(\d+)$/s;
 
 const filterFile = (filter: string): string => locationFilter.exec(filter)?.[1] ?? filter;
 
+// phase configs are passed absolute: vitest resolves a relative --config against --root
 // one report file per phase next to the requested one: report.json -> report.<phase>.json
 const phasePath = (path: string, phase: string): string => {
   const extension = extname(path);
@@ -109,7 +112,8 @@ const phasePath = (path: string, phase: string): string => {
 
 const outputFileOption = /^(--outputFile(?:\.[^=]+)?)(?:=(.*))?$/s;
 
-const rewriteOutputFiles = (options: ReadonlyArray<string>, phase: string): ReadonlyArray<string> => {
+// vitest resolves output files against its root (cli-api.De07GUeT.js:9378-9384); the runner passes absolute paths
+const rewriteOutputFiles = (options: ReadonlyArray<string>, phase: string, base: string): ReadonlyArray<string> => {
   const rewritten: string[] = [];
   for (let index = 0; index < options.length; index++) {
     const token = options[index] ?? "";
@@ -117,11 +121,11 @@ const rewriteOutputFiles = (options: ReadonlyArray<string>, phase: string): Read
     if (match === null) {
       rewritten.push(token);
     } else if (match[2] !== undefined) {
-      rewritten.push(`${match[1]}=${phasePath(match[2], phase)}`);
+      rewritten.push(`${match[1]}=${phasePath(resolve(base, match[2]), phase)}`);
     } else {
       const value = options[index + 1];
       rewritten.push(token);
-      if (value !== undefined) rewritten.push(phasePath(value, phase));
+      if (value !== undefined) rewritten.push(phasePath(resolve(base, value), phase));
       index++;
     }
   }
@@ -129,6 +133,24 @@ const rewriteOutputFiles = (options: ReadonlyArray<string>, phase: string): Read
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+// the caller options that change which files vitest selects, passed to the listing as they reach the run
+const selectionOptions = (options: Parsed["options"]): ReadonlyArray<string> => {
+  const values = (value: unknown): ReadonlyArray<string> =>
+    typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+  const changed: unknown = options.changed;
+  return [
+    ...values(options.exclude).map((pattern) => `--exclude=${pattern}`),
+    ...values(options.dir).map((dir) => `--dir=${dir}`),
+    ...values(options.root).map((root) => `--root=${root}`),
+    ...(changed === true ? ["--changed"] : typeof changed === "string" ? [`--changed=${changed}`] : []),
+  ];
+};
+
+// every output file the caller requested, absolute against the effective root
+const outputPaths = (outputFile: unknown, base: string): ReadonlyArray<string> =>
+  (typeof outputFile === "string" ? [outputFile] : isRecord(outputFile) ? Object.values(outputFile).filter((path): path is string => typeof path === "string") : [])
+    .map((path) => resolve(base, path));
 
 // vitest json reports of disjoint phases: counts add up, results concatenate, the run starts at the earliest start
 const mergeValue = (left: unknown, right: unknown, key: string): unknown => {
@@ -172,7 +194,8 @@ const program = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const scratch = yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-run-" });
   const startedAt = yield* Clock.monotonicTimeNanos;
-  const run: { group: number | undefined; records: PhaseRecord[]; combined: string | undefined } = { group: undefined, records: [], combined: undefined };
+  const run: { group: number | undefined; active: number | undefined; records: PhaseRecord[]; combined: string | undefined } =
+    { group: undefined, active: undefined, records: [], combined: undefined };
 
   const remainingMs = Effect.map(Clock.monotonicTimeNanos, (now) => Math.max(0, deadlineMs - Math.round(Number(now - startedAt) / 1e6)));
 
@@ -202,9 +225,10 @@ const program = Effect.gen(function* () {
   }).pipe(Effect.catch((error) => Effect.succeed<Outcome>({ _tag: "Crashed", message: error.message }))));
 
   // the files each phase selects, by vitest's own filter matching (`vitest list --filesOnly`)
-  const listFiles = (phase: Phase, filters: ReadonlyArray<string>) => Effect.gen(function* () {
+  const listFiles = (phase: Phase, filters: ReadonlyArray<string>, selection: ReadonlyArray<string>) => Effect.gen(function* () {
     const listing = join(scratch, `${phase.name}.files.json`);
-    const outcome = yield* runVitest(`phase ${phase.name} files: `, ["list", "--filesOnly", `--json=${listing}`, "--config", phase.config, ...new Set(filters.map(filterFile))], "ignore");
+    const outcome = yield* runVitest(`phase ${phase.name} files: `,
+      ["list", "--filesOnly", `--json=${listing}`, "--config", resolve(phase.config), ...selection, ...new Set(filters.map(filterFile))], "ignore");
     if (outcome._tag !== "Exited" || outcome.code !== 0) return outcome;
     const files: unknown = JSON.parse(yield* fs.readFileString(listing).pipe(Effect.orDie));
     return new Set(Array.isArray(files) ? files.flatMap((entry) => isRecord(entry) && typeof entry.file === "string" ? [entry.file] : []) : []);
@@ -221,24 +245,29 @@ const program = Effect.gen(function* () {
     const options = separateFilters(forwarded, parsed);
     if (typeof options === "string") return { _tag: "Usage", message: options } satisfies Outcome;
     const filters = parsed.filter;
+    const selection = selectionOptions(parsed.options);
     const selected: Array<{ readonly phase: Phase; readonly filters: ReadonlyArray<string> }> = [];
+    const owned = new Set<string>();
     for (const phase of phases) {
-      if (filters.length === 0) {
+      // without any caller selection every phase runs, so a phase that lost all its files still fails as vitest does
+      if (filters.length === 0 && selection.length === 0) {
         selected.push({ phase, filters });
         continue;
       }
-      const files = yield* listFiles(phase, filters);
+      const files = yield* listFiles(phase, filters, selection);
       if (!(files instanceof Set)) return files;
       if (files.size === 0) continue;
+      for (const file of files) owned.add(file);
       // a location filter goes only to the phase that owns its file; vitest rejects it anywhere else
       selected.push({ phase, filters: filters.filter((filter) => !locationFilter.test(filter) || files.has(resolve(filterFile(filter)))) });
     }
-    // nothing selected anywhere: vitest reports the empty selection itself
     const [first] = phases;
-    if (selected.length === 0 && first !== undefined) return yield* single(["--config", first.config, ...forwarded], `phase ${first.name}: `);
+    // nothing selected anywhere, or a location no selected phase owns: vitest reports it itself
+    const unowned = filters.length > 0 && filters.some((filter) => locationFilter.test(filter) && !owned.has(resolve(filterFile(filter))));
+    if ((selected.length === 0 || unowned) && first !== undefined) return yield* single(["--config", resolve(first.config), ...forwarded], `phase ${first.name}: `);
     if (selected.length === 1) {
       const [{ phase, filters: own }] = selected as [typeof selected[number]];
-      return yield* single(["--config", phase.config, ...options, ...own], `phase ${phase.name}: `);
+      return yield* single(["--config", resolve(phase.config), ...options, ...own], `phase ${phase.name}: `);
     }
     // several phases: every report goes to its own file; json reports also combine into the requested one
     const reporters = parsed.options.reporter ?? [];
@@ -247,13 +276,20 @@ const program = Effect.gen(function* () {
     if (reporters.includes("json") && jsonTarget === undefined) {
       return { _tag: "Usage", message: "watchdog: --reporter=json over several phases needs --outputFile=<path> (or --outputFile.json=<path>)" } satisfies Outcome;
     }
-    const combine = reporters.includes("json") ? jsonTarget : undefined;
+    const base = resolve(typeof parsed.options.root === "string" ? parsed.options.root : ".");
+    const combine = reporters.includes("json") && jsonTarget !== undefined ? resolve(base, jsonTarget) : undefined;
+    // nothing of an earlier run may count for this one: the combined report and every phase output are removed first
+    const stale = [...(combine === undefined ? [] : [combine]),
+      ...selected.flatMap(({ phase }) => outputPaths(parsed.options.outputFile, base).map((path) => phasePath(path, phase.name)))];
+    for (const path of stale) yield* fs.remove(path, { force: true }).pipe(Effect.orDie);
     run.combined = combine;
     run.records = selected.map(({ phase }) => ({ phase: phase.name, config: phase.config, status: "not run", report: combine === undefined ? undefined : phasePath(combine, phase.name) }));
     for (const [index, { phase, filters: own }] of selected.entries()) {
       const record = run.records[index];
       if (record === undefined) continue;
-      const outcome = yield* single(["--config", phase.config, ...rewriteOutputFiles(options, phase.name), ...own], `phase ${phase.name}: `);
+      run.active = index;
+      const outcome = yield* single(["--config", resolve(phase.config), ...rewriteOutputFiles(options, phase.name, base), ...own], `phase ${phase.name}: `);
+      run.active = undefined;
       record.status = outcome._tag === "Exited" ? (outcome.code === 0 ? "passed" : "failed") : outcome._tag === "Crashed" ? "crashed" : "not run";
       if (outcome._tag === "Exited") record.exitCode = outcome.code;
       if (outcome._tag !== "Exited" || outcome.code !== 0) return outcome;
@@ -261,40 +297,47 @@ const program = Effect.gen(function* () {
     return { _tag: "Exited", code: 0 } satisfies Outcome;
   });
 
-  const markActive = (status: PhaseStatus) => {
-    const active = run.records.find((record) => record.status === "not run");
-    if (active !== undefined && run.group !== undefined) active.status = status;
-  };
+  // the combined json of this run only: reports of phases that completed now, a status for every phase (also after
+  // an expiry or a signal) and a failed result when a completed phase left no valid report; true when complete
+  const finalizeReports = Effect.gen(function* () {
+    const active = run.active === undefined ? undefined : run.records[run.active];
+    if (active !== undefined && active.status === "not run") {
+      active.status = received.expired ? "expired" : received.signal !== undefined ? "signalled" : "interrupted";
+    }
+    if (run.combined === undefined) return true;
+    const reports: unknown[] = [];
+    for (const record of run.records) {
+      if (record.report === undefined || (record.status !== "passed" && record.status !== "failed")) continue;
+      const report = yield* fs.readFileString(record.report).pipe(Effect.map((text): unknown => JSON.parse(text)), Effect.orElseSucceed(() => undefined));
+      if (isRecord(report)) reports.push(report);
+      else record.reportMissing = true;
+    }
+    const merged = reports.reduce<unknown>((left, right) => mergeValue(left, right, ""), {});
+    const complete = run.records.every((record) => record.status === "passed" && record.reportMissing === undefined);
+    yield* fs.writeFileString(run.combined, `${JSON.stringify({ ...(isRecord(merged) ? merged : {}), success: complete && (!isRecord(merged) || merged.success !== false), phases: run.records }, null, 2)}\n`);
+    yield* Console.error(`watchdog: combined json report ${run.combined} from ${run.records.map((record) => `${record.phase} (${record.status}${record.reportMissing ? ", no report" : ""})`).join(", ")}`);
+    return complete;
+  }).pipe(Effect.catch((error) => Console.error(`watchdog: writing the combined json report failed: ${error.message}`).pipe(Effect.as(false))));
 
   const phaseFiber = yield* Effect.forkChild(runPhases);
+  // the active vitest group is terminated (or already gone) before the reports of this run are finalized
+  const settle = Fiber.interrupt(phaseFiber).pipe(Effect.andThen(finalizeReports));
   const outcome = yield* Effect.raceAll<Effect.Effect<Outcome>>([
     Fiber.join(phaseFiber),
     Deferred.await(signal).pipe(Effect.map((name): Outcome => ({ _tag: "Signalled", signal: name }))),
     Effect.sleep(deadline).pipe(Effect.as<Outcome>({ _tag: "Expired" })),
-  ]).pipe(Effect.onInterrupt(() => Fiber.interrupt(phaseFiber)));
+  ]).pipe(Effect.onInterrupt(() => Effect.asVoid(settle)));
 
   if (outcome._tag === "Expired") {
     received.expired = true;
-    markActive("expired");
     yield* Console.error(run.group === undefined
       ? `watchdog: test run exceeded ${deadlineMs} ms; no further phase starts`
       : `watchdog: test run exceeded ${deadlineMs} ms; terminating process group ${run.group} (SIGTERM, SIGKILL after ${Duration.toMillis(killGrace)} ms); no further phase starts`);
   }
-  if (outcome._tag === "Signalled") markActive("signalled");
-  // the active vitest group is terminated (or already gone) before the result is reported
-  if (outcome._tag === "Expired" || outcome._tag === "Signalled") yield* Fiber.interrupt(phaseFiber);
-
-  if (run.combined !== undefined) {
-    const reports: unknown[] = [];
-    for (const record of run.records) {
-      if (record.report === undefined || !(yield* fs.exists(record.report).pipe(Effect.orElseSucceed(() => false)))) continue;
-      const report = yield* fs.readFileString(record.report).pipe(Effect.map((text): unknown => JSON.parse(text)), Effect.orElseSucceed(() => undefined));
-      if (isRecord(report)) reports.push(report);
-    }
-    const merged = reports.reduce<unknown>((left, right) => mergeValue(left, right, ""), {});
-    const complete = run.records.every((record) => record.status === "passed");
-    yield* fs.writeFileString(run.combined, `${JSON.stringify({ ...(isRecord(merged) ? merged : {}), success: complete && (!isRecord(merged) || merged.success !== false), phases: run.records }, null, 2)}\n`);
-    yield* Console.error(`watchdog: combined json report ${run.combined} from ${run.records.map((record) => `${record.phase} (${record.status})`).join(", ")}`);
+  const reportsComplete = yield* Effect.uninterruptible(settle);
+  if (outcome._tag === "Exited" && outcome.code === 0 && !reportsComplete) {
+    yield* Console.error("watchdog: a completed phase left no valid json report of this run");
+    return 1;
   }
 
   switch (outcome._tag) {

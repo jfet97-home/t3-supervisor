@@ -37,4 +37,7 @@
   Vitest does, an explicit `--config` runs once, json reports stay per phase and combine
   without duplicates, a first or second phase failure stops the run with its code, one
   deadline spans both phases (the second gets the remainder; expiry starts no later phase)
-  and SIGTERM in the second phase ends its group.
+  and SIGTERM in the second phase ends its group; `--exclude` leaves out an excluded phase
+  with or without file filters, a location no phase owns fails as Vitest does, reused report
+  paths after a first-phase failure or a second-phase SIGTERM carry only this run, and a
+  relative report path under a non-default `--root` lands in that root.

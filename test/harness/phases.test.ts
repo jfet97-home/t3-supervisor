@@ -1,6 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { groupExists, processExists, readMarker, startWatchdog, waitForFile, type WatchdogRun } from "./fixture-run.js";
 
 // the whole-run contract of scripts/run-tests.ts over two disjoint phases, with small fixture partitions
@@ -57,7 +59,7 @@ describe("watchdog phases", () => {
   it("runs a filter that only phase a selects in phase a alone", async () => {
     const { markers, run: result } = await run(() => [...phases, "phase-a.fixture"]);
     expect(result.code).toBe(0);
-    expect(phaseRun(result.output, "a")).toContain("vitest run --config test/harness/fixtures/vitest.phase-a.config.ts phase-a.fixture");
+    expect(phaseRun(result.output, "a")).toContain("test/harness/fixtures/vitest.phase-a.config.ts phase-a.fixture");
     expect(phaseRun(result.output, "b")).toBeUndefined();
     expect(existsSync(join(markers, "phase-a.json"))).toBe(true);
     expect(existsSync(join(markers, "phase-b.json"))).toBe(false);
@@ -182,6 +184,76 @@ describe("watchdog phases", () => {
     expect(existsSync(join(markers, "phase-b.json"))).toBe(false);
     const combined = readJson<CombinedReport>(join(markers, "report.json"));
     expect(combined.phases.map((phase) => [phase.phase, phase.status])).toEqual([["a", "expired"], ["b", "not run"]]);
+    noGroupLeft(result);
+  });
+
+  it("leaves out a phase whose files the caller excluded, with and without file filters", async () => {
+    const filtered = await run(() => [...phases, "phase-a.fixture", "phase-b.fixture", "--exclude=**/phase-b.fixture.ts"]);
+    expect(filtered.run.code).toBe(0);
+    expect(phaseRun(filtered.run.output, "b")).toBeUndefined();
+    expect(existsSync(join(filtered.markers, "phase-a.json"))).toBe(true);
+    noGroupLeft(filtered.run);
+    const unfiltered = await run(() => [...phases, "--exclude=**/phase-b*.fixture.ts", "--exclude=**/phase-a-*.fixture.ts"]);
+    expect(unfiltered.run.code).toBe(0);
+    expect(phaseRun(unfiltered.run.output, "a")).toContain("--exclude=**/phase-b*.fixture.ts --exclude=**/phase-a-*.fixture.ts");
+    expect(phaseRun(unfiltered.run.output, "b")).toBeUndefined();
+    noGroupLeft(unfiltered.run);
+  });
+
+  it("fails as vitest does when a requested location belongs to no phase, even next to a valid one", async () => {
+    const { markers, run: result } = await run(() => [...phases, "test/harness/fixtures/phase-a.fixture.ts:4", "test/harness/fixtures/phase-missing.fixture.ts:3"]);
+    expect(result.code).toBe(1);
+    expect(result.output).toContain("Couldn't find file test/harness/fixtures/phase-missing.fixture.ts");
+    expect(existsSync(join(markers, "phase-a.json"))).toBe(false);
+    noGroupLeft(result);
+  });
+
+  it("reports only this run's phases when an earlier run's reports are in place", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "t3-supervisor-reused-report-"));
+    onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
+    const report = join(directory, "report.json");
+    const passed = await run(() => [...phases, "phase-a.fixture", "phase-b.fixture", "--reporter=json", `--outputFile=${report}`]);
+    expect(passed.run.code).toBe(0);
+    expect(readJson<CombinedReport>(report).numTotalTests).toBe(4);
+
+    const failed = await run(() => [...phases, "phase-a-fail", "phase-b.fixture", "--reporter=json", `--outputFile=${report}`]);
+    expect(failed.run.code).toBe(1);
+    const afterFailure = readJson<CombinedReport>(report);
+    expect(tests(afterFailure)).toEqual(["a fails"]);
+    expect([afterFailure.numTotalTests, afterFailure.numPassedTests, afterFailure.success]).toEqual([1, 0, false]);
+    expect(afterFailure.phases.map((phase) => [phase.phase, phase.status])).toEqual([["a", "failed"], ["b", "not run"]]);
+    expect(existsSync(join(directory, "report.b.json"))).toBe(false);
+
+    const again = await run(() => [...phases, "phase-a.fixture", "phase-b.fixture", "--reporter=json", `--outputFile=${report}`]);
+    expect(again.run.code).toBe(0);
+    expect(readJson<CombinedReport>(report).success).toBe(true);
+    const started = await startWatchdog(() => [...phases, "phase-a.fixture", "phase-b-hang", "--reporter=json", `--outputFile=${report}`]);
+    await waitForFile(join(started.markers, "phase-b-hang.json"), 30_000);
+    process.kill(started.pid, "SIGTERM");
+    const signalled = await started.result;
+    expect(signalled.code).toBe(143);
+    noGroupLeft(signalled);
+    const afterSignal = readJson<CombinedReport>(report);
+    expect(afterSignal.success).toBe(false);
+    expect(tests(afterSignal)).toEqual(["a one", "a two"]);
+    expect(afterSignal.phases.map((phase) => [phase.phase, phase.status])).toEqual([["a", "passed"], ["b", "signalled"]]);
+  });
+
+  it("writes every report under a non-default --root that a relative output path names", async () => {
+    const repository = fileURLToPath(new URL("../..", import.meta.url));
+    const root = mkdtempSync(join(tmpdir(), "t3-supervisor-root-"));
+    onTestFinished(() => rmSync(root, { recursive: true, force: true }));
+    symlinkSync(join(repository, "node_modules"), join(root, "node_modules"));
+    for (const file of ["test/harness/fixtures/phase-a.fixture.ts", "test/harness/fixtures/phase-b.fixture.ts", "test/harness/fixtures/phase-marker.ts", "test/support/leak-collect.ts"]) {
+      mkdirSync(join(root, file, ".."), { recursive: true });
+      copyFileSync(join(repository, file), join(root, file));
+    }
+    const { run: result } = await run(() => [...phases, `--root=${root}`, "--reporter=json", "--outputFile=rooted-report.json"]);
+    expect(result.code).toBe(0);
+    expect(existsSync(join(repository, "rooted-report.json"))).toBe(false);
+    const combined = readJson<CombinedReport>(join(root, "rooted-report.json"));
+    expect([combined.numTotalTests, combined.numPassedTests, combined.success]).toEqual([4, 4, true]);
+    expect(existsSync(join(root, "rooted-report.a.json")) && existsSync(join(root, "rooted-report.b.json"))).toBe(true);
     noGroupLeft(result);
   });
 
