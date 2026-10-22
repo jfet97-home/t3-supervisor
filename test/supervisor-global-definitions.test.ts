@@ -55,7 +55,7 @@ it.effect("merges global and project definitions with separate identities and ed
   assert.deepEqual(globalDelivery.sequence, [{workflow: snapshot.workflows.find(workflow => workflow.origin === "global" && workflow.sourceId === "reviewer")!.id}]);
   assert.deepEqual(projectDelivery.sequence, [{workflow: "reviewer"}]);
   assert.deepEqual(snapshot.sources.map(source => source.origin), ["global", "global", "global", "global", "project", "project", "project", "project"]);
-  assert.equal(snapshot.globalRevision, yield* withDefinitions(f, definitions => definitions.globalFingerprint));
+  assert.equal(snapshot.globalRevision, yield* withDefinitions(f, definitions => definitions.globalFingerprint(AbortSignal.timeout(5000))));
 }));
 
 it.effect("uses enabled global definitions alone for Scratch and never reads the scratch checkout", () => Effect.gen(function* () {

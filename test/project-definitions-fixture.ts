@@ -1,6 +1,7 @@
-import { Effect, Layer } from "effect";
-import { ProjectDefinitionLoader, ProjectDefinitions, type ProjectDefinitionLoaderOptions } from "../src/project-definitions.js";
-import { ProjectConfigEditorService, type DefinitionSaveRecorder } from "../src/project-config-editor.js";
+import { Context, Effect, Layer, Scope } from "effect";
+import { ProjectDefinitions, type ProjectDefinitionLoaderOptions, type ProjectDefinitionSources } from "../src/project-definitions.js";
+import { ProjectConfigEditorService, type DefinitionSaveRecorder, type ProjectConfigDefinitions } from "../src/project-config-editor.js";
+import { projectConfigEditorFacade, projectDefinitionsFacade } from "../src/guidance-application.js";
 import { ProjectFileError, type ProjectFiles, type ProjectWriter } from "../src/project-files.js";
 import { stringify } from "yaml";
 import { definitionCatalogPath, type DefinitionCatalogKind, type DefinitionReference, type EffectiveConfigurationInfo, type ProjectConfigurationInfo } from "../src/project-definitions-contract.js";
@@ -132,7 +133,16 @@ export function makeDefinitionFixture(options: {
     isScratchProject: (_id, registeredRoot) => options.scratch === true && registeredRoot === root,
     setupWriter,
   };
-  const loader = new ProjectDefinitionLoader(source, t3, files, loaderOptions);
+  // the definitions service and its promise facade, built as the composition root builds them (plan 3.9 b-03), for the fixture's lifetime
+  const run = Effect.runPromiseWith(Context.empty());
+  const scope = Effect.runSync(Scope.make());
+  const definitionsWith = (replaced: {files?: ProjectFiles; options?: ProjectDefinitionLoaderOptions; t3?: ProjectDefinitionSources["t3"]} = {}) =>
+    Effect.runSync(Scope.provide(scope)(ProjectDefinitions.make({source, t3: replaced.t3 ?? t3, files: replaced.files ?? files, options: replaced.options ?? loaderOptions})));
+  const definitions = definitionsWith();
+  const loader = projectDefinitionsFacade(run, definitions);
+  // the facade over definitions with replaced native files and options
+  const loaderWith = (replacedFiles: ProjectFiles, replacedOptions: ProjectDefinitionLoaderOptions) =>
+    projectDefinitionsFacade(run, definitionsWith({files: replacedFiles, options: replacedOptions}));
   const writer: ProjectWriter = {
     checkProjectConfigFile: async (targetRoot, signal) => {
       const folder = await files.list(targetRoot, ".t3-supervisor", signal);
@@ -155,5 +165,8 @@ export function makeDefinitionFixture(options: {
   const layer = ProjectDefinitions.layer({source, t3, files, options: loaderOptions});
   const editorLayer = (configWriter: ProjectWriter = writer, onSaved?: DefinitionSaveRecorder) =>
     ProjectConfigEditorService.layer(configWriter, onSaved).pipe(Layer.provideMerge(layer));
-  return {loader, layer, editorLayer, files, writer, trees, directories, failures, truncatedPaths, truncatedFiles, calls, writes, addFile, addDirectory, writeIndex, root, projectId, globalRoot, threadRoot};
+  // the config editor's promise facade over a project writer and the fixture's (or the given) definitions service
+  const editor = (configWriter: ProjectWriter = writer, over: ProjectConfigDefinitions = definitions) =>
+    projectConfigEditorFacade(run, Effect.runSync(Scope.provide(scope)(ProjectConfigEditorService.make({definitions: over, writer: configWriter}))));
+  return {loader, loaderWith, definitions, definitionsWith, editor, run, source, t3, loaderOptions, layer, editorLayer, files, writer, trees, directories, failures, truncatedPaths, truncatedFiles, calls, writes, addFile, addDirectory, writeIndex, root, projectId, globalRoot, threadRoot};
 }

@@ -5,7 +5,7 @@ import {join} from "node:path";
 import { it } from "@effect/vitest";
 import {Context, Effect, Layer, Ref} from "effect";
 import {WebSocketServer} from "ws";
-import {ProjectConfigEditor, ProjectConfigEditorService} from "../src/project-config-editor.js";
+import {ProjectConfigEditorService} from "../src/project-config-editor.js";
 import {ProjectDefinitions} from "../src/project-definitions.js";
 import {released} from "./support/http.js";
 import type {ProjectConfigSave} from "../src/project-definitions-contract.js";
@@ -216,7 +216,7 @@ it.live("project-configuration endpoint keeps session, origin and CSRF checks", 
   const f = makeDefinitionFixture();
   seedProject(f);
   // the dashboard server is not ported yet (S6c), so it serves the Promise facades of the loader and the editor
-  const editor = new ProjectConfigEditor(f.loader, f.writer);
+  const editor = f.editor(f.writer);
   const config: SupervisorConfig = {
     dataDirectory: directory, t3Url: "unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0,
     uiPort: 0, uiHost: "127.0.0.1", uiAssetsDirectory: directory,

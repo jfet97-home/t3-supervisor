@@ -1,8 +1,8 @@
 import { Context, Effect, Layer, RcMap, Result, Scope, Semaphore } from "effect";
 import { isMap, isSeq, parseDocument, stringify } from "yaml";
 import { posix } from "node:path";
-import {decodeDefinitionSource, definitionsCanceled, DefinitionSourceFailure, DefinitionSourceInvalid, nativeDefinitionsCall, parseProjectConfiguration,
-  ProjectConfigurationSource, ProjectDefinitions, runDefinitionsFacade, withDefinitionsDeadline, type ProjectDefinitionLoader} from "./project-definitions.js";
+import {decodeDefinitionSource, definitionsCanceled, definitionsOperation, definitionsSignal, DefinitionSourceFailure, DefinitionSourceInvalid, nativeDefinitionsCall,
+  parseProjectConfiguration, ProjectConfigurationSource, ProjectDefinitions} from "./project-definitions.js";
 import { ProjectFileError, type ProjectWriter } from "./project-files.js";
 import { type DefinitionCatalogEntry, type ProjectConfigSave, type ProjectConfigSaveOutcome, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 
@@ -57,6 +57,8 @@ const makeProjectConfigEditor = Effect.fnUntraced(function* ({definitions, write
   const saveLocks = yield* RcMap.make({lookup: (_root: string) => Semaphore.make(1)});
 
   const save = (input: ProjectConfigSave): Effect.Effect<ProjectConfigSaveOutcome, DefinitionSourceFailure> => Effect.gen(function* () {
+    // the save's own signal (its caller's cancel signal narrowed by its deadline) goes to every definitions call, as the baseline passed its signal
+    const operation = yield* definitionsSignal;
     const outcome = (status: ProjectConfigSaveOutcome["status"], message: string, snapshot: ProjectDefinitionSnapshot | null = null): ProjectConfigSaveOutcome =>
       ({status, message, definitions: snapshot ? {...snapshot, editingAvailable: true} : null});
     // the writer's methods are read for every save, as the baseline read them
@@ -72,7 +74,7 @@ const makeProjectConfigEditor = Effect.fnUntraced(function* ({definitions, write
     if (Buffer.byteLength(stringify(configDocument(intended), {lineWidth: 0}), "utf8") > 64 * 1024 || !/^[a-f0-9]{64}$/.test(input.expectedRevision))
       return outcome("invalid", "Check the 64 KiB project.yaml limit and refresh the definitions.");
 
-    const initial = yield* definitions.load(input.projectId, input.threadId);
+    const initial = yield* definitions.load(input.projectId, input.threadId, operation);
     if (initial.globalOnly) return outcome("unavailable", "Shared global configuration is read-only in project settings.", initial);
     if (!initial.complete || !initial.revision) return outcome(initial.status === "permission_required" ? "permission_required" : "unavailable",
       "Project configuration cannot be edited until the selected definition collection is fully readable.", initial);
@@ -80,7 +82,7 @@ const makeProjectConfigEditor = Effect.fnUntraced(function* ({definitions, write
     if (!posix.isAbsolute(root)) return outcome("unavailable", "The selected project checkout has no safe native write root.", initial);
     return yield* Effect.scoped(Effect.flatMap(RcMap.get(saveLocks, root), lock => lock.withPermit(Effect.gen(function* () {
       if (yield* definitionsCanceled) return outcome("unavailable", "The save expired before writing. Refresh the project configuration.");
-      const fresh = yield* definitions.load(input.projectId, input.threadId);
+      const fresh = yield* definitions.load(input.projectId, input.threadId, operation);
       if (!fresh.complete || !fresh.revision || fresh.workspaceRoot !== root || fresh.revision !== input.expectedRevision)
         return outcome("conflict", "The checkout or definition sources changed. Your draft was kept; refresh before saving again.", fresh);
       if (fresh.globalOnly) return outcome("conflict", "The selected definition scope changed. Refresh before saving.", fresh);
@@ -99,7 +101,7 @@ const makeProjectConfigEditor = Effect.fnUntraced(function* ({definitions, write
       if (Result.isFailure(target)) return outcome(target.failure.error instanceof ProjectFileError && target.failure.error.code === "permission_required" ? "permission_required" : "unavailable",
         "Could not verify the project.yaml write target with the native filesystem:read permission.", fresh);
       if (!target.success) return outcome("unavailable", "Editing requires an existing .t3-supervisor directory and a regular project.yaml file.", fresh);
-      if ((yield* definitions.currentWorkspace(input.projectId, input.threadId)) !== root)
+      if ((yield* definitions.currentWorkspace(input.projectId, input.threadId, operation)) !== root)
         return outcome("conflict", "The selected checkout changed before writing. Refresh before saving again.");
       if (yield* definitionsCanceled) return outcome("unavailable", "The save expired before writing. Refresh the project configuration.");
       // a write failure other than a definite permission refusal is uncertain and never retried
@@ -109,9 +111,9 @@ const makeProjectConfigEditor = Effect.fnUntraced(function* ({definitions, write
         if (error instanceof ProjectFileError && error.code === "permission_required") return outcome("permission_required", error.message, fresh);
         return outcome("uncertain", "The write outcome could not be confirmed. Your draft was kept. Refresh and inspect project.yaml before retrying.");
       }
-      const verified = yield* definitions.load(input.projectId, input.threadId);
+      const verified = yield* definitions.load(input.projectId, input.threadId, operation);
       const readback = yield* Effect.result(Effect.gen(function* () {
-        const bytes = yield* definitions.readProjectConfig(root);
+        const bytes = yield* definitions.readProjectConfig(root, operation);
         const regular = yield* checkTarget;
         return yield* Effect.try({try: () => regular && !bytes.truncated && bytes.contents === contents && bytes.byteLength === Buffer.byteLength(contents, "utf8"),
           catch: error => new DefinitionSourceFailure({error})});
@@ -125,15 +127,16 @@ const makeProjectConfigEditor = Effect.fnUntraced(function* ({definitions, write
       if (Result.isFailure(recorded)) return outcome("uncertain", "The file was saved, but its user-authorization record could not be retained. Refresh before retrying.", verified);
       return outcome("saved", "Saved .t3-supervisor/project.yaml. Required flags remain visible to the Supervisor for semantic review.", verified);
     }))));
-  }).pipe(withDefinitionsDeadline("30 seconds"));
+  });
 
-  return {save};
+  return {save: (input: ProjectConfigSave, cancel?: AbortSignal) => save(input).pipe(definitionsOperation(cancel, "30 seconds"))};
 });
 
 /** Saves only the checkout-local project.yaml through the trusted native writer. */
 export class ProjectConfigEditorService extends Context.Service<ProjectConfigEditorService, {
   // saves of one checkout are serialized; a stale revision, a missing file or an unconfirmed write is never reported saved (30 s deadline)
-  readonly save: (input: ProjectConfigSave) => Effect.Effect<ProjectConfigSaveOutcome, DefinitionSourceFailure>;
+  // a save cancelled or past its deadline before writing reports the expired save once its turn comes
+  readonly save: (input: ProjectConfigSave, cancel?: AbortSignal) => Effect.Effect<ProjectConfigSaveOutcome, DefinitionSourceFailure>;
 }>()("t3-supervisor/ProjectConfigEditor") {
   static readonly make: (options: EditorOptions) => Effect.Effect<ProjectConfigEditorService["Service"], never, Scope.Scope> = makeProjectConfigEditor;
   static readonly layer = (writer: ProjectWriter, onSaved?: DefinitionSaveRecorder): Layer.Layer<ProjectConfigEditorService, never, ProjectDefinitions> =>
@@ -142,23 +145,7 @@ export class ProjectConfigEditorService extends Context.Service<ProjectConfigEdi
     }));
 }
 
-// the Promise loader seen as the editor's definitions; its methods are read on every call, so a wrapped loader observes each load
-const promiseDefinitions = (loader: ProjectDefinitionLoader): ProjectConfigDefinitions => ({
-  // a loader rejection rejects the save with the same value, as the baseline's await did
-  load: (projectId, threadId = null) => nativeDefinitionsCall(signal => loader.load(projectId, threadId, signal)).pipe(Effect.catch(failure => Effect.die(failure.error))),
-  currentWorkspace: (projectId, threadId) => nativeDefinitionsCall(signal => loader.currentWorkspace(projectId, threadId, signal)),
-  readProjectConfig: root => nativeDefinitionsCall(signal => loader.files.read(root, projectConfigPath, signal)),
-});
-
-// promise facade (plan 3.9 b-03) over the editor and a promise loader for unported callers; it belongs in the composition root and goes with its last caller (s6c)
-export class ProjectConfigEditor {
-  private readonly editor: ProjectConfigEditorService["Service"];
-  constructor(readonly loader: ProjectDefinitionLoader, readonly writer: ProjectWriter, readonly onSaved?: DefinitionSaveRecorder) {
-    // the save locks live as long as this object, as the baseline queue map did
-    this.editor = Effect.runSync(Scope.provide(Scope.makeUnsafe())(makeProjectConfigEditor({definitions: promiseDefinitions(loader), writer, onSaved})));
-  }
-
-  save(input: ProjectConfigSave, parentSignal?: AbortSignal): Promise<ProjectConfigSaveOutcome> {
-    return runDefinitionsFacade(this.editor.save(input), parentSignal);
-  }
+// the baseline promise call shape of the editor for unported callers (plan 3.9 b-03); the composition root builds it over the service
+export interface ProjectConfigEditor {
+  save(input: ProjectConfigSave, parentSignal?: AbortSignal): Promise<ProjectConfigSaveOutcome>;
 }

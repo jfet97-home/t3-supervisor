@@ -9,12 +9,12 @@ import { ProjectFileError, type FreshGitInfo, type ProjectFiles, type ProjectWri
 import type { ProjectConfigSave } from "../src/project-definitions-contract.js";
 import { makeDefinitionFixture } from "./project-definitions-fixture.js";
 
-// target regressions of the ProjectDefinitions and ProjectConfigEditor services: interruption, the Effect-clock deadline and the Schema source boundary
+// target regressions of the ProjectDefinitions and ProjectConfigEditor services: interruption, soft cancellation, the Effect-clock deadline and the Schema source boundary
 
 type Fixture = ReturnType<typeof makeDefinitionFixture>;
 // the definitions service over the fixture's catalog and projection with replaced files or options
 const definitionsLayer = (f: Fixture, replaced: {files?: ProjectFiles; options?: ProjectDefinitionLoaderOptions} = {}) =>
-  ProjectDefinitions.layer({source: f.loader.source, t3: f.loader.t3, files: replaced.files ?? f.files, options: replaced.options ?? f.loader.options});
+  ProjectDefinitions.layer({source: f.source, t3: f.t3, files: replaced.files ?? f.files, options: replaced.options ?? f.loaderOptions});
 const serviceOf = <I, S>(layer: Layer.Layer<I>, tag: Context.Key<I, S>) => Effect.map(Layer.build(layer), context => Context.get(context, tag));
 
 const seedCheck = (f: Fixture) => {
@@ -69,7 +69,7 @@ it.effect("TR-PD-03: interrupting create-and-commit setup before the second writ
   const f = makeDefinitionFixture({threadRoot: null});
   const secondWrite = Promise.withResolvers<void>();
   const commits: unknown[] = [];
-  const options: ProjectDefinitionLoaderOptions = {...f.loader.options,
+  const options: ProjectDefinitionLoaderOptions = {...f.loaderOptions,
     setupWriter: {
       writeFile: async (root, path, contents, signal) => {
         if (path === ".t3-supervisor/project.yaml") {f.writes.push({root, path, contents});f.addFile(root, path, contents);return;}
@@ -112,7 +112,7 @@ it.effect("TR-EDITOR-01: an interrupted save queued behind another leaves the qu
   const loaded = yield* Deferred.make<void>();
   let loads = 0;
   const editor = yield* ProjectConfigEditorService.make({writer, definitions: {...definitions,
-    load: (projectId, threadId) => definitions.load(projectId, threadId).pipe(Effect.tap(() => ++loads === 3 ? Deferred.succeed(loaded, undefined) : Effect.void))}});
+    load: (...args) => definitions.load(...args).pipe(Effect.tap(() => ++loads === 3 ? Deferred.succeed(loaded, undefined) : Effect.void))}});
   const input = (revision: string, summary: string): ProjectConfigSave => ({projectId: "project", threadId: null, expectedRevision: revision, config: {
     workflows: [{path: "workflows/local-flow.yaml", summary: "Run the local flow.", required: false}],
     steps: [{path: "steps/local-step.md", summary, required: false}],
@@ -131,6 +131,73 @@ it.effect("TR-EDITOR-01: an interrupted save queued behind another leaves the qu
   const next = yield* editor.save(input(saved.definitions!.revision!, "Next draft."));
   assert.equal(next.status, "saved", next.message);
   assert.equal(f.writes.length, 2);
+  assert.ok(f.writes.every(write => !write.contents.includes("Cancelled draft")));
+}), {timeout: 10_000});
+
+it.effect("TR-PD-05: a cancel signal ends a load and a setup softly, so the service itself settles with the unavailable snapshot and the stale setup", () => Effect.gen(function* () {
+  const f = makeDefinitionFixture({threadRoot: null});
+  seedCheck(f);
+  const {files, entered} = hangingRead(f, ".t3-supervisor/steps/check.md");
+  const hung = yield* serviceOf(definitionsLayer(f, {files}), ProjectDefinitions);
+  const cancelLoad = new AbortController();
+  const loading = yield* Effect.forkChild(hung.load("project", null, cancelLoad.signal));
+  yield* Effect.promise(() => entered);
+  cancelLoad.abort();
+  const snapshot = yield* Fiber.join(loading);
+  assert.deepEqual({status: snapshot.status, complete: snapshot.complete, revision: snapshot.revision, issues: snapshot.issues}, {status: "unavailable", complete: false, revision: null,
+    issues: [{path: ".t3-supervisor/steps/check.md", code: "definition_source_unreadable", message: "T3 project file access is unavailable."}]});
+
+  const g = makeDefinitionFixture({threadRoot: null});
+  const cancelSetup = new AbortController();
+  const commits: unknown[] = [];
+  const definitions = yield* serviceOf(definitionsLayer(g, {options: {...g.loaderOptions,
+    setupWriter: {
+      writeFile: async (root, path, contents) => {g.writes.push({root, path, contents});g.addFile(root, path, contents);cancelSetup.abort();},
+      commitFiles: async (...args) => {commits.push(args);return {status: "committed", commitSha: "never"};},
+    },
+    gitProbe: async (root): Promise<FreshGitInfo> => ({workspaceRoot: root, branch: "main", isRepo: true, changedPaths: g.writes.map(write => write.path), operationState: {status: "safe"}}),
+  }}), ProjectDefinitions);
+  const outcome = yield* definitions.initialize("project", null, {origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/workspace", expectedBranch: "main"}, cancelSetup.signal);
+  assert.deepEqual(outcome, {status: "stale", workspaceRoot: "/workspace", branch: "main", path: ".t3-supervisor", message: "Setup was canceled; files created so far were left uncommitted."});
+  assert.deepEqual(g.writes.map(write => write.path), [".t3-supervisor/project.yaml"]);
+  assert.deepEqual(commits, []);
+}), {timeout: 10_000});
+
+it.effect("TR-EDITOR-02: a save whose cancel signal aborts while it is queued waits its turn, then the service reports the expired save and writes nothing", () => Effect.gen(function* () {
+  const f = makeDefinitionFixture();
+  f.addFile(f.root, ".t3-supervisor/project.yaml", "workflows:\n  - path: workflows/local-flow.yaml\n    summary: Run the local flow.\nsteps:\n  - path: steps/local-step.md\n    summary: Check the local behavior.\n");
+  f.addFile(f.root, ".t3-supervisor/steps/local-step.md", "---\nid: local-step\nname: local-step\ndescription: Inspect the changed behavior.\n---\n");
+  f.addFile(f.root, ".t3-supervisor/workflows/local-flow.yaml", "name: Local flow\ndescription: Local flow workflow.\nsequence:\n  - step: local-step\n");
+  const firstWrite = Promise.withResolvers<void>();
+  const releaseFirst = Promise.withResolvers<void>();
+  let writes = 0;
+  const writer: ProjectWriter = {checkProjectConfigFile: f.writer.checkProjectConfigFile, writeProjectConfig: async (root, contents, signal) => {
+    if (++writes === 1) {firstWrite.resolve();await releaseFirst.promise;}
+    await f.writer.writeProjectConfig(root, contents, signal);
+  }};
+  const definitions = yield* serviceOf(definitionsLayer(f), ProjectDefinitions);
+  const loaded = yield* Deferred.make<void>();
+  let loads = 0;
+  const editor = yield* ProjectConfigEditorService.make({writer, definitions: {...definitions,
+    load: (...args) => definitions.load(...args).pipe(Effect.tap(() => ++loads === 3 ? Deferred.succeed(loaded, undefined) : Effect.void))}});
+  const input = (revision: string, summary: string): ProjectConfigSave => ({projectId: "project", threadId: null, expectedRevision: revision, config: {
+    workflows: [{path: "workflows/local-flow.yaml", summary: "Run the local flow.", required: false}],
+    steps: [{path: "steps/local-step.md", summary, required: false}],
+  }});
+  const revision = (yield* definitions.load("project")).revision!;
+  const first = yield* Effect.forkChild(editor.save(input(revision, "First draft.")));
+  yield* Effect.promise(() => firstWrite.promise);
+  const cancel = new AbortController();
+  const second = yield* Effect.forkChild(editor.save(input(revision, "Cancelled draft."), cancel.signal));
+  yield* Deferred.await(loaded);
+  cancel.abort();
+  yield* Effect.yieldNow;
+  assert.equal(second.pollUnsafe(), undefined, "the cancelled save still waits for the save ahead of it");
+  releaseFirst.resolve();
+  assert.equal((yield* Fiber.join(first)).status, "saved");
+  assert.deepEqual(yield* Fiber.join(second), {status: "unavailable", message: "The save expired before writing. Refresh the project configuration.", definitions: null});
+  assert.equal(loads, 4, "the expired save loaded nothing after its turn came");
+  assert.equal(f.writes.length, 1);
   assert.ok(f.writes.every(write => !write.contents.includes("Cancelled draft")));
 }), {timeout: 10_000});
 

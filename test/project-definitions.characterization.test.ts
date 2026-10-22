@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "vitest";
-import { ProjectDefinitionLoader } from "../src/project-definitions.js";
+import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
 import { ProjectFileError, type FreshGitInfo, type ProjectFiles } from "../src/project-files.js";
 import { deferred, loopTurn, within } from "./support/c3b-http.js";
 import { makeDefinitionFixture } from "./project-definitions-fixture.js";
@@ -14,7 +14,7 @@ const loaderWith = (f: ReturnType<typeof makeDefinitionFixture>, options: {
   commitFiles?: (root: string, paths: readonly string[], message: string, actionId: string, signal: AbortSignal) => Promise<{status: "committed" | "uncertain"; commitSha?: string}>;
   gitProbe?: (root: string, signal: AbortSignal) => Promise<FreshGitInfo>;
 } = {}) => {
-  return new ProjectDefinitionLoader(f.loader.source, f.loader.t3, options.files ?? f.files, {
+  return f.loaderWith(options.files ?? f.files, {
     globalRoot: f.globalRoot,
     useGlobalDefinitions: () => false,
     isScratchProject: () => false,

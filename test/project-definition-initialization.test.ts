@@ -115,7 +115,7 @@ const withDefinitions = <A, E>(f: ReturnType<typeof fixture>, use: (definitions:
 
 it.effect("global opt-in initializes a server-home scaffold once and preserves existing contents", () => Effect.gen(function* () {
   const f = fixture();
-  const created = yield* withDefinitions(f, definitions => definitions.initializeGlobal);
+  const created = yield* withDefinitions(f, definitions => definitions.initializeGlobal(AbortSignal.timeout(5000)));
   assert.equal(created.status, "created");
   assert.equal(created.workspaceRoot, "~");
   assert.equal(created.path, "~/.t3-supervisor");
@@ -123,12 +123,12 @@ it.effect("global opt-in initializes a server-home scaffold once and preserves e
   assert.equal(f.trees.get("~")?.get(".t3-supervisor/steps/.gitkeep"), "");
   assert.equal(f.trees.get("~")?.get(".t3-supervisor/workflows/.gitkeep"), "");
   assert.equal(f.commits.length, 0);
-  assert.ok(yield* withDefinitions(f, definitions => definitions.globalFingerprint));
+  assert.ok(yield* withDefinitions(f, definitions => definitions.globalFingerprint(AbortSignal.timeout(5000))));
 
   const existing = "workflows: []\nsteps: []\n";
   f.addFile("~", ".t3-supervisor/project.yaml", existing);
   const before = f.writes.length;
-  const unchanged = yield* withDefinitions(f, definitions => definitions.initializeGlobal);
+  const unchanged = yield* withDefinitions(f, definitions => definitions.initializeGlobal(AbortSignal.timeout(5000)));
   assert.equal(unchanged.status, "unchanged");
   assert.equal(f.writes.length, before);
   assert.equal(f.trees.get("~")?.get(".t3-supervisor/project.yaml"), existing);
@@ -138,7 +138,7 @@ it.effect("project Create writes only the scaffold files and Create plus commit 
   const createFixture = fixture({isRepo: false, branch: null, worktree: null});
   const created = yield* withDefinitions(createFixture, definitions => definitions.initialize("project", null, {
     origin: "project", action: "create", expectedWorkspaceRoot: "/workspace", expectedBranch: null,
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(created.status, "created");
   assert.deepEqual(createFixture.writes.map(write => [write.path, write.contents]), [
     [".t3-supervisor/project.yaml", "workflows: []\nsteps: []\n"],
@@ -150,7 +150,7 @@ it.effect("project Create writes only the scaffold files and Create plus commit 
   const commitFixture = fixture({isRepo: true, branch: "feature"});
   const committed = yield* withDefinitions(commitFixture, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(committed.status, "committed");
   assert.equal(commitFixture.commits.length, 1);
   assert.deepEqual(commitFixture.commits[0]?.paths, [".t3-supervisor/project.yaml", ".t3-supervisor/steps/.gitkeep", ".t3-supervisor/workflows/.gitkeep"]);
@@ -161,7 +161,7 @@ it.effect("Create plus commit verifies the exact setup tree when Git collapses u
   const f = fixture({isRepo: true, branch: "feature", collapseSetupStatus: true});
   const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(outcome.status, "committed");
   assert.equal(f.commits.length, 1);
 }));
@@ -170,7 +170,7 @@ it.effect("Create plus commit requires a fresh Git probe before writing", () => 
   const f = fixture({isRepo: true, branch: "feature", provideGitProbe: false});
   const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(outcome.status, "unavailable");
   assert.match(outcome.message, /fresh local Git status/);
   assert.equal(f.writes.length, 0);
@@ -181,7 +181,7 @@ it.effect("Create plus commit uses fresh Git status when the native VCS subscrip
   const f = fixture({isRepo: true, branch: "feature", staleVcsSnapshot: true});
   const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(outcome.status, "committed");
   assert.equal(f.commits.length, 1);
   assert.ok(f.vcsSnapshots.every(paths => paths.length === 0));
@@ -194,7 +194,7 @@ it.effect("stale cached foreign paths cannot block setup when fresh Git status i
   const f = fixture({isRepo: true, branch: "feature", staleVcsSnapshot: true, cachedVcsPaths: ["README.md"]});
   const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(outcome.status, "committed");
   assert.equal(f.commits.length, 1);
   assert.ok(f.vcsSnapshots.length > 0 && f.vcsSnapshots.every(paths => paths[0] === "README.md"));
@@ -205,7 +205,7 @@ it.effect("setup refuses stale branches, existing folders, and Create plus commi
   const staleFixture = fixture({isRepo: true, branch: "feature"});
   const stale = yield* withDefinitions(staleFixture, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "old-branch",
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(stale.status, "stale");
   assert.equal(staleFixture.writes.length, 0);
 
@@ -213,7 +213,7 @@ it.effect("setup refuses stale branches, existing folders, and Create plus commi
   existingFixture.addFile("/worktrees/feature", ".t3-supervisor/project.yaml", "workflows: []\nsteps: []\n");
   const conflict = yield* withDefinitions(existingFixture, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(conflict.status, "conflict");
   assert.equal(existingFixture.trees.get("/worktrees/feature")?.get(".t3-supervisor/project.yaml"), "workflows: []\nsteps: []\n");
   assert.equal(existingFixture.writes.length, 0);
@@ -221,7 +221,7 @@ it.effect("setup refuses stale branches, existing folders, and Create plus commi
   const noGitFixture = fixture({isRepo: false, branch: null, worktree: null});
   const unavailable = yield* withDefinitions(noGitFixture, definitions => definitions.initialize("project", null, {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/workspace", expectedBranch: null,
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(unavailable.status, "unavailable");
   assert.match(unavailable.message, /not a Git repository/);
   assert.equal(noGitFixture.writes.length, 0);
@@ -231,7 +231,7 @@ it.effect("Create plus commit refuses tracked or staged changes before creating 
   const f = fixture({isRepo: true, branch: "feature", initialChangedPaths: ["README.md"]});
   const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(outcome.status, "conflict");
   assert.match(outcome.message, /clean checkout/);
   assert.equal(f.writes.length, 0);
@@ -243,7 +243,7 @@ it.effect("Create plus commit refuses merge or rebase state before creating file
     const f = fixture({isRepo: true, branch: "feature", gitOperationState: {status: "in_progress", marker}});
     const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
       origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-    }));
+    }, AbortSignal.timeout(5000)));
     assert.equal(outcome.status, "conflict");
     assert.match(outcome.message, new RegExp(marker));
     assert.equal(f.writes.length, 0);
@@ -256,7 +256,7 @@ it.effect("Create still leaves the scaffold uncommitted in a dirty or in-progres
     gitOperationState: {status: "in_progress", marker: "MERGE_HEAD"}});
   const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(outcome.status, "created");
   assert.equal(f.writes.length, 3);
   assert.equal(f.commits.length, 0);
@@ -266,7 +266,7 @@ it.effect("Create plus commit stops when any extra change appears with the new s
   const f = fixture({isRepo: true, branch: "feature", unexpectedPathAfterSecondWrite: "README.md"});
   const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(outcome.status, "conflict");
   assert.match(outcome.message, /left uncommitted/);
   assert.equal(f.writes.length, 2);
@@ -277,7 +277,7 @@ it.effect("Create plus commit rejects extra setup content hidden by Git's collap
   const f = fixture({isRepo: true, branch: "feature", collapseSetupStatus: true, extraSetupFileAfterSecondWrite: ".t3-supervisor/steps/extra.md"});
   const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(outcome.status, "conflict");
   assert.match(outcome.message, /other files/);
   assert.equal(f.writes.length, 2);
@@ -286,7 +286,7 @@ it.effect("Create plus commit rejects extra setup content hidden by Git's collap
 
 it.effect("checkout choices expose the registered root and operative main-thread worktree", () => Effect.gen(function* () {
   const f = fixture();
-  const targets = yield* withDefinitions(f, definitions => definitions.checkoutTargets("project"));
+  const targets = yield* withDefinitions(f, definitions => definitions.checkoutTargets("project", AbortSignal.timeout(5000)));
   assert.deepEqual(targets, [
     {origin: "project", threadId: null, workspaceRoot: "/workspace", branch: "main", isGitRepository: true},
     {origin: "project", threadId: "main-thread", workspaceRoot: "/worktrees/feature", branch: "feature", isGitRepository: true},
@@ -338,7 +338,7 @@ it.effect("setup rechecks the operative checkout branch before each native file 
   const f = fixture({isRepo: true, branch: "feature", worktreeBranchAfterFirstWrite: "other-branch"});
   const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }));
+  }, AbortSignal.timeout(5000)));
   assert.equal(outcome.status, "stale");
   assert.equal(f.writes.length, 1);
   assert.equal(f.trees.get("/worktrees/feature")?.get(".t3-supervisor/project.yaml"), "workflows: []\nsteps: []\n");

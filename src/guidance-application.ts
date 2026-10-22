@@ -9,8 +9,8 @@ import type { SupervisorConfig } from "./types.js";
 import { readFile } from "node:fs/promises";
 import { posix } from "node:path";
 import { makeProjectCommitter, makeProjectFiles, makeProjectWriter } from "./project-files.js";
-import { ProjectDefinitionLoader } from "./project-definitions.js";
-import { ProjectConfigEditor } from "./project-config-editor.js";
+import { ProjectDefinitions, type DefinitionCheckoutUnavailable, type DefinitionSourceFailure, type ProjectDefinitionLoader } from "./project-definitions.js";
+import { ProjectConfigEditorService, type ProjectConfigEditor } from "./project-config-editor.js";
 import { existsSync } from "node:fs";
 import { ProjectSupervisorStore, loadSupervisorOwnership } from "./project-supervisor-store.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
@@ -18,6 +18,33 @@ import { makeSupervisorRpc, readSupervisorBaseline, readSupervisorThreads, recor
 import { makeGitProbe } from "./git-probe.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
 import { createWorkflowMcpEndpoint } from "./workflow-mcp.js";
+
+// the root context's promise runner (b-01) that the b-03 facades call
+export type RootRun = <A, E>(effect: Effect.Effect<A, E>) => Promise<A>;
+// a failed definitions call rejects with its baseline value: the native, catalog or projection error itself, or the fixed checkout reason
+const definitionsRejection = (failure: DefinitionSourceFailure | DefinitionCheckoutUnavailable): unknown =>
+  failure._tag === "DefinitionSourceFailure" ? failure.error : new Error(failure.reason);
+// b-03 (plan 3.9): the baseline promise call shapes over the definitions service; a call's signal is the service's own cancel signal, so a cancelled call settles with its baseline outcome
+export const projectDefinitionsFacade = (run: RootRun, definitions: ProjectDefinitions["Service"]): ProjectDefinitionLoader => {
+  const settle = <A>(effect: Effect.Effect<A, DefinitionSourceFailure | DefinitionCheckoutUnavailable>) => run(Effect.mapError(effect, definitionsRejection));
+  return {
+    globalHomePath: () => definitions.globalHomePath,
+    globalDefinitionsPath: () => definitions.globalDefinitionsPath,
+    currentWorkspace: (projectId, threadId, signal) => settle(definitions.currentWorkspace(projectId, threadId, signal)),
+    presenceGlobal: signal => run(definitions.presenceGlobal(signal)),
+    presence: (projectId, signal) => run(definitions.presence(projectId, signal)),
+    presenceForCheckout: (projectId, threadId, signal) => run(definitions.presenceForCheckout(projectId, threadId, signal)),
+    globalFingerprint: signal => run(definitions.globalFingerprint(signal)),
+    checkoutTargets: (projectId, signal) => settle(definitions.checkoutTargets(projectId, signal)),
+    initializeGlobal: signal => settle(definitions.initializeGlobal(signal)),
+    initialize: (projectId, threadId, input, signal) => settle(definitions.initialize(projectId, threadId, input, signal)),
+    load: (projectId, threadId = null, signal) => run(definitions.load(projectId, threadId, signal)),
+  };
+};
+// b-03 (plan 3.9): the baseline promise call shape over the config editor service
+export const projectConfigEditorFacade = (run: RootRun, editor: ProjectConfigEditorService["Service"]): ProjectConfigEditor => ({
+  save: (input, signal) => run(Effect.mapError(editor.save(input, signal), definitionsRejection)),
+});
 
 export const runGuidanceApplication = (
   config: SupervisorConfig,
@@ -61,7 +88,8 @@ export const runGuidanceApplication = (
       ...(commitWriter ? {commitFiles: commitWriter.commitFiles} : {}),
     } : undefined;
     const managedScratchRoot = config.managedScratchRoot && posix.isAbsolute(config.managedScratchRoot) ? posix.normalize(config.managedScratchRoot) : null;
-    const definitions = new ProjectDefinitionLoader(source, t3, makeProjectFiles(config.t3Url, readToken.trim()), {
+    // the definitions and the config editor are built once in the supervision run scope; unported callers receive their b-03 facades
+    const definitionsService = yield* ProjectDefinitions.make({source, t3, files: makeProjectFiles(config.t3Url, readToken.trim()), options: {
       globalRoot: "~",
       useGlobalDefinitions: () => supervisionStore.useGlobalDefinitions(),
       isScratchProject: (projectId, workspaceRoot) => {
@@ -71,8 +99,10 @@ export const runGuidanceApplication = (
       },
       ...(setupWriter ? {setupWriter} : {}),
       ...(gitProbe ? {gitProbe: gitProbe.probe} : {}),
-    });
-    const editor = projectWriter ? new ProjectConfigEditor(definitions, projectWriter, (snapshot, expectedRevision) => supervisionStore.recordDefinitionUserSave(snapshot, expectedRevision)) : undefined;
+    }});
+    const definitions = projectDefinitionsFacade(run, definitionsService);
+    const editor = projectWriter ? projectConfigEditorFacade(run, yield* ProjectConfigEditorService.make({definitions: definitionsService, writer: projectWriter,
+      onSaved: (snapshot, expectedRevision) => supervisionStore.recordDefinitionUserSave(snapshot, expectedRevision)})) : undefined;
     const operateToken = config.guidanceTokenFile && existsSync(config.guidanceTokenFile) ? yield* Effect.tryPromise(() => readFile(config.guidanceTokenFile!, "utf8")) : "";
     const readRpc = makeSupervisorRpc(config.t3Url, readToken.trim());
     const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, readRpc,

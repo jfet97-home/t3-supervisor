@@ -52,7 +52,7 @@ interface DefinitionScopeRead extends MutableScopeSnapshot {
   inputs: unknown[];
 }
 
-// a native, catalog or projection call failed; the original value serves only the baseline classification and the Promise facade, never a log
+// a native, catalog or projection call failed; the original value serves only the baseline classification and the root facade's rejection, never a log
 export class DefinitionSourceFailure extends Data.TaggedError("DefinitionSourceFailure")<{readonly error: unknown}> {}
 // a source exceeded the read bounds; its fixed message becomes the source diagnostic
 export class DefinitionReadLimit extends Schema.TaggedError<DefinitionReadLimit>()("DefinitionReadLimit", {message: Schema.String}) {}
@@ -68,32 +68,35 @@ const fileFailure = (failure: DefinitionSourceFailure | DefinitionReadLimit): Fi
 const failureMessage = (failure: DefinitionSourceFailure | DefinitionReadLimit, fallback: string): string =>
   failure._tag === "DefinitionReadLimit" ? failure.message : failure.error instanceof Error ? failure.error.message : fallback;
 
-// the signal the promise native adapters receive: a promise caller's cancellation (b-03 facades) narrowed by deadlines; effect callers interrupt instead
-export const DefinitionsAbortSignal = Context.Reference<AbortSignal | undefined>("t3-supervisor/DefinitionsAbortSignal", {defaultValue: () => undefined});
-// whether the operation was cancelled or ran past its deadline, checked where the baseline checked signal.aborted
-export const definitionsCanceled: Effect.Effect<boolean> = Effect.map(DefinitionsAbortSignal, signal => signal?.aborted === true);
-// a deadline on the effect clock: when it passes, native calls in flight are aborted as by the baseline signal and the operation completes with what it saw
-export const withDefinitionsDeadline = (duration: Duration.Input) => <A, E, R>(self: Effect.Effect<A, E, R>): Effect.Effect<A, E, Exclude<R, Scope.Scope>> =>
-  Effect.scoped(Effect.gen(function* () {
-    const caller = yield* DefinitionsAbortSignal;
+// the running operation's signal: its caller's cancel signal narrowed by its deadline; set only by definitionsOperation
+const OperationSignal = Context.Reference<AbortSignal | undefined>("t3-supervisor/DefinitionsOperationSignal", {defaultValue: () => undefined});
+// soft cancellation is part of the service contract, as the baseline signal was: a cancelled call settles with its baseline outcome
+// (an unavailable snapshot, a stale setup, an expired save: ct-pd-02, ct-pd-04, ct-editor-02), which an interruption would discard
+// runs one operation under its caller's cancel signal and, when given, a deadline on the effect clock that aborts native calls in flight
+export const definitionsOperation = (cancel: AbortSignal | undefined, deadline?: Duration.Input) => <A, E>(self: Effect.Effect<A, E>): Effect.Effect<A, E> =>
+  deadline === undefined ? Effect.provideService(self, OperationSignal, cancel) : Effect.scoped(Effect.gen(function* () {
     const expired = new AbortController();
-    yield* Effect.forkScoped(Effect.sleep(duration).pipe(Effect.andThen(Effect.sync(() => expired.abort()))));
-    return yield* Effect.provideService(self, DefinitionsAbortSignal, caller ? AbortSignal.any([expired.signal, caller]) : expired.signal);
+    yield* Effect.forkScoped(Effect.sleep(deadline).pipe(Effect.andThen(Effect.sync(() => expired.abort()))));
+    return yield* Effect.provideService(self, OperationSignal, cancel ? AbortSignal.any([expired.signal, cancel]) : expired.signal);
   }));
-// one call into a promise native adapter (until s4 ports them) with the operation's signal, also aborted on interruption
+// the running operation's signal, handed explicitly to a nested definitions call
+export const definitionsSignal: Effect.Effect<AbortSignal | undefined> = OperationSignal;
+// whether the running operation was cancelled or ran past its deadline, checked where the baseline checked signal.aborted
+export const definitionsCanceled: Effect.Effect<boolean> = Effect.map(OperationSignal, signal => signal?.aborted === true);
+// interim promise adapter over today's native clients, removed at s4 integration; the call gets the operation's signal, also aborted on interruption
 export const nativeDefinitionsCall = <A>(call: (signal: AbortSignal) => Promise<A>): Effect.Effect<A, DefinitionSourceFailure> =>
-  Effect.flatMap(DefinitionsAbortSignal, operation => Effect.tryPromise({
+  Effect.flatMap(OperationSignal, operation => Effect.tryPromise({
     try: interrupted => call(operation ? AbortSignal.any([operation, interrupted]) : interrupted),
     catch: error => new DefinitionSourceFailure({error}),
   }));
-// a catalog or projection read ends when the operation's signal aborts, as the baseline's runPromise(effect, {signal}) did
+// a catalog or projection read ends when the operation's signal aborts, as the baseline's signal-bound read did
 const abortedBy = (signal: AbortSignal) => Effect.callback<never, DefinitionSourceFailure>(resume => {
   const abort = () => resume(Effect.fail(new DefinitionSourceFailure({error: signal.reason})));
   if (signal.aborted) {abort();return;}
   signal.addEventListener("abort", abort, {once: true});
   return Effect.sync(() => signal.removeEventListener("abort", abort));
 });
-const boundedRead = <A, E>(read: () => Effect.Effect<A, E>): Effect.Effect<A, DefinitionSourceFailure> => Effect.flatMap(DefinitionsAbortSignal, signal => {
+const boundedRead = <A, E>(read: () => Effect.Effect<A, E>): Effect.Effect<A, DefinitionSourceFailure> => Effect.flatMap(OperationSignal, signal => {
   const effect = Effect.suspend(read).pipe(Effect.mapError(error => new DefinitionSourceFailure({error})),
     Effect.catchDefect(error => Effect.fail(new DefinitionSourceFailure({error}))));
   return signal ? Effect.raceFirst(effect, abortedBy(signal)) : effect;
@@ -1048,21 +1051,23 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
       issue(globalDefinitionsPath, result.status, failure.error instanceof ProjectFileError ? failure.error.message : "Project definitions could not be read; check the T3 connection and workspace.");
     })));
     return result as ProjectDefinitionSnapshot;
-  }).pipe(withDefinitionsDeadline("30 seconds"));
+  });
 
+  // every public operation runs under its caller's cancel signal; only load carries the 30 s deadline, as in the baseline
   return {
     globalHomePath,
     globalDefinitionsPath,
-    load,
-    presence: (projectId: string) => presenceForCheckout(projectId, null),
-    presenceGlobal,
-    presenceForCheckout,
-    checkoutTargets,
-    currentWorkspace,
-    globalFingerprint,
-    initialize,
-    initializeGlobal,
-    readProjectConfig: (root: string) => read(root, projectConfigPath),
+    load: (projectId: string, threadId: string | null = null, cancel?: AbortSignal) => load(projectId, threadId).pipe(definitionsOperation(cancel, "30 seconds")),
+    presence: (projectId: string, cancel?: AbortSignal) => presenceForCheckout(projectId, null).pipe(definitionsOperation(cancel)),
+    presenceGlobal: (cancel?: AbortSignal) => presenceGlobal.pipe(definitionsOperation(cancel)),
+    presenceForCheckout: (projectId: string, threadId: string | null, cancel?: AbortSignal) => presenceForCheckout(projectId, threadId).pipe(definitionsOperation(cancel)),
+    checkoutTargets: (projectId: string, cancel?: AbortSignal) => checkoutTargets(projectId).pipe(definitionsOperation(cancel)),
+    currentWorkspace: (projectId: string, threadId: string | null, cancel?: AbortSignal) => currentWorkspace(projectId, threadId).pipe(definitionsOperation(cancel)),
+    globalFingerprint: (cancel?: AbortSignal) => globalFingerprint.pipe(definitionsOperation(cancel)),
+    initialize: (projectId: string, threadId: string | null, input: ProjectDefinitionSetupInput, cancel?: AbortSignal) =>
+      initialize(projectId, threadId, input).pipe(definitionsOperation(cancel)),
+    initializeGlobal: (cancel?: AbortSignal) => initializeGlobal.pipe(definitionsOperation(cancel)),
+    readProjectConfig: (root: string, cancel?: AbortSignal) => read(root, projectConfigPath).pipe(definitionsOperation(cancel)),
   };
 });
 
@@ -1071,59 +1076,36 @@ export class ProjectDefinitions extends Context.Service<ProjectDefinitions, {
   readonly globalHomePath: string;
   readonly globalDefinitionsPath: string;
   // never fails: an unreadable scope makes the snapshot incomplete and revision-less (30 s deadline)
-  readonly load: (projectId: string, threadId?: string | null) => Effect.Effect<ProjectDefinitionSnapshot>;
-  readonly presence: (projectId: string) => Effect.Effect<DefinitionPresence>;
-  readonly presenceGlobal: Effect.Effect<GlobalDefinitionPresence>;
-  readonly presenceForCheckout: (projectId: string, threadId: string | null) => Effect.Effect<DefinitionPresence>;
-  readonly checkoutTargets: (projectId: string) => Effect.Effect<DefinitionCheckoutTarget[], DefinitionSourceFailure | DefinitionCheckoutUnavailable>;
+  readonly load: (projectId: string, threadId?: string | null, cancel?: AbortSignal) => Effect.Effect<ProjectDefinitionSnapshot>;
+  readonly presence: (projectId: string, cancel?: AbortSignal) => Effect.Effect<DefinitionPresence>;
+  readonly presenceGlobal: (cancel?: AbortSignal) => Effect.Effect<GlobalDefinitionPresence>;
+  readonly presenceForCheckout: (projectId: string, threadId: string | null, cancel?: AbortSignal) => Effect.Effect<DefinitionPresence>;
+  readonly checkoutTargets: (projectId: string, cancel?: AbortSignal) => Effect.Effect<DefinitionCheckoutTarget[], DefinitionSourceFailure | DefinitionCheckoutUnavailable>;
   // the operative checkout comes from the native projection; caller-supplied roots are never accepted
-  readonly currentWorkspace: (projectId: string, threadId: string | null) => Effect.Effect<string | null, DefinitionSourceFailure>;
-  readonly globalFingerprint: Effect.Effect<string | null>;
-  readonly initialize: (projectId: string, threadId: string | null, input: ProjectDefinitionSetupInput) => Effect.Effect<ProjectDefinitionSetupOutcome, DefinitionSourceFailure>;
-  readonly initializeGlobal: Effect.Effect<ProjectDefinitionGlobalSetupOutcome, DefinitionSourceFailure>;
+  readonly currentWorkspace: (projectId: string, threadId: string | null, cancel?: AbortSignal) => Effect.Effect<string | null, DefinitionSourceFailure>;
+  readonly globalFingerprint: (cancel?: AbortSignal) => Effect.Effect<string | null>;
+  // setup is serialized per root; a cancel signal stops it at the next check, leaving files written so far uncommitted
+  readonly initialize: (projectId: string, threadId: string | null, input: ProjectDefinitionSetupInput, cancel?: AbortSignal) =>
+    Effect.Effect<ProjectDefinitionSetupOutcome, DefinitionSourceFailure>;
+  readonly initializeGlobal: (cancel?: AbortSignal) => Effect.Effect<ProjectDefinitionGlobalSetupOutcome, DefinitionSourceFailure>;
   // the native readback of a checkout's project.yaml
-  readonly readProjectConfig: (root: string) => Effect.Effect<DefinitionFileRead, DefinitionSourceFailure>;
+  readonly readProjectConfig: (root: string, cancel?: AbortSignal) => Effect.Effect<DefinitionFileRead, DefinitionSourceFailure>;
 }>()("t3-supervisor/ProjectDefinitions") {
   static readonly make: (sources: ProjectDefinitionSources) => Effect.Effect<ProjectDefinitions["Service"], never, Scope.Scope> = makeProjectDefinitions;
   static readonly layer = (sources: ProjectDefinitionSources): Layer.Layer<ProjectDefinitions> => Layer.effect(ProjectDefinitions, makeProjectDefinitions(sources));
 }
 
-// runs an operation for a promise caller (plan 3.9 b-03): its signal cancels softly as the baseline signal did, and a failure rejects with the baseline value
-export const runDefinitionsFacade = <A>(effect: Effect.Effect<A, DefinitionSourceFailure | DefinitionCheckoutUnavailable>, signal?: AbortSignal): Promise<A> =>
-  Effect.runPromise(effect.pipe(Effect.provideService(DefinitionsAbortSignal, signal),
-    Effect.catch(failure => Effect.die(failure._tag === "DefinitionSourceFailure" ? failure.error : new Error(failure.reason)))));
-
-// promise facade (plan 3.9 b-03) keeping each baseline method shape for unported callers; it belongs in the composition root and goes with its last caller (s6c)
-export class ProjectDefinitionLoader {
-  private readonly definitions: ProjectDefinitions["Service"];
-
-  constructor(
-    readonly source: Pick<StoreShape, "catalog">,
-    readonly t3: Pick<T3ClientShape, "projection">,
-    readonly files: ProjectFiles,
-    readonly options: ProjectDefinitionLoaderOptions = {},
-  ) {
-    // the setup locks live as long as this object, as the baseline queue map did
-    this.definitions = Effect.runSync(Scope.provide(Scope.makeUnsafe())(makeProjectDefinitions({source, t3, files, options})));
-  }
-
-  globalHomePath(): string {return this.definitions.globalHomePath;}
-  globalDefinitionsPath(): string {return this.definitions.globalDefinitionsPath;}
-  currentWorkspace(projectId: string, threadId: string | null, signal: AbortSignal): Promise<string | null> {
-    return runDefinitionsFacade(this.definitions.currentWorkspace(projectId, threadId), signal);
-  }
-  presenceGlobal(signal: AbortSignal): Promise<GlobalDefinitionPresence> {return runDefinitionsFacade(this.definitions.presenceGlobal, signal);}
-  presence(projectId: string, signal: AbortSignal): Promise<DefinitionPresence> {return runDefinitionsFacade(this.definitions.presence(projectId), signal);}
-  presenceForCheckout(projectId: string, threadId: string | null, signal: AbortSignal): Promise<DefinitionPresence> {
-    return runDefinitionsFacade(this.definitions.presenceForCheckout(projectId, threadId), signal);
-  }
-  globalFingerprint(signal: AbortSignal): Promise<string | null> {return runDefinitionsFacade(this.definitions.globalFingerprint, signal);}
-  checkoutTargets(projectId: string, signal: AbortSignal): Promise<DefinitionCheckoutTarget[]> {return runDefinitionsFacade(this.definitions.checkoutTargets(projectId), signal);}
-  initializeGlobal(signal: AbortSignal): Promise<ProjectDefinitionGlobalSetupOutcome> {return runDefinitionsFacade(this.definitions.initializeGlobal, signal);}
-  initialize(projectId: string, threadId: string | null, input: ProjectDefinitionSetupInput, signal: AbortSignal): Promise<ProjectDefinitionSetupOutcome> {
-    return runDefinitionsFacade(this.definitions.initialize(projectId, threadId, input), signal);
-  }
-  load(projectId: string, threadId: string | null = null, parentSignal?: AbortSignal): Promise<ProjectDefinitionSnapshot> {
-    return runDefinitionsFacade(this.definitions.load(projectId, threadId), parentSignal);
-  }
+// the baseline promise call shape of the definitions for unported callers (plan 3.9 b-03); the composition root builds it over the service
+export interface ProjectDefinitionLoader {
+  globalHomePath(): string;
+  globalDefinitionsPath(): string;
+  currentWorkspace(projectId: string, threadId: string | null, signal: AbortSignal): Promise<string | null>;
+  presenceGlobal(signal: AbortSignal): Promise<GlobalDefinitionPresence>;
+  presence(projectId: string, signal: AbortSignal): Promise<DefinitionPresence>;
+  presenceForCheckout(projectId: string, threadId: string | null, signal: AbortSignal): Promise<DefinitionPresence>;
+  globalFingerprint(signal: AbortSignal): Promise<string | null>;
+  checkoutTargets(projectId: string, signal: AbortSignal): Promise<DefinitionCheckoutTarget[]>;
+  initializeGlobal(signal: AbortSignal): Promise<ProjectDefinitionGlobalSetupOutcome>;
+  initialize(projectId: string, threadId: string | null, input: ProjectDefinitionSetupInput, signal: AbortSignal): Promise<ProjectDefinitionSetupOutcome>;
+  load(projectId: string, threadId?: string | null, parentSignal?: AbortSignal): Promise<ProjectDefinitionSnapshot>;
 }

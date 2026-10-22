@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { it } from "vitest";
-import { ProjectConfigEditor } from "../src/project-config-editor.js";
-import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
+import { Effect } from "effect";
+import type { ProjectDefinitions } from "../src/project-definitions.js";
 import type { ProjectConfigSave } from "../src/project-definitions-contract.js";
 import type { ProjectWriter } from "../src/project-files.js";
 import { deferred, loopTurn, within } from "./support/c3b-http.js";
@@ -27,14 +27,12 @@ const queuedEditor = () => {
     const check = () => {if (events.filter(event => event === "load").length >= count) resolve();else loaded.push(check);};
     check();
   });
-  const loader = Object.assign(Object.create(f.loader) as ProjectDefinitionLoader, {
-    load: async (...args: Parameters<ProjectDefinitionLoader["load"]>) => {
-      const result = await f.loader.load(...args);
+  const definitions = {...f.definitions,
+    load: (...args: Parameters<ProjectDefinitions["Service"]["load"]>) => f.definitions.load(...args).pipe(Effect.tap(() => Effect.sync(() => {
       events.push("load");
       for (const waiter of loaded.splice(0)) waiter();
-      return result;
-    },
-  });
+    }))),
+  };
   const firstWrite = deferred();
   const releaseFirst = deferred();
   let writes = 0;
@@ -48,7 +46,7 @@ const queuedEditor = () => {
       events.push(`write:${index}:end`);
     },
   };
-  return {f, editor: new ProjectConfigEditor(loader, writer), events, loads, firstWrite: firstWrite.promise, release: releaseFirst.resolve};
+  return {f, editor: f.editor(writer, definitions), events, loads, firstWrite: firstWrite.promise, release: releaseFirst.resolve};
 };
 
 const input = (revision: string, summary: string): ProjectConfigSave => ({projectId: "project", threadId: null, expectedRevision: revision, config: {
