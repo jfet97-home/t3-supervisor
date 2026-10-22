@@ -1,11 +1,9 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Cause, Config, ConfigProvider, Context, Effect, Exit, Layer, Option, Schema } from "effect";
-import type { SupervisorConfig as SupervisorSettings } from "./types.js";
-
-// the reason code a malformed SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID fails with
-const invalidHelperProviderInstanceId = "invalid_helper_provider_instance_id";
+import { Config, ConfigProvider, Context, Effect, Layer, Option, Schema } from "effect";
+import { InvalidConfiguration } from "./errors.js";
+import type { SupervisorSettings } from "./types.js";
 
 const dataDirectoryFrom = (explicit: string | undefined, stateHome: string | undefined): string =>
   explicit ?? join(stateHome ?? join(homedir(), ".local", "state"), "t3-supervisor");
@@ -17,8 +15,7 @@ export const loadDataDirectory = (): string => dataDirectoryFrom(process.env.DAT
 export const environment = (): ConfigProvider.ConfigProvider => ConfigProvider.fromEnv({ preserveEmptyStrings: true });
 
 // trimmed, then at most 256 characters without whitespace
-const HelperProviderInstanceId = Schema.Trim.check(Schema.makeFilter(
-  (id: string) => id.length <= 256 && !/\s/u.test(id), { message: invalidHelperProviderInstanceId }));
+const HelperProviderInstanceId = Schema.Trim.check(Schema.makeFilter((id: string) => id.length <= 256 && !/\s/u.test(id)));
 
 const defaultUiAssetsDirectory = fileURLToPath(new URL("../ui-dist", import.meta.url));
 
@@ -29,16 +26,14 @@ const numeric = (name: string, value: string) => withDefault(name, value).pipe(C
 const list = (name: string, item: (value: string) => string) =>
   withDefault(name, "").pipe(Config.map((value) => value.split(",").map(item).filter(Boolean)));
 
-const supervisorConfig: Config.Config<SupervisorSettings> = Config.all({
+const supervisorConfig = Config.all({
   dataDirectory: Config.all([optional("DATA_DIRECTORY"), optional("XDG_STATE_HOME")])
     .pipe(Config.map(([explicit, stateHome]) => dataDirectoryFrom(explicit, stateHome))),
   t3Url: withDefault("T3_URL", "http://127.0.0.1:3773"),
   t3TokenFile: withDefault("T3_TOKEN_FILE", "/run/secrets/t3-read-token"),
   excludedThreadIds: list("EXCLUDED_THREAD_IDS", (id) => id.trim()),
   healthPort: numeric("HEALTH_PORT", "9007"),
-  // a blank value leaves helper isolation unset
-  helperProviderInstanceId: Config.schema(HelperProviderInstanceId, "SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID")
-    .pipe(Config.option, Config.map((id) => Option.getOrUndefined(id) || undefined)),
+  helperProviderInstanceId: optional("SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID"),
   uiPort: numeric("UI_PORT", "9008"),
   uiHost: withDefault("UI_HOST", "127.0.0.1"),
   workflowMcpHosts: list("WORKFLOW_MCP_HOSTS", (host) => host.trim().toLowerCase()),
@@ -50,32 +45,27 @@ const supervisorConfig: Config.Config<SupervisorSettings> = Config.all({
   projectCommitTokenFile: withDefault("T3_PROJECT_COMMIT_TOKEN_FILE", "/run/secrets/t3-project-commit-token"),
   gitProbeTokenFile: withDefault("T3_GIT_PROBE_TOKEN_FILE", "/run/secrets/t3-git-probe-token"),
   managedScratchRoot: optional("T3_MANAGED_SCRATCH_ROOT"),
-}).pipe(Config.map(({ helperProviderInstanceId, workflowMcpBindHost, workflowMcpPort, managedScratchRoot, ...settings }) => ({
-  ...settings,
-  // optional settings are absent unless set to a non-empty value
-  ...(helperProviderInstanceId ? { helperProviderInstanceId } : {}),
-  ...(workflowMcpBindHost ? { workflowMcpBindHost } : {}),
-  ...(workflowMcpPort ? { workflowMcpPort: Number(workflowMcpPort) } : {}),
-  ...(managedScratchRoot ? { managedScratchRoot } : {}),
-})));
+});
+
+// parsed from the current ConfigProvider; a malformed helper instance id fails with its reason code and no value
+const settings: Effect.Effect<SupervisorSettings, InvalidConfiguration> = Effect.gen(function* () {
+  const { helperProviderInstanceId: helperInput, workflowMcpBindHost, workflowMcpPort, managedScratchRoot, ...parsed } =
+    yield* supervisorConfig.pipe(Effect.mapError(() => new InvalidConfiguration({ reason: "invalid_configuration" })));
+  // a blank value leaves helper isolation unset
+  const helperProviderInstanceId = helperInput === undefined ? "" : yield* Schema.decodeUnknownEffect(HelperProviderInstanceId)(helperInput)
+    .pipe(Effect.mapError(() => new InvalidConfiguration({ reason: "invalid_helper_provider_instance_id" })));
+  return {
+    ...parsed,
+    // optional settings are absent unless set to a non-empty value
+    ...(helperProviderInstanceId ? { helperProviderInstanceId } : {}),
+    ...(workflowMcpBindHost ? { workflowMcpBindHost } : {}),
+    ...(workflowMcpPort ? { workflowMcpPort: Number(workflowMcpPort) } : {}),
+    ...(managedScratchRoot ? { managedScratchRoot } : {}),
+  };
+});
 
 // the process configuration, parsed once and immutable
 export class SupervisorConfig extends Context.Service<SupervisorConfig, Readonly<SupervisorSettings>>()("t3-supervisor/SupervisorConfig") {
   // parsed from the current ConfigProvider; the process provides `environment`
-  static readonly layer: Layer.Layer<SupervisorConfig, Config.ConfigError> = Layer.effect(SupervisorConfig, supervisorConfig);
+  static readonly layer: Layer.Layer<SupervisorConfig, InvalidConfiguration> = Layer.effect(SupervisorConfig, settings);
 }
-
-// today's synchronous loader over the same description, until main.ts builds SupervisorConfig.layer
-export const loadConfig = (): SupervisorSettings => {
-  const exit = Effect.runSyncExit(supervisorConfig.parse(environment()));
-  if (Exit.isSuccess(exit)) return exit.value;
-  return loadHelperProviderInstanceId(Cause.squash(exit.cause));
-};
-
-// keeps the baseline uncaught startup error, a plain error carrying only the reason code; CT-MAIN-03 pins this frame name
-const loadHelperProviderInstanceId = (failure: unknown): never => {
-  if (failure instanceof Config.ConfigError && failure.message.includes(invalidHelperProviderInstanceId)) {
-    throw new Error(invalidHelperProviderInstanceId);
-  }
-  throw failure;
-};

@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import {mkdtemp, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {Clock, Effect, Fiber, Layer, Queue, type Scope} from "effect";
+import {Clock, Effect, Fiber, Layer, Queue, SubscriptionRef, type Scope} from "effect";
 import {TestClock} from "effect/testing";
 import {it, vi, type TestContext} from "vitest";
+import {SupervisorConfig as Configuration} from "../src/config.js";
+import {SupervisorOwnership} from "../src/project-supervisor-store.js";
 import {makeStore} from "../src/store.js";
-import {createStatus, runSupervisor, type SupervisorStatus} from "../src/supervisor.js";
+import {createStatus, supervise, SupervisorStatusRef, type SupervisorStatus} from "../src/supervisor.js";
+import {ThreadPolicy} from "../src/thread-policy.js";
 import {T3Client, T3TransportError, type T3ClientShape, type T3EnvironmentDescriptor} from "../src/t3.js";
 import type {ProjectInfo, SupervisorConfig} from "../src/types.js";
 import {after, mockMethod} from "./support/node-test.js";
@@ -46,10 +49,25 @@ const captureEvents = (t: TestContext, onEvent: (event: string, fields: Record<s
   return events;
 };
 
-const layers = (directory: string, client: T3ClientShape) => Layer.mergeAll(makeStore(directory), Layer.succeed(T3Client, client));
+// the status service over a SubscriptionRef, seen through a live view so the assertions read the current status as they
+// read the baseline status object
+const statusRefs = new WeakMap<SupervisorStatus, SubscriptionRef.SubscriptionRef<SupervisorStatus>>();
+const liveStatus = (settings: SupervisorConfig): SupervisorStatus => {
+  const ref = Effect.runSync(SubscriptionRef.make(createStatus(settings, Date.now())));
+  const view = Object.defineProperties({}, Object.fromEntries(Object.keys(SubscriptionRef.getUnsafe(ref)).map((key) =>
+    [key, {enumerable: true, get: () => SubscriptionRef.getUnsafe(ref)[key as keyof SupervisorStatus]}]))) as SupervisorStatus;
+  statusRefs.set(view, ref);
+  return view;
+};
+
+// the services of the run: the catalog, the fake T3 client, the status and the root thread-policy and ownership services
+const layers = (settings: SupervisorConfig, status: SupervisorStatus, client: T3ClientShape) => Layer.mergeAll(
+  makeStore(settings.dataDirectory), Layer.succeed(T3Client, client), Layer.succeed(SupervisorStatusRef, statusRefs.get(status)!),
+  ThreadPolicy.layer, SupervisorOwnership.layer,
+).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)));
 
 const startReal = (t: TestContext, settings: SupervisorConfig, status: SupervisorStatus, client: T3ClientShape, settle: () => void) => {
-  const fiber = Effect.runFork(runSupervisor(settings, status).pipe(Effect.scoped, Effect.provide(layers(settings.dataDirectory, client))));
+  const fiber = Effect.runFork(supervise(layers(settings, status, client)));
   after(t, async () => {
     await Effect.runPromise(Fiber.interrupt(fiber));
     settle();
@@ -69,7 +87,7 @@ it("CT-HEALTH-01: /health and /live answer over real HTTP with the exact status 
   const directory = await temporaryDirectory(t);
   const port = await freePort();
   const settings = config(directory, port);
-  const status = createStatus(settings);
+  const status = liveStatus(settings);
   const descriptorCalled = Promise.withResolvers<void>();
   const descriptorGate = Promise.withResolvers<void>();
   const watchCalled = Promise.withResolvers<void>();
@@ -162,7 +180,7 @@ it("CT-HEALTH-01: enabled supervision that is not ready keeps /health at 503 whi
   const directory = await temporaryDirectory(t);
   const port = await freePort();
   const settings = {...config(directory, port), uiPort: 0, uiHost: "127.0.0.1"};
-  const status = createStatus(settings);
+  const status = liveStatus(settings);
   const supervisionFailed = Promise.withResolvers<void>();
   const ingested = Promise.withResolvers<void>();
   captureEvents(t, (event) => {
@@ -198,7 +216,7 @@ it("CT-HEALTH-01: enabled supervision that is not ready keeps /health at 503 whi
 it("CT-MAIN-04: a descriptor failure sets t3_authentication and retries exactly every 10 s", {timeout: 10_000}, async (t) => {
   const directory = await temporaryDirectory(t);
   const settings = config(directory, 0);
-  const status = createStatus(settings);
+  const status = liveStatus(settings);
   const events = captureEvents(t);
   await runWithTestClock(Effect.gen(function* () {
     const descriptorCalls = yield* Queue.unbounded<number>();
@@ -215,7 +233,7 @@ it("CT-MAIN-04: a descriptor failure sets t3_authentication and retries exactly 
       projection: () => Effect.fail(new T3TransportError("No projection is expected")),
       watch: () => Clock.currentTimeMillis.pipe(Effect.flatMap(now => Queue.offer(watchCalls, now)), Effect.andThen(Effect.never)),
     };
-    const fiber = yield* Effect.forkChild(runSupervisor(settings, status).pipe(Effect.scoped, Effect.provide(layers(directory, client))));
+    const fiber = yield* Effect.forkChild(supervise(layers(settings, status, client)));
     assert.equal(yield* within(Queue.take(descriptorCalls)), 0);
     assert.equal(status.lastErrorPhase, "t3_authentication");
     assert.equal(status.activation, null);
@@ -241,7 +259,7 @@ it("CT-MAIN-04: a descriptor failure sets t3_authentication and retries exactly 
 it("CT-MAIN-04: a supervision failure degrades and restarts the guidance application exactly 10 s later", {timeout: 10_000}, async (t) => {
   const directory = await temporaryDirectory(t);
   const settings = {...config(directory, 0), uiPort: 0, uiHost: "127.0.0.1"};
-  const status = createStatus(settings);
+  const status = liveStatus(settings);
   await runWithTestClock(Effect.gen(function* () {
     const failures = yield* Queue.unbounded<string>();
     const descriptorCalls = yield* Queue.unbounded<number>();
@@ -253,7 +271,7 @@ it("CT-MAIN-04: a supervision failure degrades and restarts the guidance applica
       projection: () => Effect.fail(new T3TransportError("No projection is expected")),
       watch: () => Effect.never,
     };
-    const fiber = yield* Effect.forkChild(runSupervisor(settings, status).pipe(Effect.scoped, Effect.provide(layers(directory, client))));
+    const fiber = yield* Effect.forkChild(supervise(layers(settings, status, client)));
     // the root activation and the first guidance application each read the descriptor at 0
     assert.equal(yield* within(Queue.take(descriptorCalls)), 0);
     assert.equal(yield* within(Queue.take(descriptorCalls)), 0);
@@ -276,7 +294,7 @@ it("CT-MAIN-04: a supervision failure degrades and restarts the guidance applica
 it("CT-MAIN-04: a watch failure clears t3Connected and restarts the watch exactly 10 s later", {timeout: 10_000}, async (t) => {
   const directory = await temporaryDirectory(t);
   const settings = config(directory, 0);
-  const status = createStatus(settings);
+  const status = liveStatus(settings);
   await runWithTestClock(Effect.gen(function* () {
     const deferred = yield* Queue.unbounded<Record<string, unknown>>();
     const watchCalls = yield* Queue.unbounded<number>();
@@ -297,7 +315,7 @@ it("CT-MAIN-04: a watch failure clears t3Connected and restarts the watch exactl
         return yield* Effect.fail(new T3TransportError("stream dropped"));
       }),
     };
-    const fiber = yield* Effect.forkChild(runSupervisor(settings, status).pipe(Effect.scoped, Effect.provide(layers(directory, client))));
+    const fiber = yield* Effect.forkChild(supervise(layers(settings, status, client)));
     assert.equal(yield* within(Queue.take(watchCalls)), 0);
     const failure = yield* within(Queue.take(deferred));
     assert.equal(failure.phase, "t3_stream");
@@ -318,7 +336,7 @@ it("CT-MAIN-05: interrupting runSupervisor closes the health listener and logs n
   const directory = await temporaryDirectory(t);
   const port = await freePort();
   const settings = config(directory, port);
-  const status = createStatus(settings);
+  const status = liveStatus(settings);
   const watching = Promise.withResolvers<void>();
   const events = captureEvents(t);
   const client: T3ClientShape = {
@@ -343,7 +361,7 @@ it("CT-MAIN-05: interruption inside the deferred-retry sleep logs no further ope
   const directory = await temporaryDirectory(t);
   const port = await freePort();
   const settings = config(directory, port);
-  const status = createStatus(settings);
+  const status = liveStatus(settings);
   const deferredLogged = Promise.withResolvers<void>();
   const events = captureEvents(t, (event) => {
     if (event === "operation_deferred") deferredLogged.resolve();

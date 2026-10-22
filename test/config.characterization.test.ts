@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { ConfigProvider, Effect } from "effect";
 import { it } from "vitest";
-import { loadConfig, loadDataDirectory } from "../src/config.js";
+import { environment, loadDataDirectory, SupervisorConfig } from "../src/config.js";
+
+// the configuration as the process parses it: the SupervisorConfig layer over the current process environment
+const loadConfig = () => Effect.runSync(SupervisorConfig.useSync((config) => config).pipe(
+  Effect.provide(SupervisorConfig.layer), Effect.provide(ConfigProvider.layer(environment()))));
 
 // every variable loadConfig reads, plus the two that locate the default data directory
 const variables = [

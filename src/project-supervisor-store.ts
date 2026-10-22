@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Context, Effect, Layer } from "effect";
+import { SupervisorConfig as Configuration } from "./config.js";
 import type { GuidanceStore } from "./guidance-store.js";
 import { fingerprint } from "./guidance-store.js";
 import { defaultMonitoringSettings, type DefinitionReviewInfo, type SupervisorBinding, type SupervisorModelSelection, type SupervisorMonitoringSettings, type TaskInterpretationInfo, type WorkflowProtocolDiagnostic } from "./project-supervisor-contract.js";
@@ -49,6 +51,14 @@ export const loadSupervisorOwnership = (directory: string): Set<string> => {
     return new Set(db.prepare("SELECT id FROM supervisor_owned_threads").all().map(row => String(row.id)));
   } finally {db.close();}
 };
+// the permanent root and helper ownership, loaded once before supervision starts; the guidance store adds new IDs to this
+// same set, which unported readers receive by reference (B-02)
+export class SupervisorOwnership extends Context.Service<SupervisorOwnership, Set<string>>()("t3-supervisor/SupervisorOwnership") {
+  static readonly layer: Layer.Layer<SupervisorOwnership, never, Configuration> = Layer.effect(SupervisorOwnership, Effect.gen(function* () {
+    const config = yield* Configuration;
+    return yield* Effect.sync(() => loadSupervisorOwnership(config.dataDirectory));
+  }));
+}
 export const isSupervisorThread = (config: SupervisorConfig, thread: {id: string; lineage: {parentThreadId: string | null; rootThreadId?: unknown}}): boolean => {
   const ids = config.supervisorOwnedThreadIds;
   const supervisorId = (id: unknown): boolean => typeof id === "string" &&

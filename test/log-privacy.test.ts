@@ -4,13 +4,16 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
-import { Cause, Effect, Exit, Fiber, Layer, Logger, Tracer } from "effect";
+import { Cause, Effect, Exit, Fiber, Layer, Logger, SubscriptionRef, Tracer } from "effect";
 import { it, type TestContext } from "vitest";
+import { SupervisorConfig as Configuration } from "../src/config.js";
+import { SupervisorOwnership } from "../src/project-supervisor-store.js";
 import { createServiceAuth, forgeDashboardToken } from "../src/service-auth.js";
-import { makeStore } from "../src/store.js";
+import { makeStore, type Store } from "../src/store.js";
 import { makeSupervisorRpc, SupervisorRpcError } from "../src/supervisor-native.js";
-import { createStatus, readiness, runSupervisor, type SupervisorStatus } from "../src/supervisor.js";
+import { createStatus, readiness, supervise, SupervisorStatusRef, type SupervisorStatus } from "../src/supervisor.js";
 import { makeT3Client, T3Client, T3TransportError, type T3ClientShape } from "../src/t3.js";
+import { ThreadPolicy } from "../src/thread-policy.js";
 import type { SupervisorConfig } from "../src/types.js";
 import { startFakeT3 } from "./support/cli-fake-t3.js";
 import { fingerprint, leakedSecrets } from "./support/cli-process.js";
@@ -113,6 +116,22 @@ const config = (dataDirectory: string, uiPort?: number): SupervisorConfig => ({
   ...(uiPort === undefined ? {} : { uiPort, uiHost: "127.0.0.1" }),
 });
 
+// the status service over a SubscriptionRef, seen through a live view so the checks read the current status as they read
+// the baseline status object
+const statusRefs = new WeakMap<SupervisorStatus, SubscriptionRef.SubscriptionRef<SupervisorStatus>>();
+const liveStatus = (settings: SupervisorConfig): SupervisorStatus => {
+  const ref = Effect.runSync(SubscriptionRef.make(createStatus(settings, Date.now())));
+  const view = Object.defineProperties({}, Object.fromEntries(Object.keys(SubscriptionRef.getUnsafe(ref)).map((key) =>
+    [key, { enumerable: true, get: () => SubscriptionRef.getUnsafe(ref)[key as keyof SupervisorStatus] }]))) as SupervisorStatus;
+  statusRefs.set(view, ref);
+  return view;
+};
+
+// the services of the run: the given catalog and T3 client, the status and the root thread-policy and ownership services
+const services = (settings: SupervisorConfig, status: SupervisorStatus, base: Layer.Layer<Store | T3Client, unknown>) => Layer.mergeAll(
+  base, Layer.succeed(SupervisorStatusRef, statusRefs.get(status)!), ThreadPolicy.layer, SupervisorOwnership.layer,
+).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)));
+
 // the /health body the status would serve
 const healthBody = (status: SupervisorStatus, settings: SupervisorConfig) =>
   JSON.stringify({ ok: false, readiness: readiness(status, settings), ...status });
@@ -146,8 +165,8 @@ it("CT-REDACT-01: native transport failures carrying a token, a native error bod
     after(t, () => refusing.close());
     const refusedDirectory = await temporaryDirectory(t, "log-privacy-descriptor-");
     const refusedConfig = config(refusedDirectory);
-    const refusedStatus = createStatus(refusedConfig);
-    const refused = Effect.runFork(instrumented(Effect.scoped(Effect.provide(runSupervisor(refusedConfig, refusedStatus),
+    const refusedStatus = liveStatus(refusedConfig);
+    const refused = Effect.runFork(instrumented(supervise(services(refusedConfig, refusedStatus,
       Layer.mergeAll(makeStore(refusedDirectory), makeT3Client({ baseUrl: refusing.baseUrl, token: secrets.token })))), observation));
     try {
       await refusing.until((traffic) => traffic.http.length > 0, 5_000, "a descriptor request");
@@ -162,8 +181,8 @@ it("CT-REDACT-01: native transport failures carrying a token, a native error bod
     after(t, () => failing.close());
     const watchDirectory = await temporaryDirectory(t, "log-privacy-watch-");
     const watchConfig = config(watchDirectory);
-    const watchStatus = createStatus(watchConfig);
-    const watching = Effect.runFork(instrumented(Effect.scoped(Effect.provide(runSupervisor(watchConfig, watchStatus),
+    const watchStatus = liveStatus(watchConfig);
+    const watching = Effect.runFork(instrumented(supervise(services(watchConfig, watchStatus,
       Layer.mergeAll(makeStore(watchDirectory), makeT3Client({ baseUrl: failing.baseUrl, token: secrets.token })))), observation));
     try {
       await observation.until((lines) => lines.some((line) => line.includes("operation_deferred")), 5_000, "operation_deferred line");
@@ -211,8 +230,8 @@ it("CT-REDACT-01: nested causes carrying a token, a native error body and a webh
         { cause: new Error(`webhook ${secrets.webhookUrl} refused Bearer ${secrets.token}`) })),
     };
     const settings = config(directory, 0);
-    const status = createStatus(settings);
-    const fiber = Effect.runFork(instrumented(Effect.scoped(Effect.provide(runSupervisor(settings, status),
+    const status = liveStatus(settings);
+    const fiber = Effect.runFork(instrumented(supervise(services(settings, status,
       Layer.mergeAll(makeStore(directory), Layer.succeed(T3Client, client)))), observation));
     try {
       await observation.until((lines) => lines.some((line) => line.includes("supervision_unavailable")) &&

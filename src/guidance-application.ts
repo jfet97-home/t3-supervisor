@@ -26,6 +26,8 @@ export const runGuidanceApplication = (
   onReady: () => void = () => {},
 ) =>
   Effect.gen(function* () {
+    // the root context, captured once per supervision run, runs root effects for the unported promise callers (B-01)
+    const run = Effect.runPromiseWith(yield* Effect.context<never>());
     const store = yield* Effect.acquireRelease(
       Effect.sync(() => new GuidanceStore(config.dataDirectory)),
       (store) => Effect.sync(() => store.close()),
@@ -88,7 +90,7 @@ export const runGuidanceApplication = (
       stops: {stop: (input, evidence, signal) => supervision.stopSupervision(input, evidence, signal)},
       native: {
         listThreads: readSupervisorThreads(config.t3Url, readToken.trim(), readRpc),
-        projection: async (threadId, signal) => (await Effect.runPromise(t3.projection(threadId), {signal})).projection,
+        projection: async (threadId, signal) => (await run(t3.projection(threadId), {signal})).projection,
         getTurnItem: async (input, signal) => {
           const result = await readRpc("orchestration.getTurnItem", input, signal);
           if (!record(result) || !("item" in result)) throw new Error("workflow_native_item_unavailable");
@@ -111,7 +113,7 @@ export const runGuidanceApplication = (
     yield* Effect.forkScoped(interpretation);
     const cycle = Effect.tryPromise({
       try: async () => {
-        runtime.descriptor = await Effect.runPromise(t3.descriptor());
+        runtime.descriptor = await run(t3.descriptor());
         store.bind(runtime.descriptor.environmentId);
         store.prune();
         runtime.connected = true;

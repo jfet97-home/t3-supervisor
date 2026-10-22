@@ -36,6 +36,13 @@ const tokenLine = { lines: 1, endsWithNewline: true, tokenLength: 43, canonical:
 
 const events = (stdout: string): unknown[] => stdout.split("\n").filter(Boolean).map((line) => (JSON.parse(line) as { event?: unknown }).event);
 
+// json lines without their timestamp
+const classified = (stdout: string): unknown[] => stdout.split("\n").filter(Boolean).map((line) => {
+  const { time, ...fields } = JSON.parse(line) as Record<string, unknown>;
+  assert.equal(typeof time, "string");
+  return fields;
+});
+
 const signalAndWait = async (child: ReturnType<SupervisorHarness["start"]>, signal: NodeJS.Signals): Promise<ProcessResult> => {
   process.kill(child.pid, signal);
   return child.closed(exitTimeoutMs);
@@ -64,7 +71,7 @@ it("CT-MAIN-01: SIGTERM after readiness exits 130, closes the health, UI and MCP
   await assertReleased(harness, child.pid, readyFiles, readyDatabases);
 });
 
-it("CT-MAIN-03: startup failures exit 1 without token bytes: missing token file (path shown via runMain's nested cause) and invalid helper id",
+it("CT-MAIN-03: startup failures exit 1 with one classified line and no stack, token bytes or token path: missing token file and invalid helper id",
   { timeout: 60_000 }, async (t) => {
     const harness = await supervisorHarness(t);
     const canaries = ["guidance", "project-write", "project-commit", "git-probe"].map((name) => `${name}-canary-${harness.token.slice(0, 16)}`);
@@ -85,12 +92,12 @@ it("CT-MAIN-03: startup failures exit 1 without token bytes: missing token file 
       });
       assert.deepEqual({ code: missing.code, signal: missing.signal }, { code: 1, signal: null }, label);
       assert.deepEqual(leakedSecrets(missing.stdout + missing.stderr, [harness.token, ...canaries]), [], label);
-      // baseline rendering: runMain's default logger reports the UnknownError on stdout, not stderr, with its ENOENT cause
-      // naming the configured path (configuration, not a secret; BC-CLI-04 replaces it with a fixed message)
+      // target rendering (BC-CLI-04): one classified line on stdout naming the reason, without stack, cause or token path
       privately(label, [harness.token, ...canaries], () => {
         assert.equal(missing.stderr, "");
-        assert.match(missing.stdout, /^\[[\d:.]+\] ERROR \(#\d+\): UnknownError: An error occurred in Effect\.tryPromise$/mu);
-        assert.ok(missing.stdout.includes(`[cause]: Error: ENOENT: no such file or directory, open '${missingTokenFile}'`));
+        assert.deepEqual(classified(missing.stdout), [{ event: "supervisor_failed", reason: "t3_token_unavailable" }]);
+        assert.equal(missing.stdout.includes(missingTokenFile), false);
+        assert.doesNotMatch(missing.stdout, /^\s+at /mu);
       });
 
       const invalidDataDirectory = join(harness.home, `invalid-${label.replace(/\W/gu, "-")}`);
@@ -100,11 +107,11 @@ it("CT-MAIN-03: startup failures exit 1 without token bytes: missing token file 
       });
       assert.deepEqual({ code: invalid.code, signal: invalid.signal }, { code: 1, signal: null }, label);
       assert.deepEqual(leakedSecrets(invalid.stdout + invalid.stderr, [harness.token]), [], label);
-      // baseline: loadConfig throws at module top level, so node prints the uncaught error with its stack
+      // target rendering (BC-CLI-04): the configuration failure is one classified line naming its reason, without a stack
       privately(label, [harness.token], () => {
-        assert.equal(invalid.stdout, "");
-        assert.match(invalid.stderr, /^Error: invalid_helper_provider_instance_id$/mu);
-        assert.match(invalid.stderr, /^\s+at loadHelperProviderInstanceId \(/mu);
+        assert.equal(invalid.stderr, "");
+        assert.deepEqual(classified(invalid.stdout), [{ event: "supervisor_failed", reason: "invalid_helper_provider_instance_id" }]);
+        assert.doesNotMatch(invalid.stdout, /^\s+at /mu);
       });
       await assert.rejects(stat(invalidDataDirectory), { code: "ENOENT" }, "configuration fails before any store opens");
     }

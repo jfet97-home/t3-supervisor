@@ -1,10 +1,11 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { Schema } from "effect";
+import { Context, Effect, Layer, Schema } from "effect";
+import { SupervisorConfig as Configuration } from "./config.js";
 import type { SupervisorConfig } from "./types.js";
 
-import { ThreadPolicy, type ThreadPolicySettings } from "./thread-policy-contract.js";
+import { ThreadPolicy as ThreadPolicyDocument, type ThreadPolicySettings } from "./thread-policy-contract.js";
 const validId = (id: string) => id.length > 0 && id.length <= 512 && !/[\s\x00-\x1f\x7f]/u.test(id);
 
 /** Persists instance-specific excluded-thread policy. */
@@ -20,7 +21,7 @@ export class ThreadPolicyStore {
   }
   close(): void { this.db.close(); }
   get(): ThreadPolicySettings {
-    return Schema.decodeUnknownSync(ThreadPolicy)(JSON.parse(String(this.db.prepare("SELECT document FROM settings WHERE id=1").get()?.document)) as unknown);
+    return Schema.decodeUnknownSync(ThreadPolicyDocument)(JSON.parse(String(this.db.prepare("SELECT document FROM settings WHERE id=1").get()?.document)) as unknown);
   }
   save(input: ThreadPolicySettings): ThreadPolicySettings {
     if (!Number.isSafeInteger(input.generation) || input.excludedThreadIds.length > 500 ||
@@ -35,3 +36,15 @@ export class ThreadPolicyStore {
 export const currentThreadPolicy = (config: SupervisorConfig): ThreadPolicySettings => config.threadPolicy?.get() ?? {
   generation: 0, excludedThreadIds: config.excludedThreadIds,
 };
+
+// the process thread-policy store, opened from the configuration and closed on release; until S6d it is the existing
+// synchronous store (D-01, B-02), with no SqlClient
+export class ThreadPolicy extends Context.Service<ThreadPolicy, ThreadPolicyStore>()("t3-supervisor/ThreadPolicy") {
+  static readonly layer: Layer.Layer<ThreadPolicy, never, Configuration> = Layer.effect(ThreadPolicy, Effect.gen(function* () {
+    const config = yield* Configuration;
+    return yield* Effect.acquireRelease(
+      Effect.sync(() => new ThreadPolicyStore(config.dataDirectory, { excludedThreadIds: config.excludedThreadIds })),
+      (store) => Effect.sync(() => store.close()),
+    );
+  }));
+}
