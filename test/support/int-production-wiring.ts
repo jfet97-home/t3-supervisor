@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { GuidanceRuntime } from "../../src/guidance.js";
+import { guidanceRuntimeFacade } from "../../src/guidance-application.js";
 import { startGuidanceUi } from "./service-auth-harness.js";
 import { ProjectSupervisorStore, loadSupervisorOwnership } from "../../src/project-supervisor-store.js";
 import { ProjectSupervisor } from "../../src/project-supervisor.js";
@@ -103,7 +104,8 @@ export const startIntEndpoint = async (core: IntSupervision, definitions: IntDef
   const teamController = new SupervisorTeamController(workflowReader, supervision.team, supervision.operateRpc, supervision.conversation.requests);
   supervision.teamEffects = teamController;
   const workflows = createWorkflowMcpEndpoint(workflowReader, teamController);
-  const ui = await startGuidanceUi(config, new GuidanceRuntime(config, core.guidance, core.source), undefined, undefined, supervision, workflows, workflowReader);
+  const ui = await startGuidanceUi(config, guidanceRuntimeFacade(Effect.runPromise, Effect.runSync(GuidanceRuntime.make(config, core.guidance, core.source)), config),
+    undefined, undefined, supervision, workflows, workflowReader);
   const address = ui.server.address();
   if (address === null || typeof address === "string") throw new Error("ui did not bind a TCP port");
   const token = await readFile(join(config.dataDirectory, "access", "workflow-mcp-token"), "utf8");

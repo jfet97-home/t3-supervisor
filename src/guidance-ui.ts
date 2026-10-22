@@ -6,7 +6,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { extname, join, resolve, sep } from "node:path";
 import { SupervisorApi, UiError } from "./guidance-contract.js";
-import type { GuidanceRuntime } from "./guidance.js";
+import type { GuidanceRuntimeReader } from "./guidance.js";
 import type { SupervisorConfig } from "./types.js";
 import type { ProjectDefinitionLoader } from "./project-definitions.js";
 import type { ProjectConfigEditor } from "./project-config-editor.js";
@@ -41,7 +41,7 @@ const body = async (request: IncomingMessage, limit = 64_000): Promise<string> =
 
 export const startGuidanceUi = async (
   config: SupervisorConfig,
-  runtime: GuidanceRuntime,
+  runtime: GuidanceRuntimeReader,
   // the caller's service auth and its root runner (b-01): the checks are awaited in request order (b-04 t-01)
   auth: ServiceAuth["Service"],
   run: <A, E>(effect: Effect.Effect<A, E>) => Promise<A>,

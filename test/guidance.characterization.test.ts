@@ -11,6 +11,7 @@ import { HttpApi } from "effect/http-api";
 import { TestClock } from "effect/testing";
 import { it } from "vitest";
 import { GuidanceRuntime } from "../src/guidance.js";
+import { guidanceRuntimeFacade } from "../src/guidance-application.js";
 import { SupervisorApi } from "../src/guidance-contract.js";
 import { GuidanceStore } from "../src/guidance-store.js";
 import type { ProjectConfigEditor } from "../src/project-config-editor.js";
@@ -54,9 +55,9 @@ it("CT-APP-01: dashboard classification lets explicit choices win and resolves t
     project("unavailable", "/work/scratch", false),
   ];
   const classify = async (managedScratchRoot?: string) => {
-    const runtime = new GuidanceRuntime({...uiConfig(directory), ...(managedScratchRoot === undefined ? {} : {managedScratchRoot})}, store,
-      {catalog: () => Effect.succeed({projects, threads: []})});
-    return Object.fromEntries((await runtime.snapshot()).projects.map(item => [item.id, item.classification]));
+    const runtime = Effect.runSync(GuidanceRuntime.make({...uiConfig(directory), ...(managedScratchRoot === undefined ? {} : {managedScratchRoot})}, store,
+      {catalog: () => Effect.succeed({projects, threads: []})}));
+    return Object.fromEntries((await Effect.runPromise(runtime.snapshot)).projects.map(item => [item.id, item.classification]));
   };
   const managed = {
     managed: "scratch", "managed-slash": "scratch", "managed-dots": "scratch", other: "project",
@@ -555,7 +556,9 @@ it("CT-UI-06: a listen failure on the MCP bind host closes the UI listener and t
   const uiPort = await freePort();
   const store = new GuidanceStore(directory);
   defer(t, () => store.close());
-  const runtime = new GuidanceRuntime(uiConfig(directory), store, {catalog: () => Effect.succeed({projects: [], threads: []})});
+  const runtimeConfig = uiConfig(directory);
+  const runtime = guidanceRuntimeFacade(Effect.runPromise,
+    Effect.runSync(GuidanceRuntime.make(runtimeConfig, store, {catalog: () => Effect.succeed({projects: [], threads: []})})), runtimeConfig);
   const login = join(directory, "access", "login.sqlite3");
   assert.equal(openDescriptors(login), 0);
 

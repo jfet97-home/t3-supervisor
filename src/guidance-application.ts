@@ -1,8 +1,8 @@
 import {SupervisorTeamController} from "./supervisor-team-controller.js";
 import { NodeFileSystem } from "@effect/platform-node";
-import { Context, Effect, Layer } from "effect";
+import { Cause, Context, Effect, Layer } from "effect";
 import { GuidanceStore } from "./guidance-store.js";
-import { GuidanceRuntime } from "./guidance.js";
+import { GuidanceRuntime, type GuidanceRuntimeReader } from "./guidance.js";
 import { startGuidanceUi } from "./guidance-ui.js";
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
@@ -49,6 +49,11 @@ export const projectDefinitionsFacade = (run: RootRun, definitions: ProjectDefin
 export const projectConfigEditorFacade = (run: RootRun, editor: ProjectConfigEditorService["Service"]): ProjectConfigEditor => ({
   save: (input, signal) => run(Effect.mapError(editor.save(input, signal), definitionsRejection)),
 });
+// b-03 (plan 3.9): the baseline promise shape the unported dashboard handlers read the runtime through
+export const guidanceRuntimeFacade = (run: RootRun, runtime: GuidanceRuntime["Service"], config: SupervisorConfig): GuidanceRuntimeReader => ({
+  config,
+  snapshot: () => run(runtime.snapshot),
+});
 
 export const runGuidanceApplication = (
   config: SupervisorConfig,
@@ -63,13 +68,11 @@ export const runGuidanceApplication = (
       Effect.sync(() => new GuidanceStore(config.dataDirectory)),
       (store) => Effect.sync(() => store.close()),
     );
-    const runtime = new GuidanceRuntime(
-      config,
-      store,
-      source,
-    );
-    runtime.descriptor = yield* t3.descriptor();
-    store.bind(runtime.descriptor.environmentId);
+    const guidanceRuntime = yield* GuidanceRuntime.make(config, store, source);
+    const runtime = guidanceRuntimeFacade(run, guidanceRuntime, config);
+    const descriptor = yield* t3.descriptor();
+    yield* guidanceRuntime.recordDescriptor(descriptor);
+    store.bind(descriptor.environmentId);
     const readToken = yield* Effect.tryPromise(() => readFile(config.t3TokenFile, "utf8"));
     const writePath = config.projectWriteTokenFile;
     const writeToken = writePath && existsSync(writePath) ? yield* Effect.tryPromise(() => readFile(writePath, "utf8")) : "";
@@ -158,23 +161,15 @@ export const runGuidanceApplication = (
       Effect.andThen(Effect.sleep("5 seconds")), Effect.forever,
     );
     yield* Effect.forkScoped(interpretation);
-    const cycle = Effect.tryPromise({
-      try: async () => {
-        runtime.descriptor = await run(t3.descriptor());
-        store.bind(runtime.descriptor.environmentId);
+    // each cycle publishes the descriptor before binding and pruning; any failure but an interruption marks the runtime unavailable
+    const cycle = t3.descriptor().pipe(
+      Effect.tap(guidanceRuntime.recordDescriptor),
+      Effect.tap(next => Effect.sync(() => {
+        store.bind(next.environmentId);
         store.prune();
-        runtime.connected = true;
-        runtime.lastCycleAt = Date.now();
-        runtime.coverage = "Native project and workflow supervision is active.";
-      },
-      catch: () => new Error("monitor_cycle_failed"),
-    }).pipe(
-      Effect.catch(() =>
-        Effect.sync(() => {
-          runtime.connected = false;
-          runtime.coverage = "T3 connection unavailable. Project editing needs a working T3 connection.";
-        }),
-      ),
+      })),
+      Effect.andThen(guidanceRuntime.markActive),
+      Effect.catchCause(cause => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : guidanceRuntime.markUnavailable),
       Effect.andThen(Effect.sleep("5 seconds")),
       Effect.forever,
     );

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import type { TestContext } from "vitest";
 import { GuidanceRuntime } from "../../src/guidance.js";
+import { guidanceRuntimeFacade } from "../../src/guidance-application.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import type { WorkflowMcpEndpoint } from "../../src/guidance-ui.js";
 import { startGuidanceUi } from "./service-auth-harness.js";
@@ -56,7 +57,7 @@ export const startUi = async (t: TestContext, options: {
   const directory = options.directory ?? await tempDirectory(t, "c3b-ui-");
   const config = uiConfig(directory, options.config);
   const store = new GuidanceStore(directory);
-  const runtime = new GuidanceRuntime(config, store, { catalog: () => Effect.succeed({ projects: [], threads: [] }) });
+  const runtime = guidanceRuntimeFacade(Effect.runPromise, Effect.runSync(GuidanceRuntime.make(config, store, { catalog: () => Effect.succeed({ projects: [], threads: [] }) })), config);
   let ui: StartedUi["ui"];
   try {
     ui = await startGuidanceUi(config, runtime, options.definitions, options.editor, options.supervision, options.workflows);
