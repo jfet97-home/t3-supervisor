@@ -1156,6 +1156,27 @@ timeouts (`run.BPv-BBRv.js:3270-3271`). Policy:
    exactly; it fails closed if the field is missing. Each allowlist entry names the
    resource kind, the creating source location, the test file, a maximum count and the
    removing slice (not a fungible per-file count). S8 requires an empty allowlist.
+   Two refinements, both with harness self-tests: test workers run with `--expose-gc` and
+   collect once after each file before the scan, because Node emits `destroy` for an
+   unreachable `AsyncResource` (the context Effect keeps for a suspended fiber) only after
+   garbage collection; a still-referenced suspended fiber stays reported. **Exception
+   (GATE-CPU, coordinator-approved):** Vitest 5.0.5 applies `detectAsyncLeaks` globally
+   (`index.1TqnEahn.js:4101`), and its per-promise hook slowed the unchanged CPU-bound
+   deadline tests of `test/t3-projection-stream.test.ts` (0.6 s without the hook, 10–56 s
+   with it, against the product 5 s bound) and two of `test/t3.test.ts` (the 25 ms
+   `httpTimeoutMs` re-read and the 32 MiB default-budget read). These two files run in a
+   separately invoked `vitest.cpu-bound.config.ts` (`npm test` runs both invocations, each
+   under the watchdog) without that hook; every assertion and explicit deadline is
+   unchanged. Their compensating gate, `test/support/handle-gate.ts`, fails a file that
+   leaves any native resource open (timers, immediates, sockets, servers, requests; net
+   count per kind against the file's start, after two loop turns so already closed handles
+   finish) and fails closed without `process.getActiveResourcesInfo`; self-tests prove a
+   leaked interval and an open server fail and a closed server passes. It does **not** see
+   pending promises or Effect fibers: the code these files exercise (`src/t3.ts`,
+   `src/t3-projection-stream.ts`) starts no fibers, and their own abort, timeout and
+   cleanup assertions (aborted and timed-out reads, unread bodies, closed servers) remain
+   the evidence for promise settlement. When the owning slice ports these modules (S4),
+   their Effect tests return to the full detector or record why not.
 4. **Outer watchdog (tooling adapter, O-03).** `npm test` runs `scripts/run-tests.ts`, an
    Effect program (`effect/process` `ChildProcess` with `NodeChildProcessSpawner`) that
    starts `vitest run` in its own process group under a 20-minute whole-run deadline (about
@@ -1697,6 +1718,8 @@ reopens it on the frozen revision. Manifest rows carry the IDs that affect them 
 | SOL-PREC | Sol (run 3 precision notes) | CT-ISUB-14 validation spans; CT-APP-02 slice wording; CT-PSS-02/CT-TSTORE-02 reuse/observation fields; per-panel browser behaviour | CT-ISUB-14; registry fixes; section 7 UI note | resolved in v2.1 |
 | RUN4-PREC | Sol and Astra (run 4 consistency notes) | `reconcileStopNotice` is asynchronous (T-03); `reconcileStopped` returns a Promise (call shapes); per-file S6e prose uses `attemptId`, the current-attempt pointer and the namespaced receipt; B2 ordering; stale "fork" wording in 3.11 | 3.9 T-03; `temporaryBoundaries.callShapes`; manifest S6e rows for `project-supervisor.ts`, `project-supervisor-store.ts`, `supervisor-conversation-store.ts`; 3.12 B2; 3.11 item 1 | resolved in v2.2 |
 | UPGRADE-406 | User (via coordinator, 19:08Z) | use the latest v4: the matching 4.0.6 set is published under `latest` | section 2: exact 4.0.6 pins with provenance; transition evidence (typecheck, 869/869 baseline, harness, 8-case probe identical); S1c goes 4.0.1 -> 4.0.6; S0 4.0.1 parity unchanged | resolved |
+| GATE-CPU | Coordinator (S0) | the unchanged CPU-bound deadline tests cannot run under Vitest's global async hook | 5.3 rule 3 exception: `t3.test.ts` and `t3-projection-stream.test.ts` in a separate invocation with the fatal native-resource gate; coverage excludes pending promises and fibers (none started by the exercised code); deadlines and assertions unchanged | resolved (S0) |
+| UI-STORY-03-BASELINE | Coordinator (UI baseline, fixture `1e09d57`) | session revoked while a Save POST is held: the dropped POST was followed by a second POST to the same path (rejected 401 before body read) before manual re-authentication; the API helper has one `fetch` and no write replay, so the source (likely browser transport retry) is unverified | recorded as a baseline qualification for S7 and real-HTTP semantics: S7 must not add an application-level replay; whether one user action can produce two wire POSTs after a dropped connection is observed again on the S7 build; evidence `story-03-save-log.json`, `story-03-observations.json` (coordinator) | recorded |
 | SOL-FILES | Sol | 34 per-file rows reference SOL-PLAN-01..09 | each row carries the IDs in `reviewFindings` and its row change; validation lists 34/34 | resolved in v2 |
 | ASTRA-FILES | Astra | 113 per-file rows reference A-P01..A-P08 and O-03 | each row carries the IDs in `reviewFindings`; slices, phases, Schema boundaries, clock domains and test phases normalized; validation lists 113/113 | resolved in v2 |
 | L-01 | W4 | helper channel `scheduledTasks.upsert` is sent after awaits without a recheck (`supervisor-helper-transport.ts:235-244`) | preserved exactly; repair is a separate decision | open decision (not blocking) |

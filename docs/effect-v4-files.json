@@ -23953,6 +23953,20 @@
    "requirement": "use the latest v4: the matching 4.0.6 set is published under latest",
    "response": "plan section 2: exact 4.0.6 pins with provenance and transition evidence; S1c goes 4.0.1 -> 4.0.6; S0 4.0.1 parity unchanged",
    "status": "resolved"
+  },
+  {
+   "id": "GATE-CPU",
+   "source": "Coordinator (S0)",
+   "requirement": "the unchanged CPU-bound deadline tests cannot run under Vitest's global async hook",
+   "response": "plan 5.3 rule 3 exception: test/t3.test.ts and test/t3-projection-stream.test.ts run in a separate invocation (vitest.cpu-bound.config.ts) with the fatal native-resource gate test/support/handle-gate.ts; it does not cover pending promises or Effect fibers (none started by the exercised code); deadlines and assertions unchanged",
+   "status": "resolved (S0)"
+  },
+  {
+   "id": "UI-STORY-03-BASELINE",
+   "source": "Coordinator (UI baseline, fixture 1e09d57)",
+   "requirement": "after a held Save POST was dropped on session revocation, a second POST to the same path arrived (401 before body read) before manual re-authentication; source unverified (likely browser transport retry); the API helper has one fetch and no write replay",
+   "response": "baseline qualification for S7 and real-HTTP semantics: no application-level replay may be added; the behaviour is re-observed on the S7 build; coordinator evidence story-03-save-log.json and story-03-observations.json",
+   "status": "recorded"
   }
  ]
 }
