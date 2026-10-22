@@ -776,7 +776,8 @@ export class ProjectSupervisor {
         if (!this.store.store.transaction(() => this.activateStart(start))) {this.rejectStart(start, "Dashboard Start was superseded before activation.");continue;}
         start.status = "active";
       }
-      if (!start.source || !start.taskId || start.status === "rejected" || this.store.task(start.threadId)?.id === start.taskId) continue;
+      if (!start.source || !start.taskId || start.status === "rejected" || start.taskPrepared) continue;
+      if (this.store.task(start.threadId)?.id === start.taskId) {this.store.saveStart({...start, taskPrepared: true});continue;}
       if (start.status === "pending" && !this.validPendingStart(start)) {this.rejectStart(start, "Start was superseded by a control change.");continue;}
       if (!this.projectEnabled(start.projectId, start.threadId)) continue;
       await this.serial(supervisorScopeKey(start.projectId, start.threadId), async () => {
@@ -784,11 +785,14 @@ export class ProjectSupervisor {
         const message = this.genuineUserMessage(main, start.source!.messageId);
         if (!message || message.runId !== start.source!.runId || fingerprint(message.text) !== start.source!.hash) {this.rejectStart(start, "The original human request changed or became unavailable.");return;}
         const binding = await this.ensureBinding(start.projectId, start.threadId, main.thread.title, signal);
-        if (!this.projectEnabled(start.projectId, start.threadId)) return;
+        if (!this.projectEnabled(start.projectId, start.threadId) || this.store.start(start.threadId)?.operationId !== start.operationId) return;
+        this.store.store.transaction(() => {
         this.store.saveTask({id: start.taskId!, threadId: start.threadId, projectId: start.projectId, sourceMessageId: message.id, sourceRunId: start.source!.runId,
           sourceOrdinal: start.source!.ordinal, sourceHash: start.source!.hash, status: "queued", objective: null, reason: "Preparing the explicitly requested supervision.",
           updatedAt: this.now(), requestText: "", supervisorThreadId: binding.threadId, messageId: `supervisor-objective:${start.taskId}`,
           supervisorRunId: null, dispatchedAt: null, replayCount: 0});
+        this.store.saveStart({...this.store.start(start.threadId)!, taskPrepared: true});
+        });
       }).catch(() => undefined);
     }
   }
@@ -1402,6 +1406,13 @@ export class ProjectSupervisor {
     this.store.saveTask({...job, status, objective, reason, workflow: workflow ?? null, requestText: "", updatedAt: Date.now()});
   }
   private async reconcile(job: TaskRecord, projection: Projection, signal: AbortSignal): Promise<void> {
+    const nativeIdentity = projection.messages.find(item => item.id === job.messageId && item.threadId === job.supervisorThreadId);
+    if (nativeIdentity && nativeIdentity.text !== job.requestText) {
+      const nativeRun = projection.runs.find(item => item.id === nativeIdentity.runId && item.userMessageId === job.messageId);
+      if (nativeRun && ["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(nativeRun.status))
+        this.complete({...job, supervisorRunId: nativeRun.id}, "unavailable", null, "The retained interpretation identity belongs to different native content; its confirmed terminal result was not applied or resent.");
+      return;
+    }
     const message = projection.messages.find(m => m.id === job.messageId && m.threadId === job.supervisorThreadId && m.text === job.requestText);
     const run = message ? projection.runs.find(r => r.userMessageId === job.messageId && r.threadId === job.supervisorThreadId && r.id === message.runId) : undefined;
     if (!run) {

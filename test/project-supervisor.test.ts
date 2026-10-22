@@ -1735,3 +1735,24 @@ test("a Stop before any root exists still exposes its original caller/source/tim
     assert.equal(f.fixture.operations.length, 0);
   } finally {await f.cleanup();}
 });
+
+test("a later human task survives repeated discovery and restart without recreating the Start interpretation", async () => {
+  const f = await noProjectFixture();
+  try {
+    await f.supervisor.startSupervision({callerThreadId: "manual", userMessageId: "request-start", operationId: "start-handoff"}, {runId: "run-request-start"}, AbortSignal.timeout(1000));await f.supervisor.runOnce();
+    const initial = f.fixture.supervisorStore.task("manual")!;
+    completeSupervisorRequest(f.fixture.projections.get(initial.supervisorThreadId)!, initial.messageId, JSON.stringify({startRequested: true, objective: null, reason: "User requested supervision", sourceMessageIds: [initial.sourceMessageId], workflow: null}));
+    await f.supervisor.runOnce();
+    f.fixture.restart();const resumed = f.fixture.makeSupervisor();
+    f.fixture.addTurn("manual", "project-a", {id: "later-greeting", sequence: 21, text: "Reply with a greeting."});
+    f.fixture.projections.get("manual")!.messages.at(-1)!.createdAt = new Date(Date.now() + 1000).toISOString();
+    await resumed.runOnce();const next = f.fixture.supervisorStore.task("manual")!;
+    assert.notEqual(next.id, initial.id);assert.equal(next.sourceMessageId, "later-greeting");
+    await resumed.runOnce();assert.equal(f.fixture.supervisorStore.task("manual")?.id, next.id);
+    completeSupervisorRequest(f.fixture.projections.get(next.supervisorThreadId)!, next.messageId, JSON.stringify({objective: "Reply with a greeting", reason: "Self-contained greeting", sourceMessageIds: [next.sourceMessageId], supervision: "not_needed", workflow: null}));
+    await resumed.runOnce();await resumed.runOnce();
+    assert.equal(f.fixture.supervisorStore.task("manual")?.id, next.id);assert.equal(f.fixture.supervisorStore.task("manual")?.status, "not_supervised");
+    assert.equal(f.fixture.operations.filter(op => op.payload.type === "message.dispatch" && op.payload.threadId === initial.supervisorThreadId).length, 2);
+    assert.equal(resumed.scopeEnabled("project-a", "manual"), true);
+  } finally {await f.cleanup();}
+});

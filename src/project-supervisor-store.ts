@@ -30,7 +30,7 @@ export const prepareStopNotice = (binding: Pick<BindingRecord, "threadId">, stop
 export type SupervisionStartRecord = {
   threadId: string; projectId: string; operationId: string; requestHash: string; route: "agent" | "ui";
   status: "pending" | "active" | "rejected"; reason: string; intentAt: number; modeGeneration: number; masterGeneration: number;
-  source?: {messageId: string; runId: string; ordinal: number; hash: string}; taskId: string | null;
+  source?: {messageId: string; runId: string; ordinal: number; hash: string}; taskId: string | null; taskPrepared?: boolean;
 };
 export type SupervisorBaseline = {version?: 2; snapshotSequence: number; threads: Array<{id: string; latestRunId: string | null}>};
 export type SupervisionFolderPresence = {status: "present" | "missing" | "unavailable"; message?: string};
