@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { Exit, Schema } from "effect";
 import { mainRunNodeReader } from "./domain.js";
 import { canonicalJson } from "./canonical-json.js";
 import type { Projection, RunInfo } from "./types.js";
@@ -112,6 +113,9 @@ type RecordedArguments = {
   observedToolName?: string;
 };
 
+// a string snapshot input is decoded as JSON before its arguments are compared; malformed input matches no arguments
+const decodeSnapshotJson = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
+
 const isTruncatedSnapshot = (item: Record<string, unknown>): boolean =>
   item.inputTruncated === true || item.truncated === true || isRecord(item.input) && item.input.truncated === true;
 
@@ -154,13 +158,13 @@ export const workflowEvidenceCandidates = (
       if (!unknownToolName) {
         plausible = true;
       } else {
-        try {
-          const parsed = JSON.parse(snapshotInput) as unknown;
-          if (isRecord(parsed)) {
-            const snapshotArguments = recordedArguments({...item, input: parsed}, tool);
+        const parsed = decodeSnapshotJson(snapshotInput);
+        if (Exit.isSuccess(parsed) && isRecord(parsed.value)) {
+          try {
+            const snapshotArguments = recordedArguments({...item, input: parsed.value}, tool);
             plausible = snapshotArguments !== null && canonicalJson(snapshotArguments.arguments) === expectedCanonical;
-          }
-        } catch {plausible = false;}
+          } catch {plausible = false;}
+        }
         if (!plausible && isTruncatedSnapshot(item)) plausible = true;
       }
     }

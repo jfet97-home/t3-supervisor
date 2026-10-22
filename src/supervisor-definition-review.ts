@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { Exit, Schema } from "effect";
 import { definitionReferenceFields, validDefinitionReferences } from "./definition-references.js";
 import { fingerprint } from "./guidance-store.js";
 import { nativeUserMessageVisible, timestampMs } from "./domain.js";
@@ -14,7 +15,6 @@ const MAX_FILES = 100;
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_TOTAL_BYTES = 512 * 1024;
 const MAX_USER_REFERENCES = 100;
-const decisionFields = ["taskId", "expectedRevision", "observedRevision", "decision", "userMessageIds", "reason"];
 const definitionIdPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const absent = (value: unknown): boolean => value === undefined || value === null;
 
@@ -26,6 +26,18 @@ export type ProjectDefinitionDecision = {
   userMessageIds: string[];
   reason: string;
 };
+
+// one fenced decision record as the Supervisor wrote it: exact keys, revisions and message evidence are checked against the task afterwards
+const ProjectDefinitionDecisionRecord = Schema.Struct({
+  taskId: Schema.String,
+  expectedRevision: Schema.String,
+  observedRevision: Schema.NullOr(Schema.String),
+  decision: Schema.Literals(["authorized", "revert_requested"]),
+  userMessageIds: Schema.Array(Schema.String).check(Schema.isMaxLength(MAX_USER_REFERENCES)),
+  reason: Schema.String.check(Schema.isMaxLength(1000)),
+});
+const decodeDecisionRecord = Schema.decodeUnknownExit(ProjectDefinitionDecisionRecord);
+const decodeRecordJson = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 
 export type ParsedProjectDefinitionDecision = {
   decision: ProjectDefinitionDecision;
@@ -191,7 +203,9 @@ export const extractProjectDefinitionDecisionRecords = (text: string): unknown[]
       if (bodyLength > MAX_MESSAGE_CHARS) break;
     }
     if (!closed) continue;
-    try {records.push(JSON.parse(body.join("\n")) as unknown);} catch { /* malformed records are ignored */ }
+    // malformed records are ignored
+    const decoded = decodeRecordJson(body.join("\n"));
+    if (Exit.isSuccess(decoded)) records.push(decoded.value);
   }
   return records;
 };
@@ -216,17 +230,17 @@ export const parseProjectDefinitionDecisionRecord = (
 ): ParsedProjectDefinitionDecision | null => {
   const approved = extractApprovedProjectDefinitions(task);
   const observed = snapshot(observedValue, task, ["ready", "missing", "invalid"]);
+  const decoded = decodeDecisionRecord(value, {onExcessProperty: "error"});
   if (!approved || !observed || !approved.revision || observed.workspaceRoot !== approved.workspaceRoot ||
     observed.status === "ready" && observed.revision === approved.revision ||
-    agent.thread.id !== task.threadId || agent.thread.projectId !== task.projectId || !record(value) || !exactFields(value, decisionFields) ||
-    value.taskId !== task.id || value.expectedRevision !== approved.revision || value.observedRevision !== observed.revision ||
-    (value.decision !== "authorized" && value.decision !== "revert_requested") || !Array.isArray(value.userMessageIds) ||
-    value.userMessageIds.length > MAX_USER_REFERENCES || !boundedText(value.reason, 1000, true)) return null;
+    agent.thread.id !== task.threadId || agent.thread.projectId !== task.projectId || Exit.isFailure(decoded) ||
+    decoded.value.taskId !== task.id || decoded.value.expectedRevision !== approved.revision || decoded.value.observedRevision !== observed.revision) return null;
+  const entry = decoded.value;
 
   const userMessageIds: string[] = [];
   const userTextHashes: ParsedProjectDefinitionDecision["userTextHashes"] = [];
   const seen = new Set<string>();
-  for (const id of value.userMessageIds) {
+  for (const id of entry.userMessageIds) {
     if (!boundedText(id, 512) || seen.has(id)) return null;
     const message = validExternalUserMessage(agent, task, id);
     if (!message) return null;
@@ -234,15 +248,15 @@ export const parseProjectDefinitionDecisionRecord = (
     userMessageIds.push(id);
     userTextHashes.push({messageId: id, textHash: fingerprint(message.text)});
   }
-  if (value.decision === "authorized" && (!observed.revision || observed.status !== "ready" || !observed.complete || userMessageIds.length === 0)) return null;
-  const reason = redact(value.reason.trim());
+  if (entry.decision === "authorized" && (!observed.revision || observed.status !== "ready" || !observed.complete || userMessageIds.length === 0)) return null;
+  const reason = redact(entry.reason.trim());
   if (reason.length > 1000) return null;
   return {
     decision: {
       taskId: task.id,
       expectedRevision: approved.revision,
       observedRevision: observed.revision,
-      decision: value.decision,
+      decision: entry.decision,
       userMessageIds,
       reason,
     },
