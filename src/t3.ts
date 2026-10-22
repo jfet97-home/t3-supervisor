@@ -172,7 +172,6 @@ const projectionStreamError = (error: ProjectionStreamError): T3TransportError =
     case "timed_out": return new T3TransportError("T3 thread projection request timed out");
     case "unreadable": return new T3TransportError("T3 thread projection response could not be read");
     case "invalid": return new T3TransportError("T3 thread projection response was not valid JSON");
-    case "interrupted": return new T3TransportError("T3 thread projection request failed");
     case "retained_too_large":
     case "transfer_too_large": return tooLarge("thread projection");
   }

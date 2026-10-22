@@ -11,7 +11,7 @@ export const UNREAD_PROJECTION_KEYS: ReadonlySet<string> = new Set(["visibleTurn
   "checkpoints", "contextHandoffs", "contextTransfers", "providerSessions"]);
 
 export const ProjectionStreamFailure = Schema.Literals(["retained_too_large", "transfer_too_large", "invalid", "unreadable",
-  "interrupted", "timed_out"]);
+  "timed_out"]);
 export type ProjectionStreamFailure = typeof ProjectionStreamFailure.Type;
 
 export class ProjectionStreamError extends Schema.TaggedError<ProjectionStreamError>()("ProjectionStreamError", {
@@ -29,7 +29,7 @@ export interface ProjectionStreamBudget {
   readonly deadline: number;
 }
 
-// immediately available chunks never return to the event loop on their own, so timers and aborts would starve
+// immediately available chunks never return to the event loop on their own, so timers and interruption would starve
 const YIELD_INTERVAL_MS = 20;
 // an incoming chunk is scanned in slices of at most this size, so the deadline and yields never depend on its size
 const SCAN_SLICE_BYTES = 64 * 1024;
@@ -295,20 +295,19 @@ function* scanSnapshot(cursor: ByteCursor, retainedBytes: number): Scan<Record<s
 }
 
 // reads a complete thread snapshot body: a web stream, or an effect byte stream whose own failures pass through unchanged;
-// interrupting the read cancels the body, and an aborted signal ends it as `interrupted` at the next slice
+// interrupting the read cancels the body and publishes nothing
 export const readProjectionSnapshot = <E = never>(body: ReadableStream<Uint8Array> | Stream.Stream<Uint8Array, E>,
-  budget: ProjectionStreamBudget, signal?: AbortSignal): Effect.Effect<Record<string, unknown>, ProjectionStreamError | E> =>
+  budget: ProjectionStreamBudget): Effect.Effect<Record<string, unknown>, ProjectionStreamError | E> =>
   Effect.scoped(Effect.gen(function*() {
     const bytes: Stream.Stream<Uint8Array, ProjectionStreamError | E> = Stream.isStream(body) ? body : Stream.fromReadableStream({
       evaluate: () => body,
       // a body the connection stopped delivering is unreadable, not malformed
-      onError: () => failure(signal?.aborted === true ? "interrupted" : "unreadable"),
+      onError: () => failure("unreadable"),
     });
     const pull = yield* Stream.toPull(bytes);
     const now = Effect.map(Clock.monotonicTimeNanos, (nanos) => Number(nanos) / 1_000_000);
-    // fails once cancelled or past the deadline; checked between slices and before publishing
+    // fails once past the deadline; checked between slices and before publishing
     const check = Effect.gen(function*() {
-      if (signal?.aborted === true) return yield* Effect.fail(failure("interrupted"));
       if ((yield* now) > budget.deadline) return yield* Effect.fail(failure("timed_out"));
     });
     let yieldedAt = yield* now;

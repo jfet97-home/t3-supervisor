@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { Cause, Context, Effect, Exit, Fiber, Layer } from "effect";
 import { it } from "vitest";
 import { makeT3Client, T3Client } from "../src/t3.js";
-import { ProjectionStreamError, readProjectionSnapshot } from "../src/t3-projection-stream.js";
+import { readProjectionSnapshot } from "../src/t3-projection-stream.js";
 import { released } from "./support/http.js";
 import { deferred, startMockT3, within } from "./support/c3a-fake-t3.js";
 
@@ -21,15 +21,15 @@ const snapshotBody = (threadId: string, rows: number) => ({
 const budget = { retainedBytes: 1 << 20, transferBytes: 4 << 20, deadline: Number.POSITIVE_INFINITY };
 
 it("CT-T3-06: interrupting an in-flight read cancels the body reader, stops pulling and yields no partial value", { timeout: 10_000 }, async () => {
-  // abort signal seam: a counting stream that the reader cancels once the read is interrupted
-  const controller = new AbortController();
+  // fiber interruption seam: a counting stream whose third pull interrupts the reading fiber; the reader cancels it
   const bytes = encoder.encode(JSON.stringify(snapshotBody("main", 20)));
   let pulls = 0;
   let pullsAtCancel: number | undefined;
+  const reading: { fiber?: Fiber.Fiber<unknown, unknown> } = {};
   const body = new ReadableStream<Uint8Array>({
     pull(stream) {
       pulls++;
-      if (pulls === 3) controller.abort();
+      if (pulls === 3) reading.fiber?.interruptUnsafe();
       stream.enqueue(bytes.slice((pulls - 1) * 64, pulls * 64));
       if (pulls * 64 >= bytes.length) stream.close();
     },
@@ -37,12 +37,9 @@ it("CT-T3-06: interrupting an in-flight read cancels the body reader, stops pull
       pullsAtCancel = pulls;
     },
   });
-  let value: unknown;
-  let failure: unknown;
-  await Effect.runPromise(readProjectionSnapshot(body, budget, controller.signal)).then((result) => {value = result;}, (error: unknown) => {failure = error;});
-  assert.equal(value, undefined);
-  assert.ok(failure instanceof ProjectionStreamError);
-  assert.equal(failure.code, "interrupted");
+  reading.fiber = Effect.runFork(readProjectionSnapshot(body, budget));
+  const read = await Effect.runPromise(Fiber.await(reading.fiber));
+  assert.ok(Exit.isFailure(read) && Cause.hasInterruptsOnly(read.cause), "the interrupted read yields no partial value");
   assert.ok(pulls * 64 < bytes.length, "the body was interrupted before its end");
   assert.equal(pullsAtCancel, pulls, "the reader cancelled the source");
   // a cancelled stream is closed, so no later turn can pull again
