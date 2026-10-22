@@ -297,9 +297,16 @@ request's unsent introduction is never sent after that Enable or boundary. Retry
 only re-observes the retained identity, so a delivery whose native outcome stays unknown keeps
 its pair held, across any Stop, Enable or activation boundary, until that outcome appears or the
 Supervisor conversation is replaced. A stop
-cancels never-sent check-ins, keeps sent and uncertain delivery identities, sends no new
-check-in, introduction or contact (rechecked immediately before every send), and
-settles the owned Supervisor once it is idle and every accepted delivery, the
+cancels never-sent check-ins, keeps sent and uncertain delivery identities, and sends no new
+check-in or introduction. An explicit Stop schedules one concise operative notice per
+Enable period, only if supervision previously contacted that main. The notice says to
+stop replying to the Supervisor while continuing the task; it never asks for a reply.
+Unsent notices are fenced by Enable; accepted or uncertain identities are only observed.
+Historical exclusions are not backfilled. A crash between the separate policy save and
+notice reservation can leave a stopped chat without a notice; Stop remains effective.
+Notice delivery also runs while supervision is disabled and does not hold settlement.
+The owned Supervisor settles promptly on the next idle cycle, without the ordinary
+60-second quiet window, once every accepted delivery, the
 interpretation request included, has a confirmed native outcome; reconciliation of those
 deliveries continues, without sending anything, even while project supervision is
 disabled. A root check-in or interpretation whose delivery stays genuinely unknown keeps
@@ -307,7 +314,8 @@ the Supervisor active; elapsed time never resolves it. In a team the same
 observation-only reconciliation matches accepted helper check-ins and notices to their
 native outcome, fences requests and notices that were never posted and closes guidance
 awaiting a fallback route as not sent; nothing is sent, retried or retired, and each
-service cycle observes with a fresh bounded read budget. The stop
+service cycle observes with a fresh bounded read budget. On an unsolicited wake the root reads current supervision status first;
+a stopped root contacts nobody and finishes so it can settle again. The stop
 then waits only for a team effect whose delivery is still genuinely unknown (an
 unresolved team request, a notice being delivered, a helper request); review-only
 events are superseded by the stop. The stop supersedes earlier keep-active

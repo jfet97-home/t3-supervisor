@@ -460,6 +460,11 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
   const rpc: SupervisorRpc = async (tag, payload) => {
     const call = { tag, payload: { ...payload } };
     calls.push(call);
+    if (tag === "orchestration.dispatchCommand" && payload.type === "thread.settle") {
+      const projection = projections.get(String(payload.threadId));assert.ok(projection);
+      projection.thread.settledAt = iso(clock.now);projection.thread.settledOverride = "settled";
+      return {sequence: calls.length};
+    }
     if (tag !== "orchestration.dispatchCommand" || payload.type !== "message.dispatch")
       throw new Error(`unexpected fake native command ${tag}/${String(payload.type)}`);
 
@@ -828,7 +833,7 @@ test("a main and two reviewer children share one complete task context and ackno
   assert.equal(context.taskContext.proposal.digest, preparedAcceptanceRecord(fixture.projectStore.task(task.threadId)!)?.digest ?? null);
   for (const row of envelope.threads) {
     assert.equal(row.taskContextThreadId, context.threadId);
-    assert.ok(row.items.length >= 3);
+    assert.equal(row.items.length, 2);
     assert.ok(row.contactLimit);
     assert.equal(row.activityRefs, undefined, "one activity list per row");
     assert.equal(row.draft, undefined);
@@ -841,29 +846,22 @@ test("a main and two reviewer children share one complete task context and ackno
   for (const row of request.batch.threads) assert.equal(fixture.conversation.monitor.pending(projectId, row.threadId).length, 0);
 });
 
-test("an oversized monitoring context becomes a visible unsent failure while pending activity remains intact", async t => {
+test("a large stored objective stays pull-readable without inflating or blocking monitoring", async t => {
   const clock = {now: baseTime};
   t.mock.method(Date, "now", () => clock.now);
-  const fixture = await makeFixture(clock);
-  t.after(fixture.cleanup);
-  const task = installNestedCatalog(fixture);
-  appendNoticeForTask(fixture, task, fixture.operative);
+  const fixture = await makeFixture(clock);t.after(fixture.cleanup);
+  const task = installNestedCatalog(fixture);appendNoticeForTask(fixture, task, fixture.operative);
   for (let index = 0; index < 3; index++) addCommandActivity(fixture.operative, `large-context-${index}`, "Work", clock.now - 10_000 + index);
   await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now);
-  // wakes no longer carry plans or catalogs, so only an outsized stored objective can still exceed the transport bound
-  fixture.projectStore.saveTask({...task, objective: "An unusually long stored objective. ".repeat(4_000), agreement: {status: "agreed", message: "Earlier accepted plan.",
-    proposalId: "earlier-proposal", agreedAt: clock.now, supervisorMessageId: "earlier-root", agentMessageId: "earlier-main", workflow: task.workflow!}});
-  const pendingBefore = fixture.conversation.monitor.pending(projectId, operativeThreadId).map(item => item.id);
+  const objective = "An unusually long stored objective. ".repeat(4000);
+  fixture.projectStore.saveTask({...task, objective});
   await fixture.run();
-  assert.equal(fixture.calls.length, 0);
-  assert.equal(fixture.conversation.requests.pending(projectId, fixture.binding.threadId), null);
-  const status = fixture.conversation.status(projectId, fixture.binding.threadId);
-  assert.equal(status.state, "unavailable");
-  assert.equal(status.retryable, true);
-  assert.match(status.message ?? "", /Complete monitoring context exceeds its limit/u);
-  assert.deepEqual(fixture.conversation.monitor.pending(projectId, operativeThreadId).map(item => item.id), pendingBefore);
-  await fixture.run();
-  assert.equal(fixture.conversation.requests.requests(projectId, fixture.binding.threadId).filter(request => request.state === "failed").length, 1);
+  const request = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.equal(request?.kind, "review");assert.ok(request!.text.length < 4500);
+  assert.equal(request!.text.includes("An unusually long stored objective"), false);
+  const context = await fixture.conversation.readContextView(fixture.binding, {view: "context"}, AbortSignal.timeout(5_000));
+  assert.equal((context.task as {objective: string}).objective, objective);
+  assert.ok(fixture.conversation.monitor.pending(projectId, operativeThreadId).length > 0, "a send never acknowledges the frozen work");
 });
 
 test("an oversized stale-agreement recovery is visible without a definition review and can be explicitly retried", async t => {
@@ -1918,7 +1916,7 @@ test("a direct peer reply with senderThreadId does not contaminate a valid revie
   assert.equal(fixture.conversation.monitor.pending(projectId, operativeThreadId).length, 0);
 });
 
-test("a 100-item monitor burst freezes and acknowledges all activity while showing only 20 IDs in the prompt", async t => {
+test("a 100-item monitor burst freezes and acknowledges all activity while showing only two navigation handles in the prompt", async t => {
   const clock = { now: baseTime };
   t.mock.method(Date, "now", () => clock.now);
   const fixture = await makeFixture(clock, { settings: { intervalMinutes: 5, activityThreshold: 3 } });
@@ -1943,7 +1941,7 @@ test("a 100-item monitor burst freezes and acknowledges all activity while showi
   const envelope = JSON.parse(request.text.slice(envelopeStart, envelopeEnd)) as { threads: Array<{ items: Array<{ readItemId: string | null }>;
     pendingItemCount: number; taskContext?: {protocolRepair: (typeof diagnostic & {blocked: boolean}) | null}; canonicalAuthoringMaterial?: unknown }> };
   const preview = envelope.threads[0]?.items ?? [];
-  assert.equal(preview.length, 20, "the model receives a bounded preview rather than every frozen activity ID");
+  assert.equal(preview.length, 2, "the model receives a bounded preview rather than every frozen activity ID");
   const frozenReadIds = new Set(request.batch.threads[0]?.items.map(item => item.readItemId).filter(Boolean));
   assert.ok(preview.every(item => item.readItemId === null || frozenReadIds.has(item.readItemId)), "preview read handles belong to the frozen batch");
   assert.equal(envelope.threads[0]?.pendingItemCount, frozenIds.size, "the preview retains the complete frozen count");
@@ -2058,8 +2056,8 @@ test("completed activity first observed on new and reused children is batched by
   assert.equal(nativeEnvelope?.origin, "native_child");
   assert.equal(nativeEnvelope?.parentThreadId, operativeThreadId);
   assert.deepEqual(nativeEnvelope?.fallbackAncestors, [{threadId: operativeThreadId, main: true, eligible: true, contactable: true}]);
-  assert.equal(nativeEnvelope?.items[0]?.sourceItemId, "child-command%253Aopaque%3A1");
-  assert.ok(request.text.includes("Omit sourceRunId and never decode, re-encode, normalize or reconstruct opaque IDs"),
+  assert.equal(nativeEnvelope?.items[0]?.sourceItemId, undefined, "write evidence is pulled from the exact native read");
+  assert.ok(request.text.includes("never reconstruct opaque IDs"),
     "root guidance copies only the exact item or message pair");
   assert.equal(envelope.threads.find(item => item.threadId === delegated.thread.id)?.origin, "delegated_child");
   assert.equal(envelope.threads.find(item => item.threadId === reused.thread.id)?.origin, "delegated_child");
@@ -2079,14 +2077,15 @@ test("completed activity first observed on new and reused children is batched by
   assert.equal(request.text.includes("PRIVATE_CURRENT_CHILD_BODY"), false);
   assert.equal(request.text.includes("PRIVATE_NESTED_BODY"), false);
   assert.equal(request.text.includes("PRIVATE_ROUTE_TARGET_BODY"), false);
-  assert.ok(request.text.includes("Contact the operative main using mode auto; T3 will steer an active turn or start/queue a turn when idle."));
-  assert.ok(request.text.includes("Guide native children through their nearest verified eligible, contactable ancestor in fallbackAncestors."));
-  assert.ok(request.text.includes("For a verified active delegated child, use mode steer only."));
-  assert.ok(request.text.includes("If its result is delivery:started instead of steered, treat it as a wake"));
-  assert.ok(request.text.includes("route through the nearest verified eligible, contactable ancestor"));
-  assert.ok(request.text.includes("After a definite rejection from the main, fresh-read and reconsider at a later check-in"));
-  assert.ok(request.text.includes("When a child cannot be steered or a definite child-steer rejection occurs, use the supplied fallbackAncestors in order"));
-  assert.ok(request.text.includes("pending runtime question or approval, defer potentially interrupting guidance"));
+  const reference = String((await fixture.conversation.readContextView(fixture.binding, {view: "instructions"}, AbortSignal.timeout(5_000))).instructions);
+  assert.ok(reference.includes("Contact the operative main using mode auto; T3 will steer an active turn or start/queue a turn when idle."));
+  assert.ok(reference.includes("Guide native children through their nearest verified eligible, contactable ancestor in fallbackAncestors."));
+  assert.ok(reference.includes("For a verified active delegated child, use mode steer only."));
+  assert.ok(reference.includes("If its result is delivery:started instead of steered, treat it as a wake"));
+  assert.ok(reference.includes("route through the nearest verified eligible, contactable ancestor"));
+  assert.ok(reference.includes("After a definite rejection from the main, fresh-read and reconsider at a later check-in"));
+  assert.ok(reference.includes("When a child cannot be steered or a definite child-steer rejection occurs, use the supplied fallbackAncestors in order"));
+  assert.ok(reference.includes("pending runtime question or approval, defer potentially interrupting guidance"));
   assert.equal(fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId && call.payload.type === "message.dispatch").length, 1);
 });
 
@@ -4509,7 +4508,7 @@ test("a stopped chat reconciles its accepted check-in while project supervision 
   assert.equal(fixture.conversation.requests.requests(projectId, fixture.binding.threadId).find(item => item.id === request.id)?.state, "completed",
     "reconciliation confirms the outcome without sending anything while supervision is disabled");
   assert.deepEqual(settles(), [fixture.binding.threadId], "only the owned Supervisor settles; the operative main is untouched");
-  assert.equal(fixture.calls.filter(call => call.payload.type === "message.dispatch").length, 0, "nothing new is sent to a stopped chat");
+  assert.equal(fixture.calls.filter(call => call.payload.type === "message.dispatch" && call.payload.threadId === fixture.binding.threadId).length, 0, "no automatic check-in reaches the stopped Supervisor");
 });
 
 test("a stopped team chat settles despite review-only team events, but waits for an in-flight team effect", async t => {
@@ -4819,7 +4818,7 @@ test("wake budgets: the concise standing role once per version, then a short poi
     if (wake === 0) fixture.projectStore.saveSettings(projectId, fixture.projectStore.settings(projectId).generation, defaultSupervisorModel, undefined, {maxHelpersPerRoot: 0});
   }
   const occurrences = (text: string, part: string) => text.split(part).length - 1;
-  assert.equal(occurrences(texts[0]!, "Never restate, relay or paraphrase a human message to the operative"), 1, "the first wake delivers the standing role once");
+  assert.equal(occurrences(texts[0]!, "Never restate a human request"), 1, "the first wake delivers the standing role once");
   assert.equal(occurrences(texts[0]!, `Standing instructions version ${version}.`), 1);
   for (const text of texts) {
     assert.doesNotMatch(text, /Root team coordination|Temporary helper provider isolation|Workflow chat records \(compact protocol|Current helper limit/u,
@@ -5024,7 +5023,7 @@ test("an interpretation whose delivery is unknown holds a stopped Supervisor; on
   clock.now += 61_000;await service.runOnce(signal);clock.now += 61_000;await service.runOnce(signal);
   const settles = fixture.calls.filter(call => call.payload.type === "thread.settle");
   assert.ok(settles.length >= 1 && settles.every(call => call.payload.threadId === fixture.binding.threadId), "then only the stopped Supervisor settles");
-  assert.equal(fixture.calls.filter(call => call.payload.type === "message.dispatch").length, sendsBefore, "observation never resends the interpretation");
+  assert.equal(fixture.calls.filter(call => call.payload.type === "message.dispatch" && call.payload.threadId === fixture.binding.threadId).length, sendsBefore, "observation never resends the interpretation");
 });
 
 test("the Settings excluded-chat editor records the same Enable and Stop as the dashboard, so a replayed stop never reverses its Enable", async t => {
@@ -5532,7 +5531,8 @@ test("a direct stop cites the freshly read latest human message with its own ope
   t.after(fixture.cleanup);
   const view = await fixture.conversation.readContextView(fixture.binding, {view: "instructions"}, AbortSignal.timeout(5_000));
   const standing = String(view.instructions).split("\n\nDetailed reference:")[0]!;
-  assert.match(standing, /For a stop written directly in your conversation, first freshly read your own thread and cite that latest genuine human message; never reuse an earlier stop's message ID or operationId/u);
+  assert.match(standing, /freshly read your own local thread and cite the latest exact human message/u);
+  assert.match(standing, /Never reuse an earlier Stop ID/u);
   assert.match(supervisionStopToolDefinition.description, /Cite the latest genuine human message that asks to stop, freshly read, with an operationId unique to it; never reuse an earlier stop's message ID or operationId/u);
 });
 
@@ -5559,4 +5559,100 @@ test("every rendered root and operative payload stays bounded and carries no cat
   assert.equal(repair?.kind, "review");
   assert.ok(repair!.text.length < 1_600, `protocol repair ${repair!.text.length}`);
   assert.doesNotMatch(repair!.text, /Never restate, relay or paraphrase|"requirements":/u);
+});
+
+
+test("Stop sends one concise operative notice and settles the idle root without a quiet-minute delay", async t => {
+  for (const route of ["direct", "ui", "settings"] as const) {
+    const clock = {now: baseTime};t.mock.method(Date, "now", () => clock.now);
+    const fixture = await makeFixture(clock);t.after(fixture.cleanup);
+    appendNoticeForTask(fixture, fixture.task, fixture.operative);
+    const service = fixture.makeProjectSupervisor();const signal = AbortSignal.timeout(10_000);
+    if (route === "direct") {
+      const human = appendActualUserMessage(fixture.supervisor, `human-stop-${route}`, "Stop supervising this chat.", clock.now);
+      const args = {callerThreadId: fixture.binding.threadId, targetThreadId: operativeThreadId, userMessageId: human.id, operationId: "stop-notice-direct"};
+      assert.equal((await nativeStopController(fixture, fixture.supervisor, human, args, "stop-notice-native", service).stop(args)).status, "stopped");
+    } else if (route === "settings") service.saveThreadPolicy({...fixture.threadPolicy.get(), excludedThreadIds: [operativeThreadId]});
+    else await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: fixture.threadPolicy.get().generation}, signal);
+    const before = clock.now;
+    await service.runOnce(signal);
+    const notices = () => fixture.calls.filter(call => call.payload.type === "message.dispatch" && call.payload.threadId === operativeThreadId);
+    assert.equal(notices().length, 1, route);
+    const notice = notices()[0]!.payload;
+    assert.match(String(notice.text), /Stop sending updates, findings and workflow acceptances/u);
+    assert.match(String(notice.text), /Continue the user's task without supervision/u);
+    assert.match(String(notice.text), /Do not reply/u);
+    assert.ok(String(notice.text).length < 500);
+    assert.equal(clock.now, before);
+    assert.equal(fixture.calls.filter(call => call.payload.type === "thread.settle" && call.payload.threadId === fixture.binding.threadId).length, 1,
+      "the first idle cycle settles only the root");
+    assert.ok(!fixture.operative.thread.settledAt);
+    await service.runOnce(signal);await service.runOnce(signal);
+    assert.equal(notices().length, 1, `accepted notice is observed, never duplicated: ${route}`);
+    assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)?.stopNotice?.state, "sent");
+  }
+});
+
+test("Enable fences an unsent Stop notice; historical exclusions never create notices", async t => {
+  const clock = {now: baseTime};t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);t.after(fixture.cleanup);
+  const service = fixture.makeProjectSupervisor();const signal = AbortSignal.timeout(10_000);
+  const toggle = async (enabled: boolean) => service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled, policyGeneration: fixture.threadPolicy.get().generation}, signal);
+  await toggle(false);await toggle(true);
+  await fixture.conversation.reconcileStopNotice(fixture.binding, signal);
+  assert.equal(fixture.calls.length, 0);
+  assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)?.stopNotice?.state, "superseded");
+  const row = fixture.projectStore.binding(projectId, operativeThreadId)!;
+  delete row.stopNotice;delete row.supervisionStop;fixture.projectStore.setBinding(row);
+  fixture.projectStore.store.db.prepare("UPDATE supervisor_main_bindings SET document=json_remove(document,'$.stopNotice','$.supervisionStop') WHERE main_thread_id=?").run(operativeThreadId);
+  fixture.threadPolicy.save({...fixture.threadPolicy.get(), excludedThreadIds: [operativeThreadId]});
+  await fixture.conversation.reconcileStopNotice(fixture.binding, signal);
+  assert.equal(fixture.calls.length, 0, "existing exclusions are not backfilled with contact");
+});
+
+test("a lost Stop-notice response preserves its exact identity across Stop, Enable and observation", async t => {
+  const clock = {now: baseTime};t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);t.after(fixture.cleanup);
+  appendNoticeForTask(fixture, fixture.task, fixture.operative);
+  const service = fixture.makeProjectSupervisor();const signal = AbortSignal.timeout(10_000);
+  const toggle = async (enabled: boolean) => service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled, policyGeneration: fixture.threadPolicy.get().generation}, signal);
+  await toggle(false);const stale = fixture.projectStore.binding(projectId, operativeThreadId)!;fixture.failNextIntroduction();
+  await fixture.conversation.reconcileStopNotice(fixture.binding, signal);
+  const unknown = fixture.projectStore.binding(projectId, operativeThreadId)!.stopNotice!;
+  assert.equal(unknown.state, "uncertain");
+  fixture.projectStore.setBinding(stale);
+  assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)?.stopNotice?.state, "uncertain", "a stale lifecycle write cannot restore a sendable notice");
+  await toggle(true);clock.now += 1000;await toggle(false);
+  for (let index = 0; index < 3; index++) await fixture.conversation.reconcileStopNotice(fixture.binding, signal);
+  assert.equal(fixture.calls.length, 1, "an unknown notice is not replayed with a new identity");
+  assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)?.stopNotice?.messageId, unknown.messageId);
+  assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)?.stopNotice?.commandId, unknown.commandId);
+});
+
+
+test("Stop of a no-contact request sends no operative message, and stopped context remains readable without a task", async t => {
+  const clock = {now: baseTime};t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);t.after(fixture.cleanup);
+  const service = fixture.makeProjectSupervisor();const signal = AbortSignal.timeout(10000);
+  await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: fixture.threadPolicy.get().generation}, signal);
+  await fixture.conversation.reconcileStopNotice(fixture.binding, signal);
+  assert.equal(fixture.calls.length, 0);
+  fixture.projectStore.store.db.prepare("DELETE FROM supervisor_task_interpretations WHERE thread_id=?").run(operativeThreadId);
+  const result = await fixture.conversation.readContextView(fixture.binding, {view: "context"}, signal);
+  assert.equal(result.supervision, "stopped");assert.equal(result.status, "ok");
+});
+
+test("a definitely rejected Stop steer queues once with retained rejected IDs", async t => {
+  const clock = {now: baseTime};t.mock.method(Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);t.after(fixture.cleanup);appendNoticeForTask(fixture, fixture.task, fixture.operative);
+  const service = fixture.makeProjectSupervisor();const signal = AbortSignal.timeout(10000);
+  await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: fixture.threadPolicy.get().generation}, signal);
+  fixture.rejectNextIntroduction();await fixture.conversation.reconcileStopNotice(fixture.binding, signal);
+  const fallback = fixture.projectStore.binding(projectId, operativeThreadId)!.stopNotice!;
+  assert.equal(fallback.state, "ready");assert.equal(fallback.dispatchMode?.type, "queue_after_active");
+  assert.deepEqual(fallback.rejectedAttempts, [{messageId: fixture.calls[0]!.payload.messageId, commandId: fixture.calls[0]!.payload.commandId}]);
+  await fixture.conversation.reconcileStopNotice(fixture.binding, signal);
+  assert.equal(fixture.calls.length, 2);
+  assert.equal((fixture.calls[1]!.payload.dispatchMode as {type: string}).type, "queue_after_active");
+  assert.equal(fixture.calls[1]!.payload.messageId, fallback.messageId);
 });

@@ -1030,33 +1030,23 @@ test("only accepted or current fixed occurrences constrain the first workflow ap
   assert.equal(validateWorkflowApplyAgainstPinnedContext(candidate, context, original, "task-a", "proposal-a", sourceHash, target, [], original.plan), null);
 });
 
-test("a manifest too large for one interpretation request keeps the reader and names what it omitted", async () => {
-  const {snapshot} = await load({"project.yaml": {required: [{step: "scope"}]}, "steps/scope.md": stepSource("scope", "Scope guidance.")});
+test("reader interpretation size is independent of catalog size and retains source and pull coordinates", async () => {
+  const {snapshot} = await load({...commonSteps, "project.yaml": {required: [{step: "inspect"}]}});
   const reader = {supervisorThreadId: "supervisor-root:reader", bindingGeneration: 3};
-  const envelopeOf = (text: string) => JSON.parse(text.split("UNTRUSTED_WORKFLOW_ENVELOPE\n")[1]!.split("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE")[0]!);
-  const wide = {...snapshot, workflows: Array.from({length: 40}, (_, index) => ({id: `workflow-${index}`, name: `Workflow ${index}`,
-    description: "A workflow with many members.", summary: testSummary(`workflow-${index}`), fixed: false, sequence: Array.from({length: 400}, () => ({step: "scope"}))}))};
-  const counted = prepareWorkflowRequest(threadId, sourceMessageId, "Implement the export.", wide as ProjectDefinitionSnapshot, {reader});
-  const countedEnvelope = envelopeOf(counted.requestText);
-  assert.ok(counted.requestText.length <= 120_000, `bounded: ${counted.requestText.length}`);
-  assert.deepEqual(countedEnvelope.reader, {tool: "t3-supervisor-workflows workflow_read", ...reader,
-    toolInputs: {definitions: {...reader, view: "definitions", definitionIds: []}}}, "the reader and its ready arguments are kept rather than switching to the inline protocol");
-  assert.match(counted.requestText, /workflow_read/u);
-  assert.equal(countedEnvelope.definitions.workflows.length, 40);
-  assert.equal(countedEnvelope.definitions.workflows[0].memberCount, 400);
-  assert.deepEqual(countedEnvelope.definitions.manifestOmitted, {summariesAndMembers: true, steps: 0, workflows: 0,
-    read: "workflow_read view definitions returns the full manifest; definitionIds return complete definitions."});
-  assert.equal(counted.context?.promptComplete, true, "complete definitions stay retrievable, so the request is not downgraded");
-  const many = {...snapshot, workflows: Array.from({length: 4000}, (_, index) => ({id: `workflow-${index}-${"x".repeat(40)}`, name: `Workflow ${index} ${"y".repeat(40)}`,
-    description: "A workflow.", summary: testSummary(`workflow-${index}`), fixed: false, sequence: [{step: "scope"}]}))};
-  const prefix = prepareWorkflowRequest(threadId, sourceMessageId, "Implement the export.", many as ProjectDefinitionSnapshot, {reader});
-  const prefixEnvelope = envelopeOf(prefix.requestText);
-  assert.ok(prefix.requestText.length <= 120_000 && prefixEnvelope.reader, "an ID prefix still fits with the reader");
-  assert.equal(prefixEnvelope.definitions.workflows.length + prefixEnvelope.definitions.manifestOmitted.workflows, 4000, "the omitted count is exact");
-  assert.ok(prefixEnvelope.definitions.manifestOmitted.workflows > 0);
+  const baseline = prepareWorkflowRequest(threadId, sourceMessageId, "Implement the export.", snapshot, {reader});
+  const many = {...snapshot, workflows: Array.from({length: 4000}, (_, index) => ({id: `workflow-${index}`, name: `Workflow ${index}`,
+    description: "Complete guidance remains on demand.", summary: testSummary(`workflow-${index}`), fixed: false,
+    sequence: Array.from({length: 400}, () => ({step: "inspect"}))}))};
+  const prepared = prepareWorkflowRequest(threadId, sourceMessageId, "Implement the export.", many as ProjectDefinitionSnapshot, {reader});
+  assert.equal(prepared.requestText, baseline.requestText, "no catalog fields or summaries are pushed, regardless of catalog size");
+  const envelope = JSON.parse(prepared.requestText.split("UNTRUSTED_WORKFLOW_ENVELOPE\n")[1]!.split("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE")[0]!);
+  assert.deepEqual(envelope.reader, reader);
+  assert.equal(envelope.text, "Implement the export.");
+  assert.equal(envelope.definitions, undefined);
+  assert.equal(prepared.context?.promptComplete, true, "the complete source-bound catalog remains stored for the reader");
 });
 
-test("reader-based interpretation carries a manifest, earlier unresolved requests and reader coordinates instead of the catalog", async () => {
+test("reader-based interpretation carries earlier unresolved requests and reader coordinates instead of instructions and catalog", async () => {
   const guidance = (id: string) => `${id} guidance. ${"Preserve the requested outcome, the evidence and the completion rules. ".repeat(24)}END_${id}`;
   const stepIds = ["scope", "evidence", "design", "data", "implement", "prevent", "verify", "correctness", "fit", "findings", "deliver"];
   const files: Files = {"project.yaml": {required: [{step: "scope"}, {workflow: "review"}]}};
@@ -1077,22 +1067,14 @@ test("reader-based interpretation carries a manifest, earlier unresolved request
   assert.equal(prepared.requestText.includes("END_scope"), false, "complete step guidance is read on demand");
   assert.match(prepared.requestText, /workflow_read/u);
   assert.doesNotMatch(prepared.requestText, /Do not use tools, MCP/u);
-  assert.match(prepared.requestText, /a bootstrap, setup or recovery instruction is a step toward that earlier request/u);
-  assert.match(prepared.requestText, /"supervision" \("needed"\|"not_needed"\)/u);
+  assert.match(prepared.requestText, /Earlier unresolved requests remain part of the task/u);
+  assert.match(prepared.requestText, /"supervision":"not_needed"/u);
   const envelope = JSON.parse(prepared.requestText.split("UNTRUSTED_WORKFLOW_ENVELOPE\n")[1]!.split("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE")[0]!);
   assert.deepEqual(envelope.earlierMessages, [{messageId: "m0", text: "https://issues.example/browse/PROJ-1"}]);
-  // the reader carries its coordinates and the exact ready-to-copy workflow_read arguments for selected definitions
-  assert.deepEqual(envelope.reader, {tool: "t3-supervisor-workflows workflow_read", supervisorThreadId: "supervisor-root:reader", bindingGeneration: 3,
-    toolInputs: {definitions: {supervisorThreadId: "supervisor-root:reader", bindingGeneration: 3, view: "definitions", definitionIds: []}}});
-  assert.deepEqual(Object.keys(envelope.reader.toolInputs.definitions).sort(), ["bindingGeneration", "definitionIds", "supervisorThreadId", "view"],
-    "only advertised workflow_read fields");
-  assert.deepEqual(envelope.definitions.workflows.find((item: {id: string}) => item.id === "review").members, ["step:correctness", "step:fit", "step:findings"]);
-  assert.ok(envelope.definitions.steps.every((item: {summary: string}) => item.summary.length <= 260));
-  // the manifest carries each definition's project.yaml index summary verbatim, never an excerpt of its description
-  assert.deepEqual(envelope.definitions.steps.map((item: {id: string; summary: string}) => [item.id, item.summary]),
-    [...stepIds].sort().map(id => [id, testSummary(id)]));
-  assert.deepEqual(envelope.definitions.workflows.map((item: {id: string; summary: string}) => [item.id, item.summary]),
-    ["change", "investigate", "plan", "release", "review"].map(id => [id, testSummary(id)]));
+  assert.deepEqual(envelope.reader, {supervisorThreadId: "supervisor-root:reader", bindingGeneration: 3});
+  assert.equal(envelope.definitions, undefined, "the catalog manifest is fetched, not pushed");
+  assert.ok(prepared.requestText.length < 1800, `interpretation request: ${prepared.requestText.length}`);
+
 });
 
 test("a semantic not-needed decision returns no workflow and is distinct from an unclear task", async () => {

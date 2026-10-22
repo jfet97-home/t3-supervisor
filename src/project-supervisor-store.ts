@@ -16,7 +16,10 @@ import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.j
 export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "codex", model: "gpt-6-luna", options: [{id: "reasoningEffort", value: "high"}]};
 export const SUPERVISOR_ROOT_THREAD_PREFIX = "supervisor-root:";
 export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; teamSettings?: {maxHelpersPerRoot: number}; applyAttempts?: number; applicationMessage?: string | null};
-export type BindingRecord = SupervisorBinding & {mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string; deliveredRoleVersion?: string; stopObservedAt?: number; supervisionStop?: {route: "direct" | "relay" | "chat" | "ui"; callerThreadId: string | null; userMessageId: string | null; stoppedAt: number}};
+export type SupervisorStopNotice = {messageId: string; commandId: string; stoppedAt: number; enabledAt: number | null;
+  state: "ready" | "uncertain" | "accepted" | "sent" | "blocked" | "superseded";
+  dispatchMode?: {type: "steer_active"; targetRunId: string} | {type: "queue_after_active"}; rejectedAttempts?: Array<{messageId: string; commandId: string}>; error?: string | null};
+export type BindingRecord = SupervisorBinding & {stopNotice?: SupervisorStopNotice;mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string; deliveredRoleVersion?: string; stopObservedAt?: number; supervisionStop?: {route: "direct" | "relay" | "chat" | "ui"; callerThreadId: string | null; userMessageId: string | null; stoppedAt: number}};
 export type SupervisorBaseline = {version?: 2; snapshotSequence: number; threads: Array<{id: string; latestRunId: string | null}>};
 export type SupervisionFolderPresence = {status: "present" | "missing" | "unavailable"; message?: string};
 /** Native positions from which workflow protocol records belong to a task source revision: the service prompt that gave the
@@ -334,7 +337,33 @@ export class ProjectSupervisorStore {
     });
     this.ownedIds.add(value.threadId);return value;
   }
-  setBinding(value: BindingRecord): void {this.store.db.prepare("UPDATE supervisor_main_bindings SET document=? WHERE project_id=? AND main_thread_id=?").run(JSON.stringify(value), value.projectId, value.mainThreadId);}
+  setBinding(value: BindingRecord): void {
+    // preserve exact notice objects, including null epoch fields, across stale lifecycle writes.
+    const write = () => {
+      const current = this.binding(value.projectId, value.mainThreadId);
+      const next = {...value};
+      for (const key of ["stopNotice", "supervisionStop"] as const) {
+        if (current?.[key] !== undefined) Object.assign(next, {[key]: current[key]});
+        else delete next[key];
+      }
+      this.store.db.prepare("UPDATE supervisor_main_bindings SET document=? WHERE project_id=? AND main_thread_id=?")
+        .run(JSON.stringify(next), value.projectId, value.mainThreadId);
+    };
+    if (this.store.db.isTransaction) write(); else this.store.transaction(write);
+  }
+  setSupervisionStop(binding: BindingRecord, stop: BindingRecord["supervisionStop"] | null): void {
+    if (stop) this.store.db.prepare(`UPDATE supervisor_main_bindings SET document=json_set(
+      json_remove(document,'$.manualKeepActive','$.stopObservedAt'),'$.supervisionStop',json(?)) WHERE project_id=? AND main_thread_id=?`)
+      .run(JSON.stringify(stop), binding.projectId, binding.mainThreadId);
+    else this.store.db.prepare("UPDATE supervisor_main_bindings SET document=json_remove(document,'$.supervisionStop','$.stopObservedAt') WHERE project_id=? AND main_thread_id=?")
+      .run(binding.projectId, binding.mainThreadId);
+  }
+  setStopNotice(binding: BindingRecord, expectedMessageId: string | null, notice: SupervisorStopNotice): void {
+    this.store.db.prepare(`UPDATE supervisor_main_bindings SET document=json_set(document,'$.stopNotice',json(?))
+      WHERE project_id=? AND main_thread_id=? AND json_extract(document,'$.stopNotice.messageId') IS ?`)
+      .run(JSON.stringify(notice), binding.projectId, binding.mainThreadId, expectedMessageId);
+  }
+
   replaceMissingBinding(binding: BindingRecord, selection: SupervisorModelSelection): BindingRecord {
     if (binding.state !== "missing") throw new Error("supervisor_not_missing");
     const value = this.store.transaction(() => {

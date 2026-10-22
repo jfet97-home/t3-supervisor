@@ -358,7 +358,7 @@ export class SupervisorLifecycle {
     return null;
   }
   /**
-   * A chat whose supervision a human stopped: its owned Supervisor settles after the quiet window once idle and once every
+   * A chat whose supervision a human stopped: its owned Supervisor settles promptly once idle and once every
    * accepted request has a confirmed native outcome. The stop supersedes earlier keep-active choices for that Supervisor; a stop without a
    * recorded time dates from its first observation. Uncertain identities are retained, and the operative main is never settled or interrupted.
    */
@@ -376,10 +376,6 @@ export class SupervisorLifecycle {
       this.store.setBinding({...binding, quietSince: null, settlement: {...binding.settlement, state: "superseded"}});return;
     }
     if (binding.settlement?.state === "uncertain" && ((binding.settlement.attempts ?? 0) >= 3 || now - binding.settlement.observedAt < SUPERVISOR_SETTLE_QUIET_MS)) return;
-    if (binding.quietFingerprint !== version || binding.quietSince == null) {
-      this.store.setBinding({...binding, quietFingerprint: version, quietSince: now, settlementBlockedBy: "quiet_window"});return;
-    }
-    if (now - binding.quietSince < SUPERVISOR_SETTLE_QUIET_MS) return;
     let fresh: Projection;
     try {fresh = await this.projection(binding.threadId, signal);} catch {this.clearQuiet(binding, "supervisor_unreadable");return;}
     if (fresh.thread.id !== binding.threadId || fresh.thread.projectId !== binding.projectId || fresh.thread.archivedAt || fresh.thread.deletedAt) {this.clearQuiet(binding, "supervisor_unavailable");return;}
@@ -398,7 +394,7 @@ export class SupervisorLifecycle {
       if (!record(receipt) || !Number.isSafeInteger(receipt.sequence)) throw new SupervisorRpcError("uncertain");
       this.store.setBinding({...binding, settlementBlockedBy: null, settlement: {...sending, state: "settled"}});
       const current = await this.projection(binding.threadId, signal);
-      this.store.setBinding({...binding, settlementBlockedBy: null, settlement: {...sending, state: current.thread.settledAt || current.thread.settledOverride === "settled" ? "settled" : "superseded"}});
+      this.store.setBinding({...binding, settlementBlockedBy: null, settlement: {...sending, state: current.thread.settledAt || current.thread.settledOverride === "settled" ? "settled" : current.thread.settledOverride === "active" ? "superseded" : "uncertain"}});
     } catch (cause) {
       if (cause instanceof SupervisorRpcError && cause.definiteRejection) this.store.setBinding({...binding, quietSince: null, settlement: {...sending, state: "superseded"}});
       else if (this.store.binding(binding.projectId, binding.mainThreadId)?.settlement?.state !== "settled") this.store.setBinding({...binding, settlement: {...sending, state: "uncertain"}});

@@ -343,11 +343,13 @@ test("dispatch uses complete definitions from the operative source worktree", as
   assert.equal(dispatch.threadId, binding.threadId);
   assert.equal(task.definitionContext?.workspaceRoot, "/work/project/worktrees/feature");
   assert.equal(task.definitionContext?.revision, "revision-1");
-  assert.match(String(dispatch.text), /"workspaceRoot":"\/work\/project\/worktrees\/feature"/u);
-  assert.match(String(dispatch.text), /"revision":"revision-1"/u);
-  assert.match(String(dispatch.text), /"required":\[\{"step":"test-plan"\}\]/u);
-  // the manifest carries the definition's project.yaml index summary, not a sentence derived from its description
-  assert.ok(String(dispatch.text).includes(`"summary":${JSON.stringify(testSummary("test-plan"))}`));
+  const definitions = await supervisor.conversation.readContextView(binding, {view: "definitions"}, AbortSignal.timeout(5000));
+  const material = JSON.stringify(definitions);
+  assert.match(material, /"workspaceRoot":"\/work\/project\/worktrees\/feature"/u);
+  assert.match(material, /"revision":"revision-1"/u);
+  assert.ok(material.includes(`"summary":${JSON.stringify(testSummary("test-plan"))}`));
+  assert.doesNotMatch(String(dispatch.text), /"workspaceRoot"|"required"|"summary"/u, "the complete source-bound catalog stays pull-only");
+
 });
 
 test("a correlated native result appears in the project DTO without repeating or self-triggering work", async (t) => {
@@ -469,8 +471,7 @@ test("bounded unavailable preparation reads still dispatch a provisional workflo
   assert.equal(dispatched?.workflow?.requirementsKnown, false);
   assert.equal(dispatched?.definitionContext?.revision, null);
   assert.match(String(request), /UNTRUSTED_WORKFLOW_ENVELOPE/u);
-  assert.match(String(request), /"requirementsKnown":false/u);
-  assert.match(String(request), /Requirements and policy remain unknown/u);
+  assert.doesNotMatch(String(request), /"requirementsKnown"/u, "unknown definition details stay in the source-bound reader");
   assert.equal(fixture.dispatches().length, 1);
 
   const binding = fixture.binding();
@@ -680,7 +681,7 @@ test("a link-only request stays context for the next genuine request instead of 
   const dispatched = String(fixture.dispatches().at(-1)?.payload.text);
   assert.ok(dispatched.includes(JSON.stringify([{messageId: sourceMessageId, text: "https://issues.example/browse/PROJ-1"}])),
     "the interpretation sees the original request beside the bootstrap instruction");
-  assert.match(dispatched, /a bootstrap, setup or recovery instruction is a step toward that earlier request, not a replacement for it/u);
+  assert.match(dispatched, /Earlier unresolved requests remain part of the task/u);
 });
 
 test("a semantic not-needed decision is persisted without negotiation and the next genuine request is reconsidered", async (t) => {
@@ -852,26 +853,19 @@ test("the interpretation request carries the concise standing role once, permits
   const text = String(fixture.dispatches()[0]?.payload.text);
   assert.ok(task.roleVersion, "the root's first message carries the standing role");
   const occurrences = (part: string) => text.split(part).length - 1;
-  assert.equal(occurrences("Never restate, relay or paraphrase a human message to the operative"), 1);
+  assert.equal(occurrences("Never restate a human request"), 1);
   assert.equal(occurrences(`Standing instructions version ${task.roleVersion}.`), 1);
-  assert.match(text, /This turn is an interpretation request: follow only the interpretation instructions below/u);
-  const instruction = text.slice(0, text.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE"));
-  assert.match(instruction, /mcp__t3-supervisor-workflows__workflow_read; you may use MCPX discovery\/schema\/call tools or a code-mode wrapper solely to invoke it/u);
-  assert.match(instruction, /Decide first, from the request itself and before reading or assessing any definitions, whether it warrants supervision/u);
-  assert.match(instruction, /configured required references alone never make a task needed/u);
-  assert.match(instruction, /If you cannot invoke workflow_read, that says nothing about the project's definitions/u);
-  assert.doesNotMatch(instruction, /templatePath|omissions/u, "no obsolete expansion format");
-  // the exact reader arguments are ready to copy, also through an MCPX call tool
+  assert.match(text, /Only local t3-code thread readers\/senders/u);
+  assert.match(text, /MCPX wrappers may invoke them/u);
+  assert.match(text, /Decide from its substance.*before reading definitions/u);
+  assert.match(text, /freshly read your own local thread and cite the latest exact human message/u);
+  assert.match(text, /Never reuse an earlier Stop ID/u);
   const envelope = JSON.parse(text.slice(text.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE\n") + "UNTRUSTED_WORKFLOW_ENVELOPE\n".length, text.indexOf("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE")));
-  assert.deepEqual(envelope.reader.toolInputs.definitions, {supervisorThreadId: fixture.binding()!.threadId, bindingGeneration: fixture.binding()!.generation, view: "definitions", definitionIds: []});
-  assert.match(instruction, /Copy reader\.toolInputs\.definitions as the complete arguments and put the exact IDs you need in definitionIds; through an MCPX call tool, use name t3-supervisor-workflows__workflow_read with that object as arguments and no extra wrapper/u);
-  // T3 tools come from this environment's local t3-code server only
-  assert.match(text, /t3_thread_read and t3_thread_send of the local t3-code server only \(t3-code\.t3_thread_read or mcp__t3-code__t3_thread_read/u);
-  assert.match(text, /another server's T3 tools reach another environment, so on thread_not_found check the namespace first/u);
-  // a genuine direct stop during interpretation may still be read freshly and applied: the only exception to the tool limit
-  assert.match(instruction, /The one exception to this tool limit: if a genuine human writes directly in this conversation asking to stop supervising this chat, freshly read your own thread with the local t3-code server's t3_thread_read and call t3-supervisor-workflows supervision_stop citing that latest message with a fresh operationId/u);
-  assert.match(text, /use no tool except the workflow_read reader they name, or the fresh own-thread read and supervision_stop call for a genuine direct human stop request/u);
-  assert.ok(text.length < 16_000, `interpretation request ${text.length} characters`);
+  assert.deepEqual(envelope.reader, {supervisorThreadId: fixture.binding()!.threadId, bindingGeneration: fixture.binding()!.generation});
+  const instructions = await supervisor.conversation.readContextView(fixture.binding()!, {view: "interpretation"}, AbortSignal.timeout(5000));
+  assert.match(String(instructions.instructions), /configured required references alone never make a task needed/u);
+  assert.match(String(instructions.instructions), /If you cannot invoke workflow_read, that says nothing about the project's definitions/u);
+  assert.ok(text.length < 4500, `interpretation request ${text.length} characters`);
   const native = fixture.projections.get(fixture.binding()!.threadId)!;
   completeSupervisorRequest(native, task.messageId, workflowResponse(sourceMessageId));
   await supervisor.runOnce();

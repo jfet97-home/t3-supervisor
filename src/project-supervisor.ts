@@ -691,6 +691,8 @@ export class ProjectSupervisor {
     if (application?.applicationMessage) message = `${message} ${application.applicationMessage}`;
     if (current.pending && models.length && !validModelSelection(current.modelSelection, models)) message = "The saved Supervisor model is unavailable. Choose an available T3 model; no fallback will run.";
     if (binding?.settlement?.state === "uncertain") message += " Automatic settlement could not be confirmed. Retry native access reconciles the retained settlement command; supervision can continue in the same chat.";
+    if (binding?.stopNotice && ["uncertain", "accepted", "blocked", "ready"].includes(binding.stopNotice.state))
+      message += ` Operative Stop notice: ${binding.stopNotice.state}${binding.stopNotice.error ? ` (${binding.stopNotice.error})` : "."}`;
     if (binding?.manualKeepActive) message += " Automatic settlement is held by an observed user keep-active choice.";
     if (!this.store.scopeCompatible) {available = false;message = "Supervisor state has an unsupported scope version. Supervision is disabled without resetting state; other service integrations remain available.";}
     if (binding?.state === "rejected" && binding.creationMessage) message = binding.creationMessage;
@@ -733,14 +735,20 @@ export class ProjectSupervisor {
     }
     return {status: "conflict"};
   }
-  // records attribution on every binding of the stopped main and fences its unsent check-ins; the operative main is never touched.
+  // records the stop and a single operative notice, and fences unsent check-ins without cancelling operative work.
   // a stop supersedes any earlier keep-active choice for the owned Supervisor, so its settlement is not vetoed by an older intent.
   private applyChatStop(threadId: string, stop: NonNullable<BindingRecord["supervisionStop"]> | null): void {
     for (const binding of this.store.bindings().filter(item => item.mainThreadId === threadId)) {
-      const next = {...binding};delete next.stopObservedAt;
-      if (stop) {next.supervisionStop = stop;delete next.manualKeepActive;} else delete next.supervisionStop;
-      this.store.setBinding(next);
-      if (stop) this.conversation.fenceStoppedSupervision(next);
+      this.store.store.transaction(() => {
+        this.store.setSupervisionStop(binding, stop);
+        const notice = binding.stopNotice;
+        const enabledAt = this.store.chatEnabledAt(threadId);
+        if (stop && (!notice || notice.enabledAt !== enabledAt && ["sent", "blocked", "superseded"].includes(notice.state)))
+          this.store.setStopNotice(binding, notice?.messageId ?? null, {messageId: `supervisor-notice:stop:${randomUUID()}`,
+            commandId: `supervisor-stop-notice:${randomUUID()}`, stoppedAt: stop.stoppedAt, enabledAt, state: "ready"});
+        else if (!stop && notice?.state === "ready") this.store.setStopNotice(binding, notice.messageId, {...notice, state: "superseded"});
+      });
+      if (stop) this.conversation.fenceStoppedSupervision(this.store.binding(binding.projectId, binding.mainThreadId)!);
     }
   }
   private genuineUserMessage(projection: Projection, messageId: string): MessageInfo | null {
@@ -834,7 +842,7 @@ export class ProjectSupervisor {
     if (input.enabled) this.store.recordChatEnable(input.mainThreadId, this.now());
     this.applyChatStop(input.mainThreadId, input.enabled ? null : {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: this.now()});
     return {status: "saved", message: input.enabled ? "Supervision is enabled for this chat; its next request is supervised by the same Supervisor."
-      : "Supervision is stopped for this chat. Its Supervisor conversation settles when idle; nothing in the chat itself is changed.", snapshot: await this.snapshot(input.projectId, signal, input.mainThreadId)};
+      : "Supervision is stopped for this chat. Its operative is notified to stop replying to the Supervisor, which settles when idle. The operative task continues.", snapshot: await this.snapshot(input.projectId, signal, input.mainThreadId)};
   }
   async retry(input: ProjectSupervisorRetryInput, signal: AbortSignal): Promise<ProjectSupervisorSaveOutcome> {
     if (!this.store.scopeCompatible) return {status: "unavailable", message: "Supervisor state version is unsupported; no changes were made.", snapshot: null};
@@ -1029,8 +1037,9 @@ export class ProjectSupervisor {
       if (signal.aborted) return;
       const batch = bindings.slice(index, index + 4);
       if (masterEnabled) await Promise.allSettled(batch.map(binding => this.resolveControl(binding.projectId, signal)));
-      await Promise.allSettled(batch.map(binding => {
+      await Promise.allSettled(batch.map(async binding => {
         const deadline = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+        await this.serial(supervisorScopeKey(binding.projectId, binding.mainThreadId), () => this.conversation.reconcileStopNotice(binding, deadline));
         // a human stop settles its owned Supervisor even while global or project supervision is disabled
         if (this.supervisionStopped(binding.mainThreadId)) return this.serial(supervisorScopeKey(binding.projectId, binding.mainThreadId), async () => {
           // reconciliation sends nothing; it confirms accepted root, helper and guidance deliveries before the owned Supervisor may settle

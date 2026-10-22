@@ -82,7 +82,7 @@ export type WorkflowWritePayload = WorkflowLocator & (
     resultRevision: number; decision: ExternalContributionDecision; note: string}
 );
 
-export type SupervisorContextViewName = "context" | "definitions" | "instructions" | "check";
+export type SupervisorContextViewName = "context" | "definitions" | "instructions" | "interpretation" | "check";
 export type SupervisorContextViewInput = {view: SupervisorContextViewName; definitionIds?: string[]; includeSources?: boolean; record?: unknown};
 export type SupervisorContextViewResult = {status: string; view: SupervisorContextViewName; [key: string]: unknown};
 /** Bounded on-demand Supervisor context for the verified current binding: task, definitions, instructions and dry-run proposal checks. */
@@ -408,7 +408,7 @@ const parseReadPayload = (value: unknown): ParsedReadInput => {
     ["view", "definitionIds", "includeSources", "record", "workflowId", "workflowOffset", "lineageOffset", "limit", ...authorityKeys])) return {ok: false, reason: "invalid_read_arguments"};
   const locator = parseLocator(value);
   if (value.view !== undefined) {
-    if (!locator || !["context", "definitions", "instructions", "check"].includes(String(value.view)) ||
+    if (!locator || !["context", "definitions", "instructions", "interpretation", "check"].includes(String(value.view)) ||
       value.definitionIds !== undefined && (!Array.isArray(value.definitionIds) || value.definitionIds.length > 50 || !value.definitionIds.every(id => isId(id))) ||
       value.includeSources !== undefined && typeof value.includeSources !== "boolean" || value.view !== "check" && value.record !== undefined ||
       value.view === "check" && value.record === undefined || value.workflowId !== undefined || value.workflowOffset !== undefined ||
@@ -589,8 +589,8 @@ export const workflowReadToolDefinition = {
       workflowOffset: {type: "integer", minimum: 0, maximum: 10_000},
       lineageOffset: {type: "integer", minimum: 0, maximum: 10_000},
       limit: {type: "integer", minimum: 1, maximum: maxWorkflowReadDocs},
-      view: {type: "string", enum: ["context", "definitions", "instructions", "check"],
-        description: "Omit for workflow documents. context: current task, objective, revisions, proposal, agreement and diagnostic. definitions: a manifest, or exact complete definitions for definitionIds. instructions: the full standing Supervisor instructions. check: dry-run one compact workflow-proposal record without publishing it."},
+      view: {type: "string", enum: ["context", "definitions", "instructions", "interpretation", "check"],
+        description: "Omit for workflow documents. context: current task, objective, revisions, proposal, agreement and diagnostic. definitions: a manifest, or exact complete definitions for definitionIds. instructions: the full standing Supervisor instructions. interpretation: only the interpretation instructions. check: dry-run one compact workflow-proposal record without publishing it."},
       definitionIds: {type: "array", maxItems: 50, items: idSchema(), description: "With view definitions: exact step or workflow IDs to return completely."},
       includeSources: {type: "boolean", description: "With view definitions: also return raw definition source files, for diagnosing invalid or incomplete definitions."},
       record: {type: "object", description: "With view check: the exact compact workflow-proposal record to validate."},
@@ -705,7 +705,7 @@ export class WorkflowWriteController {
     const parsed = parseReadPayload(input);
     if (!parsed.ok) return {status: "invalid", reason: parsed.reason};
     if (!parsed.value.view) return this.read(input, signal);
-    const binding = this.resolveBinding(parsed.value, false, "read");
+    const binding = this.resolveBinding(parsed.value, false, parsed.value.view === "context" ? "status" : "read");
     if (!binding) return {status: "denied", reason: "owner_not_current_ready_enabled"};
     if (!this.options.contextViews) return {status: "unavailable", reason: "context_views_unavailable"};
     const {view, definitionIds, includeSources, record} = parsed.value;
@@ -971,7 +971,7 @@ export class WorkflowWriteController {
   }
 
   /** The current ready binding for a verified actor; an effect also requires that a human has not stopped supervision of its main. */
-  resolveBinding(locator: WorkflowLocator, allowRegistering = false, purpose: "effect" | "read" = "effect"): BindingRecord | null {
+  resolveBinding(locator: WorkflowLocator, allowRegistering = false, purpose: "effect" | "read" | "status" = "effect"): BindingRecord | null {
     if (!this.options.supervisors.scopeCompatible) return null;
     const rows = this.options.supervisors.store.db.prepare(
       "SELECT document FROM supervisor_main_bindings WHERE json_extract(document,'$.threadId')=? LIMIT 2",
@@ -984,7 +984,7 @@ export class WorkflowWriteController {
     if (!binding || binding.generation !== locator.bindingGeneration ||
       binding.state !== "ready" || !this.options.supervisors.ownedIds.has(binding.threadId) ||
       !isId(binding.projectId) || !isId(binding.mainThreadId)) return null;
-    try {if (!this.isEnabled(binding.projectId) || purpose === "effect" && this.options.isChatStopped?.(binding.mainThreadId)) return null;}
+    try {if ((!this.isEnabled(binding.projectId) && !(purpose === "status" && this.options.isChatStopped?.(binding.mainThreadId))) || purpose === "effect" && this.options.isChatStopped?.(binding.mainThreadId)) return null;}
     catch {return null;}
     if (binding.threadId !== locator.supervisorThreadId) {
       const member = this.options.team?.snapshot(binding).members.find(item => item.threadId === locator.supervisorThreadId);

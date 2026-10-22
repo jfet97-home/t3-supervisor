@@ -588,12 +588,12 @@ test("new activity supersedes an unresolved parking epoch without replacing the 
   assert.equal(f.store.binding("p", "main")?.threadId, f.binding.threadId);
 });
 
-test("an accepted settlement followed by immediate reactivation is a superseded success", async t => {
+test("an accepted settlement without a visible native settlement retains its uncertain identity", async t => {
   const f = await fixture();t.after(f.cleanup);
   const lifecycle = new SupervisorLifecycle(f.store, f.conversation, async id => f.projections.get(id)!, async () => ({sequence: 20}));
   await lifecycle.check(f.binding, f.threads, AbortSignal.timeout(1000), 1);
   await lifecycle.check(f.binding, f.threads, AbortSignal.timeout(1000), 100_000);
-  assert.equal(f.store.binding("p", "main")?.settlement?.state, "superseded");
+  assert.equal(f.store.binding("p", "main")?.settlement?.state, "uncertain");
 });
 
 test("an unknown scope version disables supervision without resetting the private database", async t => {
@@ -630,7 +630,7 @@ test("a stopped chat settles only its owned Supervisor once idle, whatever the m
   f.store.saveTask({...task, definitionReview: {status: "checking", message: "Definitions changed.", expectedRevision: "a", observedRevision: "b",
     supervisorMessageId: null, userMessageIds: [], updatedAt: 1}});
   await f.check(10);
-  assert.equal(f.store.binding("p", "main")?.settlementBlockedBy, "quiet_window");
+  assert.equal(f.store.binding("p", "main")?.settlement?.state, "settled");
   await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
   assert.deepEqual(f.calls.map(call => [call.type, call.threadId]), [["thread.settle", f.binding.threadId]],
     "the stopped main keeps running untouched; only the service-owned Supervisor is settled");
@@ -664,7 +664,7 @@ test("a stopped chat's Supervisor waits while it is busy, while any accepted del
   const stoppedAt = Date.parse("2026-10-14T11:00:00Z");
   const kept = await fixture();t.after(kept.cleanup);
   kept.conversation.supervisionStopped = threadId => threadId === "main";
-  kept.store.setBinding({...kept.store.binding("p", "main")!, supervisionStop: {route: "direct", callerThreadId: kept.binding.threadId, userMessageId: "stop", stoppedAt}});
+  kept.store.setSupervisionStop(kept.binding, {route: "direct", callerThreadId: kept.binding.threadId, userMessageId: "stop", stoppedAt});
   kept.supervisor.thread.pinnedAt = "2026-10-14T11:00:05Z";
   await kept.check(10);await kept.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
   assert.equal(kept.calls.length, 0, "a pin made after the stop is a newer human decision");
@@ -672,7 +672,7 @@ test("a stopped chat's Supervisor waits while it is busy, while any accepted del
 
   const reopened = await fixture();t.after(reopened.cleanup);
   reopened.conversation.supervisionStopped = threadId => threadId === "main";
-  reopened.store.setBinding({...reopened.store.binding("p", "main")!, supervisionStop: {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt}});
+  reopened.store.setSupervisionStop(reopened.binding, {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt});
   Object.assign(reopened.supervisor.thread, {settledOverride: "active", unsettledAt: "2026-10-14T11:30:00Z"});
   await reopened.check(10);await reopened.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
   assert.equal(reopened.calls.length, 0, "a human who reactivates the settled Supervisor after the stop is never overridden");
@@ -685,8 +685,8 @@ test("a later human stop supersedes every earlier keep-active choice for the own
     const f = await fixture();t.after(f.cleanup);
     f.conversation.supervisionStopped = threadId => threadId === "main";
     Object.assign(f.supervisor.thread, earlier);
-    f.store.setBinding({...f.store.binding("p", "main")!, manualKeepActive: true,
-      supervisionStop: {route: "chat", callerThreadId: "other-chat", userMessageId: "stop", stoppedAt}});
+    f.store.setBinding({...f.store.binding("p", "main")!, manualKeepActive: true});
+    f.store.setSupervisionStop(f.binding, {route: "chat", callerThreadId: "other-chat", userMessageId: "stop", stoppedAt});
     await f.check(10);await f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
     assert.deepEqual(f.calls.map(call => [call.type, call.threadId]), [["thread.settle", f.binding.threadId]], `${JSON.stringify(earlier)} predates the stop`);
   }
