@@ -80,10 +80,11 @@ export const runGuidanceApplication = (
       ...(config.helperProviderInstanceId ? {helperProviderInstanceId: config.helperProviderInstanceId} : {}),
       team: supervision.team,
       workflows: supervision.workflowStates,
-      isEnabled: projectId => supervision.workflowEditingEnabled(projectId),
+      isEnabled: (projectId, mainThreadId, purpose) => supervision.workflowEditingEnabled(projectId, mainThreadId, purpose),
       isChatStopped: threadId => supervision.supervisionStopped(threadId),
       loadDefinitions: (projectId, threadId, signal) => definitions.load(projectId, threadId, signal),
       contextViews: supervision.conversation,
+      starts: {start: (input, evidence, signal) => supervision.startSupervision(input, evidence, signal)},
       stops: {stop: (input, evidence, signal) => supervision.stopSupervision(input, evidence, signal)},
       native: {
         listThreads: readSupervisorThreads(config.t3Url, readToken.trim(), readRpc),

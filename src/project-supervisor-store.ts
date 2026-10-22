@@ -8,6 +8,7 @@ import { fingerprint } from "./guidance-store.js";
 import { defaultMonitoringSettings, type DefinitionReviewInfo, type SupervisorBinding, type SupervisorModelSelection, type SupervisorMonitoringSettings, type TaskInterpretationInfo, type WorkflowProtocolDiagnostic } from "./project-supervisor-contract.js";
 import type { Projection, SupervisorConfig } from "./types.js";
 import { sameModel } from "./supervisor-native.js";
+import type { NoProjectModeValue } from "./supervisor-control-contract.js";
 import type { SupervisionControlInfo } from "./supervisor-control-contract.js";
 import type { GlobalDefinitionsControlInfo } from "./supervisor-control-contract.js";
 import type { ProposalContext } from "./supervisor-workflow.js";
@@ -26,6 +27,11 @@ export const prepareStopNotice = (binding: Pick<BindingRecord, "threadId">, stop
   messageId: `supervisor-notice:stop:${randomUUID()}`, commandId: `supervisor-stop-notice:${randomUUID()}`, stoppedAt, enabledAt, state: "ready",
   text: `Supervision was stopped for this conversation at ${new Date(stoppedAt).toISOString()}. Stop sending updates, findings and workflow acceptances to Supervisor ${binding.threadId}. This does not change your task or the user's instructions; a later explicit Enable takes precedence. Do not reply to this notice.`,
 });
+export type SupervisionStartRecord = {
+  threadId: string; projectId: string; operationId: string; requestHash: string; route: "agent" | "ui";
+  status: "pending" | "active" | "rejected"; reason: string; intentAt: number; modeGeneration: number; masterGeneration: number;
+  source?: {messageId: string; runId: string; ordinal: number; hash: string}; taskId: string | null;
+};
 export type SupervisorBaseline = {version?: 2; snapshotSequence: number; threads: Array<{id: string; latestRunId: string | null}>};
 export type SupervisionFolderPresence = {status: "present" | "missing" | "unavailable"; message?: string};
 /** Native positions from which workflow protocol records belong to a task source revision: the service prompt that gave the
@@ -66,6 +72,10 @@ export class ProjectSupervisorStore {
     if (!store.db.prepare("PRAGMA table_info(supervisor_definition_user_saves)").all().some(row => row.name === "expected_revision"))
       store.db.exec("ALTER TABLE supervisor_definition_user_saves ADD COLUMN expected_revision TEXT NOT NULL DEFAULT ''");
     this.scopeCompatible = store.transaction(() => initializeMainSupervisionState(store.db));
+    for (const row of store.db.prepare("SELECT key,value FROM meta WHERE key LIKE 'supervisor_start_operation:%'").all()) {
+      const operation = JSON.parse(String(row.value));
+      if (operation.preparing) store.db.prepare("UPDATE meta SET value=? WHERE key=?").run(JSON.stringify({...operation, preparing: false, status: "rejected", reason: "Start intake was interrupted before permission was reserved. Submit a new explicit request."}), String(row.key));
+    }
     for (const row of store.db.prepare("SELECT id FROM supervisor_owned_threads").all()) ownedIds.add(String(row.id));
   }
   /** The latest explicit human Enable supervision of a chat; an older stop instruction never overrides it. */
@@ -75,6 +85,49 @@ export class ProjectSupervisorStore {
   }
   recordChatEnable(threadId: string, at: number): void {
     this.store.db.prepare("INSERT INTO supervisor_chat_enables VALUES(?,?) ON CONFLICT(thread_id) DO UPDATE SET enabled_at=max(enabled_at,excluded.enabled_at)").run(threadId, at);
+  }
+  noProjectControl(): {generation: number; mode: NoProjectModeValue; globallyEnabled: boolean; baseline?: SupervisorBaseline} {
+    const value = this.store.db.prepare("SELECT value FROM meta WHERE key='supervisor_no_project'").get()?.value;
+    return {...(value === undefined ? {generation: 0, mode: "on_request" as const} : JSON.parse(String(value))), globallyEnabled: this.control(null).enabled};
+  }
+  saveNoProjectControl(expectedGeneration: number, mode: NoProjectModeValue, baseline: SupervisorBaseline): void {
+    this.store.transaction(() => {
+      if (this.noProjectControl().generation !== expectedGeneration) throw new Error("no_project_control_conflict");
+      for (const row of this.store.db.prepare("SELECT value FROM meta WHERE key LIKE 'supervisor_start:%'").all()) {
+        const start = JSON.parse(String(row.value)) as SupervisionStartRecord;
+        if (start.status === "pending") this.saveStart({...start, status: "rejected", reason: "Superseded by a No Project mode change."});
+      }
+      this.store.db.prepare("INSERT INTO meta VALUES('supervisor_no_project',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .run(JSON.stringify({generation: expectedGeneration + 1, mode, baseline}));
+    });
+  }
+  start(threadId: string): SupervisionStartRecord | null {
+    const value = this.store.db.prepare("SELECT value FROM meta WHERE key=?").get(`supervisor_start:${threadId}`)?.value;
+    return value === undefined ? null : JSON.parse(String(value)) as SupervisionStartRecord;
+  }
+  startOperation(threadId: string, operationId: string): {threadId: string; operationId: string; requestHash: string; status: "pending" | "active" | "rejected" | "denied" | "unavailable"; reason: string; preparing?: boolean} | null {
+    const value = this.store.db.prepare("SELECT value FROM meta WHERE key=?").get(`supervisor_start_operation:${JSON.stringify([threadId, operationId])}`)?.value;
+    return value === undefined ? null : JSON.parse(String(value));
+  }
+  saveStartOperation(value: NonNullable<ReturnType<ProjectSupervisorStore["startOperation"]>>): void {
+    this.store.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(`supervisor_start_operation:${JSON.stringify([value.threadId, value.operationId])}`, JSON.stringify(value));
+  }
+  saveStart(value: SupervisionStartRecord): void {
+    this.saveStartOperation({threadId: value.threadId, operationId: value.operationId, requestHash: value.requestHash, status: value.status, reason: value.reason});
+    this.store.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(`supervisor_start:${value.threadId}`, JSON.stringify(value));
+  }
+  /** Stops without a root stay here until reservation transfers the one record to its binding. */
+  chatStop(threadId: string): BindingRecord["supervisionStop"] | null {
+    const binding = this.bindings().find(item => item.mainThreadId === threadId);
+    if (binding) return binding.supervisionStop ?? null;
+    const value = this.store.db.prepare("SELECT value FROM meta WHERE key=?").get(`supervisor_unbound_stop:${threadId}`)?.value;
+    return value === undefined ? null : JSON.parse(String(value));
+  }
+  saveUnboundStop(threadId: string, stop: BindingRecord["supervisionStop"] | null): void {
+    if (stop) this.store.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(`supervisor_unbound_stop:${threadId}`, JSON.stringify(stop));
+    else this.store.db.prepare("DELETE FROM meta WHERE key=?").run(`supervisor_unbound_stop:${threadId}`);
   }
   private read<T>(table: string, key: string, id: string): T | null {
     const value = this.store.db.prepare(`SELECT document FROM ${table} WHERE ${key}=?`).get(id)?.document;
@@ -190,8 +243,7 @@ export class ProjectSupervisorStore {
       homePath, detectionStatus, detectionError: detectionStatus === "unavailable" ? presence?.message ?? "The server-user .t3-supervisor folder could not be checked." : null};
   }
   useGlobalDefinitions(_projectId?: string): boolean {return this.globalDefinitionsRecord().enabled;}
-  saveGlobalDefinitionsControl(expectedGeneration: number, enabled: boolean, homePath = "~/.t3-supervisor", globalFingerprint: string | null = null,
-    scratchBoundaries: ReadonlyArray<{projectId: string; baseline: SupervisorBaseline}> = []): GlobalDefinitionsControlInfo {
+  saveGlobalDefinitionsControl(expectedGeneration: number, enabled: boolean, homePath = "~/.t3-supervisor", globalFingerprint: string | null = null): GlobalDefinitionsControlInfo {
     return this.store.transaction(() => {
       const current = this.globalDefinitionsRecord();
       if (current.generation !== expectedGeneration) throw new Error("global_definitions_control_conflict");
@@ -217,12 +269,6 @@ export class ProjectSupervisorStore {
             definitionReview: {status: "checking", message, expectedRevision: task.workflow.revision, observedRevision: null,
               supervisorMessageId: null, userMessageIds: [], updatedAt: changedAt}, updatedAt: changedAt});
         }
-      }
-      for (const boundary of scratchBoundaries) {
-        const control = this.controlRecord(boundary.projectId);
-        const next = {...control, baseline: boundary.baseline};
-        this.store.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-          .run(this.controlKey(boundary.projectId), JSON.stringify(next));
       }
       return this.globalDefinitionsControl(homePath);
     });
@@ -337,6 +383,9 @@ export class ProjectSupervisorStore {
       if (Number(this.store.db.prepare("SELECT count(*) AS n FROM supervisor_owned_threads").get()?.n) >= 1000) throw new Error("supervisor_capacity");
       const binding: BindingRecord = {projectId, mainThreadId, threadId: `${SUPERVISOR_ROOT_THREAD_PREFIX}${randomUUID()}`, modelState: {...this.settings(projectId), modelSelection: selection, pending: false}, title: `Supervisor · ${title.slice(0,160)}`, generation: 1, enabledAt: now,
         enableAfterSequence: watermark, initialModel: selection, creationAttempts: 0, state: "creating"};
+      const stop = this.chatStop(mainThreadId);
+      if (stop) binding.supervisionStop = stop;
+      this.saveUnboundStop(mainThreadId, null);
       this.store.db.prepare("INSERT INTO supervisor_owned_threads VALUES(?)").run(binding.threadId);
       this.store.db.prepare("INSERT INTO supervisor_main_bindings VALUES(?,?,?)").run(projectId, mainThreadId, JSON.stringify(binding));
       return binding;

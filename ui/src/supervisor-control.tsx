@@ -210,7 +210,7 @@ export function GlobalDefinitionsControlView({control, busy, blocked, message, o
     <p><strong>{control.enabled ? "Enabled" : "Disabled"}</strong>{control.enabled && !control.effectiveEnabled ? " — the master supervision switch is off" : ""}</p>
     <p>Shared definitions: <code>~/.t3-supervisor/project.yaml</code>, <code>steps/</code>, and <code>workflows/</code> in the T3 server user's home.</p>
     <p>This starts disabled. First enabling creates the shared project.yaml and empty steps/ and workflows/ directories if needed. Existing definitions are preserved, and the files are left uncommitted.</p>
-    <p>These definitions are shared by enabled project Supervisors and Scratch. Disabling them leaves each enabled project's own definitions available. The master switch overrides all supervision.</p>
+    <p>These definitions supply policy to enabled Supervisors. This switch never activates a chat or changes No Project mode. Disabling them leaves project definitions available; No Project plans use task-local steps.</p>
     <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>
     <div className="row">
       <button type="button" disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable global definitions" : "Enable global definitions"}</button>

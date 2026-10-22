@@ -433,17 +433,17 @@ test("first explicit global definitions enable initializes a missing server-home
     });
     const result = await supervisor.saveGlobalDefinitionsControl({expectedGeneration: 0, enabled: true}, AbortSignal.timeout(2000));
     assert.equal(result.status, "saved");
-    assert.deepEqual(events, ["initializeGlobal", "globalFingerprint", "globalFingerprint", "boundary"]);
+    assert.deepEqual(events, ["initializeGlobal", "globalFingerprint", "globalFingerprint"]);
     assert.equal(store.useGlobalDefinitions("project-a"), true);
     const projection: Projection = {thread: {id: "main", projectId: "project-a", title: "Main", lineage: {parentThreadId: null, relationshipToParent: null}},
       runs: [{id: "run-1", threadId: "main", ordinal: 1, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
         {id: "run-2", threadId: "main", ordinal: 2, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
         {id: "run-3", threadId: "main", ordinal: 3, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null}], messages: []};
-    assert.equal(store.baselineOrdinal("main", projection), 2);
+    assert.equal(store.baselineOrdinal("main", projection), 1);
   });
 });
 
-test("Scratch controls remain ineffective without the separate global definitions switch", async () => {
+test("No Project mode controls activation independently of shared definitions", async () => {
   await withStore(async store => {
     const settings = store.store.settings();
     store.store.classify("project-a", "scratch", settings.generation);
@@ -455,8 +455,10 @@ test("Scratch controls remain ineffective without the separate global definition
     assert.equal(control.effectiveEnabled, false);
     const result = await supervisor.saveControl({projectId: "project-a", expectedGeneration: control.generation, enabled: true}, signal);
     assert.equal(result.status, "unavailable");
-    assert.match(result.message, /Enable the separate global definitions setting/);
+    assert.match(result.message, /Use the No Project mode/);
     store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-sha");
+    assert.equal((await supervisor.control("project-a", signal)).effectiveEnabled, false);
+    await supervisor.saveNoProjectControl({expectedGeneration: 0, mode: "automatic"}, signal);
     assert.equal((await supervisor.control("project-a", signal)).effectiveEnabled, true);
   });
 });

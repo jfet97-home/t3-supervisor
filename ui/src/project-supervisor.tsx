@@ -1,3 +1,4 @@
+import {StopNotice} from "./stop-notice.js";
 import { assessmentForTask } from "../../src/workflow-assessment.js";
 import { workAttention } from "../../src/dashboard-overview.js";
 import React, { useEffect, useRef, useState, type FormEvent } from "react";
@@ -869,7 +870,7 @@ export function ProjectSupervisorView({
     : workflowProgress?.loading ? "Reading assessment…"
     : !progressComplete ? "Assessment coverage incomplete"
     : mainWorkflow ? "Retained workflow; not linked to this task" : "No current workflow record";
-  const attention = workAttention({enabled: attentionEnabled && !snapshot.chatSupervision?.stopped, bindingState: snapshot.binding?.state ?? null,
+  const attention = workAttention({enabled: (snapshot.chatSupervision?.effectiveEnabled ?? attentionEnabled) && !snapshot.chatSupervision?.stopped, bindingState: snapshot.binding?.state ?? null,
     settlementState: snapshot.binding?.settlementState ?? null, monitoring: snapshot.monitoringStatus, task: selectedTask, assessment: currentAssessment});
   const taskLabels: Record<string, string> = {inferred: "Interpreted", needs_context: "Needs clarification", not_supervised: "Supervision not needed", queued: "Queued", dispatching: "Contacting Supervisor", waiting: "Awaiting interpretation", uncertain: "Outcome uncertain", unavailable: "Unavailable", expired: "Earlier request expired"};
   const fieldsDisabled = !connected || !snapshot.available || fieldsBusy || blocked;
@@ -895,14 +896,15 @@ export function ProjectSupervisorView({
         <li><strong>Supervisor assessment</strong><span>{assessmentSummary}{currentAssessment && <small>Read {new Date(progressPages[0]!.observedAt).toLocaleTimeString()}</small>}{workflowProgress?.loading && currentAssessment && <small>Refreshing retained assessment…</small>}{workflowProgress?.error && <small>{workflowProgress.error} {currentAssessment ? "Showing the retained assessment." : "Current status is unknown."}</small>}</span></li>
       </ol>
     </section>
+    {snapshot.mainThreadId && snapshot.chatSupervision?.stopped && snapshot.chatSupervision.stoppedAt !== null && <StopNotice title={threadId ?? snapshot.mainThreadId} audit={{route: snapshot.chatSupervision.stoppedBy ?? "unknown", stoppedAt: snapshot.chatSupervision.stoppedAt, callerThreadId: snapshot.chatSupervision.stoppedCallerThreadId ?? null, userMessageId: snapshot.chatSupervision.stoppedUserMessageId ?? null}} onEnable={() => onChatSupervision(true)} busy={!connected || chatSupervisionBusy || chatSupervisionLocked}/>}
     <div hidden={section !== "all" && section !== "progress" && section !== "supervision"} className="conversation-supervision stack">      {snapshot.mainThreadId && snapshot.chatSupervision && <div className="stack">
         <h4>Chat supervision</h4>
         <p>{snapshot.chatSupervision.stopped
           ? `Supervision is stopped for this chat${snapshot.chatSupervision.stoppedBy ? ` (${{direct: "asked directly in the Supervisor conversation", relay: "asked in this chat", chat: "asked from another chat", ui: "stopped here"}[snapshot.chatSupervision.stoppedBy]})` : ""}. It stays off until you enable it again; the chat itself is not changed.`
-          : "Allowed for this chat; project/global settings still apply."}</p>
-        <div><button type="button" disabled={!connected || chatSupervisionBusy || chatSupervisionLocked} aria-busy={chatSupervisionBusy || undefined}
+          : snapshot.chatSupervision.activation === "not_started" ? "Not started. Choose this chat from Home to start supervision." : snapshot.chatSupervision.activation === "pending" ? "Start pending. No supervision effects are authorized yet." : "Allowed for this chat; project/global settings still apply."}</p>
+        {(!snapshot.chatSupervision.stopped || snapshot.chatSupervision.stoppedAt === null) && <div><button type="button" disabled={!connected || chatSupervisionBusy || chatSupervisionLocked} aria-busy={chatSupervisionBusy || undefined}
           onClick={() => onChatSupervision(snapshot.chatSupervision!.stopped)}>
-          {chatSupervisionBusy ? "Saving…" : snapshot.chatSupervision.stopped ? "Enable supervision" : "Stop supervision"}</button></div>
+          {chatSupervisionBusy ? "Saving…" : snapshot.chatSupervision.stopped ? "Enable supervision" : "Stop supervision"}</button></div>}
         <p role="status">{chatSupervisionMessage ?? ""}</p>
       </div>}
     </div>
@@ -1158,6 +1160,21 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
     }, 30_000);
     return () => clearInterval(timer);
   }, [connected, workflowProgressKey]);
+
+  useEffect(() => {
+    if (!connected || !threadId) return;
+    const abort = new AbortController();let reading = false;
+    const timer = setInterval(() => {
+      if (document.hidden || reading || savingRef.current || chatSupervisionRef.current) return;
+      reading = true;
+      void loadProjectSupervisor(projectId, abort.signal, threadId).then(next => {
+        if (abort.signal.aborted || savingRef.current || chatSupervisionRef.current || activeScope.current !== JSON.stringify([projectId, threadId])) return;
+        setSnapshotState(current => current?.projectId === projectId && current.snapshot.mainThreadId === threadId
+          ? {...current, snapshot: {...current.snapshot, chatSupervision: next.chatSupervision ?? null}} : current);
+      }).catch(() => undefined).finally(() => {reading = false;});
+    }, 30_000);
+    return () => {clearInterval(timer);abort.abort();};
+  }, [projectId, threadId, connected]);
 
   useEffect(() => {
     if (!projectId || !connected || saving) return;
@@ -1478,7 +1495,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
 
   return <section className="stack project-supervisor" aria-labelledby="project-supervisor-title">
     <h2 id="project-supervisor-title" className="sr-only">Project Supervisor</h2>
-    <div hidden={section !== "all" && section !== "settings"}>{projectId && <SupervisionControlPanel key={projectId} projectId={projectId} active={section === "settings" || section === "all"} onStateChange={setControlActivity} />}</div>
+    <div hidden={section !== "all" && section !== "settings"}>{projectId && (activeSnapshot?.noProjectMode ? <p className="panel">No Project mode: <strong>{activeSnapshot.noProjectMode.replaceAll("_", " ")}</strong>. Change this in Instance settings. Shared definitions supply policy independently.</p> : <SupervisionControlPanel key={projectId} projectId={projectId} active={section === "settings" || section === "all"} onStateChange={setControlActivity} />)}</div>
     {!projectId && <p className="panel muted">Select a project to manage its Supervisor settings.</p>}
     {projectId && !connected && <p className="panel" role="status">T3 is disconnected. Any unsaved Supervisor settings draft is kept.</p>}
     {projectId && connected && !activeSnapshot && isLoading && <p className="panel" role="status">Loading Supervisor status…</p>}

@@ -319,6 +319,7 @@ export const TaskInterpretation = Schema.Struct({
 });
 export type TaskInterpretationInfo = typeof TaskInterpretation.Type;
 export const ProjectSupervisorSnapshot = Schema.Struct({
+  noProjectMode: Schema.optional(Schema.Literals(["off", "on_request", "automatic"])),
   projectId: Schema.String,
   mainThreadId: Schema.NullOr(Schema.String),
   modelApplication: Schema.NullOr(Schema.Struct({pending: Schema.Boolean, attempts: Schema.Number, message: Schema.NullOr(Schema.String)})),
@@ -336,7 +337,8 @@ export const ProjectSupervisorSnapshot = Schema.Struct({
     stopped: Schema.Boolean,
     policyGeneration: Schema.Number,
     stoppedBy: Schema.NullOr(Schema.Literals(["direct", "relay", "chat", "ui"])),
-    stoppedAt: Schema.NullOr(Schema.Number),
+    stoppedCallerThreadId: Schema.optional(Schema.NullOr(Schema.String)), stoppedUserMessageId: Schema.optional(Schema.NullOr(Schema.String)),
+    effectiveEnabled: Schema.optional(Schema.Boolean), activation: Schema.optional(Schema.String), stoppedAt: Schema.NullOr(Schema.Number),
   }))),
 });
 export type ProjectSupervisorInfo = typeof ProjectSupervisorSnapshot.Type;

@@ -438,7 +438,7 @@ export const contributionImportDecision = (document: WorkflowStateDocument, inpu
 /** Persists workflow plans without treating them as a scheduler or execution claim. */
 export class WorkflowStateStore {
   constructor(readonly supervisors: ProjectSupervisorStore,
-    private readonly isEnabled: (projectId: string) => boolean = projectId => supervisors.enabled(projectId)) {
+    private readonly isEnabled: (projectId: string, mainThreadId?: string) => boolean = projectId => supervisors.enabled(projectId)) {
     supervisors.store.db.exec("CREATE TABLE IF NOT EXISTS supervisor_workflow_state (" +
       "workflow_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,thread_id TEXT NOT NULL," +
       "parent_workflow_id TEXT,parent_thread_id TEXT,revision INTEGER NOT NULL,document TEXT NOT NULL," +
@@ -845,7 +845,7 @@ export class WorkflowStateStore {
     if (!this.supervisors.scopeCompatible || !validId(owner.projectId) || !validId(owner.mainThreadId) || !validId(owner.supervisorThreadId) ||
       !Number.isSafeInteger(owner.bindingGeneration) || owner.bindingGeneration < 1) return false;
     const binding = this.supervisors.binding(owner.projectId, owner.mainThreadId);
-    return this.isEnabled(owner.projectId) && binding?.state === "ready" &&
+    return this.isEnabled(owner.projectId, owner.mainThreadId) && binding?.state === "ready" &&
       binding.threadId === owner.supervisorThreadId && binding.generation === owner.bindingGeneration;
   }
 

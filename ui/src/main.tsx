@@ -1,3 +1,4 @@
+import {NoProjectPanel, StartSupervisionPanel, useChatCandidates} from "./no-project.js";
 import { clearAccess, getSessionToken, setSessionToken, watchSession } from "./access.js";
 import { useEffect, useState, useRef } from "react";
 import { createRoot } from "react-dom/client";
@@ -130,7 +131,9 @@ function ChatSettings({ data, onDirtyChange }: { data: GuidanceSnapshot; onDirty
   const save = useAtomSet(threadPolicyAtom, { mode: "promise" });
   const refresh = useAtomRefresh(snapshotAtom);
   useEffect(() => { if (!dirty) setForm(data.threadPolicy); }, [data.threadPolicy, dirty]);
-  const chats = [...data.threads, ...form.excludedThreadIds.filter(id => !data.threads.some(t => t.id === id)).map(id => ({ id, title: "Unavailable chat", available: false }))];
+  const candidates = useChatCandidates(query, "exclude");
+  const searchRef = useRef<HTMLInputElement>(null);
+  const chats = form.excludedThreadIds.filter(id => (candidates.data?.exceptions.includes(id) || !data.threadPolicy.excludedThreadIds.includes(id))).map(id => data.threads.find(thread => thread.id === id) ?? {id, title: "Unavailable chat", available: false});
   const change = (patch: Partial<typeof form>) => { setForm({ ...form, ...patch }); setDirty(true); setMessage(""); };
   return <form className="panel stack" method="post" onSubmit={async event => {
     event.preventDefault(); setSaving(true);
@@ -142,12 +145,14 @@ function ChatSettings({ data, onDirtyChange }: { data: GuidanceSnapshot; onDirty
     <p>Saved for this Supervisor instance. Changes apply without restarting.</p>
     <fieldset><legend>Excluded chats</legend>
       <p>Project Supervisors skip excluded chats. Existing project, workflow and conversation state is retained.</p>
-      <label htmlFor="chat-search">Find a chat</label><input id="chat-search" name="chatSearch" type="search" value={query} onChange={e => setQuery(e.target.value)} />
-      <div className="chat-options">{chats.filter(t => `${t.title} ${t.id}`.toLowerCase().includes(query.toLowerCase())).sort((a,b) => a.title.localeCompare(b.title)).map(t => <label className="toggle" key={t.id}>
-        <input type="checkbox" name="excludedThreadIds" value={t.id} checked={form.excludedThreadIds.includes(t.id)} onChange={e => change({ excludedThreadIds: e.target.checked ? [...form.excludedThreadIds, t.id] : form.excludedThreadIds.filter(id => id !== t.id) })} />
-        <span>{t.title}<small>{t.id}{!t.available ? " · unavailable" : ""}</small></span>
-      </label>)}</div>
-      <small>{form.excludedThreadIds.length} chats excluded.</small>
+      <p>Only explicit exclusions in enabled scopes appear here. Hidden or unavailable exclusions stay saved.</p>
+      <ul className="candidate-list">{chats.map(chat => <li key={chat.id} className="row between"><div><strong>{chat.title}</strong><p className="small muted">{chat.id}</p></div><button type="button" disabled={saving} aria-label={`Remove exclusion for ${chat.title}`} onClick={() => {change({excludedThreadIds: form.excludedThreadIds.filter(id => id !== chat.id)});searchRef.current?.focus();}}>Remove exclusion</button></li>)}</ul>
+      {!chats.length && candidates.data && <p>No explicit exclusions in enabled scopes.</p>}
+      <label htmlFor="chat-search">Add an exclusion</label><input ref={searchRef} id="chat-search" name="chatSearch" type="search" value={query} maxLength={512} autoCapitalize="off" autoCorrect="off" spellCheck={false} disabled={saving} aria-describedby="exclusion-help" onChange={e => setQuery(e.target.value)} />
+      <p id="exclusion-help" className="small muted">{candidates.error || (query ? candidates.data?.message : "Search for a chat title, ID or native T3 link.")}</p>
+      {candidates.error && <button type="button" onClick={candidates.reload}>Reload exclusion search</button>}
+      {query && <ul className="candidate-list">{candidates.data?.candidates.filter(chat => !form.excludedThreadIds.includes(chat.id)).map(chat => <li key={chat.id} className="row between"><div><strong>{chat.title}</strong><p className="small muted">{chat.id}</p></div><button type="button" disabled={saving} aria-label={`Add exclusion for ${chat.title}`} onClick={() => {change({excludedThreadIds: [...form.excludedThreadIds, chat.id]});setQuery("");searchRef.current?.focus();}}>Add exclusion</button></li>)}</ul>}
+      <small>{form.excludedThreadIds.length} exclusions retained in total.</small>
     </fieldset>
     <div className="save-bar">{dirty && <span>Unsaved chat exclusions</span>}<button className="primary" disabled={saving || !dirty} type="submit">{saving ? "Saving…" : "Save chat settings"}</button>{dirty && <button type="button" disabled={saving} onClick={() => {setForm(data.threadPolicy);setDirty(false);setMessage("");}}>Discard draft</button>}</div><p role="status">{message}</p>
   </form>;
@@ -157,8 +162,9 @@ function Settings({data, active, onDirtyChange}: {data: GuidanceSnapshot; active
   const [chatDirty, setChatDirty] = useState(false);
   const [masterActivity, setMasterActivity] = useState(idleControlActivity);
   const [definitionsActivity, setDefinitionsActivity] = useState(idleControlActivity);
-  useEffect(() => onDirtyChange(chatDirty || masterActivity.busy || masterActivity.uncertain || definitionsActivity.busy || definitionsActivity.uncertain), [chatDirty, masterActivity, definitionsActivity, onDirtyChange]);
-  return <section className="stack settings-workspace"><div className="page-heading"><h1>Instance settings</h1><p className="muted">Controls shared across this Supervisor installation. Project defaults live with each project.</p></div><SupervisionControlPanel active={active} onStateChange={setMasterActivity} onChanged={() => setControlRevision(value => value + 1)} /><GlobalDefinitionsControlPanel active={active} refreshKey={controlRevision} onStateChange={setDefinitionsActivity}/><ChatSettings data={data} onDirtyChange={setChatDirty}/>
+  const [noProjectActivity, setNoProjectActivity] = useState(idleControlActivity);
+  useEffect(() => onDirtyChange(noProjectActivity.busy || noProjectActivity.dirty || noProjectActivity.uncertain || chatDirty || masterActivity.busy || masterActivity.uncertain || definitionsActivity.busy || definitionsActivity.uncertain), [noProjectActivity, chatDirty, masterActivity, definitionsActivity, onDirtyChange]);
+  return <section className="stack settings-workspace"><div className="page-heading"><h1>Instance settings</h1><p className="muted">Controls shared across this Supervisor installation. Project defaults live with each project.</p></div><SupervisionControlPanel active={active} onStateChange={setMasterActivity} onChanged={() => setControlRevision(value => value + 1)} /><NoProjectPanel active={active} onStateChange={setNoProjectActivity}/><GlobalDefinitionsControlPanel active={active} refreshKey={controlRevision} onStateChange={setDefinitionsActivity}/><ChatSettings data={data} onDirtyChange={setChatDirty}/>
     <div className="panel stack"><h2>T3 connection</h2><p>{data.connected ? "Connected" : "Disconnected"} · Build: {data.serverVersion ?? "Unavailable"}</p><p>{data.coverage}</p>
       <details><summary>Advanced connection and editing details</summary><div className="stack"><h3>Project configuration editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .t3-supervisor/project.yaml in the selected working directory. Step and workflow definitions are read-only in the dashboard.</p>
       <p>Native dialogue can record plan proposals and agreement; those records do not prove step execution.</p></div></details>
@@ -166,6 +172,7 @@ function Settings({data, active, onDirtyChange}: {data: GuidanceSnapshot; active
 }
 function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
   const [signOutError, setSignOutError] = useState("");
+  const [startPending, setStartPending] = useState(false);
   const snapshot = useAtomValue(snapshotAtom);
   const refresh = useAtomRefresh(snapshotAtom);
   const {route, navigate, guard} = useNavigation();
@@ -194,11 +201,11 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
   }, [refresh]);
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
-      if (projectDirty || settingsDirty) event.preventDefault();
+      if (startPending || projectDirty || settingsDirty) event.preventDefault();
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [projectDirty, settingsDirty]);
+  }, [startPending, projectDirty, settingsDirty]);
   if (snapshot._tag !== "Success" && !lastData.current)
     return (
       <main className="panel">
@@ -214,7 +221,7 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
       </main>
     );
   const data = snapshot._tag === "Success" ? snapshot.value : {...lastData.current!, connected: false};
-  const dirty = projectDirty || settingsDirty;
+  const dirty = startPending || projectDirty || settingsDirty;
   return (
     <div className="app-shell">
       <a className="skip-link" href="#workspace" onClick={event => {event.preventDefault();document.getElementById("workspace")?.focus();}}>Skip to content</a>
@@ -231,7 +238,7 @@ function Dashboard({onSignOut}: {onSignOut: () => Promise<void>}) {
         {dirty && <p id="pending-changes" className="notice" role="status">Save drafts and resolve pending changes before signing out. {projectDirty && projectDraftTarget && <RouteLink to={projectDraftTarget} navigate={navigate}>Review project changes</RouteLink>}{projectDirty && settingsDirty && " · "}{settingsDirty && <RouteLink to={{...directoryRoute, page: "settings"}} navigate={navigate}>Review instance settings</RouteLink>}</p>}
         {signOutError && <p className="notice" role="alert">{signOutError}</p>}
         {snapshot._tag === "Failure" && <p className="notice" role="alert">Supervisor connection unavailable. Your drafts are kept.</p>}
-        {view === "home" && <Home data={data} overview={overview} navigate={navigate}/>}
+        <div hidden={view !== "home"}><Home data={data} overview={overview} navigate={navigate} startPanel={<StartSupervisionPanel active={view === "home"} onStateChange={setStartPending} onChanged={refresh}/>}/></div>
         <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} overview={overview} route={route} navigate={navigate} guard={guard} csrfToken={getCsrfToken()} onDirtyChange={setProjectDirty} onDraftTargetChange={setProjectDraftTarget}/></div>
         {view === "guide" && <StepsAndWorkflowsGuide />}
         {view === "activity" && <History items={data.activity} title="Supervision activity" />}

@@ -74,3 +74,19 @@ export const SupervisionSetupResult = Schema.Struct({
   workspaceRoot: Schema.NullOr(Schema.String),
   branch: Schema.NullOr(Schema.String),
 });
+
+export const NoProjectMode = Schema.Literals(["off", "on_request", "automatic"]);
+export const NoProjectControl = Schema.Struct({generation: Schema.Number, mode: NoProjectMode, globallyEnabled: Schema.Boolean});
+export const NoProjectControlSave = Schema.Struct({expectedGeneration: Schema.Number, mode: NoProjectMode});
+export const NoProjectControlResult = Schema.Struct({status: Schema.Literals(["saved", "conflict", "unavailable"]), message: Schema.String, control: NoProjectControl});
+export type NoProjectModeValue = typeof NoProjectMode.Type;
+export type NoProjectControlInput = typeof NoProjectControlSave.Type;
+export const SupervisionStart = Schema.Struct({threadId: Schema.String, operationId: Schema.String});
+export const SupervisionStartStatus = Schema.Struct({
+  threadId: Schema.String, operationId: Schema.String,
+  status: Schema.Literals(["pending", "active", "rejected", "denied", "unavailable"]), reason: Schema.String,
+});
+export const SupervisionCandidates = Schema.Struct({exceptions: Schema.Array(Schema.String), candidates: Schema.Array(Schema.Struct({
+  id: Schema.String, projectId: Schema.String, title: Schema.String, updatedAt: Schema.NullOr(Schema.String),
+  active: Schema.Boolean, excluded: Schema.Boolean,
+})), message: Schema.String});

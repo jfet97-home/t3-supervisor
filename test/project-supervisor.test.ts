@@ -1,3 +1,5 @@
+import {WorkflowWriteController} from "../src/workflow-write-controller.js";
+import { ThreadPolicyStore } from "../src/thread-policy.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -383,6 +385,7 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
   };
   return {
     directory,
+    config,
     operations,
     projectionReads,
     projections,
@@ -980,7 +983,7 @@ test("an archived reserved binding is retained and never launched again", async 
   assert.equal(fixture.operations.filter((call) => call.tag === "orchestration.launchThread").length, 1);
 });
 
-test("workflow editing waits for classification and honors Scratch/global and project controls", async t => {
+test("workflow editing waits for classification and keeps No Project activation independent of definitions", async t => {
   const fixture = await makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
   t.after(fixture.cleanup);
   reserveReadyBinding(fixture);
@@ -992,9 +995,11 @@ test("workflow editing waits for classification and honors Scratch/global and pr
   guidance.classify("project-a", "scratch", guidance.settings().generation);
   assert.equal(supervisor.workflowEditingEnabled("project-a"), false);
   fixture.supervisorStore.saveGlobalDefinitionsControl(0, true);
+  assert.equal(supervisor.workflowEditingEnabled("project-a"), false);
+  await supervisor.saveNoProjectControl({expectedGeneration: 0, mode: "automatic"}, AbortSignal.timeout(1000));
   assert.equal(supervisor.workflowEditingEnabled("project-a"), true);
   fixture.supervisorStore.saveGlobalDefinitionsControl(1, false);
-  assert.equal(supervisor.workflowEditingEnabled("project-a"), false);
+  assert.equal(supervisor.workflowEditingEnabled("project-a"), true);
   guidance.classify("project-a", "project", guidance.settings().generation);
   assert.equal(supervisor.workflowEditingEnabled("project-a"), true);
   fixture.supervisorStore.saveControl("project-a", 1, false);
@@ -1546,4 +1551,131 @@ test("a main conversation over the buffered cap is discovered and interpreted fr
   await supervisor.runOnce();
   assert.equal(fixture.supervisorStore.task("huge-main")?.status, "inferred");
   assert.equal(fixture.supervisorStore.task("huge-main")?.objective, "Build the invoice export");
+});
+
+const noProjectFixture = async () => {
+  const fixture = await makeFixture([{threadId: "manual", projectId: "project-a", turns: []}, {threadId: "other", projectId: "project-a", turns: []}]);
+  fixture.supervisorStore.store.db.prepare("INSERT INTO classifications VALUES(?,?)").run("project-a", "scratch");
+  const policy = new ThreadPolicyStore(fixture.directory, {excludedThreadIds: []});fixture.config.threadPolicy = policy;
+  const supervisor = fixture.makeSupervisor();
+  await supervisor.runOnce();
+  fixture.addTurn("manual", "project-a", {id: "request-start", sequence: 20, text: "Have Supervisor follow this task: add a CSV export."});
+  const projection = fixture.projections.get("manual")!;
+  projection.messages[0]!.createdAt = new Date(Date.now() - 1000).toISOString();
+  return {fixture, supervisor, policy, cleanup: async () => {policy.close();await fixture.cleanup();}};
+};
+
+test("No Project defaults to On request and shared definitions never activate a chat", async () => {
+  const f = await noProjectFixture();
+  try {
+    assert.equal(f.supervisor.noProjectControl().mode, "on_request");
+    f.fixture.supervisorStore.saveGlobalDefinitionsControl(0, true);
+    await f.supervisor.runOnce();
+    assert.equal(f.fixture.operations.length, 0);
+    assert.equal(f.fixture.supervisorStore.bindings().length, 0);
+    assert.equal(f.supervisor.scopeEnabled("project-a", "manual"), false);
+    assert.equal(f.supervisor.scopeEnabled("project-b", "ordinary"), true);
+  } finally {await f.cleanup();}
+});
+
+test("native Start runs one intent interpretation, grants only that chat and survives restart", async () => {
+  const f = await noProjectFixture();
+  try {
+    const args = {callerThreadId: "manual", userMessageId: "request-start", operationId: "own-start"};
+    const result = await f.supervisor.startSupervision(args, {runId: "run-request-start"}, AbortSignal.timeout(1000));
+    assert.equal(result.status, "pending");
+    await f.supervisor.runOnce();
+    const task = f.fixture.supervisorStore.task("manual")!;assert.ok(task);
+    assert.equal(f.supervisor.scopeEnabled("project-a", "manual"), false);
+    assert.equal(f.supervisor.workflowEditingEnabled("project-a", "manual"), false);
+    assert.match(task.requestText, /startRequested/);
+    assert.equal(f.fixture.operations.filter(op => op.payload.type === "message.dispatch").length, 1);
+    const root = f.fixture.projections.get(task.supervisorThreadId)!;
+    completeSupervisorRequest(root, task.messageId, JSON.stringify({objective: null, reason: "User requested supervision; awaiting a substantive task.", sourceMessageIds: [args.userMessageId], startRequested: true, workflow: null}));
+    await f.supervisor.runOnce();
+    assert.equal(f.fixture.supervisorStore.start("manual")?.status, "active", JSON.stringify({start:f.fixture.supervisorStore.start("manual"),task:f.fixture.supervisorStore.task("manual")}));
+    assert.equal(f.supervisor.scopeEnabled("project-a", "manual"), true);
+    assert.equal(f.supervisor.scopeEnabled("project-a", "other"), false);
+    assert.equal(f.fixture.supervisorStore.task("manual")?.status, "needs_context");
+    const originalTask = task.id;
+    await f.supervisor.runOnce();assert.equal(f.fixture.supervisorStore.task("manual")?.id, originalTask);
+    f.fixture.restart();const resumed = f.fixture.makeSupervisor();await resumed.runOnce();
+    assert.equal(resumed.scopeEnabled("project-a", "manual"), true);
+    assert.equal(resumed.scopeEnabled("project-a", "other"), false);
+  } finally {await f.cleanup();}
+});
+
+test("negative Start intent and later Stop fence interpretation without operative contact", async () => {
+  for (const outcome of ["negative", "stop", "mode", "edited"] as const) {
+    const f = await noProjectFixture();
+    try {
+      const args = {callerThreadId: "manual", userMessageId: "request-start", operationId: "start"};
+      await f.supervisor.startSupervision(args, {runId: "run-request-start"}, AbortSignal.timeout(1000));await f.supervisor.runOnce();
+      const task = f.fixture.supervisorStore.task("manual")!;
+      if (outcome === "stop") await f.supervisor.setChatSupervision({projectId: "project-a", mainThreadId: "manual", policyGeneration: f.policy.get().generation, enabled: false}, AbortSignal.timeout(1000));
+      if (outcome === "mode") await f.supervisor.saveNoProjectControl({expectedGeneration: 0, mode: "off"}, AbortSignal.timeout(1000));
+      if (outcome === "edited") f.fixture.projections.get("manual")!.messages[0]!.text = "Changed request";
+      completeSupervisorRequest(f.fixture.projections.get(task.supervisorThreadId)!, task.messageId, JSON.stringify({objective: null, reason: "No task", sourceMessageIds: [args.userMessageId], startRequested: outcome !== "negative", workflow: null}));
+      await f.supervisor.runOnce();
+      assert.equal(f.supervisor.scopeEnabled("project-a", "manual"), false, outcome);
+      assert.equal(f.fixture.operations.filter(op => op.payload.threadId === "manual").length, 0, outcome);
+    } finally {await f.cleanup();}
+  }
+});
+
+test("dashboard Start grants next-request permission when current work is already finished", async () => {
+  const f = await noProjectFixture();
+  try {
+    assert.equal((await f.supervisor.dashboardStart("manual", "dashboard", AbortSignal.timeout(1000))).status, "active");
+    await f.supervisor.runOnce();
+    assert.equal(f.fixture.supervisorStore.task("manual"), null);
+    assert.equal(f.fixture.operations.length, 0);
+    assert.equal((await f.supervisor.dashboardStart("manual", "dashboard", AbortSignal.timeout(1000))).status, "active");
+    assert.equal(f.fixture.supervisorStore.start("manual")?.taskId, null);
+    const off = await f.supervisor.saveNoProjectControl({expectedGeneration: 0, mode: "off"}, AbortSignal.timeout(1000));
+    assert.equal(off.status, "saved");assert.equal(f.supervisor.scopeEnabled("project-a", "manual"), false);
+    await f.supervisor.saveNoProjectControl({expectedGeneration: 1, mode: "on_request"}, AbortSignal.timeout(1000));
+    assert.equal(f.supervisor.scopeEnabled("project-a", "manual"), true);
+  } finally {await f.cleanup();}
+});
+
+test("Start intake requires exact native own-run proof before reserving permission", async () => {
+  for (const variant of ["direct", "mcpx", "forged", "foreign", "rollback", "wrong_tool"] as const) {
+    const f = await noProjectFixture();
+    try {
+      const args = {callerThreadId: "manual", userMessageId: "request-start", operationId: "native-start"};
+      const caller = f.fixture.projections.get("manual")!;const run = caller.runs[0]!;
+      if (variant === "rollback") run.status = "rolled_back";
+      const nodeId = "native-start-node";
+      (caller.nodes as Array<Record<string, unknown>>).push({id: nodeId, kind: "dynamic_tool", threadId: "manual", runId: run.id, rootNodeId: run.rootNodeId, parentNodeId: run.rootNodeId, providerThreadId: run.providerThreadId, status: "completed"});
+      const item = {id: "native-start-item", type: "dynamic_tool", threadId: variant === "foreign" ? "other" : "manual", runId: run.id, nodeId, providerThreadId: run.providerThreadId,
+        nativeItemRef: {driver: "codex", nativeId: "native-start-item", strength: "strong"}, parentItemId: null, ordinal: 2, status: "completed", toolNonExecutionKind: null,
+        toolName: variant === "mcpx" ? "mcp__mcpx__mcpx_call_tool" : variant === "wrong_tool" ? "mcp__t3-supervisor-workflows__supervision_stop" : "mcp__t3-supervisor-workflows__supervision_start",
+        input: variant === "mcpx" ? {name: "t3-supervisor-workflows__supervision_start", arguments: args} : variant === "forged" ? {...args, operationId: "other"} : args};
+      caller.turnItems = [item];
+      const controller = new WorkflowWriteController({supervisors: f.fixture.supervisorStore, workflows: f.supervisor.workflowStates, maxEvidenceWaitMs: 0,
+        native: {listThreads: async () => [caller.thread], projection: async () => caller, getTurnItem: async () => ({item})},
+        starts: {start: (input, evidence, signal) => f.supervisor.startSupervision(input, evidence, signal)}});
+      const result = await controller.startSupervision(args);
+      assert.equal(result.status === "pending" && f.fixture.supervisorStore.start("manual") !== null, variant === "direct" || variant === "mcpx", variant);
+      assert.equal(f.fixture.operations.length, 0, "intake alone never calls a model or operative");
+    } finally {await f.cleanup();}
+  }
+});
+
+test("Start rejects nonhuman, wrong-turn, project and stale sources, and keeps duplicate operation identity", async () => {
+  const f = await noProjectFixture();
+  try {
+    const args = {callerThreadId: "manual", userMessageId: "request-start", operationId: "identity"};
+    assert.equal((await f.supervisor.startSupervision(args, {runId: "other-run"}, AbortSignal.timeout(1000))).status, "denied");
+    const human = f.fixture.projections.get("manual")!.messages[0]!;human.creationSource = "mcp";args.operationId = "nonhuman";
+    assert.equal((await f.supervisor.startSupervision(args, {runId: "run-request-start"}, AbortSignal.timeout(1000))).status, "denied");human.creationSource = "web";
+    args.operationId = "stale";f.fixture.supervisorStore.saveUnboundStop("manual", {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: Date.now()});
+    assert.equal((await f.supervisor.startSupervision(args, {runId: "run-request-start"}, AbortSignal.timeout(1000))).status, "denied");
+    f.fixture.supervisorStore.saveUnboundStop("manual", null);args.operationId = "positive";
+    assert.equal((await f.supervisor.startSupervision(args, {runId: "run-request-start"}, AbortSignal.timeout(1000))).status, "pending");
+    const id = f.fixture.supervisorStore.start("manual")!.taskId;
+    assert.equal((await f.supervisor.startSupervision(args, {runId: "run-request-start"}, AbortSignal.timeout(1000))).status, "pending");
+    assert.equal(f.fixture.supervisorStore.start("manual")!.taskId, id);
+  } finally {await f.cleanup();}
 });

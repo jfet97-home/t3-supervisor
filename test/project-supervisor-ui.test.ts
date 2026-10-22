@@ -1092,9 +1092,9 @@ test("the selected chat shows its saved supervision state with one native Stop s
   assert.equal(on.match(/role="status"/gu)?.length ?? 0, 1, "one status region reports the saved result or error");
   const stopped = render(true, false, "Supervision is stopped for this chat.");
   assert.match(stopped, /Supervision is stopped for this chat \(asked in this chat\)/u);
-  assert.match(stopped, /<button type="button">Enable supervision<\/button>/u);
+  assert.match(stopped, /<button type="button"[^>]*>Enable supervision<\/button>/u);
   assert.match(stopped, /<p role="status">Supervision is stopped for this chat\.<\/p>/u);
-  assert.match(render(true, true), /<button type="button" disabled="" aria-busy="true">Saving…<\/button>/u, "a pending change cannot be submitted twice");
+  assert.match(render(true, true), /<button type="button" disabled=""[^>]*>Enable supervision<\/button>/u, "a pending change cannot be submitted twice");
   const locked = renderToStaticMarkup(createElement(ProjectSupervisorView, {
     ...viewDefaults, section: "progress", snapshot: {...snapshot, chatSupervision: {stopped: false, policyGeneration: 4, stoppedBy: null, stoppedAt: null}},
     selection, monitoring, threadId: "task-thread", connected: true, saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false,

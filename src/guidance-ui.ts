@@ -59,6 +59,11 @@ export const startGuidanceUi = async (
         try: () => {if (!supervision) throw new Error("supervision_unavailable");return supervision.overview(overviewPage(query));},
         catch: () => new UiError({message: "The work overview is unavailable. Refresh to try again."}),
       }),
+      noProjectControl: () => Effect.try({try: () => {if (!supervision) throw new Error("unavailable");return supervision.noProjectControl();}, catch: () => new UiError({message: "No Project mode unavailable."})}),
+      saveNoProjectControl: ({payload}) => Effect.tryPromise({try: signal => {if (!supervision) throw new Error("unavailable");return supervision.saveNoProjectControl(payload, signal);}, catch: () => new UiError({message: "Reload the No Project mode before retrying."})}),
+      supervisionCandidates: ({query}) => Effect.tryPromise({try: () => {if (!supervision) throw new Error("unavailable");return supervision.candidates(query.query, query.purpose);}, catch: () => new UiError({message: "Chat search unavailable."})}),
+      startSupervision: ({payload}) => Effect.tryPromise({try: async signal => {if (!supervision) throw new Error("unavailable");const result = await supervision.dashboardStart(payload.threadId, payload.operationId, signal);return {...payload, status: result.status === "invalid" ? "denied" as const : result.status, reason: result.reason};}, catch: () => new UiError({message: "Start outcome is unknown. Check its original operation ID; do not replay."})}),
+      supervisionStartStatus: ({query}) => Effect.try({try: () => {if (!supervision) throw new Error("unavailable");return supervision.startStatus(query.threadId, query.operationId);}, catch: () => new UiError({message: "Start status unavailable."})}),
       supervisionControl: ({query}) => Effect.tryPromise({
         try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.control(query.projectId ?? null, signal);},
         catch: () => new UiError({message: "Supervision control is unavailable."}),

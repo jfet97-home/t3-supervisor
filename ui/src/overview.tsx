@@ -1,3 +1,4 @@
+import {StopNotice} from "./stop-notice.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Schema } from "effect";
 import { DashboardOverview, readOverviewRange, type DashboardOverviewInfo, type DashboardWorkInfo } from "../../src/dashboard-overview.js";
@@ -72,7 +73,7 @@ export function WorkTable({work, data, navigate, empty = "No supervised conversa
   </div>;
 }
 
-export function Home({data, overview, navigate}: {data: GuidanceSnapshot; overview: OverviewState; navigate: (route: Route) => void}) {
+export function Home({data, overview, navigate, startPanel}: {data: GuidanceSnapshot; overview: OverviewState; navigate: (route: Route) => void; startPanel?: React.ReactNode}) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [project, setProject] = useState("");
@@ -91,12 +92,14 @@ export function Home({data, overview, navigate}: {data: GuidanceSnapshot; overvi
         {attention.length > 0 ? <div className="attention-list">{attention.slice(0, 5).map(item => <RouteLink key={item.mainThreadId} to={workRoute(item)} navigate={navigate} className="attention-row"><Icon name="alert"/><div><strong>{item.title}</strong><p>{item.attention[0]}</p><span className="small muted">{data.projects.find(project => project.id === item.projectId)?.title} · <ReadTime value={item.updatedAt} prefix="Task updated"/></span></div><Icon name="arrow"/></RouteLink>)}</div>
           : <div className="quiet-state"><Icon name="check"/><div><strong>{data.connected && result.available && !overview.error ? "No attention items recorded in available projects" : "No attention items in the retained read"}</strong><p className="muted">Quiet or stopped supervision does not establish that a task is complete.</p></div></div>}
       </section>
+      {startPanel}
       <section className="work-section" aria-labelledby="current-work-heading"><div className="section-heading row between"><div><h2 id="current-work-heading">Supervised work <span className="count">{result.total}</span></h2><p className="muted small">Native activity and Supervisor records describe different things.</p></div><RouteLink to={directoryRoute} navigate={navigate}>Browse projects<Icon name="arrow" size={16}/></RouteLink></div>
         <div className="filter-bar"><label className="search"><span className="sr-only">Search work</span><Icon name="search" size={18}/><input type="search" aria-label="Search work" placeholder="Search conversations or objectives" value={query} onChange={event => setQuery(event.target.value)}/></label><label><span className="sr-only">Filter by project</span><select aria-label="Filter by project" value={project} onChange={event => setProject(event.target.value)}><option value="">All projects</option>{result.projects.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><label><span className="sr-only">Filter work status</span><select aria-label="Filter work status" value={filter} onChange={event => setFilter(event.target.value)}><option value="all">All states</option><option value="attention">Needs attention</option><option value="active">Native activity: active</option><option value="stopped">Supervision off</option></select></label></div>
         <WorkTable work={work} data={data} navigate={navigate} empty={result.total ? "Try another search or filter. Filters apply to the loaded conversations." : "Open a project to inspect its conversations and supervision settings. No bound main conversations were found in available projects."}/>
         {result.hasMore && <div className="pagination"><p className="muted small">{result.work.length} of {result.total} conversations loaded. Filters apply to this loaded set.</p><button disabled={overview.loading || !data.connected} onClick={overview.loadMore}>Load more conversations</button></div>}
       </section>
     </>}
+    {result?.work.some(item => item.stop) && <section className="stack" aria-label="Stopped supervision"><h2>Stopped supervision</h2>{result.work.filter(item => item.stop).slice(0, 3).map(item => <StopNotice key={item.mainThreadId} audit={item.stop!} title={item.title} enableLabel="Review and enable" onEnable={() => navigate(workRoute(item))}/>)}</section>}
     <section aria-labelledby="recent-changes-title" className="stack"><div className="section-heading row between"><h2 id="recent-changes-title">Recent changes</h2><RouteLink to={{...directoryRoute, page: "activity"}} navigate={navigate}>All activity<Icon name="arrow" size={16}/></RouteLink></div>
       <ol className="recent-activity">{[...data.activity].sort((a, b) => b.createdAt - a.createdAt).slice(0, 5).map(item => {
         const thread = data.threads.find(thread => thread.id === item.threadId);

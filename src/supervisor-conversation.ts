@@ -295,7 +295,7 @@ export class SupervisorConversation {
     readonly projection: (threadId: string, signal: AbortSignal) => Promise<Projection>,
     readonly definitions: ConversationDefinitions | undefined,
     readonly eligible: (thread: ThreadInfo, threads: readonly ThreadInfo[]) => boolean,
-    readonly enabled: (projectId: string) => boolean = () => true,
+    readonly enabled: (projectId: string, mainThreadId?: string) => boolean = () => true,
     readonly workflows?: WorkflowStateStore,
     readonly descendantContactable: (thread: ThreadInfo, threads: readonly ThreadInfo[]) => boolean = thread => !thread.archivedAt && !thread.deletedAt,
     teamStore?: SupervisorTeamStore,
@@ -304,7 +304,7 @@ export class SupervisorConversation {
     this.requests = new SupervisorConversationStore(store.store);
     this.monitor = new ProjectSupervisorMonitorStore(store.store);
     this.teamRuntime = teamStore ? new SupervisorTeamRuntime({store, teamStore, requests: this.requests, monitor: this.monitor, rpc, projection,
-      supervisionStopped: mainThreadId => this.supervisionStopped(mainThreadId), ...(helperTransport ? {helperTransport} : {})}) : null;
+      supervisionStopped: mainThreadId => this.supervisionStopped(mainThreadId) || !this.enabled(this.store.bindings().find(item => item.mainThreadId === mainThreadId)?.projectId ?? "", mainThreadId), ...(helperTransport ? {helperTransport} : {})}) : null;
   }
   private roleFor(binding: BindingRecord): string {
     const teamPolicy = this.teamRuntime?.coordinatorPolicy(binding);
@@ -472,7 +472,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
   async observe(threads: readonly ThreadInfo[], signal: AbortSignal, now = Date.now()): Promise<void> {
     this.requests.prune(now);
     const tasks = this.store.bindings().flatMap(binding => this.store.tasksFor(binding))
-      .filter(task => this.enabled(task.projectId) && !this.supervisionStopped(task.threadId) && task.status === "inferred" && (task.workflow?.status === "proposed" || task.workflow?.status === "provisional" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale") &&
+      .filter(task => this.enabled(task.projectId, task.threadId) && !this.supervisionStopped(task.threadId) && task.status === "inferred" && (task.workflow?.status === "proposed" || task.workflow?.status === "provisional" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale") &&
         task.supervisorThreadId === this.store.bindingForSupervisor(task.supervisorThreadId)?.threadId &&
         (this.requests.introduction(task.id)?.state === "sent" || this.introductionUnsent(task.id)));
     const candidates = [...tasks.slice(this.offset), ...tasks.slice(0, this.offset)].slice(0, 20);
@@ -487,7 +487,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       const introduction = this.requests.introduction(task.id);
       try {
         const agent = await this.projection(task.threadId, signal);
-        if (!this.enabled(task.projectId)) continue;
+        if (!this.enabled(task.projectId, task.threadId)) continue;
         if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== task.projectId) {
           this.markWorkflowStale(task, "The operative conversation is no longer eligible for this workflow agreement.", now);continue;
         }
@@ -526,7 +526,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
             try {
               const childProjection = await readScopedProjection(child.id);
               if (!childProjection) continue;
-              if (!this.enabled(task.projectId) || childProjection.thread.id !== child.id ||
+              if (!this.enabled(task.projectId, task.threadId) || childProjection.thread.id !== child.id ||
                 childProjection.thread.lineage.relationshipToParent !== "subagent" ||
                 childProjection.thread.lineage.parentThreadId !== child.lineage.parentThreadId) continue;
               const sourceOrdinal = this.monitor.hasState(task.projectId, child.id)
@@ -585,7 +585,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
           }
           supervisorProjections.set(task.supervisorThreadId, supervisor);
         }
-        if (!this.enabled(task.projectId)) continue;
+        if (!this.enabled(task.projectId, task.threadId)) continue;
         if (!supervisor) {
           if (missingSupervisors.has(task.supervisorThreadId)) this.markWorkflowStale(task, "The bound Supervisor conversation was deleted; this workflow agreement is stale.", now);
           continue;
@@ -594,15 +594,15 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
           if (!this.sourceUnchanged(task, agent) || supervisor.thread.id !== task.supervisorThreadId || supervisor.thread.projectId !== task.projectId ||
             supervisor.thread.archivedAt || supervisor.thread.deletedAt) continue;
           const definitions = await this.definitions?.load(task.projectId, task.threadId, signal);
-          if (!this.enabled(task.projectId)) continue;
+          if (!this.enabled(task.projectId, task.threadId)) continue;
           if (definitions && await this.reviewDefinitions(task, definitions, agent, supervisor, now, signal)) this.renewUnsentTask(task, now);
           continue;
         }
-        if (!this.enabled(task.projectId)) continue;
+        if (!this.enabled(task.projectId, task.threadId)) continue;
         await this.observeWorkflowAgreement(task, introduction, agent, supervisor, threads, now, signal);
         this.importExternalContributions(task, introduction, agent, supervisor, now);
       } catch (cause) {
-        if (!this.enabled(task.projectId)) continue;
+        if (!this.enabled(task.projectId, task.threadId)) continue;
         if (cause instanceof T3TransportError && cause.httpStatus === 404) this.markWorkflowStale(task, "A bound workflow conversation was deleted; this workflow agreement is stale.", now);
         // projection and definition read failures preserve the prior agreement for a later observation
       }
@@ -668,7 +668,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
   }
   private async reviewDefinitions(task: TaskRecord, observed: ProjectDefinitionSnapshot, agent: Projection, supervisor: Projection,
     now: number, signal: AbortSignal): Promise<boolean> {
-    if (!this.enabled(task.projectId)) return false;
+    if (!this.enabled(task.projectId, task.threadId)) return false;
     if (observed.status === "unavailable" || observed.status === "permission_required") return false;
     const approved = extractApprovedProjectDefinitions(task);
     const matches = observed.workspaceRoot === task.workflow?.workspaceRoot && observed.revision === task.workflow?.revision &&
@@ -688,7 +688,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     let observedGlobalFingerprint: string | null = null;
     if (approved && prior && this.store.hasGlobalDefinitionsEvent() && this.definitions?.globalFingerprint) {
       try {observedGlobalFingerprint = await this.definitions.globalFingerprint(signal);} catch {return false;}
-      if (!this.enabled(task.projectId)) return false;
+      if (!this.enabled(task.projectId, task.threadId)) return false;
     }
     const explicitGlobalToggle = Boolean(approved && prior && this.store.definitionUserGlobalToggle(observed, approved, prior.updatedAt, observedGlobalFingerprint));
     if (!prior || prior.expectedRevision !== task.workflow.revision || prior.observedRevision !== observed.revision || prior.status === "authorized" || prior.status === "restored") {
@@ -707,7 +707,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       let fresh: ProjectDefinitionSnapshot;let freshAgent: Projection;let freshGlobalFingerprint: string | null;
       try {fresh = await this.definitions!.load(task.projectId, task.threadId, signal);freshAgent = await this.projection(task.threadId, signal);
         freshGlobalFingerprint = await this.definitions!.globalFingerprint!(signal);} catch {return false;}
-      if (!this.enabled(task.projectId) || fresh.status !== "ready" || fresh.revision !== observed.revision || fresh.threadId !== task.threadId ||
+      if (!this.enabled(task.projectId, task.threadId) || fresh.status !== "ready" || fresh.revision !== observed.revision || fresh.threadId !== task.threadId ||
         freshGlobalFingerprint !== observedGlobalFingerprint || !this.sourceUnchanged(current, freshAgent) ||
         !this.store.definitionUserGlobalToggle(fresh, approved, current.definitionReview!.updatedAt, freshGlobalFingerprint)) return false;
       this.adoptDefinitions(current, fresh, now, null, [], "The user changed whether global definitions are included; the current setting is adopted without asking the agent to reverse it.");
@@ -716,7 +716,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     if (explicitConfigSave) {
       let fresh: ProjectDefinitionSnapshot;let freshAgent: Projection;
       try {fresh = await this.definitions!.load(task.projectId, task.threadId, signal);freshAgent = await this.projection(task.threadId, signal);} catch {return false;}
-      if (!this.enabled(task.projectId)) return false;
+      if (!this.enabled(task.projectId, task.threadId)) return false;
       if (fresh.revision !== observed.revision || fresh.threadId !== task.threadId || !this.sourceUnchanged(current, freshAgent) ||
         !this.store.definitionUserSave(fresh, approved, current.definitionReview!.updatedAt)) return false;
       this.adoptDefinitions(current, fresh, now, null, [], "Project definitions were explicitly saved through the configuration editor; the catalogs remain repository-sourced.");
@@ -733,7 +733,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
           freshSupervisor = await this.projection(task.supervisorThreadId, signal);
           freshObserved = await this.definitions!.load(task.projectId, task.threadId, signal);
         } catch {return false;}
-        if (!this.enabled(task.projectId)) return false;
+        if (!this.enabled(task.projectId, task.threadId)) return false;
         const freshMessage = this.completedAssistantMessages(freshSupervisor, task.supervisorThreadId).find(item => item.messageId === message.messageId && item.runId === message.runId);
         if (!this.sourceUnchanged(current, freshAgent) || freshSupervisor.thread.projectId !== task.projectId || freshSupervisor.thread.deletedAt ||
           freshSupervisor.thread.archivedAt || !freshMessage || fingerprint(freshMessage.text) !== fingerprint(message.text) ||
@@ -782,7 +782,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     const now = Date.now();
     if (now - (this.requests.lastNotice(binding.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return false;
     for (const task of tasks.slice(0, 20)) {
-      if (!this.enabled(binding.projectId)) return false;
+      if (!this.enabled(binding.projectId, binding.mainThreadId)) return false;
       if ((!task.definitionReview && task.agreement?.status !== "stale") ||
         this.requests.introduction(task.id)?.state !== "sent" && this.requests.introduction(task.id)?.state !== "accepted" && !this.introductionUnsent(task.id)) continue;
       const phase = task.definitionReview?.status === "revert_requested" ? "checking" : task.definitionReview?.status ?? `stale:${task.agreement?.proposalId}`;
@@ -793,13 +793,13 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if (!approved) continue;
       let agent: Projection;let observed: ProjectDefinitionSnapshot;
       try {agent = await this.projection(task.threadId, signal);observed = await this.definitions!.load(task.projectId, task.threadId, signal);} catch {continue;}
-      if (!this.enabled(binding.projectId)) return false;
+      if (!this.enabled(binding.projectId, binding.mainThreadId)) return false;
       if (this.store.globalDefinitionsChangeAuthorized(task)) {
         if (!this.store.useGlobalDefinitions(task.projectId)) continue;
         if (this.definitions?.globalFingerprint) {
           let globalFingerprint: string | null = null;
           try {globalFingerprint = await this.definitions.globalFingerprint(signal);} catch {continue;}
-          if (!this.enabled(binding.projectId)) return false;
+          if (!this.enabled(binding.projectId, binding.mainThreadId)) return false;
           if (this.store.globalDefinitionsChangeAuthorized(task, globalFingerprint) && observed.status === "ready" && observed.revision === task.workflow?.revision) continue;
         }
       }
@@ -1069,7 +1069,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
   // never changes a status, and a rejected record only updates the single task diagnostic
   private importExternalContributions(task: TaskRecord, introduction: WorkflowIntroduction, agent: Projection, supervisor: Projection, now: number): void {
     const workflows = this.workflows;
-    if (!workflows || !this.enabled(task.projectId) || introduction.state !== "sent") return;
+    if (!workflows || !this.enabled(task.projectId, task.threadId) || introduction.state !== "sent") return;
     const binding = this.store.bindingForSupervisor(task.supervisorThreadId);
     const current = this.store.task(task.threadId);
     if (!binding || binding.state !== "ready" || binding.threadId !== task.supervisorThreadId || binding.mainThreadId !== task.threadId ||
@@ -1235,7 +1235,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
   }
   private async observeWorkflowAgreement(task: TaskRecord, introduction: WorkflowIntroduction, agent: Projection, supervisor: Projection,
     threads: readonly ThreadInfo[], now: number, signal: AbortSignal): Promise<void> {
-    if (!this.enabled(task.projectId)) return;
+    if (!this.enabled(task.projectId, task.threadId)) return;
     const binding = this.store.bindingForSupervisor(task.supervisorThreadId);
     if (!binding || binding.threadId !== task.supervisorThreadId || binding.state === "missing" || binding.state === "rejected") {
       this.markWorkflowStale(task, "The bound Supervisor conversation is no longer valid; this workflow agreement is stale.", now);return;
@@ -1254,10 +1254,10 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     let definitions: ProjectDefinitionSnapshot | null;
     try {definitions = this.definitions ? await this.definitions.load(task.projectId, task.threadId, signal) : null;}
     catch {return;}
-    if (!this.enabled(task.projectId)) return;
+    if (!this.enabled(task.projectId, task.threadId)) return;
     if (!definitions || definitions.status === "unavailable" || definitions.status === "permission_required") return;
     if (!(await this.reviewDefinitions(task, definitions, agent, supervisor, now, signal))) return;
-    if (!this.enabled(task.projectId)) return;
+    if (!this.enabled(task.projectId, task.threadId)) return;
     task = this.store.task(task.threadId) ?? task;
     if (definitions.projectId !== task.projectId || definitions.threadId !== task.threadId ||
       definitions.workspaceRoot !== task.workflow?.workspaceRoot || definitions.revision !== task.workflow?.revision ||
@@ -1361,21 +1361,21 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
   }
   private async recordWorkflowAgreement(task: TaskRecord, introduction: WorkflowIntroduction, candidate: WorkflowAgreementCandidate,
     agentMessageId: string, supervisor: Projection, threads: readonly ThreadInfo[], now: number, signal: AbortSignal): Promise<void> {
-    if (!this.enabled(task.projectId)) return;
+    if (!this.enabled(task.projectId, task.threadId)) return;
     const binding = this.store.bindingForSupervisor(task.supervisorThreadId);
     if (!binding || binding.state !== "ready" || binding.threadId !== task.supervisorThreadId) return;
     const currentTask = this.store.task(task.threadId);
     if (!currentTask || currentTask.id !== task.id || currentTask.sourceHash !== task.sourceHash || currentTask.workflowProposalId !== candidate.proposalId) return;
     let agent: Projection;
     try {agent = await this.projection(task.threadId, signal);} catch {return;}
-    if (!this.enabled(task.projectId)) return;
+    if (!this.enabled(task.projectId, task.threadId)) return;
     if (supervisor.thread.id !== binding.threadId || supervisor.thread.projectId !== task.projectId || supervisor.thread.deletedAt || supervisor.thread.archivedAt ||
       !this.eligible(agent.thread, threads) || agent.thread.projectId !== task.projectId || !this.sourceUnchanged(task, agent) ||
       !this.afterIntroduction(agent, introduction, agentMessageId)) return;
     let definitions: ProjectDefinitionSnapshot | null;
     try {definitions = this.definitions ? await this.definitions.load(task.projectId, task.threadId, signal) : null;}
     catch {return;}
-    if (!this.enabled(task.projectId)) return;
+    if (!this.enabled(task.projectId, task.threadId)) return;
     if (!definitions || definitions.status !== "ready" || definitions.projectId !== task.projectId || definitions.threadId !== task.threadId ||
       definitions.workspaceRoot !== candidate.workflow.workspaceRoot || definitions.revision !== candidate.workflow.revision) {
       if (definitions && definitions.status !== "unavailable") this.markWorkflowStale(task, "Project definitions changed before workflow agreement could be recorded.", now);
@@ -1384,7 +1384,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     const context = this.proposalContext(currentTask, definitions);
     if (!context || context.status !== "ready" || !context.complete || !context.revision) return;
     try {supervisor = await this.projection(task.supervisorThreadId, signal);} catch {return;}
-    if (!this.enabled(task.projectId)) return;
+    if (!this.enabled(task.projectId, task.threadId)) return;
     if (supervisor.thread.id !== binding.threadId || supervisor.thread.projectId !== task.projectId || supervisor.thread.deletedAt || supervisor.thread.archivedAt) return;
     const supervisorMessages = this.completedAssistantMessages(supervisor, task.supervisorThreadId);
     if (!this.proposalEvidenceCurrent(currentTask, candidate, supervisorMessages, context)) return;
@@ -1405,7 +1405,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       const liveBinding = this.store.bindingForSupervisor(task.supervisorThreadId);
       const liveIntroduction = this.requests.introduction(task.id);
       const storedCandidate = this.requests.agreementCandidate(task.id, candidate.proposalId);
-      if (!this.enabled(task.projectId) || !current || current.id !== task.id || current.status !== "inferred" || candidate.taskId !== current.id ||
+      if (!this.enabled(task.projectId, task.threadId) || !current || current.id !== task.id || current.status !== "inferred" || candidate.taskId !== current.id ||
         candidate.projectId !== current.projectId || current.sourceHash !== task.sourceHash ||
         current.workflowProposalId !== candidate.proposalId || current.supervisorThreadId !== task.supervisorThreadId ||
         liveBinding?.state !== "ready" || liveBinding.threadId !== task.supervisorThreadId || liveIntroduction?.state !== "sent" ||
@@ -1438,7 +1438,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     });
   }
   async run(binding: BindingRecord, supervisor: Projection, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
-    if (!this.enabled(binding.projectId)) return;
+    if (!this.enabled(binding.projectId, binding.mainThreadId)) return;
     if (this.supervisionStopped(binding.mainThreadId)) {await this.reconcileStopped(binding, threads, signal, supervisor);return;}
     this.teamRuntime?.startCycle(binding);
     await this.teamRuntime?.reconcile(binding, threads, signal);
@@ -1485,7 +1485,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     if (!this.rpc) {if (inflight) await this.reconcile(inflight, supervisor, threads, signal);return;}
     // introductions go to the operative and never wait behind an in-flight root check-in
     for (const task of tasks) {
-      if (!this.enabled(binding.projectId)) return;
+      if (!this.enabled(binding.projectId, binding.mainThreadId)) return;
       const previous = this.requests.introduction(task.id);
       if ((!previous || previous.state === "ready") && (settled || await isResting())) continue;
       if (previous?.state === "ready" || previous?.state === "sending" || previous?.state === "accepted" || previous?.state === "uncertain") {
@@ -1499,7 +1499,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if (previous) continue;
       let agent: Projection;
       try {agent = await this.projection(task.threadId, signal);} catch {continue;}
-      if (!this.enabled(binding.projectId)) return;
+      if (!this.enabled(binding.projectId, binding.mainThreadId)) return;
       if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== binding.projectId || !this.sourceUnchanged(task, agent)) continue;
       let text = workflowIntroductionText(task);
       let introduction: WorkflowIntroduction = {taskId: task.id, projectId: task.projectId, threadId: task.threadId, supervisorThreadId: binding.threadId,
@@ -1508,17 +1508,17 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         this.requests.saveIntroduction({...introduction, state: "blocked", error: "The Supervisor's native modes cannot contact this operative chat. Adjust runtime/interaction modes in T3; existing conversations are never auto-upgraded."});continue;
       }
       const definitions = await this.dialogueDefinitions(task, signal);
-      if (!this.enabled(binding.projectId)) return;
+      if (!this.enabled(binding.projectId, binding.mainThreadId)) return;
       if (!definitions) {
         this.requests.saveIntroduction({...introduction, state: "blocked", error: "Project definitions changed or are unavailable; the draft was not sent."});
         try {
           const observed = await this.definitions?.load(task.projectId, task.threadId, signal);
-          if (!this.enabled(binding.projectId)) return;
+          if (!this.enabled(binding.projectId, binding.mainThreadId)) return;
           if (observed) {
             if (observed.status !== "unavailable" && observed.status !== "permission_required")
               this.requests.saveIntroduction({...introduction, state: "context", error: null});
             const ready = await this.reviewDefinitions(task, observed, agent, supervisor, Date.now(), signal);
-            if (!this.enabled(binding.projectId)) return;
+            if (!this.enabled(binding.projectId, binding.mainThreadId)) return;
             if (ready) this.renewUnsentTask(task, Date.now());
           }
         } catch { /* a later observation preserves and rechecks the unsent proposal */ }
@@ -1538,7 +1538,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         this.requests.saveIntroduction({...introduction, state: "blocked", error: "The interpreted proposal could not be re-derived from the Supervisor's interpretation; the draft was not sent."});continue;
       }
       if (text.length > maxConversationTextLength) {this.requests.saveIntroduction({...introduction, state: "blocked", error: `The introduction exceeds its limit (${text.length}/${maxConversationTextLength} characters); no definition sources were truncated.`});continue;}
-      if (!this.enabled(binding.projectId)) return;
+      if (!this.enabled(binding.projectId, binding.mainThreadId)) return;
       const ready: WorkflowIntroduction = {...introduction, state: "ready"};
       this.store.store.transaction(() => {
         this.requests.saveIntroduction(ready);
@@ -1583,7 +1583,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       } catch {return null;}
     };
     for (const chat of batch?.threads ?? []) {
-      if (!this.enabled(binding.projectId)) return;
+      if (!this.enabled(binding.projectId, binding.mainThreadId)) return;
       const scopeEntry = taskScopes.get(chat.threadId);
       if (!scopeEntry) continue;
       const {task, scope} = scopeEntry;
@@ -1629,7 +1629,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         if (parent.id === task.threadId) break;
       }
       const staleRecovery = task.agreement?.status === "stale" && this.sourceUnchanged(task, mainProjection) && Boolean(await this.freshDefinitions(task, signal));
-      if (!this.enabled(binding.projectId)) return;
+      if (!this.enabled(binding.projectId, binding.mainThreadId)) return;
       if (task.agreement?.status === "stale" && !staleRecovery && !task.definitionReview) continue;
       included.push({...chat, proposalId: task.id, taskContext: this.taskContextSummary(task), staleRecovery,
         parentThreadId: observed.parentThreadId, depth: observed.depth, origin: observed.origin, lifecycle: observed.lifecycle,
@@ -1777,7 +1777,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         : {...request, state: "failed", failureAcknowledged: true, error: "Supervision was stopped for this chat before this check-in was sent; it was not sent."});
   }
   private async dispatch(request: ConversationRequest, signal: AbortSignal): Promise<void> {
-    if (!this.rpc || !this.enabled(request.projectId)) return;
+    if (!this.rpc || !this.enabled(request.projectId, this.store.bindingForSupervisor(request.supervisorThreadId)?.mainThreadId)) return;
     const owner = this.store.bindingForSupervisor(request.supervisorThreadId);
     if (owner && this.supervisionStopped(owner.mainThreadId)) {this.fenceStoppedSupervision(owner);return;}
     const sending = {...request, state: "sending" as const, sentAt: Date.now()};
@@ -1849,10 +1849,10 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       supervisor.thread.id !== binding.threadId || supervisor.thread.projectId !== request.projectId) return null;
     let agent: Projection;
     try {agent = await this.projection(task.threadId, signal);} catch {return null;}
-    if (!this.enabled(task.projectId)) return null;
+    if (!this.enabled(task.projectId, task.threadId)) return null;
     if (!this.eligible(agent.thread, threads) || agent.thread.projectId !== task.projectId || !this.sourceUnchanged(task, agent)) return null;
     const definitions = await this.dialogueDefinitions(task, signal);
-    if (!this.enabled(task.projectId)) return null;
+    if (!this.enabled(task.projectId, task.threadId)) return null;
     if (!definitions) return null;
     const context = this.proposalContext(task, definitions);
     if (!context) return null;
@@ -1897,7 +1897,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     const answers = this.completedAssistantMessages(supervisor, request.supervisorThreadId).filter(item => item.runId === run.id);
     const validCompletion = run.status === "completed" && message?.text === request.text && run.userMessageId === request.messageId && !contaminated && hasCompletionMarker(answers.at(-1)?.text ?? "", request.completionMarker);
     const initialCandidate = validCompletion && request.kind === "context" ? await this.initialWorkflowCandidate(request, run.id, supervisor, threads, signal, Date.now()) : null;
-    if (!stopped && !this.enabled(request.projectId)) return;
+    if (!stopped && !this.enabled(request.projectId, this.store.bindingForSupervisor(request.supervisorThreadId)?.mainThreadId)) return;
     const confirmedCompletion = validCompletion && (request.kind !== "context" || initialCandidate !== null);
     const ownerBinding = this.store.bindingForSupervisor(request.supervisorThreadId);
     this.store.store.transaction(() => {
@@ -1925,9 +1925,9 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     });
   }
   private async sendIntroduction(task: TaskRecord, introduction: WorkflowIntroduction, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
-    if (!this.enabled(task.projectId)) return;
+    if (!this.enabled(task.projectId, task.threadId)) return;
     const agent = await this.projection(task.threadId, signal);
-    if (!this.enabled(task.projectId)) return;
+    if (!this.enabled(task.projectId, task.threadId)) return;
     if (agent.thread.id !== task.threadId) return;
     const visible = agent.messages.find(message => message.id === introduction.messageId && message.threadId === task.threadId && message.text === introduction.text);
     if (visible) {this.requests.saveIntroduction({...introduction, state: "sent", error: null});return;}
@@ -1948,10 +1948,10 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       this.blockIntroduction(task.id, "Task eligibility or project definitions changed; the draft was not sent.");return;
     }
     const definitions = await this.dialogueDefinitions(task, signal);
-    if (!this.enabled(task.projectId)) return;
+    if (!this.enabled(task.projectId, task.threadId)) return;
     if (!definitions) {this.blockIntroduction(task.id, "Task eligibility or project definitions changed; the draft was not sent.");return;}
     const supervisor = await this.projection(task.supervisorThreadId, signal);
-    if (!this.enabled(task.projectId)) return;
+    if (!this.enabled(task.projectId, task.threadId)) return;
     // every POST reaching here is fresh (unknown identities returned above), including a known-unsent queued fallback
     if (!this.interpretationEvidenceCurrent(task, supervisor, definitions)) {
       this.blockIntroduction(task.id, "The Supervisor's interpretation answer changed or is no longer complete; the draft was not sent.");return;
@@ -1976,7 +1976,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       }
     }
     // the per-chat stop is rechecked after every awaited read: a stop saved meanwhile keeps the introduction unsent
-    if (!this.enabled(task.projectId) || this.supervisionStopped(task.threadId)) return;
+    if (!this.enabled(task.projectId, task.threadId) || this.supervisionStopped(task.threadId)) return;
     // a fresh POST belongs to the current supervision epoch: a request at or before the activation boundary, or written before the
     // chat's latest Enable, is never introduced after it (an unknown boundary sends nothing)
     const floor = this.store.baselineOrdinal(task.threadId, agent);
@@ -2006,7 +2006,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     }
   }
   retry(projectId: string, supervisorThreadId: string): void {
-    if (!this.enabled(projectId)) return;
+    if (!this.enabled(projectId, this.store.bindingForSupervisor(supervisorThreadId)?.mainThreadId)) return;
     const binding = this.store.bindingForSupervisor(supervisorThreadId);
     const notice = binding?.stopNotice;
     if (binding && notice && ["unconfirmed", "blocked"].includes(notice.state)) this.store.setStopNotice(binding, notice.messageId,

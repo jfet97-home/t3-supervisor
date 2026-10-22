@@ -1,3 +1,4 @@
+import { NoProjectControl, NoProjectControlSave, NoProjectControlResult, SupervisionStart, SupervisionStartStatus, SupervisionCandidates } from "./supervisor-control-contract.js";
 import { ThreadPolicy } from "./thread-policy-contract.js";
 import { ProjectDefinitions, ProjectConfigSaveInput, ProjectConfigSaveResult } from "./project-definitions-contract.js";
 import { Schema } from "effect";
@@ -99,6 +100,11 @@ export const SupervisorApi = HttpApi.make("supervisor").add(
       HttpApiEndpoint.get("dashboardOverview", "/dashboard-overview", {
         query: {offset: Schema.optional(Text), limit: Schema.optional(Text)}, success: DashboardOverview, error: UiError,
       }),
+      HttpApiEndpoint.get("noProjectControl", "/no-project-control", {success: NoProjectControl, error: UiError}),
+      HttpApiEndpoint.post("saveNoProjectControl", "/no-project-control", {payload: NoProjectControlSave, success: NoProjectControlResult, error: UiError}),
+      HttpApiEndpoint.get("supervisionCandidates", "/supervision-candidates", {query: {query: Schema.optional(Text), purpose: Schema.optional(Schema.Literals(["start", "exclude"]))}, success: SupervisionCandidates, error: UiError}),
+      HttpApiEndpoint.post("startSupervision", "/supervision-start", {payload: SupervisionStart, success: SupervisionStartStatus, error: UiError}),
+      HttpApiEndpoint.get("supervisionStartStatus", "/supervision-start", {query: {threadId: Text, operationId: Text}, success: SupervisionStartStatus, error: UiError}),
       HttpApiEndpoint.get("supervisionControl", "/supervision-control", {
         query: {projectId: Schema.optional(Schema.String)}, success: SupervisionControl, error: UiError,
       }),

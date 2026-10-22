@@ -146,3 +146,24 @@ exact native tool evidence and scope authorize writes; a transport credential or
 supplied thread ID does not. Preserve exact returned IDs and inspect bounded protocol
 diagnostics in their source chat. Product use does not authorize proxies, T3
 modifications or manufactured agreement/activity evidence.
+
+## No Project activation
+
+Shared home definitions supply policy; enabling them never starts supervision.
+Instance Settings offers Off, On request (default), or Automatic for No Project.
+The master switch still overrides all modes. Ordinary projects keep their existing
+activation behavior.
+
+In On request, use Home's short recent/search picker or paste a native T3 link,
+then choose Start supervision. A finished request is not replayed: the next request
+is supervised. Alternatively ask the agent in the desired No Project chat to start
+supervision; it may call supervision_start for its own chat using the original human
+message. A pending result is not active, and a rejected request contacts no agent.
+Start persists until explicit Stop. Settlement parks the same Supervisor and does
+not revoke permission. Do not start merely because a task looks substantial.
+
+Chat settings lists relevant explicit exclusions and search-to-add. Hidden or
+unavailable IDs remain saved. Removing an exclusion is an explicit Enable, not a
+way to enable the whole No Project group. Stop notices show the caller, original
+human-message ID and time; Home's Review and enable opens that conversation's
+scoped control. No extra confirmation or semantic reapproval is required for Stop.

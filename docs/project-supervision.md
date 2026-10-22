@@ -15,7 +15,29 @@ The master supervision switch starts on. Per-project initial defaults follow
 observed `.t3-supervisor` presence; saved manual choices persist. Unreadable is not
 absent. The separate global-definitions switch starts off, even when the folder
 exists. Global definitions are additive and namespaced, using the T3 server user's
-home. Scratch requires this opt-in global input.
+home. This supplies policy only and never activates No Project chats. With shared
+definitions off, No Project uses task-local steps.
+
+No Project has its own Off / On request / Automatic mode in Instance settings.
+On request is the default: discovery creates no root or model work for an unstarted
+chat. Start permission applies to one ordinary main and persists across service
+restarts and Supervisor settlement until explicit Stop. Off pauses every No Project
+scope; returning captures a fresh discovery boundary without revoking permissions.
+Normal projects retain automatic folder/manual activation.
+
+Home offers eight recent/search results or an exact native T3 link. Dashboard Start
+is authenticated human intent. It pins the latest genuine request only while that
+request's native run is unfinished; otherwise it starts with the next request.
+The agent's supervision_start tool instead cites its own current genuine human
+message. Exact native caller/tool/run proof is mandatory. The Supervisor's first
+interpretation returns an independent startRequested verdict before any operative
+contact, workflow writes, helpers or monitoring are permitted. A negative or stale
+verdict never activates. Stop and mode/source changes fence pending interpretation;
+unknown native identities are reconciled and never replaced by a fresh send.
+Start operation receipts and permissions use the existing guidance database.
+Settings shows relevant explicit exclusions and bounded search-to-add, retaining
+hidden/unavailable exclusions. Stop provenance appears in Home and the conversation;
+Home's Review and enable opens the exact scoped control.
 
 Disabling stops new service-originated interpretation, introductions, check-ins
 and recovery sends. It preserves chats, bindings, requests and agreements; a

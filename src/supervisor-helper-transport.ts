@@ -98,7 +98,7 @@ const renderedPromptOf = (detail: Record<string, unknown>): string | null =>
 
 /** Uses a genuine native webhook task, without timers or repeated tasks on the root. */
 export class SupervisorHelperTransport {
-  constructor(readonly options: {store: ProjectSupervisorStore; rpc: SupervisorRpc | null; baseUrl: string;
+  constructor(readonly options: {store: ProjectSupervisorStore; enabled?: (projectId: string, mainThreadId: string) => boolean; rpc: SupervisorRpc | null; baseUrl: string;
     projection(threadId: string, signal: AbortSignal): Promise<Projection>;
     fetch?: typeof fetch}) {
     options.store.store.db.exec(`CREATE TABLE IF NOT EXISTS supervisor_helper_channels(
@@ -350,7 +350,7 @@ export class SupervisorHelperTransport {
   // `authorized` is re-checked after this method's own awaits, immediately before the receipt and POST, so
   // authority revoked meanwhile (for example a quarantine) posts nothing.
   async send(binding: BindingRecord, input: SupervisorHelperMessage, signal: AbortSignal, authorized?: () => boolean): Promise<SupervisorHelperSendResult> {
-    if (!this.options.rpc || !this.options.store.enabled(binding.projectId)) return "busy";
+    if (!this.options.rpc || !(this.options.enabled?.(binding.projectId, binding.mainThreadId) ?? this.options.store.enabled(binding.projectId))) return "busy";
     const row = this.options.store.store.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
       .get(binding.threadId, binding.generation, input.messageId);
     const hash = workflowRequestHash(input);
@@ -386,7 +386,7 @@ export class SupervisorHelperTransport {
       const endpoint = new URL(channel.task.webhook.path, this.options.baseUrl);
       if (endpoint.origin !== new URL(this.options.baseUrl).origin || endpoint.search || endpoint.hash) return settle("rejected");
       // project or global supervision disabled during the awaited reads: nothing is posted and the identity waits
-      if (!this.options.store.enabled(binding.projectId)) return settle("busy");
+      if (!(this.options.enabled?.(binding.projectId, binding.mainThreadId) ?? this.options.store.enabled(binding.projectId))) return settle("busy");
       if (authorized && !authorized()) return settle("revoked");
       const posting: Delivery = {...input, hash, taskId: channel.channel.taskId, state: "posting"};
       this.save(binding, posting);

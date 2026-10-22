@@ -355,3 +355,8 @@ footer { display: flex; flex-wrap: wrap; gap: 20px; justify-content: space-betwe
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
 }
+
+.candidate-list {list-style: none; margin: 0; padding: 0;}
+.candidate-list > li {padding-block: .75rem; border-bottom: 1px solid var(--border); gap: 1rem;}
+.candidate-list p {overflow-wrap: anywhere;}
+@media (max-width: 760px) {.candidate-list > li {align-items: flex-start; flex-direction: column;}}

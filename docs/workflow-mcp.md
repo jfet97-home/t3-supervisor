@@ -198,6 +198,18 @@ human that supervision was not stopped and points them to the dashboard's Stop s
 control. When the caller acts in the chat the human wrote in, its
 verified call must belong to the run T3 delivered that message into, including a steer into
 an already running turn (`stop_call_not_in_human_turn`); a later turn cannot borrow it.
+`supervision_start` takes exactly `{callerThreadId,userMessageId,operationId}`.
+It requests permission only for the caller's own ordinary No Project main on a
+genuine current human request. It never enables the master or normal project
+controls. Native direct/MCPX argument proof is checked before any reservation;
+source provenance, turn identity and human Stop/Enable times are checked next.
+The first Supervisor interpretation explicitly judges intent with startRequested,
+independently from task relevance/plan validity. Pending roots may read their
+interpretation/definitions but cannot write, guide, recruit or contact the agent.
+A positive source- and epoch-bound verdict commits the task and permission together.
+Use the same operationId on retries; pending is not activation. No extra Stop
+judge is added. Read authority remains the existing same-user model, not a sandbox.
+
 `supervision_stop` stays callable while project supervision is disabled. The stop is the
 instance thread policy the dashboard's per-chat control also edits; only a human can
 enable supervision again. After a stop the chat's Supervisor and its helpers can still

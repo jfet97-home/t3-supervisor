@@ -9,6 +9,7 @@ export const DashboardWork = Schema.Struct({
   mainThreadId: Schema.String,
   title: Schema.String,
   supervisorThreadId: Schema.String,
+  stop: Schema.optional(Schema.NullOr(Schema.Struct({route: Schema.String, callerThreadId: Schema.NullOr(Schema.String), userMessageId: Schema.NullOr(Schema.String), stoppedAt: Schema.Number}))),
   nativeState: Schema.Literals(["active", "waiting", "quiet", "unknown"]),
   supervision: Schema.Literals(["enabled", "stopped", "disabled"]),
   objective: Schema.NullOr(Schema.String),
@@ -83,6 +84,7 @@ export function buildDashboardOverview(input: {
   control: (projectId: string) => SupervisionControlInfo;
   monitoring: (binding: BindingRecord) => SupervisorMonitoringStatus;
   assessment?: (binding: BindingRecord, task: TaskRecord | undefined) => DashboardWorkInfo["assessment"];
+  scopeEnabled?: (projectId: string, mainThreadId: string) => boolean;
   excluded: ReadonlySet<string>;
   offset: number; limit: number;
 }): DashboardOverviewInfo {
@@ -100,7 +102,7 @@ export function buildDashboardOverview(input: {
     const main = threadById.get(binding.mainThreadId);
     if (!project?.available || !main || main.projectId !== project.id || main.deletedAt || main.archivedAt) continue;
     const task = tasksByProject.get(project.id)?.find(task => task.threadId === main.id && task.supervisorThreadId === binding.threadId);
-    const supervision = input.excluded.has(main.id) ? "stopped" : project.effectiveEnabled ? "enabled" : "disabled";
+    const supervision = input.excluded.has(main.id) ? "stopped" : (input.scopeEnabled?.(project.id, main.id) ?? project.effectiveEnabled) ? "enabled" : "disabled";
     const monitoring = input.monitoring(binding);
     const assessment = input.assessment?.(binding, task) ?? null;
     const attention = workAttention({enabled: supervision === "enabled", bindingState: binding.state,
@@ -108,7 +110,7 @@ export function buildDashboardOverview(input: {
     const nativeState = main.activityRunStatus === "waiting" ? "waiting" : main.activeRunId ? "active"
       : main.activityRunStatus || main.latestRunCompletedAt ? "quiet" : "unknown";
     work.push({projectId: project.id, mainThreadId: main.id, title: main.title,
-      supervisorThreadId: binding.threadId, nativeState, supervision,
+      supervisorThreadId: binding.threadId, nativeState, supervision, stop: supervision === "stopped" ? binding.supervisionStop ?? null : null,
       objective: task?.objective?.slice(0, 800) ?? null,
       reason: (task?.reason ?? monitoring.message).slice(0, 800), taskStatus: task?.status ?? null,
       planStatus: task?.agreement?.status ?? task?.workflow?.status ?? null, assessment,
