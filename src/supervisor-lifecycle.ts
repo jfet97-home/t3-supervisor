@@ -357,13 +357,23 @@ export class SupervisorLifecycle {
     if (this.store.tasksFor(binding).some(task => ["dispatching", "waiting", "uncertain"].includes(task.status))) return "stopped_interpretation_unresolved";
     return null;
   }
+  /** Parks an inactive No Project scope without manufacturing a human Stop or changing its permission. */
+  async parkInactive(input: BindingRecord, signal: AbortSignal, stillInactive: () => boolean): Promise<void> {
+    const binding = this.store.binding(input.projectId, input.mainThreadId);
+    if (!binding || binding.threadId !== input.threadId || binding.state !== "ready" || !stillInactive()) return;
+    let supervisor: Projection;
+    try {supervisor = await this.projection(binding.threadId, signal);} catch {return;}
+    if (supervisor.thread.id !== binding.threadId || supervisor.thread.projectId !== binding.projectId || supervisor.thread.archivedAt || supervisor.thread.deletedAt ||
+      supervisor.thread.settledAt || supervisor.thread.settledOverride === "settled" || !stillInactive()) return;
+    await this.settleStopped(binding, supervisor, signal, Date.now(), stillInactive);
+  }
   /**
    * A chat whose supervision a human stopped: its owned Supervisor settles promptly once idle and once every
    * accepted request has a confirmed native outcome. The stop supersedes earlier keep-active choices for that Supervisor; a stop without a
    * recorded time dates from its first observation. Uncertain identities are retained, and the operative main is never settled or interrupted.
    */
-  private async settleStopped(binding: BindingRecord, supervisor: Projection, signal: AbortSignal, now: number): Promise<void> {
-    let stoppedAt = binding.supervisionStop?.stoppedAt ?? binding.stopObservedAt;
+  private async settleStopped(binding: BindingRecord, supervisor: Projection, signal: AbortSignal, now: number, inactive?: () => boolean): Promise<void> {
+    let stoppedAt = inactive ? 0 : binding.supervisionStop?.stoppedAt ?? binding.stopObservedAt;
     if (stoppedAt === undefined) {
       stoppedAt = now;binding = {...binding, stopObservedAt: now};this.store.setBinding(binding);
     }
@@ -371,7 +381,7 @@ export class SupervisorLifecycle {
     if (attention) {this.clearQuiet(binding, attention);return;}
     // an accepted delivery without a confirmed native outcome can still start a run, so it holds the Supervisor; elapsed time never resolves it
     if (this.conversation.requests.pending(binding.projectId, binding.threadId)) {this.clearQuiet(binding, "stopped_request_unresolved");return;}
-    const version = fingerprint({stopped: true, supervisor: activityVersion(supervisor)});
+    const version = fingerprint({stopped: !inactive, supervisor: activityVersion(supervisor)});
     if (binding.settlement && ["pending", "uncertain"].includes(binding.settlement.state) && binding.settlement.activityVersion !== version) {
       this.store.setBinding({...binding, quietSince: null, settlement: {...binding.settlement, state: "superseded"}});return;
     }
@@ -381,7 +391,8 @@ export class SupervisorLifecycle {
     if (fresh.thread.id !== binding.threadId || fresh.thread.projectId !== binding.projectId || fresh.thread.archivedAt || fresh.thread.deletedAt) {this.clearQuiet(binding, "supervisor_unavailable");return;}
     const freshAttention = this.stoppedAttention(binding, fresh, stoppedAt);
     if (freshAttention) {this.clearQuiet(binding, freshAttention);return;}
-    if (fingerprint({stopped: true, supervisor: activityVersion(fresh)}) !== version) {this.clearQuiet(binding, "activity_changed");return;}
+    if (fingerprint({stopped: !inactive, supervisor: activityVersion(fresh)}) !== version) {this.clearQuiet(binding, "activity_changed");return;}
+    if (inactive ? !inactive() : !this.conversation.supervisionStopped(binding.mainThreadId)) return;
     await this.sendSettlement(this.store.binding(binding.projectId, binding.mainThreadId)!, version, now, signal);
   }
   private async sendSettlement(binding: BindingRecord, version: string, now: number, signal: AbortSignal): Promise<void> {

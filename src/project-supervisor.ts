@@ -110,7 +110,7 @@ export class ProjectSupervisor {
         projection: (threadId, signal) => this.projection(threadId, signal)});
       this.workflowStates = new WorkflowStateStore(store, (projectId, mainThreadId) => this.workflowEditingEnabled(projectId, mainThreadId));
       this.conversation = new SupervisorConversation(store, operateRpc, (threadId, signal) => this.projection(threadId, signal), definitions,
-        (thread, threads) => this.eligible(thread, threads), (projectId, mainThreadId) => this.scopeEnabled(projectId, mainThreadId), this.workflowStates,
+        (thread, threads) => this.eligible(thread, threads), (projectId, mainThreadId, purpose) => this.scopeEnabled(projectId, mainThreadId, purpose), this.workflowStates,
         thread => !isSupervisorThread(config, thread) && !thread.archivedAt && !thread.deletedAt, this.team,
         this.helperTransport, config.helperProviderInstanceId);
       this.conversation.supervisionStopped = threadId => this.supervisionStopped(threadId);
@@ -140,17 +140,18 @@ export class ProjectSupervisor {
     return Boolean(this.config.managedScratchRoot && resolve(workspaceRoot) === resolve(this.config.managedScratchRoot));
   }
   private isNoProject(projectId: string): boolean {
-    return this.store.store.classification(projectId) === "scratch" || this.scratchProjectIds.has(projectId);
+    const classification = this.store.store.classification(projectId);
+    return classification === "unclassified" ? this.scratchProjectIds.has(projectId) : classification === "scratch";
   }
   /** One scope predicate protects every effect; only a pending Start's interpretation can run before activation. */
-  scopeEnabled(projectId: string, mainThreadId?: string, purpose: "effect" | "interpretation" = "effect"): boolean {
-    if (!this.isNoProject(projectId)) return this.store.enabled(projectId) && (!mainThreadId || !this.supervisionStopped(mainThreadId));
+  scopeEnabled(projectId: string, mainThreadId?: string, purpose: "effect" | "interpretation" | "reconcile" = "effect"): boolean {
+    if (!this.isNoProject(projectId)) return this.store.enabled(projectId) && (purpose === "reconcile" || !mainThreadId || !this.supervisionStopped(mainThreadId));
     const control = this.store.noProjectControl();
     if (!control.globallyEnabled || control.mode === "off") return false;
     if (!mainThreadId) return control.mode === "automatic";
     const start = this.store.start(mainThreadId);
-    if (start?.status === "pending") return purpose === "interpretation" && this.validPendingStart(start);
-    if (this.supervisionStopped(mainThreadId)) return false;
+    if (start?.status === "pending") return purpose !== "effect" && this.validPendingStart(start);
+    if (purpose !== "reconcile" && this.supervisionStopped(mainThreadId)) return false;
     return control.mode === "automatic" || start?.status === "active";
   }
   private validPendingStart(start: SupervisionStartRecord): boolean {
@@ -852,9 +853,10 @@ export class ProjectSupervisor {
     if (!binding && models.length && !validModelSelection(current.modelSelection, models)) message = "Default Supervisor model unavailable. Choose an available T3 model; no fallback will run.";
     if (!this.projectEnabled(projectId, mainThreadId ?? undefined)) message = "Supervision is disabled globally or for this project. Existing chats and history are retained. " + message;
     const policy = currentThreadPolicy(this.config);
+    const stop = mainThreadId ? this.store.chatStop(mainThreadId) : null;
     const chatSupervision = mainThreadId ? {stopped: policy.excludedThreadIds.includes(mainThreadId), policyGeneration: policy.generation,
-      stoppedBy: binding?.supervisionStop?.route ?? null, stoppedAt: binding?.supervisionStop?.stoppedAt ?? null,
-      stoppedCallerThreadId: binding?.supervisionStop?.callerThreadId ?? null, stoppedUserMessageId: binding?.supervisionStop?.userMessageId ?? null,
+      stoppedBy: stop?.route ?? null, stoppedAt: stop?.stoppedAt ?? null,
+      stoppedCallerThreadId: stop?.callerThreadId ?? null, stoppedUserMessageId: stop?.userMessageId ?? null,
       effectiveEnabled: this.scopeEnabled(projectId, mainThreadId), activation: this.isNoProject(projectId) ? this.store.start(mainThreadId)?.status ?? "not_started" : "automatic"} : null;
     return {projectId, mainThreadId, ...(this.isNoProject(projectId) ? {noProjectMode: this.store.noProjectControl().mode} : {}), chatSupervision, team: binding ? supervisorTeamView(this.team, binding, catalog.threads, this.conversation.requests, this.now()) : null, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring, teamSettings: current.teamSettings ?? {maxHelpersPerRoot: 5}}, monitoringStatus: this.conversation.status(projectId, binding?.threadId ?? null), binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models, available, message,
       tasks: (binding ? this.store.tasksFor(binding) : []).slice(-200).reverse().map(({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview,workflowProtocolDiagnostic}) => ({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow: workflow ?? null,
@@ -959,7 +961,7 @@ export class ProjectSupervisor {
       // a request from another chat must name the exact target so the human, not the agent, selects the stopped scope
       if (candidate.route === "chat" && !namesTarget) return {status: "denied", reason: "target_not_named_by_user"};
       // a stop instruction older than the latest explicit Enable never reverses it, including a replayed tool call
-      const enabledAt = Math.max(this.store.chatEnabledAt(target.id) ?? -1, this.store.start(target.id)?.intentAt ?? -1);
+      const enabledAt = Math.max(this.store.chatEnabledAt(target.id) ?? -1, (this.store.start(target.id)?.status === "rejected" ? -1 : this.store.start(target.id)?.intentAt) ?? -1);
       if (enabledAt !== null && !(Date.parse(message.createdAt) > enabledAt)) return {status: "denied", reason: "superseded_by_later_enable"};
       // when the caller acts in the chat the human wrote in, its verified native call must answer that message, not a later unrelated turn
       const verifiedRunId = typeof evidence === "object" && evidence !== null && typeof (evidence as {runId?: unknown}).runId === "string" ? (evidence as {runId: string}).runId : null;
@@ -1017,19 +1019,19 @@ export class ProjectSupervisor {
   }
   async retry(input: ProjectSupervisorRetryInput, signal: AbortSignal): Promise<ProjectSupervisorSaveOutcome> {
     if (!this.store.scopeCompatible) return {status: "unavailable", message: "Supervisor state version is unsupported; no changes were made.", snapshot: null};
-    const control = await this.control(input.projectId, signal);
-    if (!control.effectiveEnabled) return {status: "unavailable", message: "Enable global and project supervision before retrying native work.", snapshot: null};
+    await this.control(input.projectId, signal);
+    if (!this.scopeEnabled(input.projectId, input.mainThreadId, "reconcile")) return {status: "unavailable", message: "Enable global and project supervision before retrying native work.", snapshot: null};
     return this.serial(supervisorScopeKey(input.projectId, input.mainThreadId), async () => {
       const {project} = await this.project(input.projectId);
       const settings = this.store.settings(input.projectId);
-      if (!this.projectEnabled(input.projectId, input.mainThreadId)) return {status: "unavailable", message: "Enable global and project supervision before retrying native work.", snapshot: null};
+      if (!this.scopeEnabled(input.projectId, input.mainThreadId, "reconcile")) return {status: "unavailable", message: "Enable global and project supervision before retrying native work.", snapshot: null};
       if (settings.generation !== input.expectedGeneration) return {status: "conflict", message: "Settings changed. Refresh before retrying native access.", snapshot: null};
       let binding = this.store.binding(input.projectId, input.mainThreadId);
       if (!binding || !this.operateRpc) return {status: "unavailable", message: "No Supervisor conversation is available to reconcile.", snapshot: null};
       if (binding.threadId !== input.threadId || binding.generation !== input.bindingGeneration ||
         (input.action === "replace") !== (binding.state === "missing")) return {status: "conflict", message: "The conversation state changed. Refresh and choose the intended recovery action again.", snapshot: null};
       const main = await this.lifecycle.readMain(binding, signal);
-      if (!this.projectEnabled(input.projectId, input.mainThreadId)) return {status: "unavailable", message: "Supervision was disabled before the retry began; retained work was left unchanged.", snapshot: null};
+      if (!this.scopeEnabled(input.projectId, input.mainThreadId, "reconcile")) return {status: "unavailable", message: "Supervision was disabled before the retry began; retained work was left unchanged.", snapshot: null};
       if (!main || unavailable(main.thread)) return {status: "unavailable", message: "The main conversation is archived, deleted, or unavailable. Lifecycle handling will park its retained supervision state.", snapshot: null};
       if (binding.state !== "ready") {
         if (binding.state === "missing") {
@@ -1062,7 +1064,7 @@ export class ProjectSupervisor {
         this.store.setBinding({...binding, creationAttempts: 0});
         await this.ensureBinding(input.projectId, input.mainThreadId, project.title, signal).catch(() => undefined);
       } else {
-        if (!this.projectEnabled(input.projectId, input.mainThreadId)) return {status: "unavailable", message: "Supervision was disabled before reconciliation; retained work was left unchanged.", snapshot: null};
+        if (!this.scopeEnabled(input.projectId, input.mainThreadId, "reconcile")) return {status: "unavailable", message: "Supervision was disabled before reconciliation; retained work was left unchanged.", snapshot: null};
         this.conversation.retry(input.projectId, binding.threadId);
         this.store.modelAttempt(binding, true);
         if (binding.settlement?.state === "uncertain") this.store.setBinding({...this.store.binding(binding.projectId, binding.mainThreadId)!, settlement: {...binding.settlement, state: "pending", attempts: 0}});
@@ -1142,6 +1144,7 @@ export class ProjectSupervisor {
       for (const thread of candidates) {
         if (signal.aborted) return;
         const project = catalog.projects.find(p => p.available && p.project.id === thread.projectId)?.project;if (!project || !this.projectEnabled(project.id, thread.id)) continue;
+        if (this.store.start(thread.id)?.status === "pending") continue;
         const previous = this.store.task(thread.id);
         // an unresolved request or a temporary not-needed decision is reconsidered when the next genuine human request arrives; an
         // interpreted task is reconsidered only when the latest Enable or activation boundary came after it (checked below); queued
@@ -1223,6 +1226,14 @@ export class ProjectSupervisor {
               await this.teamEffects?.reconcileStopped(binding, deadline);
             }
           } finally {if (!deadline.aborted) await this.lifecycle.check(binding, catalog.threads, deadline);}
+        });
+        if (this.isNoProject(binding.projectId) && !this.projectEnabled(binding.projectId, binding.mainThreadId)) return this.serial(supervisorScopeKey(binding.projectId, binding.mainThreadId), async () => {
+          await this.reconcileStoppedInterpretation(binding, deadline);
+          this.conversation.fenceStoppedSupervision(binding);
+          await this.conversation.reconcileStopped(binding, catalog.threads, deadline);
+          await this.conversation.teamRuntime?.reconcileStopped(binding, catalog.threads, deadline);
+          await this.teamEffects?.reconcileStopped(binding, deadline);
+          await this.lifecycle.parkInactive(binding, deadline, () => !this.projectEnabled(binding.projectId, binding.mainThreadId));
         });
         if (!masterEnabled || !this.projectEnabled(binding.projectId, binding.mainThreadId)) return this.checkClosedMainLifecycle(binding, catalog.threads, deadline);
         return this.serial(supervisorScopeKey(binding.projectId, binding.mainThreadId), async () => {

@@ -295,7 +295,7 @@ export class SupervisorConversation {
     readonly projection: (threadId: string, signal: AbortSignal) => Promise<Projection>,
     readonly definitions: ConversationDefinitions | undefined,
     readonly eligible: (thread: ThreadInfo, threads: readonly ThreadInfo[]) => boolean,
-    readonly enabled: (projectId: string, mainThreadId?: string) => boolean = () => true,
+    readonly enabled: (projectId: string, mainThreadId?: string, purpose?: "effect" | "reconcile") => boolean = () => true,
     readonly workflows?: WorkflowStateStore,
     readonly descendantContactable: (thread: ThreadInfo, threads: readonly ThreadInfo[]) => boolean = thread => !thread.archivedAt && !thread.deletedAt,
     teamStore?: SupervisorTeamStore,
@@ -2006,7 +2006,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     }
   }
   retry(projectId: string, supervisorThreadId: string): void {
-    if (!this.enabled(projectId, this.store.bindingForSupervisor(supervisorThreadId)?.mainThreadId)) return;
+    if (!this.enabled(projectId, this.store.bindingForSupervisor(supervisorThreadId)?.mainThreadId, "reconcile")) return;
     const binding = this.store.bindingForSupervisor(supervisorThreadId);
     const notice = binding?.stopNotice;
     if (binding && notice && ["unconfirmed", "blocked"].includes(notice.state)) this.store.setStopNotice(binding, notice.messageId,

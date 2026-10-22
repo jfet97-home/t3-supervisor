@@ -1679,3 +1679,59 @@ test("Start rejects nonhuman, wrong-turn, project and stale sources, and keeps d
     assert.equal(f.fixture.supervisorStore.start("manual")!.taskId, id);
   } finally {await f.cleanup();}
 });
+
+test("Retry reaches a started No Project chat and still reconciles Stop notice/settlement in ordinary projects", async () => {
+  for (const noProject of [false, true]) {
+    const f = await noProjectFixture();
+    try {
+      if (!noProject) f.fixture.supervisorStore.store.db.prepare("UPDATE classifications SET classification='project' WHERE project_id='project-a'").run();
+      else await f.supervisor.dashboardStart("manual", "recovery-grant", AbortSignal.timeout(1000));
+      const binding = reserveReadyBinding(f.fixture, "manual");
+      const first = await f.supervisor.retry(retryInput("project-a", 0, binding, "retry"), AbortSignal.timeout(1000));
+      assert.notEqual(first.status, "unavailable", noProject ? "started No Project recovery is reachable" : "ordinary recovery works");
+      await f.supervisor.setChatSupervision({projectId: "project-a", mainThreadId: "manual", policyGeneration: f.policy.get().generation, enabled: false}, AbortSignal.timeout(1000));
+      const stopped = f.fixture.supervisorStore.binding("project-a", "manual")!;
+      assert.ok(stopped.stopNotice);
+      f.fixture.supervisorStore.setStopNotice(stopped, stopped.stopNotice.messageId, {...stopped.stopNotice, state: "unconfirmed"});
+      f.fixture.supervisorStore.setBinding({...stopped, settlement: {commandId: "uncertain-settle", state: "uncertain", attempts: 3, observedAt: 1}});
+      const before = f.fixture.operations.length;
+      const result = await f.supervisor.retry(retryInput("project-a", 0, stopped, "retry"), AbortSignal.timeout(1000));
+      assert.notEqual(result.status, "unavailable", JSON.stringify({noProject, result}));
+      const retried = f.fixture.supervisorStore.binding("project-a", "manual")!;
+      assert.equal(retried.stopNotice?.state, "uncertain");assert.equal(retried.stopNotice?.messageId, stopped.stopNotice.messageId);
+      assert.equal(retried.settlement?.attempts, 0);assert.equal(retried.settlement?.commandId, "uncertain-settle");
+      assert.equal(f.fixture.operations.length, before, "recovery rearms reconciliation without posting new work");
+    } finally {await f.cleanup();}
+  }
+});
+
+test("an inactive rejected Start parks its root without a human Stop or losing source history", async () => {
+  const f = await noProjectFixture();
+  try {
+    await f.supervisor.startSupervision({callerThreadId: "manual", userMessageId: "request-start", operationId: "reject-and-park"}, {runId: "run-request-start"}, AbortSignal.timeout(1000));
+    await f.supervisor.runOnce();const task = f.fixture.supervisorStore.task("manual")!;
+    completeSupervisorRequest(f.fixture.projections.get(task.supervisorThreadId)!, task.messageId, JSON.stringify({objective: null, reason: "No Start intent", sourceMessageIds: [task.sourceMessageId], startRequested: false, workflow: null}));
+    await f.supervisor.runOnce();await f.supervisor.runOnce();
+    const binding = f.fixture.supervisorStore.binding("project-a", "manual")!;
+    assert.equal(binding.settlement?.state, "settled");assert.equal(binding.supervisionStop, undefined);assert.equal(binding.stopObservedAt, undefined);
+    assert.equal(f.policy.get().excludedThreadIds.length, 0);
+    assert.equal(f.fixture.supervisorStore.task("manual")?.sourceMessageId, task.sourceMessageId);
+    assert.equal(f.fixture.operations.filter(op => op.payload.threadId === "manual").length, 0);
+  } finally {await f.cleanup();}
+});
+
+test("a Stop before any root exists still exposes its original caller/source/time without creating a conversation", async () => {
+  const f = await noProjectFixture();
+  try {
+    f.fixture.addTurn("manual", "project-a", {id: "stop-without-root", sequence: 21, text: "Stop supervision for this chat."});
+    const message = f.fixture.projections.get("manual")!.messages.at(-1)!;message.createdAt = new Date().toISOString();
+    const result = await f.supervisor.stopSupervision({callerThreadId: "manual", targetThreadId: "manual", userMessageId: message.id, operationId: "unbound-stop"}, {runId: message.runId}, AbortSignal.timeout(1000));
+    assert.equal(result.status, "stopped");
+    const snapshot = await f.supervisor.snapshot("project-a", AbortSignal.timeout(1000), "manual");
+    assert.equal(snapshot.binding, null);assert.equal(snapshot.chatSupervision?.stopped, true);
+    assert.equal(snapshot.chatSupervision?.stoppedCallerThreadId, "manual");
+    assert.equal(snapshot.chatSupervision?.stoppedUserMessageId, message.id);
+    assert.equal(snapshot.chatSupervision?.stoppedAt, Date.parse(message.createdAt));
+    assert.equal(f.fixture.operations.length, 0);
+  } finally {await f.cleanup();}
+});
