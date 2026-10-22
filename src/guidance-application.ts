@@ -129,8 +129,8 @@ export const runGuidanceApplication = (
       isChatStopped: threadId => supervision.gate.supervisionStopped(threadId),
       loadDefinitions: (projectId, threadId, signal) => definitions.load(projectId, threadId, signal),
       contextViews: supervision.conversation,
-      starts: {start: (input, evidence, signal) => supervision.startSupervision(input, evidence, signal)},
-      stops: {stop: (input, evidence, signal) => supervision.stopSupervision(input, evidence, signal)},
+      starts: {start: (input, evidence, signal) => supervision.supervisionControl.startSupervision(input, evidence, signal)},
+      stops: {stop: (input, evidence, signal) => supervision.supervisionControl.stopSupervision(input, evidence, signal)},
       native: {
         listThreads: signal => run(nativeShell.threads, {signal}),
         projection: async (threadId, signal) => (await run(t3.projection(threadId), {signal})).projection,
