@@ -11,7 +11,7 @@ const restrictedImports = ({ sqlite, ws }) => ["error", {
 }];
 
 // the native clients not yet ported onto the envelope; each S4 port removes its file from this list
-const unportedNativeClients = ["src/t3.ts", "src/supervisor-native.ts", "src/project-files.ts", "src/git-probe.ts"];
+const unportedNativeClients = ["src/project-files.ts", "src/git-probe.ts"];
 
 export default tseslint.config(
   { ignores: ["dist/**", "node_modules/**", "vendor/**"] },
