@@ -1756,3 +1756,19 @@ test("a later human task survives repeated discovery and restart without recreat
     assert.equal(resumed.scopeEnabled("project-a", "manual"), true);
   } finally {await f.cleanup();}
 });
+
+test("Off pauses an active No Project permission without Stop-style fencing of prepared team/context work", async () => {
+  const f = await noProjectFixture();
+  try {
+    await f.supervisor.dashboardStart("manual", "pause-grant", AbortSignal.timeout(1000));
+    const binding = reserveReadyBinding(f.fixture, "manual");
+    const prepared = f.supervisor.conversation.requests.prepare({id: "prepared-before-off", projectId: binding.projectId, supervisorThreadId: binding.threadId,
+      kind: "review", taskId: null, text: "A retained review", batch: null, completionMarker: "retained-review-complete"}, Date.now());
+    await f.supervisor.saveNoProjectControl({expectedGeneration: 0, mode: "off"}, AbortSignal.timeout(1000));
+    await f.supervisor.runOnce();
+    assert.deepEqual(f.supervisor.conversation.requests.requests(binding.projectId, binding.threadId).find(row => row.id === prepared.id), prepared);
+    assert.equal(f.fixture.supervisorStore.start("manual")?.status, "active");
+    assert.equal(f.fixture.supervisorStore.binding(binding.projectId, "manual")?.supervisionStop, undefined);
+    assert.equal(f.fixture.operations.length, 0);
+  } finally {await f.cleanup();}
+});

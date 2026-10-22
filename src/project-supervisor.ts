@@ -1231,7 +1231,7 @@ export class ProjectSupervisor {
             }
           } finally {if (!deadline.aborted) await this.lifecycle.check(binding, catalog.threads, deadline);}
         });
-        if (this.isNoProject(binding.projectId) && !this.projectEnabled(binding.projectId, binding.mainThreadId)) return this.serial(supervisorScopeKey(binding.projectId, binding.mainThreadId), async () => {
+        if (this.isNoProject(binding.projectId) && this.store.start(binding.mainThreadId)?.status !== "active" && !this.projectEnabled(binding.projectId, binding.mainThreadId)) return this.serial(supervisorScopeKey(binding.projectId, binding.mainThreadId), async () => {
           await this.reconcileStoppedInterpretation(binding, deadline);
           this.conversation.fenceStoppedSupervision(binding);
           await this.conversation.reconcileStopped(binding, catalog.threads, deadline);
