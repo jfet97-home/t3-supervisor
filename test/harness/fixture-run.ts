@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 import { onTestFinished } from "vitest";
 
 // nested fixture runs through the real watchdog entry point, as `npm test` starts it
@@ -74,8 +75,10 @@ export const startWatchdog = async (args: (markers: string) => ReadonlyArray<str
   const result = new Promise<WatchdogRun>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => {
-      const groups = [...output.matchAll(/leads process group (\d+)/g)].map((match) => Number(match[1]));
-      resolve({ code, signal, output, elapsedMs: performance.now() - started, groups });
+      // reporters colour their output when the environment asks for it (FORCE_COLOR on ci); assertions read plain text
+      const plain = stripVTControlCharacters(output);
+      const groups = [...plain.matchAll(/leads process group (\d+)/g)].map((match) => Number(match[1]));
+      resolve({ code, signal, output: plain, elapsedMs: performance.now() - started, groups });
     });
   });
   onTestFinished(async () => {
