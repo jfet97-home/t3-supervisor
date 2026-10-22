@@ -50,13 +50,13 @@ export const processExists = (pid: number): boolean => {
 
 export const groupExists = (group: number): boolean => processExists(-group);
 
-export const startFixtureRun = async (fixture: string, deadlineMs: number): Promise<StartedFixtureRun> => {
+export const startFixtureRun = async (fixture: string, deadlineMs: number, config = fixtureConfig): Promise<StartedFixtureRun> => {
   const markers = await mkdtemp(join(tmpdir(), "t3-supervisor-harness-"));
   const report = join(markers, "report.json");
   const started = performance.now();
   const child = spawn(process.execPath, [
     "--import", "tsx", "scripts/run-tests.ts", `--watchdog-deadline-ms=${deadlineMs}`,
-    "--config", fixtureConfig, `test/harness/fixtures/${fixture}.fixture.ts`,
+    "--config", config, `test/harness/fixtures/${fixture}.fixture.ts`,
     "--reporter=default", "--reporter=json", `--outputFile=${report}`,
   ], { cwd: root, env: nestedEnvironment(markers), stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
@@ -80,8 +80,8 @@ export const startFixtureRun = async (fixture: string, deadlineMs: number): Prom
   return { pid: child.pid, markers, report, result };
 };
 
-export const runFixture = async (fixture: string, deadlineMs: number) => {
-  const started = await startFixtureRun(fixture, deadlineMs);
+export const runFixture = async (fixture: string, deadlineMs: number, config = fixtureConfig) => {
+  const started = await startFixtureRun(fixture, deadlineMs, config);
   return { ...started, run: await started.result };
 };
 

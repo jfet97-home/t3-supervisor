@@ -13,6 +13,8 @@ export default defineConfig({
     testTimeout: 0,
     hookTimeout: 0,
     detectAsyncLeaks: true,
+    execArgv: ["--expose-gc"],
+    setupFiles: ["test/support/leak-collect.ts"],
     reporters: ["default"],
   },
 });
