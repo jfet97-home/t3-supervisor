@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { it } from "vitest";
 import { loadConfig } from "../src/config.js";
 
-test("helper provider isolation is opt-in and trims a bounded native instance ID", () => {
+it("helper provider isolation is opt-in and trims a bounded native instance ID", () => {
   const configured = process.env.SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID;
   try {
     delete process.env.SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID;

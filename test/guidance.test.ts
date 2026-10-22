@@ -3,7 +3,7 @@ import {mkdtemp, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {Effect} from "effect";
-import test from "node:test";
+import {it} from "vitest";
 import {GuidanceRuntime} from "../src/guidance.js";
 import {GuidanceStore} from "../src/guidance-store.js";
 import {startGuidanceUi} from "../src/guidance-ui.js";
@@ -44,7 +44,7 @@ const signIn = async (origin: string, directory: string): Promise<string> => {
   return payload.session;
 };
 
-test("dashboard snapshot uses the native catalog and excludes owned roots and descendants", async () => {
+it("dashboard snapshot uses the native catalog and excludes owned roots and descendants", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-snapshot-"));
   const store = new GuidanceStore(directory);
   const settings = config(directory);
@@ -66,7 +66,7 @@ test("dashboard snapshot uses the native catalog and excludes owned roots and de
   } finally {store.close(); await rm(directory, {recursive: true, force: true});}
 });
 
-test("dashboard sessions retain authenticated snapshot and excluded-thread settings access", async () => {
+it("dashboard sessions retain authenticated snapshot and excluded-thread settings access", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-dashboard-"));
   const store = new GuidanceStore(directory);
   const policy = new ThreadPolicyStore(directory, {excludedThreadIds: []});

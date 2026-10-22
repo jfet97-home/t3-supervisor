@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { gzipSync } from "node:zlib";
 import type { Duplex } from "node:stream";
-import { test } from "node:test";
+import { it } from "vitest";
 import { Context, Effect, Fiber, Layer } from "effect";
 import { WebSocketServer } from "ws";
 import { makeT3Client, T3Client, T3TransportError, type T3ClientOptions } from "../src/t3.js";
@@ -153,7 +153,7 @@ const within = <A>(promise: Promise<A>, milliseconds = 2500): Promise<A> =>
     );
   });
 
-test("descriptor and full projection use read-only authenticated protocol 2 requests", async () => {
+it("descriptor and full projection use read-only authenticated protocol 2 requests", async () => {
   const requests: Array<{ path: string; authorization: string | undefined; protocol: string | undefined }> = [];
   const threadId = "thread/with space";
   const server = await startMockServer((request, response) => {
@@ -208,7 +208,7 @@ test("descriptor and full projection use read-only authenticated protocol 2 requ
 });
 
 
-test("full projection reader continues rejecting bounded history windows", async () => {
+it("full projection reader continues rejecting bounded history windows", async () => {
   const threadId = "thread-1";
   let responseBody: JsonRecord = {
     snapshotSequence: 19,
@@ -231,7 +231,7 @@ test("full projection reader continues rejecting bounded history windows", async
   }
 });
 
-test("descriptor rejects an unknown orchestration protocol", async () => {
+it("descriptor rejects an unknown orchestration protocol", async () => {
   const server = await startMockServer((_request, response) => {
     sendJson(response, 200, {
       environmentId: "environment-1",
@@ -248,7 +248,7 @@ test("descriptor rejects an unknown orchestration protocol", async () => {
   }
 });
 
-test("HTTP response budget and failures do not disclose bearer credentials or response bodies", async () => {
+it("HTTP response budget and failures do not disclose bearer credentials or response bodies", async () => {
   const server = await startMockServer((request, response) => {
     if (request.url === "/.well-known/t3/environment") {
       sendJson(response, 401, { message: `invalid ${token}` });
@@ -284,7 +284,7 @@ test("HTTP response budget and failures do not disclose bearer credentials or re
   }
 });
 
-test("HTTP streamed response limit has a typed response_too_large code", async () => {
+it("HTTP streamed response limit has a typed response_too_large code", async () => {
   const server = await startMockServer((_request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
     response.write('{"payload":"');
@@ -325,7 +325,7 @@ const withoutUnread = (body: JsonRecord): JsonRecord => {
   return {...body, projection};
 };
 
-test("a full snapshot over the retained budget is read exactly once its unread arrays are dropped", async () => {
+it("a full snapshot over the retained budget is read exactly once its unread arrays are dropped", async () => {
   const threadId = "thread-1";
   const body = paddedSnapshot(threadId, 300_000);
   const encoded = Buffer.byteLength(JSON.stringify(body));
@@ -344,7 +344,7 @@ test("a full snapshot over the retained budget is read exactly once its unread a
   }
 });
 
-test("a snapshot over a byte budget is typed, memoized for its thread and read again after expiry", async () => {
+it("a snapshot over a byte budget is typed, memoized for its thread and read again after expiry", async () => {
   let now = 1_000_000;
   let reads = 0;
   let body = paddedSnapshot("thread-1", 300_000);
@@ -378,7 +378,7 @@ test("a snapshot over a byte budget is typed, memoized for its thread and read a
   }
 });
 
-test("a projection body whose content hides under __proto__ fails validation through the client", async () => {
+it("a projection body whose content hides under __proto__ fails validation through the client", async () => {
   const projection = makeProjection("thread-1");
   const server = await startMockServer((_request, response) => {
     const body = `{"snapshotSequence":1,"projection":{"__proto__":${JSON.stringify(projection)}}}`;
@@ -394,7 +394,7 @@ test("a projection body whose content hides under __proto__ fails validation thr
   }
 });
 
-test("a snapshot read that stalls mid-body times out without being memoized", async () => {
+it("a snapshot read that stalls mid-body times out without being memoized", async () => {
   let reads = 0;
   const text = JSON.stringify(paddedSnapshot("thread-1", 1000));
   const server = await startMockServer((_request, response) => {
@@ -414,7 +414,7 @@ test("a snapshot read that stalls mid-body times out without being memoized", as
   }
 });
 
-test("the stream deadline and a broken body map to retryable timeout and unreadable failures through the client", async () => {
+it("the stream deadline and a broken body map to retryable timeout and unreadable failures through the client", async () => {
   const text = JSON.stringify(paddedSnapshot("thread-1", 100_000));
   const firstPart = deferred<void>();
   const proceed = deferred<void>();
@@ -451,7 +451,7 @@ test("the stream deadline and a broken body map to retryable timeout and unreada
   }
 });
 
-test("a timed-out snapshot read is not memoized as oversized", async () => {
+it("a timed-out snapshot read is not memoized as oversized", async () => {
   let reads = 0;
   let slow = true;
   const server = await startMockServer((_request, response) => {
@@ -471,7 +471,7 @@ test("a timed-out snapshot read is not memoized as oversized", async () => {
   }
 });
 
-test("a gzip snapshot counts decompressed bytes toward the transfer budget, and a large content-length fails early", async () => {
+it("a gzip snapshot counts decompressed bytes toward the transfer budget, and a large content-length fails early", async () => {
   const body = JSON.stringify(paddedSnapshot("thread-1", 200_000));
   const compressed = gzipSync(body);
   let declared: number | null = null;
@@ -501,7 +501,7 @@ test("a gzip snapshot counts decompressed bytes toward the transfer budget, and 
   }
 });
 
-test("a full snapshot over 32 MiB on the wire is read with the default budgets when what is kept fits", async () => {
+it("a full snapshot over 32 MiB on the wire is read with the default budgets when what is kept fits", async () => {
   const threadId = "large-thread";
   const body = paddedSnapshot(threadId, 36 * 1024 * 1024);
   const text = JSON.stringify(body);
@@ -521,7 +521,7 @@ test("a full snapshot over 32 MiB on the wire is read with the default budgets w
   }
 });
 
-test("HTTP 404 exposes only a safe status hint", async () => {
+it("HTTP 404 exposes only a safe status hint", async () => {
   const server = await startMockServer((_request, response) => {
     sendJson(response, 404, { message: `missing resource for ${token}` });
   });
@@ -543,7 +543,7 @@ test("HTTP 404 exposes only a safe status hint", async () => {
   }
 });
 
-test("HTTP requests time out and abort their underlying fetch", async () => {
+it("HTTP requests time out and abort their underlying fetch", async () => {
   const aborted = deferred<void>();
   const server = await startMockServer((request, response) => {
     request.on("close", () => aborted.resolve());
@@ -572,7 +572,7 @@ test("HTTP requests time out and abort their underlying fetch", async () => {
   }
 });
 
-test("watch handles RPC envelopes and waits for durable ingestion before acknowledging chunks", async () => {
+it("watch handles RPC envelopes and waits for durable ingestion before acknowledging chunks", async () => {
   const subscriptions: JsonRecord[] = [];
   const acknowledgements: string[] = [];
   const requestsSeen = deferred<void>();
@@ -667,7 +667,7 @@ test("watch handles RPC envelopes and waits for durable ingestion before acknowl
   }
 });
 
-test("watch bounds a websocket peer that completes the handshake but never answers native Ping", async () => {
+it("watch bounds a websocket peer that completes the handshake but never answers native Ping", async () => {
   const pingSeen = deferred<void>();
   const remoteClosed = deferred<void>();
   const server = await startMockServer((_request, response) => sendJson(response, 404, {}));
@@ -700,7 +700,7 @@ test("watch bounds a websocket peer that completes the handshake but never answe
   }
 });
 
-test("watch keeps a quiet websocket alive when the peer answers native Ping", async () => {
+it("watch keeps a quiet websocket alive when the peer answers native Ping", async () => {
   let pingCount = 0;
   const twoPingsAnswered = deferred<void>();
   const remoteClosed = deferred<void>();
@@ -731,7 +731,7 @@ test("watch keeps a quiet websocket alive when the peer answers native Ping", as
   }
 });
 
-test("watch bounds a websocket handshake that never completes", async () => {
+it("watch bounds a websocket handshake that never completes", async () => {
   const server = await startHungHandshakeServer();
 
   try {
@@ -750,7 +750,7 @@ test("watch bounds a websocket handshake that never completes", async () => {
   }
 });
 
-test("watch fails closed on subscription Exit and Defect frames so the caller can reconnect", async () => {
+it("watch fails closed on subscription Exit and Defect frames so the caller can reconnect", async () => {
   for (const terminal of [
     { _tag: "Exit", requestId: "1", exit: { _tag: "Success", value: null } },
     { _tag: "Defect", requestId: "2", defect: { message: "private server detail" } }
@@ -781,7 +781,7 @@ test("watch fails closed on subscription Exit and Defect frames so the caller ca
   }
 });
 
-test("watch rejects shell snapshots with an unsupported schema version", async () => {
+it("watch rejects shell snapshots with an unsupported schema version", async () => {
   const sent = deferred<void>();
   const acknowledgements: string[] = [];
   const server = await startMockServer((_request, response) => sendJson(response, 404, {}));
@@ -821,7 +821,7 @@ test("watch rejects shell snapshots with an unsupported schema version", async (
   }
 });
 
-test("watch propagates ingestion failures without acknowledging their chunk", async () => {
+it("watch propagates ingestion failures without acknowledging their chunk", async () => {
   const sent = deferred<void>();
   const acknowledgements: string[] = [];
   const server = await startMockServer((_request, response) => sendJson(response, 404, {}));

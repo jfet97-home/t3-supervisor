@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { DatabaseSync } from "node:sqlite";
-import test from "node:test";
+import { it } from "vitest";
 import { createServiceAuth } from "../src/service-auth.js";
 
 const execute = promisify(execFile);
@@ -24,7 +24,7 @@ const sessionRows = (directory: string): Array<Record<string, unknown>> => {
   }
 };
 
-test("the local CLI mints a new single-use token into the running service's auth state", async () => {
+it("the local CLI mints a new single-use token into the running service's auth state", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-auth-cli-"));
   const auth = await createServiceAuth(directory);
   try {
@@ -57,7 +57,7 @@ test("the local CLI mints a new single-use token into the running service's auth
   } finally {auth.close();await rm(directory, {recursive: true, force: true});}
 });
 
-test("the local CLI rejects an existing database without both current auth tables", async () => {
+it("the local CLI rejects an existing database without both current auth tables", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-auth-cli-schema-"));
   const auth = await createServiceAuth(directory);
   auth.close();
@@ -79,7 +79,7 @@ test("the local CLI rejects an existing database without both current auth table
   }
 });
 
-test("the local CLI does not bootstrap missing service state or accept unknown commands", async () => {
+it("the local CLI does not bootstrap missing service state or accept unknown commands", async () => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-auth-cli-missing-"));
   try {
     await assert.rejects(invoke(directory), (error: unknown) => {
@@ -97,7 +97,7 @@ test("the local CLI does not bootstrap missing service state or accept unknown c
   } finally {await rm(directory, {recursive: true, force: true});}
 });
 
-test("direct installations find the user state from any directory and support an explicit instance", async () => {
+it("direct installations find the user state from any directory and support an explicit instance", async () => {
   const home = await mkdtemp(join(tmpdir(), "supervisor-auth-cli-home-"));
   const directory = join(home, ".local", "state", "t3-supervisor");
   const auth = await createServiceAuth(directory);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {mkdtempSync, rmSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {test} from "node:test";
+import {it} from "vitest";
 import {WebSocketServer} from "ws";
 import {GuidanceStore} from "../src/guidance-store.js";
 import {GitProbeError, makeGitProbe} from "../src/git-probe.js";
@@ -153,7 +153,7 @@ const storeFixture = () => {
   return {directory, store, close: () => {store.close();rmSync(directory, {recursive: true, force: true});}};
 };
 
-test("native Git probe uses a short bootstrap, canonical Python input, a framed result, and deletes terminal history", async () => {
+it("native Git probe uses a short bootstrap, canonical Python input, a framed result, and deletes terminal history", async () => {
   const root = "/tmp/repo'$(do-not-run)";
   const t3 = await fakeT3(() => ({workspaceRoot: root, branch: "feature", isRepo: true, changedPaths: ["README.md"], operationState: {status: "safe"}}));
   const state = storeFixture();
@@ -176,7 +176,7 @@ test("native Git probe uses a short bootstrap, canonical Python input, a framed 
   }
 });
 
-test("each Git probe returns a fresh status instead of reusing the previous result", async () => {
+it("each Git probe returns a fresh status instead of reusing the previous result", async () => {
   const root = "/workspace";
   const t3 = await fakeT3(index => ({
     workspaceRoot: root,
@@ -201,7 +201,7 @@ test("each Git probe returns a fresh status instead of reusing the previous resu
   }
 });
 
-test("an echoed bootstrap command cannot satisfy the standalone readiness handshake", async () => {
+it("an echoed bootstrap command cannot satisfy the standalone readiness handshake", async () => {
   const root = "/workspace";
   const t3 = await fakeT3(() => ({workspaceRoot: root, branch: "main", isRepo: true, changedPaths: [], operationState: {status: "safe"}}), 0, {holdReadyMarker: true});
   const state = storeFixture();
@@ -226,7 +226,7 @@ test("an echoed bootstrap command cannot satisfy the standalone readiness handsh
   }
 });
 
-test("native zero signal means normal exit while a positive termination signal rejects the probe", async () => {
+it("native zero signal means normal exit while a positive termination signal rejects the probe", async () => {
   const root = "/workspace";
   for (const exitSignal of [0, 2]) {
     const t3 = await fakeT3(() => ({workspaceRoot: root, branch: "main", isRepo: true, changedPaths: [], operationState: {status: "safe"}}), 0, {exitSignal});
@@ -243,7 +243,7 @@ test("native zero signal means normal exit while a positive termination signal r
   }
 });
 
-test("probe rejects nonzero native exit and still closes the persistent terminal session", async () => {
+it("probe rejects nonzero native exit and still closes the persistent terminal session", async () => {
   const root = "/workspace";
   const t3 = await fakeT3(() => ({workspaceRoot: root, branch: "main", isRepo: true, changedPaths: [], operationState: {status: "safe"}}), 2);
   const state = storeFixture();
@@ -258,7 +258,7 @@ test("probe rejects nonzero native exit and still closes the persistent terminal
   }
 });
 
-test("startup cleanup closes pending probe sessions from the private metadata table", async () => {
+it("startup cleanup closes pending probe sessions from the private metadata table", async () => {
   const root = "/workspace";
   const t3 = await fakeT3(() => ({workspaceRoot: root, branch: "main", isRepo: true, changedPaths: [], operationState: {status: "safe"}}));
   const state = storeFixture();
@@ -277,7 +277,7 @@ test("startup cleanup closes pending probe sessions from the private metadata ta
   }
 });
 
-test("corrupted pending metadata cannot close a user-owned terminal", async () => {
+it("corrupted pending metadata cannot close a user-owned terminal", async () => {
   const t3 = await fakeT3(() => ({workspaceRoot: "/workspace", branch: "main", isRepo: true, changedPaths: [], operationState: {status: "safe"}}));
   const state = storeFixture();
   try {

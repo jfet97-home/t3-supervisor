@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
-import test from "node:test";
+import { describe, it } from "vitest";
 import { Worker } from "node:worker_threads";
 import { createServiceAuth, forgeDashboardToken, type ServiceAuth } from "../src/service-auth.js";
 
@@ -151,7 +151,7 @@ const makeConsumerWorker = (directory: string, token: string, barrier: SharedArr
   return {worker, ready, result, exited};
 };
 
-test("service auth persists a private workflow token and stores only hashed one-time dashboard grants", async () => {
+it("service auth persists a private workflow token and stores only hashed one-time dashboard grants", async () => {
   await withTemporaryDirectory(async (directory) => {
     const now = 12_345;
     const auth = await createServiceAuth(directory, {now: () => now});
@@ -212,7 +212,7 @@ test("service auth persists a private workflow token and stores only hashed one-
   });
 });
 
-test("grants and sessions persist across reopen without renewing their original deadlines", async () => {
+it("grants and sessions persist across reopen without renewing their original deadlines", async () => {
   await withTemporaryDirectory(async (directory) => {
     let currentTime = 1_000;
     let auth: ServiceAuth | undefined = await createServiceAuth(directory, {now: () => currentTime});
@@ -254,7 +254,7 @@ test("grants and sessions persist across reopen without renewing their original 
   });
 });
 
-test("a committed session survives an abrupt child-process exit and a grant cannot replay", async () => {
+it("a committed session survives an abrupt child-process exit and a grant cannot replay", async () => {
   await withTemporaryDirectory(async (directory) => {
     const auth = await createServiceAuth(directory);
     const grant = await forgeDashboardToken(directory);
@@ -267,7 +267,7 @@ test("a committed session survives an abrupt child-process exit and a grant cann
   });
 });
 
-test("retained shorter sessions keep their original deadline after the login lifetime changes", async () => {
+it("retained shorter sessions keep their original deadline after the login lifetime changes", async () => {
   await withTemporaryDirectory(async directory => {
     let currentTime = 1_000;
     let auth = await createServiceAuth(directory, {now: () => currentTime});
@@ -289,7 +289,7 @@ test("retained shorter sessions keep their original deadline after the login lif
   });
 });
 
-test("SQLite recovers a hot session journal after SIGKILL without losing committed sessions", async () => {
+it("SQLite recovers a hot session journal after SIGKILL without losing committed sessions", async () => {
   await withTemporaryDirectory(async (directory) => {
     let currentTime = 3_000;
     const auth = await createServiceAuth(directory, {now: () => currentTime});
@@ -357,7 +357,7 @@ test("SQLite recovers a hot session journal after SIGKILL without losing committ
   });
 });
 
-test("grant and session tables share one database", async () => {
+it("grant and session tables share one database", async () => {
   await withTemporaryDirectory(async (directory) => {
     const auth = await createServiceAuth(directory);
     try {
@@ -390,7 +390,7 @@ test("grant and session tables share one database", async () => {
   });
 });
 
-test("failed login rolls back grant consumption, expiry pruning and session eviction", async () => {
+it("failed login rolls back grant consumption, expiry pruning and session eviction", async () => {
   await withTemporaryDirectory(async (directory) => {
     const sessionTtl = 30 * 24 * 60 * 60 * 1_000;
     const currentTime = 50_000_000;
@@ -462,7 +462,7 @@ test("failed login rolls back grant consumption, expiry pruning and session evic
   });
 });
 
-test("logout revokes across open instances and durable sessions keep a global stable cap", async () => {
+it("logout revokes across open instances and durable sessions keep a global stable cap", async () => {
   await withTemporaryDirectory(async (directory) => {
     let currentTime = 2_000;
     const auth = await createServiceAuth(directory, {now: () => currentTime});
@@ -516,7 +516,7 @@ test("logout revokes across open instances and durable sessions keep a global st
   });
 });
 
-test("logout by another service instance remains revoked after reopen", async () => {
+it("logout by another service instance remains revoked after reopen", async () => {
   await withTemporaryDirectory(async (directory) => {
     const first = await createServiceAuth(directory);
     const second = await createServiceAuth(directory);
@@ -540,7 +540,7 @@ test("logout by another service instance remains revoked after reopen", async ()
   });
 });
 
-test("pending dashboard grants are isolated between service state directories", async () => {
+it("pending dashboard grants are isolated between service state directories", async () => {
   await withTemporaryDirectory(async (firstDirectory) => {
     await withTemporaryDirectory(async (secondDirectory) => {
       const first = await createServiceAuth(firstDirectory);
@@ -564,7 +564,7 @@ test("pending dashboard grants are isolated between service state directories", 
   });
 });
 
-test("grant issuance prunes expired rows and fails closed at the pending-grant limit", async () => {
+it("grant issuance prunes expired rows and fails closed at the pending-grant limit", async () => {
   await withTemporaryDirectory(async (directory) => {
     let currentTime = 10_000;
     const auth = await createServiceAuth(directory, {now: () => currentTime});
@@ -592,7 +592,7 @@ test("grant issuance prunes expired rows and fails closed at the pending-grant l
   });
 });
 
-test("concurrent service initialization preserves one workflow token and one two-table database", async () => {
+it("concurrent service initialization preserves one workflow token and one two-table database", async () => {
   await withTemporaryDirectory(async (directory) => {
     const [first, second] = await Promise.all([
       createServiceAuth(directory),
@@ -612,7 +612,7 @@ test("concurrent service initialization preserves one workflow token and one two
   });
 });
 
-test("grant forging requires an initialized database and does not bootstrap missing state", async () => {
+it("grant forging requires an initialized database and does not bootstrap missing state", async () => {
   await withTemporaryDirectory(async (directory) => {
     await assert.rejects(forgeDashboardToken(directory));
     await assert.rejects(lstat(accessPath(directory)), {code: "ENOENT"});
@@ -623,7 +623,7 @@ test("grant forging requires an initialized database and does not bootstrap miss
   });
 });
 
-test("valid existing auth files are tightened to private modes", async () => {
+it("valid existing auth files are tightened to private modes", async () => {
   await withTemporaryDirectory(async (directory) => {
     const first = await createServiceAuth(directory);
     first.close();
@@ -640,8 +640,8 @@ test("valid existing auth files are tightened to private modes", async () => {
   });
 });
 
-test("malformed, oversized, symlink and non-regular workflow token files fail closed", async (t) => {
-  await t.test("malformed content", async () => {
+describe("malformed, oversized, symlink and non-regular workflow token files fail closed", () => {
+  it("malformed content", async () => {
     await withTemporaryDirectory(async (directory) => {
       await mkdir(accessPath(directory), {mode: 0o700});
       const corrupt = "!".repeat(43);
@@ -651,7 +651,7 @@ test("malformed, oversized, symlink and non-regular workflow token files fail cl
     });
   });
 
-  await t.test("oversized content", async () => {
+  it("oversized content", async () => {
     await withTemporaryDirectory(async (directory) => {
       await mkdir(accessPath(directory), {mode: 0o700});
       const oversized = "A".repeat(44);
@@ -661,7 +661,7 @@ test("malformed, oversized, symlink and non-regular workflow token files fail cl
     });
   });
 
-  await t.test("symlink", async () => {
+  it("symlink", async () => {
     await withTemporaryDirectory(async (directory) => {
       await mkdir(accessPath(directory), {mode: 0o700});
       const target = join(directory, "outside-token");
@@ -672,7 +672,7 @@ test("malformed, oversized, symlink and non-regular workflow token files fail cl
     });
   });
 
-  await t.test("directory in place of token file", async () => {
+  it("directory in place of token file", async () => {
     await withTemporaryDirectory(async (directory) => {
       await mkdir(tokenPath(directory), {recursive: true, mode: 0o700});
       await assert.rejects(createServiceAuth(directory));
@@ -681,8 +681,8 @@ test("malformed, oversized, symlink and non-regular workflow token files fail cl
   });
 });
 
-test("malformed, oversized, symlink and non-regular auth databases fail closed", async (t) => {
-  await t.test("corrupt database remains untouched", async () => {
+describe("malformed, oversized, symlink and non-regular auth databases fail closed", () => {
+  it("corrupt database remains untouched", async () => {
     await withTemporaryDirectory(async (directory) => {
       await mkdir(accessPath(directory), {mode: 0o700});
       const corrupt = Buffer.from("not a sqlite database");
@@ -692,7 +692,7 @@ test("malformed, oversized, symlink and non-regular auth databases fail closed",
     });
   });
 
-  await t.test("oversized database", async () => {
+  it("oversized database", async () => {
     await withTemporaryDirectory(async (directory) => {
       await mkdir(accessPath(directory), {mode: 0o700});
       const oversized = Buffer.alloc(1_048_577, 0x41);
@@ -702,7 +702,7 @@ test("malformed, oversized, symlink and non-regular auth databases fail closed",
     });
   });
 
-  await t.test("symlink", async () => {
+  it("symlink", async () => {
     await withTemporaryDirectory(async (directory) => {
       const targetDirectory = join(directory, "target");
       await mkdir(targetDirectory);
@@ -716,7 +716,7 @@ test("malformed, oversized, symlink and non-regular auth databases fail closed",
     });
   });
 
-  await t.test("directory in place of database file", async () => {
+  it("directory in place of database file", async () => {
     await withTemporaryDirectory(async (directory) => {
       await mkdir(databasePath(directory), {recursive: true, mode: 0o700});
       await assert.rejects(createServiceAuth(directory));
@@ -725,8 +725,8 @@ test("malformed, oversized, symlink and non-regular auth databases fail closed",
   });
 });
 
-test("unexpected session table schemas and row caps fail closed", async (t) => {
-  await t.test("missing current table is not added to an existing database", async () => {
+describe("unexpected session table schemas and row caps fail closed", () => {
+  it("missing current table is not added to an existing database", async () => {
     await withTemporaryDirectory(async (directory) => {
       const auth = await createServiceAuth(directory);
       auth.close();
@@ -741,7 +741,7 @@ test("unexpected session table schemas and row caps fail closed", async (t) => {
     });
   });
 
-  await t.test("unexpected schema remains untouched", async () => {
+  it("unexpected schema remains untouched", async () => {
     await withTemporaryDirectory(async (directory) => {
       const auth = await createServiceAuth(directory);
       auth.close();
@@ -754,7 +754,7 @@ test("unexpected session table schemas and row caps fail closed", async (t) => {
     });
   });
 
-  await t.test("more than 32 persisted sessions fail closed", async () => {
+  it("more than 32 persisted sessions fail closed", async () => {
     await withTemporaryDirectory(async (directory) => {
       const auth = await createServiceAuth(directory);
       auth.close();
@@ -770,7 +770,7 @@ test("unexpected session table schemas and row caps fail closed", async (t) => {
     });
   });
 
-  await t.test("SQLite rejects nonpositive sessions and lifetimes beyond 30 days", async () => {
+  it("SQLite rejects nonpositive sessions and lifetimes beyond 30 days", async () => {
     await withTemporaryDirectory(async (directory) => {
       const auth = await createServiceAuth(directory);
       auth.close();
@@ -789,7 +789,7 @@ test("unexpected session table schemas and row caps fail closed", async (t) => {
 
 });
 
-test("two concurrent service instances can consume one grant only once", async () => {
+it("two concurrent service instances can consume one grant only once", async () => {
   await withTemporaryDirectory(async (directory) => {
     const owner = await createServiceAuth(directory);
     const grant = await forgeDashboardToken(directory);

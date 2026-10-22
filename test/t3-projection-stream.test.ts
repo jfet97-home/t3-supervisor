@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { it } from "vitest";
 import { ProjectionStreamError, readProjectionSnapshot, UNREAD_PROJECTION_KEYS } from "../src/t3-projection-stream.js";
 
 const encoder = new TextEncoder();
@@ -48,7 +48,7 @@ const expectedView = (body: ReturnType<typeof snapshotBody>) => {
   return {...body, projection};
 };
 
-test("a streamed snapshot equals JSON.parse of the whole body minus unread arrays, for every chunk split", async () => {
+it("a streamed snapshot equals JSON.parse of the whole body minus unread arrays, for every chunk split", async () => {
   const body = snapshotBody();
   const bytes = encoder.encode(JSON.stringify(body));
   const expected = expectedView(JSON.parse(JSON.stringify(body)) as ReturnType<typeof snapshotBody>);
@@ -61,14 +61,14 @@ test("a streamed snapshot equals JSON.parse of the whole body minus unread array
   assert.deepEqual(await readProjectionSnapshot(streamOf(pretty, [1, 2, 3]), budget, AbortSignal.timeout(5000)), expected);
 });
 
-test("a user or assistant turn item shares its message text only when the value is identical", async () => {
+it("a user or assistant turn item shares its message text only when the value is identical", async () => {
   const result = await readProjectionSnapshot(streamOf(encoder.encode(JSON.stringify(snapshotBody()))), budget, AbortSignal.timeout(5000));
   const projection = result.projection as {messages: Array<{text: string}>; turnItems: Array<{text?: string}>};
   assert.equal(projection.turnItems[0]!.text, projection.messages[0]!.text);
   assert.equal(projection.turnItems[1]!.text, "a different text", "a differing turn item text is kept as sent");
 });
 
-test("unread arrays do not count toward the retained budget, but retained records do", async () => {
+it("unread arrays do not count toward the retained budget, but retained records do", async () => {
   const body = snapshotBody();
   // many small unread rows: their total far exceeds the retained budget, while each stays within the per-record bound
   body.projection.plans = [{id: "plan", markdown: "x".repeat(200)}];
@@ -86,7 +86,7 @@ test("unread arrays do not count toward the retained budget, but retained record
     AbortSignal.timeout(5000)), (error: unknown) => error instanceof ProjectionStreamError && error.code === "transfer_too_large");
 });
 
-test("only keys directly under the projection are unread; the same names inside retained records survive", async () => {
+it("only keys directly under the projection are unread; the same names inside retained records survive", async () => {
   const body = snapshotBody();
   (body.projection.thread as Record<string, unknown>).visibleTurnItems = ["kept inside the thread row"];
   (body.projection.turnItems[2]!.input as Record<string, unknown>).plans = {checkpoints: [1]};
@@ -99,7 +99,7 @@ test("only keys directly under the projection are unread; the same names inside 
   }
 });
 
-test("truncated, trailing, duplicated or malformed bodies fail as invalid", async () => {
+it("truncated, trailing, duplicated or malformed bodies fail as invalid", async () => {
   const text = JSON.stringify(snapshotBody());
   const invalid = async (value: string, label: string) => assert.rejects(
     readProjectionSnapshot(streamOf(encoder.encode(value), [3, 50]), budget, AbortSignal.timeout(5000)),
@@ -124,7 +124,7 @@ test("truncated, trailing, duplicated or malformed bodies fail as invalid", asyn
     (error: unknown) => error instanceof ProjectionStreamError && error.code === "invalid");
 });
 
-test("a __proto__ key in the envelope or projection is an own field, exactly as JSON.parse makes it", async () => {
+it("a __proto__ key in the envelope or projection is an own field, exactly as JSON.parse makes it", async () => {
   const projection = snapshotBody().projection;
   const text = `{"snapshotSequence":3,"__proto__":{"polluted":true},"projection":{"__proto__":{"thread":{"id":"hidden"}},${JSON.stringify(projection).slice(1)}}`;
   const result = await readProjectionSnapshot(streamOf(encoder.encode(text), [7, 40]), budget, AbortSignal.timeout(5000));
@@ -141,7 +141,7 @@ test("a __proto__ key in the envelope or projection is an own field, exactly as 
   assert.equal((hidden.projection as Record<string, unknown>).thread, undefined);
 });
 
-test("a byte order mark before a retained or unread value is rejected as JSON.parse would", async () => {
+it("a byte order mark before a retained or unread value is rejected as JSON.parse would", async () => {
   const text = JSON.stringify(snapshotBody());
   for (const [label, value] of [["unread", text.replace('"plans":[', '"plans":[\ufeff0,')], ["retained", text.replace('"snapshotSequence":17', '"snapshotSequence":\ufeff17')]] as const) {
     assert.throws(() => JSON.parse(value), SyntaxError);
@@ -150,7 +150,7 @@ test("a byte order mark before a retained or unread value is rejected as JSON.pa
   }
 });
 
-test("chunks that arrive back to back still meet the deadline and let timers run", async () => {
+it("chunks that arrive back to back still meet the deadline and let timers run", async () => {
   const tiny = encoder.encode(`{"snapshotSequence":1,"projection":{"thread":{"id":"t"},"runs":[],"messages":[],"plans":[${Array(200_000).fill("null").join(",")}]}}`);
   const immediate = () => {
     let offset = 0;
@@ -177,7 +177,7 @@ test("chunks that arrive back to back still meet the deadline and let timers run
   assert.equal(observedDuringRead, true, "the read yields to the event loop between chunks");
 });
 
-test("sharing an identical text charges it once, which a budget between both sizes proves", async () => {
+it("sharing an identical text charges it once, which a budget between both sizes proves", async () => {
   const text = "s".repeat(20_000);
   const body = (itemText: string) => encoder.encode(JSON.stringify({snapshotSequence: 1, projection: {thread: {id: "t"}, runs: [],
     messages: [{id: "m", threadId: "t", text}], turnItems: [{id: "i", threadId: "t", type: "user_message", messageId: "m", text: itemText}]}}));
@@ -190,7 +190,7 @@ test("sharing an identical text charges it once, which a budget between both siz
     (error: unknown) => error instanceof ProjectionStreamError && error.code === "retained_too_large", "a differing text is charged twice");
 });
 
-test("retained keys are charged, an oversized key is invalid, and a failing body is unreadable", async () => {
+it("retained keys are charged, an oversized key is invalid, and a failing body is unreadable", async () => {
   const keys = Object.fromEntries(Array.from({length: 2000}, (_, index) => [`k${"x".repeat(100)}${index}`, 0]));
   const many = encoder.encode(JSON.stringify({snapshotSequence: 1, projection: {thread: {id: "t"}, runs: [], messages: [], ...keys}}));
   await assert.rejects(readProjectionSnapshot(streamOf(many), {...budget, retainedBytes: 100_000}, AbortSignal.timeout(5000)),
@@ -209,7 +209,7 @@ test("retained keys are charged, an oversized key is invalid, and a failing body
     (error: unknown) => error instanceof ProjectionStreamError && error.code === "unreadable");
 });
 
-test("one huge chunk of tiny values is still scanned in slices that meet the deadline and let timers run", async () => {
+it("one huge chunk of tiny values is still scanned in slices that meet the deadline and let timers run", async () => {
   const tiny = encoder.encode(`{"snapshotSequence":1,"projection":{"thread":{"id":"t"},"runs":[],"messages":[],"plans":[${Array(400_000).fill("null").join(",")}]}}`);
   const single = () => new ReadableStream<Uint8Array>({start(controller) {controller.enqueue(tiny);controller.close();}});
   let clock = 0;
@@ -226,7 +226,7 @@ test("one huge chunk of tiny values is still scanned in slices that meet the dea
   assert.equal(firedDuringRead, true, "the read yields to the event loop inside one chunk");
 });
 
-test("an abort that lands as the body ends is never published", async () => {
+it("an abort that lands as the body ends is never published", async () => {
   const controller = new AbortController();
   const bytes = encoder.encode(JSON.stringify(snapshotBody()));
   let sent = false;
@@ -240,7 +240,7 @@ test("an abort that lands as the body ends is never published", async () => {
     (error: unknown) => error instanceof ProjectionStreamError && error.code === "interrupted");
 });
 
-test("an aborted read stops with interrupted and keeps no partial result", async () => {
+it("an aborted read stops with interrupted and keeps no partial result", async () => {
   const controller = new AbortController();
   let pulls = 0;
   const bytes = encoder.encode(JSON.stringify(snapshotBody()));

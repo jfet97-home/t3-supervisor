@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Effect } from "effect";
-import test from "node:test";
+import { it } from "vitest";
 import { makeStore, Store, StoreError, type StoreShape } from "../src/store.js";
 import type { ProjectInfo, SourceItem, ThreadInfo } from "../src/types.js";
 
@@ -32,7 +32,7 @@ const withTemporaryDirectory = async <A>(run: (directory: string) => Promise<A>)
   try {return await run(directory);} finally {rmSync(directory, {recursive: true, force: true});}
 };
 
-test("activation, catalog shells and source cursors persist in a private catalog store", async () => {
+it("activation, catalog shells and source cursors persist in a private catalog store", async () => {
   await withTemporaryDirectory(async directory => {
     assert.equal(await withStore(directory, store => store.activate("environment-1", 1_000)), 1_000);
     assert.equal(await withStore(directory, store => store.activate("environment-1", 2_000)), 1_000);
@@ -55,7 +55,7 @@ test("activation, catalog shells and source cursors persist in a private catalog
   });
 });
 
-test("catalog store creates only the generic T3 and activation tables", async () => {
+it("catalog store creates only the generic T3 and activation tables", async () => {
   await withTemporaryDirectory(async directory => {
     await withStore(directory, store => store.stats());
     const database = new DatabaseSync(join(directory, "catalog.sqlite3"));
@@ -67,7 +67,7 @@ test("catalog store creates only the generic T3 and activation tables", async ()
   });
 });
 
-test("metadata enrichment updates projects without replacing inventory or rewinding the cursor", async () => {
+it("metadata enrichment updates projects without replacing inventory or rewinding the cursor", async () => {
   await withTemporaryDirectory(async directory => {
     await withStore(directory, store => Effect.gen(function* () {
       yield* store.ingest(sourceItem("active", {kind: "snapshot", snapshot: {
@@ -88,7 +88,7 @@ test("metadata enrichment updates projects without replacing inventory or rewind
   });
 });
 
-test("archive removal keeps the known shell and advances the archived cursor", async () => {
+it("archive removal keeps the known shell and advances the archived cursor", async () => {
   await withTemporaryDirectory(async directory => {
     await withStore(directory, store => Effect.gen(function* () {
       yield* store.ingest(sourceItem("archive", {kind: "snapshot", snapshot: {
@@ -106,7 +106,7 @@ test("archive removal keeps the known shell and advances the archived cursor", a
   });
 });
 
-test("failed shell ingestion leaves its cursor unacknowledged", async () => {
+it("failed shell ingestion leaves its cursor unacknowledged", async () => {
   await withTemporaryDirectory(async directory => {
     await assert.rejects(withStore(directory, store => store.ingest(sourceItem("active", {
       kind: "thread.updated", sequence: 1, thread: {id: "malformed", title: "Missing lineage"},
@@ -115,7 +115,7 @@ test("failed shell ingestion leaves its cursor unacknowledged", async () => {
   });
 });
 
-test("stored shells omit conversation and goal text while retaining policy fields", async () => {
+it("stored shells omit conversation and goal text while retaining policy fields", async () => {
   await withTemporaryDirectory(async directory => {
     const privateValues = ["private latest visible message body", "private provider goal objective", "private last error details",
       "private background task description", "private runtime request text"];
