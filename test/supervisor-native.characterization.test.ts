@@ -3,7 +3,16 @@ import { createServer, type Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { it, vi, type TestContext } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Effect } from "effect";
 import { makeSupervisorRpc, SupervisorRpcError } from "../src/supervisor-native.js";
+import { makeT3Client, T3Client, T3TransportError } from "../src/t3.js";
+import { makeProjectCommitter, makeProjectFiles, ProjectFileError } from "../src/project-files.js";
+import { GitProbeError, makeGitProbe } from "../src/git-probe.js";
+import { GuidanceStore } from "../src/guidance-store.js";
+import { fakeT3 } from "./support/c1-git-probe-peer.js";
 import { after } from "./support/node-test.js";
 import { turn, withDeadline } from "./support/c1-loopback.js";
 
@@ -182,4 +191,125 @@ it("CT-NATIVE-03: batched array frames are flattened up to four levels and deepe
   const error = rpcError(await withDeadline(deepCall.outcome, 3_000, "deep batch"));
   assert.equal(error.outcome, "uncertain");
   assert.equal(error.definiteRejection, false);
+});
+
+// the shared envelope goldens: exact client frame text, compared byte for byte
+const pongFrame = '{"_tag":"Pong"}';
+const exitFrame = (requestId: string, exit: unknown) => JSON.stringify({ _tag: "Exit", requestId, exit });
+const failureExit = (failure: unknown) => ({ _tag: "Failure", cause: { _tag: "Fail", failure } });
+const raw = (peer: { frames: Frame[] }) => peer.frames.map((frame) => frame.data);
+
+it("CT-WSFRAME-01: supervisor-native sends the exact Request frame, answers Ping with Pong and decodes Exit Success and Failure", { timeout: 10_000 }, async (t) => {
+  for (const outcome of ["Success", "Failure"] as const) {
+    const peer = await startPeer(t, (socket, frame) => {
+      if (frame._tag === "Request") socket.send(JSON.stringify({ _tag: "Ping" }));
+      else if (frame._tag === "Pong") socket.send(exitFrame("supervisor", outcome === "Success" ? { _tag: "Success", value: { ok: true } } : failureExit({ name: "UnrelatedServerError" })));
+    });
+    const call = settledState(makeSupervisorRpc(peer.url, "frame-token")("server.getConfig", { probe: 1 }, new AbortController().signal));
+    const result = await withDeadline(call.outcome, 3_000, `native ${outcome}`);
+    if (outcome === "Success") assert.deepEqual(result, { value: { ok: true } });
+    else assert.deepEqual([rpcError(result).outcome, rpcError(result).definiteRejection], ["uncertain", false]);
+    assert.deepEqual(raw(peer), ['{"_tag":"Request","id":"supervisor","tag":"server.getConfig","payload":{"probe":1},"headers":[]}', pongFrame]);
+  }
+});
+
+it("CT-WSFRAME-01: project-files sends exact Request frames, answers Ping, Acks commit Chunks, not snapshot Chunks, and decodes Exits", { timeout: 10_000 }, async (t) => {
+  const signal = () => AbortSignal.timeout(3_000);
+  for (const outcome of ["Success", "Failure"] as const) {
+    const peer = await startPeer(t, (socket, frame) => {
+      if (frame._tag === "Request") socket.send(JSON.stringify({ _tag: "Ping" }));
+      else if (frame._tag === "Pong") socket.send(exitFrame("definitions", outcome === "Success"
+        ? { _tag: "Success", value: { contents: "steps: []\n", byteLength: 10, truncated: false } } : failureExit({ code: "ENOENT" })));
+    });
+    const read = makeProjectFiles(peer.url, "frame-token").read("/work", ".t3-supervisor/project.yaml", signal());
+    if (outcome === "Success") assert.deepEqual(await read, { contents: "steps: []\n", byteLength: 10, truncated: false });
+    else await assert.rejects(read, (error: unknown) => error instanceof ProjectFileError && error.code === "missing");
+    assert.deepEqual(raw(peer), ['{"_tag":"Request","id":"definitions","tag":"projects.readFile","payload":{"cwd":"/work","relativePath":".t3-supervisor/project.yaml"},"headers":[]}', pongFrame]);
+  }
+
+  const commit = await startPeer(t, (socket, frame) => {
+    if (frame._tag === "Request") socket.send(JSON.stringify({ _tag: "Ping" }));
+    else if (frame._tag === "Pong") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "definition-setup-commit",
+      values: [{ actionId: "action-1", kind: "action_finished", result: { commit: { status: "created", commitSha: "abc123" } } }] }));
+    else if (frame._tag === "Ack") socket.send(exitFrame("definition-setup-commit", { _tag: "Success", value: null }));
+  });
+  assert.deepEqual(await makeProjectCommitter(commit.url, "frame-token").commitFiles("/work", [".t3-supervisor/project.yaml"], "Add definitions", "action-1", signal()),
+    { status: "committed", commitSha: "abc123" });
+  assert.deepEqual(raw(commit), [
+    '{"_tag":"Request","id":"definition-setup-commit","tag":"git.runStackedAction","payload":{"actionId":"action-1","cwd":"/work","action":"commit","commitMessage":"Add definitions","filePaths":[".t3-supervisor/project.yaml"]},"headers":[]}',
+    pongFrame,
+    '{"_tag":"Ack","requestId":"definition-setup-commit"}',
+  ]);
+
+  const vcs = await startPeer(t, (socket, frame) => {
+    if (frame._tag === "Request" && frame.tag === "vcs.listRefs") socket.send(exitFrame("definitions", { _tag: "Success", value: { isRepo: true, refs: [{ current: true, name: "main" }] } }));
+    else if (frame._tag === "Request" && frame.tag === "subscribeVcsStatus") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "definition-vcs-snapshot",
+      values: [{ _tag: "snapshot", local: { isRepo: true, workingTree: { files: [{ path: "README.md" }] } } }] }));
+  });
+  const files = makeProjectFiles(vcs.url, "frame-token");
+  assert.ok(files.vcsInfo);
+  assert.deepEqual(await files.vcsInfo("/work", signal()), { isRepo: true, branch: "main", changedPaths: ["README.md"] });
+  assert.deepEqual(raw(vcs), [
+    '{"_tag":"Request","id":"definitions","tag":"vcs.listRefs","payload":{"cwd":"/work","refKind":"local","limit":200},"headers":[]}',
+    '{"_tag":"Request","id":"definition-vcs-snapshot","tag":"subscribeVcsStatus","payload":{"cwd":"/work","includeRemote":false},"headers":[]}',
+  ]);
+});
+
+it("CT-WSFRAME-01: t3.ts subscriptions send exact Request frames, answer Ping with Pong, Ack each Chunk and end on any Exit", { timeout: 10_000 }, async (t) => {
+  for (const outcome of ["Success", "Failure"] as const) {
+    const peer = await startPeer(t, (socket, frame) => {
+      if (frame._tag === "Request" && frame.id === "2") socket.send(JSON.stringify({ _tag: "Ping" }));
+      else if (frame._tag === "Pong") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "1", values: [{ kind: "synchronized" }] }));
+      else if (frame._tag === "Ack") socket.send(exitFrame("1", outcome === "Success" ? { _tag: "Success", value: null } : failureExit({ message: "ended" })));
+    });
+    const items: unknown[] = [];
+    const watch = T3Client.use((client) => client.watch(7, (item) => Effect.sync(() => { items.push(item); })))
+      .pipe(Effect.flip, Effect.provide(makeT3Client({ baseUrl: peer.url, token: "frame-token" })));
+    const error = await withDeadline(Effect.runPromise(watch), 5_000, `t3 ${outcome}`);
+    assert.ok(error instanceof T3TransportError);
+    assert.equal(error.message, "T3 subscription ended");
+    assert.deepEqual(items, [{ stream: "active", item: { kind: "synchronized" } }]);
+    assert.deepEqual(raw(peer), [
+      '{"_tag":"Request","id":"1","tag":"orchestration.subscribeShell","payload":{"afterSequence":7},"headers":[]}',
+      '{"_tag":"Request","id":"2","tag":"orchestration.subscribeArchivedShell","payload":{},"headers":[]}',
+      pongFrame,
+      '{"_tag":"Ack","requestId":"1"}',
+    ]);
+  }
+});
+
+it("CT-WSFRAME-01: git-probe sends exact Request frames, answers Ping with Pong, Acks every attach Chunk and decodes Exit Success and Failure", { timeout: 10_000 }, async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "c1-git-probe-frames-"));
+  const store = new GuidanceStore(directory);
+  const peers: Array<{ close(): Promise<void> }> = [];
+  after(t, async () => {
+    for (const peer of peers) await peer.close();
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const root = "/work/repository";
+  const t3 = await fakeT3(() => ({ workspaceRoot: root, branch: "main", isRepo: true, changedPaths: [], operationState: { status: "safe" } }), 0, { pingBeforeOpenExit: true });
+  peers.push(t3);
+  assert.deepEqual(await makeGitProbe(t3.url, "frame-token", store).probe(root, AbortSignal.timeout(5_000)),
+    { workspaceRoot: root, branch: "main", isRepo: true, changedPaths: [], operationState: { status: "safe" } });
+  const frames = t3.frames.map((text) => ({ text, frame: JSON.parse(text) as { _tag: string; id?: string; tag?: string; payload?: unknown; requestId?: string } }));
+  const requests = frames.filter(({ frame }) => frame._tag === "Request");
+  assert.deepEqual(requests.map(({ frame }) => frame.tag), ["terminal.open", "terminal.attach", "terminal.write", "terminal.write", "terminal.close"]);
+  for (const { text, frame } of requests) {
+    assert.match(String(frame.id), frame.tag === "terminal.attach" ? /^git-probe-stream-[0-9a-f-]{36}$/u : /^git-probe-[0-9a-f-]{36}$/u);
+    assert.equal(text, JSON.stringify({ _tag: "Request", id: frame.id, tag: frame.tag, payload: frame.payload, headers: [] }));
+  }
+  assert.deepEqual(frames.filter(({ frame }) => frame._tag === "Pong").map(({ text }) => text), [pongFrame]);
+  const streamId = requests.find(({ frame }) => frame.tag === "terminal.attach")?.frame.id;
+  const acks = frames.filter(({ frame }) => frame._tag === "Ack").map(({ text }) => text);
+  assert.deepEqual(acks, Array.from({ length: 5 }, () => `{"_tag":"Ack","requestId":"${streamId}"}`));
+  assert.equal(frames.length, requests.length + 1 + acks.length);
+
+  const refusing = await fakeT3(() => ({ workspaceRoot: root, branch: null, isRepo: false, changedPaths: [], operationState: { status: "safe" } }), 0, { failOpen: true });
+  peers.push(refusing);
+  await assert.rejects(makeGitProbe(refusing.url, "frame-token", store).probe(root, AbortSignal.timeout(5_000)),
+    (error: unknown) => error instanceof GitProbeError && error.message === "T3 rejected a terminal Git probe request.");
+  // the refused open is still followed by a history-deleting close of the same session
+  assert.deepEqual(refusing.requests.map((request) => request.tag), ["terminal.open", "terminal.close"]);
+  assert.deepEqual(refusing.closes.map((payload) => payload.deleteHistory), [true]);
 });
