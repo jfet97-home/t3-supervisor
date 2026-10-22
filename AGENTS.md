@@ -39,6 +39,17 @@ require rebuilding or restarting the application.
 - Keep updates and maintained instructions concise. Give evidence-based estimates;
   when a blocker invalidates an ETA, say so promptly rather than rolling it forward.
 
+## Effect v4 throughout
+
+The application, CLI, tooling and tests use Effect v4 at one exactly pinned version for
+`effect` and every `@effect/*` package. Write services as `Context.Service` with Layers,
+decode untrusted input and stored rows with `Schema`, persist through `effect/sql`, keep UI
+async state in Atom/AtomHttpApi, and test with `@effect/vitest` (`TestClock` for timing,
+`it.live` for real I/O). Do not call `Effect.run*` in business code or add Promise polling,
+ad hoc timers or hand-rolled async state machines. Never log raw causes, tokens or native
+bodies. Third-party, native and browser integrations stay small scoped adapters with a
+recorded reason; pure calculations, types and JSX stay plain.
+
 ## Knowledge Base
 
 This project has an LLM-maintained knowledge base in `knowledge/` (git-ignored). Invoke `$knowledge` or `/knowledge` with the same subcommands and arguments.

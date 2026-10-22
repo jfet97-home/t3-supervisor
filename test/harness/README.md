@@ -15,5 +15,11 @@
   killed at the deadline (exit 124, SIGKILL escalation, no group member left); SIGINT and
   SIGTERM are forwarded to the group (exit 130 and 143); an invalid deadline option exits 2.
 
-Deferred to S1c (needs `@effect/vitest` 4.0.5): an `it.effect` per-test timeout interrupts
-the fiber and runs its finalizers.
+- `effect-timeout.test.ts`: an `@effect/vitest` per-test timeout interrupts the effect fiber
+  and runs its finalizer; an in-effect `Effect.timeout` fails typed inside `it.live`.
+- `leak-collect.test.ts`: an interrupted fiber is not reported, a still-referenced suspended
+  fiber is, and a worker without `--expose-gc` fails closed.
+- `handle-gate.test.ts`: the native resource gate of `vitest.cpu-bound.config.ts` fails a
+  leaked interval and an open server, passes a closed server and fails closed without
+  `process.getActiveResourcesInfo`.
+- `node-test.test.ts`: the node:test cleanup-order shim of `test/support/node-test.ts`.
