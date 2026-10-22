@@ -1,10 +1,12 @@
 # Effect v4 migration plan
 
-Status: **plan v2**, superseding frozen v1 `14b4a875`. It reconciles Sol's terminal review
+Status: **plan v2.1**, a narrow follow-up to frozen v2 `059e4a82` (which superseded v1
+`14b4a875`): section 3.12 reconciles both reviewers' typed-interpretation design reports and
+the Luna MAX evidence; nothing else changes. It reconciles Sol's terminal review
 (SOL-PLAN-01..09), Astra's terminal review (A-P01..A-P08, O-01..O-06 and 113 per-file
 objection rows), Astra's early auth correction, Andrea's CLI and execution directions and
-Andrea's typed-interpretation, routing and model-comparison requests (3.12, proposed and
-pending Sol/Astra alignment) in one ledger (section 13). No production or test port starts
+Andrea's typed-interpretation, routing and model-comparison requests (3.12) in one ledger
+(section 13). No production or test port starts
 until both reviewers approve this frozen revision and the coordinator confirms alignment. Owner: Opus (sole implementation owner).
 Manifest: [`effect-v4-files.json`](effect-v4-files.json) (one row per baseline tracked
 file; `planVersion` `v2`).
@@ -91,14 +93,14 @@ all I/O goes through platform, socket, HTTP or SQL services, untrusted data is d
 
 ### 3.1 Process, CLI and configuration (CC-CLI, CC-CONFIG, CC-SHUTDOWN, CC-HEALTH)
 
-- **Entries.** From S3 (with the CLI port), `src/main.ts` exports the server program and
+- **Entries.** From S6c (with the CLI port), `src/main.ts` exports the server program and
   calls `NodeRuntime.runMain` only when it is the process entry (`import.meta.main`,
   Node ≥ 24.2), so `node dist/main.js` (Dockerfile `CMD`, `npm start`) and
   `t3-supervisor start` run the same program under exactly one `runMain`; until then the
   unported `start` keeps importing `main.ts`, whose top-level `runMain` stays as today. The
   other entries are `src/cli.ts`, `scripts/probe-t3.ts`, `scripts/run-tests.ts` and
   `ui/src/main.tsx`.
-- **CLI (Andrea: Effect end to end, `effect/cli` extension points first; S3).** `src/cli.ts` is
+- **CLI (Andrea: Effect end to end, `effect/cli` extension points first; S6c).** `src/cli.ts` is
   an `effect/cli` program under `runMain` (`disableErrorReporting: true`): root
   `t3-supervisor` with subcommands `start` and `auth forge`, each with an optional
   `--data-dir`. Extension points: `CliConfig.layer({builtIns: [GlobalFlag.Help]})` (no
@@ -187,8 +189,8 @@ statement, so sequences outside a transaction can interleave. Rules:
 7. A failed COMMIT is rolled back under the semaphore before the connection is reused;
    nested `withTransaction` failures roll back to their SAVEPOINT.
 
-Target-regression SQL tests on the real driver (S3 for CatalogDb/AccessDb, S6d for
-GuidanceDb/PolicyDb): **CT-SQL-01** an interrupted waiter completes only after the holder
+Target-regression SQL tests on the real driver (S3 for CatalogDb, S6c for AccessDb, S6d
+for GuidanceDb/PolicyDb): **CT-SQL-01** an interrupted waiter completes only after the holder
 releases and its body never runs; **CT-SQL-02** interruption inside a body rolls back and
 the connection is reusable; **CT-SQL-03** a failed COMMIT is cleaned up and the next
 transaction succeeds; **CT-SQL-04** two independent clients on one file in different
@@ -198,7 +200,7 @@ BEGIN IMMEDIATE.
 | File | Owner | Journal | Guarantees | Client | Slice |
 | --- | --- | --- | --- | --- | --- |
 | `catalog.sqlite3` | `store.ts` | WAL | `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`, `wal_autocheckpoint=256`, `secure_delete=ON`, `max_page_count`; dir 0700, db/-wal/-shm 0600 | `CatalogDb`; file created and chmodded 0600 before open, pragmas after open; process lifetime | S3 |
-| `access/login.sqlite3` | `service-auth.ts` (server and `auth forge`) | **DELETE** (validated) | `synchronous=FULL`, `busy_timeout=5000`, `max_page_count`; exactly two STRICT tables; caps/TTL; `quick_check`; O_NOFOLLOW + dev/ino identity before open and lstat re-check after open; size bounds; CLI never bootstraps | `AccessDb` = `SqliteClient.make({disableWAL: true})` after the private-files checks: **one client for the lifetime of the dashboard HTTP server** shared by every login/session/revocation operation (baseline `createServiceAuth`, `service-auth.ts:420-528`, opened at `guidance-ui.ts:144` and closed with the server at `:333/:348`; re-acquired with the server after a degraded supervision restart, released after the server's listeners), and **one short-lived client per forge operation in the separate CLI process** (`forgeDashboardToken`, `:530-566`). Never two clients in one process: a second client's synchronous busy wait would block the event loop while the first is suspended inside a transaction (Astra's 4.0.5 probe: `harness-probe/auth-client-contention`, LockTimeoutError after 53 ms). Cross-process contention stays BEGIN IMMEDIATE + `busy_timeout` (CT-AUTH-05, CT-SQL-04) | S3 |
+| `access/login.sqlite3` | `service-auth.ts` (server and `auth forge`) | **DELETE** (validated) | `synchronous=FULL`, `busy_timeout=5000`, `max_page_count`; exactly two STRICT tables; caps/TTL; `quick_check`; O_NOFOLLOW + dev/ino identity before open and lstat re-check after open; size bounds; CLI never bootstraps | `AccessDb` = `SqliteClient.make({disableWAL: true})` after the private-files checks: **one client for the lifetime of the dashboard HTTP server** shared by every login/session/revocation operation (baseline `createServiceAuth`, `service-auth.ts:420-528`, opened at `guidance-ui.ts:144` and closed with the server at `:333/:348`; re-acquired with the server after a degraded supervision restart, released after the server's listeners), and **one short-lived client per forge operation in the separate CLI process** (`forgeDashboardToken`, `:530-566`). Never two clients in one process: a second client's synchronous busy wait would block the event loop while the first is suspended inside a transaction (Astra's 4.0.5 probe: `harness-probe/auth-client-contention`, LockTimeoutError after 53 ms). Cross-process contention stays BEGIN IMMEDIATE + `busy_timeout` (CT-AUTH-05, CT-SQL-04) | S6c (with its only callers: the HTTP auth checks and the CLI; 3.9 T-01) |
 | `guidance.sqlite3` | `guidance-store.ts`; shared by project-supervisor, workflow-state, conversation, monitor and team stores, helper transport, write controller, git probe | WAL | `synchronous=FULL`, `busy_timeout=5000`, `secure_delete=ON`, `max_page_count=16384`; idempotent DDL at open; restart recovery (CC-RECOVERY) | `GuidanceDb` (S6d); until then the existing synchronous store (3.4); ownership preload from the same layer | S6d |
 | `thread-settings.sqlite3` | `thread-policy.ts` | WAL | `synchronous=FULL`, `busy_timeout=5000`; single-row document read on every Stop check (`thread-policy.ts:22-24`, no cache) | `PolicyDb` (S6d); reads stay authoritative DB reads; Stop/Enable commits are ordered against send admission by the admission section (3.11) | S6d |
 
@@ -396,14 +398,14 @@ Resulting order (each line calls only lines above it):
 | Slice | Services (call order) |
 | --- | --- |
 | S2 | `SupervisorConfig`, `SupervisorIds`, `Logger`, elapsed-clock helper, redaction, `ThreadPolicy`/`SupervisorOwnership` root services, server program (`main.ts`), health/status (`supervisor.ts`) |
-| S3 | `Store` (`CatalogDb`), `ServiceAuth` (`AccessDb`), CLI (`auth forge` calls `ServiceAuth`) |
+| S3 | `Store` (`CatalogDb`) |
 | S4 | native envelope, `T3Client` + projection stream, `SupervisorNative`, `ProjectFiles`, `GitProbe`, probe script |
 | S5 | `ProjectDefinitionLoader`, `ProjectConfigEditor` |
 | S6a | extraction commits; pure modules; `ScopeLocks`; `SupervisionGate` (+ admission, 3.11); `HelperTransport`; `TeamRuntime` |
 | S6b | `SupervisorConversation` → `SupervisorLifecycle` → `SupervisionControl` → `WorkflowWriteController` → `SupervisorTeamController` → `ProjectSupervisor` → `WorkflowProgress`, team view, dashboard overview |
-| S6c | `GuidanceRuntime`, MCP route, HTTP handlers/router/auth routes/static, `SupervisionLive` (replaces `runGuidanceApplication`) |
+| S6c | `ServiceAuth` (`AccessDb`), CLI, `GuidanceRuntime`, MCP route, HTTP handlers/router/auth routes/static, `SupervisionLive` (replaces `runGuidanceApplication`) |
 | S6d | `GuidanceDb`/`PolicyDb` engine switch (all callers already ported) |
-| S6e | typed interpretation submission (3.12; owner proposal pending alignment) |
+| S6e | typed interpretation submission (3.12; attempt-bound submission, prompt return, completed-run finalization) |
 | S7 | UI |
 
 `ProjectSupervisor` still calls the team controller for reconciliation (today's late-bound
@@ -428,7 +430,39 @@ the one root context; none builds a runtime, rebuilds a Layer or opens a connect
 | --- | --- | --- | --- |
 | B-01 | `const run = Effect.runPromiseWith(yield* Effect.context<RootServices>())`: `(effect, {signal}) => Promise` handed to unported objects | `runGuidanceApplication` run scope (one capture per supervision run) | S6c |
 | B-02 | interim `GuidanceStoreSync`/`PolicyStoreSync`: the existing synchronous objects, acquired where they are today and passed by reference to unported constructors | guidance: supervision run; policy: process (`main.ts`) | S6d |
-| B-03 | Promise facades `(args, signal) => run(service.op(args), signal)` for each ported service an unported caller still uses (e.g. catalog, `T3Client.projection`, `ServiceAuth`, `ProjectDefinitionLoader`, `HelperTransport`), passed through existing constructor parameters instead of being constructed inside the unported class | composition root | the slice that ports the last unported caller; all by S6c |
+| B-03 | facades for each ported service an unported caller still uses, built in `runGuidanceApplication` from the captured context and handed over through constructor parameters. Each method keeps its baseline shape (`temporaryBoundaries.callShapes`): an asynchronous method becomes `(args, signal) => run(service.op(args), signal)`; a synchronous method stays synchronous only when it is pure or a read/write over the B-02 stores (for example `HelperTransport.hasDelivery`, `TeamRuntime.partition`, `SupervisorConversation.status`, `WorkflowWriteController.resolveBinding`, the gate predicates). Any other synchronous use is a caller transition (B-04) | composition root | the slice that ports the last unported caller; all by S6c |
+
+**Synchronous call sites (B-04).** A Promise facade cannot stand in for a synchronous call:
+a Promise is always truthy in a condition, and login/revoke order would be lost. Each
+transition below is a narrow, ledgered call-site edit in the still-unported consumer, made
+in the same commit as the callee change, preserving check order and login/revoke behaviour. Every synchronous call from a still-unported
+caller into a service ported earlier is therefore given an explicit transition, listed in
+the manifest (`syncTransitions`):
+
+| ID | Synchronous call sites | Transition |
+| --- | --- | --- |
+| T-01 | `guidance-ui.ts:187-224`: `auth.mcpAuthorized`, `auth.authenticated`, `auth.login`, `auth.logout` inside request conditions | `ServiceAuth` cannot stay synchronous once it runs on `AccessDb`, so it ports in S6c together with these HTTP checks, the `/auth/*` routes and the CLI (`auth forge`); S3 keeps only the catalog store. No facade |
+| T-02 | `guidance-ui.ts:129-137` `supervision.saveThreadPolicy` inside an `Effect.try` handler; `guidance-ui.ts:62,66` `noProjectControl` and `startStatus` inside `Effect.try` handlers | `saveThreadPolicy` becomes asynchronous in S6a (T-07); the same S6a commit changes that handler to yield the admitted Effect directly (the handler is already an Effect), mapped to the same `UiError`. `noProjectControl` and `startStatus` stay synchronous B-02 reads until S6c, when the handlers port |
+| T-07 | the extracted, still-Promise `SupervisionControl` Stop, Enable, thread-policy save and chat-supervision paths, and the Start activation blocks in `prepareStarts` and `reconcile` (`project-supervisor.ts:670-679,780-795,1466-1474`), from S6a until S6b | in S6a, when the first ported send can yield between its guard and its `initiate`, each of these legacy policy writes runs its existing synchronous block as one `Effect.sync` inside `run(gate.admit(...))` (B-01), awaited by the Promise caller; Start activation acquires the admission section before opening its guidance transaction, never from inside it |
+| T-03 | `project-supervisor.ts`, `supervisor-lifecycle.ts` → `SupervisorConversation` (`status`, `hasInflight`, `supervisionStopped`, `interpretationRole`, `roleDelivered`, `retry`, `reconcileStopNotice`, `fenceStoppedSupervision`) during the S6b commit series | these stay synchronous methods over the interim stores (B-02) until S6d; `fenceStoppedSupervision` runs inside the Stop bookkeeping critical section |
+| T-04 | `supervisor-conversation.ts:1443,1480,1667,1917,1920` and `supervisor-lifecycle.ts:114,355` → `TeamRuntime` (`startCycle` in-memory; `partition`, `coordinatorPolicy`, `rootOwnedBatch`, `hasBlockingWork`, `hasInflightEffects` B-02 reads; `acknowledgeRootEvents` B-02 write) between S6a and S6b | stay synchronous until S6d; `TeamRuntime`'s own calls to `HelperTransport.receiptText`/`matchesMessage` (B-02 reads) stay inside WP-S6a-SEND |
+| T-05 | `cli.ts:3,28` → `config.loadDataDirectory` between S2 and S6c (`guidance-ui.ts:144`'s direct `createServiceAuth` factory import disappears with T-01, because ServiceAuth and that caller port together) | a retained pure data-directory resolver (flag and environment in, path out) in `config.ts`, not a facade; the forge process has no supervision runtime. In S6c the CLI resolves it through `SupervisorConfig` in its own `runMain` |
+| T-06 | gate predicates (`scopeEnabled`, `supervisionStopped`, `workflowEditingEnabled`) and `workflowLocator` (`workflow-progress.ts:244-257`), B-02 reads from unported callers | synchronous by design (3.9); guarding uses go through the admission section (3.11) |
+
+Store calls into the D-01 stores are B-02, not transitions. A synchronous method kept for an
+unported caller is a plain read or write over B-02 stores or a pure computation; it never
+hides an asynchronous implementation. The extracted call shapes (`temporaryBoundaries.callShapes`)
+have no other cross-slice synchronous method: `globalHomePath`/`globalDefinitionsPath` are
+pure, and `SupervisorTeamController.reconcileStopped` already returns a Promise.
+
+Two lower services are constructed inside unported classes today and become injected
+facade arguments in the commit that ports them: **I-01** `SupervisorHelperTransport`,
+constructed by `ProjectSupervisor` (`project-supervisor.ts:109-110`), becomes a constructor
+parameter of `ProjectSupervisor` (and is passed on to `SupervisorConversation`) in S6a;
+**I-02** `SupervisorTeamRuntime`, constructed by `SupervisorConversation`
+(`supervisor-conversation.ts:306`), becomes a constructor parameter passed through
+`ProjectSupervisor` in S6a. Both are built once in `runGuidanceApplication` from the root
+context and removed in S6b, when those classes become Layers.
 
 The ledger in the manifest (`temporaryBoundaries`) lists each B-03 facade with its
 consumer, service operation and removing slice. S6c deletes B-01 and every B-03 facade; S6d
@@ -492,7 +526,8 @@ this contract closes them.
 
 1. **One admission section.** `SupervisionGate` owns one process-wide `Semaphore(1)`.
    (Per-scope keys would also satisfy the contract but need multi-key ordering for bulk
-   policy saves; the sections contain only synchronous store work and a fork.)
+   policy saves; the sections contain only synchronous store work and a fork. The manifest's
+   `CC-STOP-LIN` uses the same process-wide section; W4's per-scope draft is superseded.)
    - Stop, Enable, thread-policy saves, dashboard chat-supervision changes and Start
      activation run inside it: policy commit, then the guidance bookkeeping (start
      rejection, unbound stop, `setSupervisionStop`, `setStopNotice`,
@@ -500,19 +535,48 @@ this contract closes them.
    - Every fresh send path runs its final guard (authoritative policy and guidance reads,
      scope enabled, actor/assignment and receipt checks), its durable receipt commit and its
      **native admission** inside it.
-   - Native admission is the linearization point of a send: the native call is forked into
-     the owning `FiberMap` with its final identity, inside the section. The section ends
-     immediately after admission; the caller awaits the call outside it. No lock is held
-     across socket open, a reply or a body read, and no SQL transaction spans two files.
+   - Every **policy-dependent durable write** runs its guard and its write inside it: any
+     guidance mutation whose guard reads the stop list, an Enable time or the scope
+     predicates in the same baseline synchronous block (task creation and queueing, start
+     records, binding updates, interpretation application, introduction and notice
+     preparation, settlement records, stale marking), and explicitly the `workflow_write`
+     commit (`workflow-write-controller.ts:1327-1355`), the `supervision_team` mutations
+     (`supervisor-team-controller.ts:158-205`), the typed interpretation intake and
+     finalization (3.12) and Start activation. A single-file transaction does not close the
+     cross-file window: a writer holding `GuidanceDb` could otherwise read the policy, yield,
+     and commit after a Stop committed `PolicyDb`. The
+     generated inventory (`contracts.CC-STOP-LIN.policyDependentMutations`, 50 sites, e.g.
+     `project-supervisor.ts:1356→1357`, `supervisor-conversation.ts:1984→1989`,
+     `supervisor-lifecycle.ts:274→276`) is checked again at each port. To make this
+     enforceable rather than a convention, the gate exposes its predicates for guarding
+     only through an admission capability (`SupervisionGate.admit(f)`, where `f` receives
+     the guard API); outside `admit` only display reads are available.
+   - **Native admission** is the linearization point of a send. It is the adapter's
+     synchronous handoff, not a fiber fork: every native transport exposes
+     `initiate(request): Effect<InFlight>`, implemented with `Effect.sync`, which
+     irrevocably commits the request exactly as today (the WS RPC request frame bound to a
+     newly created socket and sent on open, as `supervisor-native.ts:23,35-41` does; the
+     helper webhook `fetch` invoked with its body, as `supervisor-helper-transport.ts:394`
+     does) and returns at once. `initiate` runs inside the section after the receipt
+     commit; the section ends right after it. Socket open, the reply and any body read
+     happen afterwards in `InFlight.result`, outside the section. Whatever the D-08 spike
+     selects must expose this synchronous `initiate` step. The caller then awaits
+     `InFlight.result` through `FiberMap.run(inflight, identity, result,
+     {onlyIfMissing: true})`, so a second call for the same identity never replaces or
+     cancels an admitted send, and caller interruption (the 120 s cycle deadline, request
+     abort, shutdown) aborts it locally exactly where today's `AbortSignal` does. Stop never
+     interrupts an admitted send; its outcome is classified by the sent boundary and
+     reconciled, never replayed under a new identity. No SQL transaction spans two files.
      The existing per-scope `serial` queue (`project-supervisor.ts:119-123`, `ScopeLocks` in
      the target) spans network work and is not the admission lock.
-   - After admission, Stop never interrupts the call. Caller interruption (the 120 s cycle
-     deadline, request abort, shutdown) aborts it locally exactly where today's
-     `AbortSignal` does; the outcome is classified by the sent boundary and reconciled,
-     never replayed under a new identity.
-2. **Masking and order.** Each section body runs under `uninterruptibleMask` around
-   commit + bookkeeping and around receipt commit + admission; an interruption before the
-   guard admits nothing. Acquisition order: `ScopeLocks` key (if held) → admission section →
+   - The section is one operation, `SupervisionGate.admit(f)`:
+     `Semaphore.withPermits(admission, 1)(Effect.uninterruptible(f(guard)))`
+     (`Semaphore.ts:462`). Waiting for the permit stays interruptible; the body, which
+     contains only synchronous store work (or short `withTransaction` blocks after S6d) and
+     at most one `initiate`, is uninterruptible. The guard predicates for writes and sends
+     are only reachable through `admit`'s argument.
+2. **Masking and order.** Each section body is uninterruptible (item 1); an interruption
+   before the permit is acquired admits nothing. Acquisition order: `ScopeLocks` key (if held) → admission section →
    database critical section (`Effect.sync` before S6d, `withTransaction` after). The
    section is never acquired inside a transaction.
 3. **Outcomes.** A Stop ordered before a send's admission makes its guard fail: zero fresh
@@ -521,7 +585,16 @@ this contract closes them.
    then produces exactly one operative notice, as today. Stop/Enable/Stop keeps the
    baseline notice rules (`supervisor-conversation.ts:1720`, `project-supervisor.ts:
    912-915`).
-4. **Preserved baseline limitations (not widened, not fixed in this batch).** A crash
+4. **Introduced together (S6a).** The admission section exists from the first S6a commit
+   that ports a send (helper transport). In that same commit series the remaining legacy
+   policy writers join it (3.9 T-07), so at every intermediate freeze each Stop, Enable,
+   thread-policy save and Start activation is ordered against every ported send and
+   policy-dependent write. Unported sends still run guard, receipt and initiation in one
+   synchronous turn and cannot be interleaved. Start activation keeps the baseline order
+   inside the section: policy write, then the guidance transaction commit, with the
+   section acquired before the transaction opens. CT-LIN-02, -05 and -06 run at that first
+   S6a freeze, including the unported callers.
+5. **Preserved baseline limitations (not widened, not fixed in this batch).** A crash
    between the policy commit and the guidance bookkeeping keeps today's recovery behaviour.
    A bookkeeping failure after the policy commit keeps today's results (Stop: sends stay
    fenced but no notice is written and a dashboard retry returns `conflict`; Enable: a
@@ -535,185 +608,311 @@ this contract closes them.
 Tests (5.4): CT-LIN-01 (policy commit before each path's next guard), CT-LIN-03 (failed
 bookkeeping), CT-LIN-06 (Stop after initiation) and the interpretation variant of CT-LIN-04
 are `s1-baseline`; CT-LIN-02 has a baseline probe and a target barrier variant; CT-LIN-04
-for the other paths and CT-LIN-05 (final guard → native admission with a parked adapter and
-a concurrent Stop) are `target-regression`.
+for the other paths, CT-LIN-05, CT-LIN-07 and CT-LIN-08 are `target-regression`.
 
-### 3.12 Typed interpretation submission and routing (CC-INTERP-SUBMIT; proposal pending alignment)
+**CT-LIN-05, the executable admission contract** (`it.live`, S6a for the helper path, then
+every send path), with a fake adapter whose `initiate` appends `"initiate"` to a `Ref` log
+synchronously and returns an `InFlight` whose `result` waits on a `Deferred` reply:
+1. Fork a send with `Effect.forkChild`; wait for `"initiate"`; then fork a Stop and
+   `Fiber.join` it **while the reply `Deferred` is still unresolved**. The Stop completes,
+   which proves no network response is awaited under the section; the log is
+   `initiate, policy-commit, bookkeeping`; the send is not interrupted; resolving the reply
+   records its outcome under the original identity; a second send for the same identity
+   returns the same in-flight fiber (`onlyIfMissing`).
+2. Reverse order: the Stop holds the section through a `Deferred` barrier inside its
+   bookkeeping; a concurrent send waits for the permit; after release its guard fails, the
+   log has no `initiate`, and no receipt is written.
+3. Interrupting the waiting send in (2) before it gets the permit leaves no receipt and no
+   `initiate`.
+CT-LIN-07: `admit` called while a `GuidanceDb` transaction is open on the same fiber dies
+with a defect (the per-client transaction key, `SqlClient.ts:179`, is present), so the
+section is never acquired inside a transaction. CT-LIN-08: controlled interleavings for the
+policy-dependent writes — a Stop ordered against `workflow_write`, a `supervision_team`
+mutation, a typed interpretation intake and finalization, and Start activation, each with
+the writer parked between its guard and its commit — show the write either commits before
+the Stop or sees the Stop and writes nothing.
 
-IDs: ANDREA-ITOOL-01, ANDREA-ROUTE-01, ANDREA-ITOOL-EVAL-01, ANDREA-MODEL-01. Status: owner
-proposal aligned with Sol's working recommendation; pending Sol/Astra terminal alignment.
+### 3.12 Typed interpretation submission and routing (CC-INTERP-SUBMIT)
+
+IDs: ANDREA-ITOOL-01, ANDREA-ROUTE-01, ANDREA-ITOOL-EVAL-01, ANDREA-MODEL-01, and the
+reviewers' design obligations SOL-ITOOL-1..8 and A-I01..A-I04 (section 13). Status: one
+design reconciled from the owner proposal (v2), Sol's design report
+(`sol-typed-interpretation-design.md`) and Astra's (`typed-interpretation-design.md`); both
+reviewers recommend exactly this shape.
 
 Andrea asked to replace free-form final-chat JSON interpretation parsing with a typed
 Supervisor MCP submission tool validated with `Schema`, keeping exact native identity,
 source, run and binding authority, with no T3 change, no permanent fallback and no
-duplicate store; and asked whether the tool could also dispatch to the right thread. The
+duplicate store, and asked whether the tool could also dispatch to the right thread. The
 published `message.dispatch` has no `outputSchema`, so the final message cannot be typed
 natively. Baseline path (`project-supervisor.ts:1262-1483`): `processProject` dispatches
 the interpretation request to the bound root (`message.dispatch`, `commandId
-supervisor-objective:<taskId>`, `:1360-1362`); `reconcile` waits for that run to complete,
-`JSON.parse`s the last assistant message (`:1440-1450`, `parseInterpretation` /
-`parseWorkflowInterpretation`, `supervisor-workflow.ts:68,1467`), revalidates definitions
-and source, then applies the result and any Start activation in one transaction
-(`:1466-1474`); the same cycle introduces an `inferred` task through the existing
-conversation path (`:1297-1299`). The early pilot (L-06) failed exactly at the
-`JSON.parse` step (one missing closing brace) and failed closed. The coordinator's
-read-only comparison with the original Codex provider JSONL shows identical lengths and
-hashes, so the braces are missing in the model output itself, not truncated by the T3
-projection; the same happened with GPT-6.1 Sol LOW on a coding plan. Model choice alone does
-not remove the dependence on free-form final-chat syntax; the typed tool does.
+supervisor-objective:<taskId>`, `:1360-1362`); `reconcile` waits for that run to complete
+successfully (`:1425`), `JSON.parse`s the last assistant message (`:1440-1450`,
+`parseInterpretation`/`parseWorkflowInterpretation`, `supervisor-workflow.ts:68,1467`),
+revalidates definitions and source, then applies the result and any Start activation in one
+transaction (`:1466-1474`); the same cycle introduces an `inferred` task through the
+existing conversation path (`:1297-1299`), whose candidate evidence re-parses that final
+answer (`supervisor-conversation.ts:1143,1535,1801-1830,1956`, provenance fields in
+`supervisor-conversation-store.ts:45`). The early pilot failed exactly at the `JSON.parse`
+step and failed closed; the original Codex provider JSONL shows the braces missing in the
+model output itself (Luna HIGH, Luna MAX and Sol 6.1 LOW coding plans), not a T3
+truncation. Model choice alone does not remove the dependence on free-form syntax; the
+typed tool does. It does not fix semantic contamination from a reused root's history.
 
-**Recommendation (aligned with Sol's working recommendation): the tool records a
-source-bound result, wakes the existing reconciler and returns immediately; it never sends
-and never waits for its own run.** Delivery stays service-owned on the existing durable
-path.
+**Answer to "can the tool dispatch to the right thread?"** Yes in the sense that a
+successful submission starts the existing service-owned delivery to the operative derived
+from the binding. No in the sense of a model-chosen destination, route or run, or a send
+inside the tool call: those would be different features and are rejected.
 
-1. **Tool.** `supervision_interpretation_submit` on the existing `/mcp/workflows` endpoint
-   (same bearer, Host/Origin and stateless SDK adapter, 3.7). Arguments:
-   `supervisorThreadId`, `bindingGeneration`, `interpretationId` (the task ID quoted in the
-   request envelope), `sourceMessageIds`, `objective`, `reason`, and, by the task's state,
-   `supervision` + `workflow` (definition context present) and `startRequested` (the task
-   is the pending Start's task). No target, thread or route argument exists; any excess
-   field is rejected (`onExcessProperty: "error"`).
-2. **Authority.** Reuse `findToolEvidence`/`verifyWorkflowToolEvidence`
-   (`workflow-write-evidence.ts:207-275`) with a new evidence tool kind: an executed,
-   strong, main-run `dynamic_tool` item of the bound root with canonically equal raw
-   arguments, **plus** `evidence.runId` must be the run whose `userMessageId` is the task's
-   `messageId` (the dispatched interpretation request). The binding (`projectId`, main,
-   root, generation) is resolved from the task, never from caller-supplied IDs; the
-   locator fields must merely equal it.
-3. **Decode.** One `Schema` per variant; the existing semantic validators
-   (`parseInterpretation`/`parseWorkflowInterpretation` rules, `validateWorkflowPlan`,
-   size limits) run on the decoded value. Invalid input returns `invalid` with typed
-   diagnostics and records nothing, so the model can correct and resubmit inside the same
-   run. The advertised `inputSchema` is generated once with `Schema.toJsonSchemaDocument`
-   (`Schema.ts:17040`) and pinned by a golden test.
-4. **Commit (write-once receipt).** One `GuidanceDb` transaction (S6e follows S6d; the
-   admission section of 3.11 is not needed because nothing is sent) checks that the task is still `dispatching`,
-   `waiting` or `uncertain` for that `messageId`, the binding generation is current, the
-   scope is enabled for interpretation (a valid pending Start counts, as in
-   `scopeEnabled(..., "interpretation")`), and the source is current
-   (`currentSource`, `:1393-1402`); it then stores `interpretationSubmission`
-   `{runId, itemId, argumentsHash, rawArguments, decoded, receivedAt}` on the existing task
-   record. Identical replay returns the same receipt; different content for the same
-   `interpretationId` returns `conflict` and keeps the first. Stopped scope or stale source
-   returns `denied`/`stale` and records nothing. A pending Start needs only this exact
-   submission allowance; nothing is activated at submission time. After the commit the tool
-   signals the scope's reconciler wake (below) and returns at once: `recorded` (with "this
-   is an interpretation, not an agreement"), `duplicate`, `pending` (evidence not yet
-   visible within the existing 400 ms evidence budget), `invalid`, `stale`, `denied`,
-   `conflict`. It never awaits run completion: the run cannot finish while its own tool
-   call waits.
-5. **Wake.** A recorded submission signals the scope's wake; until that task's run is
-   terminal the scope rechecks on a short `Schedule` (250 ms, bounded by the existing 300 s
-   interpretation limit) instead of the 5 s spacing, so application and introduction
-   follow the run's end closely. The wake only shortens latency; correctness never depends
-   on it.
-6. **Apply (existing path).** `reconcile` keeps its run-terminal gate, source,
-   boundary and definition revalidation and the Start activation transaction; it reads the
-   recorded submission instead of the last assistant message. A completed run without a
-   recorded submission closes `unavailable` ("did not submit a valid, source-linked
-   interpretation"); a failed, cancelled or rolled-back run discards the submission. The
-   final-message `JSON.parse`, fence stripping and string parsers are deleted; no fallback.
-7. **Proposal evidence switches together.** Every caller that reparses the root's final
-   interpretation text as proposal evidence moves to the recorded submission in the same
-   commit series, with no dual path: `supervisor-conversation.ts:1801-1830`
-   (`interpretationMatches`, `interpretationEvidenceCurrent`, `interpretationCandidate`)
-   compare the plan with the decoded submission and treat evidence as current only while
-   the native tool item (by `itemId`, re-read with `getTurnItem`) is still executed, not
-   rolled back, in the same run, with an unchanged canonical-argument hash.
-8. **Routing.** The operative target is always the bound main of the task's binding.
-   An applied `inferred` task is introduced by the existing conversation path
-   (receipt-first, admission section, Stop fence, unknown-send reconciliation, CC-STOP-LIN).
-   The tool never calls `message.dispatch`: sending inside a 9 s MCP call would couple an
-   unknown native outcome to a tool response the model may retry, and would bypass the
-   admission and receipt contracts.
-9. **Agreement boundary.** A recorded or applied submission is an interpretation and at
-   most a proposal; operative agreement still needs the existing exact operative
-   acceptance records. Nothing marks an agreement from the submission.
-10. **Prompt.** The interpretation request tells the root to call the tool exactly once with
-   the quoted `interpretationId` and not to reply with JSON; the root must have the
-   Supervisor MCP server available (deployment gate, see blockers).
+1. **Attempt identity.** One interpretation *attempt* is identified by an immutable key:
+   binding generation, task ID, the task's current source revision (source message, run,
+   ordinal and hash) and the dispatched interpretation request message ID (and its text
+   hash). The task ID alone never identifies an attempt: the baseline keeps `task.id` and
+   spreads the old task into the new one when the user edits the source
+   (`supervisor-conversation.ts:846-861`, new `messageId supervisor-task-revision:*`, new
+   source hash) and when approved definitions renew an unsent proposal (`:615-625`, new
+   `messageId supervisor-task-renewal:*`). The service mints an immutable `attemptId` for
+   the key when it builds the request text (the existing `processProject` step), and the
+   envelope carries `attemptId` and the `sourcePin`. An identical replay of the same
+   request keeps them; a renewal or source edit produces a new attempt. Both values are
+   assertions checked against durable state; neither grants authority.
+2. **Tool and arguments.** `supervision_interpretation_submit` on the existing
+   `/mcp/workflows` endpoint (same bearer, Host/Origin checks, stateless SDK adapter, 9 s
+   budget, cancellation and cleanup, 3.7). Arguments: `supervisorThreadId`,
+   `bindingGeneration`, `taskId`, `attemptId`, `sourcePin`, `objective`, `reason`,
+   `sourceMessageIds`, and by the task's state `supervision` + `workflow` (definition
+   context present) and `startRequested` (only when the server holds a matching pending
+   Start). No target thread, run, dispatch mode, delivery body, model/provider setting,
+   proposal acceptance or callback exists.
+3. **Decode.** `Schema.Struct`/`Schema.Union`/`Schema.Literals` decoded with
+   `Schema.decodeUnknownEffect(..., {onExcessProperty: "error"})` (`Schema.ts:1524`,
+   `SchemaAST.ts:539`), keeping the existing text, byte, depth, node, definition and
+   expansion limits; no `Schema.Unknown` hiding workflow objects. The complete raw argument
+   object and its canonical hash are captured before any normalization, trimming,
+   redaction or defaulting. Existing pure semantic validation then decides formal,
+   finite provisional, unavailable and not-needed outcomes; `workflow: null` keeps today's
+   provisional/unavailable meaning, provisional plans stay representable and are never
+   promoted. Source-ID rules stay as today: a null objective may have an empty list, a
+   non-null objective requires exactly the pinned source, and a pending-Start verdict
+   requires exactly the pinned source regardless of the objective. Rejecting a new wire
+   shape is an approved protocol change, not a parity claim.
+4. **Native authority.** Reuse `findToolEvidence`/`verifyWorkflowToolEvidence`
+   (`workflow-write-evidence.ts:45,207-275`) with one new evidence tool kind and its
+   direct and MCPX names: the current owned root (never a helper, operative, sibling or
+   other root), the exact ready binding and generation, the native provider identity, an
+   executed strong main-run `dynamic_tool` item and node, no parent item, nothing rolled
+   back or unexecuted, and the complete raw arguments canonically equal to the native
+   item. In addition the item's run must be the run whose `userMessageId` is the task's
+   persisted interpretation request message and whose request text hash equals the task's;
+   a valid call from another run of the same root is insufficient. A running item counts
+   for intake, as the verifier already allows. If it is not yet visible within the existing
+   400 ms evidence budget the tool returns `pending_proof` with no receipt, and only an
+   identical retry is meaningful.
+5. **Intake commit (write-once per attempt).** Inside the admission section of 3.11 (the
+   intake is a policy-dependent write), after proof and fresh checks of the attempt (the
+   task's current attempt, status `dispatching`/`waiting`/`uncertain`), source pin and
+   genuine human message (`currentSource`, `:1393-1402`), binding, activation floor, Stop
+   and control generations, one `GuidanceDb` transaction CASes the first verified
+   submission for that `attemptId` into the existing workflow receipt table
+   (CC-WFRECEIPT: owner, binding generation, namespace `interpretation`, operation =
+   `attemptId`, request hash = raw-argument hash) with the immutable decoded payload and
+   the native proof reference (item, run, node, provider identity). The task record holds
+   only a pointer to its current attempt, so a renewal or source edit that spreads the old
+   task gets a new attempt and pointer and keeps the old receipt as history. Rules:
+   - order of intake: authenticate (bearer, Host/Origin), decode, verify native proof, then
+     look up an existing receipt for the `attemptId` **before** the attempt-state gate; an
+     identical replay returns its original receipt even after finalization, without
+     re-activation or a new send; only without a receipt does the state gate (current
+     attempt, `dispatching`/`waiting`/`uncertain`) apply before the commit;
+   - a durable receipt whose HTTP response was lost does not make its native evidence usable
+     later: finalization re-verifies it (item 7), and a missing or failed original tool
+     completion leaves it unapplied;
+   - changed content under the same `attemptId` returns `conflict`, and nothing else can
+     replace a committed result;
+   - a submission for a superseded attempt (a late call from the old run after a renewal
+     or source edit) is `stale` and never writes the new attempt;
+   - a failed decode or proof reserves nothing; a SQL failure rolls back result, proof and
+     receipt together.
 
-**Interpretation of "could the tool dispatch?"** Read as: typed submission followed by
-service-owned routing and delivery to the bound operative. A materially different reading,
-letting the model choose or trigger a target, is rejected: targets come only from the
-binding, and the send stays on the receipt/admission path. The speed gain comes from the
-wake (item 5), not from sending inside the tool.
+   No new table or database, no outbox, no scheduler. Pending Start uses a narrow
+   interpretation-submission permission (the exact pinned Start task and source, current
+   mode and master generations, no later Stop or Enable), not `authorizeNative`'s effect
+   permission and not any workflow or team write privilege. Recording never activates a
+   Start.
+6. **Prompt return and wake.** The tool returns right after the commit:
+   `submitted` (meaning recorded and awaiting native completion; never delivered or
+   agreed), `duplicate`, `pending_proof`, `invalid`, `stale`, `denied`, `conflict`,
+   `unavailable` or `storage_failed`, all as redacted typed errors (codes and paths only;
+   no raw arguments, secrets or pretty-printed Schema causes in logs). It never waits for
+   its own run, which cannot finish while the call is open. The commit signals a coalesced
+   per-scope wake (`Queue.sliding(1)` owned by the supervision service, not by the MCP
+   request scope); until that task's run is terminal the scope rechecks on a short
+   `Schedule` (250 ms, bounded by the existing 300 s interpretation limit) instead of the
+   5 s spacing. The persisted task state is the record of work; restart and the normal
+   cycle recover a lost wake, and the response never blocks on a full queue.
+7. **Finalization (existing completed-run gate).** `reconcile` keeps its gate: only a
+   successfully completed run of the exact request message finalizes the task's current
+   attempt. Before applying the result and before any Start activation it re-verifies the
+   full retained proof (item executed, strong, in the same run, node not rolled back, main
+   graph and provider identity unchanged, raw-argument hash equal); an item or node rolled
+   back while the run itself completed discards the submission. It then refreshes source,
+   boundary, definitions, control and binding and applies the recorded result and any Start
+   activation inside the admission section, in the existing transaction and policy-file
+   ordering (`project-supervisor.ts:670`). The re-verification precedes every application,
+   including a bare Start and a no-workflow result; those never enter proposal checks. A completed run without a recorded submission
+   closes `unavailable` ("did not submit a valid, source-linked interpretation"); a
+   failed, interrupted, cancelled or rolled-back run discards it. Final chat text is
+   irrelevant: the final-message `JSON.parse`, fence stripping, string parsers and their
+   prompts are deleted (`supervisor-workflow.ts:65,68,411,1467`, the reader interpretation
+   instructions and `supervisor-conversation.ts:425`), with no fallback. A bare positive
+   Start may activate permission without a substantive workflow; a negative verdict
+   activates nothing; shared definitions never activate No Project; On request stays the
+   default.
+8. **Proposal evidence switches together.** In the same commit series, every reader of
+   the interpretation as proposal evidence moves to the submission, including the shared
+   `proposalEvidenceCurrent` and `agreementEvidenceCurrent`
+   (`supervisor-conversation.ts:1143-1203`, which today require a completed assistant
+   message and text hash) and the other readers at `:1535,1801,1810,1822,1956`. Later
+   negotiated proposal and operative acceptance records keep their existing protocol and
+   parser; only final-chat interpretation parsing is removed.
+   `WorkflowAgreementCandidate` provenance (`supervisor-conversation-store.ts:45`) becomes a
+   discriminated `evidence`: `interpretation_submission` {taskId, attemptId, itemId,
+   runId, argumentsHash, sourcePin, canonical plan digest} for new interpretations, and the
+   existing `supervisor_message` {messageId, runId, runOrdinal, textHash} kept for later
+   proposals. No tool item ID is stored in an assistant-message field. Evidence is current
+   only while the native tool item is still executed, in the same run, not rolled back,
+   with an unchanged argument hash; introduction checks, candidate use and agreement
+   invalidation use it.
+9. **Routing.** The destination is always the task's bound operative main, derived from the
+   binding and task. A needed interpretation goes through the existing preparation and
+   `sendIntroduction` (pending owner input, steer versus queue, native mode and contact
+   restrictions, visibility, durable command and message IDs); a not-needed or no-task
+   result sends nothing. Stop, control, source and binding fences apply at finalization and
+   again at native admission under CC-STOP-LIN (3.11). An introduction admitted before a
+   Stop keeps its exact body, IDs and route and is only observed and reconciled; it is never
+   relabelled unsent, rerouted or given fresh IDs, and a tool retry never re-sends it. The
+   existing definite-rejection fallback stays distinct from an unknown outcome. Submitting
+   or stopping never interrupts the operative.
+10. **Agreement boundary.** A submission, receipt, root completion or tool success is
+    interpretation and proposal evidence only. Agreement still needs the operative main's
+    own completed exact acceptance of the current task, proposal and digest after the real
+    introduction.
+11. **Cut-over (one-off, evidence-preserving).** At the S6e deployment, in one logged
+    startup step that reads native evidence and never sends:
+    - **In-flight old-prompt requests** (`dispatching`/`waiting`/`uncertain` with a JSON-only
+      request): never rewritten or re-sent under their native IDs, and no typed receipt is
+      minted for their final answers. Their native runs are observed read-only; once
+      terminal, each attempt closes unapplied with an explicit reason ("interpretation
+      protocol changed; a new genuine request is interpreted under the typed protocol").
+      Unknown native work stays observable with its IDs. The coordinator schedules the
+      cut-over when none are in flight where possible.
+    - **Pending Start** waiting on such an attempt is rejected with that reason; the human
+      can request again.
+    - **Retained initial candidates and accepted agreements** built from final-message
+      evidence: each is checked against the still-present native message (same message,
+      run and text hash) and, if it matches, converted once to the `supervisor_message`
+      evidence variant with its existing IDs and hash; if it no longer matches it is marked
+      stale exactly as the baseline would, never deleted. Its currency is afterwards
+      checked by hash equality, never by re-parsing.
+    - **Unsent introductions** prepared from such candidates keep their state; they are
+      sent only if their converted evidence is current, through the normal path.
+    - Histories, sessions, identities and non-disposable rows are kept; nothing is reset,
+      no parallel execution path remains, and every new interpretation requires the tool.
+12. **Prompt.** The interpretation request asks the root to make one successful immutable
+    submission with the quoted `taskId`, `attemptId` and `sourcePin` (an identical retry
+    after a pending or lost response, or a corrected call after `invalid`, is allowed) and
+    not to answer with JSON. The
+    root must reach the Supervisor MCP tool on both hosts.
 
-Blockers before implementation (S6e): (B1) Sol/Astra alignment on this design; (B2) the
-coordinator confirms the bound roots on both hosts reach the Supervisor MCP tool (MCPX)
-with the same bearer; (B3) the tests below are accepted as the contract; (B4) the existing
-tests coupled to final-text parsing (in `supervisor-workflow.test.ts`,
-`project-supervisor.test.ts`, `project-supervisor-workflow.test.ts`,
-`supervisor-conversation.test.ts`, `supervisor-workflow-agreement.test.ts`,
-`workflow-write-controller.test.ts`) keep their names where the intent survives (their
-fixtures produce tool items instead of assistant JSON); any leaf that only tested
-fence/JSON-syntax handling is replaced and listed by name in the S6e ledger (A-01 holds
-through S6d). Optional ideas are listed after the evaluation table below.
+Blockers before implementation (S6e):
+- **B1.** Both reviewers align on this reconciled design (A-I01..A-I04, SOL-ITOOL-1..8).
+- **B2.** The coordinator's early native check shows a running `dynamic_tool` item of
+  this tool visible through the direct and the MCPX paths actually used, on both hosts.
+- **B3.** CT-ISUB-01..19 are accepted as the contract.
+- **B4.** The coupled suites (`supervisor-workflow.test.ts`, `project-supervisor.test.ts`,
+  `project-supervisor-workflow.test.ts`, `supervisor-conversation.test.ts`,
+  `supervisor-workflow-agreement.test.ts`, `workflow-write-controller.test.ts`) keep their
+  names where the intent survives, with fixtures producing tool items. Any leaf that only
+  tested fence or JSON syntax is replaced and listed by name in the S6e ledger (A-01 holds
+  through S6d).
 
-Tests (`new-behaviour`, S6e): CT-ISUB-01 valid submission in the exact interpretation run →
-recorded → applied once at run completion → one introduction to the bound main via the
-existing path; CT-ISUB-02 authority: other thread, subagent child, earlier root run,
-argument mismatch, truncated or rolled-back item → nothing recorded; CT-ISUB-03 no
-model-chosen target: excess `targetThreadId`/route fields rejected, delivery only to the
-binding's main; CT-ISUB-04 idempotency: identical replay, conflicting replay, replay after
-apply, lost MCP response then retry; CT-ISUB-05 Schema/semantic invalid inputs return
-diagnostics and allow an in-run resubmission; CT-ISUB-06 source freshness at submission
-and at apply; CT-ISUB-07 pending Start: `startRequested` true activates, false rejects,
-missing is invalid, Stop or supersede before apply prevents activation; CT-ISUB-08 Stop
-before submission (denied), between submission and apply (not applied), during
-introduction (CC-STOP-LIN); CT-ISUB-09 completed run without submission → `unavailable`,
-and a well-formed final-chat JSON is ignored; CT-ISUB-10 run failed/rolled back after
-submission → discarded; CT-ISUB-11 restart between submission and apply → applied once;
-CT-ISUB-12 no-contact: greeting → objective null or `not_needed`, no introduction;
-CT-ISUB-13 submission never creates agreement; CT-ISUB-14 latency timestamps recorded
-(dispatch admitted, root run start, submission recorded, run terminal, apply,
-introduction admitted); CT-ISUB-15 the tool returns before its run completes and the wake
-applies the result without waiting for the 5 s spacing; CT-ISUB-16 conversation proposal
-evidence follows the recorded tool item (rolled-back or changed item → evidence not
-current), never final text. CT-INT-01 gains the same tool through the authenticated route
-after S6e.
+Tests (`new-behaviour`, S6e; reuse existing fixtures, real MCP route, controller, native
+HTTP/WS peer and guidance SQL):
+
+| ID | Case |
+| --- | --- |
+| CT-ISUB-01 | valid submission in the exact request run → `submitted` → finalized once on run completion → one introduction to the bound main |
+| CT-ISUB-02 | authority: other root, helper, operative, earlier run of the same root, another provider identity, changed raw arguments, weak, truncated, forged or rolled-back item → nothing recorded; direct and MCPX wrappers |
+| CT-ISUB-03 | excess keys (including any target/route field), oversize, depth and node limits rejected; Schema normalization cannot hide a raw-argument mismatch |
+| CT-ISUB-04 | idempotency: identical concurrent calls, identical replay, conflicting payload under the same `attemptId`, another ID for the same attempt, replay after finalization (receipt lookup before the state gate, no re-activation), lost response then retry, missing or failed original tool completion, identical in-run retry, transaction failure rollback |
+| CT-ISUB-05 | invalid inputs return typed diagnostics, reserve nothing, and a corrected resubmission in the same run succeeds |
+| CT-ISUB-06 | source edit, new genuine request, definitions change, binding replacement and control change between proof, commit, finalization and send |
+| CT-ISUB-07 | pending Start (extending `project-supervisor.test.ts:1581,1608,1642`): true activates after completion, false rejects, missing verdict invalid, mode/master/binding change or later Stop prevents activation, bare Start without a task, a changed or rolled-back tool item before activation prevents it, no widening to general effects |
+| CT-ISUB-08 | Stop before submission (denied), after receipt before send (suppressed), at native admission (CC-STOP-LIN); admitted or unknown introduction survives restart with its IDs; Retry never re-sends; definite rejection keeps its own path |
+| CT-ISUB-09 | completed run without submission → `unavailable`; well-formed or malformed final-chat JSON and arbitrary final prose are ignored |
+| CT-ISUB-10 | failed, interrupted, cancelled or rolled-back run after submission → discarded; an item or node rolled back while the run completes → discarded before apply and before Start activation; unchanged proof → applied; another run's completion does not finalize |
+| CT-ISUB-11 | restart after commit and before the wake → finalized exactly once |
+| CT-ISUB-12 | greeting and negative Start → no contact |
+| CT-ISUB-13 | submission, receipt, root or helper acceptance, plain "yes", completed coding or a changed digest never create agreement |
+| CT-ISUB-14 | timestamps or spans per phase: dispatch admitted, model time to tool invocation, submission received, Schema validated, native proof verified, commit, run terminal, finalization, introduction visible, exact operative acceptance |
+| CT-ISUB-15 | the tool returns before its run completes; the wake finalizes without waiting for the 5 s spacing |
+| CT-ISUB-16 | conversation proposal and agreement evidence follow the recorded tool item end to end (rolled-back or changed item → not current); bare Start and no-workflow results never enter proposal checks; no hidden final-text re-parse |
+| CT-ISUB-17 | cut-over: an in-flight JSON-only request closes unapplied after its run ends without a re-send; a pending Start on it is rejected; a retained final-message candidate and accepted agreement stay valid by hash after the one-off conversion, and a mismatching one is marked stale, not deleted; an unsent introduction is sent only with current converted evidence; restart after conversion keeps all of them |
+| CT-ISUB-18 | logs and spans for every typed error carry codes and paths only, never raw arguments or secret-shaped values |
+| CT-ISUB-19 | attempts: a source edit and an approved-definitions renewal of the same task ID, each with a late submission from the old run (`stale`, writes nothing), a duplicate after apply (original receipt), a successful current-run submission, and exactly one introduction |
+
+CT-INT-01 gains the same tool through the authenticated route after S6e.
 
 **Other model-to-service structured results (ANDREA-ITOOL-EVAL-01, evaluation only).**
-Andrea approved exactly one new tool. The other contracts where the service reads a
-model's structured result were checked against the baseline; no other tool is added, and
-none of this blocks the migration.
+Andrea approved exactly one new tool; both reviewers' evaluations agree. "Keep" means the
+existing typed path stays and is migrated to Effect `Schema` with the rest of the plan.
 
 | Contract (producer → reader) | Existing typed path | Demonstrated failure or risk | Recommendation |
 | --- | --- | --- | --- |
-| Interpretation result incl. pending-Start verdict (root → `project-supervisor.ts:1433-1474`; proposal evidence in `supervisor-conversation.ts:1801-1830`) | none: final-chat JSON | demonstrated: missing final brace (Luna HIGH greeting and coding, Sol 6.1 LOW coding), confirmed in provider JSONL; failed closed | **needed — approved**: `supervision_interpretation_submit` (this section) |
-| Workflow proposal and operative acceptance records (Supervisor ↔ operative chat, fenced JSON, `supervisor-workflow-agreement.ts:40-76`) | none for the records; `workflow_write`/`workflow_read` are typed for state edits | not demonstrated (the pilot never reached negotiation); malformed records already surface as `record_json_invalid` and are repaired in dialogue; records must stay visible to the human and be authored by the operative | **possible-needed**: decide only from post-S6e pilot evidence (malformed-record rate, negotiation latency); no tool now |
-| Project definition decision (operative → `supervisor-definition-review.ts:176-230`, fenced JSON) | none | not demonstrated; malformed fences are ignored, so the decision stays pending (fail closed) | **possible-needed**: same evidence rule; no tool now |
-| Helper check-in and readiness completion (helper → `supervisor-team-runtime.ts:383-391, 568-572`) | `supervision_team` (`register`, `ready`, `report`, `review_handover`, `note`, …) carries the structured content | exact completion marker only (no JSON); a missing marker fails closed | **keep** |
-| Team assignment, quarantine, guidance and reports | `supervision_team`, `supervision_guide` with native proof | none | **keep** |
-| Workflow edits and assessment | `workflow_write`/`workflow_read`; assessment derived from the state document (`workflow-assessment.ts`) | none | **keep** |
-| Start and Stop requests | `supervision_start`/`supervision_stop` with native proof | none (pilot: Start and Stop succeeded with exact proof) | **keep** |
-| Activity monitoring (`supervisor-monitor.ts`) | native event observation, not a model result | none | **unnecessary** |
+| Initial interpretation incl. pending-Start verdict | none: final-chat JSON | demonstrated: missing final brace (Luna HIGH, Luna MAX, Sol 6.1 LOW), stale CSV content (Luna HIGH, Luna MAX); failed closed | **needed — approved**: `supervision_interpretation_submit` (this section) |
+| Initial routing and delivery | existing durable introduction and dispatcher; `supervision_guide` for child guidance | model-chosen targets would widen authority | **unnecessary**: no dispatch tool |
+| Workflow proposals and operative acceptance (fenced records, `supervisor-workflow-agreement.ts:40-76`) | none for the records; `workflow_read` check, `workflow_write` for state | not demonstrated (negotiation never reached); malformed records surface as `record_json_invalid` | **possible future gap**: only a separately approved contract on post-S6e negotiation evidence, preserving operative-own-run acceptance after the introduction; nothing now |
+| Definition change authorization (`supervisor-conversation.ts:713-749`) | Supervisor decision records plus genuine human evidence, or the editor save | not demonstrated; malformed fences leave the decision pending | **keep** |
+| Operative external contribution report and root assessment | completed `external-contribution` record; `workflow_write` `assess_contribution` | not demonstrated | **keep** |
+| Workflow status, plan and assessment | `workflow_write` (`apply`, `ensure_main`, `link_child`, `assess_contribution`) | none | **keep** |
+| Helper readiness, reports, assignment, handover | `supervision_team` with epochs and receipts | none | **keep** |
+| Root and helper check-in completion, frozen-batch ACK | exact completion marker on a completed own run; transactional ACK | a missing marker stalls safely | **keep** |
+| Start and Stop | `supervision_start` / `supervision_stop` with native proof | none (pilot: Start and Stop succeeded) | **keep** |
+| Activity monitoring | native observation, not a model result | none | **unnecessary** |
 
-Essential for interpretation and routing (blockers B1–B4 above, plus Sol's two
-conditions: the tool never waits for its own run, and every final-text proposal-evidence
-caller switches together). Optional future ideas, not planned: typed agreement or
-definition-decision records if pilot evidence shows a real failure rate; generating every
-MCP input schema from `Schema`; an ephemeral interpretation thread against history
-contamination.
+None of the other rows blocks the migration, and no other result is folded into the
+interpretation tool.
 
-**Model comparison (ANDREA-MODEL-01, coordinator evidence; D-28).** On the owned fixture
-class, without coaching and without changing global defaults, the coordinator compares
-GPT-6 Luna MAX and GPT-6.1 Sol LOW (current Luna HIGH pilot observations kept separately
-labelled) on the same cases: bare Start, greeting (no-contact effect and semantic verdict
-separately), substantive coding request, reused-root history contamination
-(`earlierMessages: []`), Stop during interpretation. Correctness: valid and source-linked
-result, correct verdict, no resurrected earlier request, effects as expected. Speed:
-interpretation latency (dispatch admitted → root run start → result → task applied) and
-negotiation latency (introduction admitted → exact operative acceptance), from native
-event timestamps; coding and npm durations are excluded. Measured on the baseline
-final-JSON path now and again after S6e. Baseline observations so far, same retained root (Luna MAX
-pending): greeting — Sol 6.1 LOW correct `not_needed` in 3.019 s, Luna HIGH 16.509 s with the
-stale CSV request resurrected (rejected); bare Start root latency — Sol LOW 7.777 s, Luna HIGH
-9.114 s; coding plan — Sol LOW 17.576 s but the final outer brace missing (failed closed, no
-introduction), Luna HIGH also missing a brace. Sol 6.1 LOW becomes the default only if the
-evidence shows equal or better correctness on every case and lower latency; until then
-models, defaults and settings stay unchanged.
+**Model comparison (ANDREA-MODEL-01, coordinator evidence; D-28).** Observations on the
+same retained root and owned fixture, sequential trials, no coaching, global and project
+defaults unchanged, Luna HIGH labelled separately; single samples, so individual values
+only:
+
+| Trial | Luna HIGH | Luna MAX | Sol 6.1 LOW |
+| --- | --- | --- | --- |
+| Bare Start (root latency) | 9.114 s, passed | 5.713 s, passed | 7.777 s, passed |
+| Greeting | 16.509 s; stale CSV, malformed JSON; failed closed | 19.554 s; stale CSV, malformed JSON; failed closed | 3.019 s; correct `not_needed` |
+| Coding plan | malformed JSON; failed closed | 13.659 s; stale CSV, malformed JSON; failed closed | 17.576 s; malformed JSON, no stale CSV; failed closed |
+| Genuine Stop and settlement | passed | passed | passed |
+
+No successful negotiation has been observed yet, so nothing here decides a default. Only the
+owned fixture root's model was changed for these trials and has been restored; global and
+project defaults were never changed. After
+S6e the coordinator repeats the comparison on the same frozen build and the typed protocol,
+with comparable uncoached requests and an explicit budget, recording per trial the native
+provider, model and effective options read back, fixture, root, run and source IDs, context
+and trial order. Phases are measured separately: source intake → interpretation dispatch →
+model time to tool invocation → validation and commit → native run terminal →
+finalization → introduction visible → exact operative acceptance; monotonic time for
+local phases and one native clock domain for native milestones, never subtracting
+unrelated host clocks. Success rate is reported before latency, with failed, unavailable
+and censored outcomes kept in the denominator; coding, npm and build time are excluded.
+Old final-JSON trials are not pooled with typed-tool trials. Semantic correctness (no
+resurrected request, correct verdict) is judged separately from schema validity. Sol 6.1
+LOW becomes the default only if it shows equal or better correctness on every case and
+lower interpretation and negotiation latency than Luna MAX; until then models, defaults and
+settings stay unchanged.
 
 ## 4. Cross-file contract map
 
@@ -723,11 +922,11 @@ the policy commit list.
 
 | ID | Owner | Slice | Invariant (first clause; full text in the manifest) | Pins |
 | --- | --- | --- | --- | --- |
-| CC-AUTH | `src/service-auth.ts` | S3 | login.sqlite3 journal_mode DELETE, exactly two STRICT tables, caps of 32 grants/sessions, grant consume + session insert in one BEGIN IMMEDIATE, O_NOFOLLOW + dev/ino identity checks, fchmod 0600/0700, link()-based … | service-auth.test.ts, auth-cli.test.ts, CT-AUTH-01..04, CT-AUTH-05 |
+| CC-AUTH | `src/service-auth.ts` | S6c | login.sqlite3 journal_mode DELETE, exactly two STRICT tables, caps of 32 grants/sessions, grant consume + session insert in one BEGIN IMMEDIATE, O_NOFOLLOW + dev/ino identity checks, fchmod 0600/0700, link()-based … | service-auth.test.ts, auth-cli.test.ts, CT-AUTH-01..04, CT-AUTH-05 |
 | CC-BINDING-GEN | `src/project-supervisor-contract.ts` | S7 | UI and API results are applied only to the exact project/main/binding generation that requested them. | CT-UI-PS-02, project-supervisor-ui tests |
 | CC-BINDING-MERGE | `src/project-supervisor-store.ts` | S6d | stale full-document binding writes keep the stored stopNotice/supervisionStop | CT-LIFE-02 |
 | CC-CATALOG | `src/store.ts` | S3 | Store service shape unchanged | store.test.ts, t3 watch tests, CT-STORE-01..03 |
-| CC-CLI | `src/cli.ts` | S3 | commands start and auth forge with --data-dir | auth-cli.test.ts, CT-CLI-01, CT-CLI-02, CT-CLI-03, CT-CLI-04, CT-CLI-BIN-01, CT-CLI-BIN-02, CT-CLI-BIN-03 |
+| CC-CLI | `src/cli.ts` | S6c | commands start and auth forge with --data-dir | auth-cli.test.ts, CT-CLI-01, CT-CLI-02, CT-CLI-03, CT-CLI-04, CT-CLI-BIN-01, CT-CLI-BIN-02, CT-CLI-BIN-03 |
 | CC-CLOCK-ELAPSED | `cross-cutting` | S2 | in-memory budgets and deadlines use monotonic time (Clock.monotonicTimeNanos or Effect.timeout/sleep) | CT-CLOCK-01, t3-projection-stream.test.ts deadlines |
 | CC-CLOCK-WALL | `cross-cutting` | S2 | persisted timestamps, TTLs, cooldowns compared across restarts and session expiry use wall Clock.currentTimeMillis where the baseline used Date.now | per-slice TestClock tests, service-auth TTL tests |
 | CC-CONFIG | `src/types.ts` | S2 | same env names, defaults and validation (invalid_helper_provider_instance_id) | config.test.ts, CT-CONFIG-01..03 |
@@ -743,7 +942,7 @@ the policy commit list.
 | CC-HTTPAPI | `src/guidance-contract.ts` | S6c | SupervisorApi endpoints, payload/response Schemas and error encodings stay wire-identical for server (guidance-ui.ts) and client (ui/src/api.ts AtomHttpApi). | CT-UI-01..08, CT-UI-API-01 |
 | CC-IDS | `src/supervisor-conversation-store.ts` | S6d | persisted identity formats (supervisor-review:<id>, supervisor-notice:workflow:<taskId>, supervisor-objective:<taskId>, supervisor-create:<thread>:<generation>, supervisor-settle:<uuid>, … | CT-SW-01, golden id tests per store |
 | CC-INTERP | `src/project-supervisor.ts` | S6b | interpretation command persisted 'dispatching' before RPC | project-supervisor.test.ts L770-L964, CT-PS-01, CT-PS-02 |
-| CC-INTERP-SUBMIT | `src/project-supervisor.ts` | S6e | interpretation results arrive only through supervision_interpretation_submit, which records and returns immediately (never awaiting its own run) and wakes the scope reconciler | CT-ISUB-01, CT-ISUB-02, CT-ISUB-03, CT-ISUB-04, CT-ISUB-05, CT-ISUB-06, CT-ISUB-07, CT-ISUB-08 |
+| CC-INTERP-SUBMIT | `src/project-supervisor.ts` | S6e | interpretation results arrive only through supervision_interpretation_submit | CT-ISUB-01, CT-ISUB-02, CT-ISUB-03, CT-ISUB-04, CT-ISUB-05, CT-ISUB-06, CT-ISUB-07, CT-ISUB-08 |
 | CC-MCP | `src/workflow-mcp.ts` | S6c | stateless Streamable HTTP at /mcp/workflows (no Mcp-Session-Id), JSON responses, 1 MiB body, 9 s per call, abort on client close, tool list order, isError reasons | workflow-mcp.test.ts, CT-MCP-01..05, CT-WWC-06 |
 | CC-MONITOR-ACK | `src/supervisor-monitor-store.ts` | S6d | frozen activity batches are acknowledged only at their exact version inside the caller's transaction. | monitor L637/L657/L1012, conversation L1799, team-runtime L739/L974 |
 | CC-NATIVE | `src/supervisor-native.ts` | S4 | outcome classification: before send -> rejected (not definite) | supervisor-native.test.ts 1-8, CT-NATIVE-01..04 |
@@ -765,7 +964,7 @@ the policy commit list.
 | CC-START-FENCE | `ui/src/no-project.tsx` | S7 | a retained browser Start intent (threadId, operationId) blocks new Starts until a terminal status | CT-UI-START-01 |
 | CC-STATUS | `src/supervisor.ts` | S2 | status written by 4 fibers | supervisor.test.ts, CT-HEALTH-01 |
 | CC-STOP | `src/project-supervisor.ts` | S6b | a per-chat human Stop fences every new send | CT-PS-07, CT-PS-09, CT-PSS-03, conversation L4229-L5029, team-runtime L189/L1886/L1923, CT-LIN-01, CT-LIN-03, CT-LIN-06 |
-| CC-STOP-LIN | `src/project-supervisor.ts` | S6a | policy reads stay authoritative database reads (no snapshot) | CT-LIN-01, CT-LIN-02, CT-LIN-03, CT-LIN-04, CT-LIN-05, CT-LIN-06, CT-PS-09, CT-INT-03 |
+| CC-STOP-LIN | `src/project-supervisor.ts` | S6a | policy reads stay authoritative database reads (no snapshot) | CT-LIN-01, CT-LIN-02, CT-LIN-03, CT-LIN-04, CT-LIN-05, CT-LIN-06, CT-LIN-07, CT-LIN-08 |
 | CC-SYNC-ATOMIC | `cross-cutting` | S4–S6c | every baseline synchronous block (DB or in-memory read-check-write) maps to one Effect.sync section, Ref.modify, SynchronizedRef or Semaphore-guarded section | s1-baseline characterizations per controller, target-regression forced-yield variants after each port |
 | CC-T3RPC | `src/t3.ts` | S4 | native T3 RPC frames are the effect/rpc RpcMessage protocol (Request/Ack/Ping/Pong/Chunk/Exit) | t3.test.ts, CT-T3-01..05, CT-WSFRAME-01 |
 | CC-TEAM-EPOCH | `src/supervisor-team-store.ts` | S6d | member epoch + assignment epoch + coverage CAS on every helper write, request, assessment, notice and guide | supervisor-team-store.test.ts, team-controller L218, team-runtime L1589/L1681/L1700 |
@@ -889,27 +1088,28 @@ timeouts (`run.BPv-BBRv.js:3270-3271`). Policy:
 
 ### 5.4 Characterization wave and target tests
 
-The registry holds 199 entries: the 157 v1 IDs (phased by W5 from the baseline code) plus 42
+The registry holds 205 entries: the 157 v1 IDs (phased by W5 from the baseline code) plus 48
 new ones (CT-INT, CT-LIN, CT-SQL, CT-AUTH-05, CT-CLI-BIN, CT-PROBE-T3, CT-CLOCK-01,
-CT-REDACT-01, CT-UI-EDITOR-01, CT-UI-SETUP-01). Dispositions: 185 keep, 7 consolidated into
-another ID, 7 covered by an existing test. Phases: 155 `s1-baseline`, 7 `s0-parity`, 15
-`target-regression`, 16 `new-behaviour`, 4 `s1c-transition-golden`, 2 `known-failure`. 79
+CT-REDACT-01, CT-UI-EDITOR-01, CT-UI-SETUP-01, CT-UI-FIXTURE-01, CT-ISUB-01..19).
+Dispositions: 188 keep, 7 consolidated into another ID, 7 covered by an existing test, 3
+retired by D-26 (CT-GDB-03, CT-GDB-04, CT-GDB-05). Phases: 156 `s1-baseline`, 7 `s0-parity`,
+17 `target-regression`, 19 `new-behaviour`, 4 `s1c-transition-golden`, 2 `known-failure`. 80
 kept cases also carry a separate post-port `targetRegression` variant.
 
-**S1 (`s1-baseline`, 151 kept cases, unchanged source, baseline dependencies):**
+**S1 (`s1-baseline`, 150 kept cases, unchanged source, baseline dependencies):**
 
 | Kind | IDs |
 | --- | --- |
-| atomicity-restart | CT-AUTH-01, CT-AUTH-05, CT-CONV-04, CT-CSTORE-03, CT-GDB-01..02, CT-GDB-05, CT-MSTORE-01, CT-PS-02, CT-PS-07, CT-PSS-01, CT-PSS-04, CT-PSS-07..08, CT-RESET-01, CT-STORE-01..02, CT-TRUN-03, CT-WSS-01, CT-WSS-03, CT-WWC-04..05 |
+| atomicity-restart | CT-AUTH-01, CT-AUTH-05, CT-CONV-04, CT-CSTORE-03, CT-GDB-01..02, CT-MSTORE-01, CT-PS-02, CT-PS-07, CT-PSS-01, CT-PSS-04, CT-PSS-07..08, CT-RESET-01, CT-STORE-01..02, CT-TRUN-03, CT-WSS-01, CT-WSS-03, CT-WWC-04..05 |
 | characterization | CT-APP-01, CT-APP-03, CT-AUTH-02, CT-AUTH-04, CT-CONFIG-01..03, CT-CONV-08..09, CT-CSTORE-04, CT-FILES-02, CT-GDB-06, CT-HEALTH-01, CT-HTX-04, CT-LIFE-03, CT-MAIN-03..04, CT-MCP-02, CT-MCP-04..05, CT-NATIVE-03, CT-PD-03, CT-POLICY-02, CT-PROBE-T3-01..02, CT-PROBE-T3-05, CT-PS-10, CT-PSS-03, CT-PSS-05..06, CT-REDACT-01, CT-STORE-03, CT-SW-01, CT-SWA-01, CT-T3-04..05, CT-TCTRL-05, CT-TRUN-04, CT-UI-04, CT-UI-06..07, CT-WP-02, CT-WSC-01, CT-WSFRAME-01, CT-WSS-04, CT-WWC-06 |
 | cli | CT-CLI-01..04, CT-CLI-BIN-01 |
 | interruption | CT-CLI-BIN-02..03, CT-CONV-01..03, CT-EDITOR-02, CT-HTX-01, CT-LIFE-01, CT-MAIN-01, CT-MAIN-05, CT-MCP-03, CT-PD-02, CT-PD-04, CT-PROBE-02, CT-PROBE-T3-03, CT-PS-09, CT-T3-03, CT-T3-06, CT-TCTRL-01, CT-TRUN-01, CT-UI-05, CT-WWC-01 |
 | native-authority | CT-INT-01..02, CT-MCP-01, CT-TCTRL-04, CT-WWC-08, CT-WWE-01 |
 | no-contact | CT-CONV-07, CT-PROBE-T3-04, CT-PS-08, CT-TRUN-05 |
 | race | CT-CONV-06, CT-EDITOR-01, CT-LIFE-02, CT-LIN-01..04, CT-LIN-06, CT-PD-01, CT-POLICY-01, CT-PROBE-03, CT-PS-03..05, CT-T3-01, CT-TCTRL-02, CT-TRUN-02, CT-UI-PS-02, CT-UI-SETUP-01, CT-WP-01, CT-WSS-02, CT-WWC-02 |
-| resource | CT-APP-02, CT-FILES-MODE-01, CT-HTX-03, CT-PS-11, CT-T3-02 |
+| resource | CT-APP-02, CT-FILES-MODE-01, CT-HTX-03, CT-PS-11, CT-T3-02, CT-UI-FIXTURE-01 |
 | ui-draft-auth | CT-AUTH-03, CT-PSC-02, CT-UI-01..03, CT-UI-AUTH-01, CT-UI-EDITOR-01, CT-UI-NOPROJ-01, CT-UI-OVERVIEW-01, CT-UI-PS-01, CT-UI-SHELL-01, CT-UI-START-01 |
-| unknown-send | CT-CSTORE-01, CT-FILES-01, CT-GDB-04, CT-INT-03, CT-NATIVE-01..02, CT-PS-01 |
+| unknown-send | CT-CSTORE-01, CT-FILES-01, CT-INT-03, CT-NATIVE-01..02, CT-PS-01 |
 
 Present seams only: real abort controllers, crash fakes plus a new controller on the same
 file, real sockets and HTTP peers, child processes and process kill, temp-file SQLite, and
@@ -931,9 +1131,12 @@ test.
 rerun unchanged after the 4.0.5 bump).
 
 **`target-regression` (after the owning port):** CT-CLOCK-01 (S4, S6b), CT-CSTORE-02 (S6d),
-CT-GDB-03 (S6d), CT-LIN-05 (S6a, S6b), CT-MAIN-02 (S2), CT-MSTORE-02 (S6d), CT-PSS-02 (S6d),
-CT-SQL-01 (S3, S6d), CT-SQL-02 (S3, S6d), CT-SQL-03 (S3, S6d), CT-SQL-04 (S3, S6d),
-CT-TSTORE-01 (S6d), CT-TSTORE-02 (S6d), CT-WWC-07 (S6b).
+CT-LIN-05 (S6a, S6b), CT-LIN-07 (S6d), CT-LIN-08 (S6a (Start activation), S6b, S6e (typed
+intake and finalization)), CT-MAIN-02 (S2), CT-MSTORE-02 (S6d), CT-PSS-02 (S6d), CT-SQL-01
+(S3 (CatalogDb), S6c (AccessDb), S6d (GuidanceDb, PolicyDb)), CT-SQL-02 (S3 (CatalogDb), S6c
+(AccessDb), S6d (GuidanceDb, PolicyDb)), CT-SQL-03 (S3 (CatalogDb), S6c (AccessDb), S6d
+(GuidanceDb, PolicyDb)), CT-SQL-04 (S3 (CatalogDb), S6c (AccessDb), S6d (GuidanceDb,
+PolicyDb)), CT-TSTORE-01 (S6d), CT-TSTORE-02 (S6d), CT-WWC-07 (S6b).
 
 **Consolidated (O-01):** CT-CONV-05 → CT-CSTORE-01; CT-HTX-02 → CT-TRUN-02; CT-NATIVE-04 →
 CT-NATIVE-02; CT-PDC-01 → CT-UI-08; CT-PS-06 → CT-PSS-01; CT-TSTORE-03 → CT-TCTRL-03;
@@ -980,18 +1183,18 @@ and open objections.
 | Slice | Content | Exit gate |
 | --- | --- | --- |
 | S0 | Vitest 5.0.5 only (effect stays 4.0.1); `vitest.config.ts` (timeouts 0), leak gate with the measured baseline allowlist, `scripts/run-tests.ts` watchdog, harness self-tests, mechanical conversion of 47 suites + fixture; lint and typecheck cover `scripts/**`, Vitest configs, reporters, harness and support files; eslint bans `node:test`; CI `timeout-minutes` and `test:harness` | 863/863 leaves and 6/6 groups identical and passing; timing and leak reports recorded; harness self-tests; lint, typecheck, build, Docker build; CI green on the branch |
-| S1 | `s1-baseline` wave (5.4) on the unchanged source and baseline dependencies (effect 4.0.1), including the recorded `s1c-transition-golden` outputs | all S1 tests green; **coordinator's baseline VM pilot recorded (section 7); entry gate of the implementation campaign** |
+| S1 | `s1-baseline` wave (5.4) on the unchanged source and baseline dependencies (effect 4.0.1), including the recorded `s1c-transition-golden` outputs | all S1 tests green; the coordinator's baseline live record (section 7, completed) is the entry evidence of the implementation campaign |
 | S1b | D-21: red run of CT-TCTRL-03 recorded as evidence, then the separately reviewed minimal fix with the test | red-then-green evidence; full suite green |
 | S1c | Exact 4.0.5 pins for `effect` and companions, `@effect/vitest` 4.0.5; finite runner bounds (5.3 rule 2); Effect timeout self-test; compile-only API probe; concise AGENTS.md rule (section 10) | parity 863/863 and every S1 test unchanged and green on 4.0.5 (transition proof); goldens identical; harness; registry recheck; Docker build |
 | S2 | `SupervisorConfig`, `Redacted` token files, JSON `Logger`, typed errors, `SupervisorIds`, elapsed-clock helper, server program in `main.ts` (still started by today's top-level `runMain` until S3), health/status in `supervisor.ts`, root `ThreadPolicy`/`SupervisorOwnership` services, boundary B-01 | CT-CLI-BIN-02 (start signals), CT-MAIN, CT-HEALTH, CT-CONFIG, CT-REDACT-01; no `process.exitCode`, `process.env` or `process.on` outside the config and entry modules |
-| S3 | `src/db.ts`; `catalog.sqlite3` (`store.ts`) and `login.sqlite3` (`service-auth.ts` server-lifetime client + forge per-operation client); CLI on `effect/cli` (after ServiceAuth, which `auth forge` calls), with `main.ts` switching to the `import.meta.main` entry guard in the same commit | per-DB pragma/schema/mode tests; DELETE journal and identity tests; CT-AUTH-05; CT-CLI-BIN-01/03 with BC-CLI expectations; CT-SQL-01..04 for these files; Docker build |
+| S3 | `src/db.ts`; `catalog.sqlite3` (`store.ts`) on `CatalogDb` | per-DB pragma/schema/mode tests; CT-SQL-01..04 for the catalog; Docker build |
 | S4 | Native envelope (D-08 spike), `t3.ts`, projection stream, `supervisor-native.ts`, `project-files.ts`, `git-probe.ts` (guidance writes in `Effect.sync` sections), `scripts/probe-t3.ts` | real-ws frame/limit/close/interrupt tests; unknown outcomes; CT-CLOCK-01; CT-PROBE-T3; VM native read probe |
 | S5 | `definition-references.ts` (pure), `project-definitions.ts`, `project-config-editor.ts` | YAML Schema diagnostics goldens; editor uncertain/never-retried mapping |
 | S6a | Extraction of `SupervisionGate` and `SupervisionControl` on Promise code (3.9); pure modules (IDs injected into `supervisor-workflow.ts` builders); `ScopeLocks`; `SupervisionGate` with the admission section (3.11); helper transport; team runtime | extraction commits pass the full S1 suite unchanged; CT-LIN for helper paths; no `runPromise`, timers or promise chains left in these modules |
 | S6b | Conversation, lifecycle, `SupervisionControl`, write controller, team controller, project supervisor, workflow progress, team view, dashboard overview server part | receipts, CAS, unknown-effect, Stop and CT-LIN tests; No Project default; golden identity tests; coordinator reruns the S1 pilot journeys |
-| S6c | `guidance.ts`, `guidance-contract.ts`, MCP route with the SDK adapter, HTTP handlers/router/auth routes/static, `SupervisionLive` replacing `runGuidanceApplication`; B-01 and all B-03 deleted | status/body matrix, CSRF/Host/Origin/session, MCP auth/protocol/abort/close; no `Effect.run*` outside the allowlist; VM MCPX direct |
+| S6c | `service-auth.ts` on `AccessDb` (server-lifetime client + per-forge client) with its HTTP checks and `/auth/*` routes (3.9 T-01); CLI on `effect/cli` with `main.ts` switching to the `import.meta.main` entry guard; `guidance.ts`, `guidance-contract.ts`, MCP route with the SDK adapter, HTTP handlers/router/static, `SupervisionLive` replacing `runGuidanceApplication`; B-01 and all B-03 deleted | DELETE journal and identity tests; CT-AUTH-05; CT-SQL-01..04 for the access file; CT-CLI-BIN-01/03 with BC-CLI expectations; status/body matrix, CSRF/Host/Origin/session, MCP auth/protocol/abort/close; no `Effect.run*` outside the allowlist; VM MCPX direct and `auth forge` |
 | S6d | `GuidanceDb` for `guidance.sqlite3`, `PolicyDb` for `thread-settings.sqlite3`; all stores become Effects; critical sections become `withTransaction`; CC-GDB-IMPLICIT wrapped; ownership preload from the guidance layer; B-02 deleted | S1 atomicity tests green on the new engine; CT-SQL-01..04 for these files; no `node:sqlite` import outside the SQL layer and PrivateFiles adapter; Docker build; VM cut-over |
-| S6e | Typed interpretation submission (3.12): `supervision_interpretation_submit` on `/mcp/workflows`, evidence kind bound to the interpretation run, write-once submission on the task record, `reconcile` applies it, final-text parsers deleted, prompt updated; coupled test fixtures produce tool items | CT-ISUB-01..16; CT-INT-01 through the tool; no `JSON.parse` of model text left; coordinator reruns the pilot journeys and the model comparison |
+| S6e | Typed interpretation submission (3.12): attempt `attemptId`/`sourcePin` in the envelope; `supervision_interpretation_submit` on `/mcp/workflows`; evidence kind bound to the exact request run and text hash; CAS intake receipt; prompt return and wake; `reconcile` finalizes from the submission; discriminated candidate provenance; final-text parsers and prompts deleted; one-off cut-over; coupled fixtures produce tool items | CT-ISUB-01..19; CT-INT-01 through the tool; no final-chat interpretation text is parsed; coordinator runs the cut-over, the pilot journeys and the model comparison |
 | S7 | UI on Atom/AtomHttpApi following 3.8 (Modern Web Guidance → Impeccable → WCAG) | atom tests; replay of UI-STORY-01..08 by the coordinator; Docker build |
 | S8 | Remove superseded machinery; final lint bans (`Effect.run*` outside the allowlist, `setTimeout`/`setInterval` in `src`, `ws`/`node:sqlite`/`loadExtension` outside approved adapters); empty leak allowlist; README update | full suite, harness, build, Docker build; handoff to the coordinator for both-host deployment |
 
@@ -999,7 +1202,8 @@ Order inside each slice follows the manifest (`order`). File counts per slice ar
 manifest `summary.slice`.
 
 v1 → v2 mapping: v1 S0 → S0 (Vitest only) + S1c (4.0.5 transition, after S1); v1 S1 → S1 +
-S1b; v1 S2 → S2 (the CLI moves to S3); v1 S5 (HTTP, MCP, composition) → S6c;
+S1b; v1 S2 → S2 (the CLI moves to S6c); v1 S3 → S3 for the catalog, with the login store
+moving to S6c (T-01); v1 S5 (HTTP, MCP, composition) → S6c;
 `project-definitions.ts` and `project-config-editor.ts` (v1 S6b) → S5; the v1 S6a/S6b
 controllers are regrouped by 3.9; v1 S6c (engine switch) → S6d; S6e is new (Andrea's typed
 submission).
@@ -1025,9 +1229,13 @@ sole implementation owner.
    fixtures, the D-21 fix, the CT-LIN suite, integration and validation.
 3. **Contract first.** In each slice Opus first commits the frozen shared interfaces
    (`Context.Service` shapes, Layers, test support) on the integration branch. Workers
-   start from that commit in isolated worktrees (harness-managed `isolation: "worktree"`;
-   uncommitted edits are never relied on), implement against the frozen interfaces with
-   test layers, and commit on their own branch.
+   are launched with the T3 `delegate_task` tool, using the provider, model and options
+   discovered from `orchestrator_capabilities` (the inherited effort and service options
+   travel in `target.options`, never only in the prompt; a native subagent that would drop
+   them is not used), with `isolation: "worktree"` for code packages. Each worker starts
+   from that commit (uncommitted edits are never relied on), implements against the frozen
+   interfaces with test layers, and commits on its own branch. Every returned `taskId` is
+   retained and tracked with `task_status`; only terminal results are integrated.
 4. **Brief.** Each worker receives: its package ID and file list, the plan sections and
    manifest rows for those files, the frozen interfaces, the target and characterization
    tests it must make pass, the commands to run (`npm run autofix`, `lint`, `typecheck`,
@@ -1049,17 +1257,17 @@ sole implementation owner.
 | Slice | Opus (central) | Parallel worker packages |
 | --- | --- | --- |
 | S0 | runner, configs, leak gate, watchdog, harness, package/lock, eslint, tsconfig, CI; parity report | 4 packages of disjoint test suites (mechanical conversion) |
-| S1 | `test/support` fixtures (production wiring, fake T3 peer, bin harness); CT-LIN suite; S1b D-21 fix | CT-INT suites; CLI-BIN + PROBE-T3 + CLI cases; per-suite characterization additions in 3 disjoint suite groups |
+| S1 | `test/support` fixtures (production wiring, fake T3 peer, bin harness); CT-LIN suite; S1b D-21 fix | CT-INT suites; CLI-BIN + PROBE-T3 + CLI cases; per-suite characterization additions in 3 disjoint suite groups; UI baseline fixture (WP-S1-UI, below) |
 | S1c | dependency transition, finite bounds, AGENTS.md | none |
 | S2 | `main.ts`, `supervisor.ts`, root services, B-01 | foundation services (`config.ts`, `types.ts`, redaction, IDs, logger, errors) |
-| S3 | `src/db.ts` (four interfaces) | catalog store; access store + CLI |
+| S3 | `src/db.ts` (four interfaces) | catalog store |
 | S4 | native envelope + D-08 spike | `t3.ts` + projection stream; `supervisor-native.ts`; `project-files.ts` + `git-probe.ts`; probe script |
 | S5 | interface review | definitions loader + config editor |
 | S6a | extraction commits, `SupervisionGate`/admission, `ScopeLocks` | pure modules; helper transport → team runtime |
 | S6b | frozen service interfaces; every admission/critical-section call site review | conversation + lifecycle; write controller + team controller; control + project supervisor + progress + team view + overview |
-| S6c | composition (`SupervisionLive`), boundary deletion | `GuidanceRuntime`; MCP route; HTTP handlers/router |
+| S6c | composition (`SupervisionLive`), boundary deletion, `main.ts` entry guard | `ServiceAuth` + CLI + HTTP auth checks; `GuidanceRuntime`; MCP route; HTTP handlers/router |
 | S6d | `GuidanceDb`/`PolicyDb` layers and every caller's `withTransaction` | store files in disjoint groups with their store suites |
-| S6e | submission authority, commit and apply (`src/interpretation-submission.ts`, `reconcile`), prompt | MCP tool wiring + golden schema; fixture conversion of the coupled suites in disjoint groups |
+| S6e | submission authority, intake commit, finalization, candidate provenance, cut-over step, prompts (`src/interpretation-submission.ts`, `reconcile`, conversation evidence) | MCP tool wiring + golden schema; fixture conversion of the coupled suites in disjoint groups |
 | S7 | AtomHttpApi service, registry, mutation/draft families, `access.ts`, `api.ts` | project supervisor panels; definitions/editor panels; shell, navigation, No Project, overview |
 | S8 | cleanup, bans, README | none |
 
@@ -1070,34 +1278,75 @@ with existing fixtures, explicit IDs and budget; only owned idle fixtures are cl
 No seeded agreements, no protocol coaching, no first-tool barrier claims, no replay of
 historical closed requests, and the no-contact Stop behaviour stays unchanged.
 
-- **S1 gate, on the baseline image, before any production port (SOL-PLAN-07, A-P01).**
-  - One bounded **uncoached operative request** on an owned fixture chat through the real
-    controller and native transport. Record raw rendered prompts, actual tool arguments,
-    native source/run/event timestamps, total traffic and repeated messages, and first
-    edit, introduction and completed acceptance separately. Timing is advisory; unmodified
-    T3 has no pre-first-tool barrier.
-  - One **trivial no-contact** request. Record the effect (no introduction or contact) and
-    the semantic verdict separately; the early pilot already shows the effect boundary
-    holding by failing closed while the `not_needed` verdict fails on a reused root (L-06).
-  - One **unknown-send/Stop race**: Stop a supervised fixture chat while a helper check-in
-    or root check-in is in flight; and cut the connection or kill the process between the
-    `sending` record and the receipt for a root check-in, an introduction and a helper
-    webhook POST, then restart. Expect no duplicate native message, the original identity
-    reconciled, exactly one operative notice, and recorded native counts and timestamps.
-  - **UI-STORY-01..08** recorded on the baseline build (below).
-  This evidence is reused after S6a/S6b (rerun of the same journeys) and S7; it is not a
-  full historical campaign.
+- **Baseline live evidence before any production port (SOL-PLAN-07, A-P01) — completed.**
+  The coordinator ran the executable baseline subset on the unchanged VM, uncoached, on
+  owned fixtures: a coding request, a greeting, and a genuine agent Start, Stop and
+  settlement (L-06, ANDREA-MODEL-01). Every coding interpretation failed closed on
+  malformed final JSON, so there was no introduction; the greeting caused no contact; Start
+  and Stop passed with exact proof. Rendered prompts, tool arguments, native identities and
+  timestamps are retained locally. Afterwards the root model was restored, fixtures
+  archived, the owned login revoked, and runtimes, assets, credentials and original
+  sessions preserved. This is the S1 entry evidence; it is a current-boundary record, not a
+  positive negotiation.
+- **What the baseline cannot show live, and where it is proven instead.** A positive
+  introduction, helper check-in or negotiation cannot be reached at baseline because
+  interpretation fails first, and it must not be forced by coaching, seeding or a repaired
+  parser. The unknown-send and Stop races for root check-in, introduction and helper
+  webhook are therefore characterized before any port at the Node boundary, with real
+  loopback sockets, real HTTP and WS peers, real SQLite files and process kill, and no T3
+  change or proxy (CT-INT-03, CT-CONV-01/02 crash variants, CT-TRUN-01, CT-HTX-01,
+  CT-LIN-01/03/06, CT-PS-01). Any additional pre-port VM fault check uses only a naturally
+  reachable owned state with an explicit ID and budget (an interpretation-dispatch kill
+  and restart is the one such case); otherwise it is recorded as deferred with its reason. The
+  positive live proofs move to after S6e.
+- **UI-STORY-01..08** are not recorded yet. They are recorded before S7 against the
+  unchanged `3b8129a` UI and replayed after S7. They are not S1 entry evidence and do not
+  delay S0/S1. The coordinator executes them in its own collaborative browser tab with the
+  preview tools; WP-S1-UI (below) provides the fixture.
+- **UI baseline fixture (WP-S1-UI, after plan alignment, alongside S0/S1).** Owner or a
+  worker writes, the coordinator runs:
+  - an isolated localhost test fixture under `test/ui-fixture/`: an Effect v4 HTTP server
+    (`HttpRouter` on `NodeHttpServer`, bound to `127.0.0.1` on an ephemeral port, started
+    and stopped by a scoped runner, never a service) that serves the actual unchanged
+    compiled UI assets of `3b8129a` from a directory the parent copies, and answers the
+    `/api/guidance/*`, `/api/csrf` and `/auth/*` calls with recorded or synthetic data
+    decoded through the existing `SupervisorApi` schemas;
+  - no proxy or relay to any Supervisor, no forwarding, no real API writes, no real user
+    or project controls, no credentials; every response carries
+    `x-supervisor-fixture: <scenario>`, and recordings are labelled `fixture` or `native`;
+  - deterministic scenario controls under a fixture-only `/__fixture/` prefix: session
+    expiry on the next API call, sign-out from another tab, a mutation POST that is
+    received and then never answered or dropped (unknown outcome), 401, 403, 409 and 413
+    on save, conflict and uncertain editor saves, slow reads, setup races and reload;
+  - a request log (method, path, body hash, scenario, monotonic time) that shows every
+    mutation POST received once and never replayed, drafts, auth and operation fences
+    retained across reload and re-sign-in, and one poll per interval;
+  - plain DOM snippets only at the browser boundary for the coordinator's checks; the
+    runner, server and fixture self-tests (`test/ui-fixture/*.test.ts`: binds only
+    loopback, never forwards, scenarios deterministic, no write leaves the process) use
+    Effect v4 and run under the S0 runner.
+  Each story records the actual per-panel behaviour (including navigation blocked by a
+  dirty-draft guard or an explicit discard) rather than assuming every draft survives every
+  unmount, and that recorded behaviour is what S7 must preserve.
+  UI-STORY-01..05 and 07 run on the fixture; UI-STORY-04, 06 and 08 can also run on the
+  native deployment (read-only, owned fixtures). StrictMode checks need a development build
+  of the same commit and are optional. Design, CSS, PNG marks and copy are untouched; the
+  prepared UI skill sources (`/tmp/effv4-ui-skills`) apply to S7 only, and no aesthetic work
+  delays S0/S1. No positive baseline negotiation is fabricated.
 - **After S2:** `docker stop` gives exit 130 with finalizers run; health ready; JSON log
   lines unchanged in shape.
 - **After S3:** the ported build opens the existing state volume: catalog cursor continues,
-  `login.sqlite3` stays DELETE with byte-identical schema, `-wal`/`-shm` modes 0600, health
-  ready; `t3-supervisor auth forge` inside the deployment gives token-only stdout and the
-  exit codes, sign-in works and existing sessions survive a restart.
+  `-wal`/`-shm` modes 0600, health ready.
 - **After S4:** real T3 watch (snapshot then Ack, heartbeat over 60 s idle, reconnect after
   a T3 restart); a native read RPC and a git probe on a real checkout.
-- **After S6a/S6b:** rerun of the S1 pilot journeys; an uncoached No Project Start then Stop
-  during interpretation (exactly one notice).
-- **After S6c:** MCPX connecting directly to `/mcp/workflows`: initialize, tools/list, a
+- **After S6a/S6b:** rerun the baseline subset (coding, greeting, Start/Stop) and compare it
+  with the baseline record; an uncoached No Project Start then Stop during interpretation
+  (exactly one notice). Interpretation still uses final JSON until S6e, so failing closed
+  stays the expected outcome; nothing is coached.
+- **After S6c:** `login.sqlite3` stays DELETE with a byte-identical schema;
+  `t3-supervisor auth forge` inside the deployment gives token-only stdout and the exit
+  codes; sign-in works and existing sessions survive a restart. MCPX connecting directly to
+  `/mcp/workflows`: initialize, tools/list, a
   bounded `workflow_read`, and a `workflow_write` (first call may be pending; the identical
   retry applies once). No session header, bearer only, Host allowlist, foreign Origin
   rejected.
@@ -1106,8 +1355,19 @@ historical closed requests, and the no-contact Stop behaviour stays unchanged.
   event-loop delay against the S1 baseline workload; the synchronous `busy_timeout`
   limitation remains), pragmas unchanged, team/monitor/receipt rows intact, definitions
   revision identical.
-- **After S6e:** rerun the pilot journeys through the typed submission tool and repeat the
-  model comparison of 3.12 (Luna MAX versus Sol 6.1 LOW, Luna HIGH labelled separately).
+- **After S6e:** run the one-off cut-over (3.12 item 11) when no interpretation is in
+  flight where possible and confirm retained agreements stay valid. Then the first positive
+  live proofs, uncoached, through the typed submission tool:
+  - an operative request reaching introduction and, if it happens naturally, exact
+    operative acceptance, with first edit, introduction and acceptance recorded separately;
+  - the unknown-send and Stop races for a root check-in, an introduction and a helper
+    webhook POST (Stop while in flight; connection cut or process kill between the
+    `sending` record and the receipt, then restart): no duplicate native message, the
+    original identity reconciled, exactly one operative notice;
+  - the greeting no-contact case again.
+  Repeat the model comparison of 3.12 (Luna MAX versus Sol 6.1 LOW, Luna HIGH labelled
+  separately) as the default gate. If a positive journey still does not happen naturally,
+  that is recorded as a result, not coached.
 - **After S7:** replay UI-STORY-01..08.
 - **Batch completion:** both-host deployment, state preservation, native MCP and browser
   acceptance, and Lab records (coordinator only).
@@ -1227,7 +1487,7 @@ Every non-code file has a disposition and rationale in the manifest (`auditRatio
 - **New files** (manifest `plannedNewFiles`): `vitest.config.ts`,
   `vitest.harness.config.ts`, `scripts/run-tests.ts`, `test/support/leak-gate.ts`,
   `test/harness/*`, `test/support/*` (shared Effect test layers and the CT-INT production
-  wiring fixtures), `test/support/cli-bin.ts` (built/installed bin harness),
+  wiring fixtures), `test/ui-fixture/*` (UI baseline fixture and its self-tests, section 7), `test/support/cli-bin.ts` (built/installed bin harness),
   `src/db.ts` (the four named database interfaces and their layers),
   `src/supervision-gate.ts`, `src/supervision-control.ts`, and a compile-only API probe
   under `test/harness/`.
@@ -1247,7 +1507,9 @@ the frozen v2):
 | D-23 | Transition order | dependency extraction of `SupervisionGate`/`SupervisionControl` and the slice order of 3.9; boundaries only in the composition root (B-01..B-03) |
 | D-24 | `login.sqlite3` lifetimes | one server-lifetime client, one per-forge client in the CLI process, never two in one process (3.2) |
 | D-25 | Admission granularity | one process-wide admission `Semaphore(1)` (3.11) rather than per-scope keys |
-| D-27 | Typed interpretation submission (Andrea) | owner proposal 3.12: record-only MCP tool bound to the interpretation run, existing apply and introduction path, no model-chosen target, no fallback; slice S6e after S6d so it is built once on the final engine; pending Sol/Astra alignment |
+| D-27 | Typed interpretation submission (Andrea) | architecture accepted by both reviewers (run 3); 3.12 as reconciled: CAS intake bound to the exact request run, prompt return plus wake, existing completed-run finalization and introduction path, discriminated candidate provenance, one-off evidence-preserving cut-over, no model-chosen target, no fallback; slice S6e after S6d so it is built once on the final engine |
+| D-29 | Synchronous cross-slice calls | explicit transitions T-01..T-07 (3.9): `ServiceAuth` and the CLI port in S6c with their synchronous HTTP callers; kept synchronous methods are B-02 reads or pure computations only |
+| D-30 | UI baseline proof | an isolated loopback Effect v4 fixture serving the unchanged compiled UI with recorded or synthetic data and deterministic scenarios (section 7, WP-S1-UI); the coordinator records UI-STORY-01..08 with the preview tools before S7 |
 | D-28 | Interpretation model default (Andrea) | evidence-based only (3.12): GPT-6.1 Sol LOW becomes the default only with equal or better correctness on every fixture case and lower interpretation/negotiation latency than GPT-6 Luna MAX; defaults and settings unchanged until then |
 
 Owner defaults (reviewers may object):
@@ -1279,13 +1541,13 @@ Owner defaults (reviewers may object):
   S1b as a narrow, separately reviewed fix with red-then-green evidence (accepted by Astra).
 - **D-22:** the team-controller tests stay in `workflow-write-controller.test.ts` (name and
   file parity).
-- **D-26 (proposal):** W5 found no `src` caller for the GuidanceStore notice-pipeline
-  methods `commit`, `start`, `finish`, `reset`, `reserveTokens`, `notices`,
-  `resolveEpisode`, `saveRule` and `mute` (`classify` is used only as a test fixture and
-  stays). Instead of porting dead code, S6d deletes them in a separately reviewed commit
-  that carries the call-graph proof; CT-GDB-03..05 retire with them and constructor
-  recovery (CC-RECOVERY) stays. If either reviewer objects, they are ported mechanically
-  and the three cases stay.
+- **D-26 (accepted by both reviewers):** the GuidanceStore notice-pipeline methods
+  `commit`, `start`, `finish`, `reset`, `reserveTokens`, `notices`, `resolveEpisode`,
+  `saveRule` and `mute` have no `src` caller (`classify` is a test fixture and stays). S6d
+  deletes them in a separately reviewed commit carrying the call-graph proof instead of
+  porting them; constructor recovery (CC-RECOVERY), stored rows and their readers stay. The
+  proposed CT-GDB-03..05 are retired rather than written for code about to be removed; no
+  existing assertion disappears.
 
 ## 13. Findings and acceptance ledger (v2)
 
@@ -1297,17 +1559,17 @@ reopens it on the frozen revision. Manifest rows carry the IDs that affect them 
 | ID | Source | Requirement (short) | Response and evidence | Status |
 | --- | --- | --- | --- | --- |
 | SOL-PLAN-01 | Sol P0 | complete native-authorized mutation and real helper HTTP characterizations | CT-INT-01 (authenticated MCP `workflow_write` → production-wired write controller → production native adapter → loopback T3 HTTP/WS peer → real `guidance.sqlite3`: valid proof, weak/foreign/truncated/missing/lagged proof with zero rows, replay/conflict, Stop/generation/source change), CT-INT-02 (`supervision_team` through `authorizeNative`), CT-INT-03 (production team runtime + transport + global `fetch` over a real loopback socket: lost reply + restart, stalled/truncated 2xx, Stop/quarantine before and after the POST, redirect), all `s1-baseline` (5.4; registry) | resolved in v2 |
-| SOL-PLAN-02 | Sol P0 | exact Stop publication / native initiation linearization; identified controlled-interleaving tests | 3.11 CC-STOP-LIN with the 18-path table (`contracts.CC-STOP-LIN.paths`); D-07 snapshot dropped (baseline has none); admission section; CT-LIN-01..06 with phases | resolved in v2 |
-| SOL-PLAN-03 | Sol P1 | D-01 phases per row, interim bridges ledgered with owner/removal, four named DB interfaces, AccessDb lifetime, SQL wait/rollback/COMMIT/CAS tests | 3.2 (`CatalogDb`/`GuidanceDb`/`PolicyDb`/`AccessDb`, lifetimes, rules 6–7, CT-SQL-01..04), 3.4 + row `phases`, 3.9 (B-01..B-03, no Layer rebuild, no second connection), `guidance-application.ts` in S6c | resolved in v2 |
+| SOL-PLAN-02 | Sol P0 (run 3: open, narrowed) | Stop ordering must cover policy-dependent SQL mutations, not only sends; reconcile admission with actual adapter initiation | 3.11 items 1, 2, 4: one process-wide `admit` section for Stop/Enable, sends and every policy-dependent write (including `workflow_write`, team mutations, typed intake/finalization, Start activation); admission = the adapter's synchronous `initiate` handoff, not a fork; `FiberMap.run(..., {onlyIfMissing: true})`; CT-LIN-05 executable contract (Stop completes while the reply is pending), CT-LIN-07, CT-LIN-08; `CC-STOP-LIN.policyDependentMutations` | resolved in v2.1 (Sol `sol-v2-frozen-plan-review.md`) |
+| SOL-PLAN-03 | Sol P1 (run 3: partial) | real call shapes and acquisition/injection points for synchronous consumers; CLI/config without a fake supervision runtime | 3.9 B-03 call-shape rule (`temporaryBoundaries.callShapes`), I-01/I-02 injections, B-04 T-01..T-07 (ServiceAuth + CLI in S6c, retained pure `loadDataDirectory`, saveThreadPolicy handler in S6a) | resolved in v2.1 |
 | SOL-PLAN-04 | Sol P1 | phase/seam/expected/target per case; known failures as red evidence; consolidation | 5.1 phases; registry fields for every case; CT-TCTRL-03 `known-failure` in S1b with D-21; consolidations in 5.4 | resolved in v2 |
 | SOL-PLAN-05 | Sol P1 | compiled/installed bin harness, signals, probe cases, tooling in lint/typecheck | 3.1 (CT-CLI-BIN-01..03, CT-PROBE-T3-01..05, entries), 5.3 rule 4, section 9 watchdog row, section 11 lint/typecheck coverage | resolved in v2 |
 | SOL-PLAN-06 | Sol P1 | mounted baseline stories, lifetimes, scope/session keys, mutation non-replay, guidance order | 3.8; section 7 UI-STORY-01..08; CT-UI-EDITOR-01, CT-UI-SETUP-01 | resolved in v2 |
-| SOL-PLAN-07 | Sol P0 | uncoached operative + trivial no-contact + unknown-send/Stop pilot at the S1 gate | section 7 first bullet; S1 exit gate in section 6 | resolved in v2 (evidence is the coordinator's) |
+| SOL-PLAN-07 | Sol P0 (run 3: execution gate) | honest baseline VM subset; executable S1 fault tests; positive fault proof after S6e; UI stories before S7 | section 7: the executable baseline subset is completed and recorded; positive introduction/helper races are characterized at the Node boundary before any port and proven live after S6e; extra pre-port VM checks only on a naturally reachable owned state, else deferred with reason; UI-STORY-01..08 before S7 with actual per-panel behaviour | resolved in v2.1 |
 | SOL-PLAN-08 | Sol P1 | monotonic elapsed time, wall time for stored timestamps, clock-jump test | 3.5 CC-CLOCK-ELAPSED/CC-CLOCK-WALL; CT-CLOCK-01; rows `t3.ts`, `t3-projection-stream.ts`, `workflow-write-controller.ts` | resolved in v2 |
 | SOL-PLAN-09 | Sol P1 | mandatory Schema boundaries; exact API spellings; stale labels | 3.10; rows name decode boundaries; `Layer.scoped`/`Schema.parseJson` removed; stale D1–D11/S3d labels mapped; API check script 0 problems | resolved in v2 |
-| A-P01 | Astra | acyclic service/API transition map; rows normalized; S1 VM proof before the campaign | 3.9 (extraction, call order, B-01..B-03); section 6 slices and v1→v2 map; every row's slice/phases normalized; S1 gate | resolved in v2 |
+| A-P01 | Astra (run 3: open) | adapt synchronous consumers at each service transition (auth, CLI/config, `noProjectControl`/`startStatus`/`saveThreadPolicy` handlers) | 3.9 B-04 T-01..T-07 and call shapes; ServiceAuth, CLI and the `main.ts` entry guard in S6c with their callers; retained pure `loadDataDirectory`; work packages WP-S6c-AUTH/WP-S6c-COMP | resolved in v2.1 (Astra `plan-v2-review.md`) |
 | A-P02 | Astra | one server-lifetime auth client; forge separate; concurrent HTTP-login test | 3.2 table and D-24; CT-AUTH-05 | resolved in v2 |
-| A-P03 | Astra | shared admission rule for Stop/Enable publication and all fresh sends; masking, order, callers, barriers | 3.11 and `CC-STOP-LIN.paths` (interpretation, Start activation, thread creation, root check-in, introduction and fallbacks, Stop notices, settlement, guide and replay, helper POST, channel upsert/retire); CT-LIN-01..06 | resolved in v2 |
+| A-P03 | Astra (run 3: open) | one process-wide contract in plan and manifest; actual adapter initiation, not a fork (Astra's 4.0.5 probe `harness-probe/admission-fork-v2.json`); coordinate legacy Stop callers from S6a | 3.11 items 1, 2, 4; manifest `CC-STOP-LIN` normalized to the process-wide section; 3.9 T-07; CT-LIN-02/05/06 at the first S6a freeze | resolved in v2.1 |
 | A-P04 | Astra | separate baseline characterization, Vitest-only parity, 4.0.5 transition goldens and new regressions | 5.1 phases; S0/S1c split; CT-MAIN-02 and CT-PS-01 split; registry `reuses`/`newObservation` | resolved in v2 |
 | A-P05 | Astra | finite runner and finalizer bounds after S0; self-tests; watchdog escalation; specific leak allowlist | 5.3 rules 2–5 | resolved in v2 |
 | A-P06 | Astra | mounted baseline matrix; query vs mutation lifetimes; scope keys; editor and setup drafts | 3.8; UI-STORY-01..08; CT-UI-EDITOR-01, CT-UI-SETUP-01 | resolved in v2 |
@@ -1320,12 +1582,30 @@ reopens it on the frozen revision. Manifest rows carry the IDs that affect them 
 | O-05 | Astra | no absolute "no event-loop stall" claim | 3.2 rule 5; section 7 S6d bullet | resolved in v2 |
 | O-06 | Astra | name the SDK callback bridge and its request scope | 3.7; section 9 | resolved in v2 |
 | ASTRA-EARLY-01 | Astra (early) | login DB is one service-lifetime connection, forge separate | 3.2; D-24 | resolved in v2 |
-| ANDREA-CLI-01 | Andrea | CLI on Effect end to end via `effect/cli`; preserve token stdout, commands, path security, exit meaning; flag behaviour changes | 3.1; BC-CLI-01..04 for both reviewers | resolved in v2 (BC acknowledgement pending) |
+| ANDREA-CLI-01 | Andrea | CLI on Effect end to end via `effect/cli`; preserve token stdout, commands, path security, exit meaning; flag behaviour changes | 3.1; BC-CLI-01..04 accepted by both reviewers (run 3) | resolved |
 | ANDREA-EXEC-01 | Andrea | use subagents in the implementation phase after the plan gate; disjoint ownership, shared contracts central, isolated worktrees, owner integration, every worker terminal before each frozen candidate | section 6.1; manifest `workPackages` and per-row `workPackage` (no file in two packages of one slice, checked by the generator) | resolved in v2 |
-| ANDREA-ITOOL-01 | Andrea | typed Supervisor MCP interpretation submission validated with `Schema`, exact native identity/source/run/binding authority, no T3 change, superseded parsing removed, no fallback or duplicate store | 3.12 items 1–5, 8; CC-INTERP-SUBMIT; CT-ISUB-01..16; slice S6e; D-27 | proposed; pending Sol/Astra alignment |
-| ANDREA-ROUTE-01 | Andrea | could the tool also dispatch to the right thread? | 3.12 item 6: no; record-only tool, service-owned routing to the binding's main through the existing introduction path; optional scope wake for speed | proposed; pending Sol/Astra alignment |
-| ANDREA-ITOOL-EVAL-01 | Andrea | evaluate (only) whether other model-to-service structured results need typed MCP tools; add none for uniformity | 3.12 gap table: interpretation needed (approved); agreement and definition-decision records possible-needed only on post-S6e evidence; helper markers, team, guide, workflow, Start/Stop keep; monitoring unnecessary; no other tool added, nothing blocks the migration | evaluated; no further tool |
-| ANDREA-MODEL-01 | Andrea | compare correctness and speed of GPT-6 Luna MAX and GPT-6.1 Sol LOW (Luna HIGH labelled separately); interpretation/validation and negotiation latency only | 3.12 model comparison; section 7 S1 and S6e bullets; D-28. Baseline so far (same root): greeting Sol LOW correct `not_needed` 3.019 s vs Luna HIGH 16.509 s with stale CSV; bare Start 7.777 s vs 9.114 s; Sol LOW coding plan 17.576 s missing the final brace (failed closed); provider JSONL confirms the missing braces are model output, not T3 truncation; Luna MAX pending | open (coordinator evidence; defaults unchanged) |
+| ANDREA-ITOOL-01 | Andrea | typed Supervisor MCP interpretation submission validated with `Schema`, exact native identity/source/run/binding authority, no T3 change, superseded parsing removed, no fallback or duplicate store | 3.12 items 1–8, 11, 12; CC-INTERP-SUBMIT; CT-ISUB-01..19; slice S6e; D-27 | reconciled with both design reports (v2.1); pending reviewer confirmation |
+| ANDREA-ROUTE-01 | Andrea | could the tool also dispatch to the right thread? | 3.12 answer and item 9: yes, a successful submission starts the existing service-owned delivery to the bound operative; no model-chosen destination and no send inside the tool | reconciled (both reviewers agree) |
+| SOL-ISUB-01 | Sol P0 (run 3) | write-once per interpretation attempt, not per reused task ID; source-edit and definition-renewal scenarios | 3.12 items 1 and 5 (attempt key, `attemptId`, receipts in the existing receipt table, task pointer, superseded attempts `stale`); CT-ISUB-19 | resolved in v2.1 |
+| SOL-ISUB-02 | Sol P1 (run 3) | candidate store and `proposalEvidenceCurrent`, proof re-verification before apply and Start, retained request/agreement cut-over without a permanent parser | 3.12 items 7, 8, 11; CT-ISUB-07/10/16/17 | resolved in v2.1 |
+| I-03 | Astra (run 3) | persisted candidate/agreement provenance, bounded cut-over (agreements, unsent introductions, pending Start, in-flight requests), re-verification before all application including bare Start, receipt lookup before the state gate, final-chat interpretation wording | 3.12 items 5, 7, 8, 11, 12; CT-ISUB-04/07/10/16/17; CC-INTERP-SUBMIT participants include `supervisor-conversation-store.ts` | resolved in v2.1 |
+| SOL-ITOOL-1 | Sol design | actual authenticated MCP → controller → real native proof → real SQL receipt; wrong root/helper/run/provider/source/generation, weak/forged/rolled-back, excess keys and lag rejected; raw input not stripped | 3.12 items 2–4; CT-ISUB-02, -03 | resolved in v2.1 |
+| SOL-ITOOL-2 | Sol design | prompt return with a staged receipt; finalize once on successful completion; ignore final prose and JSON | 3.12 items 6–7; CT-ISUB-01, -09, -10, -15 | resolved in v2.1 |
+| SOL-ITOOL-3 | Sol design | concurrent and replayed calls give one result and one introduction; conflicts cannot replace; SQL failure rolls back result, proof and receipt | 3.12 item 5; CT-ISUB-04, -11 | resolved in v2.1 |
+| SOL-ITOOL-4 | Sol design | source, definitions, binding, control and Stop/Enable fences at every proof/apply/send boundary; unknown delivery keeps route, body and IDs | 3.12 items 5, 7, 9; CT-ISUB-06, -08 | resolved in v2.1 |
+| SOL-ITOOL-5 | Sol design | pending Start accepts only its exact pinned interpretation; negative Start and greeting cause no contact; bare Start may activate without a workflow; no No Project shortcut | 3.12 items 5, 7; CT-ISUB-07, -12 | resolved in v2.1 |
+| SOL-ITOOL-6 | Sol design | initial candidate evidence uses the submission end to end; operative acceptance still required | 3.12 items 8, 10; CT-ISUB-13, -16 | resolved in v2.1 |
+| SOL-ITOOL-7 | Sol design | a structurally valid stale-CSV interpretation is semantically wrong; uncoached correctness trials | 3.12 model comparison (semantic correctness judged separately) | resolved in v2.1 |
+| SOL-ITOOL-8 | Sol design | bounded cut-over for in-flight JSON-only requests and retained candidates; never rewrite or re-send under old IDs; no invented submission; no permanent old-parser branch | 3.12 item 11; CT-ISUB-17 | resolved in v2.1 |
+| A-I01 | Astra design | exact request/run/source authority and pending-Start-only permission | 3.12 items 1, 4, 5; CT-ISUB-02, -07 | resolved in v2.1 |
+| A-I02 | Astra design | non-blocking durable receipt, native-completion and replay recovery, Stop/send admission, unknown IDs | 3.12 items 5–7, 9; CT-ISUB-04, -08, -11, -15 | resolved in v2.1 |
+| A-I03 | Astra design | all shared candidate and agreement evidence consumers, bounded preservation cut-over, removal of final-chat fallback | 3.12 items 7, 8, 11; CT-ISUB-09, -16, -17 | resolved in v2.1 |
+| A-I04 | Astra design | strict typed limits, provisional semantics, updated prompts, real-boundary tests, redacted typed errors | 3.12 items 3, 6, 12; CT-ISUB-03, -05, -18 | resolved in v2.1 |
+| ANDREA-ITOOL-EVAL-01 | Andrea | evaluate (only) whether other model-to-service structured results need typed MCP tools; add none for uniformity | 3.12 gap table, matching both reviewers' evaluations: interpretation needed and approved; later proposal/acceptance records a possible future gap only; definition decisions, contribution reports, workflow, team, guide, check-in markers, Start/Stop kept; monitoring unnecessary | evaluated; no other tool |
+| ANDREA-MODEL-01 | Andrea | compare correctness and speed of GPT-6 Luna MAX and GPT-6.1 Sol LOW (Luna HIGH labelled separately); interpretation/validation and negotiation latency only | 3.12 model comparison table and protocol; section 7 S6e bullet; D-28. Baseline (same retained root, sequential): bare Start Luna HIGH 9.114 s, Luna MAX 5.713 s, Sol LOW 7.777 s; greeting 16.509 s (stale CSV, malformed), 19.554 s (stale CSV, malformed), 3.019 s (correct `not_needed`); coding plan malformed / 13.659 s (stale CSV, malformed) / 17.576 s (malformed, no stale CSV); Stop and settlement passed for each; no negotiation reached | open: post-S6e quality and latency comparison is the default gate; defaults unchanged |
+| COORD-UI-01 | Coordinator | bounded UI baseline proof package: isolated loopback fixture serving the unchanged compiled UI, deterministic scenarios, fixture/native labels, no proxy and no real writes; coordinator records UI-STORY-01..08 before S7 | section 7 (UI baseline fixture), section 6.1 S1 row, D-30, WP-S1-UI, CT-UI-FIXTURE-01 | prepared in v2.1 |
+| D-26-ACCEPT | Sol and Astra (run 3) | D-26 accepted: delete the unused GuidanceStore notice-pipeline methods with call-graph proof; keep constructor recovery, stored rows and fixture `classify`; retire CT-GDB-03..05 | section 12 D-26; registry CT-GDB-03..05 `retired` | resolved |
+| SOL-PREC | Sol (run 3 precision notes) | CT-ISUB-14 validation spans; CT-APP-02 slice wording; CT-PSS-02/CT-TSTORE-02 reuse/observation fields; per-panel browser behaviour | CT-ISUB-14; registry fixes; section 7 UI note | resolved in v2.1 |
 | SOL-FILES | Sol | 34 per-file rows reference SOL-PLAN-01..09 | each row carries the IDs in `reviewFindings` and its row change; validation lists 34/34 | resolved in v2 |
 | ASTRA-FILES | Astra | 113 per-file rows reference A-P01..A-P08 and O-03 | each row carries the IDs in `reviewFindings`; slices, phases, Schema boundaries, clock domains and test phases normalized; validation lists 113/113 | resolved in v2 |
 | L-01 | W4 | helper channel `scheduledTasks.upsert` is sent after awaits without a recheck (`supervisor-helper-transport.ts:235-244`) | preserved exactly; repair is a separate decision | open decision (not blocking) |
@@ -1333,7 +1613,7 @@ reopens it on the frozen revision. Manifest rows carry the IDs that affect them 
 | L-03 | W4 | active-chat settlement does not recheck Enable after its awaits (`supervisor-lifecycle.ts:346-404`) | preserved exactly | open decision (not blocking) |
 | L-04 | W4 | bookkeeping failure after a policy commit (no notice; stale `chatEnabledAt`) | preserved and pinned by CT-LIN-03 | open decision (not blocking) |
 | L-05 | W4 | a 307 response makes `fetch` POST the webhook body again to `Location` (unverified until CT-INT-03 H6 runs) | pinned by H6; D-16 keeps it | open decision (not blocking) |
-| L-06 | Coordinator (early VM pilot) | unchanged VM, archived fixture `54c7e18a-ca52-498f-8467-f63c689656ff`, root `supervisor-root:9b20f073-bfdd-4d01-9dc9-7926d079de0d`, no new chat or project, model and settings unchanged. Genuine bare Start passed (source-pinned MCPX `supervision_start`, run 16; one reconciliation repeat of the stable operation; root run 6 `startRequested: true`, `objective: null`; UI active, `effectiveEnabled: true`, same root). Greeting ("Hi! Hope your day is going well.", `earlierMessages: []`): the reused root (run 7) resurrected an older CSV request from its own history and answered `needed`; the interpretation was **rejected** (task `18f2a960` `unavailable`, `objective: null`, `agreement: null`, "The Supervisor did not return a valid, source-linked interpretation"); no introduction or contact was authorized or observed. An uncoached coding request's interpretation also carried stale CSV context and was rejected; native operative coding continued independently | two separate results: (a) the **no-contact effect boundary passed** by failing closed and stays a preserved effect invariant (A-09); (b) the **semantic `not_needed` verdict failed / is unproven** on a reused root with prior history, a model and proof limit recorded as baseline evidence, not relabelled correct, not fixed, coached or retried in this batch; the same fixture class is rerun after S6a/S6b and compared on both (a) and (b) | (a) baseline pass; (b) recorded baseline limit (coordinator evidence) |
+| L-06 | Coordinator (early VM pilot) | unchanged VM, archived fixture `54c7e18a-ca52-498f-8467-f63c689656ff`, root `supervisor-root:9b20f073-bfdd-4d01-9dc9-7926d079de0d`, no new chat or project, model and settings unchanged. Genuine bare Start passed (source-pinned MCPX `supervision_start`, run 16; one reconciliation repeat of the stable operation; root run 6 `startRequested: true`, `objective: null`; UI active, `effectiveEnabled: true`, same root). Greeting ("Hi! Hope your day is going well.", `earlierMessages: []`): the reused root (run 7, Luna HIGH) resurrected an older CSV request from its own history and answered `needed` (Luna MAX did the same; Sol 6.1 LOW answered `not_needed` correctly); the interpretation was **rejected** (task `18f2a960` `unavailable`, `objective: null`, `agreement: null`, "The Supervisor did not return a valid, source-linked interpretation"); no introduction or contact was authorized or observed. An uncoached coding request's interpretation also carried stale CSV context and was rejected; native operative coding continued independently | two separate results: (a) the **no-contact effect boundary passed** by failing closed and stays a preserved effect invariant (A-09); (b) the **semantic `not_needed` verdict failed / is unproven** on a reused root with prior history, a model and proof limit recorded as baseline evidence, not relabelled correct, not fixed, coached or retried in this batch; the same fixture class is rerun after S6a/S6b and after S6e and compared on both (a) and (b); no positive negotiation is claimed at baseline | (a) baseline pass; (b) recorded baseline limit (coordinator evidence) |
 
 Earlier findings: F-001 (shared guidance transaction) incorporated (3.2 rule 1, 3.4, S1);
 F-002 (login DELETE journal) incorporated (3.2); F-003 (20 children) corrected; F-004 (leak
@@ -1367,6 +1647,7 @@ Acceptance cases for the whole batch (all must hold before handoff):
 - **A-10:** no `Effect.run*` outside the allowlist, no boundary B-01..B-03 left, no ad hoc
   timers or polling, and every residual adapter is listed in section 9.
 - **A-11:** every test runs under a finite runner bound with an empty leak allowlist.
-- **A-12 (after S6e, if D-27 is aligned):** interpretation results arrive only through the
-  typed submission tool; no model text is `JSON.parse`d; the operative target always comes
-  from the binding; a submission never counts as agreement.
+- **A-12 (after S6e):** interpretation results arrive only through the typed submission
+  tool; no final-chat interpretation text is parsed; the operative target always comes from the
+  binding; a submission never counts as agreement; retained agreements survive the
+  cut-over.
