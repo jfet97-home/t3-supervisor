@@ -8,7 +8,7 @@ import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../
 import type { WorkflowProposalInfo } from "../../src/project-supervisor-contract.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import type { WorkflowIntroduction } from "../../src/supervisor-conversation-store.js";
-import { forgeDashboardToken } from "../../src/service-auth.js";
+import { forgeDashboardToken } from "./service-auth-harness.js";
 import type { SupervisorMonitorBatch, SupervisorMonitorThreadBatch } from "../../src/supervisor-monitor.js";
 import { proposalContextFromDefinitions, validateWorkflowPlan } from "../../src/supervisor-workflow.js";
 import type { MessageInfo, Projection, RunInfo, ThreadInfo } from "../../src/types.js";

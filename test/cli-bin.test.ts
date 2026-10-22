@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, it, type TestContext } from "vitest";
-import { createServiceAuth } from "../src/service-auth.js";
+import { createServiceAuth } from "./support/service-auth-harness.js";
 import { prepareInstalledBin, type InstalledBin } from "./support/cli-bin.js";
 import { groupAlive, leakedSecrets, nodePath, repositoryRoot, runProcess, startProcess, tokenLineShape, tsxLoader,
   type ProcessResult } from "./support/cli-process.js";
@@ -13,6 +13,7 @@ import { privately } from "./support/private-assert.js";
 import { dataFiles, listenerStates, quickChecks, supervisorHarness, waitUntilDescriptorRetry, waitUntilReady,
   type SupervisorHarness } from "./support/cli-supervisor.js";
 import { after } from "./support/node-test.js";
+import { forgeHelp, relativeDataDirectory, rootHelp, usageError } from "./support/cli-help.js";
 
 // process-level characterization of the supervisor entries: tsx source (main.ts, cli.ts) and the built/installed bin
 
@@ -29,7 +30,6 @@ const readyFiles = [
 ];
 const readyDatabases = ["access/login.sqlite3", "catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"];
 
-const usage = "Usage: t3-supervisor start [--data-dir <absolute-path>]\n       t3-supervisor auth forge [--data-dir <absolute-path>]\n";
 const forgeFailure = "Could not issue a sign-in token. Run as the account that runs T3 Supervisor, after the service has initialized. " +
   "If it uses a custom state directory, pass --data-dir <absolute-path> or the same DATA_DIRECTORY. Pending tokens expire after five minutes.\n";
 const tokenLine = { lines: 1, endsWithNewline: true, tokenLength: 43, canonical: true };
@@ -147,14 +147,15 @@ describe("built and installed bin", () => {
     { timeout: 60_000 }, async (variant, t) => {
       const { home, state, auth, workflowToken, env } = await forgeState(t, "cli-bin-argv-");
       const [command, prefix] = entry(variant);
-      // recorded from today's build; the target differs only by BC-CLI-01..04
+      // recorded from today's build; the target differs only by BC-CLI-01..04: effect/cli renders the help (01) and a
+      // usage error prints it on stdout with the parse error, if any, on stderr, still exit 2 (02)
       const table: ReadonlyArray<{ argv: string[]; expected: Omit<ProcessResult, "signal"> }> = [
-        { argv: ["--help"], expected: { code: 0, stdout: usage, stderr: "" } },
-        { argv: ["-h"], expected: { code: 0, stdout: usage, stderr: "" } },
-        { argv: [], expected: { code: 2, stdout: "", stderr: usage } },
-        { argv: ["unknown"], expected: { code: 2, stdout: "", stderr: usage } },
-        { argv: ["auth", "forge", "--data-dir", "relative-state"], expected: { code: 2, stdout: "", stderr: usage } },
-        { argv: ["auth", "forge", "--data-dir", state, "extra"], expected: { code: 2, stdout: "", stderr: usage } },
+        { argv: ["--help"], expected: { code: 0, stdout: rootHelp, stderr: "" } },
+        { argv: ["-h"], expected: { code: 0, stdout: rootHelp, stderr: "" } },
+        { argv: [], expected: { code: 2, stdout: rootHelp, stderr: "" } },
+        { argv: ["unknown"], expected: { code: 2, stdout: rootHelp, stderr: usageError("Unknown subcommand \"unknown\" for \"t3-supervisor\"") } },
+        { argv: ["auth", "forge", "--data-dir", "relative-state"], expected: { code: 2, stdout: forgeHelp, stderr: relativeDataDirectory("relative-state") } },
+        { argv: ["auth", "forge", "--data-dir", state, "extra"], expected: { code: 2, stdout: forgeHelp, stderr: usageError("Unexpected positional argument: \"extra\"") } },
         { argv: ["auth", "forge", "--data-dir", join(home, "uninitialized")], expected: { code: 1, stdout: "", stderr: forgeFailure } },
       ];
       const outputs: string[] = [];
@@ -243,9 +244,10 @@ describe("built and installed bin", () => {
       process.kill(forge.pid, "SIGINT");
       const interrupted = await forge.closed(exitTimeoutMs);
       const exitMs = performance.now() - signalledAt;
-      // baseline: forge installs no signal handler, so the default disposition ends it at once, well inside busy_timeout (5000 ms)
-      privately("interrupted forge", [], () => assert.deepEqual(interrupted, { code: null, signal: "SIGINT", stdout: "", stderr: "" }));
-      assert.ok(exitMs < 5_000, `exit took ${Math.round(exitMs)} ms`);
+      // target: runMain interrupts the forge, which prints nothing and exits 130; a signal that lands in the synchronous busy
+      // wait takes effect only when the wait ends, so the exit is bounded by busy_timeout (5000 ms) plus the release
+      privately("interrupted forge", [], () => assert.deepEqual(interrupted, { code: 130, signal: null, stdout: "", stderr: "" }));
+      assert.ok(exitMs < 5_000 + 2_000, `exit took ${Math.round(exitMs)} ms`);
 
       holder.child.stdin?.write("commit\n");
       await holder.waitForStdout((stdout) => stdout === "locked\ncommitted\n", 15_000, "the holder commit");

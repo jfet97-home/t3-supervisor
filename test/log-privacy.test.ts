@@ -8,7 +8,7 @@ import { Cause, Effect, Exit, Fiber, Layer, Logger, SubscriptionRef, Tracer } fr
 import { it, type TestContext } from "vitest";
 import { SupervisorConfig as Configuration } from "../src/config.js";
 import { SupervisorOwnership } from "../src/project-supervisor-store.js";
-import { createServiceAuth, forgeDashboardToken } from "../src/service-auth.js";
+import { createServiceAuth, forgeDashboardToken } from "./support/service-auth-harness.js";
 import { makeStore, type Store } from "../src/store.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { makeSupervisorRpc } from "./support/supervisor-native-client.js";

@@ -1,5 +1,6 @@
 import {SupervisorTeamController} from "./supervisor-team-controller.js";
-import { Effect } from "effect";
+import { NodeFileSystem } from "@effect/platform-node";
+import { Context, Effect, Layer } from "effect";
 import { GuidanceStore } from "./guidance-store.js";
 import { GuidanceRuntime } from "./guidance.js";
 import { startGuidanceUi } from "./guidance-ui.js";
@@ -20,6 +21,7 @@ import { NativeRpc, NativeShell, record, type NativeRpcShape, type SupervisorRpc
 import { GitProbe } from "./git-probe.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
 import { createWorkflowMcpEndpoint } from "./workflow-mcp.js";
+import { ServiceAuth } from "./service-auth.js";
 
 // the root context's promise runner (b-01) that the b-03 facades call
 export type RootRun = <A, E>(effect: Effect.Effect<A, E>) => Promise<A>;
@@ -144,8 +146,10 @@ export const runGuidanceApplication = (
     const teamController = new SupervisorTeamController(workflowReader, supervision.team, supervision.operateRpc, supervision.conversation.requests);
     supervision.teamEffects = teamController;
     const workflows = createWorkflowMcpEndpoint(workflowReader, teamController);
+    // the dashboard's access client, acquired in this scope right before the listeners and released after them
+    const auth = Context.get(yield* Layer.build(ServiceAuth.layer(config.dataDirectory).pipe(Layer.provide(NodeFileSystem.layer))), ServiceAuth);
     yield* Effect.acquireRelease(
-      Effect.promise(() => startGuidanceUi(config, runtime, definitions, editor, supervision, workflows, workflowReader)),
+      Effect.promise(() => startGuidanceUi(config, runtime, auth, run, definitions, editor, supervision, workflows, workflowReader)),
       (ui) => Effect.promise(() => ui.close()),
     );
     yield* Effect.sync(onReady);

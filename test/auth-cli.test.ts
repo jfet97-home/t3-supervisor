@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { DatabaseSync } from "node:sqlite";
 import { it } from "vitest";
-import { createServiceAuth } from "../src/service-auth.js";
+import { createServiceAuth } from "./support/service-auth-harness.js";
+import { privately } from "./support/private-assert.js";
 
 const execute = promisify(execFile);
 const command = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
@@ -91,8 +92,10 @@ it("the local CLI does not bootstrap missing service state or accept unknown com
     assert.deepEqual(await readdir(directory), []);
     await assert.rejects(invoke(directory, ["unknown"]), (error: unknown) => {
       const failure = error as {code: number; stdout: string; stderr: string};
-      assert.equal(failure.code, 2);assert.equal(failure.stdout, "");
-      assert.match(failure.stderr, /Usage:/u);return true;
+      // BC-CLI-02: the help goes to stdout and the parse error to stderr, still exit 2
+      assert.equal(failure.code, 2);
+      privately("unknown command output", [], () => {assert.match(failure.stdout, /USAGE/u);assert.match(failure.stderr, /Unknown subcommand "unknown"/u);});
+      return true;
     });
   } finally {await rm(directory, {recursive: true, force: true});}
 });

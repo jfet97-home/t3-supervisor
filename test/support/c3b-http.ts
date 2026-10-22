@@ -4,7 +4,7 @@ import { request as httpRequest } from "node:http";
 import { createServer as createNetServer, connect } from "node:net";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { TestContext } from "vitest";
-import { forgeDashboardToken } from "../../src/service-auth.js";
+import { forgeDashboardToken } from "./service-auth-harness.js";
 import { after } from "./node-test.js";
 
 // loopback helpers shared by the c3b characterization suites

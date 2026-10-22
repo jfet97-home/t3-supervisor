@@ -4,15 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { it, type TestContext } from "vitest";
-import { createServiceAuth } from "../src/service-auth.js";
+import { createServiceAuth } from "./support/service-auth-harness.js";
 import { leakedSecrets, nodePath, repositoryRoot, runProcess, tokenLineShape, tsxLoader, type ProcessResult } from "./support/cli-process.js";
 import { privately } from "./support/private-assert.js";
 import { after } from "./support/node-test.js";
+import { forgeHelp, relativeDataDirectory, rootHelp, startHelp, usageError } from "./support/cli-help.js";
 
-// the cli on its tsx source path in a real child process: exact usage bytes, exit codes and forge output
+// the cli on its tsx source path in a real child process: exact help bytes, exit codes and forge output
 
 const command = join(repositoryRoot, "src", "cli.ts");
-const usage = "Usage: t3-supervisor start [--data-dir <absolute-path>]\n       t3-supervisor auth forge [--data-dir <absolute-path>]\n";
 const forgeFailure = "Could not issue a sign-in token. Run as the account that runs T3 Supervisor, after the service has initialized. " +
   "If it uses a custom state directory, pass --data-dir <absolute-path> or the same DATA_DIRECTORY. Pending tokens expire after five minutes.\n";
 const tokenLine = { lines: 1, endsWithNewline: true, tokenLength: 43, canonical: true };
@@ -29,18 +29,27 @@ const invoke = (cwd: string, args: ReadonlyArray<string>, env: NodeJS.ProcessEnv
 
 it("CT-CLI-01: --help and -h write the exact two-line usage to stdout with empty stderr and exit 0", { timeout: 60_000 }, async (t) => {
   const cwd = await home(t);
-  for (const flag of ["--help", "-h"]) assert.deepEqual(await invoke(cwd, [flag]), { code: 0, signal: null, stdout: usage, stderr: "" }, flag);
+  // BC-CLI-01: the help effect/cli renders replaces the hand-written usage
+  for (const flag of ["--help", "-h"]) {
+    const result = await invoke(cwd, [flag]);
+    privately(flag, [], () => assert.deepEqual(result, { code: 0, signal: null, stdout: rootHelp, stderr: "" }));
+  }
 });
 
 it("CT-CLI-02: malformed --data-dir forms, extra arguments and a missing value exit 2 with the exact usage on stderr only", { timeout: 60_000 }, async (t) => {
   const cwd = await home(t);
-  const cases = [
-    ["auth", "forge", "--data-dir", "relative"],
-    ["auth", "forge", `--data-dir=${join(cwd, "absolute")}`],
-    ["auth", "forge", "extra"],
-    ["start", "--data-dir"],
+  // BC-CLI-02: a usage error prints the command's help on stdout and the parse error on stderr, still exit 2;
+  // BC-CLI-03: the equals form is accepted, so on an uninitialized absolute directory it is a forge failure
+  const cases: ReadonlyArray<readonly [ReadonlyArray<string>, Omit<ProcessResult, "signal">]> = [
+    [["auth", "forge", "--data-dir", "relative"], { code: 2, stdout: forgeHelp, stderr: relativeDataDirectory("relative") }],
+    [["auth", "forge", `--data-dir=${join(cwd, "absolute")}`], { code: 1, stdout: "", stderr: forgeFailure }],
+    [["auth", "forge", "extra"], { code: 2, stdout: forgeHelp, stderr: usageError("Unexpected positional argument: \"extra\"") }],
+    [["start", "--data-dir"], { code: 2, stdout: startHelp, stderr: usageError("Missing value for flag --data-dir. Expected: absolute-path") }],
   ];
-  for (const args of cases) assert.deepEqual(await invoke(cwd, args), { code: 2, signal: null, stdout: "", stderr: usage }, args.join(" "));
+  for (const [args, expected] of cases) {
+    const result = await invoke(cwd, args);
+    privately(args.join(" "), [], () => assert.deepEqual(result, { ...expected, signal: null }));
+  }
 });
 
 it("CT-CLI-03: forge succeeds with an invalid helper instance id and a missing T3 token file because it loads no service configuration",

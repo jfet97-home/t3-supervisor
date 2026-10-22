@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { GuidanceRuntime } from "../../src/guidance.js";
-import { startGuidanceUi } from "../../src/guidance-ui.js";
+import { startGuidanceUi } from "./service-auth-harness.js";
 import { ProjectSupervisorStore, loadSupervisorOwnership } from "../../src/project-supervisor-store.js";
 import { ProjectSupervisor } from "../../src/project-supervisor.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";

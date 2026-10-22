@@ -1,4 +1,4 @@
-import { Context, Effect, Layer } from "effect";
+import { Context, Effect, Layer, Redacted } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
 import { HttpRouter, HttpServer } from "effect/http";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -13,7 +13,7 @@ import type { ProjectConfigEditor } from "./project-config-editor.js";
 import type { ProjectSupervisor } from "./project-supervisor.js";
 import type { WorkflowWriteController } from "./workflow-write-controller.js";
 import { parseWorkflowProgressPageQuery, readWorkflowProgressPage } from "./workflow-progress.js";
-import { createServiceAuth } from "./service-auth.js";
+import type { ServiceAuth } from "./service-auth.js";
 import { overviewPage } from "./dashboard-overview.js";
 
 export type WorkflowMcpEndpoint = {
@@ -42,6 +42,9 @@ const body = async (request: IncomingMessage, limit = 64_000): Promise<string> =
 export const startGuidanceUi = async (
   config: SupervisorConfig,
   runtime: GuidanceRuntime,
+  // the caller's service auth and its root runner (b-01): the checks are awaited in request order (b-04 t-01)
+  auth: ServiceAuth["Service"],
+  run: <A, E>(effect: Effect.Effect<A, E>) => Promise<A>,
   definitions?: ProjectDefinitionLoader,
   editor?: ProjectConfigEditor,
   supervision?: ProjectSupervisor,
@@ -141,7 +144,6 @@ export const startGuidanceUi = async (
     Layer.provide(handlers),
     Layer.provide(HttpServer.layerServices),
   );
-  const auth = await createServiceAuth(config.dataDirectory);
   const web = HttpRouter.toWebHandler(routes, { disableLogger: true });
   const csrf = randomBytes(32).toString("base64url");
   const activeRequests = new Set<AbortController>();
@@ -197,7 +199,7 @@ export const startGuidanceUi = async (
       if (url.pathname.startsWith("/auth/")) {
         if (url.pathname === "/auth/status" && request.method === "GET") {
           response.writeHead(200, {...headers, "Content-Type": "application/json"});
-          response.end(JSON.stringify({authenticated: auth.authenticated(session)}));
+          response.end(JSON.stringify({authenticated: await run(auth.authenticated(session))}));
           return;
         }
         if (request.method !== "POST" || !["/auth/login", "/auth/logout"].includes(url.pathname))
@@ -209,19 +211,19 @@ export const startGuidanceUi = async (
           try { payload = JSON.parse(await body(request, 2048)); }
           catch (error) { if (error instanceof BodyLimitError) throw error; return reject(400, "Invalid sign-in request."); }
           const token = typeof payload === "object" && payload !== null && "token" in payload && typeof payload.token === "string" ? payload.token : "";
-          const authenticated = auth.login(token);
+          const authenticated = await run(auth.login(token));
           if (!authenticated) return reject(401, "The access token is invalid.");
-          auth.logout(session);
+          await run(auth.logout(session));
           response.writeHead(200, {...headers, "Content-Type": "application/json"});
-          response.end(JSON.stringify({authenticated: true, session: authenticated}));
+          response.end(JSON.stringify({authenticated: true, session: Redacted.value(authenticated)}));
           return;
         }
-        auth.logout(session);
+        await run(auth.logout(session));
         response.writeHead(200, {...headers, "Content-Type": "application/json"});
         response.end(JSON.stringify({authenticated: false}));
         return;
       }
-      if (url.pathname.startsWith("/api/") && !auth.authenticated(session))
+      if (url.pathname.startsWith("/api/") && !(await run(auth.authenticated(session))))
         return reject(401, "Sign in to Supervisor.");
       if (url.pathname.startsWith("/api/")) {
         if (
@@ -326,11 +328,9 @@ export const startGuidanceUi = async (
     const address = server.address();
     if (mcpServer) await listen(mcpServer, config.workflowMcpPort ?? (typeof address === "object" && address ? address.port : config.uiPort ?? 9008), config.workflowMcpBindHost!);
   } catch (error) {
-    try {
-      await stop(server);
-      if (mcpServer) await stop(mcpServer);
-      await web.dispose();
-    } finally { auth.close(); }
+    await stop(server);
+    if (mcpServer) await stop(mcpServer);
+    await web.dispose();
     throw error;
   }
   return {
@@ -341,11 +341,9 @@ export const startGuidanceUi = async (
       try {
         await workflows?.close();
       } finally {
-        try {
-          await stop(server);
-          if (mcpServer) await stop(mcpServer);
-          await web.dispose();
-        } finally { auth.close(); }
+        await stop(server);
+        if (mcpServer) await stop(mcpServer);
+        await web.dispose();
       }
     },
   };

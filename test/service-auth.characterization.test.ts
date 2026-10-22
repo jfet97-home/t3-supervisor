@@ -9,8 +9,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { it } from "vitest";
 import type { GuidanceRuntime } from "../src/guidance.js";
-import { startGuidanceUi } from "../src/guidance-ui.js";
-import { createServiceAuth, forgeDashboardToken } from "../src/service-auth.js";
+import { createServiceAuth, forgeDashboardToken, startGuidanceUi } from "./support/service-auth-harness.js";
 import { childFailure, privately } from "./support/private-assert.js";
 import type { SupervisorConfig } from "../src/types.js";
 

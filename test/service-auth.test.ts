@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "vitest";
 import { Worker } from "node:worker_threads";
-import { createServiceAuth, forgeDashboardToken, type ServiceAuth } from "../src/service-auth.js";
+import { createServiceAuth, forgeDashboardToken, type ServiceAuth } from "./support/service-auth-harness.js";
 
 const withTemporaryDirectory = async <A>(run: (directory: string) => Promise<A>): Promise<A> => {
   const directory = await mkdtemp(join(tmpdir(), "t3-service-auth-test-"));
@@ -57,7 +57,7 @@ const runAuthChild = async (
   action: "login" | "authenticated",
   token: string,
 ): Promise<string> => {
-  const moduleUrl = new URL("../src/service-auth.ts", import.meta.url).href;
+  const moduleUrl = new URL("./support/service-auth-harness.ts", import.meta.url).href;
   const loader = fileURLToPath(new URL("../node_modules/tsx/dist/loader.mjs", import.meta.url));
   const source = `
     let input = "";
@@ -88,7 +88,7 @@ const runAuthChild = async (
 
 const makeConsumerWorker = (directory: string, token: string, barrier: SharedArrayBuffer) => {
   const source = `
-    const { parentPort, workerData } = require("node:worker_threads");
+    import { parentPort, workerData } from "node:worker_threads";
     (async () => {
       let auth;
       try {
@@ -105,11 +105,11 @@ const makeConsumerWorker = (directory: string, token: string, barrier: SharedArr
       }
     })();
   `;
-  const worker = new Worker(source, {
-    eval: true,
+  // an es module worker: tsx resolves the relative imports of the module under test only there
+  const worker = new Worker(new URL(`data:text/javascript,${encodeURIComponent(source)}`), {
     execArgv: ["--import", "tsx"],
     workerData: {
-      moduleUrl: new URL("../src/service-auth.ts", import.meta.url).href,
+      moduleUrl: new URL("./support/service-auth-harness.ts", import.meta.url).href,
       directory,
       token,
       barrier,
