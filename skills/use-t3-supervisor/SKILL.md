@@ -123,9 +123,10 @@ work stays unresolved; relevant activity reuses the same Supervisor identity.
   then says so, and points to the Stop supervision button.
 - Removing a chat from, or adding it to, the excluded chats in Settings is the same Enable or Stop.
 - A stop survives restarts, cancels unsent check-ins and settles only the Supervisor conversation, even if it was
-  pinned or kept active before the stop. If supervision contacted the operative, one concise notice tells it to stop
+  pinned or kept active before the stop. One concise notice tells the operative to stop
   replying to the Supervisor. The task continues; other chats and the project remain unchanged. Pending or uncertain
-  notice delivery is shown separately and never causes a fresh replay.
+  notice delivery is shown separately and never causes a fresh replay. This notice also applies when the Supervisor
+  had not introduced itself; automatic handling of a trivial request stays silent until an explicit Stop.
 
 ## Teams and native actions
 

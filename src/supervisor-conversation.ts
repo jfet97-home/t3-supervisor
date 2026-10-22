@@ -1725,9 +1725,6 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     const introductions = this.requests.introductions(owner.projectId).filter(intro => intro.supervisorThreadId === owner.threadId && intro.threadId === owner.mainThreadId &&
       ["sending", "uncertain", "accepted", "sent"].includes(intro.state) && (notice.enabledAt === null ||
         (timestampMs(main.messages.find(message => message.id === tasks.find(task => task.id === intro.taskId)?.sourceMessageId)?.createdAt) ?? 0) > notice.enabledAt));
-    const contacted = introductions.length > 0 || main.messages.some(message => message.senderThreadId === owner.threadId &&
-      (notice.enabledAt === null || (timestampMs(message.createdAt) ?? 0) > notice.enabledAt));
-    if (!contacted) {save({...notice, state: "superseded", error: null});return;}
     const pendingIntroduction = introductions.some(intro => !main.messages.some(message => message.id === intro.messageId && message.text === intro.text));
     if (pendingIntroduction) {defer("The earlier proposal delivery is not yet visible.");return;}
     if (hasPendingOwnerInput(main)) {save({...notice, nextObserveAt: Date.now() + 60_000, error: "Stop notice waits for the existing native input or approval."});return;}

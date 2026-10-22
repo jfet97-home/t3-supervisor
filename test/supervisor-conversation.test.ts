@@ -5633,13 +5633,17 @@ test("a lost Stop-notice response preserves its exact identity across Stop, Enab
 });
 
 
-test("Stop of a no-contact request sends no operative message, and stopped context remains readable without a task", async t => {
+test("explicit Stop notifies an uncontacted operative once, and stopped context remains readable without a task", async t => {
   const clock = {now: baseTime};t.mock.method(Date, "now", () => clock.now);
   const fixture = await makeFixture(clock);t.after(fixture.cleanup);
   const service = fixture.makeProjectSupervisor();const signal = AbortSignal.timeout(10000);
   await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: fixture.threadPolicy.get().generation}, signal);
   await fixture.conversation.reconcileStopNotice(fixture.binding, signal);
-  assert.equal(fixture.calls.length, 0);
+  assert.equal(fixture.calls.length, 1);
+  assert.equal(fixture.calls[0]!.payload.threadId, operativeThreadId);
+  assert.match(String(fixture.calls[0]!.payload.text), /Supervision was stopped for this conversation/u);
+  await fixture.conversation.reconcileStopNotice(fixture.binding, signal);
+  assert.equal(fixture.calls.length, 1, "the accepted notice is not sent again");
   fixture.projectStore.store.db.prepare("DELETE FROM supervisor_task_interpretations WHERE thread_id=?").run(operativeThreadId);
   const result = await fixture.conversation.readContextView(fixture.binding, {view: "context"}, signal);
   assert.equal(result.supervision, "stopped");assert.equal(result.status, "ok");

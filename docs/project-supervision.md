@@ -299,7 +299,7 @@ its pair held, across any Stop, Enable or activation boundary, until that outcom
 Supervisor conversation is replaced. A stop
 cancels never-sent check-ins, keeps sent and uncertain delivery identities, and sends no new
 check-in or introduction. An explicit Stop schedules one concise operative notice per
-Enable period, only if supervision previously contacted that main. The notice says to
+Enable period, including when supervision has not previously contacted that main. The notice says to
 stop replying to the Supervisor while continuing the task; it never asks for a reply.
 Unsent notices are fenced by Enable; accepted or uncertain identities are only observed.
 Three visibility misses at least a minute apart park the notice as unconfirmed with
