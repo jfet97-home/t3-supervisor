@@ -1,10 +1,14 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React from "react";
+import { useAtomValue } from "@effect/atom-react";
+import { Effect, Option, Schema } from "effect";
+import { Atom } from "effect/reactivity";
 
-export type ProjectSection = "progress" | "plan" | "supervision" | "definitions" | "settings" | "conversations";
+const sections = ["progress", "plan", "supervision", "definitions", "settings", "conversations"] as const;
+export type ProjectSection = typeof sections[number];
 export type Route = {page: "home" | "projects" | "activity" | "settings" | "guide"; projectId: string; main: string | null; section: ProjectSection};
 export const directoryRoute: Route = {page: "projects", projectId: "", main: null, section: "progress"};
 export const homeRoute: Route = {...directoryRoute, page: "home"};
-export const projectSections: readonly ProjectSection[] = ["progress", "plan", "supervision", "definitions", "settings", "conversations"];
+export const projectSections: readonly ProjectSection[] = sections;
 export type NavigationGuard = (next: Route) => boolean;
 
 export function parseRoute(hash: string): Route {
@@ -27,20 +31,21 @@ export function routeHref(route: Route): string {
   return `#/projects/${encodeURIComponent(route.projectId)}/${route.section}${query}`;
 }
 
+// the chat and section last opened in a project, kept for this tab in sessionStorage; stored values are untrusted
+const RememberedContext = Schema.fromJsonString(Schema.Struct({main: Schema.String, section: Schema.Literals(sections)}));
+const decodeRemembered = Schema.decodeUnknownOption(RememberedContext);
+const encodeRemembered = Schema.encodeSync(RememberedContext);
+
 export function rememberContext(route: Route) {
   if (!route.projectId || route.main === null) return;
-  try { sessionStorage.setItem(`supervisor-context:${route.projectId}`, JSON.stringify({main: route.main, section: route.section})); } catch { /* Navigation also works without storage. */ }
+  try { sessionStorage.setItem(`supervisor-context:${route.projectId}`, encodeRemembered({main: route.main, section: route.section})); } catch { /* Navigation also works without storage. */ }
 }
 
 export function openProject(projectId: string): Route {
   const fallback = {...directoryRoute, projectId};
-  try {
-    const value: unknown = JSON.parse(sessionStorage.getItem(`supervisor-context:${projectId}`) ?? "null");
-    if (typeof value === "object" && value !== null && "main" in value && typeof value.main === "string" && "section" in value && projectSections.includes(value.section as ProjectSection)) {
-      return {...fallback, main: value.main, section: value.section as ProjectSection};
-    }
-  } catch { /* An absent or invalid remembered context opens the chooser. */ }
-  return fallback;
+  let stored: string | null = null;
+  try { stored = sessionStorage.getItem(`supervisor-context:${projectId}`); } catch { /* An absent or invalid remembered context opens the chooser. */ }
+  return Option.match(decodeRemembered(stored), {onNone: () => fallback, onSome: ({main, section}) => ({...fallback, main, section})});
 }
 
 type HistoryState = {hash: string; state: unknown; index?: number | null; length?: number};
@@ -164,26 +169,41 @@ export function createNavigator(initial: Route, host: NavigationHistory, allow: 
   };
 }
 
-export function useNavigation() {
-  const [route, setRoute] = useState(() => parseRoute(window.location.hash));
-  const guard = useRef<NavigationGuard>(() => true);
-  const [controller] = useState(() => createNavigator(route, {
+// the route of this page and its guarded navigator; history and hash events feed the route, and the listeners and the
+// bounded restore timer are released with the atom (the residual history adapter, plan section 9)
+export interface Navigation {
+  readonly route: Route;
+  readonly navigate: (next: Route) => void;
+  readonly guard: {current: NavigationGuard};
+}
+export const navigationAtom: Atom.Atom<Navigation> = Atom.make((get) => {
+  const guard = {current: (() => true) as NavigationGuard};
+  // the latest restore deadline; a newer one replaces it, and the navigator ignores a superseded deadline anyway
+  const deadline = Atom.make<{readonly callback: () => void; readonly ms: number} | null>(null);
+  get.mount(Atom.make((get) => {
+    const pending = get(deadline);
+    return pending === null ? Effect.void : Effect.sleep(pending.ms).pipe(Effect.andThen(Effect.sync(pending.callback)));
+  }));
+  const initial = parseRoute(window.location.hash);
+  let current: Navigation = {route: initial, navigate: next => controller.navigate(next), guard};
+  const controller = createNavigator(initial, {
     read: () => ({hash: window.location.hash, state: history.state, index: window.navigation?.currentEntry?.index ?? null, length: history.length}),
     push: (href, state) => history.pushState(state, "", href),
     replace: (href, state) => history.replaceState(state, "", href),
     go: delta => history.go(delta),
-    later: (callback, ms) => { window.setTimeout(callback, ms); },
-  }, next => guard.current(next), next => { rememberContext(next); setRoute(next); }));
-  const navigate = useCallback((next: Route) => controller.navigate(next), [controller]);
-  useEffect(() => {
-    controller.start();
-    rememberContext(route);
-    const changed = () => controller.historyChanged();
-    window.addEventListener("hashchange", changed);
-    window.addEventListener("popstate", changed);
-    return () => { window.removeEventListener("hashchange", changed); window.removeEventListener("popstate", changed); };
-  }, [controller]);
-  return {route, navigate, guard};
+    later: (callback, ms) => get.set(deadline, {callback, ms}),
+  }, next => guard.current(next), next => { rememberContext(next); current = {...current, route: next}; get.setSelf(current); });
+  controller.start();
+  rememberContext(current.route);
+  const changed = () => controller.historyChanged();
+  window.addEventListener("hashchange", changed);
+  window.addEventListener("popstate", changed);
+  get.addFinalizer(() => { window.removeEventListener("hashchange", changed); window.removeEventListener("popstate", changed); });
+  return current;
+});
+
+export function useNavigation(): Navigation {
+  return useAtomValue(navigationAtom);
 }
 
 export function RouteLink({to, navigate, children, ...props}: Omit<React.AnchorHTMLAttributes<HTMLAnchorElement>, "href"> & {to: Route; navigate: (route: Route) => void}) {

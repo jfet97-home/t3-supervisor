@@ -1,9 +1,12 @@
 import {StopNotice} from "./stop-notice.js";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Schema } from "effect";
-import { DashboardOverview, readOverviewRange, type DashboardOverviewInfo, type DashboardWorkInfo } from "../../src/dashboard-overview.js";
+import { useEffect, useState } from "react";
+import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react";
+import { Data, Effect, Option } from "effect";
+import { AsyncResult, Atom } from "effect/reactivity";
+import type { DashboardOverviewInfo, DashboardWorkInfo } from "../../src/dashboard-overview.js";
 import type { GuidanceSnapshot } from "../../src/guidance-contract.js";
-import { loadAccess, sessionHeaders } from "./access.js";
+import { ApiClient, classifyMutation } from "./api.js";
+import { pollWhileVisible, uiRuntime } from "./atoms.js";
 import { directoryRoute, RouteLink, type Route } from "./navigation.js";
 import { Icon } from "./icons.js";
 
@@ -14,42 +17,82 @@ export function ReadTime({value, prefix = "Read"}: {value: number | null; prefix
   return <span className="small muted">{prefix} {value === null ? "time unavailable" : <time dateTime={new Date(value).toISOString()} title={new Date(value).toLocaleString()}>{new Date(value).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}</time>}</span>;
 }
 
-export function useOverview(active: boolean, connected: boolean) {
-  const [data, setData] = useState<DashboardOverviewInfo | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const current = useRef(data); current.current = data;
-  const request = useRef<AbortController | null>(null);
-  const load = useCallback(async (more = false) => {
-    if (!connected) return;
-    request.current?.abort();
-    const controller = new AbortController(); request.current = controller;
-    setLoading(true); setError("");
-    const previous = current.current;
-    const count = Math.max(100, (previous?.work.length ?? 0) + (more ? 100 : 0));
-    try {
-      const result = await readOverviewRange(async offset => {
-        const response = await fetch(`/api/guidance/dashboard-overview?offset=${offset}&limit=100`, {credentials: "omit", headers: sessionHeaders(), signal: controller.signal});
-        if (!response.ok) {
-          if (response.status === 401 || response.status === 403) await loadAccess();
-          throw new Error("The work overview could not be refreshed.");
-        }
-        return Schema.decodeUnknownSync(DashboardOverview)(await response.json());
-      }, count);
-      if (!controller.signal.aborted) setData(result);
-    } catch {
-      if (!controller.signal.aborted) setError("The work overview could not be refreshed. The last successful read is kept; current state may have changed.");
-    } finally {if (!controller.signal.aborted) setLoading(false);}
-  }, [connected]);
-  useEffect(() => {
-    if (!active || !connected) {request.current?.abort(); setLoading(false); return;}
-    void load();
-    const timer = setInterval(() => {if (!document.hidden) void load();}, 30_000);
-    return () => {clearInterval(timer); request.current?.abort();};
-  }, [active, connected, load]);
-  return {data, loading, error, refresh: () => {void load();}, loadMore: () => {void load(true);}};
+// a page sequence that cannot form one coherent prefix of the overview
+export class OverviewRangeError extends Data.TaggedError("OverviewRangeError")<{readonly reason: "invalid_overview_page" | "overview_changed_during_read"}> {}
+
+// reads a coherent fresh prefix of at least `count` conversations in pages, restarting once when the overview changes
+// between pages and rejecting reordered or duplicate pages (the Effect form of readOverviewRange)
+export const readOverviewPages = <E, R>(read: (offset: number) => Effect.Effect<DashboardOverviewInfo, E, R>, count: number) => {
+  const attempt = Effect.gen(function* () {
+    const first = yield* read(0);
+    if (first.offset !== 0) return yield* new OverviewRangeError({reason: "invalid_overview_page"});
+    let latest = first;
+    const work = [...first.work];
+    while (latest.hasMore && work.length < count) {
+      const offset = latest.offset + latest.work.length;
+      if (!latest.work.length) return yield* new OverviewRangeError({reason: "invalid_overview_page"});
+      const next = yield* read(offset);
+      if (next.revision !== first.revision) return Option.none<DashboardOverviewInfo>();
+      if (next.offset !== offset || next.total !== first.total) return yield* new OverviewRangeError({reason: "invalid_overview_page"});
+      work.push(...next.work); latest = next;
+    }
+    if (new Set(work.map(item => item.mainThreadId)).size !== work.length) return yield* new OverviewRangeError({reason: "invalid_overview_page"});
+    return Option.some({...first, work, hasMore: latest.hasMore});
+  });
+  return Effect.flatMap(attempt, Option.match({
+    onSome: Effect.succeed,
+    onNone: () => Effect.flatMap(attempt, Option.match({onSome: Effect.succeed, onNone: () => Effect.fail(new OverviewRangeError({reason: "overview_changed_during_read"}))})),
+  }));
+};
+
+export const overviewRefreshMillis = 30_000;
+export const overviewFailureMessage = "The work overview could not be refreshed. The last successful read is kept; current state may have changed.";
+
+// the work overview of a dashboard: while enabled (active and connected) it reads the loaded range, at least 100
+// conversations and 100 more after a load-more request, and keeps its last successful read through refreshes and
+// failures; disabling it interrupts the read in flight and keeps the last result; the poll is mounted only while enabled.
+// it is not keyed by the auth epoch: a 401 refreshes access, which announces a session change, so an epoch-keyed read
+// would repeat while signed out (the baseline read retried only on its interval)
+export const makeOverview = (pollMillis: number) => {
+  const enabled = Atom.make(false);
+  const more = Atom.make(false);
+  const read = uiRuntime.atom((get) => {
+    if (!get(enabled)) return Effect.never;
+    const loaded = Option.match(Option.flatMap(get.self<AsyncResult.AsyncResult<DashboardOverviewInfo, unknown>>(), AsyncResult.value), {onNone: () => 0, onSome: value => value.work.length});
+    const extend = get.once(more);
+    if (extend) get.set(more, false);
+    const count = Math.max(100, loaded + (extend ? 100 : 0));
+    return Effect.flatMap(ApiClient, client => readOverviewPages(offset =>
+      classifyMutation(client.guidance.dashboardOverview({query: {offset: String(offset), limit: "100"}})), count));
+  });
+  return {enabled, more, read, polled: read.pipe(pollWhileVisible(pollMillis))};
+};
+export const overview = makeOverview(overviewRefreshMillis);
+
+export interface OverviewState {
+  readonly data: DashboardOverviewInfo | null;
+  readonly loading: boolean;
+  readonly error: string;
+  readonly refresh: () => void;
+  readonly loadMore: () => void;
 }
-export type OverviewState = ReturnType<typeof useOverview>;
+
+// what the shell shows for an overview result: a paused read is not loading, and a failure stays visible until the
+// next read starts
+export const overviewView = (result: AsyncResult.AsyncResult<DashboardOverviewInfo, unknown>, enabled: boolean) => {
+  const loading = enabled && result.waiting;
+  return {data: Option.getOrNull(AsyncResult.value(result)), loading, error: AsyncResult.isFailure(result) && !loading ? overviewFailureMessage : ""};
+};
+
+export function useOverview(active: boolean, connected: boolean): OverviewState {
+  const enabled = active && connected;
+  const setEnabled = useAtomSet(overview.enabled);
+  useEffect(() => setEnabled(enabled), [enabled, setEnabled]);
+  const result = useAtomValue(enabled ? overview.polled : overview.read);
+  const refresh = useAtomRefresh(overview.read);
+  const setMore = useAtomSet(overview.more);
+  return {...overviewView(result, enabled), refresh, loadMore: () => { setMore(true); refresh(); }};
+}
 
 export function WorkState({work}: {work: DashboardWorkInfo}) {
   return <div className="work-state"><span className={`pill ${work.attention.length ? "amber" : work.supervision === "enabled" ? "green" : ""}`}>
