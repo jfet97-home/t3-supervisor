@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import {test} from "node:test";
+import { it } from "vitest";
 import {ProjectFileError} from "../src/project-files.js";
 import {proposalContextFromDefinitions} from "../src/supervisor-workflow.js";
 import {requiredReferences} from "../src/project-definitions-contract.js";
 import {indexSource, makeDefinitionFixture, projectIndex, stepSource, workflowSource} from "./project-definitions-fixture.js";
 
-test("merges global and project definitions with separate identities and editable local configuration", async () => {
+it("merges global and project definitions with separate identities and editable local configuration", async () => {
   const f = makeDefinitionFixture({globalEnabled: true});
   const indexOptions = {steps: ["review"], workflows: ["delivery", "reviewer"], required: [{step: "review"}, {workflow: "delivery"}], default_workflow: "delivery"};
   const globalConfig = indexSource(indexOptions);
@@ -52,7 +52,7 @@ test("merges global and project definitions with separate identities and editabl
   assert.equal(snapshot.globalRevision, await f.loader.globalFingerprint(AbortSignal.timeout(5000)));
 });
 
-test("uses enabled global definitions alone for Scratch and never reads the scratch checkout", async () => {
+it("uses enabled global definitions alone for Scratch and never reads the scratch checkout", async () => {
   let globalEnabled = true;
   const f = makeDefinitionFixture({projectId: "scratch", root: "/scratch", scratch: true, globalEnabled});
   f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", indexSource({steps: ["shared"], workflows: ["shared"], required: [{workflow: "shared"}], default_workflow: "shared"}));
@@ -81,7 +81,7 @@ test("uses enabled global definitions alone for Scratch and never reads the scra
   assert.ok(disabledFixture.calls.every(call => call.root !== disabledFixture.globalRoot && call.root !== "/worktrees/feature"));
 });
 
-test("an unreadable enabled global scope cannot become an empty ready collection", async () => {
+it("an unreadable enabled global scope cannot become an empty ready collection", async () => {
   const f = makeDefinitionFixture({globalEnabled: true});
   f.addFile(f.root, ".t3-supervisor/project.yaml", indexSource());
   f.addDirectory(f.root, ".t3-supervisor/steps");
@@ -95,7 +95,7 @@ test("an unreadable enabled global scope cannot become an empty ready collection
   assert.deepEqual(snapshot.sources.map(source => source.origin), ["project"]);
 });
 
-test("keeps enabled global requirements visible when the project folder is missing", async () => {
+it("keeps enabled global requirements visible when the project folder is missing", async () => {
   const f = makeDefinitionFixture({globalEnabled: true});
   f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", indexSource({steps: ["shared"], required: [{step: "shared"}]}));
   f.addFile(f.globalRoot, ".t3-supervisor/steps/shared.md", stepSource("shared"));
@@ -109,7 +109,7 @@ test("keeps enabled global requirements visible when the project folder is missi
   assert.equal(snapshot.steps[0]?.origin, "global");
 });
 
-test("missing enabled global definitions remain explicit and global fingerprints track later sources", async () => {
+it("missing enabled global definitions remain explicit and global fingerprints track later sources", async () => {
   const f = makeDefinitionFixture({globalEnabled: true});
   f.addFile(f.root, ".t3-supervisor/project.yaml", indexSource());
   f.addDirectory(f.root, ".t3-supervisor/steps");

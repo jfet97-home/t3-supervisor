@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { StepsAndWorkflowsGuide } from "../ui/src/steps-and-workflows-guide.js";
 
-test("steps and workflows guide documents the approved layout, syntax and planning boundaries", () => {
+it("steps and workflows guide documents the approved layout, syntax and planning boundaries", () => {
   const html = renderToStaticMarkup(createElement(StepsAndWorkflowsGuide));
 
   assert.match(html, /\.t3-supervisor\//);
@@ -53,7 +53,7 @@ test("steps and workflows guide documents the approved layout, syntax and planni
   assert.doesNotMatch(html, /Project rules|Reusable blocks/);
 });
 
-test("guide FAQs use native disclosures with visible summaries and no headings inside triggers", () => {
+it("guide FAQs use native disclosures with visible summaries and no headings inside triggers", () => {
   const html = renderToStaticMarkup(createElement(StepsAndWorkflowsGuide));
   const disclosures = [...html.matchAll(/<details class="panel guide-faq">([\s\S]*?)<\/details>/g)];
 

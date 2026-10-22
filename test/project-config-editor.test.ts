@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {mkdtemp, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {test} from "node:test";
+import { it } from "vitest";
 import {WebSocketServer} from "ws";
 import {ProjectConfigEditor} from "../src/project-config-editor.js";
 import type {ProjectConfigSave} from "../src/project-definitions-contract.js";
@@ -23,7 +23,7 @@ const seedProject = (f: ReturnType<typeof makeDefinitionFixture>, config = index
   f.addFile(f.root, ".t3-supervisor/workflows/local-flow.yaml", workflowSource("Local flow", "  - step: local-step\n"));
 };
 
-test("saves only local project.yaml, preserves valid YAML comments and retains global policy", async () => {
+it("saves only local project.yaml, preserves valid YAML comments and retains global policy", async () => {
   const f = makeDefinitionFixture({globalEnabled: true});
   const globalIndex = indexSource({steps: ["shared-step"], workflows: ["shared-flow"], required: [{step: "shared-step"}], default_workflow: "shared-flow"});
   f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", globalIndex);
@@ -93,7 +93,7 @@ default_workflow: local-flow # keep this default comment
   assert.deepEqual(reloaded.projectConfig?.workflows.map(row => row.required), [false]);
 });
 
-test("indexes an existing unlisted file and rejects stale, missing-file, global, malformed or old-format indexes before writing", async () => {
+it("indexes an existing unlisted file and rejects stale, missing-file, global, malformed or old-format indexes before writing", async () => {
   const f = makeDefinitionFixture({globalEnabled: true});
   seedProject(f);
   f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", indexSource({steps: ["shared"]}));
@@ -141,7 +141,7 @@ test("indexes an existing unlisted file and rejects stale, missing-file, global,
   assert.deepEqual(requiredReferences(indexed.definitions!.projectConfig!), [{step: "new-step"}]);
 });
 
-test("reports definite permission and uncertain native write outcomes without retrying", async () => {
+it("reports definite permission and uncertain native write outcomes without retrying", async () => {
   const f = makeDefinitionFixture();
   seedProject(f);
   const definitions = await f.loader.load(f.projectId);
@@ -158,7 +158,7 @@ test("reports definite permission and uncertain native write outcomes without re
   assert.equal(attempts, 2);
 });
 
-test("native project writer checks the regular project.yaml target and writes only its fixed path", async () => {
+it("native project writer checks the regular project.yaml target and writes only its fixed path", async () => {
   const server = new WebSocketServer({host: "127.0.0.1", port: 0});
   await new Promise<void>(resolve => server.once("listening", resolve));
   const address = server.address();assert.ok(address && typeof address !== "string");
@@ -194,7 +194,7 @@ test("native project writer checks the regular project.yaml target and writes on
   }
 });
 
-test("project-configuration endpoint keeps session, origin and CSRF checks", async () => {
+it("project-configuration endpoint keeps session, origin and CSRF checks", async () => {
   const directory = await mkdtemp(join(tmpdir(), "project-config-api-"));
   const f = makeDefinitionFixture();
   seedProject(f);

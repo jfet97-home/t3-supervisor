@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { it } from "vitest";
 import { directoryRoute, openProject, parseRoute, rememberContext, routeHref } from "../ui/src/navigation.js";
 
-test("deep links preserve exact opaque project and conversation identities and explicit root choice", () => {
+it("deep links preserve exact opaque project and conversation identities and explicit root choice", () => {
   const route = {...directoryRoute, projectId: "project/with ?#%", main: "mcp:chat/&?#", section: "plan" as const};
   assert.deepEqual(parseRoute(routeHref(route)), route);
   assert.equal(parseRoute("#/projects/a/progress").main, null);
@@ -11,7 +11,7 @@ test("deep links preserve exact opaque project and conversation identities and e
   assert.deepEqual(parseRoute("#/projects/%ZZ/progress"), directoryRoute);
 });
 
-test("remembered context is per project and cannot override an explicit deep link", () => {
+it("remembered context is per project and cannot override an explicit deep link", () => {
   const previous = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
   const values = new Map<string, string>();
   Object.defineProperty(globalThis, "sessionStorage", {configurable: true, value: {getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value)}});
@@ -30,7 +30,7 @@ test("remembered context is per project and cannot override an explicit deep lin
   }
 });
 
-test("canceling Back restores the current entry without erasing the destination or prompting twice", async () => {
+it("canceling Back restores the current entry without erasing the destination or prompting twice", async () => {
   const {createNavigator} = await import("../ui/src/navigation.js");
   const first = {...directoryRoute, projectId: "a", main: "old"};
   const second = {...first, main: "new"};
@@ -61,7 +61,7 @@ test("canceling Back restores the current entry without erasing the destination 
   assert.deepEqual(entries[0], originalDestination);
 });
 
-test("a canceled manually entered hash retains the current route and earlier history", async () => {
+it("a canceled manually entered hash retains the current route and earlier history", async () => {
   const {createNavigator} = await import("../ui/src/navigation.js");
   const route = {...directoryRoute, projectId: "a", main: "exact"};
   let value: {hash: string; state: unknown} = {hash: routeHref(route), state: null};
@@ -73,7 +73,7 @@ test("a canceled manually entered hash retains the current route and earlier his
   assert.equal(changed, false);
 });
 
-test("canceling a manual hash then a long Back keeps distinct positions and navigation usable", async () => {
+it("canceling a manual hash then a long Back keeps distinct positions and navigation usable", async () => {
   const {createNavigator} = await import("../ui/src/navigation.js");
   const route = (id: string) => ({...directoryRoute, projectId: id, main: ""});
   const entries: Array<{hash: string; state: unknown}> = [{hash: routeHref(route("a")), state: null}];
@@ -89,7 +89,7 @@ test("canceling a manual hash then a long Back keeps distinct positions and navi
   allowed = true;controller.navigate(route("e"));assert.equal(current.projectId,"e");
 });
 
-test("an unexpected traversal during restoration cannot permanently latch navigation", async () => {
+it("an unexpected traversal during restoration cannot permanently latch navigation", async () => {
   const {createNavigator} = await import("../ui/src/navigation.js");
   const route = (id: string) => ({...directoryRoute, projectId:id, main:""});
   const entries: Array<{hash:string;state:object}> = [{hash:routeHref(route("a")),state:{}}];let cursor=0;let pending=0;let allowed=true;let current=route("a");
@@ -97,7 +97,7 @@ test("an unexpected traversal during restoration cannot permanently latch naviga
   controller.start();controller.navigate(route("b"));controller.navigate(route("c"));allowed=false;cursor=1;controller.historyChanged();cursor=0;controller.historyChanged();cursor+=pending;controller.historyChanged();allowed=true;controller.navigate(route("d"));assert.equal(current.projectId,"d");
 });
 
-test("browser entry indices restore a canceled Back into history predating initialization", async () => {
+it("browser entry indices restore a canceled Back into history predating initialization", async () => {
   const {createNavigator} = await import("../ui/src/navigation.js");
   const before={...directoryRoute,projectId:"before",main:""};const initial={...directoryRoute,projectId:"current",main:""};
   const entries:Array<{hash:string;state:unknown}>=[{hash:routeHref(before),state:null},{hash:routeHref(initial),state:null}];let cursor=1;let pending=0;
@@ -144,7 +144,7 @@ const markerBrowser = async (preInitialized: Array<string | {id: string; state: 
   };
 };
 
-test("without the Navigation API, canceled traversal into pre-initialization history keeps every entry and navigation usable", async () => {
+it("without the Navigation API, canceled traversal into pre-initialization history keeps every entry and navigation usable", async () => {
   const browser = await markerBrowser(["a"], "b");
   browser.link("c");
   browser.state.dirty = true;
@@ -166,7 +166,7 @@ test("without the Navigation API, canceled traversal into pre-initialization his
   assert.deepEqual([browser.at(), browser.app()], ["c", "c"]);
 });
 
-test("without the Navigation API, an accepted pre-initialization entry stays unindexed and later cancellations return to it", async () => {
+it("without the Navigation API, an accepted pre-initialization entry stays unindexed and later cancellations return to it", async () => {
   const browser = await markerBrowser(["a", "z"], "b");
   browser.go(-1);
   assert.deepEqual([browser.at(), browser.app()], ["z", "z"]);
@@ -188,7 +188,7 @@ test("without the Navigation API, an accepted pre-initialization entry stays uni
   assert.deepEqual([browser.at(), browser.app()], ["z", "z"]);
 });
 
-test("without the Navigation API, a canceled manual hash that replaced a forward entry recovers instead of waiting forever", async () => {
+it("without the Navigation API, a canceled manual hash that replaced a forward entry recovers instead of waiting forever", async () => {
   const browser = await markerBrowser([], "a");
   browser.link("b");
   browser.go(-1);
@@ -205,7 +205,7 @@ test("without the Navigation API, a canceled manual hash that replaced a forward
   assert.deepEqual([browser.at(), browser.app()], ["c", "c"]);
 });
 
-test("without the Navigation API, a canceled manual hash at the end is replaced immediately", async () => {
+it("without the Navigation API, a canceled manual hash at the end is replaced immediately", async () => {
   const browser = await markerBrowser([], "a");
   browser.state.dirty = true;
   browser.type("x");
@@ -219,7 +219,7 @@ test("without the Navigation API, a canceled manual hash at the end is replaced 
   assert.deepEqual([browser.at(), browser.app()], ["a", "a"]);
 });
 
-test("without the Navigation API, duplicate traversal events prompt once and markers from another page lifetime are not trusted", async () => {
+it("without the Navigation API, duplicate traversal events prompt once and markers from another page lifetime are not trusted", async () => {
   const stale = {supervisorPosition: 5, owner: "other"};
   const browser = await markerBrowser([{id: "a", state: stale}], "b");
   browser.link("c");
@@ -231,7 +231,7 @@ test("without the Navigation API, duplicate traversal events prompt once and mar
   assert.equal(browser.entries[0]!.state, stale);
 });
 
-test("without the Navigation API, indistinguishable unindexed entries end in a bounded recovery instead of a lock", async () => {
+it("without the Navigation API, indistinguishable unindexed entries end in a bounded recovery instead of a lock", async () => {
   const browser = await markerBrowser(["a", "a"], "b");
   browser.state.dirty = true;
   browser.go(-2);
@@ -244,7 +244,7 @@ test("without the Navigation API, indistinguishable unindexed entries end in a b
   assert.deepEqual([browser.at(), browser.app()], ["b", "b"]);
 });
 
-test("without the Navigation API, a marker lineage adopted from the initial entry restores consistent entries and never rewrites inconsistent ones", async () => {
+it("without the Navigation API, a marker lineage adopted from the initial entry restores consistent entries and never rewrites inconsistent ones", async () => {
   const {createNavigator} = await import("../ui/src/navigation.js");
   const route = (id: string) => ({...directoryRoute, projectId: id, main: ""});
   const run = (earlierPosition: number) => {
@@ -281,7 +281,7 @@ test("without the Navigation API, a marker lineage adopted from the initial entr
   assert.notEqual(run(7), "earlier", "an inconsistent adopted marker recovers on a new entry instead of overwriting one");
 });
 
-test("without the Navigation API, markers written without a lineage never steer a canceled Forward", async () => {
+it("without the Navigation API, markers written without a lineage never steer a canceled Forward", async () => {
   const {createNavigator} = await import("../ui/src/navigation.js");
   const route = (id: string) => ({...directoryRoute, projectId: id, main: ""});
   const scenario = (stack: Array<[string, number | null]>, initial: number, back: number, reinitialize: boolean) => {

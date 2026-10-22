@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DefinitionsContent } from "../ui/src/project-definitions.js";
@@ -53,7 +53,7 @@ const definitions: ProjectDefinitionSnapshot = {
   issues: [],
 };
 
-test("definitions UI shows effective global and project requirements plus nested workflow structure", () => {
+it("definitions UI shows effective global and project requirements plus nested workflow structure", () => {
   const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions}));
   assert.match(html, /Effective requirements/);
   assert.match(html, /End-to-end testing/);
@@ -75,7 +75,7 @@ test("definitions UI shows effective global and project requirements plus nested
   assert.doesNotMatch(html, /Project rules|Reusable blocks|instructions|expected result/i);
 });
 
-test("invalid and incomplete collections never imply that unreadable requirements are absent", () => {
+it("invalid and incomplete collections never imply that unreadable requirements are absent", () => {
   const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions: {...definitions, status: "invalid", complete: false, config: {workflows: [], steps: []}, steps: [],
     issues: [{path: ".t3-supervisor/workflows/reviewer.yaml", code: "workflow_cycle", message: "Workflow reference cycle: reviewer -> nested -> reviewer."}]}}));
   assert.match(html, /Definitions need attention/);
@@ -86,7 +86,7 @@ test("invalid and incomplete collections never imply that unreadable requirement
   assert.doesNotMatch(html, /No effective required references are configured/);
 });
 
-test("raw repository source is escaped plain text and missing references stay diagnostic text", () => {
+it("raw repository source is escaped plain text and missing references stay diagnostic text", () => {
   const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions: {...definitions,
     workflows: [{...definitions.workflows[0]!, sequence: [{step: "missing-step"}]}],
     sources: [{path: ".t3-supervisor/steps/bad.md", origin: "project", content: '<script>window.injected=true</script><img src=x onerror="alert(1)">'}],
@@ -97,7 +97,7 @@ test("raw repository source is escaped plain text and missing references stay di
   assert.match(html, /Missing or invalid step: missing-step/);
 });
 
-test("configuration editor saves checkout-local defaults and remains available to repair a fully read invalid collection", () => {
+it("configuration editor saves checkout-local defaults and remains available to repair a fully read invalid collection", () => {
   const invalid = {...definitions, status: "invalid" as const, issues: [{path: ".t3-supervisor/workflows/reviewer.yaml", code: "workflow_cycle", message: "Workflow reference cycle."}]};
   const html = renderToStaticMarkup(createElement(ProjectConfigurationEditor, {
     definitions: invalid,
@@ -112,7 +112,7 @@ test("configuration editor saves checkout-local defaults and remains available t
   assert.match(html, /selected checkout&#x27;s <code>\.t3-supervisor\/project\.yaml<\/code>/);
 });
 
-test("a complete readable but invalid project.yaml can be replaced without claiming its requirements were empty", () => {
+it("a complete readable but invalid project.yaml can be replaced without claiming its requirements were empty", () => {
   const invalid = {...definitions, status: "invalid" as const, projectConfig: null, complete: true, revision: "b".repeat(64),
     sources: [{path: ".t3-supervisor/project.yaml", origin: "project" as const, content: "workflows: [broken"}],
     issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "Invalid YAML."}]};
@@ -131,7 +131,7 @@ test("a complete readable but invalid project.yaml can be replaced without claim
   assert.doesNotMatch(html, /Required in this checkout:<\/strong> None/);
 });
 
-test("global-only and incomplete snapshots never expose project configuration editing", () => {
+it("global-only and incomplete snapshots never expose project configuration editing", () => {
   const props = {csrfToken: "csrf", onSaved: () => {}, onDirtyChange: () => {}, onSavingChange: () => {}};
   const globalHtml = renderToStaticMarkup(createElement(ProjectConfigurationEditor, {definitions: {...definitions, globalOnly: true}, ...props}));
   assert.match(globalHtml, /global-only/);
@@ -141,7 +141,7 @@ test("global-only and incomplete snapshots never expose project configuration ed
   assert.doesNotMatch(incompleteHtml, /Edit project configuration/);
 });
 
-test("catalog UI retains required missing rows and separates authored summaries from full policy", () => {
+it("catalog UI retains required missing rows and separates authored summaries from full policy", () => {
   const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions: {...definitions, status: "invalid", steps: [], workflows: []}}));
   assert.match(html, /Verify changed behavior in the real application/);
   assert.match(html, /Missing or invalid step: e2e-testing/);
@@ -151,7 +151,7 @@ test("catalog UI retains required missing rows and separates authored summaries 
   assert.doesNotMatch(html, /No effective required references/);
 });
 
-test("catalog editor fields keep missing and invalid draft rows, label native controls and offer unlisted local files", () => {
+it("catalog editor fields keep missing and invalid draft rows, label native controls and offer unlisted local files", () => {
   const config = {...definitions.projectConfig!, steps: [
     ...definitions.projectConfig!.steps,
     {path: "../outside.md", summary: "First line\nSecond line\nThird line", required: true},
@@ -182,7 +182,7 @@ test("catalog editor fields keep missing and invalid draft rows, label native co
   assert.match(locked, /Third line/);
 });
 
-test("editor shared validation enforces summary and canonical path boundaries without extra name heuristics", () => {
+it("editor shared validation enforces summary and canonical path boundaries without extra name heuristics", () => {
   const base = definitions.projectConfig!;
   const withStep = (change: Partial<typeof base.steps[number]>) => ({...base, steps: [{...base.steps[0]!, ...change}]});
   const valid = normalizeProjectConfiguration(withStep({summary: ` ${"a".repeat(119)}\r\n${"b".repeat(120)} `}));
@@ -198,7 +198,7 @@ test("editor shared validation enforces summary and canonical path boundaries wi
   assert.equal("required" in valid, false);
 });
 
-test("definition client reads the selected configuration scope and rejects mismatched snapshots", async () => {
+it("definition client reads the selected configuration scope and rejects mismatched snapshots", async () => {
   const previous = globalThis.fetch;
   const controller = new AbortController();
   try {
@@ -225,7 +225,7 @@ test("definition client reads the selected configuration scope and rejects misma
   } finally {globalThis.fetch = previous;}
 });
 
-test("configuration client posts local project.yaml config and preserves the origin session header", async () => {
+it("configuration client posts local project.yaml config and preserves the origin session header", async () => {
   const previous = globalThis.fetch;
   const input: ProjectConfigSave = {projectId: "project", threadId: null, expectedRevision: definitions.revision!, config: definitions.projectConfig!};
   try {
@@ -243,7 +243,7 @@ test("configuration client posts local project.yaml config and preserves the ori
   } finally {globalThis.fetch = previous;}
 });
 
-test("expired CSRF refresh keeps a definite no-save draft opportunity and never replays the POST", async () => {
+it("expired CSRF refresh keeps a definite no-save draft opportunity and never replays the POST", async () => {
   const previous = globalThis.fetch;
   const input: ProjectConfigSave = {projectId: "project", threadId: null, expectedRevision: definitions.revision!, config: definitions.projectConfig!};
   clearAccess();

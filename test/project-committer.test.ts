@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {test} from "node:test";
+import { it } from "vitest";
 import {WebSocketServer} from "ws";
 import {makeProjectCommitter, ProjectFileError} from "../src/project-files.js";
 
@@ -80,7 +80,7 @@ const commit = (server: Awaited<ReturnType<typeof fakeGitServer>>) =>
     "/workspace", [".t3-supervisor/rules.yaml"], "Create Supervisor definitions", "action-1", AbortSignal.timeout(5000),
   );
 
-test("native commit ACKs each action chunk before accepting the next and reports the finished commit", async () => {
+it("native commit ACKs each action chunk before accepting the next and reports the finished commit", async () => {
   const server = await fakeGitServer("success");
   try {
     const result = await commit(server);
@@ -93,7 +93,7 @@ test("native commit ACKs each action chunk before accepting the next and reports
   }
 });
 
-test("matching action_failed events retain the uncertain result", async () => {
+it("matching action_failed events retain the uncertain result", async () => {
   const server = await fakeGitServer("failed");
   try {
     assert.deepEqual(await commit(server), {status: "uncertain"});
@@ -104,7 +104,7 @@ test("matching action_failed events retain the uncertain result", async () => {
   }
 });
 
-test("events from another action identity do not make a failed commit uncertain", async () => {
+it("events from another action identity do not make a failed commit uncertain", async () => {
   const server = await fakeGitServer("foreign_identity");
   try {
     await assert.rejects(commit(server), (error: unknown) => error instanceof ProjectFileError && error.code === "unavailable");

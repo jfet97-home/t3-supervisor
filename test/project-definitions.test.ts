@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {test} from "node:test";
+import { it } from "vitest";
 import {ProjectConfigEditor} from "../src/project-config-editor.js";
 import {parseDefinitionStep, parseDefinitionWorkflow, parseProjectConfiguration} from "../src/project-definitions.js";
 import {ProjectFileError} from "../src/project-files.js";
@@ -7,7 +7,7 @@ import {proposalContextFromDefinitions, validateWorkflowPlan} from "../src/super
 import {requiredReferences} from "../src/project-definitions-contract.js";
 import {indexSource, makeDefinitionFixture, stepSource, workflowSource} from "./project-definitions-fixture.js";
 
-test("parses the strict project.yaml index and step formats", () => {
+it("parses the strict project.yaml index and step formats", () => {
   const index = "workflows:\n  - path: workflows/reviewer.yaml\n    summary: |\n      Review a change before release.\n      Use it for every public change.\n    required: true\n" +
     "steps:\n  - path: steps/e2e-testing.md\n    summary: \"  Run end-to-end tests when behavior changes.  \"\n    required: false\ndefault_workflow: reviewer\n";
   assert.deepEqual(parseProjectConfiguration(index), {
@@ -58,7 +58,7 @@ test("parses the strict project.yaml index and step formats", () => {
   ]) assert.throws(() => parseDefinitionStep(id!, contents!));
 });
 
-test("parses reusable and local steps in nested ordered and parallel workflow groups", () => {
+it("parses reusable and local steps in nested ordered and parallel workflow groups", () => {
   const workflow = parseDefinitionWorkflow("delivery", `name: Delivery\ndescription: Ship the change.\nfixed: true\nsequence:\n  - step: e2e-testing\n  - step:\n      id: check-notes\n      name: Check notes\n      description: Compare notes with behavior.\n  - parallel:\n      - step: security-review\n      - sequence:\n          - workflow: reviewer\n          - step: report\n`);
   assert.equal(workflow.id, "delivery");
   assert.equal(workflow.fixed, true);
@@ -76,7 +76,7 @@ test("parses reusable and local steps in nested ordered and parallel workflow gr
   ]) assert.throws(() => parseDefinitionWorkflow("bad", contents));
 });
 
-test("retains unknown refs as diagnostics in a complete invalid source snapshot", async () => {
+it("retains unknown refs as diagnostics in a complete invalid source snapshot", async () => {
   const f = makeDefinitionFixture();
   const configuration = indexSource({steps: ["known", "missing-required"], workflows: ["delivery", "missing-default", "missing-workflow"],
     required: [{step: "missing-required"}, {workflow: "missing-workflow"}], default_workflow: "missing-default"});
@@ -108,7 +108,7 @@ test("retains unknown refs as diagnostics in a complete invalid source snapshot"
   ]);
 });
 
-test("allows independent workflow reuse and reports exact direct and indirect cycles", async () => {
+it("allows independent workflow reuse and reports exact direct and indirect cycles", async () => {
   const f = makeDefinitionFixture();
   f.addFile(f.root, ".t3-supervisor/steps/check.md", stepSource("check"));
   f.addFile(f.root, ".t3-supervisor/workflows/root.yaml", workflowSource("Root", "  - workflow: branch-a\n  - workflow: branch-b\n  - workflow: shared\n  - workflow: shared\n"));
@@ -134,7 +134,7 @@ test("allows independent workflow reuse and reports exact direct and indirect cy
   assert.ok(cycles.revision);
 });
 
-test("rejects statically expanded workflow graphs beyond the shared node budget", async () => {
+it("rejects statically expanded workflow graphs beyond the shared node budget", async () => {
   const f = makeDefinitionFixture();
   f.addDirectory(f.root, ".t3-supervisor/steps");
   f.addDirectory(f.root, ".t3-supervisor/workflows");
@@ -159,7 +159,7 @@ test("rejects statically expanded workflow graphs beyond the shared node budget"
     "the graph exceeds the node budget without exceeding the depth bound");
 });
 
-test("keeps a 12-workflow reference chain within the shared structural depth bound", async () => {
+it("keeps a 12-workflow reference chain within the shared structural depth bound", async () => {
   const f = makeDefinitionFixture();
   f.addDirectory(f.root, ".t3-supervisor/steps");
   f.addDirectory(f.root, ".t3-supervisor/workflows");
@@ -183,7 +183,7 @@ test("keeps a 12-workflow reference chain within the shared structural depth bou
   assert.ok(!proposal.issues.some(issue => issue.code === "workflow_expansion_depth"));
 });
 
-test("keeps a genuinely over-bound workflow reference chain explicitly invalid", async () => {
+it("keeps a genuinely over-bound workflow reference chain explicitly invalid", async () => {
   const f = makeDefinitionFixture();
   f.addDirectory(f.root, ".t3-supervisor/steps");
   f.addDirectory(f.root, ".t3-supervisor/workflows");
@@ -206,7 +206,7 @@ test("keeps a genuinely over-bound workflow reference chain explicitly invalid",
   assert.ok(proposal.issues.some(issue => issue.code === "workflow_expansion_depth"));
 });
 
-test("an unreadable index reads no definitions, keeps their files in the inventory and invents no empty valid policy", async () => {
+it("an unreadable index reads no definitions, keeps their files in the inventory and invents no empty valid policy", async () => {
   const f = makeDefinitionFixture();
   const configuration = "workflows: [\n";
   const step = "---\nid: review\nname: Review\ndescription: Inspect.\n---\nBody text is not allowed.\n";
@@ -234,7 +234,7 @@ test("an unreadable index reads no definitions, keeps their files in the invento
   assert.ok(indexed.issues.some(issue => issue.code === "workflows_invalid"));
 });
 
-test("reports stray and retired entries without reading or counting them as definition sources", async () => {
+it("reports stray and retired entries without reading or counting them as definition sources", async () => {
   const f = makeDefinitionFixture();
   f.addFile(f.root, ".t3-supervisor/steps/valid.md", "invalid definition content\n");
   f.addFile(f.root, ".t3-supervisor/steps/README.md", "#" + "x".repeat(64 * 1024));
@@ -264,7 +264,7 @@ test("reports stray and retired entries without reading or counting them as defi
   assert.equal(f.writes[0]?.path, ".t3-supervisor/project.yaml");
 });
 
-test("ignores inert Finder metadata without making a valid definition scope invalid", async () => {
+it("ignores inert Finder metadata without making a valid definition scope invalid", async () => {
   const f = makeDefinitionFixture();
   f.addFile(f.root, ".t3-supervisor/project.yaml", indexSource());
   f.addFile(f.root, ".t3-supervisor/.DS_Store", "metadata only\n");
@@ -278,7 +278,7 @@ test("ignores inert Finder metadata without making a valid definition scope inva
   assert.ok(!f.calls.some(call => call.kind === "read" && call.path.includes(".DS_Store")));
 });
 
-test("does not migrate old-only folders and explains the manual format replacement", async () => {
+it("does not migrate old-only folders and explains the manual format replacement", async () => {
   const f = makeDefinitionFixture();
   f.addFile(f.root, ".t3-supervisor/rules.yaml", "rules: []\n");
   f.addDirectory(f.root, ".t3-supervisor/blocks");
@@ -290,7 +290,7 @@ test("does not migrate old-only folders and explains the manual format replaceme
   assert.ok(snapshot.issues.some(issue => issue.code === "legacy_definition_format" && /workflows: \[\] and steps: \[\]/.test(issue.message)));
 });
 
-test("permission, truncation, unsafe paths and source size limits never appear complete", async () => {
+it("permission, truncation, unsafe paths and source size limits never appear complete", async () => {
   const denied = makeDefinitionFixture();
   denied.addFile(denied.root, ".t3-supervisor/project.yaml", indexSource({steps: ["review"]}));
   denied.addFile(denied.root, ".t3-supervisor/steps/review.md", stepSource("review"));
@@ -339,7 +339,7 @@ test("permission, truncation, unsafe paths and source size limits never appear c
   assert.ok(totalLimit.issues.some(issue => issue.code === "definition_source_unreadable"));
 });
 
-test("selects the native operative worktree binding and keeps missing project scope explicit", async () => {
+it("selects the native operative worktree binding and keeps missing project scope explicit", async () => {
   const f = makeDefinitionFixture();
   f.addFile("/worktrees/feature", ".t3-supervisor/project.yaml", indexSource());
   const snapshot = await f.loader.load(f.projectId, "thread");
@@ -356,7 +356,7 @@ test("selects the native operative worktree binding and keeps missing project sc
   assert.equal(absent.sources.length, 0);
 });
 
-test("a representative 12-step and 5-workflow index loads every indexed definition with its summary and derives inclusion from flags", async () => {
+it("a representative 12-step and 5-workflow index loads every indexed definition with its summary and derives inclusion from flags", async () => {
   const f = makeDefinitionFixture();
   const steps = ["scope-and-authority", "context", "plan", "implement", "unit-tests", "integration-tests", "lint", "docs", "security", "performance", "release-notes", "verify"];
   const workflows = ["review", "delivery", "hotfix", "research", "release"];
@@ -383,7 +383,7 @@ test("a representative 12-step and 5-workflow index loads every indexed definiti
   assert.deepEqual(context.config.required, [{workflow: "review"}, {step: "scope-and-authority"}]);
 });
 
-test("unlisted, missing and stale definition files are diagnosed without dropping any required flag", async () => {
+it("unlisted, missing and stale definition files are diagnosed without dropping any required flag", async () => {
   const f = makeDefinitionFixture();
   f.addFile(f.root, ".t3-supervisor/steps/listed.md", stepSource("listed"));
   f.addFile(f.root, ".t3-supervisor/steps/stray.md", stepSource("stray"));

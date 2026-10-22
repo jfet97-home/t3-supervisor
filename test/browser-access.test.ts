@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { it } from "vitest";
 import { clearAccess, getCsrfToken, getSessionToken, loadAccess, setSessionToken, watchSession } from "../ui/src/access.js";
 
 const storage = () => {
@@ -7,7 +7,7 @@ const storage = () => {
   return {getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); }, removeItem: (key: string) => { values.delete(key); }};
 };
 
-test("browser access keeps a shared session, synchronizes sign-out and ignores stale access responses", async () => {
+it("browser access keeps a shared session, synchronizes sign-out and ignores stale access responses", async () => {
   const originals = new Map(["localStorage", "sessionStorage", "window", "fetch"].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const local = storage();
   const tab = storage();

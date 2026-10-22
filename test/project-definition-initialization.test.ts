@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {test} from "node:test";
+import { it } from "vitest";
 import {Effect} from "effect";
 import {WebSocketServer} from "ws";
 import {ProjectDefinitionLoader} from "../src/project-definitions.js";
@@ -109,7 +109,7 @@ function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: 
   return {loader, files, trees, directories, writes, commits, addFile, freshProbeSnapshots, vcsSnapshots};
 }
 
-test("global opt-in initializes a server-home scaffold once and preserves existing contents", async () => {
+it("global opt-in initializes a server-home scaffold once and preserves existing contents", async () => {
   const f = fixture();
   const created = await f.loader.initializeGlobal(AbortSignal.timeout(5000));
   assert.equal(created.status, "created");
@@ -130,7 +130,7 @@ test("global opt-in initializes a server-home scaffold once and preserves existi
   assert.equal(f.trees.get("~")?.get(".t3-supervisor/project.yaml"), existing);
 });
 
-test("project Create writes only the scaffold files and Create plus commit stages only those paths", async () => {
+it("project Create writes only the scaffold files and Create plus commit stages only those paths", async () => {
   const createFixture = fixture({isRepo: false, branch: null, worktree: null});
   const created = await createFixture.loader.initialize("project", null, {
     origin: "project", action: "create", expectedWorkspaceRoot: "/workspace", expectedBranch: null,
@@ -153,7 +153,7 @@ test("project Create writes only the scaffold files and Create plus commit stage
   assert.equal(commitFixture.commits[0]?.root, "/worktrees/feature");
 });
 
-test("Create plus commit verifies the exact setup tree when Git collapses untracked paths", async () => {
+it("Create plus commit verifies the exact setup tree when Git collapses untracked paths", async () => {
   const f = fixture({isRepo: true, branch: "feature", collapseSetupStatus: true});
   const outcome = await f.loader.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
@@ -162,7 +162,7 @@ test("Create plus commit verifies the exact setup tree when Git collapses untrac
   assert.equal(f.commits.length, 1);
 });
 
-test("Create plus commit requires a fresh Git probe before writing", async () => {
+it("Create plus commit requires a fresh Git probe before writing", async () => {
   const f = fixture({isRepo: true, branch: "feature", provideGitProbe: false});
   const outcome = await f.loader.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
@@ -173,7 +173,7 @@ test("Create plus commit requires a fresh Git probe before writing", async () =>
   assert.equal(f.commits.length, 0);
 });
 
-test("Create plus commit uses fresh Git status when the native VCS subscription snapshot stays stale", async () => {
+it("Create plus commit uses fresh Git status when the native VCS subscription snapshot stays stale", async () => {
   const f = fixture({isRepo: true, branch: "feature", staleVcsSnapshot: true});
   const outcome = await f.loader.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
@@ -186,7 +186,7 @@ test("Create plus commit uses fresh Git status when the native VCS subscription 
   assert.ok(f.freshProbeSnapshots.some(paths => paths.length === 3 && paths.includes(".t3-supervisor/project.yaml") && paths.includes(".t3-supervisor/steps/.gitkeep") && paths.includes(".t3-supervisor/workflows/.gitkeep")));
 });
 
-test("stale cached foreign paths cannot block setup when fresh Git status is clean", async () => {
+it("stale cached foreign paths cannot block setup when fresh Git status is clean", async () => {
   const f = fixture({isRepo: true, branch: "feature", staleVcsSnapshot: true, cachedVcsPaths: ["README.md"]});
   const outcome = await f.loader.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
@@ -197,7 +197,7 @@ test("stale cached foreign paths cannot block setup when fresh Git status is cle
   assert.ok(f.freshProbeSnapshots.some(paths => paths.length === 0));
 });
 
-test("setup refuses stale branches, existing folders, and Create plus commit outside Git", async () => {
+it("setup refuses stale branches, existing folders, and Create plus commit outside Git", async () => {
   const staleFixture = fixture({isRepo: true, branch: "feature"});
   const stale = await staleFixture.loader.initialize("project", "main-thread", {
     origin: "project", action: "create", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "old-branch",
@@ -223,7 +223,7 @@ test("setup refuses stale branches, existing folders, and Create plus commit out
   assert.equal(noGitFixture.writes.length, 0);
 });
 
-test("Create plus commit refuses tracked or staged changes before creating files", async () => {
+it("Create plus commit refuses tracked or staged changes before creating files", async () => {
   const f = fixture({isRepo: true, branch: "feature", initialChangedPaths: ["README.md"]});
   const outcome = await f.loader.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
@@ -234,7 +234,7 @@ test("Create plus commit refuses tracked or staged changes before creating files
   assert.equal(f.commits.length, 0);
 });
 
-test("Create plus commit refuses merge or rebase state before creating files", async () => {
+it("Create plus commit refuses merge or rebase state before creating files", async () => {
   for (const marker of ["MERGE_HEAD", "rebase-merge"]) {
     const f = fixture({isRepo: true, branch: "feature", gitOperationState: {status: "in_progress", marker}});
     const outcome = await f.loader.initialize("project", "main-thread", {
@@ -247,7 +247,7 @@ test("Create plus commit refuses merge or rebase state before creating files", a
   }
 });
 
-test("Create still leaves the scaffold uncommitted in a dirty or in-progress checkout", async () => {
+it("Create still leaves the scaffold uncommitted in a dirty or in-progress checkout", async () => {
   const f = fixture({isRepo: true, branch: "feature", initialChangedPaths: ["README.md"], provideGitProbe: false,
     gitOperationState: {status: "in_progress", marker: "MERGE_HEAD"}});
   const outcome = await f.loader.initialize("project", "main-thread", {
@@ -258,7 +258,7 @@ test("Create still leaves the scaffold uncommitted in a dirty or in-progress che
   assert.equal(f.commits.length, 0);
 });
 
-test("Create plus commit stops when any extra change appears with the new setup files", async () => {
+it("Create plus commit stops when any extra change appears with the new setup files", async () => {
   const f = fixture({isRepo: true, branch: "feature", unexpectedPathAfterSecondWrite: "README.md"});
   const outcome = await f.loader.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
@@ -269,7 +269,7 @@ test("Create plus commit stops when any extra change appears with the new setup 
   assert.equal(f.commits.length, 0);
 });
 
-test("Create plus commit rejects extra setup content hidden by Git's collapsed untracked path", async () => {
+it("Create plus commit rejects extra setup content hidden by Git's collapsed untracked path", async () => {
   const f = fixture({isRepo: true, branch: "feature", collapseSetupStatus: true, extraSetupFileAfterSecondWrite: ".t3-supervisor/steps/extra.md"});
   const outcome = await f.loader.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
@@ -280,7 +280,7 @@ test("Create plus commit rejects extra setup content hidden by Git's collapsed u
   assert.equal(f.commits.length, 0);
 });
 
-test("checkout choices expose the registered root and operative main-thread worktree", async () => {
+it("checkout choices expose the registered root and operative main-thread worktree", async () => {
   const f = fixture();
   const targets = await f.loader.checkoutTargets("project", AbortSignal.timeout(5000));
   assert.deepEqual(targets, [
@@ -289,7 +289,7 @@ test("checkout choices expose the registered root and operative main-thread work
   ]);
 });
 
-test("native Git operation inspection follows a worktree .git pointer with existing T3 read RPCs", async () => {
+it("native Git operation inspection follows a worktree .git pointer with existing T3 read RPCs", async () => {
   const server = new WebSocketServer({host: "127.0.0.1", port: 0});
   await new Promise<void>(resolve => server.once("listening", resolve));
   const address = server.address();assert.ok(address && typeof address !== "string");
@@ -328,7 +328,7 @@ test("native Git operation inspection follows a worktree .git pointer with exist
   }
 });
 
-test("setup rechecks the operative checkout branch before each native file write", async () => {
+it("setup rechecks the operative checkout branch before each native file write", async () => {
   const f = fixture({isRepo: true, branch: "feature", worktreeBranchAfterFirstWrite: "other-branch"});
   const outcome = await f.loader.initialize("project", "main-thread", {
     origin: "project", action: "create", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
