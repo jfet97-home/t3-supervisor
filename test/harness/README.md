@@ -23,6 +23,12 @@
   leaked interval and an open server, passes a closed server and fails closed without
   `process.getActiveResourcesInfo`.
 - `node-test.test.ts`: the node:test cleanup-order shim of `test/support/node-test.ts`.
+- `deadlines.test.ts`: both phase configs give every test Vitest's own 10 s timeout and no
+  slower class; in a scaled nested run an unlisted test (an effect and a promise) times out
+  at the default bound with its finalizer run, while an explicit slow bound is kept.
+- `private-assert.test.ts`: token-bearing assertion failures (repeated token, token in
+  stderr or stdout, secret in an error message, failed child process) still fail, and
+  neither the console nor the json report carries a token.
 - `lint-guards.test.ts`: the SQLite driver (barrel, subpath or re-export) is rejected outside
   `src/db.ts`, extension loading is rejected, and suites cannot import `node:test`.
 - `phases.test.ts`: `npm test` is one watchdog over the main and cpu-bound phases; over two

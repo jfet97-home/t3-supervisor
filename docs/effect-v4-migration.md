@@ -1145,10 +1145,11 @@ timeouts (`run.BPv-BBRv.js:3270-3271`). Policy:
    explicit deadline stays as written (for example `AbortSignal.timeout(5000)` in git-probe,
    projection-stream and config-editor tests).
 2. **From S1c, finite bounds for every suite** (new S1 tests carry the same bounds as
-   explicit per-test options from the start): `testTimeout` 10 s for deterministic
-   service and pure cases; a named `slow-integration` class at 60 s per test, listed by
-   file and title from the S0 timing report (every case that took over 2 s on either the
-   owner's or Astra's run); `hookTimeout` and `teardownTimeout` 30 s. The values are
+   explicit per-test options from the start): Vitest's own `testTimeout` of 10 s for every
+   test in both phases; the 55 slow baseline tests from the S0 timing report (every case
+   that took over 2 s on either the owner's or Astra's run) carry an explicit per-test
+   `{ timeout: 60_000 }` at their definition, so no other test inherits the slower bound
+   (SOL-R9-01); `hookTimeout` and `teardownTimeout` 30 s. The values are
    finalized from S0 evidence in the S1c commit. Tighter product and test deadlines stay,
    including projection-stream 5000 ms. After a failure, no retry, no timeout increase and
    no re-run is used to obtain green; a timeout change is a ledger item with evidence.
@@ -1733,6 +1734,8 @@ reopens it on the frozen revision. Manifest rows carry the IDs that affect them 
 | UI-STORY-03-BASELINE | Coordinator (UI baseline, fixture `1e09d57`) | session revoked while a Save POST is held: the dropped POST was followed by a second POST to the same path (rejected 401 before body read) before manual re-authentication; the API helper has one `fetch` and no write replay, so the source (likely browser transport retry) is unverified | recorded as a baseline qualification for S7 and real-HTTP semantics: S7 must not add an application-level replay; whether one user action can produce two wire POSTs after a dropped connection is observed again on the S7 build; evidence `story-03-save-log.json`, `story-03-observations.json` (coordinator) | recorded |
 | S0-RUN-ORCH | Sol and Astra (round 8, A-S0-R01/R02, SOL-S0-RUN-01) | `npm test` chained two watchdogs with `&&`: each got its own 20-minute deadline, and npm forwarded filters, configuration, reporters and the deadline only to the second | 5.3 rule 4: one runner owns both phases under one whole-run deadline and routes caller arguments once (configuration, file and location filters, per-phase and combined reports); runner self-tests `test/harness/phases.test.ts` | fixed (S0), recheck pending |
 | SQL-406 | Astra (round 9) | exact 4.0.6 cancels a queued transaction before the holder releases (real CatalogDb probe 0.33 ms); 3.2 rule 6 and CT-SQL-01 described 4.0.5 | 3.2 rule 6 and CT-SQL-01 state the 4.0.6 behaviour (immediate return, body never runs, holder unaffected); no masking recreates the older delay; CT-SQL-01..04 are committed with S3 before catalog activation | resolved |
+| R9-TEST | Sol and Astra (round 9: SOL-R9-01, SOL-R9-02, A-R9-02) | unlisted tests in slow files kept the 60 s project timeout (the 10 s check ran only after completion); failed CLI/auth assertions could render captured tokens, secret error messages and child output | 5.3 rule 2: one 10 s Vitest timeout per phase, explicit 60 s on the 55 listed tests, slow-integration project and after-the-fact check removed; token-bearing comparisons fail through `test/support/private-assert.ts` (label and redacted message only, boolean comparison for repeated tokens, child failures as status and sizes); self-tests `deadlines.test.ts`, `private-assert.test.ts` | resolved, recheck pending |
+| R9-DB | Astra (round 9: A-R9-01, A-R9-03) | `src/db.ts` used synchronous node:fs; the SQLite import guard missed package subpaths | the catalog layer prepares and secures files through the injected `FileSystem`; SQL work runs untraced (`untracedSql`, plan 3.10); the guard covers the barrel and every subpath (`lint-guards.test.ts`) | resolved, recheck pending |
 | SOL-FILES | Sol | 34 per-file rows reference SOL-PLAN-01..09 | each row carries the IDs in `reviewFindings` and its row change; validation lists 34/34 | resolved in v2 |
 | ASTRA-FILES | Astra | 113 per-file rows reference A-P01..A-P08 and O-03 | each row carries the IDs in `reviewFindings`; slices, phases, Schema boundaries, clock domains and test phases normalized; validation lists 113/113 | resolved in v2 |
 | L-01 | W4 | helper channel `scheduledTasks.upsert` is sent after awaits without a recheck (`supervisor-helper-transport.ts:235-244`) | preserved exactly; repair is a separate decision | open decision (not blocking) |

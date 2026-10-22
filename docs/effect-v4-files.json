@@ -23982,6 +23982,20 @@
    "requirement": "exact 4.0.6 cancels a queued transaction before the holder releases; plan 3.2 rule 6 and CT-SQL-01 described 4.0.5",
    "response": "3.2 rule 6 and CT-SQL-01 state the 4.0.6 behaviour (immediate return, body never runs, holder unaffected); no masking recreates the older delay; CT-SQL-01..04 are committed with S3 before catalog activation",
    "status": "resolved"
+  },
+  {
+   "id": "R9-TEST",
+   "source": "Sol and Astra (round 9: SOL-R9-01, SOL-R9-02, A-R9-02)",
+   "requirement": "unlisted tests in slow files kept the 60 s project timeout; failed CLI/auth assertions could render captured tokens, secret error messages and child output",
+   "response": "5.3 rule 2: one 10 s Vitest timeout per phase, explicit 60 s on the 55 listed tests, slow-integration project and after-the-fact check removed; token-bearing comparisons fail through test/support/private-assert.ts; self-tests deadlines.test.ts and private-assert.test.ts",
+   "status": "resolved, recheck pending"
+  },
+  {
+   "id": "R9-DB",
+   "source": "Astra (round 9: A-R9-01, A-R9-03)",
+   "requirement": "src/db.ts used synchronous node:fs; the SQLite import guard missed package subpaths",
+   "response": "the catalog layer prepares and secures files through the injected FileSystem; SQL work runs untraced (untracedSql, plan 3.10); the guard covers the barrel and every subpath (lint-guards.test.ts)",
+   "status": "resolved, recheck pending"
   }
  ]
 }
