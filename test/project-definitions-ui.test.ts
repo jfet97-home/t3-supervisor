@@ -1,13 +1,38 @@
 import assert from "node:assert/strict";
-import { it } from "vitest";
+import { afterAll, beforeAll, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { Effect } from "effect";
+import { FetchHttpClient } from "effect/http";
+import { AtomRegistry } from "effect/reactivity";
 import { DefinitionsContent } from "../ui/src/project-definitions.js";
 import { ProjectCatalogFields, ProjectConfigurationEditor } from "../ui/src/project-configuration-editor.js";
 import { loadProjectDefinitions } from "../ui/src/project-definitions-api.js";
 import { ProjectConfigRequestError, saveProjectConfiguration } from "../ui/src/project-definitions-api.js";
 import { normalizeProjectConfiguration, projectConfigurationError, type ProjectConfigSave, type ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { clearAccess, loadAccess } from "../ui/src/access.js";
+import { clearAccess, loadAccess, type SessionAccess } from "../ui/src/access.js";
+import type { ApiClient } from "../ui/src/api.js";
+import { uiRuntime } from "../ui/src/atoms.js";
+
+// the client helpers are effects on the dashboard page runtime; its requests resolve their paths against the page origin
+// and, as the baseline helpers did, call the fetch installed when they are sent
+const pageLayer = AtomRegistry.make().get(uiRuntime.layer);
+const onPage = <A, E>(effect: Effect.Effect<A, E, ApiClient | SessionAccess>, signal?: AbortSignal) =>
+  Effect.runPromise(effect.pipe(Effect.provide(pageLayer), Effect.provideService(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init))),
+    signal ? {signal} : undefined);
+const pageOrigin = "http://supervisor.test";
+beforeAll(() => {Object.defineProperty(globalThis, "location", {configurable: true, writable: true, value: {origin: pageOrigin, pathname: "/"}});});
+afterAll(() => {Reflect.deleteProperty(globalThis, "location");});
+
+// presents a request of the effect http client in the call shape of the baseline fetch helpers: a same-origin request as
+// its path, the request headers by name and the encoded body as text
+const baselineCall = (fetch: (url: string, init?: RequestInit) => Promise<Response>) => (input: RequestInfo | URL, init?: RequestInit) => {
+  const url = new URL(String(input), pageOrigin);
+  const headers = new Headers(init?.headers);
+  return fetch(url.origin === pageOrigin ? url.pathname + url.search : String(input), {...init,
+    headers: new Proxy({}, {get: (_, name) => typeof name === "string" ? headers.get(name) ?? undefined : undefined}),
+    body: init?.body instanceof Uint8Array ? new TextDecoder().decode(init.body) : init?.body ?? null});
+};
 
 const definitions: ProjectDefinitionSnapshot = {
   projectId: "project",
@@ -101,7 +126,6 @@ it("configuration editor saves checkout-local defaults and remains available to 
   const invalid = {...definitions, status: "invalid" as const, issues: [{path: ".t3-supervisor/workflows/reviewer.yaml", code: "workflow_cycle", message: "Workflow reference cycle."}]};
   const html = renderToStaticMarkup(createElement(ProjectConfigurationEditor, {
     definitions: invalid,
-    csrfToken: "csrf",
     onSaved: () => {},
     onDirtyChange: () => {},
     onSavingChange: () => {},
@@ -118,7 +142,6 @@ it("a complete readable but invalid project.yaml can be replaced without claimin
     issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "Invalid YAML."}]};
   const html = renderToStaticMarkup(createElement(ProjectConfigurationEditor, {
     definitions: invalid,
-    csrfToken: "csrf",
     onSaved: () => {},
     onDirtyChange: () => {},
     onSavingChange: () => {},
@@ -132,7 +155,7 @@ it("a complete readable but invalid project.yaml can be replaced without claimin
 });
 
 it("global-only and incomplete snapshots never expose project configuration editing", () => {
-  const props = {csrfToken: "csrf", onSaved: () => {}, onDirtyChange: () => {}, onSavingChange: () => {}};
+  const props = {onSaved: () => {}, onDirtyChange: () => {}, onSavingChange: () => {}};
   const globalHtml = renderToStaticMarkup(createElement(ProjectConfigurationEditor, {definitions: {...definitions, globalOnly: true}, ...props}));
   assert.match(globalHtml, /global-only/);
   assert.doesNotMatch(globalHtml, /Edit project configuration/);
@@ -205,23 +228,23 @@ it("definition client reads the selected configuration scope and rejects mismatc
     let seen = "";
     globalThis.fetch = async (input, init) => {
       seen = String(input);
-      assert.equal(init?.signal, controller.signal);
+      assert.ok(init?.signal instanceof AbortSignal);
       assert.equal(init?.credentials, "omit");
       return new Response(JSON.stringify({...definitions, projectId: "project & other", threadId: "thread?#"}), {status: 200});
     };
-    const result = await loadProjectDefinitions("project & other", "thread?#", controller.signal);
+    const result = await onPage(loadProjectDefinitions("project & other", "thread?#"), controller.signal);
     assert.equal(result.threadId, "thread?#");
     const query = new URL(seen, "http://localhost").searchParams;
     assert.equal(new URL(seen, "http://localhost").pathname, "/api/guidance/project-configuration");
     assert.equal(query.get("projectId"), "project & other");
     assert.equal(query.get("threadId"), "thread?#");
     globalThis.fetch = async () => new Response(JSON.stringify({...definitions, projectId: "wrong"}));
-    await assert.rejects(loadProjectDefinitions("project", null, controller.signal));
+    await assert.rejects(onPage(loadProjectDefinitions("project", null), controller.signal));
     globalThis.fetch = async () => new Response(JSON.stringify({status: "ready"}));
-    await assert.rejects(loadProjectDefinitions("project", null, controller.signal));
+    await assert.rejects(onPage(loadProjectDefinitions("project", null), controller.signal));
     globalThis.fetch = async () => new Response(JSON.stringify(definitions));
     controller.abort();
-    await assert.rejects(loadProjectDefinitions("project", null, controller.signal));
+    await assert.rejects(onPage(loadProjectDefinitions("project", null), controller.signal));
   } finally {globalThis.fetch = previous;}
 });
 
@@ -229,15 +252,15 @@ it("configuration client posts local project.yaml config and preserves the origi
   const previous = globalThis.fetch;
   const input: ProjectConfigSave = {projectId: "project", threadId: null, expectedRevision: definitions.revision!, config: definitions.projectConfig!};
   try {
-    globalThis.fetch = async (url, init) => {
+    globalThis.fetch = baselineCall(async (url, init) => {
       assert.equal(String(url), "/api/guidance/project-configuration");
       assert.equal(init?.method, "POST");
       assert.equal(init?.credentials, "omit");
       assert.equal((init?.headers as Record<string, string>)["Content-Type"], "application/json");
       assert.deepEqual(JSON.parse(String(init?.body)), input);
       return new Response(JSON.stringify({status: "saved", message: "Saved project.yaml.", definitions}), {status: 200});
-    };
-    const result = await saveProjectConfiguration(input, "csrf-token");
+    });
+    const result = await onPage(saveProjectConfiguration(input));
     assert.equal(result.status, "saved");
     assert.equal(result.definitions?.projectId, "project");
   } finally {globalThis.fetch = previous;}
@@ -258,15 +281,15 @@ it("expired CSRF refresh keeps a definite no-save draft opportunity and never re
     };
     assert.equal(await loadAccess(), true);
     currentToken = "after-restart";
-    await assert.rejects(saveProjectConfiguration(input, "first-session"), (error: unknown) => error instanceof ProjectConfigRequestError && error.definitelyNotSaved && /Session refreshed/.test(error.message));
+    await assert.rejects(onPage(saveProjectConfiguration(input)), (error: unknown) => error instanceof ProjectConfigRequestError && error.definitelyNotSaved && /Session refreshed/.test(error.message));
     assert.equal(writes, 1);
-    assert.equal((await saveProjectConfiguration(input, "first-session")).status, "saved");
+    assert.equal((await onPage(saveProjectConfiguration(input))).status, "saved");
     assert.equal(writes, 2);
     for (const status of [413, 415]) {
       globalThis.fetch = async () => new Response("{}", {status});
-      await assert.rejects(saveProjectConfiguration(input, "old"), (error: unknown) => error instanceof ProjectConfigRequestError && error.definitelyNotSaved);
+      await assert.rejects(onPage(saveProjectConfiguration(input)), (error: unknown) => error instanceof ProjectConfigRequestError && error.definitelyNotSaved);
     }
     globalThis.fetch = async () => new Response("{}", {status: 500});
-    await assert.rejects(saveProjectConfiguration(input, "old"), (error: unknown) => error instanceof ProjectConfigRequestError && !error.definitelyNotSaved);
+    await assert.rejects(onPage(saveProjectConfiguration(input)), (error: unknown) => error instanceof ProjectConfigRequestError && !error.definitelyNotSaved);
   } finally {globalThis.fetch = previous;clearAccess();}
 });

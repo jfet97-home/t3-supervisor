@@ -1,6 +1,10 @@
-import React, { useEffect, useId, useRef, useState } from "react";
-import { catalogEntryId, catalogSummaryLimits, normalizeProjectConfiguration, projectConfigurationError, requiredReferences, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
-import { ProjectConfigRequestError, saveProjectConfiguration } from "./project-definitions-api.js";
+import React, { useEffect, useId, useRef } from "react";
+import { useAtom, useAtomSet, useAtomValue } from "@effect/atom-react";
+import { Cause, Exit, Option } from "effect";
+import { AsyncResult } from "effect/reactivity";
+import { catalogEntryId, catalogSummaryLimits, normalizeProjectConfiguration, projectConfigurationError, requiredReferences, type ProjectConfigSave, type ProjectConfigSaveOutcome, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
+import { draftFamily, scopeKey } from "./atoms.js";
+import { resolveSave, saveProjectConfigurationAtom, type ProjectConfigRequestError } from "./project-definitions-api.js";
 
 const emptyConfiguration = (): ProjectConfigurationInfo => ({workflows: [], steps: []});
 const copyConfiguration = (value: ProjectConfigurationInfo): ProjectConfigurationInfo => ({
@@ -9,6 +13,66 @@ const copyConfiguration = (value: ProjectConfigurationInfo): ProjectConfiguratio
   ...(value.default_workflow === undefined ? {} : {default_workflow: value.default_workflow}),
 });
 type CatalogKind = "workflows" | "steps";
+
+// the editor state of one loaded project.yaml revision (CC-UI-DRAFTS): kept across navigation, unmount, session expiry
+// and re-sign-in; it equals the saved configuration after a verified save, is kept on failure or uncertainty and is
+// discarded by Cancel and by the panel's confirmed discard
+export interface ConfigurationDraft {
+  readonly editing: boolean;
+  // null until the first edit: the loaded configuration
+  readonly config: ProjectConfigurationInfo | null;
+  // the admitted save of the next or current attempt; a settled attempt gets a new id, so nothing is replayed
+  readonly operationId: string;
+  readonly blocked: boolean;
+  readonly message: string;
+  readonly messageAlert: boolean;
+}
+export const freshDraft = (): ConfigurationDraft =>
+  ({editing: false, config: null, operationId: crypto.randomUUID(), blocked: false, message: "", messageAlert: false});
+export const configurationDrafts = draftFamily(freshDraft);
+// the draft scope of a loaded snapshot: project, checkout and the revision its save is compared against
+export const configurationScope = (definitions: ProjectDefinitionSnapshot): string => scopeKey(definitions.projectId, definitions.threadId, definitions.revision);
+
+export type SavePlan =
+  | {readonly _tag: "Invalid"; readonly message: string}
+  | {readonly _tag: "Declined"}
+  | {readonly _tag: "Save"; readonly normalized: ProjectConfigurationInfo; readonly input: ProjectConfigSave};
+
+// validates the draft before asking to write the exact project.yaml path; the save compares against the loaded revision
+export const planSave = (definitions: ProjectDefinitionSnapshot, config: ProjectConfigurationInfo, ask: (question: string) => boolean): SavePlan => {
+  const normalized = normalizeProjectConfiguration(config);
+  const validationError = projectConfigurationError(normalized);
+  if (validationError) return {_tag: "Invalid", message: validationError};
+  const action = definitions.projectConfig ? "Save project configuration" : "Replace the unreadable project.yaml with this configuration";
+  if (!ask(`${action} at ${definitions.workspaceRoot}/.t3-supervisor/project.yaml? This updates the selected working tree.`)) return {_tag: "Declined"};
+  return {_tag: "Save", normalized, input: {
+    projectId: definitions.projectId,
+    threadId: definitions.threadId,
+    expectedRevision: definitions.revision!,
+    config: copyConfiguration(normalized),
+  }};
+};
+
+// the definitions of a verified save, which replace the loaded snapshot
+export const savedDefinitions = (outcome: Exit.Exit<ProjectConfigSaveOutcome, ProjectConfigRequestError>): ProjectDefinitionSnapshot | null =>
+  Exit.isSuccess(outcome) && outcome.value.status === "saved" ? outcome.value.definitions : null;
+
+// the draft after a resolved save: a conflict, an uncertain, unavailable or permission_required answer, a saved answer
+// without definitions and any unconfirmed failure block further saves; a definite refusal keeps editing allowed
+export const settleSave = (draft: ConfigurationDraft, outcome: Exit.Exit<ProjectConfigSaveOutcome, ProjectConfigRequestError>, normalized: ProjectConfigurationInfo): ConfigurationDraft => {
+  const next = {...draft, operationId: crypto.randomUUID()};
+  if (Exit.isFailure(outcome)) {
+    const failure = Option.getOrUndefined(Cause.findErrorOption(outcome.cause));
+    return {...next, message: failure?.message ?? "Save outcome unknown. Refresh before retrying.", messageAlert: true, blocked: !failure?.definitelyNotSaved};
+  }
+  const result = outcome.value;
+  if (result.status === "saved" && result.definitions)
+    return {...next, config: copyConfiguration(result.definitions.projectConfig ?? normalized), message: result.message, messageAlert: false, editing: false};
+  if (result.status === "saved")
+    return {...next, message: `${result.message} Refresh definitions to inspect the saved project.yaml before editing again.`, messageAlert: true, blocked: true};
+  return {...next, message: result.message, messageAlert: true,
+    blocked: result.status === "conflict" || result.status === "uncertain" || result.status === "unavailable" || result.status === "permission_required"};
+};
 
 // The index is the source of rows, including entries whose full definition cannot be read.
 export function ProjectCatalogFields({kind, config, definitions, disabled, onChange}: {
@@ -55,28 +119,29 @@ export function ProjectCatalogFields({kind, config, definitions, disabled, onCha
   </fieldset>;
 }
 
-export function ProjectConfigurationEditor({definitions, csrfToken, onSaved, onDirtyChange, onSavingChange}: {
+export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange, onSavingChange}: {
   definitions: ProjectDefinitionSnapshot;
-  csrfToken: string;
   onSaved: (result: ProjectDefinitionSnapshot) => void;
   onDirtyChange: (dirty: boolean) => void;
   onSavingChange: (saving: boolean) => void;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [config, setConfig] = useState<ProjectConfigurationInfo>(() => copyConfiguration(definitions.projectConfig ?? emptyConfiguration()));
-  const [saving, setSaving] = useState(false);
-  const [blocked, setBlocked] = useState(false);
-  const [message, setMessage] = useState("");
-  const [messageAlert, setMessageAlert] = useState(false);
+  const scope = configurationScope(definitions);
+  const [draft, setDraft] = useAtom(configurationDrafts(scope));
+  const attempt = saveProjectConfigurationAtom({scope, operationId: draft.operationId});
+  const save = useAtomSet(attempt, {mode: "promiseExit"});
+  const saving = AsyncResult.isWaiting(useAtomValue(attempt));
+  const {editing, blocked, message, messageAlert} = draft;
   const error = useRef<HTMLParagraphElement>(null);
   const messageId = useId();
   const projectConfig = definitions.projectConfig;
+  const config = draft.config ?? copyConfiguration(projectConfig ?? emptyConfiguration());
   const brokenConfigSource = definitions.sources.find(source => source.origin === "project" && source.path === ".t3-supervisor/project.yaml");
   const baseline = projectConfig ? copyConfiguration(projectConfig) : null;
   const dirty = baseline ? JSON.stringify(config) !== JSON.stringify(baseline) : editing && brokenConfigSource !== undefined;
   useEffect(() => {onDirtyChange(dirty);}, [dirty, onDirtyChange]);
+  useEffect(() => {onSavingChange(saving);}, [saving, onSavingChange]);
   useEffect(() => {if (message && messageAlert) error.current?.focus();}, [message, messageAlert]);
-  const update = (next: ProjectConfigurationInfo) => {setConfig(next);setMessage("");setMessageAlert(false);};
+  const update = (next: ProjectConfigurationInfo) => setDraft(current => ({...current, config: next, message: "", messageAlert: false}));
   const workflowIds = [...new Set(config.workflows.flatMap(workflow => catalogEntryId("workflows", workflow.path) ?? []))];
   const unreadableSource = brokenConfigSource && <details className="definition-block"><summary>Inspect the unreadable project.yaml source</summary><pre className="definition-copy">{brokenConfigSource.content}</pre></details>;
 
@@ -97,40 +162,21 @@ export function ProjectConfigurationEditor({definitions, csrfToken, onSaved, onD
           <p><strong>Required in this checkout:</strong> {required.length === 0 ? "None" : required.join(", ")}</p>
           <p><strong>Default workflow:</strong> {projectConfig.default_workflow ?? "None"} <span className="muted">· starting suggestion</span></p></>
         : <><p>The existing file was read but could not be parsed, so its requirements are unknown. The repair form starts with an empty replacement draft; that does not mean the unreadable file had no requirements.</p>{unreadableSource}</>}
-      <div><button type="button" onClick={() => setEditing(true)}>{projectConfig ? "Edit project configuration" : "Repair project configuration"}</button></div>
+      <div><button type="button" onClick={() => setDraft(current => ({...current, editing: true}))}>{projectConfig ? "Edit project configuration" : "Repair project configuration"}</button></div>
     </div>;
   }
 
   return <form className="panel stack project-configuration-editor" method="post" action="/api/guidance/project-configuration" noValidate aria-describedby={message ? messageId : undefined} onSubmit={async event => {
     event.preventDefault();
     if (saving || blocked) return;
-    const normalized = normalizeProjectConfiguration(config);
-    const validationError = projectConfigurationError(normalized);
-    if (validationError) {setMessage(validationError);setMessageAlert(true);error.current?.focus();return;}
-    const action = projectConfig ? "Save project configuration" : "Replace the unreadable project.yaml with this configuration";
-    if (!confirm(`${action} at ${definitions.workspaceRoot}/.t3-supervisor/project.yaml? This updates the selected working tree.`)) return;
-    setSaving(true);onSavingChange(true);setMessage("");setMessageAlert(false);
-    try {
-      const result = await saveProjectConfiguration({
-        projectId: definitions.projectId,
-        threadId: definitions.threadId,
-        expectedRevision: definitions.revision!,
-        config: copyConfiguration(normalized),
-      }, csrfToken);
-      if (result.status === "saved" && result.definitions) {
-        setConfig(copyConfiguration(result.definitions.projectConfig ?? normalized));
-        setMessage(result.message);setMessageAlert(false);onDirtyChange(false);setEditing(false);onSaved(result.definitions);
-      } else if (result.status === "saved") {
-        setMessage(`${result.message} Refresh definitions to inspect the saved project.yaml before editing again.`);setMessageAlert(true);setBlocked(true);
-      } else {
-        setMessage(result.message);setMessageAlert(true);
-        setBlocked(result.status === "conflict" || result.status === "uncertain" || result.status === "unavailable" || result.status === "permission_required");
-      }
-    } catch (cause) {
-      setMessage(cause instanceof Error ? cause.message : "Save outcome unknown. Refresh before retrying.");
-      setMessageAlert(true);
-      setBlocked(!(cause instanceof ProjectConfigRequestError && cause.definitelyNotSaved));
-    } finally {setSaving(false);onSavingChange(false);}
+    const plan = planSave(definitions, config, question => confirm(question));
+    if (plan._tag === "Invalid") {setDraft(current => ({...current, message: plan.message, messageAlert: true}));error.current?.focus();return;}
+    if (plan._tag === "Declined") return;
+    setDraft(current => ({...current, message: "", messageAlert: false}));
+    const outcome = resolveSave(plan.input)(await save(plan.input));
+    setDraft(current => settleSave(current, outcome, plan.normalized));
+    const saved = savedDefinitions(outcome);
+    if (saved) {onDirtyChange(false);onSaved(saved);}
   }}>
     <div className="stack">
       <h3>{projectConfig ? "Edit project configuration" : "Repair project configuration"}</h3>
@@ -159,7 +205,7 @@ export function ProjectConfigurationEditor({definitions, csrfToken, onSaved, onD
       <button className="primary" type="submit" disabled={saving || blocked}>{saving ? "Saving…" : "Save project configuration"}</button>
       <button type="button" disabled={saving} onClick={() => {
         if (dirty && !confirm("Discard unsaved project configuration changes?")) return;
-        setConfig(copyConfiguration(projectConfig ?? emptyConfiguration()));onDirtyChange(false);setEditing(false);setBlocked(false);setMessage("");setMessageAlert(false);
+        setDraft(freshDraft());onDirtyChange(false);
       }}>Cancel editing</button>
     </div>
   </form>;

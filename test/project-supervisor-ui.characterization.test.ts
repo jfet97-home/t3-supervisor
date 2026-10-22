@@ -62,7 +62,7 @@ it("CT-PSC-01: the baseline server's snapshot and save results match the golden 
   assert.deepEqual(calls.chats, [chatInput]);
 });
 
-// a browser storage, window and fetch installed on globalThis for the exported fetch helpers, restored afterwards
+// a browser storage, window, location and fetch installed on globalThis for the exported fetch helpers, restored afterwards
 const installBrowser = (t: TestContext) => {
   const values = new Map<string, string>();
   const storage = {getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => {values.set(key, value);},
@@ -93,8 +93,9 @@ it("CT-UI-API-01: every exported mutation helper maps 401, 403, 413, 415, 500 an
     browser.values.set("supervisor-session", "session-1");
     const requests: string[] = [];
     browser.setFetch(async (url, init) => {
-      requests.push(`${init?.method ?? "GET"} ${url}`);
-      const chosen = url === "/api/csrf" ? csrf : reply;
+      const path = new URL(String(url), "http://supervisor.test").pathname;
+      requests.push(`${init?.method ?? "GET"} ${path}`);
+      const chosen = path === "/api/csrf" ? csrf : reply;
       return new Response(chosen.body, {status: chosen.status});
     });
     const before = expired;
@@ -113,7 +114,7 @@ it("CT-UI-API-01: every exported mutation helper maps 401, 403, 413, 415, 500 an
     saveProjectSupervisor: {call: () => runUi(saveProjectSupervisor(saveInput)), path: "/api/guidance/project-supervisor"},
     retryProjectSupervisor: {call: () => runUi(retryProjectSupervisor(retryInput)), path: "/api/guidance/project-supervisor/retry"},
     setChatSupervision: {call: () => runUi(setChatSupervision(chatInput)), path: "/api/guidance/project-supervisor/chat-supervision"},
-    saveProjectConfiguration: {call: () => saveProjectConfiguration(configInput, "prop-csrf"), path: "/api/guidance/project-configuration"},
+    saveProjectConfiguration: {call: () => runUi(saveProjectConfiguration(configInput)), path: "/api/guidance/project-configuration"},
   };
   const supervisorText = {
     refreshed: "Session refreshed. Your Supervisor change was not performed; review the state and try again.",
@@ -150,13 +151,10 @@ it("CT-UI-API-01: every exported mutation helper maps 401, 403, 413, 415, 500 an
         {outcome: [text.unknown, false], requests: [post], session: "session-1", expired: 0}],
       ["400 UiError", json({_tag: "UiError", message: "Reload first."}, 400), refreshed,
         {outcome: [text.unknown, false], requests: [post], session: "session-1", expired: 0}],
-      // the config helper lets the raw parse or decode error escape; the editor then treats the save as unconfirmed
-      ["malformed JSON", {status: 200, body: "{\"status\":"}, refreshed, name === "saveProjectConfiguration"
-        ? {outcome: "not a request error", requests: [post], session: "session-1", expired: 0}
-        : {outcome: [text.unknown, false], requests: [post], session: "session-1", expired: 0}],
-      ["undecodable JSON", json({status: "saved", message: 1}), refreshed, name === "saveProjectConfiguration"
-        ? {outcome: "not a request error", requests: [post], session: "session-1", expired: 0}
-        : {outcome: [text.unknown, false], requests: [post], session: "session-1", expired: 0}],
+      ["malformed JSON", {status: 200, body: "{\"status\":"}, refreshed,
+        {outcome: [text.unknown, false], requests: [post], session: "session-1", expired: 0}],
+      ["undecodable JSON", json({status: "saved", message: 1}), refreshed,
+        {outcome: [text.unknown, false], requests: [post], session: "session-1", expired: 0}],
     ];
     for (const [label, reply, csrf, expected] of matrix) assert.deepEqual(await run(helper.call, reply, csrf), expected, `${name} ${label}`);
   }

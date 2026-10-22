@@ -1,32 +1,75 @@
-import { Schema } from "effect";
-import { ProjectConfigSaveResult, ProjectDefinitions, type ProjectConfigSave, type ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
-import { getCsrfToken, loadAccess, sessionHeaders } from "./access.js";
+import { Cause, Clock, Data, Effect, Exit, Option } from "effect";
+import { Atom } from "effect/reactivity";
+import type { ProjectConfigSave, ProjectConfigSaveOutcome, ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
+import { ApiClient, classifyMutation, type MutationFailure, type MutationRefusal } from "./api.js";
+import { admittedMutation, scopeKey, uiRuntime } from "./atoms.js";
 
-export class ProjectConfigRequestError extends Error {
-  constructor(message: string, readonly definitelyNotSaved: boolean) {super(message);}
+// a save outcome the editor reports with its golden text; definitelyNotSaved keeps editing allowed
+export class ProjectConfigRequestError extends Data.TaggedError("ProjectConfigRequestError")<{
+  readonly message: string;
+  readonly definitelyNotSaved: boolean;
+}> {}
+
+// a definitions read that failed or answered for another selection; the panel shows its own text for both
+export class ProjectDefinitionsReadError extends Data.TaggedError("ProjectDefinitionsReadError")<{readonly message: string}> {}
+
+// reads the definitions of one checkout selection; an answer for another selection is not a read of this one
+export const loadProjectDefinitions = (projectId: string, threadId: string | null) => Effect.gen(function* () {
+  const client = yield* ApiClient;
+  const value = yield* client.guidance.projectConfiguration({query: threadId === null ? {projectId} : {projectId, threadId}}).pipe(
+    Effect.mapError(() => new ProjectDefinitionsReadError({message: "Project definitions could not be loaded."})));
+  if (value.projectId !== projectId || value.threadId !== threadId)
+    return yield* new ProjectDefinitionsReadError({message: "The definition response belongs to another selection."});
+  return value;
+});
+
+export interface LoadedDefinitions {
+  readonly definitions: ProjectDefinitionSnapshot;
+  readonly loadedAt: number;
 }
 
-export const loadProjectDefinitions = async (projectId: string, threadId: string | null, signal: AbortSignal): Promise<ProjectDefinitionSnapshot> => {
-  const query = new URLSearchParams({projectId});
-  if (threadId !== null) query.set("threadId", threadId);
-  const response = await fetch(`/api/guidance/project-configuration?${query}`, {credentials: "omit", headers: sessionHeaders(), signal});
-  if (!response.ok) throw new Error("Project definitions could not be loaded.");
-  const value = Schema.decodeUnknownSync(ProjectDefinitions)(await response.json());
-  if (signal.aborted || value.projectId !== projectId || value.threadId !== threadId) throw new Error("The definition response belongs to another selection.");
-  return value;
-};
+// the family key of one definitions read: the checkout selection, the panel's reload count and the auth epoch
+export const definitionsReadKey = (projectId: string, threadId: string | null, reload: number, authEpoch: number): string =>
+  scopeKey(projectId, threadId, reload, authEpoch);
 
-export const saveProjectConfiguration = async (input: ProjectConfigSave, csrfToken: string) => {
-  const response = await fetch("/api/guidance/project-configuration", {method: "POST", credentials: "omit", headers: {"Content-Type": "application/json", ...sessionHeaders(), "x-csrf-token": getCsrfToken() || csrfToken}, body: JSON.stringify(input)});
-  if (response.status === 401 || response.status === 403) {
-    const refreshed = await loadAccess().catch(() => false);
-    throw new ProjectConfigRequestError(refreshed ? "Session refreshed. Your draft was not saved; review it and save again." : "Your draft was not saved. Session refresh failed; reconnect and save again.", true);
-  }
-  if (response.status === 413 || response.status === 415)
-    throw new ProjectConfigRequestError(response.status === 413 ? "Your draft was not saved. The request is too large; shorten the project configuration before saving again." : "Your draft was not saved. The server rejected the request format.", true);
-  if (!response.ok) throw new ProjectConfigRequestError("The save outcome could not be confirmed. Refresh and inspect project.yaml before retrying.", false);
-  const result = Schema.decodeUnknownSync(ProjectConfigSaveResult)(await response.json());
-  if (result.definitions && (result.definitions.projectId !== input.projectId || result.definitions.threadId !== input.threadId))
-    throw new ProjectConfigRequestError("The save response belongs to another workspace. Refresh and inspect project.yaml before retrying.", false);
-  return result;
+// the definitions read of one key (definitionsReadKey); a new key disposes and interrupts the previous read
+export const projectDefinitionsAtom = Atom.family((key: string) => {
+  const [projectId, threadId] = JSON.parse(key) as [string, string | null];
+  return uiRuntime.atom(Effect.zipWith(loadProjectDefinitions(projectId, threadId), Clock.currentTimeMillis,
+    (definitions, loadedAt): LoadedDefinitions => ({definitions, loadedAt})));
+});
+
+const requestSave = (input: ProjectConfigSave) =>
+  Effect.flatMap(ApiClient, (client) => client.guidance.saveProjectConfiguration({payload: input}));
+
+// one admitted save per user action, keyed by the editor's draft scope and the attempt's operation id
+export const saveProjectConfigurationAtom = admittedMutation(requestSave);
+
+const refusalText: Record<MutationRefusal, string> = {
+  refreshed: "Session refreshed. Your draft was not saved; review it and save again.",
+  refresh_failed: "Your draft was not saved. Session refresh failed; reconnect and save again.",
+  too_large: "Your draft was not saved. The request is too large; shorten the project configuration before saving again.",
+  format: "Your draft was not saved. The server rejected the request format.",
 };
+const unconfirmed = (message: string) => new ProjectConfigRequestError({message, definitelyNotSaved: false});
+
+// the editor's outcome of an admitted save (CT-UI-API-01): a refusal before the write keeps editing allowed; an
+// unconfirmed or interrupted save and an answer for another workspace are not confirmed
+export const resolveSave = (input: ProjectConfigSave) =>
+  (exit: Exit.Exit<ProjectConfigSaveOutcome, MutationFailure>): Exit.Exit<ProjectConfigSaveOutcome, ProjectConfigRequestError> => {
+    if (Exit.isFailure(exit)) {
+      const failure = Cause.findErrorOption(exit.cause);
+      if (Option.isNone(failure)) return Exit.fail(unconfirmed("Save outcome unknown. Refresh before retrying."));
+      return Exit.fail(failure.value._tag === "NotPerformed"
+        ? new ProjectConfigRequestError({message: refusalText[failure.value.reason], definitelyNotSaved: true})
+        : unconfirmed("The save outcome could not be confirmed. Refresh and inspect project.yaml before retrying."));
+    }
+    const result = exit.value;
+    if (result.definitions && (result.definitions.projectId !== input.projectId || result.definitions.threadId !== input.threadId))
+      return Exit.fail(unconfirmed("The save response belongs to another workspace. Refresh and inspect project.yaml before retrying."));
+    return Exit.succeed(result);
+  };
+
+// the classified save request resolved as the editor resolves its admitted save
+export const saveProjectConfiguration = (input: ProjectConfigSave) =>
+  Effect.flatMap(Effect.exit(classifyMutation(requestSave(input))), resolveSave(input));
