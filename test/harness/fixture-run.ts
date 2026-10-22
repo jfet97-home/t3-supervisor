@@ -28,6 +28,8 @@ export interface StartedWatchdog {
   readonly pid: number;
   readonly markers: string;
   readonly result: Promise<WatchdogRun>;
+  // resolves once the watchdog's plain output so far contains the text
+  readonly printed: (text: string, timeoutMs: number) => Promise<void>;
 }
 
 export interface StartedFixtureRun {
@@ -70,8 +72,21 @@ export const startWatchdog = async (args: (markers: string) => ReadonlyArray<str
     cwd: root, env: nestedEnvironment(markers), stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
-  child.stdout.setEncoding("utf8").on("data", (chunk: string) => { output += chunk; });
-  child.stderr.setEncoding("utf8").on("data", (chunk: string) => { output += chunk; });
+  const waiters = new Set<() => void>();
+  const append = (chunk: string) => { output += chunk; for (const check of waiters) check(); };
+  child.stdout.setEncoding("utf8").on("data", append);
+  child.stderr.setEncoding("utf8").on("data", append);
+  const printed = (text: string, timeoutMs: number) => new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { waiters.delete(check); reject(new Error(`watchdog did not print ${JSON.stringify(text)} within ${timeoutMs} ms`)); }, timeoutMs);
+    const check = () => {
+      if (!stripVTControlCharacters(output).includes(text)) return;
+      clearTimeout(timer);
+      waiters.delete(check);
+      resolve();
+    };
+    waiters.add(check);
+    check();
+  });
   const result = new Promise<WatchdogRun>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => {
@@ -88,7 +103,7 @@ export const startWatchdog = async (args: (markers: string) => ReadonlyArray<str
     await rm(markers, { recursive: true, force: true });
   });
   if (child.pid === undefined) throw new Error("the watchdog did not start");
-  return { pid: child.pid, markers, result };
+  return { pid: child.pid, markers, result, printed };
 };
 
 export const startFixtureRun = async (fixture: string, deadlineMs: number, config = fixtureConfig): Promise<StartedFixtureRun> => {

@@ -246,6 +246,14 @@ const program = Effect.gen(function* () {
     if (typeof options === "string") return { _tag: "Usage", message: options } satisfies Outcome;
     const filters = parsed.filter;
     const selection = selectionOptions(parsed.options);
+    // nothing of an earlier run may count for this one: the requested outputs and every phase's own outputs are removed
+    // before the first file-discovery child starts, so a signal, an expiry or a failure during discovery or a phase
+    // leaves no earlier report standing as this run's result
+    const base = resolve(typeof parsed.options.root === "string" ? parsed.options.root : ".");
+    const requested = outputPaths(parsed.options.outputFile, base);
+    for (const path of [...requested, ...phases.flatMap((phase) => requested.map((output) => phasePath(output, phase.name)))]) {
+      yield* fs.remove(path, { force: true }).pipe(Effect.orDie);
+    }
     const selected: Array<{ readonly phase: Phase; readonly filters: ReadonlyArray<string> }> = [];
     const owned = new Set<string>();
     for (const phase of phases) {
@@ -276,12 +284,7 @@ const program = Effect.gen(function* () {
     if (reporters.includes("json") && jsonTarget === undefined) {
       return { _tag: "Usage", message: "watchdog: --reporter=json over several phases needs --outputFile=<path> (or --outputFile.json=<path>)" } satisfies Outcome;
     }
-    const base = resolve(typeof parsed.options.root === "string" ? parsed.options.root : ".");
     const combine = reporters.includes("json") && jsonTarget !== undefined ? resolve(base, jsonTarget) : undefined;
-    // nothing of an earlier run may count for this one: the combined report and every phase output are removed first
-    const stale = [...(combine === undefined ? [] : [combine]),
-      ...selected.flatMap(({ phase }) => outputPaths(parsed.options.outputFile, base).map((path) => phasePath(path, phase.name)))];
-    for (const path of stale) yield* fs.remove(path, { force: true }).pipe(Effect.orDie);
     run.combined = combine;
     run.records = selected.map(({ phase }) => ({ phase: phase.name, config: phase.config, status: "not run", report: combine === undefined ? undefined : phasePath(combine, phase.name) }));
     for (const [index, { phase, filters: own }] of selected.entries()) {

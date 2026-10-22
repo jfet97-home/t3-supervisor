@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -237,6 +237,22 @@ describe("watchdog phases", () => {
     expect(afterSignal.success).toBe(false);
     expect(tests(afterSignal)).toEqual(["a one", "a two"]);
     expect(afterSignal.phases.map((phase) => [phase.phase, phase.status])).toEqual([["a", "passed"], ["b", "signalled"]]);
+  });
+
+  it("leaves no earlier successful report when a signal arrives during file discovery", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "t3-supervisor-discovery-signal-"));
+    onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
+    const report = join(directory, "report.json");
+    const earlier = JSON.stringify({ success: true, numTotalTests: 999, numPassedTests: 999 });
+    for (const path of [report, join(directory, "report.a.json"), join(directory, "report.b.json")]) writeFileSync(path, earlier);
+    const started = await startWatchdog(() => [...phases, "phase-a.fixture", "phase-b.fixture", "--reporter=json", `--outputFile=${report}`]);
+    await started.printed("watchdog: phase a files: vitest pid", 30_000);
+    process.kill(started.pid, "SIGTERM");
+    const signalled = await started.result;
+    expect(signalled.code).toBe(143);
+    noGroupLeft(signalled);
+    expect(phaseRun(signalled.output, "a")).toBeUndefined();
+    for (const path of [report, join(directory, "report.a.json"), join(directory, "report.b.json")]) expect(existsSync(path)).toBe(false);
   });
 
   it("writes every report under a non-default --root that a relative output path names", async () => {
