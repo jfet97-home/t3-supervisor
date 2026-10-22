@@ -7,14 +7,16 @@
     "t3-supervisor": "dist/cli.js"
   },
   "scripts": {
-    "autofix": "eslint src test ui/src scripts vite.config.ts vitest.config.ts vitest.harness.config.ts --fix",
-    "lint": "eslint src test ui/src scripts vite.config.ts vitest.config.ts vitest.harness.config.ts",
+    "autofix": "eslint src test ui/src scripts vite.config.ts vitest.config.ts vitest.harness.config.ts vitest.cpu-bound.config.ts --fix",
+    "lint": "eslint src test ui/src scripts vite.config.ts vitest.config.ts vitest.harness.config.ts vitest.cpu-bound.config.ts",
     "typecheck": "tsc --noEmit && tsc -p ui/tsconfig.json",
     "build": "tsc -p tsconfig.build.json && vite build",
-    "test": "node --import tsx scripts/run-tests.ts",
+    "test": "node --import tsx scripts/run-tests.ts && node --import tsx scripts/run-tests.ts --config vitest.cpu-bound.config.ts",
     "test:harness": "node --import tsx scripts/run-tests.ts --config vitest.harness.config.ts",
     "start": "node dist/main.js",
-    "dev:ui": "vite build --watch"
+    "dev:ui": "vite build --watch",
+    "test:suites": "node --import tsx scripts/run-tests.ts",
+    "test:cpu-bound": "node --import tsx scripts/run-tests.ts --config vitest.cpu-bound.config.ts"
   },
   "dependencies": {
     "@effect/atom-react": "4.0.1",

@@ -1,4 +1,5 @@
 import { configDefaults, defineConfig } from "vitest/config";
+import { cpuBound } from "./vitest.cpu-bound.config.js";
 import { leakGate } from "./test/support/leak-gate.js";
 
 // s0 bounds (plan 5.3 rule 1): no per-test or hook timeout until s1c; the watchdog bounds the whole run
@@ -6,7 +7,7 @@ export default defineConfig({
   plugins: [leakGate()],
   test: {
     include: ["test/**/*.test.ts"],
-    exclude: [...configDefaults.exclude, "dist/**", "test/harness/**"],
+    exclude: [...configDefaults.exclude, "dist/**", "test/harness/**", ...cpuBound],
     environment: "node",
     pool: "forks",
     isolate: true,
