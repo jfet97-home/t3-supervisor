@@ -1,12 +1,21 @@
 import assert from "node:assert/strict";
-import { it } from "vitest";
-import { Schema } from "effect";
+import { afterAll, beforeAll, it } from "vitest";
+import { Effect, Schema } from "effect";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultMonitoringSettings, defaultSupervisorTeamSettings, ProjectSupervisorSave, ProjectSupervisorSnapshot, type DefinitionReviewInfo, type ProjectSupervisorInfo, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput, type ProjectSupervisorTeamInfo, type SupervisorModelSelection, type WorkflowAgreementInfo, type WorkflowPlanGroupInfo, type WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import type { WorkflowProgressSnapshot } from "../src/workflow-progress.js";
 import { confirmChatSupervisionChange, ProjectSupervisorView, WorkflowProgressPanel, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
+import { installPageLocation, runUi } from "./support/ui-run.js";
+
+// the client helpers are Effects on the page runtime; they resolve request paths against the page location
+let restoreLocation = () => {};
+beforeAll(() => {restoreLocation = installPageLocation();});
+afterAll(() => restoreLocation());
+// the chat change helper is an Effect over the change and its confirming read
+const confirmChange = (change: () => Promise<{snapshot?: ProjectSupervisorInfo | null; message: string}>, reload: () => Promise<ProjectSupervisorInfo>, isCurrent: () => boolean) =>
+  Effect.runPromise(confirmChatSupervisionChange(Effect.promise(change), Effect.promise(reload), isCurrent));
 
 const selection: SupervisorModelSelection = {
   instanceId: "provider-one",
@@ -655,16 +664,16 @@ it("Supervisor client encodes project targets, checks response identity and pass
     let seen = "";
     globalThis.fetch = async (inputValue, init) => {
       seen = String(inputValue);
-      assert.equal(init?.signal, controller.signal);
+      assert.ok(init?.signal instanceof AbortSignal);
       assert.equal(init?.credentials, "omit");
       return new Response(JSON.stringify({...snapshot, projectId: "project & one"}), {status: 200});
     };
-    const loaded = await loadProjectSupervisor("project & one", controller.signal, "task-thread");
+    const loaded = await runUi(loadProjectSupervisor("project & one", "task-thread"), controller.signal);
     assert.equal(loaded.projectId, "project & one");
     assert.equal(new URL(seen, "http://localhost").searchParams.get("projectId"), "project & one");
 
     globalThis.fetch = async () => new Response(JSON.stringify({...snapshot, projectId: "another-project"}), {status: 200});
-    await assert.rejects(loadProjectSupervisor("project", controller.signal, "task-thread"), /another project/);
+    await assert.rejects(runUi(loadProjectSupervisor("project", "task-thread"), controller.signal), /another project/);
   } finally {globalThis.fetch = original;}
 });
 
@@ -672,16 +681,22 @@ it("a late GET cannot cross an aborted selection", async () => {
   const original = globalThis.fetch;
   const controller = new AbortController();
   let resolveResponse: ((response: Response) => void) | undefined;
+  let requestSignal: AbortSignal | null | undefined;
+  let fetched!: () => void;
+  const reached = new Promise<void>(resolve => {fetched = resolve;});
   try {
     globalThis.fetch = async (_input, init) => {
-      assert.equal(init?.signal, controller.signal);
+      requestSignal = init?.signal;
+      fetched();
       return await new Promise<Response>(resolve => {resolveResponse = resolve;});
     };
-    const pending = loadProjectSupervisor("project", controller.signal, "task-thread");
+    const pending = runUi(loadProjectSupervisor("project", "task-thread"), controller.signal);
+    await reached;
     assert.ok(resolveResponse);
     controller.abort();
     resolveResponse!(new Response(JSON.stringify(snapshot), {status: 200}));
-    await assert.rejects(pending, /another project/);
+    await assert.rejects(pending, /interrupted/);
+    assert.equal(requestSignal?.aborted, true, "cancelling the selection aborts the request");
   } finally {globalThis.fetch = original;}
 });
 
@@ -693,7 +708,7 @@ it("a save response for another project is treated as an unknown outcome", async
       assert.equal(init?.credentials, "omit");
       return new Response(JSON.stringify({status: "saved", message: "Saved", snapshot: {...snapshot, projectId: "another-project"}}), {status: 200});
     };
-    await assert.rejects(saveProjectSupervisor(input, "token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
+    await assert.rejects(runUi(saveProjectSupervisor(input)), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
   } finally {globalThis.fetch = original;}
 });
 
@@ -710,7 +725,7 @@ it("Supervisor settings saves send live monitoring values with the model selecti
       assert.deepEqual(JSON.parse(String(init?.body)), monitoredInput);
       return new Response(JSON.stringify({status: "saved", message: "Settings saved.", snapshot}), {status: 200});
     };
-    assert.equal((await saveProjectSupervisor(monitoredInput, "token")).status, "saved");
+    assert.equal((await runUi(saveProjectSupervisor(monitoredInput))).status, "saved");
   } finally {globalThis.fetch = original;}
 });
 
@@ -724,7 +739,7 @@ it("native access retry uses its dedicated route and blocks a foreign-project re
       assert.deepEqual(JSON.parse(String(init?.body)), retryInput);
       return new Response(JSON.stringify({status: "uncertain", message: "Retry needs refresh.", snapshot: {...snapshot, projectId: "another-project"}}), {status: 200});
     };
-    await assert.rejects(retryProjectSupervisor(retryInput, "token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
+    await assert.rejects(runUi(retryProjectSupervisor(retryInput)), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
   } finally {globalThis.fetch = original;}
 });
 
@@ -737,7 +752,7 @@ it("deleted-conversation recovery sends an explicit replacement action and bindi
       assert.deepEqual(JSON.parse(String(init?.body)), replaceInput);
       return new Response(JSON.stringify({status: "saved", message: "Replaced explicitly.", snapshot}), {status: 200});
     };
-    assert.equal((await retryProjectSupervisor(replaceInput, "token")).status, "saved");
+    assert.equal((await runUi(retryProjectSupervisor(replaceInput))).status, "saved");
   } finally {globalThis.fetch = original;}
 });
 
@@ -761,10 +776,10 @@ it("a retry 403 refreshes the latest CSRF token without automatically repeating 
 
     const {loadAccess} = await import("../ui/src/access.js");
     assert.equal(await loadAccess(), true);
-    await assert.rejects(retryProjectSupervisor(retryInput, "old-prop-token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved);
+    await assert.rejects(runUi(retryProjectSupervisor(retryInput)), (error: unknown) => error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved);
     assert.equal(retryWrites, 1);
     assert.equal(csrfReads, 2);
-    assert.equal((await retryProjectSupervisor(retryInput, "old-prop-token")).status, "saved");
+    assert.equal((await runUi(retryProjectSupervisor(retryInput))).status, "saved");
     assert.equal(retryWrites, 2);
     assert.equal(csrfReads, 2);
   } finally {globalThis.fetch = original;}
@@ -789,12 +804,12 @@ it("a 403 refreshes CSRF without retrying the POST and the next explicit save us
 
     const {loadAccess} = await import("../ui/src/access.js");
     assert.equal(await loadAccess(), true);
-    await assert.rejects(saveProjectSupervisor(input, "stale-prop-token"), (error: unknown) =>
+    await assert.rejects(runUi(saveProjectSupervisor(input)), (error: unknown) =>
       error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved && /Session refreshed/.test(error.message));
     assert.equal(writes, 1);
     assert.equal(csrfReads, 2);
 
-    assert.equal((await saveProjectSupervisor(input, "stale-prop-token")).status, "saved");
+    assert.equal((await runUi(saveProjectSupervisor(input))).status, "saved");
     assert.equal(writes, 2);
     assert.equal(csrfReads, 2);
   } finally {globalThis.fetch = original;}
@@ -804,7 +819,7 @@ it("unconfirmed HTTP mutation outcomes are marked unsafe to retry without refres
   const original = globalThis.fetch;
   try {
     globalThis.fetch = async () => new Response("{}", {status: 500});
-    await assert.rejects(saveProjectSupervisor(input, "token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
+    await assert.rejects(runUi(saveProjectSupervisor(input)), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
   } finally {globalThis.fetch = original;}
 });
 
@@ -812,10 +827,10 @@ it("a response for another main in the same project is rejected by the client", 
   const original = globalThis.fetch;
   try {
     globalThis.fetch = async () => new Response(JSON.stringify(snapshot), {status: 200});
-    await assert.rejects(loadProjectSupervisor("project", AbortSignal.timeout(1000), "another-main"), /another project/);
+    await assert.rejects(runUi(loadProjectSupervisor("project", "another-main"), AbortSignal.timeout(1000)), /another project/);
     globalThis.fetch = async () => new Response(JSON.stringify({status: "saved", message: "Read back", snapshot}), {status: 200});
     const input: ProjectSupervisorRetryInput = {projectId: "project", mainThreadId: "another-main", expectedGeneration: 7, threadId: snapshot.binding!.threadId, bindingGeneration: 7, action: "retry"};
-    await assert.rejects(retryProjectSupervisor(input, "csrf"), /another project/);
+    await assert.rejects(runUi(retryProjectSupervisor(input)), /another project/);
   } finally {globalThis.fetch = original;}
 });
 
@@ -830,15 +845,15 @@ it("team and coverage APIs reject mismatched roots and off-scope assignments", a
         members: [], issues: [],
       },
     }), {status: 200});
-    await assert.rejects(loadProjectSupervisor("project", AbortSignal.timeout(1000), "task-thread"), /another root conversation/);
+    await assert.rejects(runUi(loadProjectSupervisor("project", "task-thread"), AbortSignal.timeout(1000)), /another root conversation/);
 
     globalThis.fetch = async () => new Response(JSON.stringify({...snapshot, settings: {...snapshot.settings, teamSettings: {maxHelpersPerRoot: 21}}}), {status: 200});
-    await assert.rejects(loadProjectSupervisor("project", AbortSignal.timeout(1000), "task-thread"), /outside the supported range/);
+    await assert.rejects(runUi(loadProjectSupervisor("project", "task-thread"), AbortSignal.timeout(1000)), /outside the supported range/);
 
     globalThis.fetch = async () => new Response(JSON.stringify({...progressSnapshot, coverage: [
       {threadId: "foreign-child", state: "assigned", assigneeThreadId: "helper", assigneeTitle: "Helper", assignmentRootThreadId: "foreign-child"},
     ]}), {status: 200});
-    await assert.rejects(loadWorkflowProgress("project", "task-thread", AbortSignal.timeout(1000)), /does not match its native scope page/);
+    await assert.rejects(runUi(loadWorkflowProgress("project", "task-thread"), AbortSignal.timeout(1000)), /does not match its native scope page/);
   } finally {globalThis.fetch = original;}
 });
 
@@ -862,7 +877,7 @@ it("an expired dashboard session is a definite rejection and never repeats the m
       if (init?.method === "POST") writes++;
       return new Response("{}", {status: 401});
     };
-    await assert.rejects(saveProjectSupervisor(input, "token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved);
+    await assert.rejects(runUi(saveProjectSupervisor(input)), (error: unknown) => error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved);
     assert.equal(writes, 1);
   } finally {globalThis.fetch = original;}
 });
@@ -932,12 +947,12 @@ it("workflow progress API pages are scoped to the requested project, main, and i
       assert.ok(init?.signal);
       return new Response(JSON.stringify(page), {status: 200});
     };
-    const loaded = await loadWorkflowProgress("project", "task-thread", AbortSignal.timeout(1000), {
+    const loaded = await runUi(loadWorkflowProgress("project", "task-thread", {
       workflowOffset: 10,
       lineageOffset: 20,
       limit: 50,
       expectedBinding: {threadId: "supervisor-thread", generation: 4},
-    });
+    }), AbortSignal.timeout(1000));
     const url = new URL(requested, "http://localhost");
     assert.equal(url.pathname, "/api/guidance/workflow-progress");
     assert.equal(url.searchParams.get("projectId"), "project");
@@ -950,19 +965,19 @@ it("workflow progress API pages are scoped to the requested project, main, and i
     assert.equal(loaded.lineageOffset, 20);
 
     globalThis.fetch = async () => new Response(JSON.stringify({...page, mainThreadId: "another-main"}), {status: 200});
-    await assert.rejects(loadWorkflowProgress("project", "task-thread", AbortSignal.timeout(1000), {
+    await assert.rejects(runUi(loadWorkflowProgress("project", "task-thread", {
       workflowOffset: 10,
       lineageOffset: 20,
       limit: 50,
       expectedBinding: {threadId: "supervisor-thread", generation: 4},
-    }), /another selection or page/);
+    }), AbortSignal.timeout(1000)), /another selection or page/);
     globalThis.fetch = async () => new Response(JSON.stringify({...page, scope: {...page.scope!, bindingGeneration: 9}}), {status: 200});
-    await assert.rejects(loadWorkflowProgress("project", "task-thread", AbortSignal.timeout(1000), {
+    await assert.rejects(runUi(loadWorkflowProgress("project", "task-thread", {
       workflowOffset: 10,
       lineageOffset: 20,
       limit: 50,
       expectedBinding: {threadId: "supervisor-thread", generation: 4},
-    }), /another Supervisor binding/);
+    }), AbortSignal.timeout(1000)), /another Supervisor binding/);
   } finally {globalThis.fetch = original;}
 });
 
@@ -988,7 +1003,7 @@ it("workflow progress refresh keeps every loaded page and fetches them sequentia
       inFlight--;
       return new Response(JSON.stringify({...progressSnapshot, workflowOffset, lineageOffset}), {status: 200});
     };
-    const pages = await refreshWorkflowProgressPages("project", "task-thread", AbortSignal.timeout(1000), requests);
+    const pages = await runUi(refreshWorkflowProgressPages("project", "task-thread", requests), AbortSignal.timeout(1000));
     assert.equal(pages.length, 3);
     assert.deepEqual(order, [[0, 0], [20, 20], [40, 40]]);
     assert.equal(maximumInFlight, 1);
@@ -1112,29 +1127,29 @@ it("a late chat-supervision response never replaces the view of a chat selected 
   const startedFor = (scope: string) => () => selected === scope;
 
   const lateSuccess = deferred<{snapshot?: typeof saved | null; message: string}>();let reloads = 0;
-  const pendingSuccess = confirmChatSupervisionChange(() => lateSuccess.promise, async () => {reloads++;return saved;}, startedFor("A"));
+  const pendingSuccess = confirmChange(() => lateSuccess.promise, async () => {reloads++;return saved;}, startedFor("A"));
   selected = "B";lateSuccess.resolve({snapshot: saved, message: "Supervision is stopped for this chat."});
   assert.equal(await pendingSuccess, null, "a response that arrives after switching chats is dropped");
 
   selected = "A";
   const lateReload = deferred<typeof saved>();
-  const pendingReload = confirmChatSupervisionChange(async () => ({message: "Saved."}), () => lateReload.promise, startedFor("A"));
+  const pendingReload = confirmChange(async () => ({message: "Saved."}), () => lateReload.promise, startedFor("A"));
   await Promise.resolve();selected = "B";lateReload.resolve(saved);
   assert.equal(await pendingReload, null, "a confirming reload that completes after switching chats is dropped");
 
   selected = "A";
   const lateFailure = deferred<{message: string}>();
-  const pendingFailure = confirmChatSupervisionChange(() => lateFailure.promise, async () => {reloads++;return saved;}, startedFor("A"));
+  const pendingFailure = confirmChange(() => lateFailure.promise, async () => {reloads++;return saved;}, startedFor("A"));
   selected = "B";lateFailure.reject(new Error("lost response"));
   assert.equal(await pendingFailure, null, "an unknown outcome after switching chats changes nothing");
   assert.equal(reloads, 0, "no stale reload is started for a chat that is no longer selected");
 
   selected = "A";
-  assert.deepEqual(await confirmChatSupervisionChange(async () => ({snapshot: saved, message: "Stopped."}), async () => saved, startedFor("A")),
+  assert.deepEqual(await confirmChange(async () => ({snapshot: saved, message: "Stopped."}), async () => saved, startedFor("A")),
     {snapshot: saved, message: "Stopped."});
-  assert.deepEqual(await confirmChatSupervisionChange(async () => {throw new Error("conflict");}, async () => saved, startedFor("A")),
+  assert.deepEqual(await confirmChange(async () => {throw new Error("conflict");}, async () => saved, startedFor("A")),
     {snapshot: saved, message: "The change could not be confirmed. The saved state is shown."}, "an unknown outcome shows the server-confirmed state");
-  assert.deepEqual(await confirmChatSupervisionChange(async () => {throw new Error("lost");}, async () => {throw new Error("down");}, startedFor("A")),
+  assert.deepEqual(await confirmChange(async () => {throw new Error("lost");}, async () => {throw new Error("down");}, startedFor("A")),
     {snapshot: null, message: "The change could not be confirmed and the saved state could not be read. Refresh Supervisor status."});
 });
 

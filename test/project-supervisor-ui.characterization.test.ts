@@ -10,6 +10,7 @@ import { loadProjectSupervisor, ProjectSupervisorRequestError, retryProjectSuper
 import { defer, readCsrf, signIn } from "./support/c3b-http.js";
 import { fakeSupervision, supervisorSnapshot } from "./support/c3b-project-supervisor.js";
 import { startUi } from "./support/c3b-ui.js";
+import { installPageLocation, runUi } from "./support/ui-run.js";
 
 type Golden = {snapshot: unknown; saveResult: unknown; retryResult: unknown};
 const golden = JSON.parse(readFileSync(new URL("./support/c3b-project-supervisor.golden.json", import.meta.url), "utf8")) as Golden;
@@ -71,6 +72,7 @@ const installBrowser = (t: TestContext) => {
   const install = (key: string, value: unknown) => Object.defineProperty(globalThis, key, {configurable: true, writable: true, value});
   install("localStorage", storage);
   install("window", window);
+  defer(t, installPageLocation());
   defer(t, () => {
     for (const [key, descriptor] of originals) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
@@ -108,9 +110,9 @@ it("CT-UI-API-01: every exported mutation helper maps 401, 403, 413, 415, 500 an
   const refreshed = json({csrf: "refreshed-csrf"});
   const refreshFailed = json({message: "Sign in to Supervisor."}, 401);
   const helpers = {
-    saveProjectSupervisor: {call: () => saveProjectSupervisor(saveInput, "prop-csrf"), path: "/api/guidance/project-supervisor"},
-    retryProjectSupervisor: {call: () => retryProjectSupervisor(retryInput, "prop-csrf"), path: "/api/guidance/project-supervisor/retry"},
-    setChatSupervision: {call: () => setChatSupervision(chatInput, "prop-csrf"), path: "/api/guidance/project-supervisor/chat-supervision"},
+    saveProjectSupervisor: {call: () => runUi(saveProjectSupervisor(saveInput)), path: "/api/guidance/project-supervisor"},
+    retryProjectSupervisor: {call: () => runUi(retryProjectSupervisor(retryInput)), path: "/api/guidance/project-supervisor/retry"},
+    setChatSupervision: {call: () => runUi(setChatSupervision(chatInput)), path: "/api/guidance/project-supervisor/chat-supervision"},
     saveProjectConfiguration: {call: () => saveProjectConfiguration(configInput, "prop-csrf"), path: "/api/guidance/project-configuration"},
   };
   const supervisorText = {
@@ -170,13 +172,13 @@ it("CT-PSC-02: an undecodable snapshot or save response never resolves as succes
 
   respond({...supervisorSnapshot, tasks: [{...supervisorSnapshot.tasks[0], status: "unknown-status"}]});
   const loadFailure = (error: unknown) => !(error instanceof ProjectSupervisorRequestError);
-  await assert.rejects(loadProjectSupervisor("project", AbortSignal.timeout(5_000), "task-thread"), loadFailure);
+  await assert.rejects(runUi(loadProjectSupervisor("project", "task-thread"), AbortSignal.timeout(5_000)), loadFailure);
   respond({...supervisorSnapshot, binding: {...supervisorSnapshot.binding, generation: "7"}});
-  await assert.rejects(loadProjectSupervisor("project", AbortSignal.timeout(5_000), "task-thread"), loadFailure);
+  await assert.rejects(runUi(loadProjectSupervisor("project", "task-thread"), AbortSignal.timeout(5_000)), loadFailure);
 
   // a saved status whose snapshot does not decode is not reported as saved
   const brokenSnapshot = {...supervisorSnapshot, models: [{instanceId: "provider-one"}]};
-  for (const helper of [() => saveProjectSupervisor(saveInput, "csrf"), () => retryProjectSupervisor(retryInput, "csrf"), () => setChatSupervision(chatInput, "csrf")]) {
+  for (const helper of [() => runUi(saveProjectSupervisor(saveInput)), () => runUi(retryProjectSupervisor(retryInput)), () => runUi(setChatSupervision(chatInput))]) {
     respond({status: "saved", message: "Saved.", snapshot: brokenSnapshot});
     await assert.rejects(helper(), unknown);
     respond({status: "saved", message: "Saved."});
@@ -184,5 +186,5 @@ it("CT-PSC-02: an undecodable snapshot or save response never resolves as succes
   }
   // the same decodable response is accepted, so the rejection above is the decode failure
   respond({status: "saved", message: "Saved.", snapshot: supervisorSnapshot});
-  assert.equal((await saveProjectSupervisor(saveInput, "csrf")).status, "saved");
+  assert.equal((await runUi(saveProjectSupervisor(saveInput))).status, "saved");
 });
