@@ -1,9 +1,9 @@
-import { Deferred, Duration, Effect, Layer, Option, Ref, Schedule, Stream } from "effect";
+import { Cause, Deferred, Duration, Effect, Exit, Layer, Option, Ref, Schedule, Stream } from "effect";
 import { HttpApiClient } from "effect/http-api";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { SupervisorApi } from "../../src/guidance-contract.js";
 import { SessionAccess } from "./access.js";
-import { ApiClient, classifyMutation, sessionHttpClient, type MutationFailure } from "./api.js";
+import { ApiClient, classifyMutation, sessionHttpClient, Unconfirmed, type MutationFailure } from "./api.js";
 
 // the shared atom contract of the dashboard (plan 3.8): one page runtime with fixed layers, scope keys, visibility-aware
 // polling, admitted mutations and keep-alive drafts; panels build their queries, mutations and drafts from these
@@ -49,19 +49,23 @@ export type MutationResult<A> = AsyncResult.AsyncResult<A, MutationFailure>;
 
 // a family of admitted mutations keyed by scope and operation id (plan 3.8): the atom stays alive across unmount, scope
 // changes, auth refreshes and refetches; writing it again while it runs joins the run already admitted instead of starting
-// a second request; a finished operation is never replayed, a new attempt needs a new operation id
+// a second request; a finished operation is never replayed, a new attempt needs a new operation id; disposing the
+// registry interrupts the request (aborting the fetch and running its finalizers) and records it as unconfirmed, since
+// the server may have applied it
 export const admittedMutation = <I, A, E, R extends ApiClient | SessionAccess>(
   run: (input: I) => Effect.Effect<A, E, R>,
 ) => {
   const family = Atom.family((_key: string) => {
     const admitted = Ref.makeUnsafe(Option.none<Deferred.Deferred<A, MutationFailure>>());
-    return Atom.keepAlive(uiRuntime.fn((input: I) => Effect.gen(function* () {
-      const existing = yield* Ref.get(admitted);
-      if (Option.isSome(existing)) return yield* Deferred.await(existing.value);
-      const done = yield* Deferred.make<A, MutationFailure>();
-      yield* Ref.set(admitted, Option.some(done));
-      return yield* Deferred.into(classifyMutation(run(input)), done).pipe(Effect.andThen(Deferred.await(done)));
-    }).pipe(Effect.uninterruptible), { concurrent: true }));
+    // only the claim and the recording of the outcome are masked; the request and every wait stay interruptible
+    return Atom.keepAlive(uiRuntime.fn((input: I) => Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+      const own = yield* Deferred.make<A, MutationFailure>();
+      const claimed = yield* Ref.modify(admitted, (current) => Option.isSome(current) ? [current.value, current] : [own, Option.some(own)]);
+      if (claimed !== own) return yield* restore(Deferred.await(claimed));
+      const exit = yield* Effect.exit(restore(classifyMutation(run(input))));
+      yield* Deferred.done(own, Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause) ? Exit.fail(new Unconfirmed()) : exit);
+      return yield* exit;
+    })), { concurrent: true }));
   });
   return (key: MutationKey) => family(JSON.stringify([key.scope, key.operationId]));
 };

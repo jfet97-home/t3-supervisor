@@ -14,7 +14,7 @@ const install = (key: string, value: unknown) => {
 
 interface Sent { readonly method: string; readonly path: string; readonly session: string | null; readonly csrf: string | null }
 const sent: Sent[] = [];
-let reply: (path: string) => Promise<Response> = async () => new Response("{}");
+let reply: (path: string, signal: AbortSignal | undefined) => Promise<Response> = async () => new Response("{}");
 const storage = new Map<string, string>();
 const browser = new EventTarget();
 let visibility: "visible" | "hidden" = "visible";
@@ -37,7 +37,7 @@ beforeAll(async () => {
     const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
     sent.push({ method: input instanceof Request ? input.method : init?.method ?? "GET", path: url.pathname,
       session: headers.get("x-supervisor-session"), csrf: headers.get("x-csrf-token") });
-    return reply(url.pathname);
+    return reply(url.pathname, init?.signal ?? (input instanceof Request ? input.signal : undefined));
   });
   access = await import("../ui/src/access.js");
   api = await import("../ui/src/api.js");
@@ -91,6 +91,58 @@ it("an admitted mutation sends one request for repeated writes, survives unmount
   const other = savePolicy()({ scope: core.scopeKey("settings", "env-2"), operationId: "op-1" });
   assert.ok(AsyncResult.isInitial(registry.get(other)));
   registry.dispose();
+});
+
+it("disposing the registry aborts a pending admitted request and runs its finalizers after unmount kept it; the operation stays unconfirmed and is not replayed", { timeout: 10_000 }, async () => {
+  const registry = AtomRegistry.make();
+  storage.set("supervisor-session", "session-1");
+  sent.length = 0;
+  let signal: AbortSignal | undefined;
+  let started: () => void = () => undefined;
+  const requested = new Promise<void>((resolve) => { started = resolve; });
+  let aborted: () => void = () => undefined;
+  const abort = new Promise<void>((resolve) => { aborted = resolve; });
+  reply = (_path, received) => new Promise<Response>((_resolve, reject) => {
+    signal = received;
+    received?.addEventListener("abort", () => { aborted(); reject(new DOMException("aborted", "AbortError")); }, { once: true });
+    started();
+  });
+  const finalizers: string[] = [];
+  let finished: () => void = () => undefined;
+  const finalized = new Promise<void>((resolve) => { finished = resolve; });
+  const finalizer = (name: string) => Effect.sync(() => { finalizers.push(name); if (finalizers.length === 2) finished(); });
+  const save = core.admittedMutation((input: typeof policy) => Effect.scoped(Effect.gen(function* () {
+    yield* Effect.acquireRelease(Effect.void, () => finalizer("scoped resource"));
+    const client = yield* api.ApiClient;
+    return yield* client.guidance.threadPolicy({ payload: input });
+  })).pipe(Effect.ensuring(finalizer("request"))));
+  const mutation = save({ scope: core.scopeKey("dispose", "env-1"), operationId: "op-1" });
+  const unmount = registry.mount(mutation);
+  registry.set(mutation, policy);
+  await requested;
+  // the panel unmounting keeps the request running
+  unmount();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(signal?.aborted, false);
+  assert.deepEqual(finalizers, []);
+  registry.dispose();
+  // bounded only so that a request left running fails here by name; disposal aborts it at once
+  const settled = (event: Promise<void>, name: string) => new Promise<string>((resolve) => {
+    const timer = setTimeout(() => resolve("still pending"), 2_000);
+    void event.then(() => { clearTimeout(timer); resolve(name); });
+  });
+  assert.equal(await settled(abort, "aborted"), "aborted");
+  assert.equal(await settled(finalized, "finalized"), "finalized");
+  assert.equal(signal?.aborted, true);
+  assert.deepEqual(finalizers, ["scoped resource", "request"]);
+  // the same operation in a new registry reports the unknown outcome and sends nothing
+  const next = AtomRegistry.make();
+  next.set(mutation, policy);
+  const failed = await until(next, mutation, AsyncResult.isFailure, "unconfirmed");
+  const error = AsyncResult.error(failed);
+  assert.equal(error._tag === "Some" ? error.value._tag : "none", "Unconfirmed");
+  assert.equal(sent.length, 1);
+  next.dispose();
 });
 
 it("mutation failures follow the baseline outcome rules without replaying the request", { timeout: 10_000 }, async () => {
