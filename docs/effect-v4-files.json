@@ -1,6 +1,6 @@
 {
  "schemaVersion": 1,
- "planVersion": "v2.1",
+ "planVersion": "v2.2",
  "plan": "docs/effect-v4-migration.md",
  "baseline": {
   "commit": "3b8129aea24518774b7237d666c22739e82af3b6",
@@ -772,7 +772,7 @@
   "CC-INTERP-SUBMIT": {
    "owner": "src/project-supervisor.ts",
    "slice": "S6e",
-   "invariant": "interpretation results arrive only through supervision_interpretation_submit; one attempt is the immutable key (binding generation, task ID, source revision and hash, dispatched request message ID and text hash) with a service-minted attemptId, so a source edit or definitions renewal of the same task ID is a new attempt; authority is the bound root's own executed strong main-run tool item with canonically equal raw arguments, inside the run started by the attempt's request message; binding, target and route come from the task, never from arguments; intake runs inside the admission section (3.11), looks up an existing receipt for the attemptId before the attempt-state gate, and CASes one immutable receipt per attempt into the existing workflow receipt table (namespace interpretation, operation = attemptId); identical replays return the original receipt, changed content conflicts, superseded attempts are stale; the tool returns immediately and wakes the scope, never waiting for its own run; finalization happens only in reconcile after a successful completed run of the exact request, re-verifying the full native proof before every application including a bare Start, then refreshing source, boundary, definitions, control and binding; pending Start uses a narrow interpretation permission; candidate evidence is a discriminated union (interpretation_submission, supervisor_message) shared by proposalEvidenceCurrent and agreementEvidenceCurrent; the tool never sends; a submission is never an agreement; no final-chat interpretation text is parsed, while later negotiated proposal and acceptance protocols are retained; the one-off cut-over closes in-flight JSON-only requests unapplied after their runs end, keeps retained candidates and agreements valid only by verified hash, and never sends",
+   "invariant": "interpretation results arrive only through supervision_interpretation_submit; one attempt is the immutable key (binding generation, task ID, source revision and hash, dispatched request message ID and text hash) with a service-minted attemptId, so a source edit or definitions renewal of the same task ID is a new attempt; authority is the bound root's own executed strong main-run tool item with canonically equal raw arguments, inside the run started by the attempt's request message; binding, target and route come from the task, never from arguments; intake runs inside the admission section (3.11), looks up an existing receipt for the attemptId before the attempt-state gate, and CASes one immutable receipt per attempt into the existing workflow receipt table (namespace interpretation, operation = attemptId); identical replays return the original receipt, changed content conflicts, superseded attempts are stale; the tool returns immediately and wakes the scope, never waiting for its own run; finalization happens only in reconcile after a successful completed run of the exact request, re-verifying the full native proof before every application including a bare Start, then refreshing source, boundary, definitions, control and binding; pending Start uses a narrow interpretation permission; candidate evidence is a discriminated union (interpretation_submission, supervisor_message) shared by proposalEvidenceCurrent and agreementEvidenceCurrent; the tool never sends; a submission is never an agreement; no final-chat interpretation text is parsed, while later negotiated proposal and acceptance protocols are retained; the one-off cut-over closes in-flight JSON-only requests unapplied after their runs end, keeps retained candidates and agreements valid only by verified hash, records candidate-free inferred or provisional interpretations once as supervisor_message evidence with plan digest and source pin on the task record (or stale with the baseline result), keeps unknown introductions with exact IDs, body and route, and never sends",
    "pins": [
     "CT-ISUB-01",
     "CT-ISUB-02",
@@ -2121,7 +2121,11 @@
      "every fresh send: final guard, durable receipt, native admission",
      "every policy-dependent durable write: guard and write (workflow_write, supervision_team mutations, typed intake and finalization, Start activation and the policyDependentMutations inventory)"
     ],
-    "nativeAdmission": "the adapter's synchronous initiate(request): Effect<InFlight> (Effect.sync) that binds the WS request frame to a created socket sent on open, or invokes fetch with the body; the result is awaited afterwards through FiberMap.run(map, identity, result, {onlyIfMissing: true}) outside the section; a fork alone is not admission",
+    "nativeAdmission": "the adapter's synchronous initiate(request): Effect<InFlight {result, release}> (Effect.sync) that binds the WS request frame to a created socket sent on open, or invokes fetch with the body; a fork alone is not admission",
+    "inFlightLookup": "inside admit and before any initiation: FiberMap.get(map, identity) returns a duplicate handle (nothing initiated); else an existing durable receipt returns the reconciliation-only outcome (never a new send); else receipt commit, initiate and FiberMap.run(map, identity, operation) in the same masked body; onlyIfMissing is not used (4.0.5 returns an interrupted sentinel for an existing key, FiberMap.ts:1427-1428)",
+    "resourceOwnership": "the registered operation is InFlight.result mapped to the path's baseline outcome classification (total; never fails the map) with Effect.ensuring(release); FiberMap.run forks it as an interruptible daemon fiber owned by the adapter-lifetime map, so no interruptible point lies between initiate and the registered release; adapter scope close interrupts it and runs release once",
+    "cancellationOwner": "the initiating caller only: the owner cell is filled inside the section and the send runs under Effect.onInterrupt(() => Fiber.interrupt(owned)), so request abort, the cycle deadline or calling-scope shutdown interrupts the mapped operation and awaits release; the outcome follows the baseline abort classification under the original identity; duplicates join with Effect.exit(Fiber.join) and never cancel or replace the original; an interrupted exit seen by a duplicate falls back to the receipt reconciliation; Stop never touches the map",
+    "evidence": "docs/effect-v4-admission-probe.mjs on effect 4.0.5: 8/8 cases (plan 3.11, below CT-LIN-05)",
     "capability": "the guard used for writes and sends is reachable only through admit",
     "lockOrder": "ScopeLocks key (if held) -> admission section -> database critical section; never acquired inside a transaction (CT-LIN-07)",
     "introduced": "S6a, together with the legacy policy writers (T-07)",
@@ -4195,7 +4199,7 @@
   "CT-ISUB-17": {
    "kind": "atomicity-restart",
    "boundary": "production-wired controller, authenticated /mcp/workflows route, loopback T3 peer serving the root's dynamic_tool items, temp-file guidance.sqlite3",
-   "description": "cut-over: an in-flight JSON-only request closes unapplied after its run ends without a re-send; a pending Start on it is rejected; a retained final-message candidate and accepted agreement stay valid by hash after the one-off conversion, and a mismatching one is marked stale, not deleted; an unsent introduction is sent only with current converted evidence; restart after conversion keeps all of them",
+   "description": "cut-over: an in-flight JSON-only request closes unapplied after its run ends without a re-send; a pending Start on it is rejected; a retained final-message candidate and accepted agreement stay valid by hash after the one-off conversion, and a mismatching one is marked stale, not deleted; an unsent introduction is sent only with current converted evidence; parameterized with the existing provisional fixture (`supervisor-conversation.test.ts:2482`): a candidate-free inferred/ready state, a sent provisional state and an admitted/unknown introduction keep provisional status and current (or baseline-equivalent stale) evidence, and the unknown introduction keeps exact IDs, body and route and only reconciles; restart after conversion keeps all of them",
    "ownerFile": "test/project-supervisor.test.ts",
    "referencedBy": [
     "src/project-supervisor.ts",
@@ -4213,7 +4217,7 @@
    "disposition": "keep",
    "consolidateInto": null,
    "reuses": "CT-INT-01 fixtures",
-   "newObservation": "cut-over: an in-flight JSON-only request closes unapplied after its run ends without a re-send; a pending Start on it is rejected; a retained final-message candidate and accepted agreement stay valid by hash after the one-off conversion, and a mismatching one is marked stale, not deleted; an unsent introduction is sent only with current converted evidence; restart after conversion keeps all of them",
+   "newObservation": "cut-over: an in-flight JSON-only request closes unapplied after its run ends without a re-send; a pending Start on it is rejected; a retained final-message candidate and accepted agreement stay valid by hash after the one-off conversion, and a mismatching one is marked stale, not deleted; an unsent introduction is sent only with current converted evidence; parameterized with the existing provisional fixture (`supervisor-conversation.test.ts:2482`): a candidate-free inferred/ready state, a sent provisional state and an admitted/unknown introduction keep provisional status and current (or baseline-equivalent stale) evidence, and the unknown introduction keeps exact IDs, body and route and only reconciles; restart after conversion keeps all of them",
    "findings": [
     "ANDREA-ITOOL-01",
     "ANDREA-ROUTE-01",
@@ -4510,8 +4514,8 @@
    "targetSlice": "S6a, S6b",
    "baselineSeam": "none in baseline: no await between guard and initiation on any send path (sameSyncTurn true)",
    "expectedBaseline": "n/a",
-   "targetSeam": "it.live: fake adapter whose initiate (Effect.sync) appends to a Ref log and returns an InFlight whose result waits on a Deferred reply; send and Stop forked with Effect.forkChild; Semaphore.withPermits(admission, 1) + Effect.uninterruptible; FiberMap.run(map, identity, result, {onlyIfMissing: true})",
-   "targetRegression": "(1) send first: the Stop completes while the reply Deferred is unresolved (no network response awaited under the section); log initiate, policy-commit, bookkeeping; send not interrupted; the outcome lands under the original identity; a second send for the identity returns the same fiber. (2) Stop first: the waiting send then fails its guard, never initiates, writes no receipt. (3) interrupting that waiting send leaves no receipt and no initiate",
+   "targetSeam": "it.live: fake adapter whose initiate (Effect.sync in production; a test barrier only to deliver an interruption inside the section) returns InFlight {result, release}; result waits on a Deferred reply; per-adapter FiberMap; send = admit(FiberMap.get lookup -> durable receipt -> receipt commit -> initiate -> FiberMap.run(map, identity, total operation with ensuring(release))) with the owner cell filled inside the section and Effect.onInterrupt(() => Fiber.interrupt(owned)); Semaphore.withPermits(admission, 1) + Effect.uninterruptible",
+   "targetRegression": "(1) Stop completes while the reply is unresolved; log initiate, policy-commit, bookkeeping; send not interrupted; a duplicate during the reply finds the entry, initiates nothing, returns the original outcome. (2) Stop first: the waiting send fails its guard, no initiate, no receipt. (3) interrupting that waiting send leaves no receipt and no initiate. (4) an interrupted duplicate leaves the original running; one release after the reply. (5) owner interrupted after initiate and before registration: release once, receipt uncertain, a later send is reconciliation-only, one initiate in total. (6) owner interrupted awaiting the reply: as (5); duplicates get the reconciliation outcome. (7) adapter scope close: release once, receipt kept",
    "w4Phase": "target-only",
    "disposition": "keep",
    "consolidateInto": null,
@@ -10692,7 +10696,7 @@
     },
     {
      "slice": "S6e",
-     "work": "task record gains the write-once interpretationSubmission field (no new table, no new database)"
+     "work": "task record gains the current-attempt pointer and interpretationEvidence (the discriminated evidence union, used when no candidate exists); the attempt's immutable receipt lives in the existing workflow receipt table under namespace interpretation, operation = attemptId (no new table, no new database)"
     }
    ],
    "reviewFindings": [
@@ -10993,7 +10997,7 @@
     },
     {
      "slice": "S6e",
-     "work": "reconcile applies the recorded typed submission instead of parsing the last assistant message; final-message JSON parsing deleted; completed run without submission -> unavailable; prompt asks for supervision_interpretation_submit with the quoted interpretationId"
+     "work": "reconcile applies the recorded typed submission instead of parsing the last assistant message; final-message JSON parsing deleted; completed run without submission -> unavailable; prompt asks for one successful supervision_interpretation_submit with the quoted taskId, attemptId and sourcePin; the service mints attemptId when it builds the request"
     }
    ]
   },
@@ -11541,7 +11545,7 @@
     },
     {
      "slice": "S6e",
-     "work": "WorkflowAgreementCandidate provenance (:45) becomes a discriminated evidence union: interpretation_submission {taskId, submissionId, itemId, runId, argumentsHash, sourcePin, plan digest} and supervisor_message {messageId, runId, runOrdinal, textHash}; one-off logged conversion of retained interpretation candidates to supervisor_message"
+     "work": "WorkflowAgreementCandidate provenance (:45) becomes a discriminated evidence union: interpretation_submission {taskId, attemptId, itemId, runId, argumentsHash, sourcePin, canonical plan digest} and supervisor_message {messageId, runId, runOrdinal, textHash}; one-off logged conversion of retained interpretation candidates to supervisor_message (candidate-free states are recorded on the task record, plan 3.12 item 11)"
     }
    ],
    "reviewFindings": [
@@ -21101,9 +21105,9 @@
   "planVersion": "v1"
  },
  "followsFrozen": {
-  "revision": "059e4a82dc8680f630735fa6d0fcecf5e4018bfb",
-  "planVersion": "v2",
-  "change": "narrow follow-up closing the run-3 findings (Sol SOL-PLAN-02/03/07, SOL-ISUB-01/02; Astra A-P01, A-P03, I-03): process-wide admission with the initiate handoff, ServiceAuth and CLI in S6c with transitions T-01..T-07 and call shapes, attempt-bound typed interpretation submission and cut-over, UI baseline fixture"
+  "revision": "d986e7eee195c2f75bfcbdde5433d79364b8eb99",
+  "planVersion": "v2.1",
+  "change": "narrow follow-up closing the run-4 findings (Sol SOL-PLAN-02, SOL-ISUB-02; Astra A-P03; RUN4-PREC): in-flight lookup before initiation, interruption-safe resource ownership and the initiating caller as cancellation owner (exact 4.0.5 probe), candidate-free interpretation cut-over, call-shape and attemptId consistency"
  },
  "workPackages": [
   {
@@ -22816,7 +22820,7 @@
  "sliceMapV1toV2": {
   "S0": "S0 (Vitest-only parity) and S1c (exact 4.0.5 transition)",
   "S1": "S1 + S1b (D-21)",
-  "S2": "S2 (cli.ts moves to S3)",
+  "S2": "S2 (cli.ts moves to S6c with ServiceAuth)",
   "S3": "S3",
   "S4": "S4",
   "S5": "S6c (HTTP, MCP, composition)",
@@ -22869,8 +22873,8 @@
   },
   {
    "id": "T-03",
-   "sites": "project-supervisor.ts and supervisor-lifecycle.ts -> SupervisorConversation status/hasInflight/supervisionStopped/interpretationRole/roleDelivered/retry/reconcileStopNotice/fenceStoppedSupervision during S6b",
-   "transition": "kept synchronous over B-02 stores until S6d; fenceStoppedSupervision runs inside the Stop bookkeeping critical section"
+   "sites": "project-supervisor.ts and supervisor-lifecycle.ts -> SupervisorConversation status/hasInflight/supervisionStopped/interpretationRole/roleDelivered/retry/fenceStoppedSupervision during S6b",
+   "transition": "kept synchronous over B-02 stores until S6d; fenceStoppedSupervision runs inside the Stop bookkeeping critical section; reconcileStopNotice is asynchronous at baseline (supervisor-conversation.ts:1687, awaited at project-supervisor.ts:1221) and uses the B-03 asynchronous facade"
   },
   {
    "id": "T-04",
@@ -23325,9 +23329,12 @@
       ],
       [
        "reconcileStopped",
-       "sync"
+       "async"
       ]
-     ]
+     ],
+     "notes": {
+      "reconcileStopped": "returns Promise<void> without the async keyword (supervisor-team-controller.ts:250)"
+     }
     },
     "src/project-supervisor.ts": {
      "class": "ProjectSupervisor",
@@ -23549,10 +23556,10 @@
   },
   {
    "id": "SOL-PLAN-02",
-   "source": "Sol P0 (run 3: open, narrowed)",
+   "source": "Sol P0 (run 4: open, narrowed to in-flight ownership)",
    "requirement": "Stop ordering must cover policy-dependent SQL mutations, not only sends; reconcile admission with actual adapter initiation",
-   "response": "3.11 items 1, 2, 4: one process-wide `admit` section for Stop/Enable, sends and every policy-dependent write (including `workflow_write`, team mutations, typed intake/finalization, Start activation); admission = the adapter's synchronous `initiate` handoff, not a fork; `FiberMap.run(..., {onlyIfMissing: true})`; CT-LIN-05 executable contract (Stop completes while the reply is pending), CT-LIN-07, CT-LIN-08; `CC-STOP-LIN.policyDependentMutations`",
-   "status": "resolved in v2.1 (Sol `sol-v2-frozen-plan-review.md`)"
+   "response": "3.11 items 1, 2, 4 (one process-wide `admit` for Stop/Enable, sends and the 50 policy-dependent writes; synchronous `initiate`); v2.2: in-section `FiberMap.get` and durable-receipt lookup before any initiation, registration in the same masked body without `onlyIfMissing`, total mapped operation with `ensuring(release)`, the initiating caller as sole cancellation owner (owner cell + `onInterrupt`), duplicates join only; CT-LIN-05 steps 1-7; exact 4.0.5 probe `docs/effect-v4-admission-probe.mjs` (8/8 cases); `sol-v21-frozen-plan-review.md`",
+   "status": "resolved in v2.2"
   },
   {
    "id": "SOL-PLAN-03",
@@ -23619,10 +23626,10 @@
   },
   {
    "id": "A-P03",
-   "source": "Astra (run 3: open)",
+   "source": "Astra (run 4: open, narrowed)",
    "requirement": "one process-wide contract in plan and manifest; actual adapter initiation, not a fork (Astra's 4.0.5 probe `harness-probe/admission-fork-v2.json`); coordinate legacy Stop callers from S6a",
-   "response": "3.11 items 1, 2, 4; manifest `CC-STOP-LIN` normalized to the process-wide section; 3.9 T-07; CT-LIN-02/05/06 at the first S6a freeze",
-   "status": "resolved in v2.1"
+   "response": "3.11 \"In-flight lookup and resource ownership\" and \"Cancellation owner\"; CT-LIN-05 steps 4-7 (duplicate, owner interruption at handoff and during the reply, Stop while pending, scope close); `FiberMap.get` lookup, no `onlyIfMissing` (`FiberMap.ts:1427-1428`); probe results under CT-LIN-05; `plan-v2.1-review.md`",
+   "status": "resolved in v2.2"
   },
   {
    "id": "A-P04",
@@ -23745,10 +23752,10 @@
   },
   {
    "id": "SOL-ISUB-02",
-   "source": "Sol P1 (run 3)",
+   "source": "Sol P1 (run 4: partial)",
    "requirement": "candidate store and `proposalEvidenceCurrent`, proof re-verification before apply and Start, retained request/agreement cut-over without a permanent parser",
-   "response": "3.12 items 7, 8, 11; CT-ISUB-07/10/16/17",
-   "status": "resolved in v2.1"
+   "response": "3.12 items 7, 8, 11 and CT-ISUB-07/10/16/17; v2.2: candidate-free inferred/provisional tasks and their introductions get `TaskRecord.interpretationEvidence` (same discriminated union); the cut-over validates their legacy message once and records `supervisor_message` with plan digest and source pin, or stale with the baseline result; CT-ISUB-17 parameterized with `supervisor-conversation.test.ts:2482`",
+   "status": "resolved in v2.2"
   },
   {
    "id": "I-03",
@@ -23875,6 +23882,13 @@
    "requirement": "CT-ISUB-14 validation spans; CT-APP-02 slice wording; CT-PSS-02/CT-TSTORE-02 reuse/observation fields; per-panel browser behaviour",
    "response": "CT-ISUB-14; registry fixes; section 7 UI note",
    "status": "resolved in v2.1"
+  },
+  {
+   "id": "RUN4-PREC",
+   "source": "Sol and Astra (run 4 consistency notes)",
+   "requirement": "`reconcileStopNotice` is asynchronous (T-03); `reconcileStopped` returns a Promise (call shapes); per-file S6e prose uses `attemptId`, the current-attempt pointer and the namespaced receipt; B2 ordering; stale \"fork\" wording in 3.11",
+   "response": "3.9 T-03; `temporaryBoundaries.callShapes`; manifest S6e rows for `project-supervisor.ts`, `project-supervisor-store.ts`, `supervisor-conversation-store.ts`; 3.12 B2; 3.11 item 1",
+   "status": "resolved in v2.2"
   },
   {
    "id": "SOL-FILES",

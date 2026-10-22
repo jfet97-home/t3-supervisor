@@ -1,15 +1,15 @@
 # Effect v4 migration plan
 
-Status: **plan v2.1**, a narrow follow-up to frozen v2 `059e4a82` (which superseded v1
-`14b4a875`): section 3.12 reconciles both reviewers' typed-interpretation design reports and
-the Luna MAX evidence; nothing else changes. It reconciles Sol's terminal review
-(SOL-PLAN-01..09), Astra's terminal review (A-P01..A-P08, O-01..O-06 and 113 per-file
-objection rows), Astra's early auth correction, Andrea's CLI and execution directions and
-Andrea's typed-interpretation, routing and model-comparison requests (3.12) in one ledger
-(section 13). No production or test port starts
-until both reviewers approve this frozen revision and the coordinator confirms alignment. Owner: Opus (sole implementation owner).
+Status: **plan v2.2**, a narrow follow-up to frozen v2.1 `d986e7ee` (after v2 `059e4a82` and
+v1 `14b4a875`). It closes the run-4 findings only: the native in-flight lookup, resource
+ownership and cancellation owner of 3.11 (SOL-PLAN-02, A-P03), the candidate-free
+interpretation cut-over of 3.12 (SOL-ISUB-02) and the consistency notes (RUN4-PREC). All
+other decisions are unchanged and reconciled in one ledger (section 13). S0/S1 test-only
+work is authorized by the coordinator on unchanged application source and baseline
+dependencies; S1b, S1c and every production port wait until both reviewers approve the
+full plan and the coordinator confirms alignment. Owner: Opus (sole implementation owner).
 Manifest: [`effect-v4-files.json`](effect-v4-files.json) (one row per baseline tracked
-file; `planVersion` `v2`).
+file; `planVersion` `v2.2`).
 
 ## 1. Baseline
 
@@ -444,7 +444,7 @@ the manifest (`syncTransitions`):
 | T-01 | `guidance-ui.ts:187-224`: `auth.mcpAuthorized`, `auth.authenticated`, `auth.login`, `auth.logout` inside request conditions | `ServiceAuth` cannot stay synchronous once it runs on `AccessDb`, so it ports in S6c together with these HTTP checks, the `/auth/*` routes and the CLI (`auth forge`); S3 keeps only the catalog store. No facade |
 | T-02 | `guidance-ui.ts:129-137` `supervision.saveThreadPolicy` inside an `Effect.try` handler; `guidance-ui.ts:62,66` `noProjectControl` and `startStatus` inside `Effect.try` handlers | `saveThreadPolicy` becomes asynchronous in S6a (T-07); the same S6a commit changes that handler to yield the admitted Effect directly (the handler is already an Effect), mapped to the same `UiError`. `noProjectControl` and `startStatus` stay synchronous B-02 reads until S6c, when the handlers port |
 | T-07 | the extracted, still-Promise `SupervisionControl` Stop, Enable, thread-policy save and chat-supervision paths, and the Start activation blocks in `prepareStarts` and `reconcile` (`project-supervisor.ts:670-679,780-795,1466-1474`), from S6a until S6b | in S6a, when the first ported send can yield between its guard and its `initiate`, each of these legacy policy writes runs its existing synchronous block as one `Effect.sync` inside `run(gate.admit(...))` (B-01), awaited by the Promise caller; Start activation acquires the admission section before opening its guidance transaction, never from inside it |
-| T-03 | `project-supervisor.ts`, `supervisor-lifecycle.ts` → `SupervisorConversation` (`status`, `hasInflight`, `supervisionStopped`, `interpretationRole`, `roleDelivered`, `retry`, `reconcileStopNotice`, `fenceStoppedSupervision`) during the S6b commit series | these stay synchronous methods over the interim stores (B-02) until S6d; `fenceStoppedSupervision` runs inside the Stop bookkeeping critical section |
+| T-03 | `project-supervisor.ts`, `supervisor-lifecycle.ts` → `SupervisorConversation` (`status`, `hasInflight`, `supervisionStopped`, `interpretationRole`, `roleDelivered`, `retry`, `fenceStoppedSupervision`; `reconcileStopNotice` is asynchronous at baseline, `supervisor-conversation.ts:1687`, awaited at `project-supervisor.ts:1221`, and uses the B-03 asynchronous facade) during the S6b commit series | these stay synchronous methods over the interim stores (B-02) until S6d; `fenceStoppedSupervision` runs inside the Stop bookkeeping critical section |
 | T-04 | `supervisor-conversation.ts:1443,1480,1667,1917,1920` and `supervisor-lifecycle.ts:114,355` → `TeamRuntime` (`startCycle` in-memory; `partition`, `coordinatorPolicy`, `rootOwnedBatch`, `hasBlockingWork`, `hasInflightEffects` B-02 reads; `acknowledgeRootEvents` B-02 write) between S6a and S6b | stay synchronous until S6d; `TeamRuntime`'s own calls to `HelperTransport.receiptText`/`matchesMessage` (B-02 reads) stay inside WP-S6a-SEND |
 | T-05 | `cli.ts:3,28` → `config.loadDataDirectory` between S2 and S6c (`guidance-ui.ts:144`'s direct `createServiceAuth` factory import disappears with T-01, because ServiceAuth and that caller port together) | a retained pure data-directory resolver (flag and environment in, path out) in `config.ts`, not a facade; the forge process has no supervision runtime. In S6c the CLI resolves it through `SupervisorConfig` in its own `runMain` |
 | T-06 | gate predicates (`scopeEnabled`, `supervisionStopped`, `workflowEditingEnabled`) and `workflowLocator` (`workflow-progress.ts:244-257`), B-02 reads from unported callers | synchronous by design (3.9); guarding uses go through the admission section (3.11) |
@@ -526,7 +526,8 @@ this contract closes them.
 
 1. **One admission section.** `SupervisionGate` owns one process-wide `Semaphore(1)`.
    (Per-scope keys would also satisfy the contract but need multi-key ordering for bulk
-   policy saves; the sections contain only synchronous store work and a fork. The manifest's
+   policy saves; the sections contain only synchronous store work, at most one `initiate`
+   and its handle registration. The manifest's
    `CC-STOP-LIN` uses the same process-wide section; W4's per-scope draft is superseded.)
    - Stop, Enable, thread-policy saves, dashboard chat-supervision changes and Start
      activation run inside it: policy commit, then the guidance bookkeeping (start
@@ -557,16 +558,51 @@ this contract closes them.
      irrevocably commits the request exactly as today (the WS RPC request frame bound to a
      newly created socket and sent on open, as `supervisor-native.ts:23,35-41` does; the
      helper webhook `fetch` invoked with its body, as `supervisor-helper-transport.ts:394`
-     does) and returns at once. `initiate` runs inside the section after the receipt
-     commit; the section ends right after it. Socket open, the reply and any body read
-     happen afterwards in `InFlight.result`, outside the section. Whatever the D-08 spike
-     selects must expose this synchronous `initiate` step. The caller then awaits
-     `InFlight.result` through `FiberMap.run(inflight, identity, result,
-     {onlyIfMissing: true})`, so a second call for the same identity never replaces or
-     cancels an admitted send, and caller interruption (the 120 s cycle deadline, request
-     abort, shutdown) aborts it locally exactly where today's `AbortSignal` does. Stop never
-     interrupts an admitted send; its outcome is classified by the sent boundary and
-     reconciled, never replayed under a new identity. No SQL transaction spans two files.
+     does) and returns at once with `InFlight` = `{result, release}`, where `release` is the
+     adapter's local cleanup (close the socket, abort the fetch). `initiate` runs inside the
+     section after the receipt commit; the section ends right after the handle is
+     registered (next item). Socket open, the reply and any body read happen afterwards in
+     `InFlight.result`, outside the section. Whatever the D-08 spike selects must expose
+     this synchronous `initiate` step. Stop never interrupts an admitted send; its outcome
+     is classified by the sent boundary and reconciled, never replayed under a new
+     identity. No SQL transaction spans two files.
+   - **In-flight lookup and resource ownership.** Each native adapter owns one
+     service-lifetime `FiberMap<Identity, Outcome>` (in the adapter Layer's scope). Inside
+     `admit`, before any fresh initiation, the send body (a) looks the identity up with
+     `FiberMap.get` (`FiberMap.ts:796`): an entry is returned as a *duplicate* handle and
+     nothing is initiated; (b) otherwise reads its durable receipt: an existing receipt
+     (admitted, sent, unknown or completed) returns the existing reconciliation-only outcome
+     and never starts another send because the map no longer holds the identity; (c)
+     otherwise commits the receipt, calls `initiate` and registers the operation with
+     `FiberMap.run(map, identity, operation)` in the same masked body. `onlyIfMissing` is
+     not used: on 4.0.5 it returns an interrupted sentinel for an existing key
+     (`FiberMap.ts:1427-1428`), and because every registration happens inside the section
+     after the lookup a collision cannot occur. The operation is `InFlight.result` mapped
+     to the path's baseline outcome classification for every reply, error and interruption
+     (it never fails the map) with `Effect.ensuring(release)`. `FiberMap.run` forks it as
+     an interruptible daemon fiber owned by the map (`FiberMap.ts:1430-1435`,
+     `internal/effect.ts:5527-5536`), so cleanup ownership exists before the section ends:
+     no interruptible point lies between `initiate` and the registered `release`.
+   - **Cancellation owner.** The caller that initiated is the operation's only
+     cancellation owner. The body stores the mapped fiber in the caller's owner cell before
+     returning, and the whole send runs under `Effect.onInterrupt(() => owned ?
+     Fiber.interrupt(owned) : Effect.void)`. The original caller's cancellation (request
+     abort, the 120 s cycle deadline, shutdown of the calling scope), whether it arrives
+     during the section, at its exit or while awaiting the reply, therefore interrupts the
+     mapped operation and waits for its `release`, as today's `AbortSignal` reaches the
+     socket and timers (`supervisor-native.ts:20-39`) and the helper POST
+     (`supervisor-helper-transport.ts:394-395`); the outcome follows the path's baseline
+     abort classification (unsent before the request left, uncertain after) under the
+     original identity. Awaiting is `Effect.exit(Fiber.join(fiber))`, outside the section.
+     A duplicate caller only joins: interrupting it ends its wait and never cancels or
+     replaces the original, and an interrupted exit seen by a duplicate falls back to the
+     receipt's reconciliation outcome. Stop does not touch the map. Closing the adapter
+     scope (process shutdown) interrupts each in-flight operation and runs its `release`
+     once; receipts stay for reconciliation. Executable evidence on exact 4.0.5:
+     `docs/effect-v4-admission-probe.mjs` (cases and results below CT-LIN-05). A variant
+     that returned the handle across an interruptible boundary lost ownership (the mapped
+     operation was orphaned and the run timed out); this is why the owner cell is filled
+     inside the masked body.
      The existing per-scope `serial` queue (`project-supervisor.ts:119-123`, `ScopeLocks` in
      the target) spans network work and is not the admission lock.
    - The section is one operation, `SupervisionGate.admit(f)`:
@@ -617,13 +653,36 @@ synchronously and returns an `InFlight` whose `result` waits on a `Deferred` rep
    `Fiber.join` it **while the reply `Deferred` is still unresolved**. The Stop completes,
    which proves no network response is awaited under the section; the log is
    `initiate, policy-commit, bookkeeping`; the send is not interrupted; resolving the reply
-   records its outcome under the original identity; a second send for the same identity
-   returns the same in-flight fiber (`onlyIfMissing`).
+   records its outcome under the original identity; a duplicate send for the identity
+   while the reply is pending finds the entry with `FiberMap.get`, initiates nothing and
+   returns the original outcome.
 2. Reverse order: the Stop holds the section through a `Deferred` barrier inside its
    bookkeeping; a concurrent send waits for the permit; after release its guard fails, the
    log has no `initiate`, and no receipt is written.
 3. Interrupting the waiting send in (2) before it gets the permit leaves no receipt and no
    `initiate`.
+4. Interrupting a duplicate waiter leaves the original running (`release` not yet run);
+   the original's reply then completes it and `release` runs once.
+5. The owner is interrupted inside the section after `initiate` and before registration
+   (the fake `initiate` holds on a test barrier; production `initiate` is `Effect.sync`):
+   the interruption takes effect at the section exit, `release` runs exactly once, the
+   receipt is classified `uncertain`, and a later send of the identity is
+   reconciliation-only with one `initiate` in total.
+6. The owner is interrupted while awaiting the reply: as in (5); a duplicate waiter
+   receives the reconciliation outcome; no second send.
+7. Closing the adapter scope with a send in flight runs `release` once and keeps the
+   receipt.
+
+Probe results (`docs/effect-v4-admission-probe.mjs`, effect 4.0.5): duplicate while
+pending → same `sent` outcome, 1 `initiate`; duplicate waiter interrupted → 0 releases
+until the reply, then `sent`; owner interrupted at handoff → owner interrupted, 1 release,
+receipt `uncertain`, later send `reconcile`, 1 `initiate`; owner interrupted awaiting
+reply → duplicate and later send `reconcile`/`uncertain`, 1 `initiate`; Stop while the
+reply is pending → Stop completes first, log `receipt, initiate, policy-commit,
+bookkeeping, release`, send `sent`; Stop first → `denied`, no receipt; interrupt while
+waiting for the permit → no receipt, no `initiate`; scope close → 1 release, `uncertain`.
+The target CT-LIN-05 runs the same cases against each ported path's real adapter
+boundary.
 CT-LIN-07: `admit` called while a `GuidanceDb` transaction is open on the same fiber dies
 with a defect (the per-client transaction key, `SqlClient.ts:179`, is present), so the
 section is never acquired inside a transaction. CT-LIN-08: controlled interleavings for the
@@ -780,7 +839,15 @@ inside the tool call: those would be different features and are rejected.
    discriminated `evidence`: `interpretation_submission` {taskId, attemptId, itemId,
    runId, argumentsHash, sourcePin, canonical plan digest} for new interpretations, and the
    existing `supervisor_message` {messageId, runId, runOrdinal, textHash} kept for later
-   proposals. No tool item ID is stored in an assistant-message field. Evidence is current
+   proposals. A candidate-free interpretation (a provisional plan, which today returns
+   `"provisional"` at `supervisor-conversation.ts:1832` before any candidate is persisted,
+   or a ready/blocked preparation before the first candidate) keeps the same union in one
+   existing-record field, `TaskRecord.interpretationEvidence`
+   (`project-supervisor-store.ts:40`): the attempt's `interpretation_submission` for new
+   interpretations, and `supervisor_message` plus the canonical plan digest only for
+   cut-over states (item 11). `interpretationEvidenceCurrent` (`:1810-1819`, used at
+   `:1956`) reads that field when no candidate exists, instead of re-parsing the run's
+   messages. No tool item ID is stored in an assistant-message field. Evidence is current
    only while the native tool item is still executed, in the same run, not rolled back,
    with an unchanged argument hash; introduction checks, candidate use and agreement
    invalidation use it.
@@ -817,6 +884,22 @@ inside the tool call: those would be different features and are rejected.
       checked by hash equality, never by re-parsing.
     - **Unsent introductions** prepared from such candidates keep their state; they are
       sent only if their converted evidence is current, through the normal path.
+    - **Candidate-free inferred or provisional tasks and their introductions** (prepared,
+      ready, blocked, sent, admitted or unknown; the state that
+      `test/supervisor-conversation.test.ts:2482` produces): the step validates their
+      legacy evidence once — the completed assistant message of `task.supervisorRunId`
+      whose plan equals `task.workflow` under today's rule — and records it in
+      `TaskRecord.interpretationEvidence` as `supervisor_message` {messageId, runId,
+      runOrdinal, textHash, canonical plan digest, sourcePin}. This one validation runs
+      only inside the logged cut-over step, which is deleted with the old parser after the
+      deployment; no runtime final-chat branch remains. Afterwards currency is hash and
+      digest equality against the still-present native message. Where no valid message
+      exists, the evidence is recorded stale and the task keeps the baseline result of a
+      changed answer (an unsent introduction blocks with today's "interpretation answer
+      changed" reason). Provisional status is preserved: no typed receipt, formal
+      candidate or agreement is invented, no old prompt or native ID is rewritten, and no
+      parallel store is added. A sent introduction stays sent; an admitted or unknown
+      introduction keeps its exact IDs, body and route and only reconciles.
     - Histories, sessions, identities and non-disposable rows are kept; nothing is reset,
       no parallel execution path remains, and every new interpretation requires the tool.
 12. **Prompt.** The interpretation request asks the root to make one successful immutable
@@ -827,8 +910,12 @@ inside the tool call: those would be different features and are rejected.
 
 Blockers before implementation (S6e):
 - **B1.** Both reviewers align on this reconciled design (A-I01..A-I04, SOL-ITOOL-1..8).
-- **B2.** The coordinator's early native check shows a running `dynamic_tool` item of
-  this tool visible through the direct and the MCPX paths actually used, on both hosts.
+- **B2.** Before implementation, the coordinator's early native check shows a running
+  `dynamic_tool` item of an existing approved Supervisor tool visible through the direct
+  and the MCPX paths actually used, on both hosts. After the S6e candidate exists, a
+  bounded initial spike on both hosts shows a running item of this exact new tool on the
+  same paths before the typed cut-over is accepted or enabled. No test-only tool, T3
+  change, proxy or forced submission is used.
 - **B3.** CT-ISUB-01..19 are accepted as the contract.
 - **B4.** The coupled suites (`supervisor-workflow.test.ts`, `project-supervisor.test.ts`,
   `project-supervisor-workflow.test.ts`, `supervisor-conversation.test.ts`,
@@ -858,7 +945,7 @@ HTTP/WS peer and guidance SQL):
 | CT-ISUB-14 | timestamps or spans per phase: dispatch admitted, model time to tool invocation, submission received, Schema validated, native proof verified, commit, run terminal, finalization, introduction visible, exact operative acceptance |
 | CT-ISUB-15 | the tool returns before its run completes; the wake finalizes without waiting for the 5 s spacing |
 | CT-ISUB-16 | conversation proposal and agreement evidence follow the recorded tool item end to end (rolled-back or changed item → not current); bare Start and no-workflow results never enter proposal checks; no hidden final-text re-parse |
-| CT-ISUB-17 | cut-over: an in-flight JSON-only request closes unapplied after its run ends without a re-send; a pending Start on it is rejected; a retained final-message candidate and accepted agreement stay valid by hash after the one-off conversion, and a mismatching one is marked stale, not deleted; an unsent introduction is sent only with current converted evidence; restart after conversion keeps all of them |
+| CT-ISUB-17 | cut-over: an in-flight JSON-only request closes unapplied after its run ends without a re-send; a pending Start on it is rejected; a retained final-message candidate and accepted agreement stay valid by hash after the one-off conversion, and a mismatching one is marked stale, not deleted; an unsent introduction is sent only with current converted evidence; parameterized with the existing provisional fixture (`supervisor-conversation.test.ts:2482`): a candidate-free inferred/ready state, a sent provisional state and an admitted/unknown introduction keep provisional status and current (or baseline-equivalent stale) evidence, and the unknown introduction keeps exact IDs, body and route and only reconciles; restart after conversion keeps all of them |
 | CT-ISUB-18 | logs and spans for every typed error carry codes and paths only, never raw arguments or secret-shaped values |
 | CT-ISUB-19 | attempts: a source edit and an approved-definitions renewal of the same task ID, each with a late submission from the old run (`stale`, writes nothing), a duplicate after apply (original receipt), a successful current-run submission, and exactly one introduction |
 
@@ -1559,7 +1646,7 @@ reopens it on the frozen revision. Manifest rows carry the IDs that affect them 
 | ID | Source | Requirement (short) | Response and evidence | Status |
 | --- | --- | --- | --- | --- |
 | SOL-PLAN-01 | Sol P0 | complete native-authorized mutation and real helper HTTP characterizations | CT-INT-01 (authenticated MCP `workflow_write` → production-wired write controller → production native adapter → loopback T3 HTTP/WS peer → real `guidance.sqlite3`: valid proof, weak/foreign/truncated/missing/lagged proof with zero rows, replay/conflict, Stop/generation/source change), CT-INT-02 (`supervision_team` through `authorizeNative`), CT-INT-03 (production team runtime + transport + global `fetch` over a real loopback socket: lost reply + restart, stalled/truncated 2xx, Stop/quarantine before and after the POST, redirect), all `s1-baseline` (5.4; registry) | resolved in v2 |
-| SOL-PLAN-02 | Sol P0 (run 3: open, narrowed) | Stop ordering must cover policy-dependent SQL mutations, not only sends; reconcile admission with actual adapter initiation | 3.11 items 1, 2, 4: one process-wide `admit` section for Stop/Enable, sends and every policy-dependent write (including `workflow_write`, team mutations, typed intake/finalization, Start activation); admission = the adapter's synchronous `initiate` handoff, not a fork; `FiberMap.run(..., {onlyIfMissing: true})`; CT-LIN-05 executable contract (Stop completes while the reply is pending), CT-LIN-07, CT-LIN-08; `CC-STOP-LIN.policyDependentMutations` | resolved in v2.1 (Sol `sol-v2-frozen-plan-review.md`) |
+| SOL-PLAN-02 | Sol P0 (run 4: open, narrowed to in-flight ownership) | Stop ordering must cover policy-dependent SQL mutations, not only sends; reconcile admission with actual adapter initiation | 3.11 items 1, 2, 4 (one process-wide `admit` for Stop/Enable, sends and the 50 policy-dependent writes; synchronous `initiate`); v2.2: in-section `FiberMap.get` and durable-receipt lookup before any initiation, registration in the same masked body without `onlyIfMissing`, total mapped operation with `ensuring(release)`, the initiating caller as sole cancellation owner (owner cell + `onInterrupt`), duplicates join only; CT-LIN-05 steps 1-7; exact 4.0.5 probe `docs/effect-v4-admission-probe.mjs` (8/8 cases); `sol-v21-frozen-plan-review.md` | resolved in v2.2 |
 | SOL-PLAN-03 | Sol P1 (run 3: partial) | real call shapes and acquisition/injection points for synchronous consumers; CLI/config without a fake supervision runtime | 3.9 B-03 call-shape rule (`temporaryBoundaries.callShapes`), I-01/I-02 injections, B-04 T-01..T-07 (ServiceAuth + CLI in S6c, retained pure `loadDataDirectory`, saveThreadPolicy handler in S6a) | resolved in v2.1 |
 | SOL-PLAN-04 | Sol P1 | phase/seam/expected/target per case; known failures as red evidence; consolidation | 5.1 phases; registry fields for every case; CT-TCTRL-03 `known-failure` in S1b with D-21; consolidations in 5.4 | resolved in v2 |
 | SOL-PLAN-05 | Sol P1 | compiled/installed bin harness, signals, probe cases, tooling in lint/typecheck | 3.1 (CT-CLI-BIN-01..03, CT-PROBE-T3-01..05, entries), 5.3 rule 4, section 9 watchdog row, section 11 lint/typecheck coverage | resolved in v2 |
@@ -1569,7 +1656,7 @@ reopens it on the frozen revision. Manifest rows carry the IDs that affect them 
 | SOL-PLAN-09 | Sol P1 | mandatory Schema boundaries; exact API spellings; stale labels | 3.10; rows name decode boundaries; `Layer.scoped`/`Schema.parseJson` removed; stale D1–D11/S3d labels mapped; API check script 0 problems | resolved in v2 |
 | A-P01 | Astra (run 3: open) | adapt synchronous consumers at each service transition (auth, CLI/config, `noProjectControl`/`startStatus`/`saveThreadPolicy` handlers) | 3.9 B-04 T-01..T-07 and call shapes; ServiceAuth, CLI and the `main.ts` entry guard in S6c with their callers; retained pure `loadDataDirectory`; work packages WP-S6c-AUTH/WP-S6c-COMP | resolved in v2.1 (Astra `plan-v2-review.md`) |
 | A-P02 | Astra | one server-lifetime auth client; forge separate; concurrent HTTP-login test | 3.2 table and D-24; CT-AUTH-05 | resolved in v2 |
-| A-P03 | Astra (run 3: open) | one process-wide contract in plan and manifest; actual adapter initiation, not a fork (Astra's 4.0.5 probe `harness-probe/admission-fork-v2.json`); coordinate legacy Stop callers from S6a | 3.11 items 1, 2, 4; manifest `CC-STOP-LIN` normalized to the process-wide section; 3.9 T-07; CT-LIN-02/05/06 at the first S6a freeze | resolved in v2.1 |
+| A-P03 | Astra (run 4: open, narrowed) | one process-wide contract in plan and manifest; actual adapter initiation, not a fork (Astra's 4.0.5 probe `harness-probe/admission-fork-v2.json`); coordinate legacy Stop callers from S6a | 3.11 "In-flight lookup and resource ownership" and "Cancellation owner"; CT-LIN-05 steps 4-7 (duplicate, owner interruption at handoff and during the reply, Stop while pending, scope close); `FiberMap.get` lookup, no `onlyIfMissing` (`FiberMap.ts:1427-1428`); probe results under CT-LIN-05; `plan-v2.1-review.md` | resolved in v2.2 |
 | A-P04 | Astra | separate baseline characterization, Vitest-only parity, 4.0.5 transition goldens and new regressions | 5.1 phases; S0/S1c split; CT-MAIN-02 and CT-PS-01 split; registry `reuses`/`newObservation` | resolved in v2 |
 | A-P05 | Astra | finite runner and finalizer bounds after S0; self-tests; watchdog escalation; specific leak allowlist | 5.3 rules 2–5 | resolved in v2 |
 | A-P06 | Astra | mounted baseline matrix; query vs mutation lifetimes; scope keys; editor and setup drafts | 3.8; UI-STORY-01..08; CT-UI-EDITOR-01, CT-UI-SETUP-01 | resolved in v2 |
@@ -1587,7 +1674,7 @@ reopens it on the frozen revision. Manifest rows carry the IDs that affect them 
 | ANDREA-ITOOL-01 | Andrea | typed Supervisor MCP interpretation submission validated with `Schema`, exact native identity/source/run/binding authority, no T3 change, superseded parsing removed, no fallback or duplicate store | 3.12 items 1–8, 11, 12; CC-INTERP-SUBMIT; CT-ISUB-01..19; slice S6e; D-27 | reconciled with both design reports (v2.1); pending reviewer confirmation |
 | ANDREA-ROUTE-01 | Andrea | could the tool also dispatch to the right thread? | 3.12 answer and item 9: yes, a successful submission starts the existing service-owned delivery to the bound operative; no model-chosen destination and no send inside the tool | reconciled (both reviewers agree) |
 | SOL-ISUB-01 | Sol P0 (run 3) | write-once per interpretation attempt, not per reused task ID; source-edit and definition-renewal scenarios | 3.12 items 1 and 5 (attempt key, `attemptId`, receipts in the existing receipt table, task pointer, superseded attempts `stale`); CT-ISUB-19 | resolved in v2.1 |
-| SOL-ISUB-02 | Sol P1 (run 3) | candidate store and `proposalEvidenceCurrent`, proof re-verification before apply and Start, retained request/agreement cut-over without a permanent parser | 3.12 items 7, 8, 11; CT-ISUB-07/10/16/17 | resolved in v2.1 |
+| SOL-ISUB-02 | Sol P1 (run 4: partial) | candidate store and `proposalEvidenceCurrent`, proof re-verification before apply and Start, retained request/agreement cut-over without a permanent parser | 3.12 items 7, 8, 11 and CT-ISUB-07/10/16/17; v2.2: candidate-free inferred/provisional tasks and their introductions get `TaskRecord.interpretationEvidence` (same discriminated union); the cut-over validates their legacy message once and records `supervisor_message` with plan digest and source pin, or stale with the baseline result; CT-ISUB-17 parameterized with `supervisor-conversation.test.ts:2482` | resolved in v2.2 |
 | I-03 | Astra (run 3) | persisted candidate/agreement provenance, bounded cut-over (agreements, unsent introductions, pending Start, in-flight requests), re-verification before all application including bare Start, receipt lookup before the state gate, final-chat interpretation wording | 3.12 items 5, 7, 8, 11, 12; CT-ISUB-04/07/10/16/17; CC-INTERP-SUBMIT participants include `supervisor-conversation-store.ts` | resolved in v2.1 |
 | SOL-ITOOL-1 | Sol design | actual authenticated MCP → controller → real native proof → real SQL receipt; wrong root/helper/run/provider/source/generation, weak/forged/rolled-back, excess keys and lag rejected; raw input not stripped | 3.12 items 2–4; CT-ISUB-02, -03 | resolved in v2.1 |
 | SOL-ITOOL-2 | Sol design | prompt return with a staged receipt; finalize once on successful completion; ignore final prose and JSON | 3.12 items 6–7; CT-ISUB-01, -09, -10, -15 | resolved in v2.1 |
@@ -1606,6 +1693,7 @@ reopens it on the frozen revision. Manifest rows carry the IDs that affect them 
 | COORD-UI-01 | Coordinator | bounded UI baseline proof package: isolated loopback fixture serving the unchanged compiled UI, deterministic scenarios, fixture/native labels, no proxy and no real writes; coordinator records UI-STORY-01..08 before S7 | section 7 (UI baseline fixture), section 6.1 S1 row, D-30, WP-S1-UI, CT-UI-FIXTURE-01 | prepared in v2.1 |
 | D-26-ACCEPT | Sol and Astra (run 3) | D-26 accepted: delete the unused GuidanceStore notice-pipeline methods with call-graph proof; keep constructor recovery, stored rows and fixture `classify`; retire CT-GDB-03..05 | section 12 D-26; registry CT-GDB-03..05 `retired` | resolved |
 | SOL-PREC | Sol (run 3 precision notes) | CT-ISUB-14 validation spans; CT-APP-02 slice wording; CT-PSS-02/CT-TSTORE-02 reuse/observation fields; per-panel browser behaviour | CT-ISUB-14; registry fixes; section 7 UI note | resolved in v2.1 |
+| RUN4-PREC | Sol and Astra (run 4 consistency notes) | `reconcileStopNotice` is asynchronous (T-03); `reconcileStopped` returns a Promise (call shapes); per-file S6e prose uses `attemptId`, the current-attempt pointer and the namespaced receipt; B2 ordering; stale "fork" wording in 3.11 | 3.9 T-03; `temporaryBoundaries.callShapes`; manifest S6e rows for `project-supervisor.ts`, `project-supervisor-store.ts`, `supervisor-conversation-store.ts`; 3.12 B2; 3.11 item 1 | resolved in v2.2 |
 | SOL-FILES | Sol | 34 per-file rows reference SOL-PLAN-01..09 | each row carries the IDs in `reviewFindings` and its row change; validation lists 34/34 | resolved in v2 |
 | ASTRA-FILES | Astra | 113 per-file rows reference A-P01..A-P08 and O-03 | each row carries the IDs in `reviewFindings`; slices, phases, Schema boundaries, clock domains and test phases normalized; validation lists 113/113 | resolved in v2 |
 | L-01 | W4 | helper channel `scheduledTasks.upsert` is sent after awaits without a recheck (`supervisor-helper-transport.ts:235-244`) | preserved exactly; repair is a separate decision | open decision (not blocking) |
