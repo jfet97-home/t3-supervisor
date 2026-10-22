@@ -23967,6 +23967,13 @@
    "requirement": "after a held Save POST was dropped on session revocation, a second POST to the same path arrived (401 before body read) before manual re-authentication; source unverified (likely browser transport retry); the API helper has one fetch and no write replay",
    "response": "baseline qualification for S7 and real-HTTP semantics: no application-level replay may be added; the behaviour is re-observed on the S7 build; coordinator evidence story-03-save-log.json and story-03-observations.json",
    "status": "recorded"
+  },
+  {
+   "id": "S0-RUN-ORCH",
+   "source": "Sol and Astra (round 8: A-S0-R01, A-S0-R02, SOL-S0-RUN-01)",
+   "requirement": "npm test chained two watchdog runs with &&: each had its own 20-minute deadline, and npm forwarded filters, configuration, reporters and the deadline only to the second",
+   "response": "plan 5.3 rule 4: one runner owns the main and cpu-bound phases under one whole-run deadline and routes caller arguments once (configuration, file and location filters, per-phase and combined reports); self-tests test/harness/phases.test.ts",
+   "status": "fixed (S0), recheck pending"
   }
  ]
 }

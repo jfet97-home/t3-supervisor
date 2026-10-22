@@ -1165,8 +1165,8 @@ timeouts (`run.BPv-BBRv.js:3270-3271`). Policy:
    deadline tests of `test/t3-projection-stream.test.ts` (0.6 s without the hook, 10–56 s
    with it, against the product 5 s bound) and two of `test/t3.test.ts` (the 25 ms
    `httpTimeoutMs` re-read and the 32 MiB default-budget read). These two files run in a
-   separately invoked `vitest.cpu-bound.config.ts` (`npm test` runs both invocations, each
-   under the watchdog) without that hook; every assertion and explicit deadline is
+   separate `vitest.cpu-bound.config.ts` phase (`npm test` runs the main and cpu-bound
+   phases in one watchdog run, rule 4) without that hook; every assertion and explicit deadline is
    unchanged. Their compensating gate, `test/support/handle-gate.ts`, fails a file that
    leaves any native resource open (timers, immediates, sockets, servers, requests; net
    count per kind against the file's start, after two loop turns so already closed handles
@@ -1177,11 +1177,20 @@ timeouts (`run.BPv-BBRv.js:3270-3271`). Policy:
    cleanup assertions (aborted and timed-out reads, unread bodies, closed servers) remain
    the evidence for promise settlement. When the owning slice ports these modules (S4),
    their Effect tests return to the full detector or record why not.
-4. **Outer watchdog (tooling adapter, O-03).** `npm test` runs `scripts/run-tests.ts`, an
-   Effect program (`effect/process` `ChildProcess` with `NodeChildProcessSpawner`) that
-   starts `vitest run` in its own process group under a 20-minute whole-run deadline (about
-   6× the 196 s baseline) and on expiry sends TERM to the group, then KILL after 10 s, and
-   exits 124. CI adds `timeout-minutes: 30`. It is deliberately a separate process
+4. **Outer watchdog (tooling adapter, O-03).** `npm test` runs `scripts/run-tests.ts` once, an
+   Effect program (`effect/process` `ChildProcess` with `NodeChildProcessSpawner`) that runs
+   the declared phases in order (`--watchdog-phase=main:vitest.config.ts` and
+   `--watchdog-phase=cpu-bound:vitest.cpu-bound.config.ts`), each `vitest run` in its own
+   process group, under one 20-minute whole-run deadline (about 6× the 196 s baseline): a
+   later phase gets only the remainder, and on expiry the active group gets TERM, then KILL
+   after 10 s, no later phase starts and the run exits 124. A failing phase stops the run
+   with its exit code; signals are forwarded to the active group (128 + n). Caller
+   arguments are parsed once with Vitest's own parser: `--config` runs that configuration
+   once with them; file filters select phases by Vitest's own matching (`vitest list
+   --filesOnly`), a location filter goes only to the phase owning its file, and a selection
+   no phase matches fails as Vitest does; over several phases each report goes to its own
+   `<name>.<phase>.<ext>` file and `--reporter=json` combines them into the requested file
+   with a per-phase status. CI adds `timeout-minutes: 30`. It is deliberately a separate process
    independent of the tested runtime; it is the emergency backstop, not the normal test
    bound (rule 2 is).
 5. **Self-tests:** `npm run test:harness` (separate config, excluded from parity, run in
@@ -1720,6 +1729,7 @@ reopens it on the frozen revision. Manifest rows carry the IDs that affect them 
 | UPGRADE-406 | User (via coordinator, 19:08Z) | use the latest v4: the matching 4.0.6 set is published under `latest` | section 2: exact 4.0.6 pins with provenance; transition evidence (typecheck, 869/869 baseline, harness, 8-case probe identical); S1c goes 4.0.1 -> 4.0.6; S0 4.0.1 parity unchanged | resolved |
 | GATE-CPU | Coordinator (S0) | the unchanged CPU-bound deadline tests cannot run under Vitest's global async hook | 5.3 rule 3 exception: `t3.test.ts` and `t3-projection-stream.test.ts` in a separate invocation with the fatal native-resource gate; coverage excludes pending promises and fibers (none started by the exercised code); deadlines and assertions unchanged | resolved (S0) |
 | UI-STORY-03-BASELINE | Coordinator (UI baseline, fixture `1e09d57`) | session revoked while a Save POST is held: the dropped POST was followed by a second POST to the same path (rejected 401 before body read) before manual re-authentication; the API helper has one `fetch` and no write replay, so the source (likely browser transport retry) is unverified | recorded as a baseline qualification for S7 and real-HTTP semantics: S7 must not add an application-level replay; whether one user action can produce two wire POSTs after a dropped connection is observed again on the S7 build; evidence `story-03-save-log.json`, `story-03-observations.json` (coordinator) | recorded |
+| S0-RUN-ORCH | Sol and Astra (round 8, A-S0-R01/R02, SOL-S0-RUN-01) | `npm test` chained two watchdogs with `&&`: each got its own 20-minute deadline, and npm forwarded filters, configuration, reporters and the deadline only to the second | 5.3 rule 4: one runner owns both phases under one whole-run deadline and routes caller arguments once (configuration, file and location filters, per-phase and combined reports); runner self-tests `test/harness/phases.test.ts` | fixed (S0), recheck pending |
 | SOL-FILES | Sol | 34 per-file rows reference SOL-PLAN-01..09 | each row carries the IDs in `reviewFindings` and its row change; validation lists 34/34 | resolved in v2 |
 | ASTRA-FILES | Astra | 113 per-file rows reference A-P01..A-P08 and O-03 | each row carries the IDs in `reviewFindings`; slices, phases, Schema boundaries, clock domains and test phases normalized; validation lists 113/113 | resolved in v2 |
 | L-01 | W4 | helper channel `scheduledTasks.upsert` is sent after awaits without a recheck (`supervisor-helper-transport.ts:235-244`) | preserved exactly; repair is a separate decision | open decision (not blocking) |

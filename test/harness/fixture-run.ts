@@ -10,12 +10,23 @@ import { onTestFinished } from "vitest";
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const fixtureConfig = "test/harness/fixtures/vitest.fixture.config.ts";
 
-export interface FixtureRun {
+export interface WatchdogRun {
   readonly code: number | null;
   readonly signal: NodeJS.Signals | null;
   readonly output: string;
   readonly elapsedMs: number;
+  // every process group the watchdog announced, in order (file listings and phases)
+  readonly groups: ReadonlyArray<number>;
+}
+
+export interface FixtureRun extends WatchdogRun {
   readonly group: number | undefined;
+}
+
+export interface StartedWatchdog {
+  readonly pid: number;
+  readonly markers: string;
+  readonly result: Promise<WatchdogRun>;
 }
 
 export interface StartedFixtureRun {
@@ -50,34 +61,43 @@ export const processExists = (pid: number): boolean => {
 
 export const groupExists = (group: number): boolean => processExists(-group);
 
-export const startFixtureRun = async (fixture: string, deadlineMs: number, config = fixtureConfig): Promise<StartedFixtureRun> => {
+// the watchdog with the given arguments; a failed assertion must not leave it or any of its groups behind
+export const startWatchdog = async (args: (markers: string) => ReadonlyArray<string>): Promise<StartedWatchdog> => {
   const markers = await mkdtemp(join(tmpdir(), "t3-supervisor-harness-"));
-  const report = join(markers, "report.json");
   const started = performance.now();
-  const child = spawn(process.execPath, [
-    "--import", "tsx", "scripts/run-tests.ts", `--watchdog-deadline-ms=${deadlineMs}`,
-    "--config", config, `test/harness/fixtures/${fixture}.fixture.ts`,
-    "--reporter=default", "--reporter=json", `--outputFile=${report}`,
-  ], { cwd: root, env: nestedEnvironment(markers), stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, ["--import", "tsx", "scripts/run-tests.ts", ...args(markers)], {
+    cwd: root, env: nestedEnvironment(markers), stdio: ["ignore", "pipe", "pipe"],
+  });
   let output = "";
   child.stdout.setEncoding("utf8").on("data", (chunk: string) => { output += chunk; });
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => { output += chunk; });
-  const result = new Promise<FixtureRun>((resolve, reject) => {
+  const result = new Promise<WatchdogRun>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => {
-      const group = /leads process group (\d+)/.exec(output)?.[1];
-      resolve({ code, signal, output, elapsedMs: performance.now() - started, group: group === undefined ? undefined : Number(group) });
+      const groups = [...output.matchAll(/leads process group (\d+)/g)].map((match) => Number(match[1]));
+      resolve({ code, signal, output, elapsedMs: performance.now() - started, groups });
     });
   });
-  // a failed assertion must not leave the nested watchdog or its group behind
   onTestFinished(async () => {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-    const { group } = await result;
-    if (group !== undefined && groupExists(group)) process.kill(-group, "SIGKILL");
+    const { groups } = await result;
+    for (const group of groups) if (groupExists(group)) process.kill(-group, "SIGKILL");
     await rm(markers, { recursive: true, force: true });
   });
   if (child.pid === undefined) throw new Error("the watchdog did not start");
-  return { pid: child.pid, markers, report, result };
+  return { pid: child.pid, markers, result };
+};
+
+export const startFixtureRun = async (fixture: string, deadlineMs: number, config = fixtureConfig): Promise<StartedFixtureRun> => {
+  let report = "";
+  const started = await startWatchdog((markers) => {
+    report = join(markers, "report.json");
+    return [
+      `--watchdog-deadline-ms=${deadlineMs}`, "--config", config, `test/harness/fixtures/${fixture}.fixture.ts`,
+      "--reporter=default", "--reporter=json", `--outputFile=${report}`,
+    ];
+  });
+  return { ...started, report, result: started.result.then((run) => ({ ...run, group: run.groups[0] })) };
 };
 
 export const runFixture = async (fixture: string, deadlineMs: number, config = fixtureConfig) => {

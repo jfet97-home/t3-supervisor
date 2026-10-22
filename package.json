@@ -11,7 +11,7 @@
     "lint": "eslint src test ui/src scripts vite.config.ts vitest.config.ts vitest.harness.config.ts vitest.cpu-bound.config.ts",
     "typecheck": "tsc --noEmit && tsc -p ui/tsconfig.json",
     "build": "tsc -p tsconfig.build.json && vite build",
-    "test": "node --import tsx scripts/run-tests.ts && node --import tsx scripts/run-tests.ts --config vitest.cpu-bound.config.ts",
+    "test": "node --import tsx scripts/run-tests.ts --watchdog-phase=main:vitest.config.ts --watchdog-phase=cpu-bound:vitest.cpu-bound.config.ts",
     "test:harness": "node --import tsx scripts/run-tests.ts --config vitest.harness.config.ts",
     "start": "node dist/main.js",
     "dev:ui": "vite build --watch",
