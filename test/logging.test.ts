@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
@@ -10,6 +10,7 @@ import { TestClock, TestConsole } from "effect/testing";
 import { InvalidConfiguration, T3TokenUnavailable } from "../src/errors.js";
 import { jsonLogger, logEvent } from "../src/logging.js";
 import { reportFailure, SupervisorLive } from "../src/supervisor.js";
+import { startFakeT3 } from "./support/cli-fake-t3.js";
 
 // secrets as a nested failure would carry them: a token, a native error body and a webhook capability URL
 const token = "Zq3x9VbN2mK7pL4tR8wY1cH6jD5sF0gAuE";
@@ -96,3 +97,25 @@ it.live("a missing T3 token fails the server graph with T3TokenUnavailable, whic
   assert.equal(typeof fields.time, "string");
   assert.deepEqual({ ...fields, time: "<time>" }, { time: "<time>", event: "supervisor_failed", reason: "t3_token_unavailable" });
 }), { timeout: 10_000 });
+
+it.live("an empty or whitespace-only T3 token file fails the server graph with T3TokenUnavailable before any request to T3", () =>
+  Effect.gen(function* () {
+    const directory = yield* Effect.acquireRelease(Effect.promise(() => mkdtemp(join(tmpdir(), "logging-blank-token-"))),
+      (path) => Effect.promise(() => rm(path, { recursive: true, force: true })));
+    const t3 = yield* Effect.acquireRelease(Effect.promise(() => startFakeT3({ token: "unused-read-token" })), (fake) => Effect.promise(() => fake.close()));
+    for (const [name, content] of [["empty", ""], ["whitespace", " \n\t \n"]] as const) {
+      const tokenFile = join(directory, `${name}-token`);
+      yield* Effect.promise(() => writeFile(tokenFile, content, { mode: 0o600 }));
+      const provider = ConfigProvider.layer(ConfigProvider.fromEnvRecord({
+        DATA_DIRECTORY: join(directory, `${name}-data`), T3_TOKEN_FILE: tokenFile, T3_URL: t3.baseUrl,
+      }));
+      const exit = yield* Effect.exit(Layer.build(SupervisorLive.pipe(Layer.provide(provider))));
+      assert.ok(Exit.isFailure(exit), name);
+      assert.ok(Cause.squash(exit.cause) instanceof T3TokenUnavailable, name);
+      const lines = yield* reportFailure(exit.cause).pipe(Effect.andThen(TestConsole.logLines), Effect.provide(TestConsole.layer));
+      assert.deepEqual(lines.map((line) => ({ ...(JSON.parse(String(line)) as object), time: "<time>" })),
+        [{ time: "<time>", event: "supervisor_failed", reason: "t3_token_unavailable" }], name);
+    }
+    // the token is checked before the descriptor request, so a blank file is never retried against T3
+    assert.deepEqual({ http: t3.traffic.http, upgrades: t3.traffic.upgrades }, { http: [], upgrades: 0 });
+  }), { timeout: 10_000 });

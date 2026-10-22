@@ -36,7 +36,7 @@ export const createStatus = (config: Pick<SupervisorSettings, "uiPort">, now: nu
   store: null,
 });
 
-export const readiness = (status: SupervisorStatus, config: SupervisorSettings, now = Date.now()) => {
+export const readiness = (status: SupervisorStatus, config: SupervisorSettings, now: number) => {
   const alive = now - status.heartbeat < 60_000;
   const supervisionProgress = config.uiPort === undefined || status.supervisionState === "ready";
   const ready = supervisionProgress && alive && status.activation !== null && status.t3Connected && status.storeState === "ready";
@@ -143,8 +143,9 @@ export const runSupervisor = Effect.gen(function* () {
   return yield* watch;
 });
 
-// the read token, trimmed, as a Redacted value; a missing or unreadable file fails without its path or cause
-const T3Token = Schema.RedactedFromValue(Schema.Trim);
+// the read token, trimmed and non-empty, as a Redacted value; a missing, unreadable or blank file fails without its path or
+// cause before any request to T3
+const T3Token = Schema.RedactedFromValue(Schema.Trim.check(Schema.isNonEmpty()));
 const readT3Token = (path: string) => FileSystem.FileSystem.use((files) => files.readFileString(path)).pipe(
   Effect.flatMap(Schema.decodeUnknownEffect(T3Token)),
   Effect.mapError(() => new T3TokenUnavailable()),

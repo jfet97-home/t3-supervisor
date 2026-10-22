@@ -132,9 +132,9 @@ const services = (settings: SupervisorConfig, status: SupervisorStatus, base: La
   base, Layer.succeed(SupervisorStatusRef, statusRefs.get(status)!), ThreadPolicy.layer, SupervisorOwnership.layer,
 ).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)));
 
-// the /health body the status would serve
-const healthBody = (status: SupervisorStatus, settings: SupervisorConfig) =>
-  JSON.stringify({ ok: false, readiness: readiness(status, settings), ...status });
+// the /health body the status would serve at the given time
+const healthBody = (status: SupervisorStatus, settings: SupervisorConfig, now: number) =>
+  JSON.stringify({ ok: false, readiness: readiness(status, settings, now), ...status });
 
 const until = async (condition: () => boolean, timeoutMs: number, label: string) => {
   const deadline = performance.now() + timeoutMs;
@@ -174,7 +174,7 @@ it("CT-REDACT-01: native transport failures carrying a token, a native error bod
     } finally {
       await Effect.runPromise(Fiber.interrupt(refused));
     }
-    assertNoLeak("descriptor status", [healthBody(refusedStatus, refusedConfig)], secrets);
+    assertNoLeak("descriptor status", [healthBody(refusedStatus, refusedConfig, Date.now())], secrets);
 
     // shell subscriptions answered with an Exit failure carrying the secrets: the guard logs the phase only
     const failing = await startFakeT3({ token: secrets.token, failure: nativeFailure(secrets), failSubscriptions: true });
@@ -195,7 +195,7 @@ it("CT-REDACT-01: native transport failures carrying a token, a native error bod
     assertNoLeak("console", observation.console, secrets);
     assertNoLeak("effect logs", observation.effectLogs, secrets);
     assertNoLeak("spans", renderSpans(observation.spans), secrets);
-    assertNoLeak("watch status", [healthBody(watchStatus, watchConfig)], secrets);
+    assertNoLeak("watch status", [healthBody(watchStatus, watchConfig, Date.now())], secrets);
     // the baseline logs exactly these classifications, writes no Effect log record and creates no span on these paths
     assert.deepEqual(supervisorEvents(observation.console), [
       { event: "supervisor_started" },
@@ -243,7 +243,7 @@ it("CT-REDACT-01: nested causes carrying a token, a native error body and a webh
     assertNoLeak("console", observation.console, secrets);
     assertNoLeak("effect logs", observation.effectLogs, secrets);
     assertNoLeak("spans", renderSpans(observation.spans), secrets);
-    assertNoLeak("status", [healthBody(status, settings)], secrets);
+    assertNoLeak("status", [healthBody(status, settings, Date.now())], secrets);
     const sortedEvents = supervisorEvents(observation.console).map((fields) => JSON.stringify(fields)).sort();
     assert.deepEqual(sortedEvents, [
       JSON.stringify({ event: "operation_deferred", phase: "t3_stream" }),
