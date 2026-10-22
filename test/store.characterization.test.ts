@@ -3,8 +3,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { Effect } from "effect";
+import { NodeFileSystem } from "@effect/platform-node";
+import { Effect, Layer } from "effect";
 import { it } from "vitest";
+import { CatalogDb, catalogDbLayer } from "../src/db.js";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { makeStore, Store, StoreError, type StoreShape } from "../src/store.js";
 import { ThreadPolicyStore } from "../src/thread-policy.js";
@@ -165,13 +167,14 @@ it("CT-STORE-02: reopen whitelists legacy shells, and a malformed stored documen
 
 it("CT-STORE-03: the store connection carries the pragma golden and only journal_mode persists", { timeout: 10_000 }, async () => {
   await withTemporaryDirectory(async directory => {
-    const pragmas = await withStore(directory, store => Effect.sync(() => {
-      // the service value is the SqliteStore instance; its private connection is reachable at runtime
-      const database = (store as unknown as { db: DatabaseSync }).db;
-      const read = (name: string) => plain(database.prepare(`PRAGMA ${name}`).get());
-      return ["journal_mode", "synchronous", "foreign_keys", "busy_timeout", "wal_autocheckpoint", "secure_delete", "max_page_count"]
-        .map(name => [name, read(name)]);
-    }));
+    const pragmas = await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      // the store is built on the catalog client that the layer also exposes, so the pragmas are read on the store's connection
+      yield* Store;
+      const database = yield* CatalogDb;
+      const read = (name: string) => database.unsafe(`PRAGMA ${name}`).pipe(Effect.map(([row]) => plain(row)));
+      return yield* Effect.forEach(["journal_mode", "synchronous", "foreign_keys", "busy_timeout", "wal_autocheckpoint", "secure_delete", "max_page_count"],
+        name => read(name).pipe(Effect.map(value => [name, value])));
+    }).pipe(Effect.provide(Store.layer.pipe(Layer.provideMerge(catalogDbLayer(directory)), Layer.provide(NodeFileSystem.layer))))));
     assert.deepEqual(pragmas, [
       ["journal_mode", { journal_mode: "wal" }],
       ["synchronous", { synchronous: 2 }],
