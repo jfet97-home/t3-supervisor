@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {createHash, randomUUID} from "node:crypto";
 import {it} from "@effect/vitest";
-import {Clock, Context, Deferred, Effect, Layer} from "effect";
+import {Clock, Context, Deferred, Effect, Exit, Layer} from "effect";
 import type {GuidanceDb} from "../src/db.js";
 import {guidanceTransaction} from "../src/guidance-sql.js";
 import {fingerprint} from "../src/guidance-store.js";
@@ -318,6 +318,13 @@ it.live("CT-WSS-01: a failure after the CAS update and before the operation inse
   assert.equal((yield* fixture.workflows.get("project-a", "main-a"))?.revision, current.revision);
   assert.deepEqual(yield* operationRows(fixture.sql), before.operations);
 
+  // joined into a caller's transaction, the same failure fails the caller and leaves nothing either
+  const joined = yield* Effect.exit(guidanceTransaction(fixture.sql)(fixture.workflows.apply(fixture.owner, input, validationFor(fixture), 350)));
+  assert.ok(Exit.isFailure(joined));
+  assert.deepEqual(updates, [current.revision + 1, current.revision + 1], "the joined CAS UPDATE also ran before the operation insert failed");
+  assert.equal(yield* rawDocument(fixture.sql, current.workflowId), before.document);
+  assert.deepEqual(yield* operationRows(fixture.sql), before.operations);
+
   // nothing was reserved: the identical request applies once the failure is removed
   yield* execute(fixture.sql, "DROP TRIGGER temp.ct_wss_01_operation");
   const applied = yield* fixture.workflows.apply(fixture.owner, input, validationFor(fixture), 400);
@@ -524,6 +531,42 @@ it.live("CT-WSS-02: concurrent applies at one expected revision yield one applie
   assert.deepEqual(stale, {status: "conflict", operationId: "other-op", reason: "revision", currentRevision: current.revision + 1});
   assert.equal(yield* rawDocument(store.sql, current.workflowId), afterOnce.document);
   assert.deepEqual(yield* operationRows(store.sql), afterOnce.operations);
+
+  // store: concurrent applies at one expected revision yield one applied and one revision conflict, and the same operation ID
+  // from two fibers writes once and both receive the identical receipt
+  {
+    const fixture = yield* makeStoreFixture();
+    const current = yield* importMain(fixture);
+    const first = applyInput(fixture, current, appendLocal(current, "first"), "concurrent-a");
+    const second = applyInput(fixture, current, appendLocal(current, "second"), "concurrent-b");
+    const results = yield* Effect.all([
+      fixture.workflows.apply(fixture.owner, first, validationFor(fixture), 300),
+      fixture.workflows.apply(fixture.owner, second, validationFor(fixture), 301),
+    ], {concurrency: "unbounded"});
+    const applied = results.filter(result => result.status === "applied");
+    const conflicts = results.filter(result => result.status === "conflict");
+    assert.equal(applied.length, 1, JSON.stringify(results));
+    assert.equal(conflicts.length, 1, JSON.stringify(results));
+    const winner = applied[0]!;
+    const loser = conflicts[0]!;
+    assert.ok(winner.status === "applied" && loser.status === "conflict");
+    assert.equal(winner.revision, current.revision + 1);
+    assert.deepEqual(loser, {status: "conflict", operationId: loser.operationId, reason: "revision", currentRevision: current.revision + 1});
+    assert.equal(winner.stateHash, sha256(yield* rawDocument(fixture.sql, current.workflowId)));
+    assert.deepEqual((yield* operationRows(fixture.sql)).map(row => row.operation_id).sort(), [winner.operationId, "agreement:" + fingerprint(["task-a", "proposal-a"])].sort());
+
+    const latest = (yield* fixture.workflows.get("project-a", "main-a"))!;
+    const once = applyInput(fixture, latest, appendLocal(latest, "once"), "same-op");
+    const [left, right] = yield* Effect.all([
+      fixture.workflows.apply(fixture.owner, once, validationFor(fixture), 400),
+      fixture.workflows.apply(fixture.owner, once, validationFor(fixture), 401),
+    ], {concurrency: "unbounded"});
+    assert.equal(left.status, "applied", JSON.stringify(left));
+    assert.deepEqual(right, left);
+    assert.equal(JSON.stringify(right), JSON.stringify(left));
+    assert.equal((yield* fixture.workflows.get("project-a", "main-a"))?.revision, latest.revision + 1);
+    assert.equal((yield* operationRows(fixture.sql)).filter(row => row.operation_id === "same-op").length, 1);
+  }
 }), {timeout: 10_000});
 
 it.live("CT-WSS-03: receipts and incompatible rows survive reopen and an exact replay returns the byte-identical receipt", () => Effect.gen(function* () {
