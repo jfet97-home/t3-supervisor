@@ -35,6 +35,23 @@ const maxTaskExcerptLength = 24_000;
 const maxPromptIssues = 40;
 const maxExpandedNodes = workflowDefinitionExpansionLimits.maxNodes;
 const maxExpansionDepth = workflowDefinitionExpansionLimits.maxDepth;
+const maxDefinitionIdLength = 200;
+const maxRequirementAssessments = 100;
+const maxInterpretationReplyLength = 16_000;
+const maxWorkflowInterpretationReplyLength = 128_000;
+// the interpretation bounds the final-chat parsers and the typed interpretation submission share
+export const interpretationLimits = {
+  maxObjectiveLength: maxTextLength,
+  maxReasonLength,
+  maxPlanTextLength,
+  maxDefinitionIdLength,
+  maxRequirementAssessments,
+  maxSourceMessageIds: 1,
+  maxInterpretationReplyLength,
+  maxWorkflowInterpretationReplyLength,
+  maxExpandedNodes,
+  maxExpansionDepth,
+} as const;
 const opaqueId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const canonicalJsonEqual = (left: unknown, right: unknown): boolean => left === undefined || right === undefined
   ? left === right : canonicalJson(left) === canonicalJson(right);
@@ -72,18 +89,38 @@ const unfenced = (text: string): string => /^```(?:json)?\s*\n([\s\S]*)\n```$/u.
 const InterpretationReply = Schema.Struct({
   objective: Schema.NullOr(Schema.String.check(Schema.isMaxLength(maxTextLength))),
   reason: Schema.String.check(Schema.isMaxLength(maxReasonLength)),
-  sourceMessageIds: Schema.Array(Schema.String).check(Schema.isMaxLength(1)),
+  sourceMessageIds: Schema.Array(Schema.String).check(Schema.isMaxLength(interpretationLimits.maxSourceMessageIds)),
 });
 const decodeInterpretationReply = Schema.decodeUnknownExit(Schema.fromJsonString(InterpretationReply));
 
+// the decoded interpretation fields the semantic rules read
+export type InterpretationFields = {readonly objective: string | null; readonly reason: string; readonly sourceMessageIds: ReadonlyArray<string>};
+export type InterpretationValue = {objective: string | null; reason: string};
+export type WorkflowInterpretationValue = InterpretationValue & {workflow: WorkflowProposalInfo; supervision?: "needed" | "not_needed"};
+// a semantic rejection as a fixed code and the argument path it concerns; it never carries the input
+export type InterpretationSemanticFailure = {
+  readonly ok: false;
+  readonly code: "objective_empty" | "source_message_ids_mismatch" | "not_needed_workflow_present";
+  readonly path: string;
+};
+export type InterpretationSemanticResult<A> = {readonly ok: true; readonly value: A} | InterpretationSemanticFailure;
+
+// the source rules over decoded fields: a non-empty objective cites exactly the source, a null one the source or nothing
+export const interpretationFromFields = (fields: InterpretationFields, sourceId: string): InterpretationSemanticResult<InterpretationValue> => {
+  const {objective, reason, sourceMessageIds} = fields;
+  if (objective !== null && objective.trim().length === 0) return {ok: false, code: "objective_empty", path: "/objective"};
+  if (sourceMessageIds.some(id => id !== sourceId) || objective !== null && sourceMessageIds.length !== 1)
+    return {ok: false, code: "source_message_ids_mismatch", path: "/sourceMessageIds"};
+  return {ok: true, value: {objective: objective === null ? null : redact(objective.trim()), reason: redact(reason)}};
+};
+
 export const parseInterpretation = (text: string, sourceId: string): {objective: string | null; reason: string} => {
-  if (text.length > 16_000) throw new Error("invalid_interpretation");
+  if (text.length > maxInterpretationReplyLength) throw new Error("invalid_interpretation");
   const decoded = decodeInterpretationReply(unfenced(text), exactKeys);
   if (Exit.isFailure(decoded)) throw new Error("invalid_interpretation");
-  const {objective, reason, sourceMessageIds} = decoded.value;
-  if (objective !== null && objective.trim().length === 0 || sourceMessageIds.some(id => id !== sourceId) ||
-    objective !== null && sourceMessageIds.length !== 1) throw new Error("invalid_interpretation");
-  return {objective: objective === null ? null : redact(objective.trim()), reason: redact(reason)};
+  const interpretation = interpretationFromFields(decoded.value, sourceId);
+  if (!interpretation.ok) throw new Error("invalid_interpretation");
+  return interpretation.value;
 };
 
 const sourceOf = (value: {origin?: "global" | "project" | undefined; path?: string | undefined; sourceId?: string | undefined}): WorkflowSourceInfo => ({
@@ -604,7 +641,7 @@ const canonicalSourceNode = (value: unknown, context: ProposalContext, options: 
       description = sourceExpected.description;
       references = sourceExpected.references;
     } else if (typeof value.definitionId === "string") {
-      if (!validText(value.definitionId, 200)) throw new Error("invalid_step_reference");
+      if (!validText(value.definitionId, maxDefinitionIdLength)) throw new Error("invalid_step_reference");
       definitionId = value.definitionId;
       const definition = steps.get(definitionId);
       if (!definition) {
@@ -615,10 +652,10 @@ const canonicalSourceNode = (value: unknown, context: ProposalContext, options: 
       } else {name = redact(definition.name);description = redact(definition.description);references = definition.references;source = sourceOf(definition);}
       localId = null;
     } else {
-      if (value.definitionId !== null || !validText(value.localId, 200) || !validText(value.name, maxPlanTextLength) || !validText(value.description, maxPlanTextLength)) {
+      if (value.definitionId !== null || !validText(value.localId, maxDefinitionIdLength) || !validText(value.name, maxPlanTextLength) || !validText(value.description, maxPlanTextLength)) {
         if (value.definitionId === undefined) {
           reportWorkflowApplyDiagnostic(options, {code: "local_step_definition_id_required", path: `${nodePath}/definitionId`, expected: "definitionId: null"});
-        } else if (value.definitionId === null && !validText(value.localId, 200)) {
+        } else if (value.definitionId === null && !validText(value.localId, maxDefinitionIdLength)) {
           reportWorkflowApplyDiagnostic(options, {code: "local_step_local_id_required", path: `${nodePath}/localId`, expected: "non-empty string up to 200 characters"});
         } else if (value.definitionId === null && !validText(value.name, maxPlanTextLength)) {
           reportWorkflowApplyDiagnostic(options, {code: "local_step_name_required", path: `${nodePath}/name`, expected: "non-empty string within the plan text limit"});
@@ -643,7 +680,7 @@ const canonicalSourceNode = (value: unknown, context: ProposalContext, options: 
   if (value.kind !== "workflow") throw new Error("unsupported_workflow_node_kind");
   if (!exactFields(value, ["kind", "definitionId", "reason"], ["nodeId", "templatePath", "name", "description", "references", "fixed", "source", "resolution", "status", "contributorThreadIds", "omissions", "plan"]))
     throw new Error("invalid_workflow_reference_fields");
-  if (!validText(value.reason, maxReasonLength) || !validText(value.definitionId, 200)) throw new Error("invalid_workflow_reference");
+  if (!validText(value.reason, maxReasonLength) || !validText(value.definitionId, maxDefinitionIdLength)) throw new Error("invalid_workflow_reference");
   if (sourceExpected && sourceExpected.kind !== "workflow") throw new Error("template_member_kind_changed");
   const definitionId = value.definitionId;
   if (sourceExpected?.kind === "workflow" && sourceExpected.definitionId !== definitionId) throw new Error("template_reference_changed");
@@ -853,7 +890,7 @@ const normalizeOmissions = (value: unknown, context: ProposalContext, owner: Def
   const normalized: WorkflowPlanWorkflowInfo["omissions"][number][] = [];
   for (const item of value) {
     if (!record(item) || !exactFields(item, ["templatePath", "kind", "id", "name", "source", "reason"]) ||
-      typeof item.templatePath !== "string" || !validText(item.id, 200) || !validText(item.name) || !validText(item.reason, maxReasonLength))
+      typeof item.templatePath !== "string" || !validText(item.id, maxDefinitionIdLength) || !validText(item.name) || !validText(item.reason, maxReasonLength))
       throw new Error("invalid_workflow_omission");
     const expected = templateLeaves.get(item.templatePath);
     if (!expected || present.has(item.templatePath) || item.kind !== expected.kind || item.id !== expected.id || item.name !== expected.name ||
@@ -995,11 +1032,11 @@ const occurrenceIdentity = (value: WorkflowPlanNodeInfo | Record<string, unknown
 const assessRequirements = (assessments: unknown, context: ProposalContext, plan: WorkflowPlanGroupInfo | null,
   options: CanonicalOptions): WorkflowRequirementInfo[] => {
   const refs = context.config.required;
-  if (!Array.isArray(assessments) || assessments.length > 100) throw new Error("invalid_workflow_requirements");
+  if (!Array.isArray(assessments) || assessments.length > maxRequirementAssessments) throw new Error("invalid_workflow_requirements");
   const assessmentByKey = new Map<string, {applies: boolean | "unknown"; reason: string}>();
   for (const item of assessments) {
     if (!record(item) || !exactFields(item, ["kind", "id", "applies", "reason"]) ||
-      !["step", "workflow"].includes(String(item.kind)) || !validText(item.id, 200) ||
+      !["step", "workflow"].includes(String(item.kind)) || !validText(item.id, maxDefinitionIdLength) ||
       !(item.applies === true || item.applies === false || item.applies === "unknown") || !validText(item.reason, maxReasonLength))
       throw new Error("invalid_requirement_assessment");
     const key = `${item.kind}:${item.id}`;
@@ -1491,28 +1528,23 @@ const WorkflowInterpretationReply = Schema.Struct({
 });
 const decodeWorkflowInterpretationReply = Schema.decodeUnknownExit(Schema.fromJsonString(WorkflowInterpretationReply));
 
-/** Converts a native Supervisor reply into a bounded, source-bound proposal. */
-export const parseWorkflowInterpretation = (text: string, sourceId: string, context: ProposalContext, nodeIds: NodeIds = randomNodeIds): {
-  objective: string | null; reason: string; workflow: WorkflowProposalInfo; supervision?: "needed" | "not_needed";
-} => {
-  if (text.length > 128_000) throw new Error("invalid_workflow_response");
-  const decoded = decodeWorkflowInterpretationReply(unfenced(text), exactKeys);
-  if (Exit.isFailure(decoded)) throw new Error("invalid_workflow_response");
-  const value = decoded.value;
-  const interpretation = parseInterpretation(JSON.stringify({objective: value.objective, reason: value.reason, sourceMessageIds: value.sourceMessageIds}), sourceId);
+// the semantic outcome of a source-checked interpretation in a definition context: not needed, needs context, a finite
+// provisional plan or a formal proposal; a provisional plan is never promoted
+export const workflowInterpretationOutcome = (interpretation: InterpretationValue, supervision: "needed" | "not_needed" | undefined,
+  workflow: unknown, context: ProposalContext, nodeIds: NodeIds = randomNodeIds): InterpretationSemanticResult<WorkflowInterpretationValue> => {
   // a semantic not-needed decision is temporary: no workflow is negotiated and a later substantive request is interpreted again
-  if (value.supervision === "not_needed" && interpretation.objective !== null) {
-    if (value.workflow !== null) throw new Error("invalid_workflow_response");
-    return {...interpretation, supervision: "not_needed", workflow: {...baseWorkflow(context, "unavailable", "Supervision was judged unnecessary for this task."), plan: null}};
+  if (supervision === "not_needed" && interpretation.objective !== null) {
+    if (workflow !== null) return {ok: false, code: "not_needed_workflow_present", path: "/workflow"};
+    return {ok: true, value: {...interpretation, supervision: "not_needed", workflow: {...baseWorkflow(context, "unavailable", "Supervision was judged unnecessary for this task."), plan: null}}};
   }
   if (interpretation.objective === null) {
-    return {...interpretation, workflow: {...baseWorkflow(context, "unavailable", "A workflow needs a clear task objective."),
-      ...provisionalPlan(context, "The latest message did not establish a task objective.")}};
+    return {ok: true, value: {...interpretation, workflow: {...baseWorkflow(context, "unavailable", "A workflow needs a clear task objective."),
+      ...provisionalPlan(context, "The latest message did not establish a task objective.")}}};
   }
-  const plan = validateWorkflowPlan(value.workflow, context, nodeIds);
+  const plan = validateWorkflowPlan(workflow, context, nodeIds);
   if (!plan) {
     const provisional = provisionalPlan(context, "The response did not contain a valid complete plan; the owning Supervisor will repair it in dialogue.");
-    return {...interpretation, workflow: {...baseWorkflow(context, "provisional", "The initial response could not be normalized. Continue with a finite provisional plan in the owning Supervisor dialogue."), ...provisional}};
+    return {ok: true, value: {...interpretation, workflow: {...baseWorkflow(context, "provisional", "The initial response could not be normalized. Continue with a finite provisional plan in the owning Supervisor dialogue."), ...provisional}}};
   }
   const unresolvedNodes = plan.plan === null || allNodes(plan.plan).some(node => node.kind === "step" ? node.resolution !== "resolved" :
     node.kind === "workflow" && node.resolution !== "resolved");
@@ -1522,7 +1554,21 @@ export const parseWorkflowInterpretation = (text: string, sourceId: string, cont
   const message = status === "proposed"
     ? "A complete source-bound semantic plan was proposed. It remains a draft until exact operative acceptance; it is not execution evidence."
     : "A finite provisional plan was proposed. Broken definitions, missing requirements, and unknown applicability remain visible and unresolved.";
-  return {...interpretation, workflow: {...baseWorkflow(context, status, message), ...plan}};
+  return {ok: true, value: {...interpretation, workflow: {...baseWorkflow(context, status, message), ...plan}}};
+};
+
+/** Converts a native Supervisor reply into a bounded, source-bound proposal. */
+export const parseWorkflowInterpretation = (text: string, sourceId: string, context: ProposalContext, nodeIds: NodeIds = randomNodeIds): {
+  objective: string | null; reason: string; workflow: WorkflowProposalInfo; supervision?: "needed" | "not_needed";
+} => {
+  if (text.length > maxWorkflowInterpretationReplyLength) throw new Error("invalid_workflow_response");
+  const decoded = decodeWorkflowInterpretationReply(unfenced(text), exactKeys);
+  if (Exit.isFailure(decoded)) throw new Error("invalid_workflow_response");
+  const value = decoded.value;
+  const interpretation = parseInterpretation(JSON.stringify({objective: value.objective, reason: value.reason, sourceMessageIds: value.sourceMessageIds}), sourceId);
+  const outcome = workflowInterpretationOutcome(interpretation, value.supervision, value.workflow, context, nodeIds);
+  if (!outcome.ok) throw new Error("invalid_workflow_response");
+  return outcome.value;
 };
 
 /** Revalidates the cached context against the full freshly loaded source snapshot. */
