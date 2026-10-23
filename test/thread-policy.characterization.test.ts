@@ -31,13 +31,17 @@ it.effect("CT-POLICY-01: two stores on one file saving the same generation concu
     assert.equal(fulfilled.length, 1);
     assert.equal(rejected.length, 1);
     assert.equal(rejected[0] instanceof Error ? rejected[0].message : rejected[0], conflict.message);
-    const winner = fulfilled[0];
-    assert.deepEqual(winner, { generation: base.generation + 1, excludedThreadIds: ["from-first"] });
+    // each store has its own client and database worker, so either save may take the write lock first
+    const winner = fulfilled[0]!;
+    const firstWon = winner.excludedThreadIds[0] === "from-first";
+    assert.deepEqual(winner, { generation: base.generation + 1, excludedThreadIds: [firstWon ? "from-first" : "from-second"] });
     assert.deepEqual(yield* first.get(), winner);
     assert.deepEqual(yield* second.get(), winner);
     // the losing store succeeds only after reloading the committed generation
-    assert.deepEqual(yield* second.save({ ...(yield* second.get()), excludedThreadIds: ["from-second"] }), { generation: base.generation + 2, excludedThreadIds: ["from-second"] });
-    assert.deepEqual(yield* first.get(), { generation: base.generation + 2, excludedThreadIds: ["from-second"] });
+    const [loser, loserId] = firstWon ? [second, "from-second"] : [first, "from-first"];
+    assert.deepEqual(yield* loser.save({ ...(yield* loser.get()), excludedThreadIds: [loserId] }), { generation: base.generation + 2, excludedThreadIds: [loserId] });
+    assert.deepEqual(yield* first.get(), { generation: base.generation + 2, excludedThreadIds: [loserId] });
+    assert.deepEqual(yield* second.get(), { generation: base.generation + 2, excludedThreadIds: [loserId] });
   })));
 }), { timeout: 10_000 });
 
