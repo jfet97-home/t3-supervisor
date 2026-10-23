@@ -123,22 +123,23 @@ export const openGuard: GateGuard = {
 export const admission = (stores: TeamStores, guard: GateGuard): Effect.Effect<Admission> =>
   Effect.map(makeSupervisionGate(guard).pipe(Effect.provide(stores.context)), (gate) => ({gate, guard}));
 
+// a suite may replace a field before it builds the next unit, as the baseline options object allowed
 export interface HelperTransportUnitOptions {
-  readonly stores: TeamStores;
-  readonly rpc: RpcHandler | null;
-  readonly baseUrl: string;
-  readonly projection: ProjectionRead;
+  stores: TeamStores;
+  rpc: RpcHandler | null;
+  baseUrl: string;
+  projection: ProjectionRead;
   // the project or global scope, read when a section evaluates it; by default the stored control of the project
-  readonly enabled?: ((projectId: string, mainThreadId: string) => boolean) | undefined;
+  enabled?: ((projectId: string, mainThreadId: string) => boolean) | undefined;
   // the native POST; the production fetch client runs over it
-  readonly fetch?: typeof globalThis.fetch | undefined;
+  fetch?: typeof globalThis.fetch | undefined;
 }
 
 /** The production helper transport over its own admission gate, with the unit's options for a later restart. */
-export interface HelperTransportUnit extends Admission {
+export type HelperTransportUnit = HelperTransportShape & Admission & {
   readonly transport: HelperTransportShape;
   readonly options: HelperTransportUnitOptions;
-}
+};
 
 /** Builds the transport's layer in the current scope (a restart builds another over the same file). */
 export const helperTransportUnit = (options: HelperTransportUnitOptions): Effect.Effect<HelperTransportUnit, never, Scope.Scope> => Effect.gen(function* () {
@@ -154,8 +155,14 @@ export const helperTransportUnit = (options: HelperTransportUnitOptions): Effect
   const context = yield* Layer.build(HelperTransport.layer({baseUrl: options.baseUrl}).pipe(Layer.provide(Layer.mergeAll(
     Layer.succeedContext(options.stores.context), Layer.succeed(SupervisionGate, parts.gate), Layer.succeed(T3Client, t3Projections(options.projection)),
     http, native)))).pipe(Effect.orDie);
-  return {...parts, transport: Context.get(context, HelperTransport), options};
+  const transport = Context.get(context, HelperTransport);
+  return {...transport, ...parts, transport, options};
 });
+
+/** Builds the team store's layer again on the same client: its acquisition runs the restart recovery, as a new process's constructor did. */
+export const recoverTeamStore = (stores: TeamStores): Effect.Effect<SupervisorTeamStore["Service"], never, Scope.Scope> =>
+  Effect.map(Layer.build(SupervisorTeamStore.layer.pipe(Layer.provide(Layer.succeedContext(stores.context)))).pipe(Effect.orDie),
+    (context) => Context.get(context, SupervisorTeamStore));
 
 export interface TeamRuntimeUnitOptions {
   readonly stores: TeamStores;
@@ -168,7 +175,7 @@ export interface TeamRuntimeUnitOptions {
   readonly requests?: SupervisorConversationStoreShape | undefined;
 }
 
-const isUnit = (transport: HelperTransportUnit | HelperTransportShape): transport is HelperTransportUnit => "transport" in transport;
+const isUnit = (transport: HelperTransportUnit | HelperTransportShape): transport is HelperTransportUnit => "gate" in transport;
 
 /** The production team runtime of one process: its layer built in the current scope over the stores and the transport. */
 export const teamRuntimeUnit = (options: TeamRuntimeUnitOptions): Effect.Effect<SupervisorTeamRuntimeShape, never, Scope.Scope> => Effect.gen(function* () {
