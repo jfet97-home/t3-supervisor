@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { Cause, Effect, Exit, type Fiber, FiberSet, Scheduler, Scope } from "effect";
+import { Cause, Effect, type Fiber, FiberSet, Scheduler, Scope } from "effect";
 import { WebSocketServer } from "ws";
 import type { Projection, ThreadInfo } from "../../src/types.js";
 
@@ -166,16 +166,6 @@ export const intPeer = (routes: ReadonlyArray<PeerRoutes> = []): Effect.Effect<I
   if (address === null || typeof address === "string") return yield* Effect.die(new Error("peer did not bind a TCP port"));
   return {baseUrl: `http://127.0.0.1:${address.port}`, log, unexpected, connections};
 });
-
-/**
- * The peer in its own scope, closed by `close`, for the promise fixture of the interpretation suites
- * (test/support/interpretation-fixture.ts, outside this group).
- */
-export const startIntPeer = async (routes: PeerRoutes[] = []): Promise<IntNativePeer & {close(): Promise<void>}> => {
-  const scope = Effect.runSync(Scope.make());
-  const peer = await Effect.runPromise(Scope.provide(scope)(intPeer(routes)));
-  return {...peer, close: () => Effect.runPromise(Scope.close(scope, Exit.void))};
-};
 
 export const httpRequests = (peer: Pick<IntNativePeer, "log">, path: string): PeerHttpEntry[] =>
   peer.log.filter((entry): entry is PeerHttpEntry => entry.kind === "http" && entry.path === path);
