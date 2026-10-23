@@ -19,19 +19,16 @@
   and runs its finalizer; an in-effect `Effect.timeout` fails typed inside `it.live`.
 - `leak-collect.test.ts`: an interrupted fiber is not reported, a still-referenced suspended
   fiber is, and a worker without `--expose-gc` fails closed.
-- `handle-gate.test.ts`: the native resource gate of `vitest.cpu-bound.config.ts` fails a
-  leaked interval and an open server, passes a closed server and fails closed without
-  `process.getActiveResourcesInfo`.
 - `node-test.test.ts`: the node:test cleanup-order shim of `test/support/node-test.ts`.
-- `deadlines.test.ts`: both phase configs give every test Vitest's own 10 s timeout and no
-  slower class; in a scaled nested run an unlisted test (an effect and a promise) times out
+- `deadlines.test.ts`: the main phase config gives every test Vitest's own 10 s timeout and
+  no slower class; in a scaled nested run an unlisted test (an effect and a promise) times out
   at the default bound with its finalizer run, while an explicit slow bound is kept.
 - `private-assert.test.ts`: token-bearing assertion failures (repeated token, token in
   stderr or stdout, secret in an error message, failed child process) still fail, and
   neither the console nor the json report carries a token.
 - `lint-guards.test.ts`: the SQLite driver (barrel, subpath or re-export) is rejected outside
   `src/db.ts`, extension loading is rejected, and suites cannot import `node:test`.
-- `phases.test.ts`: `npm test` is one watchdog over the main and cpu-bound phases; over two
+- `phases.test.ts`: `npm test` is one watchdog over the main phase alone; over two
   fixture phases (`fixtures/vitest.phase-{a,b}.config.ts`) a filter runs only the phases that
   select files, a location filter reaches only its file's phase, an empty selection fails as
   Vitest does, an explicit `--config` runs once, json reports stay per phase and combine

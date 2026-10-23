@@ -6,7 +6,7 @@ import { describe, expect, it, onTestFinished } from "vitest";
 import { groupExists, processExists, readMarker, startWatchdog, waitForFile, type WatchdogRun } from "./fixture-run.js";
 
 // the whole-run contract of scripts/run-tests.ts over two disjoint phases, with small fixture partitions
-// (a: leak detector like main, b: plain like cpu-bound)
+// (a: leak detector like main, b: plain)
 
 const killGraceMs = 10_000;
 const phases = [
@@ -49,11 +49,9 @@ const noGroupLeft = (result: WatchdogRun) => {
 const tests = (report: CombinedReport) => report.testResults.flatMap((file) => file.assertionResults.map((test) => test.fullName));
 
 describe("watchdog phases", () => {
-  it("npm test is one watchdog over the main and cpu-bound phases", () => {
+  it("npm test is one watchdog over the main phase alone", () => {
     const manifest = readJson<{ readonly scripts: Record<string, string> }>("package.json");
-    expect(manifest.scripts.test).toBe(
-      "node --import tsx scripts/run-tests.ts --watchdog-phase=main:vitest.config.ts --watchdog-phase=cpu-bound:vitest.cpu-bound.config.ts",
-    );
+    expect(manifest.scripts.test).toBe("node --import tsx scripts/run-tests.ts --watchdog-phase=main:vitest.config.ts");
   });
 
   it("runs a filter that only phase a selects in phase a alone", async () => {

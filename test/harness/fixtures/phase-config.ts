@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import { leakGate } from "../../support/leak-gate.js";
 
-// two disjoint phases for the runner self-tests, shaped like the main (leak detector) and cpu-bound (no detector) phases
+// two disjoint phases for the runner self-tests: one with the leak detector like the main phase, one plain
 const root = fileURLToPath(new URL("../../..", import.meta.url));
 const base = { environment: "node", pool: "forks", isolate: true, testTimeout: 0, hookTimeout: 250 } as const;
 

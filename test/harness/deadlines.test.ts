@@ -18,8 +18,8 @@ const testOptions = (config: string): { testTimeout?: number; projects?: unknown
 // plan 5.3 rule 2: every test is bounded by vitest's own 10 s timeout unless it carries an explicit per-test bound
 
 describe("per-test deadlines", () => {
-  it("both phases give every test vitest's own 10 s timeout and define no slower class", { timeout: 60_000 }, () => {
-    for (const config of ["vitest.config.ts", "vitest.cpu-bound.config.ts"]) expect(testOptions(config)).toEqual({ testTimeout: 10_000 });
+  it("the main phase gives every test vitest's own 10 s timeout and defines no slower class", { timeout: 60_000 }, () => {
+    expect(testOptions("vitest.config.ts")).toEqual({ testTimeout: 10_000 });
   });
 
   it("an unlisted test times out at the default bound, interrupting its effect; an explicit slow bound is kept", async () => {
