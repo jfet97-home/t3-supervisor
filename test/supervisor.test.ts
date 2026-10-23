@@ -1,17 +1,12 @@
 import assert from "node:assert/strict";
-import {mkdtemp, rm} from "node:fs/promises";
-import {tmpdir} from "node:os";
-import {join} from "node:path";
 import {it} from "@effect/vitest";
-import {NodeFileSystem} from "@effect/platform-node";
-import {Clock, Effect, Fiber, Layer, Option, Stream, SubscriptionRef} from "effect";
-import {SupervisorConfig as Configuration} from "../src/config.js";
-import {SupervisorOwnership} from "../src/project-supervisor-store.js";
+import {Clock, Effect, Fiber, Option, Stream, SubscriptionRef} from "effect";
 import {makeStore, Store} from "../src/store.js";
-import {createStatus, NativeTransportLive, readiness, supervise, SupervisorStatusRef} from "../src/supervisor.js";
-import {T3Client, T3TransportError, type T3ClientShape} from "../src/t3.js";
-import {ThreadPolicy} from "../src/thread-policy.js";
+import {createStatus, readiness, supervise} from "../src/supervisor.js";
+import {T3TransportError, type T3ClientShape} from "../src/t3.js";
 import type {ProjectInfo, SupervisorConfig} from "../src/types.js";
+import {dataDirectory} from "./support/g9-stores.js";
+import {rootServices} from "./support/g9-supervisor.js";
 
 const config = (directory: string): SupervisorConfig => ({
   dataDirectory: directory,
@@ -38,9 +33,10 @@ it("readiness depends on native T3 connection, activation, catalog health, and e
   assert.equal(readiness(status, settings, now).ready, false);
 });
 
+// it.live: the run listens on a real health port and the catalog and thread-policy files are real; the 3 s bound is a hang
+// guard on the live clock
 it.live("native T3 events persist into the generic catalog and mark the service connected", () => Effect.gen(function* () {
-  const directory = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "supervisor-loop-")));
-  yield* Effect.addFinalizer(() => Effect.promise(() => rm(directory, {recursive: true, force: true})));
+  const directory = yield* dataDirectory("supervisor-loop-");
   const settings = config(directory);
   const statusRef = yield* SubscriptionRef.make(createStatus(settings, yield* Clock.currentTimeMillis));
   const project: ProjectInfo = {id: "project", title: "Project", workspaceRoot: "/work/project"};
@@ -50,10 +46,7 @@ it.live("native T3 events persist into the generic catalog and mark the service 
     watch: (_cursor, onItem) => onItem({stream: "active", item: {kind: "project.updated", sequence: 1, project}})
       .pipe(Effect.andThen(Effect.never)),
   };
-  const fiber = yield* Effect.forkScoped(supervise(Layer.mergeAll(
-    makeStore(directory), Layer.succeed(T3Client, fake), Layer.succeed(SupervisorStatusRef, statusRef), ThreadPolicy.layer, SupervisorOwnership.layer,
-    NativeTransportLive, NodeFileSystem.layer,
-  ).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)))));
+  const fiber = yield* Effect.forkScoped(supervise(rootServices(settings, statusRef, fake)));
   // the first status in which the stored item marked the service connected after activation
   const status = Option.getOrThrow(yield* SubscriptionRef.changes(statusRef).pipe(
     Stream.filter((current) => current.t3Connected && current.activation !== null), Stream.runHead, Effect.timeout("3 seconds")));
