@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { Cause, Clock, Effect, Exit, Layer, type Scope } from "effect";
+import { Cause, Clock, Deferred, Effect, Exit, Layer, type Scope } from "effect";
 import { type Atom, AtomRegistry } from "effect/reactivity";
 
 // the page registries of the ui atom suites (G7): browser globals for a scope, a registry for the test's scope, one whose
@@ -53,3 +53,15 @@ export const rejects = <A, E, R>(effect: Effect.Effect<A, E, R>, expected?: RegE
     if (expected instanceof RegExp) assert.match(String(error), expected, message);
     else assert.equal(expected(error), true, message ?? "The validation function is expected to return \"true\".");
   }));
+
+// a stubbed answer the test releases, and the event that its request reached the stub; the event resumes the test on a
+// microtask, after the stub has returned the held answer, as the baseline promise of the event did
+export const heldResponse = Effect.map(Deferred.make<void>(), (reached) => {
+  let release!: (response: Response) => void;
+  return {
+    response: new Promise<Response>((resolve) => {release = resolve;}),
+    reached: Deferred.await(reached),
+    arrive: () => queueMicrotask(() => Deferred.doneUnsafe(reached, Exit.void)),
+    release: (response: Response) => release(response),
+  };
+});

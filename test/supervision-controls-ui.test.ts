@@ -4,7 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Schema } from "effect";
 import { SupervisionSetup, type SupervisionSetupInput } from "../src/supervisor-control-contract.js";
-import { buildSupervisionSetupIntent, GlobalDefinitionsControlView, SupervisionControlView, SupervisionSetupView } from "../ui/src/supervisor-control.js";
+import { buildSupervisionSetupIntent, createSetupFence, GlobalDefinitionsControlView, SupervisionControlView, SupervisionSetupView } from "../ui/src/supervisor-control.js";
 
 it("the master switch and shared definition switch explain their separate effects", () => {
   const handlers = {busy: false, blocked: false, message: "", onToggle: () => {}, onReload: () => {}};
@@ -62,8 +62,7 @@ it("the existing-worktree enable request preserves the selected checkout in the 
   assert.throws(() => Schema.decodeUnknownSync(SupervisionSetup)({...intent, action: "enable"}));
 });
 
-it("an unconfirmed setup outcome stays fenced until a setup read that started after every request ended", async () => {
-  const {createSetupFence} = await import("../ui/src/supervisor-control.js");
+it("an unconfirmed setup outcome stays fenced until a setup read that started after every request ended", () => {
   const states: Array<{fenced: boolean; pending: boolean}> = [];
   const fence = createSetupFence(state => {states.push(state);});
   const current = () => states.at(-1) ?? {fenced: false, pending: false};

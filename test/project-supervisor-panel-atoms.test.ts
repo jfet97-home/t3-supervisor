@@ -1,21 +1,18 @@
 import assert from "node:assert/strict";
-import { it as effectIt } from "@effect/vitest";
+import { beforeAll, it } from "@effect/vitest";
 import { Cause, Effect, Exit, Fiber, Result } from "effect";
-import { AsyncResult, type Atom, AtomRegistry } from "effect/reactivity";
+import { AsyncResult, type AtomRegistry } from "effect/reactivity";
 import { TestClock } from "effect/testing";
-import { afterAll, beforeAll, it } from "vitest";
 import type { ProjectSupervisorInfo, ProjectSupervisorSaveInput } from "../src/project-supervisor-contract.js";
 import type { WorkflowProgressSnapshot } from "../src/workflow-progress.js";
 import { supervisorSnapshot } from "./support/c3b-project-supervisor.js";
+import { heldResponse, installGlobal, scopedRegistry } from "./support/g7-page.js";
+import { abortOf, until } from "./support/g7-browser.js";
 
 // target regressions of the project supervisor panel atoms (WP-S7-PS) over a stubbed browser: drafts and reads, admitted
-// settings and chat changes, the chat supervision poll and live progress pages
-
-const originals = new Map<string, PropertyDescriptor | undefined>();
-const install = (key: string, value: unknown) => {
-  if (!originals.has(key)) originals.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
-  Object.defineProperty(globalThis, key, {configurable: true, writable: true, value});
-};
+// settings and chat changes, the chat supervision poll and live progress pages. the tests wait only for requests and atom
+// values (bounded on the live clock), so they are it.effect; the confirming read's 10 s deadline is stepped on the test
+// clock of the fiber that runs it
 
 interface Sent {readonly method: string; readonly path: string; readonly query: URLSearchParams; readonly body: unknown; readonly signal: AbortSignal | null;
   readonly session: string | null; readonly csrf: string | null}
@@ -30,13 +27,14 @@ let core: Core;
 let ps: Panel;
 let access: Access;
 
-beforeAll(async () => {
-  install("location", {origin: "http://supervisor.test", pathname: "/"});
-  install("window", new EventTarget());
-  install("document", {visibilityState: "visible", hidden: false});
-  install("localStorage", {getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => {storage.set(key, value);},
+// the stubbed browser, installed before the ui modules load and put back when the suite's scope closes
+beforeAll(() => Effect.gen(function* () {
+  yield* installGlobal("location", {origin: "http://supervisor.test", pathname: "/"});
+  yield* installGlobal("window", new EventTarget());
+  yield* installGlobal("document", {visibilityState: "visible", hidden: false});
+  yield* installGlobal("localStorage", {getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => {storage.set(key, value);},
     removeItem: (key: string) => {storage.delete(key);}});
-  install("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+  yield* installGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input), "http://supervisor.test");
     const body = init?.body instanceof Uint8Array ? JSON.parse(new TextDecoder().decode(init.body)) as unknown : undefined;
     const request = {method: init?.method ?? "GET", path: url.pathname, query: url.searchParams, body, signal: init?.signal ?? null,
@@ -45,41 +43,11 @@ beforeAll(async () => {
     return reply(request);
   });
   storage.set("supervisor-session", "session-1");
-  core = await import("../ui/src/atoms.js");
-  ps = await import("../ui/src/project-supervisor.js");
-  access = await import("../ui/src/access.js");
-});
+  core = yield* Effect.promise(() => import("../ui/src/atoms.js"));
+  ps = yield* Effect.promise(() => import("../ui/src/project-supervisor.js"));
+  access = yield* Effect.promise(() => import("../ui/src/access.js"));
+}));
 
-afterAll(() => {
-  for (const [key, descriptor] of originals) {
-    if (descriptor) Object.defineProperty(globalThis, key, descriptor);
-    else Reflect.deleteProperty(globalThis, key);
-  }
-});
-
-// resolves with the first value of the atom that satisfies the predicate
-const until = <A>(registry: AtomRegistry.AtomRegistry, atom: Atom.Atom<A>, predicate: (value: A) => boolean, label: string) =>
-  new Promise<A>((resolve, reject) => {
-    const timer = setTimeout(() => {stop();reject(new Error(`${label} not reached`));}, 5_000);
-    const stop = registry.subscribe(atom, value => {
-      if (!predicate(value)) return;
-      clearTimeout(timer);
-      queueMicrotask(() => stop());
-      resolve(value);
-    }, {immediate: true});
-  });
-
-// a response the test releases, and a signal that the request reached the stub
-const pending = () => {
-  let release!: (response: Response) => void;
-  let reached!: () => void;
-  return {
-    response: new Promise<Response>(resolve => {release = resolve;}),
-    reached: new Promise<void>(resolve => {reached = resolve;}),
-    arrive: () => reached(),
-    release: (response: Response) => release(response),
-  };
-};
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), {status});
 const isPost = (path: string) => (request: Sent) => request.method === "POST" && request.path === path;
 const isRead = (request: Sent) => request.method === "GET" && request.path === "/api/guidance/project-supervisor";
@@ -127,11 +95,11 @@ it("a read keeps every dirty draft field, moves only clean fields and the expect
   assert.equal(ps.snapshotReadNeeded({...panel, dirty: false, connected: false}), false);
 });
 
-it("a save is admitted once against the draft's expected generation and applies its verified outcome with no panel mounted", {timeout: 10_000}, async () => {
-  const registry = AtomRegistry.make();
+it.effect("a save is admitted once against the draft's expected generation and applies its verified outcome with no panel mounted", () => Effect.gen(function* () {
+  const registry = yield* scopedRegistry();
   sent.length = 0;
   showSnapshot(registry);
-  const post = pending();
+  const post = yield* heldResponse;
   reply = async request => {
     if (!isPost("/api/guidance/project-supervisor")(request)) return json({}, 500);
     post.arrive();
@@ -139,12 +107,12 @@ it("a save is admitted once against the draft's expected generation and applies 
   };
   ps.startSettingsChange(registry, projectKey(), scopeA(), {kind: "save", input: saveInput(7)});
   ps.startSettingsChange(registry, projectKey(), scopeA(), {kind: "save", input: saveInput(7)});
-  await post.reached;
+  yield* post.reached;
   const operation = registry.get(ps.projectSupervisorView(projectKey())).operation;
   assert.equal(operation?.kind, "save", "the panel is saving");
   const saved = {...snapshot, settings: {...snapshot.settings, generation: 8, monitoring: {intervalMinutes: 12, activityThreshold: 10}}};
   post.release(json({status: "saved", message: "Supervisor settings saved.", snapshot: saved}));
-  const view = await until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, "saved");
+  const view = yield* until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, "saved");
   const posts = sent.filter(isPost("/api/guidance/project-supervisor"));
   assert.equal(posts.length, 1, "a second click while saving sends nothing");
   assert.equal((posts[0]!.body as ProjectSupervisorSaveInput).expectedGeneration, 7, "the save carries the generation the draft was edited against");
@@ -159,9 +127,9 @@ it("a save is admitted once against the draft's expected generation and applies 
   registry.set(ps.saveSupervisorSettings(core.scopeKey(key.scope, key.operationId)), {projectKey: projectKey(), key, input: saveInput(7)});
   assert.equal(sent.filter(isPost("/api/guidance/project-supervisor")).length, 1);
   registry.dispose();
-});
+}), {timeout: 10_000});
 
-it("an unconfirmed save keeps the draft and blocks until a read, a refused save keeps it editable, and conflicts keep edits against the latest generation", {timeout: 10_000}, async () => {
+it.effect("an unconfirmed save keeps the draft and blocks until a read, a refused save keeps it editable, and conflicts keep edits against the latest generation", () => Effect.gen(function* () {
   for (const [label, status, csrf, blocked, text] of [
     ["500", 500, 200, true, "The operation outcome could not be confirmed. Refresh Supervisor settings before trying again."],
     ["403 refreshed", 403, 200, false, "Session refreshed. Your Supervisor change was not performed; review the state and try again."],
@@ -169,13 +137,13 @@ it("an unconfirmed save keeps the draft and blocks until a read, a refused save 
     ["401 refresh failed", 401, 401, true, "The operation outcome could not be confirmed. Refresh Supervisor settings before trying again."],
   ] as const) {
     storage.set("supervisor-session", "session-1");
-    const registry = AtomRegistry.make();
+    const registry = yield* scopedRegistry();
     sent.length = 0;
     showSnapshot(registry);
     const before = registry.get(ps.projectSupervisorDraft(projectKey()));
     reply = async request => request.path === "/api/csrf" ? json({csrf: "fresh"}, csrf) : json({message: "no"}, status);
     ps.startSettingsChange(registry, projectKey(), scopeA(), {kind: "save", input: saveInput(7)});
-    const view = await until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, label);
+    const view = yield* until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, label);
     assert.equal(view.blocked, blocked, label);
     assert.deepEqual(view.message, {scope: scopeA(), text, alert: blocked}, label);
     assert.deepEqual(registry.get(ps.projectSupervisorDraft(projectKey())), before, `${label}: the draft is kept`);
@@ -198,39 +166,39 @@ it("an unconfirmed save keeps the draft and blocks until a read, a refused save 
   const uncertain = ps.settleSave({view, draft}, "s", saveInput(7), Result.succeed({status: "uncertain", message: "Outcome unknown.", snapshot: null}));
   assert.deepEqual([uncertain.view.blocked, uncertain.view.message?.alert, uncertain.draft], [true, true, draft]);
   assert.equal(ps.settleRead(uncertain, "project", "s", {snapshot: newer, readAt: 2}, true).view.blocked, false, "only a read lifts the block");
-});
+}), {timeout: 10_000});
 
 // story03 of the UI replay: the server holds a save while the session ends, the connection then drops and the browser
 // resends the request with its original headers, so the page sees only the resend's pre-body 401. the first attempt may
 // have been applied, so the outcome stays unconfirmed and Save stays blocked until a verified read under a new session
-const endSession: Record<string, (registry: AtomRegistry.AtomRegistry) => Promise<void>> = {
+const endSession: Record<string, (registry: AtomRegistry.AtomRegistry) => Effect.Effect<void>> = {
   // another tab signs out everywhere: it removes the shared session and this tab receives the storage event
-  "another tab signs out": async () => {
+  "another tab signs out": () => Effect.sync(() => {
     storage.delete("supervisor-session");
     const event = new Event("storage");
     Object.defineProperties(event, {key: {value: "supervisor-session"}, storageArea: {value: globalThis.localStorage}});
     globalThis.window.dispatchEvent(event);
-  },
+  }),
   // this tab's own access check finds the session expired and forgets it
-  "this tab sees the session expire": async registry => {
+  "this tab sees the session expire": registry => Effect.gen(function* () {
     const check = core.uiRuntime.fn(() => Effect.flatMap(access.SessionAccess, session => session.check));
     const stop = registry.subscribe(check, () => undefined, {immediate: true});
     registry.set(check, undefined);
-    await until(registry, check, value => AsyncResult.isSuccess(value), "the expiry check");
+    yield* until(registry, check, value => AsyncResult.isSuccess(value), "the expiry check");
     stop();
-  },
+  }),
 };
 
 for (const [route, end] of Object.entries(endSession)) for (const applied of [false, true]) {
-  it(`a save held while ${route}, then refused 401 on the browser's resend after its connection dropped, stays unconfirmed and blocked until a verified read (first attempt ${applied ? "applied" : "not applied"})`, {timeout: 10_000}, async () => {
+  it.effect(`a save held while ${route}, then refused 401 on the browser's resend after its connection dropped, stays unconfirmed and blocked until a verified read (first attempt ${applied ? "applied" : "not applied"})`, () => Effect.gen(function* () {
     storage.set("supervisor-session", "session-1");
-    const registry = AtomRegistry.make();
+    const registry = yield* scopedRegistry();
     sent.length = 0;
     showSnapshot(registry);
     const before = registry.get(ps.projectSupervisorDraft(projectKey()));
     const saved = {...snapshot, settings: {...snapshot.settings, generation: 8, monitoring: {intervalMinutes: 12, activityThreshold: 10}}};
     let server: ProjectSupervisorInfo = snapshot;
-    const post = pending();
+    const post = yield* heldResponse;
     reply = async request => {
       if (isPost("/api/guidance/project-supervisor")(request)) {post.arrive();return post.response;}
       const signedIn = request.session === "session-2";
@@ -239,14 +207,14 @@ for (const [route, end] of Object.entries(endSession)) for (const applied of [fa
       return json({}, 500);
     };
     ps.startSettingsChange(registry, projectKey(), scopeA(), {kind: "save", input: saveInput(7)});
-    await post.reached;
+    yield* post.reached;
     assert.equal(sent.find(isPost("/api/guidance/project-supervisor"))?.session, "session-1", "the save went out with the valid session");
     if (applied) server = saved;
-    await end(registry);
+    yield* end(registry);
     assert.equal(storage.has("supervisor-session"), false, "the session ended while the save was out");
     // the held connection drops; the browser's resend carries the original headers and is refused before its body is read
     post.release(json({message: "Sign in again."}, 401));
-    const view = await until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, "settled");
+    const view = yield* until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, "settled");
     assert.deepEqual(view.message, {scope: scopeA(), alert: true,
       text: "The operation outcome could not be confirmed. Refresh Supervisor settings before trying again."}, "the refusal of the resend is not reported as not performed");
     assert.equal(view.blocked, true, "Save stays blocked");
@@ -257,7 +225,7 @@ for (const [route, end] of Object.entries(endSession)) for (const applied of [fa
     storage.set("supervisor-session", "session-2");
     const readAtom = ps.projectSupervisorRead({environmentId: null, projectId: "project", mainThreadId: "task-thread", revision: 1, epoch: 1});
     const stop = registry.subscribe(readAtom, () => undefined, {immediate: true});
-    const read = await until(registry, readAtom, value => AsyncResult.isSuccess(value) && !value.waiting, "verified read");
+    const read = yield* until(registry, readAtom, value => AsyncResult.isSuccess(value) && !value.waiting, "verified read");
     stop();
     assert.ok(AsyncResult.isSuccess(read));
     const refreshed = ps.settleRead({view, draft: registry.get(ps.projectSupervisorDraft(projectKey()))}, "project", scopeA(), read.value, true);
@@ -266,7 +234,7 @@ for (const [route, end] of Object.entries(endSession)) for (const applied of [fa
     assert.equal(refreshed.draft?.expectedGeneration, applied ? 8 : 7);
     registry.dispose();
     storage.set("supervisor-session", "session-1");
-  });
+  }), {timeout: 10_000});
 }
 
 // story03, server side: the session or the server process ends while the save is held and before the tab sees any
@@ -280,12 +248,12 @@ const serverEnds: Record<string, {status: 401 | 403; end: (server: {sessions: Se
 };
 
 for (const [route, {status, end}] of Object.entries(serverEnds)) for (const applied of [false, true]) {
-  it(`a save held while ${route}, then refused ${status} on the browser's resend before the tab saw a change, stays unknown and blocked until a verified read (first attempt ${applied ? "applied" : "not applied"})`, {timeout: 10_000}, async () => {
+  it.effect(`a save held while ${route}, then refused ${status} on the browser's resend before the tab saw a change, stays unknown and blocked until a verified read (first attempt ${applied ? "applied" : "not applied"})`, () => Effect.gen(function* () {
     storage.set("supervisor-session", "session-1");
-    const registry = AtomRegistry.make();
+    const registry = yield* scopedRegistry();
     sent.length = 0;
     const server = {sessions: new Set(["session-1"]), csrf: "csrf-before-restart", snapshot: snapshot as ProjectSupervisorInfo};
-    const post = pending();
+    const post = yield* heldResponse;
     reply = async request => {
       if (isPost("/api/guidance/project-supervisor")(request)) {post.arrive();return post.response;}
       const valid = request.session !== null && server.sessions.has(request.session);
@@ -297,19 +265,19 @@ for (const [route, {status, end}] of Object.entries(serverEnds)) for (const appl
     const check = core.uiRuntime.fn(() => Effect.flatMap(access.SessionAccess, session => session.check));
     const stopCheck = registry.subscribe(check, () => undefined, {immediate: true});
     registry.set(check, undefined);
-    await until(registry, check, value => AsyncResult.isSuccess(value) && value.value, "the token is loaded");
+    yield* until(registry, check, value => AsyncResult.isSuccess(value) && value.value, "the token is loaded");
     stopCheck();
     showSnapshot(registry);
     const before = registry.get(ps.projectSupervisorDraft(projectKey()));
     ps.startSettingsChange(registry, projectKey(), scopeA(), {kind: "save", input: saveInput(7)});
-    await post.reached;
+    yield* post.reached;
     const sentSave = sent.find(isPost("/api/guidance/project-supervisor"))!;
     assert.deepEqual([sentSave.session, sentSave.csrf], ["session-1", "csrf-before-restart"], "the save went out with a valid session and token");
     if (applied) server.snapshot = {...snapshot, settings: {...snapshot.settings, generation: 8, monitoring: {intervalMinutes: 12, activityThreshold: 10}}};
     end(server);
     assert.equal(storage.get("supervisor-session"), "session-1", "the tab saw no change before the refusal");
     post.release(json({message: "refused"}, status));
-    const view = await until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, "settled");
+    const view = yield* until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, "settled");
     assert.deepEqual(view.message, {scope: scopeA(), alert: true,
       text: "The operation outcome could not be confirmed. Refresh Supervisor settings before trying again."}, "the resend's refusal is not reported as not performed");
     assert.equal(view.blocked, true, "Save stays blocked");
@@ -320,7 +288,7 @@ for (const [route, {status, end}] of Object.entries(serverEnds)) for (const appl
     if (!server.sessions.has("session-1")) {server.sessions.add("session-2");storage.set("supervisor-session", "session-2");}
     const readAtom = ps.projectSupervisorRead({environmentId: null, projectId: "project", mainThreadId: "task-thread", revision: 2, epoch: 2});
     const stop = registry.subscribe(readAtom, () => undefined, {immediate: true});
-    const read = await until(registry, readAtom, value => AsyncResult.isSuccess(value) && !value.waiting, "verified read");
+    const read = yield* until(registry, readAtom, value => AsyncResult.isSuccess(value) && !value.waiting, "verified read");
     stop();
     assert.ok(AsyncResult.isSuccess(read));
     const refreshed = ps.settleRead({view, draft: registry.get(ps.projectSupervisorDraft(projectKey()))}, "project", scopeA(), read.value, true);
@@ -328,14 +296,14 @@ for (const [route, {status, end}] of Object.entries(serverEnds)) for (const appl
     assert.equal(refreshed.view.snapshot?.settings.generation, applied ? 8 : 7, "the read shows what the first attempt did");
     registry.dispose();
     storage.set("supervisor-session", "session-1");
-  });
+  }), {timeout: 10_000});
 }
 
 // the refusals that do exclude the first attempt stay definite: the check refuses the same headers on every attempt
-it("a change sent without a CSRF token, or with the token the same process still issues, is refused as not performed and stays editable", {timeout: 10_000}, async () => {
+it.effect("a change sent without a CSRF token, or with the token the same process still issues, is refused as not performed and stays editable", () => Effect.gen(function* () {
   for (const [label, token] of [["without a token", null], ["with the token the process still issues", "csrf-current"]] as const) {
     storage.set("supervisor-session", "session-1");
-    const registry = AtomRegistry.make();
+    const registry = yield* scopedRegistry();
     sent.length = 0;
     reply = async request => {
       if (request.path === "/api/csrf") return json({csrf: "csrf-current"});
@@ -345,39 +313,39 @@ it("a change sent without a CSRF token, or with the token the same process still
       const check = core.uiRuntime.fn(() => Effect.flatMap(access.SessionAccess, session => session.check));
       const stopCheck = registry.subscribe(check, () => undefined, {immediate: true});
       registry.set(check, undefined);
-      await until(registry, check, value => AsyncResult.isSuccess(value) && value.value, "the token is loaded");
+      yield* until(registry, check, value => AsyncResult.isSuccess(value) && value.value, "the token is loaded");
       stopCheck();
       sent.length = 0;
     }
     showSnapshot(registry);
     ps.startSettingsChange(registry, projectKey(), scopeA(), {kind: "save", input: saveInput(7)});
-    const view = await until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, label);
+    const view = yield* until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, label);
     assert.equal(sent.find(isPost("/api/guidance/project-supervisor"))?.csrf ?? null, token === null ? "" : token, `${label}: the token sent`);
     assert.deepEqual([view.blocked, view.message?.text], [false, "Session refreshed. Your Supervisor change was not performed; review the state and try again."], label);
     registry.dispose();
   }
-});
+}), {timeout: 10_000});
 
-it("a settings outcome that arrives after another chat was selected is dropped", {timeout: 10_000}, async () => {
-  const registry = AtomRegistry.make();
+it.effect("a settings outcome that arrives after another chat was selected is dropped", () => Effect.gen(function* () {
+  const registry = yield* scopedRegistry();
   sent.length = 0;
   showSnapshot(registry);
   const before = registry.get(ps.projectSupervisorDraft(projectKey()));
-  const post = pending();
+  const post = yield* heldResponse;
   reply = async () => {post.arrive();return post.response;};
   ps.startSettingsChange(registry, projectKey(), scopeA(), {kind: "save", input: saveInput(7)});
-  await post.reached;
+  yield* post.reached;
   registry.update(ps.projectSupervisorView(projectKey()), view => ({...view, scope: core.scopeKey("project", "other-thread")}));
   post.release(json({status: "saved", message: "Saved.", snapshot: {...snapshot, settings: {...snapshot.settings, generation: 8}}}));
-  const view = await until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, "dropped");
+  const view = yield* until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, "dropped");
   assert.equal(view.message, null);
   assert.equal(view.snapshot?.settings.generation, 7);
   assert.deepEqual(registry.get(ps.projectSupervisorDraft(projectKey())), before);
   registry.dispose();
-});
+}), {timeout: 10_000});
 
-it("a chat Stop is admitted once, confirmed by a follow-up read for its own project and chat, and dropped for a chat selected afterwards", {timeout: 10_000}, async () => {
-  const registry = AtomRegistry.make();
+it.effect("a chat Stop is admitted once, confirmed by a follow-up read for its own project and chat, and dropped for a chat selected afterwards", () => Effect.gen(function* () {
+  const registry = yield* scopedRegistry();
   sent.length = 0;
   showSnapshot(registry);
   const stopped = {...snapshot, chatSupervision: {...snapshot.chatSupervision!, stopped: true, policyGeneration: 5, stoppedBy: "ui" as const, stoppedAt: 2}};
@@ -385,7 +353,7 @@ it("a chat Stop is admitted once, confirmed by a follow-up read for its own proj
   const input = {projectId: "project", mainThreadId: "task-thread", enabled: false, policyGeneration: 4};
   ps.startChatSupervisionChange(registry, projectKey(), scopeA(), input);
   ps.startChatSupervisionChange(registry, projectKey(), scopeA(), input);
-  const view = await until(registry, ps.projectSupervisorView(projectKey()), value => value.chat === null, "confirmed");
+  const view = yield* until(registry, ps.projectSupervisorView(projectKey()), value => value.chat === null, "confirmed");
   assert.deepEqual(sent.map(request => [request.method, request.path]), [["POST", "/api/guidance/project-supervisor/chat-supervision"], ["GET", "/api/guidance/project-supervisor"]]);
   assert.deepEqual(sent[0]!.body, input);
   assert.deepEqual([sent[1]!.query.get("projectId"), sent[1]!.query.get("mainThreadId")], ["project", "task-thread"], "the confirming read is for the same chat");
@@ -393,32 +361,32 @@ it("a chat Stop is admitted once, confirmed by a follow-up read for its own proj
   assert.deepEqual(view.chatMessage, {scope: scopeA(), text: "Supervision is stopped for this chat."});
 
   sent.length = 0;
-  const post = pending();
+  const post = yield* heldResponse;
   reply = async request => {
     if (isRead(request)) return json(snapshot);
     post.arrive();
     return post.response;
   };
   ps.startChatSupervisionChange(registry, projectKey(), scopeA(), {...input, enabled: true, policyGeneration: 5});
-  await post.reached;
+  yield* post.reached;
   registry.update(ps.projectSupervisorView(projectKey()), current => ({...current, scope: core.scopeKey("project", "other-thread")}));
   post.release(json({status: "saved", message: "Supervision is enabled for this chat.", snapshot: null}));
-  const late = await until(registry, ps.projectSupervisorView(projectKey()), value => value.chat === null, "dropped");
+  const late = yield* until(registry, ps.projectSupervisorView(projectKey()), value => value.chat === null, "dropped");
   assert.equal(late.chatMessage, null, "a late outcome never replaces another chat's view");
   assert.deepEqual(sent.map(request => request.method), ["POST"], "no confirming read for a chat that is no longer selected");
   registry.dispose();
-});
+}), {timeout: 10_000});
 
-effectIt.effect("the read that confirms a chat change gives up after 10 s and aborts its request", () => Effect.gen(function* () {
+it.effect("the read that confirms a chat change gives up after 10 s and aborts its request", () => Effect.gen(function* () {
   sent.length = 0;
-  const request = pending();
+  const request = yield* heldResponse;
   reply = async sentRequest => {
     request.arrive();
     return new Promise<Response>((_resolve, reject) => sentRequest.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
   };
-  const registry = AtomRegistry.make();
+  const registry = yield* scopedRegistry();
   const fiber = yield* Effect.forkChild(Effect.exit(ps.chatSupervisionConfirmRead("project", "task-thread").pipe(Effect.provide(registry.get(core.uiRuntime.layer)))));
-  yield* Effect.promise(() => request.reached);
+  yield* request.reached;
   yield* TestClock.adjust("9999 millis");
   assert.equal(fiber.pollUnsafe(), undefined, "still waiting before 10 s");
   yield* TestClock.adjust("1 millis");
@@ -429,7 +397,7 @@ effectIt.effect("the read that confirms a chat change gives up after 10 s and ab
   registry.dispose();
 }), {timeout: 10_000});
 
-it("the chat poll reads nothing when mounted, re-reads on each refresh and replaces only the chat state; it is not mounted while a change is in flight", {timeout: 10_000}, async () => {
+it.effect("the chat poll reads nothing when mounted, re-reads on each refresh and replaces only the chat state; it is not mounted while a change is in flight", () => Effect.gen(function* () {
   const idle = {scope: scopeA(), snapshot, readAt: 1, message: null, blocked: false, operation: null, chat: null, chatMessage: null};
   const panel = {projectId: "project", threadId: "task-thread", connected: true, epoch: 0};
   assert.deepEqual(ps.chatPollScope(idle, panel), {projectId: "project", mainThreadId: "task-thread", epoch: 0});
@@ -438,16 +406,16 @@ it("the chat poll reads nothing when mounted, re-reads on each refresh and repla
   assert.equal(ps.chatPollScope(idle, {...panel, connected: false}), null);
   assert.equal(ps.chatPollScope(idle, {...panel, threadId: undefined}), null);
 
-  const registry = AtomRegistry.make();
+  const registry = yield* scopedRegistry();
   sent.length = 0;
   const stopped = {...snapshot, message: "a newer message", chatSupervision: {...snapshot.chatSupervision!, stopped: true, stoppedBy: "relay" as const, stoppedAt: 3}};
   reply = async () => json(stopped);
   const scope = {environmentId: null, projectId: "project", mainThreadId: "task-thread", epoch: 0};
   const stop = registry.subscribe(ps.chatSupervisionPoll(scope), () => undefined, {immediate: true});
-  await until(registry, ps.chatSupervisionRead(scope), value => AsyncResult.isSuccess(value) && !value.waiting, "mounted");
+  yield* until(registry, ps.chatSupervisionRead(scope), value => AsyncResult.isSuccess(value) && !value.waiting, "mounted");
   assert.equal(sent.length, 0, "mounting reads nothing");
   registry.refresh(ps.chatSupervisionRead(scope));
-  const polled = await until(registry, ps.chatSupervisionRead(scope), value => AsyncResult.isSuccess(value) && !value.waiting && value.value._tag === "Some", "polled");
+  const polled = yield* until(registry, ps.chatSupervisionRead(scope), value => AsyncResult.isSuccess(value) && !value.waiting && value.value._tag === "Some", "polled");
   assert.equal(sent.length, 1);
   const read = AsyncResult.isSuccess(polled) && polled.value._tag === "Some" ? polled.value.value : snapshot;
   const next = ps.settlePoll(idle, scopeA(), read);
@@ -456,15 +424,15 @@ it("the chat poll reads nothing when mounted, re-reads on each refresh and repla
   assert.equal(ps.settlePoll({...idle, operation: {kind: "save", scope: scopeA(), operationId: "save-2"}}, scopeA(), read).snapshot, snapshot);
   stop();
   registry.dispose();
-});
+}), {timeout: 10_000});
 
 const page = (workflowOffset: number, lineageOffset: number, status: WorkflowProgressSnapshot["status"] = "ok"): WorkflowProgressSnapshot => ({
   status, message: status === "ok" ? null : "Workflow data is not available for this page.", projectId: "project", mainThreadId: "task-thread", observedAt: 1,
   scope: null, incompatibleWorkflows: [], workflows: [], workflowOffset, workflowHasMore: true, lineageOffset, lineageHasMore: false,
 });
 
-it("live progress appends Load more pages, re-reads the loaded pages in order and keeps the shown pages when a refresh fails or comes back incomplete", {timeout: 10_000}, async () => {
-  const registry = AtomRegistry.make();
+it.effect("live progress appends Load more pages, re-reads the loaded pages in order and keeps the shown pages when a refresh fails or comes back incomplete", () => Effect.gen(function* () {
+  const registry = yield* scopedRegistry();
   sent.length = 0;
   let mode: "ok" | "fail" | "incomplete" = "ok";
   reply = async request => {
@@ -477,77 +445,77 @@ it("live progress appends Load more pages, re-reads the loaded pages in order an
   const read = ps.workflowProgressRead(scope);
   const settled = (predicate: (state: {pages: readonly WorkflowProgressSnapshot[]; error: string | null}) => boolean, label: string) =>
     until(registry, read, value => AsyncResult.isSuccess(value) && !value.waiting && predicate(value.value), label)
-      .then(value => AsyncResult.isSuccess(value) ? value.value : assert.fail(label));
+      .pipe(Effect.map(value => AsyncResult.isSuccess(value) ? value.value : assert.fail(label)));
   const stop = registry.subscribe(read, () => undefined, {immediate: true});
   const offsets = () => sent.map(request => request.query.get("workflowOffset"));
-  const first = await settled(state => state.pages.length === 1, "first page");
+  const first = yield* settled(state => state.pages.length === 1, "first page");
   assert.deepEqual(offsets(), ["0"]);
   assert.equal(first.error, null);
 
   sent.length = 0;
   registry.update(ps.workflowProgressMore(scope), current => ({seq: current.seq + 1, page: {workflowOffset: 20, lineageOffset: 0}}));
-  const two = await settled(state => state.pages.length === 2, "load more");
+  const two = yield* settled(state => state.pages.length === 2, "load more");
   assert.deepEqual(offsets(), ["20"], "load more reads only the next page");
 
   sent.length = 0;
   mode = "fail";
   registry.refresh(read);
-  const failed = await settled(state => state.error !== null, "failed refresh");
+  const failed = yield* settled(state => state.error !== null, "failed refresh");
   assert.equal(failed.error, "Progress could not be refreshed. The last successful snapshot is retained.");
   assert.deepEqual(failed.pages, two.pages, "a failed refresh keeps the shown pages");
 
   sent.length = 0;
   mode = "incomplete";
   registry.refresh(read);
-  const incomplete = await settled(state => state.error === "Workflow data is not available for this page.", "incomplete refresh");
+  const incomplete = yield* settled(state => state.error === "Workflow data is not available for this page.", "incomplete refresh");
   assert.deepEqual(incomplete.pages, two.pages, "an incomplete refresh keeps the shown pages");
   assert.deepEqual(offsets(), ["0"], "the refresh stops after the first page that is not ok");
 
   sent.length = 0;
   mode = "ok";
   registry.refresh(read);
-  const refreshed = await settled(state => state.error === null, "refresh");
+  const refreshed = yield* settled(state => state.error === null, "refresh");
   assert.deepEqual(offsets(), ["0", "20"], "a refresh re-reads the loaded pages in order");
   assert.equal(refreshed.pages.length, 2);
 
   mode = "fail";
   registry.update(ps.workflowProgressMore(scope), current => ({seq: current.seq + 1, page: {workflowOffset: 40, lineageOffset: 0}}));
-  const more = await settled(state => state.error !== null, "failed load more");
+  const more = yield* settled(state => state.error !== null, "failed load more");
   assert.equal(more.error, "The next progress page could not be loaded. The last successful snapshot is retained.");
   assert.deepEqual(more.pages, refreshed.pages);
   stop();
 
   const other = ps.workflowProgressRead({...scope, mainThreadId: "other-thread"});
   const stopOther = registry.subscribe(other, () => undefined, {immediate: true});
-  const unread = await until(registry, other, value => AsyncResult.isSuccess(value) && !value.waiting, "first read failure");
+  const unread = yield* until(registry, other, value => AsyncResult.isSuccess(value) && !value.waiting, "first read failure");
   assert.deepEqual(AsyncResult.isSuccess(unread) ? [unread.value.pages, unread.value.error] : [], [[], "Progress could not be loaded for this main conversation."]);
   stopOther();
   registry.dispose();
-});
+}), {timeout: 10_000});
 
-it("a new scope revision interrupts the snapshot read of the previous one and aborts its request", {timeout: 10_000}, async () => {
-  const registry = AtomRegistry.make();
+it.effect("a new scope revision interrupts the snapshot read of the previous one and aborts its request", () => Effect.gen(function* () {
+  const registry = yield* scopedRegistry();
   sent.length = 0;
-  const first = pending();
-  let aborted!: Promise<void>;
+  const first = yield* heldResponse;
+  let signal!: AbortSignal;
   reply = async request => {
     if (sent.length > 1) return json(snapshot);
-    aborted = new Promise(resolve => request.signal?.addEventListener("abort", () => resolve()));
+    signal = request.signal!;
     first.arrive();
     return first.response;
   };
   const previous = ps.projectSupervisorRead({environmentId: null, projectId: "project", mainThreadId: "task-thread", revision: 0, epoch: 0});
   const stopPrevious = registry.subscribe(previous, () => undefined, {immediate: true});
-  await first.reached;
+  yield* first.reached;
   stopPrevious();
   const next = ps.projectSupervisorRead({environmentId: null, projectId: "project", mainThreadId: "task-thread", revision: 1, epoch: 0});
   const stopNext = registry.subscribe(next, () => undefined, {immediate: true});
-  const read = await until(registry, next, value => AsyncResult.isSuccess(value) && !value.waiting, "next revision");
+  const read = yield* until(registry, next, value => AsyncResult.isSuccess(value) && !value.waiting, "next revision");
   assert.equal(AsyncResult.isSuccess(read) ? read.value.snapshot.projectId : null, "project");
-  await aborted;
+  yield* abortOf(signal);
   assert.equal(sent[0]?.signal?.aborted, true, "the previous read was interrupted");
   assert.ok(AsyncResult.isInitial(registry.get(previous)) || !AsyncResult.isSuccess(registry.get(previous)), "the previous read never settles as a success");
   first.release(json(snapshot));
   stopNext();
   registry.dispose();
-});
+}), {timeout: 10_000});
