@@ -23997,5 +23997,2681 @@
    "response": "the catalog layer prepares and secures files through the injected FileSystem; SQL work runs untraced (untracedSql, plan 3.10); the guard covers the barrel and every subpath (lint-guards.test.ts)",
    "status": "resolved, recheck pending"
   }
- ]
+ ],
+ "completion": {
+  "scannedCommit": "4337bc8d612182476df61656dc86cd122238ed3e",
+  "note": "the parent of the commit that writes this record; that commit changes only this file",
+  "generator": "owner helper manifest-completion.py (scans comments-stripped text of every tracked file)",
+  "statuses": {
+   "effect": "uses Effect services, layers or effects",
+   "pure": "plain calculations, types or JSX without async machinery",
+   "adapter": "small scoped native/SDK/browser adapter with its recorded reason",
+   "entry": "process, worker or child entry running one program",
+   "effect-test": "@effect/vitest it.effect/it.live (plain synchronous cases may sit beside them)",
+   "pure-test": "plain synchronous assertions only",
+   "harness": "runner self-tests and runner inputs under test:harness"
+  },
+  "files": {
+   ".dockerignore": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "preserve"
+   },
+   ".env.example": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "preserve"
+   },
+   ".github/workflows/check.yml": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "update"
+   },
+   ".gitignore": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "preserve"
+   },
+   ".impeccable/design.json": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "preserve"
+   },
+   ".impeccable/surfaces/ui-src-main-tsx.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "AGENTS.md": {
+    "kind": "doc",
+    "baselineDisposition": "update"
+   },
+   "DESIGN.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "Dockerfile": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "preserve"
+   },
+   "PRODUCT.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "README.md": {
+    "kind": "doc",
+    "baselineDisposition": "update"
+   },
+   "compose.yaml": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "preserve"
+   },
+   "docs/effect-v4-admission-probe.mjs": {
+    "kind": "doc",
+    "baselineDisposition": null
+   },
+   "docs/effect-v4-files.json": {
+    "kind": "doc",
+    "baselineDisposition": null
+   },
+   "docs/effect-v4-migration.md": {
+    "kind": "doc",
+    "baselineDisposition": null
+   },
+   "docs/guidance.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "docs/intent-guidance-review.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "docs/project-definitions.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "docs/project-supervision.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "docs/proposals/intent-monitor-review.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "docs/proposals/intent-monitor.html": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "docs/proposals/intent-monitor.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "docs/steps-and-workflows.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "docs/supervisor-team.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "docs/workflow-mcp.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "eslint.config.js": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "update"
+   },
+   "package-lock.json": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "update"
+   },
+   "package.json": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "update"
+   },
+   "scripts/probe-t3.ts": {
+    "kind": "script",
+    "baselineDisposition": "update",
+    "status": "entry",
+    "reason": "operations entry: NodeRuntime.runMain native probe",
+    "facadeImports": []
+   },
+   "scripts/rollout-scan.ts": {
+    "kind": "script",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "operations entry: NodeRuntime.runMain read-only cut-over scan",
+    "facadeImports": []
+   },
+   "scripts/run-tests.ts": {
+    "kind": "script",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "test-runner entry: NodeRuntime.runMain watchdog over the vitest phases",
+    "facadeImports": []
+   },
+   "skills/author-supervisor-workflows/SKILL.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "skills/author-supervisor-workflows/references/definition-patterns.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "skills/use-t3-supervisor/SKILL.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "skills/use-t3-supervisor/references/dashboard.md": {
+    "kind": "doc",
+    "baselineDisposition": "preserve"
+   },
+   "src/canonical-json.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/cli.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "entry",
+    "reason": "CLI entry: NodeRuntime.runMain over the command",
+    "facadeImports": []
+   },
+   "src/config.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/credential-redaction.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/dashboard-overview.ts": {
+    "kind": "source",
+    "baselineDisposition": "update",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/db.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/definition-references.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/domain.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/errors.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/git-probe.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/guidance-application.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/guidance-contract.ts": {
+    "kind": "source",
+    "baselineDisposition": "update",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/guidance-sql.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/guidance-store.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/guidance-ui.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/guidance.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/ids.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/interpretation-cutover.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/interpretation-evidence.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/interpretation-intake.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/interpretation-submission.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/interpretation-wake.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/logging.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/main.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "entry",
+    "reason": "process entry: NodeRuntime.runMain over the application layer",
+    "facadeImports": []
+   },
+   "src/native-envelope.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/project-config-editor.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/project-definitions-contract.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/project-definitions.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/project-files.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/project-supervisor-contract.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/project-supervisor-store.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/project-supervisor.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/rollout-scan.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/scope-locks.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/service-auth.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "adapter",
+    "reason": "node:fs FileHandle for the login lock and auth file checks by dev/ino (stat on the open handle), wrapped in scoped acquireRelease",
+    "facadeImports": []
+   },
+   "src/store.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervision-control.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervision-gate.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervision-live.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-control-contract.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-conversation-store.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-conversation.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-definition-review.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-helper-transport.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-lifecycle.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-monitor-store.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-monitor.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-native.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-observation.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-scope.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-state-reset.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-team-controller.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-team-runtime.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-team-store.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-team-view.ts": {
+    "kind": "source",
+    "baselineDisposition": "update",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-workflow-agreement.ts": {
+    "kind": "source",
+    "baselineDisposition": "update",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor-workflow.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/supervisor.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/t3-projection-stream.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/t3.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/thread-policy-contract.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/thread-policy.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/timestamp.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/types.ts": {
+    "kind": "source",
+    "baselineDisposition": "update",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/workflow-assessment.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/workflow-mcp.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "adapter",
+    "reason": "MCP SDK web-standard transport: the handler's Response promise is bridged once into the request's Effect scope",
+    "facadeImports": []
+   },
+   "src/workflow-progress-reader.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/workflow-progress.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/workflow-state-contract.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/workflow-state-store.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/workflow-write-controller.ts": {
+    "kind": "source",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "src/workflow-write-evidence.ts": {
+    "kind": "source",
+    "baselineDisposition": "keep-pure",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/access-sql-semantics.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/auth-cli.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/auth-cli.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/browser-access.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/browser-access.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/candidate-search-identity-atoms.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/cli-bin.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/config.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/config.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/dashboard-integration-atoms.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/dashboard-lifecycle-atoms.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/dashboard-overview.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/dashboard-shell-atoms.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/db.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/definition-references.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/definitions-lock-order.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/domain.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "pure-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/fake-t3-wait.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/git-probe.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/git-probe.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "loopback node http/ws peer standing in for T3 or git: node server callbacks, acquired and released in the test's scope",
+    "facadeImports": []
+   },
+   "test/guidance-store-service.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/guidance-ui.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/guidance.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/guidance.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/harness/README.md": {
+    "kind": "harness",
+    "baselineDisposition": null
+   },
+   "test/harness/deadlines.test.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/effect-timeout.test.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixture-run.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/blocked.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/clean.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/default-deadline.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/effect-timeout.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/fiber-interrupted.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/fiber-retained.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/finalizers.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/hang.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/leak.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/phase-a-fail.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/phase-a-slow.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/phase-a.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/phase-b-fail.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/phase-b-hang.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/phase-b-slow.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/phase-b.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/phase-config.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/phase-marker.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/private-assert.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/timeouts.fixture.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/vitest.default-deadline.config.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/vitest.fixture-nogc.config.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/vitest.fixture.config.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/vitest.phase-a.config.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/fixtures/vitest.phase-b.config.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/leak-collect.test.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/leak-gate.test.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/lint-guards.test.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/phases.test.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/private-assert.test.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/timeouts.test.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/harness/watchdog.test.ts": {
+    "kind": "harness",
+    "baselineDisposition": null,
+    "status": "harness",
+    "reason": "runner self-test or runner input (plan 5.3 rule 5: plain vitest under test:harness)",
+    "facadeImports": []
+   },
+   "test/helper-admission-races.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/helper-transport-admission.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/helper-webhook-integration.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/ids.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/interpretation-cutover.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/interpretation-finalization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/interpretation-intake.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/interpretation-start.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/interpretation-submission.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/log-privacy.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/logging.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/main-release-order.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/native-authority-integration.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/native-envelope.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "a setImmediate loop-turn probe inside Effect.callback observes ordering against the socket",
+    "facadeImports": []
+   },
+   "test/native-files-service.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "loopback node http/ws peer standing in for T3 or git: node server callbacks, acquired and released in the test's scope",
+    "facadeImports": []
+   },
+   "test/native-rpc.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/navigation-atom.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/no-project-atoms.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/no-project-ui.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "pure-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/overview-atoms.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/probe-t3-runmain.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/probe-t3.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/process-output-limit.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "timers appear only in the child script's source text, which runs in another process",
+    "facadeImports": []
+   },
+   "test/project-committer.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "loopback node http/ws peer standing in for T3 or git: node server callbacks, acquired and released in the test's scope",
+    "facadeImports": []
+   },
+   "test/project-committer.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "loopback node http/ws peer standing in for T3 or git: node server callbacks, acquired and released in the test's scope",
+    "facadeImports": []
+   },
+   "test/project-config-editor.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/project-config-editor.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "loopback node http/ws peer standing in for T3 or git: node server callbacks, acquired and released in the test's scope",
+    "facadeImports": []
+   },
+   "test/project-definition-initialization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "loopback node http/ws peer standing in for T3 or git: node server callbacks, acquired and released in the test's scope",
+    "facadeImports": []
+   },
+   "test/project-definitions-completion-atoms.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/project-definitions-fixture.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": "port-tests",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/project-definitions-service.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/project-definitions-ui-atoms.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/project-definitions-ui.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/project-definitions.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/project-definitions.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/project-monitoring-settings.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/project-supervisor-admission-authority.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/project-supervisor-panel-atoms.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/project-supervisor-scope-serialization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/project-supervisor-store.regression.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/project-supervisor-ui.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/project-supervisor-ui.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/project-supervisor-workflow.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/project-supervisor.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/project-supervisor.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/rollout-scan.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/scope-locks.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/service-auth-layer.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/service-auth.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/service-auth.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "promise and timer text appears only in a child script's source, which runs in another process",
+    "facadeImports": []
+   },
+   "test/sql-semantics.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/steps-and-workflows-guide-ui.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "pure-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/stop-linearization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/store-permissions.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/store.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/store.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervision-controls-atoms.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/supervision-controls-ui.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "pure-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervision-controls-ui.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "pure-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervision-gate-transaction.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervision-gate.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervision-live.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-child-observation.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-control.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-conversation-admission.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-conversation-creation-receipt.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-conversation-receipt.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-conversation-store-service.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-conversation.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-conversation.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-definition-decision.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "pure-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-definition-review.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "pure-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-global-definitions.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-helper-transport.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "the helper webhook transport's injected fetch parameter, stubbed with Response promises",
+    "facadeImports": []
+   },
+   "test/supervisor-helper-transport.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "the helper webhook transport's injected fetch parameter, stubbed with Response promises",
+    "facadeImports": []
+   },
+   "test/supervisor-model-output.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-monitor.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-monitor.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-native.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "loopback node http/ws peer standing in for T3 or git: node server callbacks, acquired and released in the test's scope",
+    "facadeImports": []
+   },
+   "test/supervisor-native.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "loopback http peer callbacks hold each read on a deferred",
+    "facadeImports": []
+   },
+   "test/supervisor-ownership.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-scope-lifecycle.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-scope-lifecycle.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-state-reset-service.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-team-controller.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-team-controller.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-team-member-loss.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-team-runtime.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "the helper webhook transport's injected fetch parameter, stubbed with Response promises",
+    "facadeImports": []
+   },
+   "test/supervisor-team-runtime.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "the helper webhook transport's injected fetch parameter, stubbed with Response promises",
+    "facadeImports": []
+   },
+   "test/supervisor-team-store.regression.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-team-store.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-workflow-agreement.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "pure-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-workflow-agreement.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-workflow.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "pure-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor-workflow.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/supervisor.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/access-sql-child.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "child-process entry of the SQL access suites: runs one program and exits",
+    "facadeImports": []
+   },
+   "test/support/c1-conversation-fixture.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/c1-git-probe-peer.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "adapter",
+    "reason": "loopback node http/ws peer standing in for T3 or git: node server callbacks, acquired and released in the test's scope",
+    "facadeImports": []
+   },
+   "test/support/c1-workflow-fixture.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/c2-wwc-tool-definitions.golden.json": {
+    "kind": "test-fixture",
+    "baselineDisposition": null
+   },
+   "test/support/c3a-fake-terminal-t3.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "adapter",
+    "reason": "loopback node http/ws peer standing in for T3 or git: node server callbacks, acquired and released in the test's scope",
+    "facadeImports": []
+   },
+   "test/support/c3b-project-supervisor.golden.json": {
+    "kind": "test-fixture",
+    "baselineDisposition": null
+   },
+   "test/support/c3b-project-supervisor.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/cli-bin.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/cli-fake-t3.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "adapter",
+    "reason": "loopback node http/ws peer standing in for T3 or git: node server callbacks, acquired and released in the test's scope",
+    "facadeImports": []
+   },
+   "test/support/cli-help.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/cli-probe.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/cli-process.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/ctl-progress.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/ctl-supervisor.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/ctl-workflow.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/envelope-peer.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g10-probe-guidance.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g11-app.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g11-dashboard.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g11-http.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g11-stores.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g11-supervision.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g11-team.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g12-lifecycle.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g12-stores.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g1a-conversation.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g1b-conversation.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g3-team.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g5a-bounds.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g6-dashboard.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g6-page.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g7-browser.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "adapter",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/support/g7-page.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "adapter",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/support/g7-runtime.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g8-app.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g8-auth-child.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "child-process entry of the auth contention suites",
+    "facadeImports": []
+   },
+   "test/support/g8-auth-worker.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "worker-thread entry of the auth contention suites (runFork in the worker)",
+    "facadeImports": []
+   },
+   "test/support/g8-auth.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g8-cli.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g8-mcp-inflight-close.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "child-process entry of the MCP in-flight close suite",
+    "facadeImports": []
+   },
+   "test/support/g8-mcp.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g8-peers.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g8-private.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g8-process.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "adapter",
+    "reason": "the Effect child-process runner: node child_process events and one setImmediate loop-turn probe, all inside Effect.callback",
+    "facadeImports": []
+   },
+   "test/support/g9-stores.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/g9-supervisor.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/glinint-wiring.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/guidance-store-services.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/int-helper-fixture.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/int-native-peer.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/int-workflow-fixture.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/interpretation-evidence-fixture.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/interpretation-fixture.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/interpretation-submit.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/leak-collect.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "adapter",
+    "reason": "vitest setup file of the leak gate: an afterAll hook collects garbage after one loop turn (plan 5.3 rule 3)",
+    "facadeImports": []
+   },
+   "test/support/leak-gate.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/lin-fixture.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/mcp-controllers.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "adapter",
+    "reason": "MCP SDK tool callbacks take (args, AbortSignal) and return promises; the suite drives the SDK route through them",
+    "facadeImports": []
+   },
+   "test/support/private-assert.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/ps-fixture.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "adapter",
+    "reason": "a setImmediate loop-turn yield inside Effect.callback lets sibling batch work settle before a pass is interrupted",
+    "facadeImports": []
+   },
+   "test/support/psx-sql.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/psx-stores.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/psx-submission.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/psx-supervisor.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/s6e-prep-interpretation.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/s8ui-clock.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/service-auth-harness.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/sql-db-files.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/sql-semantics-child.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "child-process entry of the SQL semantics suites: runs one program and exits",
+    "facadeImports": []
+   },
+   "test/support/wwc-fixture.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/support/wwc-stores.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/t3-client-port.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "loopback node http/ws peer standing in for T3 or git: node server callbacks, acquired and released in the test's scope",
+    "facadeImports": []
+   },
+   "test/t3-projection-stream.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/t3-projection-stream.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "a deliberate raw-timer probe proving the stream read yields to the event loop (characterization)",
+    "facadeImports": []
+   },
+   "test/t3.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/t3.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "loopback node http/ws peer standing in for T3 or git: node server callbacks, acquired and released in the test's scope",
+    "facadeImports": []
+   },
+   "test/thread-policy.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/thread-policy.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/ui-core-atoms.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "stubbed browser fetch: the UI code under test calls the browser's promise fetch, so the stub answers with Response promises",
+    "facadeImports": []
+   },
+   "test/ui-fixture/README.md": {
+    "kind": "test-fixture",
+    "baselineDisposition": null
+   },
+   "test/ui-fixture/environments.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/ui-fixture/fixture.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/ui-fixture/run.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "UI fixture server entry for the browser suites: NodeRuntime.runMain",
+    "facadeImports": []
+   },
+   "test/ui-fixture/scenarios.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/ui-fixture/server.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "adapter",
+    "reason": "UI fixture server for the browser suites: node file and http callbacks behind its entry",
+    "facadeImports": []
+   },
+   "test/workflow-context-view-cancel.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-mcp-lifecycle.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "MCP SDK tool callbacks take (args, AbortSignal) and return promises; the suite drives the SDK route through them",
+    "facadeImports": []
+   },
+   "test/workflow-mcp-route.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "MCP SDK tool callbacks take (args, AbortSignal) and return promises; the suite drives the SDK route through them",
+    "facadeImports": []
+   },
+   "test/workflow-mcp-services.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-mcp.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-mcp.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": "MCP SDK tool callbacks take (args, AbortSignal) and return promises; the suite drives the SDK route through them",
+    "facadeImports": []
+   },
+   "test/workflow-native.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-node-ids.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "pure-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-progress.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-progress.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-state-schema.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-state-store.regression.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-state.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-state.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-team-admission.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-write-controller.characterization.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-write-controller.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workflow-write-evidence-clock.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "test/workspace-navigation.test.ts": {
+    "kind": "test",
+    "baselineDisposition": "port-tests",
+    "status": "pure-test",
+    "reason": null,
+    "facadeImports": []
+   },
+   "tsconfig.build.json": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "preserve"
+   },
+   "tsconfig.json": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "update"
+   },
+   "ui/index.html": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "preserve"
+   },
+   "ui/public/app-icon.png": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "preserve"
+   },
+   "ui/public/favicon.png": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "preserve"
+   },
+   "ui/public/supervisor-icon.png": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "preserve"
+   },
+   "ui/src/access.ts": {
+    "kind": "ui",
+    "baselineDisposition": "port",
+    "status": "adapter",
+    "reason": "browser fetch: an AbortController owned by acquireRelease aborts the request when its fiber is interrupted",
+    "facadeImports": []
+   },
+   "ui/src/api.ts": {
+    "kind": "ui",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/atoms.ts": {
+    "kind": "ui",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/definition-references.tsx": {
+    "kind": "ui",
+    "baselineDisposition": "keep-pure",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/icons.tsx": {
+    "kind": "ui",
+    "baselineDisposition": "keep-pure",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/main.tsx": {
+    "kind": "ui",
+    "baselineDisposition": "port",
+    "status": "adapter",
+    "reason": "React event handlers await Atom's promiseExit setters (sign-in, sign-out); state stays in atoms",
+    "facadeImports": []
+   },
+   "ui/src/navigation.tsx": {
+    "kind": "ui",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/no-project.tsx": {
+    "kind": "ui",
+    "baselineDisposition": "port",
+    "status": "adapter",
+    "reason": "React event handler awaits an Atom promiseExit setter; state stays in atoms",
+    "facadeImports": []
+   },
+   "ui/src/overview.tsx": {
+    "kind": "ui",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/project-configuration-editor.tsx": {
+    "kind": "ui",
+    "baselineDisposition": "port",
+    "status": "adapter",
+    "reason": "React form submit awaits an Atom promiseExit setter; state stays in atoms",
+    "facadeImports": []
+   },
+   "ui/src/project-definitions-api.ts": {
+    "kind": "ui",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/project-definitions.tsx": {
+    "kind": "ui",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/project-supervisor-api.ts": {
+    "kind": "ui",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/project-supervisor.tsx": {
+    "kind": "ui",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/steps-and-workflows-guide.tsx": {
+    "kind": "ui",
+    "baselineDisposition": "keep-pure",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/stop-notice.tsx": {
+    "kind": "ui",
+    "baselineDisposition": "keep-pure",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/style.css": {
+    "kind": "ui",
+    "baselineDisposition": "preserve"
+   },
+   "ui/src/supervisor-control.tsx": {
+    "kind": "ui",
+    "baselineDisposition": "port",
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/src/vite-env.d.ts": {
+    "kind": "ui",
+    "baselineDisposition": "preserve",
+    "status": "pure",
+    "reason": null,
+    "facadeImports": []
+   },
+   "ui/tsconfig.json": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "preserve"
+   },
+   "vite.config.ts": {
+    "kind": "config-or-asset",
+    "baselineDisposition": "preserve"
+   },
+   "vitest.config.ts": {
+    "kind": "config-or-asset",
+    "baselineDisposition": null
+   },
+   "vitest.harness.config.ts": {
+    "kind": "config-or-asset",
+    "baselineDisposition": null
+   }
+  },
+  "removedBaselineFiles": [],
+  "summary": {
+   "config-or-asset": 20,
+   "doc": 22,
+   "entry": 11,
+   "pure": 24,
+   "effect": 116,
+   "adapter": 16,
+   "effect-test": 138,
+   "pure-test": 11,
+   "harness": 36,
+   "test-fixture": 3,
+   "ui": 1
+  },
+  "openProblems": []
+ }
 }
