@@ -19,7 +19,6 @@
   and runs its finalizer; an in-effect `Effect.timeout` fails typed inside `it.live`.
 - `leak-collect.test.ts`: an interrupted fiber is not reported, a still-referenced suspended
   fiber is, and a worker without `--expose-gc` fails closed.
-- `node-test.test.ts`: the node:test cleanup-order shim of `test/support/node-test.ts`.
 - `deadlines.test.ts`: the main phase config gives every test Vitest's own 10 s timeout and
   no slower class; in a scaled nested run an unlisted test (an effect and a promise) times out
   at the default bound with its finalizer run, while an explicit slow bound is kept.

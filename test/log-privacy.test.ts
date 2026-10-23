@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { inspect } from "node:util";
 import { NodeFileSystem } from "@effect/platform-node";
 import { it } from "@effect/vitest";
-import { Cause, Clock, Effect, Exit, Fiber, FileSystem, Layer, Logger, Stream, SubscriptionRef, Tracer } from "effect";
-import type { TestContext } from "vitest";
+import { Cause, Clock, Effect, Exit, Fiber, FileSystem, Layer, Logger, type Scope, Stream, SubscriptionRef, Tracer } from "effect";
+import { vi } from "vitest";
 import { SupervisorConfig as Configuration } from "../src/config.js";
 import { policyDbLayer } from "../src/db.js";
 import { NativeEnvelope } from "../src/native-envelope.js";
@@ -21,7 +21,6 @@ import { startFakeT3, untilTraffic, type FakeT3Options } from "./support/cli-fak
 import { fingerprint, leakedSecrets } from "./support/cli-process.js";
 import { cancelAfter, onLiveClock } from "./support/g11-http.js";
 import { temporaryDirectory } from "./support/g11-stores.js";
-import { mockMethod } from "./support/node-test.js";
 
 // baseline log privacy: secrets injected into native, helper and auth failures, observed at every baseline log/span seam.
 // it.live: the supervision runs talk to a loopback fake T3 (the cli suites' peer) over real sockets and keep their stores in
@@ -61,16 +60,17 @@ interface Observation {
 }
 
 // the console is the process's own: the code under test writes some lines through Effect's Console and some through
-// console directly, so the observation replaces the global console methods (restored when the test finishes). A wait for a
+// console directly, so the observation replaces the global console methods with spies restored when the test's scope closes. A wait for a
 // line removes its waiter when it ends, and its bound is a live-clock sleep that ends with it
-const observe = (t: TestContext): Observation => {
+const observe: Effect.Effect<Observation, never, Scope.Scope> = Effect.gen(function* () {
   const lines: string[] = [];
   const waiters = new Set<() => void>();
   const write = (...args: unknown[]) => {
     lines.push(args.map((value) => typeof value === "string" ? value : inspect(value, { depth: 20 })).join(" "));
     for (const waiter of waiters) waiter();
   };
-  for (const method of ["log", "error", "warn", "info", "debug"] as const) mockMethod(t, console, method, write);
+  const spies = (["log", "error", "warn", "info", "debug"] as const).map((method) => vi.spyOn(console, method).mockImplementation(write));
+  yield* Effect.addFinalizer(() => Effect.sync(() => {for (const spy of spies) spy.mockRestore();}));
   return {
     console: lines,
     effectLogs: [],
@@ -86,7 +86,7 @@ const observe = (t: TestContext): Observation => {
       return Effect.sync(() => waiters.delete(check));
     }).pipe(Effect.timeoutOrElse({ duration: timeoutMs, orElse: () => Effect.die(new Error(`no ${label} within ${timeoutMs} ms`)) }), onLiveClock),
   };
-};
+});
 
 // the recording logger replaces the default loggers; the recording tracer replaces the native tracer
 const instrumented = <A, E>(effect: Effect.Effect<A, E>, observation: Observation): Effect.Effect<A, E> => {
@@ -155,9 +155,9 @@ const assertNoLeak = (label: string, outputs: ReadonlyArray<string>, secrets: Se
 };
 
 it.live("CT-REDACT-01: native transport failures carrying a token, a native error body and a webhook URL leave only phase classifications in logs, status and spans",
-  (t) => Effect.gen(function* () {
+  () => Effect.gen(function* () {
     const secrets = makeSecrets();
-    const observation = observe(t);
+    const observation = yield* observe;
 
     // descriptor answered with a 500 whose body carries the secrets: the retry records only the phase
     const refusing = yield* fakeT3({ token: secrets.token, descriptor: "failing", failure: nativeFailure(secrets) });
@@ -199,9 +199,9 @@ it.live("CT-REDACT-01: native transport failures carrying a token, a native erro
   }), { timeout: 10_000 });
 
 it.live("CT-REDACT-01: nested causes carrying a token, a native error body and a webhook URL reach the logger only as phase classifications",
-  (t) => Effect.gen(function* () {
+  () => Effect.gen(function* () {
     const secrets = makeSecrets();
-    const observation = observe(t);
+    const observation = yield* observe;
     const directory = yield* temporaryDirectory("log-privacy-nested-");
     const nested = (): T3TransportError => {
       const error = new T3TransportError("T3 environment descriptor returned HTTP 500", 500);
@@ -243,9 +243,9 @@ it.live("CT-REDACT-01: nested causes carrying a token, a native error body and a
   }), { timeout: 10_000 });
 
 it.live("CT-REDACT-01: native rpc, helper channel and auth failures hand callers only fixed messages and classification flags",
-  (t) => Effect.gen(function* () {
+  () => Effect.gen(function* () {
     const secrets = makeSecrets();
-    const observation = observe(t);
+    const observation = yield* observe;
     const fake = yield* fakeT3({ token: secrets.token, failure: nativeFailure(secrets) });
     const rpc = yield* NativeRpc.make({ baseUrl: fake.baseUrl, token: secrets.token }).pipe(Effect.provide(NativeEnvelope.layer));
     // a native read and the helper's webhook channel upsert, both refused with the secret-bearing native body

@@ -4,6 +4,7 @@ import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { NodeFileSystem } from "@effect/platform-node";
 import { it } from "@effect/vitest";
+import { vi } from "vitest";
 import { Clock, Context, Data, Deferred, Effect, Exit, FileSystem, Layer, Scope } from "effect";
 import { HttpApi } from "effect/http-api";
 import type { SqlClient } from "effect/sql";
@@ -17,7 +18,6 @@ import { GuidanceStore } from "../src/guidance-store.js";
 import type { SupervisorIds } from "../src/ids.js";
 import type { ProjectConfigEditorService } from "../src/project-config-editor.js";
 import type { ProjectInfo } from "../src/types.js";
-import { mockMethod } from "./support/node-test.js";
 import { appConfig, fakeT3, probeToken, runApp, t3Client, type AppCatalog } from "./support/g11-app.js";
 import { definitionsOf, grant, listeners, processStores, readCsrf, runtimeOver, signIn, startUi, uiConfig, workflowController, type StartedUi } from "./support/g11-dashboard.js";
 import { blockedPort, connectRefused, exchange, exchangeJson, freePort, jsonBody, openDescriptors, openRequest, portBindable, rawRequest, within,
@@ -120,7 +120,7 @@ it.live("CT-APP-01: the running application's definition scratch check keeps a t
   assert.deepEqual(globalOnly, {bare: false, slashed: true, "explicit-scratch": true, "explicit-project": false});
 }), {timeout: 10_000});
 
-it.live("CT-APP-02: interrupting the application closes the UI listener, cleans up git probes once more while the store is open, and closes both databases", (t) => Effect.gen(function* () {
+it.live("CT-APP-02: interrupting the application closes the UI listener, cleans up git probes once more while the store is open, and closes both databases", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("c3b-app-shutdown-");
   const pending = {threadId: "t3-supervisor-git-probe-" + randomUUID(), terminalId: "t3-supervisor-git-probe-" + randomUUID()};
   yield* withStore(directory, (_seeded, sql) => execute(sql, "INSERT INTO meta(key,value) VALUES('native_git_probe_sessions',?)", JSON.stringify([pending])));
@@ -129,7 +129,8 @@ it.live("CT-APP-02: interrupting the application closes the UI listener, cleans 
   const peer = yield* fakeT3;
   const config = yield* appConfig(directory, peer.url, {gitProbeTokenFile: probeFile});
   const logs: string[] = [];
-  mockMethod(t, console, "log", (...values: unknown[]) => {logs.push(values.map(String).join(" "));});
+  const log = vi.spyOn(console, "log").mockImplementation((...values: unknown[]) => {logs.push(values.map(String).join(" "));});
+  yield* Effect.addFinalizer(() => Effect.sync(() => log.mockRestore()));
   const closes: Array<{payload: Record<string, unknown>; uiRefused: boolean}> = [];
   // the startup cleanup is rejected so the session stays pending; the shutdown cleanup then closes it
   peer.onRpc = request => Effect.gen(function* () {
@@ -597,7 +598,7 @@ it.live("CT-UI-06: a listen failure on the MCP bind host closes the UI listener 
   assert.equal(openDescriptors(login), 0);
 }), {timeout: 10_000});
 
-it.live("CT-UI-07: session and CSRF values never reach console or process output during a full request cycle", (t) => Effect.gen(function* () {
+it.live("CT-UI-07: session and CSRF values never reach console or process output during a full request cycle", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("c3b-log-");
   const started = yield* startUi({directory});
   // the process's thread-policy store the dashboard saves through
@@ -605,9 +606,10 @@ it.live("CT-UI-07: session and CSRF values never reach console or process output
   const {origin} = started;
   const captured: string[] = [];
   const capture = (...values: unknown[]) => {captured.push(values.map(value => typeof value === "string" ? value : String(value)).join(" "));return true;};
-  for (const name of ["log", "info", "warn", "error", "debug", "trace"] as const) mockMethod(t, console, name, capture);
-  mockMethod(t, process.stdout, "write", capture);
-  mockMethod(t, process.stderr, "write", capture);
+  // console and process output are spies for the test's scope, restored after everything acquired later
+  const spies = [...(["log", "info", "warn", "error", "debug", "trace"] as const).map(name => vi.spyOn(console, name).mockImplementation(capture)),
+    vi.spyOn(process.stdout, "write").mockImplementation(capture), vi.spyOn(process.stderr, "write").mockImplementation(capture)];
+  yield* Effect.addFinalizer(() => Effect.sync(() => {for (const spy of spies) spy.mockRestore();}));
   console.log("c3b capture probe");
 
   const session = yield* signIn(origin, directory);

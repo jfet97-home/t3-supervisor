@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
+import { vi } from "vitest";
 import { NodeFileSystem } from "@effect/platform-node";
 import { ConfigProvider, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Stream, SubscriptionRef } from "effect";
 import { Store } from "../src/store.js";
 import { supervise, SupervisorLive, SupervisorStatusRef, type SupervisorStatus } from "../src/supervisor.js";
 import { ThreadPolicyStore } from "../src/thread-policy.js";
-import { supervisorHarness, type SupervisorHarness } from "./support/cli-supervisor.js";
+import { supervisorHarness, type SupervisorHarness } from "./support/g8-cli.js";
 import { portState } from "./support/g11-http.js";
-import { mockMethod } from "./support/node-test.js";
 
 // target regression for D-10: the server graph of src/main.ts over a loopback fake T3, interrupted after readiness.
 // it.live: the run listens on real loopback ports and its fake T3 peer is a loopback server (the cli harness's)
@@ -27,13 +27,15 @@ const dataFiles = (harness: SupervisorHarness) => Effect.gen(function* () {
 const ready = (status: SupervisorStatus) =>
   status.supervisionState === "ready" && status.t3Connected && status.activation !== null && status.storeState === "ready";
 
-it.live("CT-MAIN-02: the supervision run and its health, UI and MCP listeners release before the catalog and thread-policy stores", (t) =>
+it.live("CT-MAIN-02: the supervision run and its health, UI and MCP listeners release before the catalog and thread-policy stores", () =>
   Effect.gen(function* () {
-    const harness = yield* Effect.promise(() => supervisorHarness(t, { activeThreads: 1, archiveThreads: 1 }));
+    const harness = yield* supervisorHarness({ activeThreads: 1, archiveThreads: 1 }).pipe(Effect.provide(NodeFileSystem.layer));
     const events: unknown[] = [];
-    mockMethod(t, console, "log", (line: unknown) => {
+    // the run's log lines, restored with the test's scope
+    const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
       if (typeof line === "string" && line.startsWith("{")) events.push((JSON.parse(line) as { event?: unknown }).event);
     });
+    yield* Effect.addFinalizer(() => Effect.sync(() => log.mockRestore()));
     const listeners = Effect.all({ health: portState(harness.ports.health), ui: portState(harness.ports.ui), mcp: portState(harness.ports.mcp) });
     const observed = yield* Deferred.make<SubscriptionRef.SubscriptionRef<SupervisorStatus>>();
     const released = yield* Deferred.make<Release>();
