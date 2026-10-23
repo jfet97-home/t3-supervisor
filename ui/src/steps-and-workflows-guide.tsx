@@ -207,10 +207,19 @@ export function StepsAndWorkflowsGuide() {
       <p>A sequence communicates intended semantic order. Members of a parallel group may overlap and have no declared order; parallel does not require simultaneous execution or create child agents.</p>
     </Topic>
 
-    <Topic id="guide-references-title" title="Supporting file references">
-      <p>Reusable steps, workflow files and local step objects may have a <code>references</code> list containing zero, one or more relative file paths. Omit it or use <code>references: []</code> for none.</p>
-      <p>Paths are relative to the operative project checkout root, including for shared definitions. Examples include <code>docs/testing.md</code>, <code>skills/use-project/SKILL.md</code> and <code>src/migration.ts</code>. Any file type is allowed; absolute paths and URLs are not supported.</p>
-      <p>References are shown read-only in Definitions and Plan views. Edit the source definition file to change them, then refresh. Supervisor records the paths without opening files or checking whether they exist. A listed path is supporting material, not a command, file permission or evidence that the file was read.</p>
+    <Topic id="guide-references-title" title="Supporting references">
+      <p>Reusable steps, workflows and local steps may carry <code>references</code>. Keep their applicability, responsibility and completion in a short description; point to maintained documents or skills for detailed procedures.</p>
+      <pre><code>{`references:
+  - docs/testing.md
+  - skill:
+      scope: local
+      path: skills/project-testing/SKILL.md
+  - skill:
+      scope: global
+      name: effect-v4-development`}</code></pre>
+      <p>File strings and local skill paths are relative to the operative checkout root, including for shared definitions. Local skill paths name <code>SKILL.md</code>. Global skill names match the consuming agent’s configured catalog exactly, including namespaces; missing or ambiguous names remain explicit gaps. Do not guess installation paths.</p>
+      <p>Omit the list or use <code>[]</code> for none. At most 100 references, with paths or names up to 4096 characters. Absolute paths, home aliases, schemes, parent traversal, backslashes, control characters and credential-like values are rejected. References grant no access or authority; readers must respect filesystem and symlink boundaries.</p>
+      <p>Definitions and Plan show pointers read-only; introductions carry them without loading their contents. Read applicable guidance progressively within the available tools and context budget. Changing a locator changes definition identity; its content is not frozen or verified by that revision. A listed reference proves neither consultation nor execution. Global skills do not enable shared definitions or supervision.</p>
     </Topic>
 
     <Topic id="guide-config-title" title="The project index, requirements and default workflow">
@@ -224,7 +233,7 @@ export function StepsAndWorkflowsGuide() {
     </Topic>
 
     <Topic id="guide-fixed-title" title="What fixed protects">
-      <p><code>fixed: true</code> preserves the workflow's original members, descriptions, file references and requirements, their relative order, and its declared parallel relationships, including nested commitments. Supporting work can be added around that fragment or between its original members.</p>
+      <p><code>fixed: true</code> preserves the workflow's original members, descriptions, supporting references and requirements, their relative order, and its declared parallel relationships, including nested commitments. Supporting work can be added around that fragment or between its original members.</p>
       <p>For example, the original <code>implementation → deployment</code> sequence may become <code>implementation → e2e-testing → deployment</code>.</p>
       <Example label="Required support work can be inserted between fixed members" value={fixedInsertionExample}/>
       <p>A genuinely not-applicable original member remains visible with its reason in the plan. An applicable commitment cannot be silently removed or weakened. Fixed does not make the workflow a project-wide requirement; <code>required</code> controls inclusion.</p>

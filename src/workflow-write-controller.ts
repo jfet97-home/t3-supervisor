@@ -1,5 +1,5 @@
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, Layer, Option, Schema } from "effect";
-import {definitionReferenceLimits, definitionReferenceProblem, describeDefinitionReferenceProblem, validDefinitionReferences} from "./definition-references.js";
+import {supportingReferencesJsonSchema, definitionReferenceProblem, describeDefinitionReferenceProblem, validDefinitionReferences} from "./definition-references.js";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb } from "./db.js";
 import { documentRow, type GuidanceStoreError, guidanceSql, guidanceTransaction, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan,
@@ -621,7 +621,7 @@ const workflowPlanDefinitions = {
     type: "object", additionalProperties: false, required: ["kind", "reason"], properties: {
       kind: {const: "step"}, nodeId: idSchema(64), definitionId: nullableTextSchema(200), localId: nullableTextSchema(200),
       templatePath: nullableTextSchema(2000), name: textSchema(160), description: {type: "string", maxLength: maxDefinitionTextLength},
-      references: {type: "array", maxItems: definitionReferenceLimits.maxPaths, items: textSchema(definitionReferenceLimits.maxPathLength)},
+      references: supportingReferencesJsonSchema,
       source: {anyOf: [{$ref: "#/$defs/source"}, {type: "null"}]}, resolution: {type: "string", enum: ["resolved", "unresolved"]},
       reason: textSchema(maxPlanReasonLength), status: {type: "string", enum: workflowExecutionStatuses},
       contributorThreadIds: {type: "array", maxItems: workflowMutationLimits.maxContributorsPerNode, uniqueItems: true, items: idSchema()},
@@ -631,7 +631,7 @@ const workflowPlanDefinitions = {
     type: "object", additionalProperties: false, required: ["kind", "definitionId", "reason"], properties: {
       kind: {const: "workflow"}, nodeId: idSchema(64), definitionId: idSchema(200), templatePath: nullableTextSchema(2000),
       name: textSchema(160), description: {type: "string", maxLength: maxDefinitionTextLength},
-      references: {type: "array", maxItems: definitionReferenceLimits.maxPaths, items: textSchema(definitionReferenceLimits.maxPathLength)},
+      references: supportingReferencesJsonSchema,
       fixed: {anyOf: [{type: "boolean"}, {type: "null"}]},
       source: {anyOf: [{$ref: "#/$defs/source"}, {type: "null"}]}, resolution: {type: "string", enum: ["resolved", "partial", "unresolved"]},
       reason: textSchema(maxPlanReasonLength), status: {type: "string", enum: workflowExecutionStatuses},
@@ -722,7 +722,7 @@ const interpretationPlanDefinitions = {
     {type: "object", additionalProperties: false, required: ["kind", "definitionId", "localId", "name", "description", "reason"],
       properties: {kind: {const: "step"}, definitionId: {type: "null"}, localId: interpretationText(interpretationLimits.maxDefinitionIdLength),
         name: interpretationText(interpretationLimits.maxPlanTextLength), description: interpretationText(interpretationLimits.maxPlanTextLength),
-        reason: interpretationText(interpretationLimits.maxReasonLength), references: {type: "array", items: {type: "string"}}}},
+        reason: interpretationText(interpretationLimits.maxReasonLength), references: supportingReferencesJsonSchema}},
     {type: "object", additionalProperties: false, required: ["kind", "definitionId", "reason"],
       properties: {kind: {const: "workflow"}, definitionId: interpretationText(interpretationLimits.maxDefinitionIdLength), reason: interpretationText(interpretationLimits.maxReasonLength)}},
     {$ref: "#/$defs/group"},

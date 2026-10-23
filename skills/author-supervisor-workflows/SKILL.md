@@ -134,9 +134,12 @@ discard relevant detail.
 
 Descriptions carry applicability, roles, inputs, evidence and completion. Link real
 authoritative project files, especially maintained Markdown docs and skills. Read them:
-references prove neither consultation nor access and grant no permission. Supporting
-references must be versioned and available in the target checkout, without ignored or
-machine-local dependencies.
+references prove neither consultation nor access and grant no permission. Use
+checkout-relative files and explicit local skill paths; name global skills through
+the consuming agent's configured catalog. Keep decision-critical obligations in the
+definition, and detailed procedures in the canonical referenced source. Missing or
+ambiguous skills remain gaps; never guess personal paths or claim consultation. See
+the product Guide for the reference contract.
 
 Separate `required: true`, fixed structure and `default_workflow`. Account for
 requirements once per main task, including nested reuse. Genuine inapplicability needs a

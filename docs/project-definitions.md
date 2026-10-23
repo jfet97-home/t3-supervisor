@@ -116,13 +116,11 @@ and uncertain notices are retained without replay. See
 and [workflow MCP](workflow-mcp.md) for connected mutable plans and authority.
 
 
-## Supporting file references
+## Supporting references
 
-Steps (YAML frontmatter), workflow YAML and inline local steps accept an optional
-`references` list of relative file paths; omission and `[]` mean none. Paths are
-relative to the operative checkout root, including for shared definitions. Any file
-type may be named, including documentation, local skills and code. Supervisor does
-not open the targets or check existence. Lists appear read-only in Definitions and
-Plan; edit the source files and refresh to change them. Source revisions, approved
-snapshots and fixed plan commitments include these lists. See
-[the definition syntax](steps-and-workflows.md#supporting-file-references).
+Steps, workflows and inline steps accept canonical relative file strings and explicit
+local/global skill references. Keep the task-specific contract short and point to
+maintained guidance instead of duplicating it. The [definition syntax](steps-and-workflows.md#supporting-references)
+owns the format, lookup rules, bounds and revision semantics. Definitions and Plan
+show these pointers read-only; Supervisor does not open targets or discover host
+skill roots. Existing configuration editing still writes only the definition index.

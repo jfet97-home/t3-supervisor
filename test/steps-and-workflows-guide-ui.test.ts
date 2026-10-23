@@ -45,11 +45,15 @@ it("steps and workflows guide documents the approved layout, syntax and planning
   assert.match(html, /Templates, plans and evidence are different/);
   assert.match(html, /agreement does not prove that review, testing or other steps were executed/);
   assert.match(html, /no migration or compatibility layer/);
-  assert.match(html, /Supporting file references/);
-  assert.match(html, /references: \[\]/);
+  assert.match(html, /Supporting references/);
+  assert.match(html, /<code>\[\]<\/code>/);
   assert.match(html, /skills\/use-project\/SKILL.md/);
   assert.match(html, /src\/migration.ts/);
-  assert.match(html, /shown read-only in Definitions and Plan/);
+  assert.match(html, /Definitions and Plan show pointers read-only/);
+  assert.match(html, /scope: local/);
+  assert.match(html, /scope: global/);
+  assert.match(html, /effect-v4-development/);
+  assert.match(html, /missing or ambiguous names remain explicit gaps/);
   assert.doesNotMatch(html, /Project rules|Reusable blocks/);
 });
 

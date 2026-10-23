@@ -24,11 +24,13 @@ references:
 ---
 ```
 
-Use real project paths, replacing the example reference if necessary. Optional
-`references` are checkout-root-relative paths, including for globally sourced
-definitions. They can name documentation, skills or code, not URLs, home aliases,
-absolute paths or line-number suffixes. They are supporting context, not reusable
-definition IDs, access grants or proof that their targets were read.
+Use real checkout-relative file strings. Explicit skill references use
+`{skill: {scope: local, path: skills/project-review/SKILL.md}}` or
+`{skill: {scope: global, name: effect-v4-development}}`. Global names come from the
+consuming agent's configured catalog, including namespaces; do not invent host
+paths or assume availability. Missing or ambiguous guidance stays an explicit gap.
+The product Guide's Supporting references section owns the full syntax, bounds and
+lookup rules. References grant no access and prove neither reading nor execution.
 
 A workflow has `name`, `description`, optional `references` and `fixed`, and one root
 `sequence` or `parallel`. Its ID is its YAML filename. Members can be `step` references,

@@ -29,8 +29,10 @@ and human corrections, use [author-supervisor-workflows](../author-supervisor-wo
 Authoring a catalog does not itself enable supervision or adopt its policy.
 
 Steps, workflows and inline local steps may carry optional `references` lists of
-checkout-relative file paths. Definitions and Plan display them read-only; edit
-the source YAML/frontmatter and refresh. Referenced files are not opened automatically.
+checkout-relative file strings or explicit local/global skill references. Definitions
+and Plan label their kinds read-only; edit source YAML/frontmatter and refresh. The
+Guide explains lookup and unavailable guidance. References are not opened or verified
+automatically and never enable supervision.
 
 Start on Home for current attention, supervised work and freshness, then open the exact conversation. Projects has Conversations, Definitions and Project settings; a conversation has Overview, Plan & agreement and Supervision. Choose the definitions checkout explicitly, including project root. Project-level views retain that checkout and its draft. Context is remembered per project in the current tab; hash links take precedence. An unavailable conversation never falls back to another checkout. Drafts survive switching views, including instance Settings exclusions.
 

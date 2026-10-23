@@ -502,3 +502,21 @@ it.effect("CT-ISUB-19: an identical replay keeps its attempt; a source edit or r
   assert.deepEqual(Schema.decodeUnknownSync(InterpretationAttempt)(JSON.parse(JSON.stringify(edited))), edited);
   assert.equal(Exit.isFailure(Schema.decodeUnknownExit(InterpretationAttempt)({...edited, attemptId: `attempt:${fx.renewedAttemptUuid}`})), true);
 }), {timeout: 10_000});
+
+
+it.effect("typed interpretation preserves task-local skill pointers and their exact native argument hash", () => Effect.gen(function* () {
+  const context = {definitionContext: yield* definitionContext, pendingStart: false};
+  const references = ["docs/testing.md", {skill: {scope: "local", path: "skills/testing/SKILL.md"}},
+    {skill: {scope: "global", name: "plugin:testing"}}];
+  const plan = structuredClone(formalWorkflow);
+  Object.assign(plan.plan.nodes[1]!, {references});
+  const raw = workflowArguments({workflow: plan});
+  const result = yield* decode(raw, context);
+  assert.deepEqual(result.rawArguments, raw);
+  assert.equal(result.argumentsHash, workflowRequestHash(raw));
+  const changed = structuredClone(plan);
+  Object.assign(changed.plan.nodes[1]!, {references: [{skill: {scope: "global", name: "other:testing"}}]});
+  assert.notEqual((yield* decode(workflowArguments({workflow: changed}), context)).argumentsHash, result.argumentsHash);
+  Object.assign(changed.plan.nodes[1]!, {references: [{skill: {scope: "global", name: "testing", path: "hidden"}}]});
+  assert.equal((yield* rejected(workflowArguments({workflow: changed}), context)).code, "arguments_schema");
+}));

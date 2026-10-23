@@ -23,7 +23,7 @@ uses the same format. Scope selection, permissions and source paths remain visib
 
 A step is a semantic piece of work, not a scheduled task or a command. Its complete
 required definition fields are `id`, `name` and `description`, with an optional
-`references` list of supporting file paths. All applicability, instructions,
+`references` list of supporting file or skill references. All applicability, instructions,
 expected results, delegation details and iteration guidance belong in description.
 There are no separate instructions or outcome fields.
 
@@ -112,35 +112,57 @@ Parallel means members may overlap, with no declared order between them. It does
 not demand simultaneous wall-clock execution or automatically create subagents.
 Sequence expresses the intended semantic order, not an execution scheduler.
 
-## Supporting file references
+## Supporting references
 
-Reusable step frontmatter, reusable workflow YAML and local step objects can each
-include `references`: a list of zero, one or more relative file paths. Omit the field
-or write `references: []` when no supporting files are needed. Paths may point to
-documentation, project-local skills such as `skills/use-project/SKILL.md`, source
-code or any other file type. These are file paths, separate from reusable definition
-IDs used by `step:`, `workflow:` or project `required` entries.
+Steps, workflows and local step objects accept an optional `references` list. A
+relative file string is the canonical file form. Skills use an explicit scope:
 
-Paths are relative to the operative project checkout root, including when their
-definition comes from the shared catalog. `../shared/guide.md` is a relative path;
-absolute paths, home aliases, URL-like strings, control/formatting characters and
-credential-like text are invalid. Use file paths only; `README.md:12` is not a
-supported line-number reference. Each list is limited to 100 paths
-of up to 4096 characters. A rejected list reports a fixed reason and the entry's
-zero-based position, such as `references[1]`, without repeating the rejected text.
-The service records paths without opening or checking
-referenced files. Missing targets do not make the YAML invalid; a reference never
-grants file access or proves that an agent read the file.
+```yaml
+references:
+  - docs/testing.md
+  - skill:
+      scope: local
+      path: skills/project-testing/SKILL.md
+  - skill:
+      scope: global
+      name: effect-v4-development
+```
 
-Definitions and Plan views display the lists read-only. Edit the original definition
-file and refresh to change them. Negotiated plans, stored workflow records and
-source-bound comparisons preserve reference lists alongside description snapshots;
-fixed commitments preserve their supporting paths as well. A changed reference
-list is a definition change and follows the existing source-review procedure.
+File strings and local skill paths are relative to the operative checkout root,
+including in shared definitions. A local skill path names its `SKILL.md`; no folder
+layout is assumed. Global names match the consuming agent's configured skill catalog
+exactly, including namespaces such as `plugin:review`. Do not guess installation
+paths, search another host's home, silently shadow a local/global name or choose
+between ambiguous catalog entries. Missing, ambiguous or unreadable material is an
+explicit gap, never proof that its duties are inapplicable. The service does not
+resolve targets or claim that a skill is installed.
+
+Keep applicability, responsibility and completion criteria in the description;
+reference maintained documents or skills for detailed procedures instead of copying
+them. Tell the operative to read the applicable material progressively, within its
+available tools and context budget. A reference grants no permission, executes
+nothing and does not override the task or Supervisor's role. Interpretation does not
+open these targets. Readers must respect their filesystem permissions and symlink
+boundaries; a valid locator is not proof of containment or access.
+
+Omit the list or use `[]` for none. At most 100 references, with each path/name at
+most 4096 characters. Absolute paths, home aliases, schemes, parent traversal,
+backslashes, control/formatting characters and credential-like values are rejected.
+A rejected list reports a fixed reason and zero-based position without echoing the
+input. `README.md:12` is not a supported line-number reference.
+
+Definitions and Plan display the lists read-only, and introductions carry labelled
+pointers without expanding their contents. Edit source definitions and refresh to
+change the list. Lists are preserved in source snapshots, proposal digests and fixed
+commitments; changing a locator changes definition identity. Referenced content is
+not loaded, frozen or included in that revision. If changed guidance alters agreed
+obligations, reassess the plan rather than silently changing an agreement. A listed
+reference proves neither access nor consultation. Global skill references do not
+enable shared definitions or supervision.
 
 ## Fixed workflows
 
-`fixed: true` protects the original members, their descriptions, file references and requirements,
+`fixed: true` protects the original members, their descriptions, supporting references and requirements,
 their relative order and the declared parallel relationships. It permits added
 support work between original members and around the fragment. A flexible outer
 plan cannot remove or weaken an inner fixed fragment.

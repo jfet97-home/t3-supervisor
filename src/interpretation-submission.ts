@@ -1,3 +1,4 @@
+import {SupportingReferences, type SupportingReference} from "./definition-references.js";
 import { Data, Effect, Schema, type SchemaAST, type SchemaIssue } from "effect";
 import { canonicalJson } from "./canonical-json.js";
 import type { LogFields } from "./logging.js";
@@ -161,7 +162,7 @@ export const retainedInterpretationAttempt = (current: InterpretationAttempt | n
 export type InterpretationPlanNode =
   | {readonly kind: "step"; readonly definitionId: string; readonly reason: string}
   | {readonly kind: "step"; readonly definitionId: null; readonly localId: string; readonly name: string; readonly description: string;
-    readonly reason: string; readonly references?: ReadonlyArray<string>}
+    readonly reason: string; readonly references?: ReadonlyArray<SupportingReference>}
   | {readonly kind: "workflow"; readonly definitionId: string; readonly reason: string}
   | InterpretationPlanGroup;
 export type InterpretationPlanGroup = {readonly kind: "sequence" | "parallel"; readonly nodes: ReadonlyArray<InterpretationPlanNode>};
@@ -173,7 +174,7 @@ const PlanText = Schema.String.check(maxLength(limits.maxPlanTextLength));
 const PlanNode: Schema.Codec<InterpretationPlanNode> = Schema.suspend((): Schema.Codec<InterpretationPlanNode> => Schema.Union([
   Schema.Struct({kind: Schema.Literal("step"), definitionId: DefinitionId, reason: Reason}),
   Schema.Struct({kind: Schema.Literal("step"), definitionId: Schema.Null, localId: DefinitionId, name: PlanText, description: PlanText, reason: Reason,
-    references: Schema.optionalKey(Schema.Array(Schema.String))}),
+    references: Schema.optionalKey(SupportingReferences)}),
   Schema.Struct({kind: Schema.Literal("workflow"), definitionId: DefinitionId, reason: Reason}),
   PlanGroup,
 ]));

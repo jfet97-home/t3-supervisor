@@ -162,9 +162,67 @@
               "type": "array",
               "maxItems": 100,
               "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 4096
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "skill"
+                    ],
+                    "properties": {
+                      "skill": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "scope",
+                          "path"
+                        ],
+                        "properties": {
+                          "scope": {
+                            "const": "local"
+                          },
+                          "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "skill"
+                    ],
+                    "properties": {
+                      "skill": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "scope",
+                          "name"
+                        ],
+                        "properties": {
+                          "scope": {
+                            "const": "global"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
               }
             },
             "source": {
@@ -256,9 +314,67 @@
               "type": "array",
               "maxItems": 100,
               "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 4096
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "skill"
+                    ],
+                    "properties": {
+                      "skill": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "scope",
+                          "path"
+                        ],
+                        "properties": {
+                          "scope": {
+                            "const": "local"
+                          },
+                          "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "skill"
+                    ],
+                    "properties": {
+                      "skill": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "scope",
+                          "name"
+                        ],
+                        "properties": {
+                          "scope": {
+                            "const": "global"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
               }
             },
             "fixed": {
@@ -625,9 +741,67 @@
               "type": "array",
               "maxItems": 100,
               "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 4096
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "skill"
+                    ],
+                    "properties": {
+                      "skill": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "scope",
+                          "path"
+                        ],
+                        "properties": {
+                          "scope": {
+                            "const": "local"
+                          },
+                          "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "skill"
+                    ],
+                    "properties": {
+                      "skill": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "scope",
+                          "name"
+                        ],
+                        "properties": {
+                          "scope": {
+                            "const": "global"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
               }
             },
             "source": {
@@ -719,9 +893,67 @@
               "type": "array",
               "maxItems": 100,
               "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 4096
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "skill"
+                    ],
+                    "properties": {
+                      "skill": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "scope",
+                          "path"
+                        ],
+                        "properties": {
+                          "scope": {
+                            "const": "local"
+                          },
+                          "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "skill"
+                    ],
+                    "properties": {
+                      "skill": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "scope",
+                          "name"
+                        ],
+                        "properties": {
+                          "scope": {
+                            "const": "global"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
               }
             },
             "fixed": {

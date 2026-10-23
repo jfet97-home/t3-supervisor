@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { Exit, Schema } from "effect";
-import { definitionReferenceFields, validDefinitionReferences } from "./definition-references.js";
+import { definitionReferenceFields, validDefinitionReferences, type SupportingReference } from "./definition-references.js";
 import { fingerprint } from "./guidance-store.js";
 import { nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { record } from "./supervisor-native.js";
@@ -127,7 +127,7 @@ const snapshot = (value: unknown, task: TaskRecord, statuses: readonly string[])
       Object.hasOwn(item, "references") && !validDefinitionReferences(item.references) ||
       !boundedText(item.id, 64) || !definitionIdPattern.test(item.id) || !boundedText(item.name, 160) || !boundedText(item.description, 8000) || !boundedText(item.summary, 4096)) return null;
     summaryBytes += Buffer.byteLength(JSON.stringify(item), "utf8");
-    steps.push({id: item.id, name: item.name, description: item.description, summary: item.summary, ...definitionReferenceFields(item.references as readonly string[] | undefined), ...metadata(item)});
+    steps.push({id: item.id, name: item.name, description: item.description, summary: item.summary, ...definitionReferenceFields(item.references as readonly SupportingReference[] | undefined), ...metadata(item)});
   }
 
   const nodeBudget = {count: 0};
@@ -140,7 +140,7 @@ const snapshot = (value: unknown, task: TaskRecord, statuses: readonly string[])
     if (!Array.isArray(item[key]) || item[key].length === 0 || item[key].length > 1000 ||
       !item[key].every(node => validDefinitionNode(node, 0, nodeBudget))) return null;
     summaryBytes += Buffer.byteLength(JSON.stringify(item), "utf8");
-    workflows.push({id: item.id, name: item.name, description: item.description, summary: item.summary, fixed: item.fixed, ...definitionReferenceFields(item.references as readonly string[] | undefined),
+    workflows.push({id: item.id, name: item.name, description: item.description, summary: item.summary, fixed: item.fixed, ...definitionReferenceFields(item.references as readonly SupportingReference[] | undefined),
       ...(key === "sequence" ? {sequence: item.sequence as ProjectDefinitionSnapshot["workflows"][number]["sequence"]} :
         {parallel: item.parallel as ProjectDefinitionSnapshot["workflows"][number]["parallel"]}), ...metadata(item)});
   }
