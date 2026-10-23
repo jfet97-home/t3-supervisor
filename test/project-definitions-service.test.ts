@@ -1,49 +1,54 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import { Context, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect";
+import { Deferred, Effect, Exit, Fiber, Schema } from "effect";
 import { TestClock } from "effect/testing";
-import { ProjectConfigEditorService } from "../src/project-config-editor.js";
-import { decodeDefinitionSource, definitionStepSource, definitionWorkflowSource, ProjectConfigurationSource, ProjectDefinitions } from "../src/project-definitions.js";
-import { ProjectFileError, type FreshGitInfo } from "../src/project-files.js";
-import { asLoaderOptions, asProjectFiles, asProjectWriter, type ProjectDefinitionLoaderOptions, type ProjectFiles, type ProjectWriter } from "./support/native-files-promise.js";
+import { ProjectConfigEditorService, type ProjectConfigWriter } from "../src/project-config-editor.js";
+import {
+  decodeDefinitionSource, definitionStepSource, definitionWorkflowSource, ProjectConfigurationSource, type ProjectDefinitionLoaderOptions,
+} from "../src/project-definitions.js";
+import { ProjectFileError, type FreshGitInfo, type ProjectFiles } from "../src/project-files.js";
 import type { ProjectConfigSave } from "../src/project-definitions-contract.js";
 import { makeDefinitionFixture } from "./project-definitions-fixture.js";
 
 // target regressions of the ProjectDefinitions and ProjectConfigEditor services: interruption, soft cancellation, the Effect-clock deadline and the Schema source boundary
 
 type Fixture = ReturnType<typeof makeDefinitionFixture>;
-// the definitions service over the fixture's catalog and projection with replaced files or options
-const definitionsLayer = (f: Fixture, replaced: {files?: ProjectFiles; options?: ProjectDefinitionLoaderOptions} = {}) =>
-  ProjectDefinitions.layer({source: f.source, t3: f.t3, files: asProjectFiles(replaced.files ?? f.files), options: asLoaderOptions(replaced.options ?? f.loaderOptions)});
-const serviceOf = <I, S>(layer: Layer.Layer<I>, tag: Context.Key<I, S>) => Effect.map(Layer.build(layer), context => Context.get(context, tag));
 
 const seedCheck = (f: Fixture) => {
   f.addFile(f.root, ".t3-supervisor/project.yaml", "workflows: []\nsteps:\n  - path: steps/check.md\n    summary: Check the change.\n");
   f.addFile(f.root, ".t3-supervisor/steps/check.md", "---\nid: check\nname: check\ndescription: Inspect the changed behavior.\n---\n");
   f.addDirectory(f.root, ".t3-supervisor/workflows");
 };
-// a native read of one path that hangs until its signal aborts and then fails as the native transport does
+// a native read of one path that hangs until its cancel trigger completes and then fails as the native transport does (a read
+// without a trigger gets one that never completes); aborted completes once that read is interrupted
 const hangingRead = (f: Fixture, hungPath: string) => {
-  const entered = Promise.withResolvers<void>();
-  const aborted = Promise.withResolvers<void>();
-  const files: ProjectFiles = {...f.files, read: (root, path, signal) => {
-    if (path !== hungPath) return f.files.read(root, path, signal);
-    entered.resolve();
-    return new Promise((_resolve, reject) => signal.addEventListener("abort", () => {aborted.resolve();reject(new ProjectFileError("unavailable"));}, {once: true}));
-  }};
-  return {files, entered: entered.promise, aborted: aborted.promise};
+  const entered = Deferred.makeUnsafe<void>();
+  const aborted = Deferred.makeUnsafe<void>();
+  const files: ProjectFiles["Service"] = {...f.projectFiles, read: (root, path, cancel = Deferred.makeUnsafe<void>()) => path !== hungPath
+    ? f.projectFiles.read(root, path)
+    : Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(cancel)), Effect.andThen(Effect.fail(new ProjectFileError("unavailable"))),
+      Effect.onInterrupt(() => Deferred.succeed(aborted, undefined)))};
+  return {files, entered: Deferred.await(entered), aborted: Deferred.await(aborted)};
 };
-const load = Effect.gen(function* () {
-  const definitions = yield* ProjectDefinitions;
-  return yield* definitions.load("project");
-});
+// a project writer whose first project.yaml write waits for release
+const heldWriter = (f: Fixture) => {
+  const firstWrite = Deferred.makeUnsafe<void>();
+  const releaseFirst = Deferred.makeUnsafe<void>();
+  let writes = 0;
+  const writer: ProjectConfigWriter = {checkProjectConfigFile: f.projectWriter.checkProjectConfigFile, writeProjectConfig: (root, contents) => Effect.gen(function* () {
+    if (++writes === 1) {yield* Deferred.succeed(firstWrite, undefined);yield* Deferred.await(releaseFirst);}
+    yield* f.projectWriter.writeProjectConfig(root, contents);
+  })};
+  return {writer, firstWrite: Deferred.await(firstWrite), release: Deferred.succeed(releaseFirst, undefined)};
+};
 
 it.effect("TR-PD-01: the 30 s load deadline runs on the Effect clock and ends a hung read with the incomplete unavailable snapshot", () => Effect.gen(function* () {
   const f = makeDefinitionFixture({threadRoot: null});
   seedCheck(f);
   const {files, entered} = hangingRead(f, ".t3-supervisor/steps/check.md");
-  const fiber = yield* Effect.forkChild(load.pipe(Effect.provide(definitionsLayer(f, {files}))));
-  yield* Effect.promise(() => entered);
+  const definitions = yield* f.makeDefinitions({files});
+  const fiber = yield* Effect.forkChild(definitions.load("project"));
+  yield* entered;
   yield* TestClock.adjust("29999 millis");
   yield* Effect.yieldNow;
   assert.equal(fiber.pollUnsafe(), undefined, "the read is still pending one millisecond before the deadline");
@@ -57,33 +62,33 @@ it.effect("TR-PD-02: interrupting a load aborts its in-flight native read and yi
   const f = makeDefinitionFixture({threadRoot: null});
   seedCheck(f);
   const {files, entered, aborted} = hangingRead(f, ".t3-supervisor/steps/check.md");
-  const fiber = yield* Effect.forkChild(load.pipe(Effect.provide(definitionsLayer(f, {files}))));
-  yield* Effect.promise(() => entered);
+  const definitions = yield* f.makeDefinitions({files});
+  const fiber = yield* Effect.forkChild(definitions.load("project"));
+  yield* entered;
   yield* Fiber.interrupt(fiber);
-  yield* Effect.promise(() => aborted);
+  yield* aborted;
   const exit = yield* Fiber.await(fiber);
   assert.ok(Exit.hasInterrupts(exit), "the interrupted load produced no snapshot");
 }), {timeout: 10_000});
 
 it.effect("TR-PD-03: interrupting create-and-commit setup before the second write leaves the first file uncommitted, never commits and releases the checkout lock", () => Effect.gen(function* () {
   const f = makeDefinitionFixture({threadRoot: null});
-  const secondWrite = Promise.withResolvers<void>();
+  const secondWrite = Deferred.makeUnsafe<void>();
   const commits: unknown[] = [];
-  const options: ProjectDefinitionLoaderOptions = {...f.loaderOptions,
+  // the second setup write hangs until its cancel trigger completes and then fails as the native transport does
+  const options: ProjectDefinitionLoaderOptions = {...f.definitionOptions,
     setupWriter: {
-      writeFile: async (root, path, contents, signal) => {
-        if (path === ".t3-supervisor/project.yaml") {f.writes.push({root, path, contents});f.addFile(root, path, contents);return;}
-        secondWrite.resolve();
-        await new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new ProjectFileError("unavailable", "write")), {once: true}));
-      },
-      commitFiles: async (...args) => {commits.push(args);return {status: "committed", commitSha: "never"};},
+      writeFile: (root, path, contents, cancel = Deferred.makeUnsafe<void>()) => path === ".t3-supervisor/project.yaml"
+        ? Effect.sync(() => {f.writes.push({root, path, contents});f.addFile(root, path, contents);})
+        : Deferred.succeed(secondWrite, undefined).pipe(Effect.andThen(Deferred.await(cancel)), Effect.andThen(Effect.fail(new ProjectFileError("unavailable", "write")))),
+      commitFiles: (...args) => Effect.sync(() => {commits.push(args);return {status: "committed" as const, commitSha: "never"};}),
     },
-    gitProbe: async (root): Promise<FreshGitInfo> => ({workspaceRoot: root, branch: "main", isRepo: true, changedPaths: f.writes.map(write => write.path), operationState: {status: "safe"}}),
+    gitProbe: root => Effect.sync((): FreshGitInfo => ({workspaceRoot: root, branch: "main", isRepo: true, changedPaths: f.writes.map(write => write.path), operationState: {status: "safe"}})),
   };
-  const definitions = yield* serviceOf(definitionsLayer(f, {options}), ProjectDefinitions);
+  const definitions = yield* f.makeDefinitions({options});
   const setup = {origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/workspace", expectedBranch: "main"} as const;
   const fiber = yield* Effect.forkChild(definitions.initialize("project", null, setup));
-  yield* Effect.promise(() => secondWrite.promise);
+  yield* Deferred.await(secondWrite);
   yield* Fiber.interrupt(fiber);
   assert.ok(Exit.hasInterrupts(yield* Fiber.await(fiber)));
   assert.deepEqual(f.writes.map(write => write.path), [".t3-supervisor/project.yaml"]);
@@ -100,18 +105,12 @@ it.effect("TR-EDITOR-01: an interrupted save queued behind another leaves the qu
   f.addFile(f.root, ".t3-supervisor/project.yaml", "workflows:\n  - path: workflows/local-flow.yaml\n    summary: Run the local flow.\nsteps:\n  - path: steps/local-step.md\n    summary: Check the local behavior.\n");
   f.addFile(f.root, ".t3-supervisor/steps/local-step.md", "---\nid: local-step\nname: local-step\ndescription: Inspect the changed behavior.\n---\n");
   f.addFile(f.root, ".t3-supervisor/workflows/local-flow.yaml", "name: Local flow\ndescription: Local flow workflow.\nsequence:\n  - step: local-step\n");
-  const firstWrite = Promise.withResolvers<void>();
-  const releaseFirst = Promise.withResolvers<void>();
-  let writes = 0;
-  const writer: ProjectWriter = {checkProjectConfigFile: f.writer.checkProjectConfigFile, writeProjectConfig: async (root, contents, signal) => {
-    if (++writes === 1) {firstWrite.resolve();await releaseFirst.promise;}
-    await f.writer.writeProjectConfig(root, contents, signal);
-  }};
-  const definitions = yield* serviceOf(definitionsLayer(f), ProjectDefinitions);
+  const {writer, firstWrite, release} = heldWriter(f);
+  const definitions = yield* f.makeDefinitions();
   // the editor's loads are counted so the test knows when the second save has its snapshot and waits for the lock
   const loaded = yield* Deferred.make<void>();
   let loads = 0;
-  const editor = yield* ProjectConfigEditorService.make({writer: asProjectWriter(writer), definitions: {...definitions,
+  const editor = yield* ProjectConfigEditorService.make({writer, definitions: {...definitions,
     load: (...args) => definitions.load(...args).pipe(Effect.tap(() => ++loads === 3 ? Deferred.succeed(loaded, undefined) : Effect.void))}});
   const input = (revision: string, summary: string): ProjectConfigSave => ({projectId: "project", threadId: null, expectedRevision: revision, config: {
     workflows: [{path: "workflows/local-flow.yaml", summary: "Run the local flow.", required: false}],
@@ -119,13 +118,13 @@ it.effect("TR-EDITOR-01: an interrupted save queued behind another leaves the qu
   }});
   const revision = (yield* definitions.load("project")).revision!;
   const first = yield* Effect.forkChild(editor.save(input(revision, "First draft.")));
-  yield* Effect.promise(() => firstWrite.promise);
+  yield* firstWrite;
   const second = yield* Effect.forkChild(editor.save(input(revision, "Cancelled draft.")));
   yield* Deferred.await(loaded);
   yield* Effect.yieldNow;
   yield* Fiber.interrupt(second);
   assert.ok(Exit.hasInterrupts(yield* Fiber.await(second)));
-  releaseFirst.resolve();
+  yield* release;
   const saved = yield* Fiber.join(first);
   assert.equal(saved.status, "saved", saved.message);
   const next = yield* editor.save(input(saved.definitions!.revision!, "Next draft."));
@@ -138,10 +137,11 @@ it.effect("TR-PD-05: a cancel signal ends a load and a setup softly, so the serv
   const f = makeDefinitionFixture({threadRoot: null});
   seedCheck(f);
   const {files, entered} = hangingRead(f, ".t3-supervisor/steps/check.md");
-  const hung = yield* serviceOf(definitionsLayer(f, {files}), ProjectDefinitions);
+  const hung = yield* f.makeDefinitions({files});
+  // the caller's cancel signal is the definitions' soft cancellation: a cancelled load or setup settles with its outcome
   const cancelLoad = new AbortController();
   const loading = yield* Effect.forkChild(hung.load("project", null, cancelLoad.signal));
-  yield* Effect.promise(() => entered);
+  yield* entered;
   cancelLoad.abort();
   const snapshot = yield* Fiber.join(loading);
   assert.deepEqual({status: snapshot.status, complete: snapshot.complete, revision: snapshot.revision, issues: snapshot.issues}, {status: "unavailable", complete: false, revision: null,
@@ -150,13 +150,13 @@ it.effect("TR-PD-05: a cancel signal ends a load and a setup softly, so the serv
   const g = makeDefinitionFixture({threadRoot: null});
   const cancelSetup = new AbortController();
   const commits: unknown[] = [];
-  const definitions = yield* serviceOf(definitionsLayer(g, {options: {...g.loaderOptions,
+  const definitions = yield* g.makeDefinitions({options: {...g.definitionOptions,
     setupWriter: {
-      writeFile: async (root, path, contents) => {g.writes.push({root, path, contents});g.addFile(root, path, contents);cancelSetup.abort();},
-      commitFiles: async (...args) => {commits.push(args);return {status: "committed", commitSha: "never"};},
+      writeFile: (root, path, contents) => Effect.sync(() => {g.writes.push({root, path, contents});g.addFile(root, path, contents);cancelSetup.abort();}),
+      commitFiles: (...args) => Effect.sync(() => {commits.push(args);return {status: "committed" as const, commitSha: "never"};}),
     },
-    gitProbe: async (root): Promise<FreshGitInfo> => ({workspaceRoot: root, branch: "main", isRepo: true, changedPaths: g.writes.map(write => write.path), operationState: {status: "safe"}}),
-  }}), ProjectDefinitions);
+    gitProbe: root => Effect.sync((): FreshGitInfo => ({workspaceRoot: root, branch: "main", isRepo: true, changedPaths: g.writes.map(write => write.path), operationState: {status: "safe"}})),
+  }});
   const outcome = yield* definitions.initialize("project", null, {origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/workspace", expectedBranch: "main"}, cancelSetup.signal);
   assert.deepEqual(outcome, {status: "stale", workspaceRoot: "/workspace", branch: "main", path: ".t3-supervisor", message: "Setup was canceled; files created so far were left uncommitted."});
   assert.deepEqual(g.writes.map(write => write.path), [".t3-supervisor/project.yaml"]);
@@ -168,17 +168,11 @@ it.effect("TR-EDITOR-02: a save whose cancel signal aborts while it is queued wa
   f.addFile(f.root, ".t3-supervisor/project.yaml", "workflows:\n  - path: workflows/local-flow.yaml\n    summary: Run the local flow.\nsteps:\n  - path: steps/local-step.md\n    summary: Check the local behavior.\n");
   f.addFile(f.root, ".t3-supervisor/steps/local-step.md", "---\nid: local-step\nname: local-step\ndescription: Inspect the changed behavior.\n---\n");
   f.addFile(f.root, ".t3-supervisor/workflows/local-flow.yaml", "name: Local flow\ndescription: Local flow workflow.\nsequence:\n  - step: local-step\n");
-  const firstWrite = Promise.withResolvers<void>();
-  const releaseFirst = Promise.withResolvers<void>();
-  let writes = 0;
-  const writer: ProjectWriter = {checkProjectConfigFile: f.writer.checkProjectConfigFile, writeProjectConfig: async (root, contents, signal) => {
-    if (++writes === 1) {firstWrite.resolve();await releaseFirst.promise;}
-    await f.writer.writeProjectConfig(root, contents, signal);
-  }};
-  const definitions = yield* serviceOf(definitionsLayer(f), ProjectDefinitions);
+  const {writer, firstWrite, release} = heldWriter(f);
+  const definitions = yield* f.makeDefinitions();
   const loaded = yield* Deferred.make<void>();
   let loads = 0;
-  const editor = yield* ProjectConfigEditorService.make({writer: asProjectWriter(writer), definitions: {...definitions,
+  const editor = yield* ProjectConfigEditorService.make({writer, definitions: {...definitions,
     load: (...args) => definitions.load(...args).pipe(Effect.tap(() => ++loads === 3 ? Deferred.succeed(loaded, undefined) : Effect.void))}});
   const input = (revision: string, summary: string): ProjectConfigSave => ({projectId: "project", threadId: null, expectedRevision: revision, config: {
     workflows: [{path: "workflows/local-flow.yaml", summary: "Run the local flow.", required: false}],
@@ -186,14 +180,14 @@ it.effect("TR-EDITOR-02: a save whose cancel signal aborts while it is queued wa
   }});
   const revision = (yield* definitions.load("project")).revision!;
   const first = yield* Effect.forkChild(editor.save(input(revision, "First draft.")));
-  yield* Effect.promise(() => firstWrite.promise);
+  yield* firstWrite;
   const cancel = new AbortController();
   const second = yield* Effect.forkChild(editor.save(input(revision, "Cancelled draft."), cancel.signal));
   yield* Deferred.await(loaded);
   cancel.abort();
   yield* Effect.yieldNow;
   assert.equal(second.pollUnsafe(), undefined, "the cancelled save still waits for the save ahead of it");
-  releaseFirst.resolve();
+  yield* release;
   assert.equal((yield* Fiber.join(first)).status, "saved");
   assert.deepEqual(yield* Fiber.join(second), {status: "unavailable", message: "The save expired before writing. Refresh the project configuration.", definitions: null});
   assert.equal(loads, 4, "the expired save loaded nothing after its turn came");

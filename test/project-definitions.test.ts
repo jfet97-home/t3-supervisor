@@ -2,18 +2,16 @@ import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import {Effect} from "effect";
 import {ProjectConfigEditorService} from "../src/project-config-editor.js";
-import {parseDefinitionStep, parseDefinitionWorkflow, parseProjectConfiguration, ProjectDefinitions} from "../src/project-definitions.js";
-import {ProjectFileError} from "../src/project-files.js";
+import {parseDefinitionStep, parseDefinitionWorkflow, parseProjectConfiguration} from "../src/project-definitions.js";
+import {ProjectFileError, type ProjectFiles} from "../src/project-files.js";
 import {proposalContextFromDefinitions, validateWorkflowPlan} from "../src/supervisor-workflow.js";
 import {requiredReferences} from "../src/project-definitions-contract.js";
 import {indexSource, makeDefinitionFixture, stepSource, workflowSource} from "./project-definitions-fixture.js";
 
 type Fixture = ReturnType<typeof makeDefinitionFixture>;
-// one load through the definitions service over the fixture's in-memory sources
-const load = (f: Fixture, projectId: string, threadId: string | null = null) => Effect.gen(function* () {
-  const definitions = yield* ProjectDefinitions;
-  return yield* definitions.load(projectId, threadId);
-}).pipe(Effect.provide(f.layer));
+// one load through a definitions service over the fixture's in-memory sources, or over replaced native files, released after the load
+const load = (f: Fixture, projectId: string, threadId: string | null = null, files: ProjectFiles["Service"] = f.projectFiles) =>
+  Effect.scoped(Effect.flatMap(f.makeDefinitions({files}), definitions => definitions.load(projectId, threadId)));
 
 it("parses the strict project.yaml index and step formats", () => {
   const index = "workflows:\n  - path: workflows/reviewer.yaml\n    summary: |\n      Review a change before release.\n      Use it for every public change.\n    required: true\n" +
@@ -267,7 +265,7 @@ it.effect("reports stray and retired entries without reading or counting them as
   const saved = yield* Effect.gen(function* () {
     const editor = yield* ProjectConfigEditorService;
     return yield* editor.save({projectId: f.projectId, threadId: null, expectedRevision: snapshot.revision!, config: snapshot.projectConfig!});
-  }).pipe(Effect.provide(f.editorLayer()));
+  }).pipe(Effect.provide(f.configEditorLayer()));
   assert.equal(saved.status, "saved");
   assert.equal(f.writes.length, 1);
   assert.equal(f.writes[0]?.path, ".t3-supervisor/project.yaml");
@@ -322,11 +320,11 @@ it.effect("permission, truncation, unsafe paths and source size limits never app
   const unsafe = makeDefinitionFixture();
   unsafe.addFile(unsafe.root, ".t3-supervisor/project.yaml", indexSource());
   unsafe.addDirectory(unsafe.root, ".t3-supervisor/steps");
-  const list = unsafe.files.list;
-  unsafe.files.list = async (root, path, signal) => path === ".t3-supervisor/steps"
-    ? {truncated: false, entries: [{path: ".t3-supervisor/../../outside.md", kind: "file"}]}
-    : list(root, path, signal);
-  const malformedListing = yield* load(unsafe, unsafe.projectId);
+  // the native listing of the steps folder names a path outside it; every other listing comes from the in-memory checkout
+  const files: ProjectFiles["Service"] = {...unsafe.projectFiles, list: (root, path) => path === ".t3-supervisor/steps"
+    ? Effect.succeed({truncated: false, entries: [{path: ".t3-supervisor/../../outside.md", kind: "file" as const}]})
+    : unsafe.projectFiles.list(root, path)};
+  const malformedListing = yield* load(unsafe, unsafe.projectId, null, files);
   assert.equal(malformedListing.complete, false);
   assert.ok(!unsafe.calls.some(call => call.kind === "read" && call.path.includes("outside")));
 

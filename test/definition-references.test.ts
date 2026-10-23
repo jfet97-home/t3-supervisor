@@ -9,6 +9,7 @@ import {WorkflowPlanGroupSchema, type WorkflowPlanGroupInfo} from "../src/projec
 import {fixedOccurrencesPreserved, prepareWorkflowRequest, validateWorkflowPlan, validateWorkflowRecord} from "../src/supervisor-workflow.js";
 import {DefinitionsContent} from "../ui/src/project-definitions.js";
 import {redact} from "../src/credential-redaction.js";
+import {definitionReferenceProblem, describeDefinitionReferenceProblem} from "../src/definition-references.js";
 import {DefinitionReferences} from "../ui/src/definition-references.js";
 import {indexSource, makeDefinitionFixture} from "./project-definitions-fixture.js";
 
@@ -53,7 +54,7 @@ const fixture = (global = false) => {
   return Effect.gen(function* () {
     const service = yield* DefinitionsService;
     return {f, definitions: yield* service.load(f.projectId, "thread")};
-  }).pipe(Effect.provide(f.layer));
+  }).pipe(Effect.provide(f.definitionsLayer));
 };
 
 it.effect("definition loading and API schemas preserve references without reading their targets, including shared definitions", () => Effect.gen(function* () {
@@ -133,8 +134,7 @@ it.effect("read-only references escape text and appear on reusable, workflow and
   assert.equal(renderToStaticMarkup(createElement(DefinitionReferences, {references: []})), "");
 }));
 
-it("rejected references report a fixed reason and position without repeating the submitted path", async () => {
-  const {definitionReferenceProblem, describeDefinitionReferenceProblem} = await import("../src/definition-references.js");
+it("rejected references report a fixed reason and position without repeating the submitted path", () => {
   const secret = "ghp_" + "B".repeat(32);
   const cases: Array<[unknown, string, number | null]> = [
     [["docs/ok.md", "/tmp/a.md"], "reference_absolute_path", 1], [[`notes/${secret}.md`], "reference_credential_like", 0],
