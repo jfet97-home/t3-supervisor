@@ -242,6 +242,36 @@ it.effect("CT-ISUB-02: only the bound root's executed strong main-run item of th
   }
 }), {timeout: 10_000});
 
+// the native shape of an executed code-mode gateway call (getTurnItem 2026-10-23, a root's workflow_read through functions.exec with
+// output and title removed): an integration toolSource, an exec native id, a provider turn and a large ordinal, still one strong
+// main-run dynamic_tool item without a parent; the same shape carrying the submission target proves it
+it.effect("CT-ISUB-02: a code-mode gateway's executed mcpx.mcpx_call_tool item, in the recorded native shape, proves the submission", () => Effect.gen(function* () {
+  const raw = fx.plainArguments();
+  const submission = yield* decode(raw);
+  const state = fx.proofState(raw);
+  mcpx(state, "mcpx.mcpx_call_tool");
+  completed(state);
+  Object.assign(state.item, {toolSource: {key: "mcp:mcpx", name: "mcpx", kind: "integration"}, parentItemId: null, ordinal: 21000006,
+    providerTurnId: "provider-turn:provider:codex:native-turn:01a1683a-1a26-7682-8aae-db34e62c51d9",
+    startedAt: "2026-10-20T10:00:08.727Z", completedAt: "2026-10-20T10:00:08.735Z", updatedAt: "2026-10-20T10:00:08.735Z"});
+  nativeRef(state).nativeId = "exec-52376326-8504-4fd1-af4e-f43b3ffc4bd6";
+  assert.deepEqual(Object.keys(state.item.input as object), ["name", "arguments"]);
+  const verdict = verifyInterpretationProof(fx.proofInput(submission, state, {}));
+  assert.equal(verdict.status, "verified", JSON.stringify(verdict));
+  assert.deepEqual(verdict.status === "verified" && {...verdict.proof}, {itemId: "tool-item", runId: "request-run", nodeId: "tool-node",
+    providerThreadId: fx.providerThreadId, toolName: "mcpx.mcpx_call_tool", driver: "codex", nativeId: "exec-52376326-8504-4fd1-af4e-f43b3ffc4bd6",
+    itemOrdinal: 21000006, argumentsHash: submission.argumentsHash, requestMessageId: fx.requestMessageId});
+  // the same gateway item naming another target, or nested under the gateway's own item, proves nothing
+  const other = fx.proofState(raw);
+  mcpx(other, "mcpx.mcpx_call_tool");
+  (other.item.input as Record<string, unknown>).name = "t3-supervisor-workflows__workflow_read";
+  assert.notEqual(verifyInterpretationProof(fx.proofInput(submission, other, {})).status, "verified");
+  const nested = fx.proofState(raw);
+  mcpx(nested, "mcpx.mcpx_call_tool");
+  nested.item.parentItemId = "turn-item:provider:codex:native-item:exec-parent";
+  assert.deepEqual(verifyInterpretationProof(fx.proofInput(submission, nested, {})), {status: "denied", code: "native_item_not_main_strong"});
+}), {timeout: 10_000});
+
 it.effect("CT-ISUB-02: finalization needs the completed item and run and the retained proof unchanged, including its provider identity", () => Effect.gen(function* () {
   const raw = fx.plainArguments();
   const submission = yield* decode(raw);
