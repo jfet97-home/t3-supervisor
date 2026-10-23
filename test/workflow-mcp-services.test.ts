@@ -108,7 +108,7 @@ describe("workflow MCP route over the controller services", () => {
     assert.deepEqual(calls, {write: 1, guide: 1, call: 1});
   }), {timeout: 10_000});
 
-  it.live("MCP-SVC-05: the endpoint layer serves the run's write and team controllers with six tools, and its release closes the endpoint", () => Effect.gen(function* () {
+  it.live("MCP-SVC-05: the endpoint layer serves the run's write and team controllers with seven tools, and its release closes the endpoint", () => Effect.gen(function* () {
     const readTool = () => Effect.succeed({status: "ok", tool: "read"});
     const team = {call: () => Effect.succeed({status: "ok", tool: "team"}), guide: () => Effect.succeed({status: "ok", tool: "guide"})} as unknown as
       SupervisorTeamController["Service"];
@@ -117,7 +117,7 @@ describe("workflow MCP route over the controller services", () => {
       Layer.succeed(SupervisorTeamController, team))))).pipe(Effect.map(context => Context.get(context, WorkflowMcp)), Scope.provide(scope));
     const listed = yield* respond(mcp, post(message("tools/list")));
     assert.deepEqual(listed.body.result?.tools?.map(tool => tool.name),
-      ["workflow_read", "workflow_write", "supervision_start", "supervision_stop", "supervision_team", "supervision_guide"]);
+      ["workflow_read", "workflow_write", "supervision_start", "supervision_stop", "supervision_interpretation_submit", "supervision_team", "supervision_guide"]);
     assert.deepEqual(callResult((yield* respond(mcp, post(toolCall("supervision_guide", {})))).body), {status: "ok", tool: "guide"});
     assert.deepEqual(callResult((yield* respond(mcp, post(toolCall("workflow_read", {})))).body), {status: "ok", tool: "read"});
     yield* Scope.close(scope, Exit.void);

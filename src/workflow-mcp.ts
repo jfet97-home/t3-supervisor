@@ -8,6 +8,7 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
   WorkflowWriteController,
   type WorkflowCallCancel,
+  supervisionInterpretationSubmitToolDefinition,
   supervisionStopToolDefinition,
   supervisionStartToolDefinition,
   workflowReadToolDefinition,
@@ -34,10 +35,13 @@ export class ToolFailed extends Data.TaggedError("ToolFailed") {
   override readonly message = "Internal error";
 }
 
-const toolResult = (value: unknown): CallToolResult => {
+// the statuses each tool answers as an MCP error: the workflow and team tools' own, and the interpretation submission's final refusals
+const toolErrorStatuses = new Set(["denied", "invalid", "unavailable", "incompatible", "too_large"]);
+const interpretationErrorStatuses = new Set(["denied", "invalid", "unavailable", "stale", "conflict", "storage_failed"]);
+
+const toolResult = (value: unknown, errorStatuses: ReadonlySet<unknown> = toolErrorStatuses): CallToolResult => {
   const result = value as {status?: unknown};
-  const isError = result.status === "denied" || result.status === "invalid" || result.status === "unavailable" ||
-    result.status === "incompatible" || result.status === "too_large";
+  const isError = errorStatuses.has(result.status);
   return {
     content: [{type: "text", text: JSON.stringify(value)}],
     ...(isError ? {isError: true} : {}),
@@ -58,8 +62,18 @@ const outcomeUnknown = (args: unknown) => {
   return {status: "uncertain", reason: "tool_outcome_unknown", retryable: true, ...(typeof operationId === "string" ? {operationId} : {})};
 };
 
+// the interpretation submission's outcome-unknown answer in its own response shape: an identical retry with the quoted attempt gets
+// the recorded receipt (duplicate) or a fresh verified commit, never a second result
+const interpretationOutcomeUnknown = (args: unknown) => {
+  const attemptId = record(args).attemptId;
+  return {status: "uncertain", code: "tool_outcome_unknown", retry: "identical",
+    ...(typeof attemptId === "string" && /^interpretation-attempt:[0-9a-f-]{36}$/u.test(attemptId) ? {attemptId} : {})};
+};
+
 // one controller call; the cancel is its soft cancel, which the call's deadline completes
 type ToolCall = (cancel: WorkflowCallCancel) => Effect.Effect<unknown, unknown>;
+// a routed tool: its call, its outcome-unknown answer and the statuses it answers as an MCP error
+type RoutedTool = {readonly start: ToolCall; readonly unknown: (args: unknown) => unknown; readonly errors: ReadonlySet<unknown>};
 
 export interface WorkflowMcpShape {
   // the /mcp/workflows handler: answers each request through a fresh stateless sdk server and transport; a closed
@@ -72,7 +86,8 @@ export interface WorkflowMcpShape {
 }
 
 const make = Effect.fnUntraced(function* (controller: WorkflowWriteController["Service"], team?: SupervisorTeamController["Service"]) {
-  const tools = [workflowReadToolDefinition, workflowWriteToolDefinition, supervisionStartToolDefinition, supervisionStopToolDefinition, ...(team ? [supervisionTeamToolDefinition, supervisionGuideToolDefinition] : [])] as unknown as Tool[];
+  const tools = [workflowReadToolDefinition, workflowWriteToolDefinition, supervisionStartToolDefinition, supervisionStopToolDefinition,
+    supervisionInterpretationSubmitToolDefinition, ...(team ? [supervisionTeamToolDefinition, supervisionGuideToolDefinition] : [])] as unknown as Tool[];
   // the endpoint's hold on every admitted request, and every started controller call, which outlives its request after an
   // outcome-unknown answer until it settles or close()
   const requests = yield* FiberSet.make<void, never>();
@@ -87,35 +102,38 @@ const make = Effect.fnUntraced(function* (controller: WorkflowWriteController["S
   // layer release closes the endpoint before the sets themselves close
   yield* Effect.addFinalizer(() => close);
 
-  const toolCall = (name: string, args: unknown): ToolCall | undefined => {
-    if (name === "workflow_read") return cancel => controller.readTool(args, cancel);
-    if (name === "workflow_write") return cancel => controller.write(args, cancel);
-    if (name === "supervision_start") return cancel => controller.startSupervision(args, cancel);
-    if (name === "supervision_stop") return cancel => controller.stopSupervision(args, cancel);
-    if (name === "supervision_team" && team) return cancel => team.call(args, cancel);
-    if (name === "supervision_guide" && team) return cancel => team.guide(args, cancel);
+  const routed = (start: ToolCall): RoutedTool => ({start, unknown: outcomeUnknown, errors: toolErrorStatuses});
+  const toolCall = (name: string, args: unknown): RoutedTool | undefined => {
+    if (name === "workflow_read") return routed(cancel => controller.readTool(args, cancel));
+    if (name === "workflow_write") return routed(cancel => controller.write(args, cancel));
+    if (name === "supervision_start") return routed(cancel => controller.startSupervision(args, cancel));
+    if (name === "supervision_stop") return routed(cancel => controller.stopSupervision(args, cancel));
+    if (name === supervisionInterpretationSubmitToolDefinition.name)
+      return {start: cancel => controller.submitInterpretation(args, cancel), unknown: interpretationOutcomeUnknown, errors: interpretationErrorStatuses};
+    if (name === "supervision_team" && team) return routed(cancel => team.call(args, cancel));
+    if (name === "supervision_guide" && team) return routed(cancel => team.guide(args, cancel));
     return undefined;
   };
 
   // starts the controller call unless the endpoint is closed, then waits for its own result: the 9 s deadline completes its
   // soft cancel, and an answer still missing after the grace is an outcome-unknown result while the call stays owned by the
   // endpoint until it settles or close() interrupts it; the request's end interrupts the call it still waits for
-  const answer = (start: ToolCall, args: unknown) => Effect.suspend(() => {
+  const answer = (tool: RoutedTool, args: unknown) => Effect.suspend(() => {
     if (MutableRef.get(closed)) return Effect.interrupt;
     const cancel = Deferred.makeUnsafe<void>();
     // any failure or defect of the call is the fixed internal error; an interruption stays one
-    const call = runCall(Effect.suspend(() => start(cancel)).pipe(
+    const call = runCall(Effect.suspend(() => tool.start(cancel)).pipe(
       Effect.mapError(() => new ToolFailed()), Effect.catchDefect(() => Effect.fail(new ToolFailed()))));
     return Fiber.join(call).pipe(
       Effect.timeout(callDeadline),
       Effect.catchTag("TimeoutError", () => Effect.andThen(
         Deferred.succeed(cancel, undefined),
-        Fiber.join(call).pipe(Effect.timeoutOption(abortGrace), Effect.map(Option.getOrElse(() => outcomeUnknown(args)))),
+        Fiber.join(call).pipe(Effect.timeoutOption(abortGrace), Effect.map(Option.getOrElse(() => tool.unknown(args)))),
       )),
       Effect.onInterrupt(() => Fiber.interrupt(call)),
     );
   }).pipe(
-    Effect.map(toolResult),
+    Effect.map((value) => toolResult(value, tool.errors)),
     Effect.catchCause(cause => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.fail(new ToolFailed())),
   );
 
@@ -135,9 +153,9 @@ const make = Effect.fnUntraced(function* (controller: WorkflowWriteController["S
     const server = new Server(serverInfo, {capabilities: {tools: {}}});
     server.setRequestHandler(ListToolsRequestSchema, () => ({tools}));
     server.setRequestHandler(CallToolRequestSchema, call => {
-      const start = toolCall(call.params.name, call.params.arguments);
-      if (!start) return toolResult({status: "invalid", reason: "unknown_tool"});
-      return wait(answer(start, call.params.arguments));
+      const tool = toolCall(call.params.name, call.params.arguments);
+      if (!tool) return toolResult({status: "invalid", reason: "unknown_tool"});
+      return wait(answer(tool, call.params.arguments));
     });
     const transport = new WebStandardStreamableHTTPServerTransport({enableJsonResponse: true, maxRequestBodySize: maxMcpRequestBodyBytes});
     let pending: Promise<Response> | undefined;

@@ -1,5 +1,6 @@
 import { Effect, Layer } from "effect";
 import { SupervisorIds } from "./ids.js";
+import { InterpretationWake } from "./interpretation-wake.js";
 import { ProjectSupervisorStore } from "./project-supervisor-store.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
 import { ScopeLocks } from "./scope-locks.js";
@@ -63,11 +64,12 @@ export const SupervisionControllersLive = (run: Pick<SupervisionRun, "helperProv
     Layer.provideMerge(Layer.mergeAll(SupervisionControl.layer, WorkflowNativeAccess.layer)),
   );
 
-// the whole run over its supervision stores (SupervisionStoresLive, built first by the caller): the per-scope locks and the ids,
-// the scope predicates, the team services, the controllers and the project supervisor
+// the whole run over its supervision stores (SupervisionStoresLive, built first by the caller): the per-scope locks, the ids and the
+// interpretation wake (signalled by the intake, served by the project supervisor), the scope predicates, the team services, the
+// controllers and the project supervisor
 export const SupervisionLive = (run: SupervisionRun) => ProjectSupervisor.layer().pipe(
   Layer.provideMerge(SupervisionControllersLive(run)),
   Layer.provideMerge(SupervisionTeamLive(run)),
   Layer.provideMerge(SupervisionScopeLive(run.operateRpcAvailable)),
-  Layer.provideMerge(Layer.mergeAll(ScopeLocks.layer, SupervisorIds.layer)),
+  Layer.provideMerge(Layer.mergeAll(ScopeLocks.layer, SupervisorIds.layer, InterpretationWake.layer)),
 );

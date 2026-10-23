@@ -41,9 +41,28 @@ import {
   workflowToolInputSize,
   type WorkflowEvidenceTool,
   type WorkflowEvidenceMatch,
-  type WorkflowEvidenceCheck,
 } from "./workflow-write-evidence.js";
-import {proposalContextFromDefinitions, proposalContextMatches, validateWorkflowApplyAgainstPinnedContext, type WorkflowApplyDiagnostic} from "./supervisor-workflow.js";
+import {interpretationLimits, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowApplyAgainstPinnedContext, type WorkflowApplyDiagnostic} from "./supervisor-workflow.js";
+import { commitInterpretationSubmission, interpretationChecks, interpretationReceiptOwner, rawInterpretationArguments, readInterpretationReceipt, taskPendingStart,
+  workflowWriteReceiptsTable, type InterpretationIntake } from "./interpretation-intake.js";
+import {
+  decodeInterpretationSubmission,
+  interpretationDeniedCode,
+  interpretationInvalidResult,
+  interpretationPendingProofCode,
+  interpretationProofResult,
+  interpretationSubmitLogFields,
+  interpretationSubmitResponse,
+  interpretationSubmitToolName,
+  verifyInterpretationProof,
+  type InterpretationAttempt,
+  type InterpretationEnvelope,
+  type InterpretationProofReference,
+  type InterpretationSubmitResponse,
+  type InterpretationSubmitResult,
+} from "./interpretation-submission.js";
+import { InterpretationWake } from "./interpretation-wake.js";
+import { logEvent, type LogFields } from "./logging.js";
 import {definitionSnapshotIndexed, type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
 import type {WorkflowPlanGroupInfo, WorkflowPlanStepInfo, WorkflowPlanWorkflowInfo, WorkflowProtocolDiagnostic, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
 
@@ -208,6 +227,12 @@ type EvidenceSearch =
   | {status: "pending"; reason: string}
   | {status: "denied"; reason: string; observedToolName?: string};
 
+// one candidate item's verification: its verified value, a pending reason or a denial
+type CandidateCheck<V> =
+  | {status: "verified"; value: V}
+  | {status: "pending"; reason: string}
+  | {status: "denied"; reason: string; observedToolName?: string};
+
 export type WorkflowNativeAuthorization =
   | {status: "verified"; binding: BindingRecord; evidence: WorkflowEvidenceMatch}
   | {status: "pending"; reason: string}
@@ -235,18 +260,7 @@ const storedResult = (text: string): Option.Option<WorkflowWriteResult> => {
   return Exit.isSuccess(parsed) ? Option.some(parsed.value as WorkflowWriteResult) : Option.none();
 };
 const writeSchema = [
-  `CREATE TABLE IF NOT EXISTS supervisor_workflow_write_receipts (
-        operation_id TEXT NOT NULL,
-        operation_namespace TEXT NOT NULL,
-        request_hash TEXT NOT NULL,
-        project_id TEXT NOT NULL,
-        main_thread_id TEXT NOT NULL,
-        supervisor_thread_id TEXT NOT NULL,
-        binding_generation INTEGER NOT NULL,
-        result TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id)
-      )`,
+  workflowWriteReceiptsTable,
   `CREATE TABLE IF NOT EXISTS supervisor_workflow_write_evidence (
         supervisor_thread_id TEXT NOT NULL,
         item_id TEXT NOT NULL,
@@ -661,6 +675,52 @@ export const supervisionStopToolDefinition = {
   },
 } as const;
 
+// the interpretation submission's arguments as the tool advertises them; the service decodes them exactly for the task's state
+const interpretationText = (maxLength: number): Record<string, unknown> => ({type: "string", maxLength});
+const interpretationPlanDefinitions = {
+  node: {anyOf: [
+    {type: "object", additionalProperties: false, required: ["kind", "definitionId", "reason"],
+      properties: {kind: {const: "step"}, definitionId: interpretationText(interpretationLimits.maxDefinitionIdLength), reason: interpretationText(interpretationLimits.maxReasonLength)}},
+    {type: "object", additionalProperties: false, required: ["kind", "definitionId", "localId", "name", "description", "reason"],
+      properties: {kind: {const: "step"}, definitionId: {type: "null"}, localId: interpretationText(interpretationLimits.maxDefinitionIdLength),
+        name: interpretationText(interpretationLimits.maxPlanTextLength), description: interpretationText(interpretationLimits.maxPlanTextLength),
+        reason: interpretationText(interpretationLimits.maxReasonLength), references: {type: "array", items: {type: "string"}}}},
+    {type: "object", additionalProperties: false, required: ["kind", "definitionId", "reason"],
+      properties: {kind: {const: "workflow"}, definitionId: interpretationText(interpretationLimits.maxDefinitionIdLength), reason: interpretationText(interpretationLimits.maxReasonLength)}},
+    {$ref: "#/$defs/group"},
+  ]},
+  group: {type: "object", additionalProperties: false, required: ["kind", "nodes"],
+    properties: {kind: {enum: ["sequence", "parallel"]}, nodes: {type: "array", maxItems: interpretationLimits.maxExpandedNodes, items: {$ref: "#/$defs/node"}}}},
+};
+export const supervisionInterpretationSubmitToolDefinition = {
+  name: interpretationSubmitToolName,
+  description: "Submit your one interpretation of the quoted Supervisor task request. Copy supervisorThreadId, bindingGeneration, taskId, attemptId and sourcePin exactly from the request; add objective, reason and sourceMessageIds, and only when the request asks for them supervision with workflow and startRequested. Call this tool directly by name, or through MCPX mcpx_call_tool with name t3-supervisor-workflows__supervision_interpretation_submit and these arguments; never through a script or code-mode wrapper, which the service cannot verify. submitted means recorded and awaiting the completion of your current turn; it is not delivery, acceptance or agreement. After pending_proof, storage_failed, unavailable or a lost response, retry once with identical arguments; after invalid, correct the reported paths and submit again; stale, denied and conflict end the attempt. The service introduces the result to the operative itself; never answer with JSON in chat, which is ignored.",
+  inputSchema: {
+    $defs: interpretationPlanDefinitions,
+    type: "object",
+    additionalProperties: false,
+    required: ["supervisorThreadId", "bindingGeneration", "taskId", "attemptId", "sourcePin", "objective", "reason", "sourceMessageIds"],
+    properties: {
+      supervisorThreadId: idSchema(),
+      bindingGeneration: {type: "integer", minimum: 0},
+      taskId: idSchema(),
+      attemptId: {type: "string", pattern: "^interpretation-attempt:[0-9a-f-]{36}$"},
+      sourcePin: {type: "object", additionalProperties: false, required: ["messageId", "runId", "ordinal", "hash"],
+        properties: {messageId: idSchema(), runId: idSchema(), ordinal: {type: "integer", minimum: 0}, hash: {type: "string", pattern: "^[0-9a-f]{64}$"}}},
+      objective: {anyOf: [interpretationText(interpretationLimits.maxObjectiveLength), {type: "null"}]},
+      reason: interpretationText(interpretationLimits.maxReasonLength),
+      sourceMessageIds: {type: "array", maxItems: interpretationLimits.maxSourceMessageIds, items: idSchema()},
+      supervision: {enum: ["needed", "not_needed"]},
+      workflow: {anyOf: [{type: "object", additionalProperties: false, required: ["requirements", "plan"], properties: {
+        requirements: {type: "array", maxItems: interpretationLimits.maxRequirementAssessments, items: {type: "object", additionalProperties: false,
+          required: ["kind", "id", "applies", "reason"], properties: {kind: {enum: ["step", "workflow"]}, id: interpretationText(interpretationLimits.maxDefinitionIdLength),
+            applies: {anyOf: [{type: "boolean"}, {const: "unknown"}]}, reason: interpretationText(interpretationLimits.maxReasonLength)}}},
+        plan: {$ref: "#/$defs/group"}}}, {type: "null"}]},
+      startRequested: {type: "boolean"},
+    },
+  },
+} as const;
+
 export const workflowReadToolDefinition = {
   name: "workflow_read",
   description: "Read bounded semantic workflow records for this current Supervisor binding and a fresh main-thread descendant summary, including retained archived descendants and incompatible older records. Writes accept only strong native item references authorized by the existing evidence verifier. currentAgreementKey only marks content matching a retained snapshot; it does not prove current acceptance, execution, or definition validity. The main workflow's contributions list main-reported external work with its untrusted summary and references and the root's current assessment; none of it proves execution or completes a step.",
@@ -751,6 +811,12 @@ export interface WorkflowWriteControllerShape {
   readonly startSupervision: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<SupervisionStartResult, SupervisionStoreError>;
   /** The MCP supervision_stop entry: verifies the caller's own native tool call, then applies the durable per-chat stop. */
   readonly stopSupervision: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<SupervisionStopResult, SupervisionStoreError>;
+  /**
+   * The MCP supervision_interpretation_submit entry (plan 3.12 items 2-6): the exact arguments for the task's state, the bound root's
+   * own native tool item in the attempt's request run, then the attempt's write-once receipt in one admission section; it never waits
+   * for its own run and answers a redacted typed result
+   */
+  readonly submitInterpretation: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<InterpretationSubmitResponse>;
   // verified native caller proof for a team or guide effect, rechecked after the evidence read
   readonly authorizeNative: (input: WorkflowLocator & Record<string, unknown>, tool: WorkflowEvidenceTool, allowRegistering?: boolean,
     cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowNativeAuthorization, SupervisionStoreError>;
@@ -781,6 +847,10 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
   if (!workflowStore) return yield* Effect.die(new Error("the workflow write controller needs the workflow state store"));
   const workflows = workflowStore;
   const maxEvidenceWaitMs = options.maxEvidenceWaitMs ?? 400;
+  // the scope predicates and checks of the interpretation intake, and the run's wake its commit signals (absent in a unit without it)
+  const scopes = yield* SupervisionScopeService;
+  const checks = interpretationChecks(supervisors, scopes);
+  const wake = Option.getOrNull(yield* Effect.serviceOption(InterpretationWake));
   // the controller's own receipt and evidence tables on the run's guidance client
   yield* guidanceSql(Effect.forEach(writeSchema, (statement) => sql.unsafe(statement)));
 
@@ -817,13 +887,19 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
   const admitted = <A, E>(block: (guard: GateGuard, now: number) => Effect.Effect<A, E>) =>
     gate.admit((guard) => Effect.flatMap(Clock.currentTimeMillis, (now) => block(guard, now)));
 
-  /** Finds the caller thread's own executed main-run tool item whose complete arguments equal this request. */
-  const findToolEvidence = Effect.fnUntraced(function* (callerThreadId: string, projectId: string, payload: Record<string, unknown>,
-    tool: WorkflowEvidenceTool, cancel: WorkflowCallCancel): Effect.fn.Return<EvidenceSearch> {
+  /**
+   * Searches the caller thread's main-run tool items whose complete arguments equal this request and verifies each candidate with
+   * `verify`. A denied candidate ends the search unless `skipDenied` is set: then it is passed over, so an identical item of
+   * another run cannot shadow the verified one, and the search is denied once a pass found only denied candidates.
+   */
+  const searchToolEvidence = <V>(callerThreadId: string, projectId: string, payload: Record<string, unknown>, tool: WorkflowEvidenceTool,
+    cancel: WorkflowCallCancel, verify: (projection: Projection, itemId: string, detail: Record<string, unknown>) => CandidateCheck<V>,
+    skipDenied: boolean) => Effect.gen(function* (): Effect.fn.Return<CandidateCheck<V>> {
     const startedAt = yield* elapsedMillis;
     let lastReason = "native_evidence_not_visible";
     let unrecognizedToolName: string | undefined;
-    const inspected = new Map<string, {signature: string; check: WorkflowEvidenceCheck; retryAfter?: number; retryCount: number}>();
+    let deniedCandidate: Extract<CandidateCheck<V>, {status: "denied"}> | undefined;
+    const inspected = new Map<string, {signature: string; check: CandidateCheck<V>; retryAfter?: number; retryCount: number}>();
     let detailReads = 0;
     const maxDetailReads = 64;
     do {
@@ -840,17 +916,20 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
         projection.thread.archivedAt != null || projection.thread.deletedAt != null)
         return {status: "denied", reason: "supervisor_projection_not_current"};
       const candidates = workflowEvidenceCandidates(projection, callerThreadId, tool, payload);
+      let passPending = false;
+      let passDenied = false;
       for (const candidate of candidates) {
         if (yield* Deferred.isDone(cancel)) return {status: "pending", reason: "native_evidence_wait_interrupted"};
         const cached = inspected.get(candidate.itemId);
         const canRetry = cached?.signature === candidate.snapshotSignature && cached.retryAfter !== undefined &&
           cached.retryCount < 1 && (yield* elapsedMillis) >= cached.retryAfter;
-        let check: WorkflowEvidenceCheck;
+        let check: CandidateCheck<V>;
         if (cached?.signature === candidate.snapshotSignature && !canRetry) {
           check = cached.check;
         } else {
           if (detailReads >= maxDetailReads) {
             lastReason = "native_item_detail_limit";
+            passPending = true;
             continue;
           }
           detailReads++;
@@ -860,6 +939,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
             const retryCount = cached?.signature === candidate.snapshotSignature ? cached.retryCount + Number(canRetry) : 0;
             inspected.set(candidate.itemId, {signature: candidate.snapshotSignature, check, retryAfter: (yield* elapsedMillis) + detailRetryMs, retryCount});
             lastReason = check.reason;
+            passPending = true;
             continue;
           }
           const detail = response.value.item;
@@ -871,8 +951,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
             if (detailBytes > workflowTurnItemDetailMaxBytes) {
               check = {status: "pending", reason: "native_item_detail_too_large"};
             } else {
-              check = verifyWorkflowToolEvidence({projection, supervisorThreadId: callerThreadId,
-                itemId: candidate.itemId, detail, tool, arguments: payload});
+              check = verify(projection, candidate.itemId, detail);
             }
           }
           const retryCount = cached?.signature === candidate.snapshotSignature ? cached.retryCount + Number(canRetry) : 0;
@@ -881,24 +960,39 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
           inspected.set(candidate.itemId, {signature: candidate.snapshotSignature, check,
             ...(retryableUnavailable && retryCount < 1 ? {retryAfter: (yield* elapsedMillis) + detailRetryMs} : {}), retryCount});
         }
-        if (check.status === "verified") return {status: "verified", evidence: check.evidence};
+        if (check.status === "verified") return check;
         if (check.status === "denied") {
           if (check.reason === "native_tool_name_unrecognized") {
             unrecognizedToolName = check.observedToolName;
             continue;
           }
-          return {status: "denied", reason: check.reason,
+          if (!skipDenied) return {status: "denied", reason: check.reason,
             ...(check.observedToolName ? {observedToolName: check.observedToolName} : {})};
+          deniedCandidate = check;
+          passDenied = true;
+          continue;
         }
         lastReason = check.reason;
+        passPending = true;
       }
+      // every visible candidate of this pass was denied: an identical retry is the only meaningful next step
+      if (deniedCandidate !== undefined && passDenied && !passPending) return deniedCandidate;
       if ((yield* elapsedMillis) - startedAt >= maxEvidenceWaitMs) break;
       yield* pause(cancel);
     } while (true);
     if (lastReason === "native_evidence_not_visible" && unrecognizedToolName !== undefined)
       return {status: "denied", reason: "native_tool_name_unrecognized", observedToolName: unrecognizedToolName};
+    if (lastReason === "native_evidence_not_visible" && deniedCandidate !== undefined) return deniedCandidate;
     return {status: "pending", reason: lastReason};
   });
+
+  /** Finds the caller thread's own executed main-run tool item whose complete arguments equal this request. */
+  const findToolEvidence = (callerThreadId: string, projectId: string, payload: Record<string, unknown>, tool: WorkflowEvidenceTool,
+    cancel: WorkflowCallCancel): Effect.Effect<EvidenceSearch> => Effect.map(searchToolEvidence(callerThreadId, projectId, payload, tool, cancel,
+    (projection, itemId, detail) => {
+      const check = verifyWorkflowToolEvidence({projection, supervisorThreadId: callerThreadId, itemId, detail, tool, arguments: payload});
+      return check.status === "verified" ? {status: "verified", value: check.evidence} : check;
+    }, false), (result): EvidenceSearch => result.status === "verified" ? {status: "verified", evidence: result.value} : result);
 
   const findEvidence = (payload: WorkflowLocator & Record<string, unknown>, owner: WorkflowOwner, cancel: WorkflowCallCancel,
     tool: WorkflowEvidenceTool = "write") => findToolEvidence(payload.supervisorThreadId, owner.projectId, payload, tool, cancel);
@@ -1315,6 +1409,89 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       Effect.catchIf((error): error is StoreError => error instanceof StoreError, (error) => Effect.die(error)));
   });
 
+  // the timestamped phases of one submission, by name only (ct-isub-14)
+  const interpretationPhase = (phase: string, fields: LogFields = {}) => Effect.flatMap(elapsedMillis, (monotonicMs) =>
+    logEvent("interpretation_phase", {phase, monotonicMs: Math.round(monotonicMs), ...fields}));
+  const staleAttempt: InterpretationSubmitResult = {status: "stale", code: "attempt_not_current"};
+  // the raw form's diagnostic, else the given result: an attempt nothing locates is decided by its raw form alone
+  const rawOr = (input: unknown, withDefinitions: boolean, result: InterpretationSubmitResult): InterpretationSubmitResult => {
+    const raw = rawInterpretationArguments(input, withDefinitions);
+    return raw.ok ? result : interpretationInvalidResult({code: raw.code, issues: [{code: raw.code, path: ""}]});
+  };
+
+  const interpretationSubmission = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<InterpretationSubmitResult, SupervisionStoreError> {
+    yield* interpretationPhase("submission_received");
+    // the asserted locator only selects the binding, the task and the receipt to check; it grants nothing
+    const loose = isRecord(input) ? input : null;
+    const supervisorThreadId = typeof loose?.supervisorThreadId === "string" ? loose.supervisorThreadId : null;
+    const attemptId = typeof loose?.attemptId === "string" ? loose.attemptId : null;
+    const bindingGeneration = typeof loose?.bindingGeneration === "number" ? loose.bindingGeneration : null;
+    if (supervisorThreadId === null || attemptId === null || bindingGeneration === null)
+      return yield* decodeInterpretationSubmission(input, {definitionContext: null, pendingStart: false}).pipe(
+        Effect.match({onFailure: interpretationInvalidResult, onSuccess: () => staleAttempt}));
+    if (!supervisors.scopeCompatible) return {status: "unavailable", code: "interpretation_submission_unavailable"};
+    const binding = yield* supervisors.bindingForSupervisor(supervisorThreadId);
+    if (!binding) return rawOr(input, true, {status: "denied", code: "caller_not_bound_root"});
+    const owner = interpretationReceiptOwner(binding);
+    const task = yield* supervisors.task(binding.mainThreadId);
+    const recorded = yield* readInterpretationReceipt(sql, owner, attemptId);
+    const current = task && task.supervisorThreadId === binding.threadId && task.attempt?.attemptId === attemptId ? task.attempt : null;
+    const attempt: InterpretationAttempt | null = recorded ? {attemptId: recorded.receipt.attemptId, key: recorded.receipt.attempt} : current;
+    // an attempt that is neither the task's current one nor recorded has no request to verify against
+    if (!attempt || !task) return rawOr(input, Boolean(task?.definitionContext), staleAttempt);
+    let intake: Omit<InterpretationIntake, "proof" | "main">;
+    let envelope: InterpretationEnvelope;
+    let rawArguments: Readonly<Record<string, unknown>>;
+    if (recorded) {
+      // a recorded attempt is decided by its raw form: identical content replays the receipt, any other content conflicts
+      const raw = rawInterpretationArguments(input, true);
+      if (!raw.ok) return interpretationInvalidResult({code: raw.code, issues: [{code: raw.code, path: ""}]});
+      rawArguments = raw.raw;
+      envelope = {supervisorThreadId, bindingGeneration, taskId: attempt.key.taskId, attemptId: attempt.attemptId, sourcePin: attempt.key.source};
+      intake = {owner, attempt, argumentsCanonical: raw.canonical, argumentsHash: raw.hash, decoded: null, startVerdict: recorded.receipt.startVerdict};
+    } else {
+      const pendingStart = taskPendingStart(task, yield* supervisors.start(binding.mainThreadId));
+      const decoded = yield* decodeInterpretationSubmission(input, {definitionContext: task.definitionContext ?? null, pendingStart}).pipe(
+        Effect.match({onFailure: interpretationInvalidResult, onSuccess: (value) => value}));
+      if ("status" in decoded) return decoded;
+      rawArguments = decoded.rawArguments;
+      envelope = decoded.envelope;
+      intake = {owner, attempt, argumentsCanonical: decoded.argumentsCanonical, argumentsHash: decoded.argumentsHash,
+        decoded: {envelope: decoded.envelope, payload: decoded.payload}, startVerdict: pendingStart};
+    }
+    yield* interpretationPhase("submission_decoded");
+    // the bound root's own executed tool item in the run of the attempt's request; an identical item of another run is passed over
+    const argumentsHash = intake.argumentsHash;
+    const verified = yield* searchToolEvidence<InterpretationProofReference>(binding.threadId, binding.projectId, rawArguments, "interpretation", cancel,
+      (projection, itemId, detail) => {
+        const verdict = verifyInterpretationProof({phase: "intake", submission: {envelope, rawArguments, argumentsHash},
+          scope: {projectId: binding.projectId, mainThreadId: binding.mainThreadId}, request: attempt.key, binding, ownedThreadIds: supervisors.ownedIds,
+          projection, itemId, detail});
+        return verdict.status === "verified" ? {status: "verified", value: verdict.proof} : verdict.status === "pending_proof"
+          ? {status: "pending", reason: verdict.code} : {status: "denied", reason: verdict.code};
+      }, true);
+    if (verified.status === "pending") return interpretationProofResult({status: "pending_proof", code: interpretationPendingProofCode(verified.reason)});
+    if (verified.status === "denied") return interpretationProofResult({status: "denied", code: interpretationDeniedCode(verified.reason)});
+    if (yield* Deferred.isDone(cancel)) return {status: "pending_proof", code: "native_evidence_wait_interrupted"};
+    yield* interpretationPhase("proof_verified");
+    // the main as it is now, for the pinned source and activation floor the commit rechecks
+    const main = yield* settled(native.projection(binding.mainThreadId, cancel));
+    if (Option.isNone(main)) return {status: "unavailable", code: "native_access_unavailable"};
+    const ready: InterpretationIntake = {...intake, proof: verified.value, main: main.value};
+    // the receipt lookup, the attempt state gate, the fresh checks and the write-once receipt as one admission section and one guidance
+    // transaction; a failed statement rolls back result, proof and receipt together
+    const committed = yield* admitted((guard, now) => transaction(commitInterpretationSubmission({sql, store: supervisors, scope: scopes, checks, guard, now, intake: ready}))).pipe(
+      Effect.catch(() => Effect.succeed<InterpretationSubmitResult>({status: "storage_failed", code: "storage_failed"})));
+    yield* interpretationPhase("submission_committed", {status: committed.status});
+    // the commit wakes its scope; the persisted task stays the record of the work
+    if (committed.status === "submitted" && wake) yield* wake.signal({projectId: binding.projectId, mainThreadId: binding.mainThreadId});
+    return committed;
+  });
+  const submitInterpretation = (input: unknown, cancel: WorkflowCallCancel): Effect.Effect<InterpretationSubmitResponse> => interpretationSubmission(input, cancel).pipe(
+    Effect.catch(() => Effect.succeed<InterpretationSubmitResult>({status: "storage_failed", code: "storage_failed"})),
+    Effect.tap((result) => logEvent("interpretation_submission", interpretationSubmitLogFields(result))),
+    Effect.map(interpretationSubmitResponse));
+
   const read = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<WorkflowReadResult, SupervisionStoreError> {
     let inputBytes: number;
     try {inputBytes = workflowToolInputSize(input);} catch {return {status: "invalid", reason: "arguments_not_json"};}
@@ -1482,6 +1659,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     write: (input, cancel) => withToolDeadline(cancel, (bounded) => write(input, bounded)),
     startSupervision: (input, cancel) => withToolDeadline(cancel, (bounded) => startSupervision(input, bounded)),
     stopSupervision: (input, cancel) => withToolDeadline(cancel, (bounded) => stopSupervision(input, bounded)),
+    submitInterpretation: (input, cancel) => withToolDeadline(cancel, (bounded) => submitInterpretation(input, bounded)),
     authorizeNative,
     resolveBinding,
   });

@@ -68,7 +68,7 @@ it.live("CT-MCP-02: tools/list without initialize or session header succeeds sta
   const listBody = (yield* json(listed)) as {jsonrpc?: string; id?: number; result?: {tools?: Array<{name: string}>}};
   assert.equal(listBody.jsonrpc, "2.0");
   assert.equal(listBody.id, 1);
-  assert.deepEqual(listBody.result?.tools?.map(tool => tool.name), ["workflow_read", "workflow_write", "supervision_start", "supervision_stop"]);
+  assert.deepEqual(listBody.result?.tools?.map(tool => tool.name), ["workflow_read", "workflow_write", "supervision_start", "supervision_stop", "supervision_interpretation_submit"]);
 
   // a tools/call without initialize is served the same way
   const called = yield* postJson(url, {jsonrpc: "2.0", id: 2, method: "tools/call", params: {name: "workflow_read", arguments: {probe: 1}}});
@@ -234,7 +234,7 @@ it.live("CT-MCP-04 (in-flight, route): close() aborts the controller signal and 
   assert.deepEqual({code: exit.code, signal: exit.signal, stderr: exit.stderr}, {code: 0, signal: null, stderr: ""});
 }), {timeout: 60_000});
 
-it.live("CT-MCP-05: with a team the tool list has six tools in fixed order and an unknown tool is an isError unknown_tool result", () => Effect.gen(function* () {
+it.live("CT-MCP-05: with a team the tool list has seven tools in fixed order and an unknown tool is an isError unknown_tool result", () => Effect.gen(function* () {
   const teamCalls: unknown[] = [];
   const controller = effectWorkflowController({readTool: () => Effect.succeed({status: "ok"})});
   const team = effectTeamController({
@@ -247,7 +247,7 @@ it.live("CT-MCP-05: with a team the tool list has six tools in fixed order and a
   assert.equal(listed.status, 200);
   const listBody = (yield* json(listed)) as {result?: {tools?: Array<{name: string}>}};
   assert.deepEqual(listBody.result?.tools?.map(tool => tool.name),
-    ["workflow_read", "workflow_write", "supervision_start", "supervision_stop", "supervision_team", "supervision_guide"]);
+    ["workflow_read", "workflow_write", "supervision_start", "supervision_stop", "supervision_interpretation_submit", "supervision_team", "supervision_guide"]);
 
   const unknown = yield* postJson(url, {jsonrpc: "2.0", id: 2, method: "tools/call", params: {name: "workflow_delete", arguments: {}}});
   assert.equal(unknown.status, 200);
