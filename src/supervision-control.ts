@@ -210,18 +210,23 @@ const makeSupervisionControl = Effect.gen(function* () {
     const prior = store.startOperation(threadId, operationId);
     if (prior) return prior.requestHash === requestHash ? {status: prior.status, reason: prior.reason} : {status: "denied", reason: "operation_id_conflict"} as SupervisionStartResult;
     if (!threadId || threadId.length > 512 || !operationId || operationId.length > 512) return {status: "invalid", reason: "invalid_start_arguments"} as SupervisionStartResult;
-    store.saveStartOperation({threadId, operationId, requestHash, status: "pending", reason: "Checking the requested chat and original human source.", preparing: true});
-    // the final status is written only while the operation is still preparing
-    const finish = (result: SupervisionStartResult): SupervisionStartResult => {
-      const saved = store.startOperation(threadId, operationId);
-      if (saved?.preparing) store.saveStartOperation({threadId, operationId, requestHash, status: result.status === "invalid" ? "denied" : result.status, reason: result.reason});
-      return result;
-    };
-    // an interrupted request finishes with the outcome its section decided, or as a failed preparation, as the aborted baseline read did
-    let decided: SupervisionStartResult | null = null;
-    const evaluated = yield* attempt(evaluateStart(threadId, operationId, route, userMessageId, runId, cancel, (result) => {decided = result;})).pipe(
-      Effect.onInterrupt(() => Effect.sync(() => finish(decided ?? failedPreparation))));
-    return finish(evaluated.ok ? evaluated.value : failedPreparation);
+    // the durable preparation claim and the installation of its owner are one masked step; only the evaluation (its catalog and
+    // evidence reads and its wait for the admission section) is interruptible, so an interruption that arrives with the claim
+    // takes effect there and the owner finishes the claim
+    return yield* Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+      store.saveStartOperation({threadId, operationId, requestHash, status: "pending", reason: "Checking the requested chat and original human source.", preparing: true});
+      // the final status is written only while the operation is still preparing
+      const finish = (result: SupervisionStartResult): SupervisionStartResult => {
+        const saved = store.startOperation(threadId, operationId);
+        if (saved?.preparing) store.saveStartOperation({threadId, operationId, requestHash, status: result.status === "invalid" ? "denied" : result.status, reason: result.reason});
+        return result;
+      };
+      // an interrupted request finishes with the outcome its section decided, or as a failed preparation, as the aborted baseline read did
+      let decided: SupervisionStartResult | null = null;
+      const evaluated = yield* attempt(restore(evaluateStart(threadId, operationId, route, userMessageId, runId, cancel, (result) => {decided = result;}))).pipe(
+        Effect.onInterrupt(() => Effect.sync(() => finish(decided ?? failedPreparation))));
+      return finish(evaluated.ok ? evaluated.value : failedPreparation);
+    }));
   });
   const stopSupervision = (input: SupervisionStopInput, evidence: unknown, cancel?: Deferred.Deferred<void>): Effect.Effect<SupervisionStopResult, StoreError> => Effect.gen(function* () {
     const catalog = yield* source.catalog();

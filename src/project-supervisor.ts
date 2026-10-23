@@ -1068,7 +1068,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         complete({...job, supervisorRunId: run.id}, "unavailable", null, "Supervision was stopped for this chat; the interpretation result was not applied.");
     }
   });
-  const reconcile = (initial: TaskRecord, supervisor: Projection) => Effect.gen(function* () {
+  const reconcile = (initial: TaskRecord, supervisor: Projection, bound: BindingRecord) => Effect.gen(function* () {
     let job = initial;
     const nativeIdentity = supervisor.messages.find(item => item.id === job.messageId && item.threadId === job.supervisorThreadId);
     if (nativeIdentity && nativeIdentity.text !== job.requestText) {
@@ -1132,12 +1132,24 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         source = yield* projection(job.threadId);
         if (!currentSource(job, source)) {complete(job, "unavailable", null, "The task source changed while the workflow was being revalidated.");return;}
       }
-      // from the last await, the boundary recheck, the Start activation and the result commit as one admission section
+      // from the last await, the result's authority, the boundary recheck, the Start activation and the result commit as one
+      // admission section
       const settled = source;
       const finished = job;
-      yield* gate.admit(() => Effect.sync(() => {
+      yield* gate.admit((guard) => Effect.sync(() => {
+        // the retained task and its binding are still the ones this result answers; otherwise another writer settled or replaced them
+        const retained = store.task(finished.threadId);
+        const owner = store.binding(finished.projectId, finished.threadId);
+        if (retained?.id !== finished.id || !["dispatching", "waiting", "uncertain"].includes(retained.status) ||
+          owner?.threadId !== bound.threadId || owner.generation !== bound.generation) return;
         // rechecked after the final await: a result for a request before a boundary saved meanwhile closes unapplied
         if (beforeBoundary(finished, settled)) {complete({...finished, supervisorRunId: run.id}, "expired", null, enabledAgainReason);return;}
+        // a Stop admitted after the last read closes the retained task unapplied, as a stopped chat's settled interpretation closes
+        if (guard.supervisionStopped(finished.threadId) && !scope.validPendingStartFor(finished.threadId)) {
+          complete({...retained, supervisorRunId: run.id}, "unavailable", null, "Supervision was stopped for this chat; the interpretation result was not applied.");return;
+        }
+        // a disable admitted after the last read leaves the result unapplied; a later cycle settles it under the enablement rules
+        if (!guard.scopeEnabled(finished.projectId, finished.threadId, "interpretation")) return;
         store.store.transaction(() => {
           if (approveStart && (!pendingStart || !scope.validPendingStart(pendingStart) || !currentSource(finished, settled) || !control.activateStart(pendingStart))) {
             if (pendingStart) control.rejectStart(pendingStart, "Start was superseded or could not be committed.");
@@ -1196,7 +1208,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
           complete({...inflight, supervisorRunId: run.id}, "expired", null, enabledAgainReason);
         return;
       }
-      yield* reconcile(inflight, supervisor);
+      yield* reconcile(inflight, supervisor, binding);
       // a proposal is introduced in the same cycle its interpretation completes, through the ordinary conversation path and its fences
       const interpreted = store.task(inflight.threadId);
       if (interpreted?.id === inflight.id && interpreted.status === "inferred" && scope.scopeEnabled(binding.projectId, binding.mainThreadId))
@@ -1443,7 +1455,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
           if (!validModelSelection(settings.modelSelection, yield* models)) return {status: "invalid", message: "Choose an available model before replacing a deleted conversation.", snapshot: null};
           if (!projectEnabled(input.projectId, input.mainThreadId)) return unavailableNow(disabledBeforeReplacement);
           const teamRecovery = yield* prepareMissingRootTeam(read);
-          // after the team recovery, its checks, the replacement with its task closures and the creation reset run as one admission section
+          // after the team recovery, its checks, the current permission and retained identity, then the replacement with its task
+          // closures and the creation reset run as one admission section; every check precedes the first write
           const replaced = yield* gate.admit((guard) => Effect.sync((): ProjectSupervisorSaveOutcome | null => {
             if (teamRecovery === "disabled") return unavailableNow(disabledBeforeReplacement);
             if (teamRecovery === "present_helper") return unavailableNow("A registered helper is still present in T3. The missing root was not replaced; archive or delete the helper, or quarantine and retire it while the root is available, then retry. No helper was treated as missing.");
@@ -1451,9 +1464,14 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
             const teamSnapshot = team.snapshot(read);
             if (teamSnapshot.assignments.some(assignment => assignment.state === "transferring") || team.unresolvedRequests(read).length)
               return unavailableNow("The Supervisor team still has unresolved handover state or native effects. Their original identities and history remain retained; reconcile them before replacing the root.");
-            const replacement = store.replaceMissingBinding(read, settings.modelSelection);
-            for (const job of store.tasksFor(read)) if (["queued", "dispatching", "waiting", "uncertain"].includes(job.status)) complete(job, "unavailable", null, "The bound Supervisor conversation was deleted; its request identity remains retained.");
-            return resetCreation(guard, replacement);
+            if (!guard.scopeEnabled(input.projectId, input.mainThreadId, "interpretation")) return unavailableNow(disabledBeforeReplacement);
+            const retained = store.binding(input.projectId, input.mainThreadId);
+            if (retained?.threadId !== read.threadId || retained.generation !== read.generation || retained.state !== "missing")
+              return {status: "conflict", message: "The conversation state changed. Refresh and choose the intended recovery action again.", snapshot: null};
+            const replacement = store.replaceMissingBinding(retained, settings.modelSelection);
+            for (const job of store.tasksFor(retained)) if (["queued", "dispatching", "waiting", "uncertain"].includes(job.status)) complete(job, "unavailable", null, "The bound Supervisor conversation was deleted; its request identity remains retained.");
+            store.setBinding({...replacement, creationAttempts: 0});
+            return null;
           }));
           if (replaced) return replaced;
         } else if (decided.next === "rejected") {
