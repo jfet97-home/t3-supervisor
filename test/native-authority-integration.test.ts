@@ -21,7 +21,7 @@ const fixture = async (t: TestContext): Promise<IntWorkflowFixture> => {
   return f;
 };
 
-const count = async /*s6d*/ (f: IntWorkflowFixture, table: string, where = "1=1", ...values: Array<string | number>): Promise<number> =>
+const count = async (f: IntWorkflowFixture, table: string, where = "1=1", ...values: Array<string | number>): Promise<number> =>
   Number((await f.core.guidance.db.prepare(`SELECT count(*) AS n FROM ${table} WHERE ${where}`).get(...values))?.n);
 
 const projectionPath = (f: IntWorkflowFixture) => `/api/orchestration/threads/${encodeURIComponent(f.supervisorThreadId)}`;
@@ -44,7 +44,7 @@ const assertReadCredentials = (peer: IntNativePeer): void => {
   assert.deepEqual(peer.unexpected, []);
 };
 
-const noWriteRows = async /*s6d*/ (f: IntWorkflowFixture): Promise<void> => {
+const noWriteRows = async (f: IntWorkflowFixture): Promise<void> => {
   assert.equal(await count(f, "supervisor_workflow_write_receipts"), 0);
   assert.equal(await count(f, "supervisor_workflow_write_evidence"), 0);
   assert.equal(await f.core.supervision.workflowStates.get(f.projectId, f.mainThreadId), null);
@@ -318,7 +318,7 @@ const teamFixture = async (t: TestContext) => {
   f.native.shellThreads.push(shellThread(helper));
   const args = {supervisorThreadId: f.supervisorThreadId, bindingGeneration: f.binding.generation,
     action: "quarantine", operationId: "int-quarantine", memberThreadId: member.threadId};
-  const memberState = async /*s6d*/ (threadId = member.threadId) => (await team.snapshot(f.binding)).members.find(item => item.threadId === threadId);
+  const memberState = async (threadId = member.threadId) => (await team.snapshot(f.binding)).members.find(item => item.threadId === threadId);
   return {f, team, ready, args, memberState};
 };
 

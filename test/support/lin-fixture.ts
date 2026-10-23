@@ -283,7 +283,7 @@ export const startLinFixture = async (options: LinOptions = {}): Promise<LinFixt
   try {
     core = await openIntSupervision({directory, peerUrl: peer.baseUrl, definitions: loader,
       catalog: () => ({projects: [{project: {id: projectId, title: "Project P", workspaceRoot: "/work/p"}, available: true}], threads})});
-    const control = async /*s6d*/ (scope: string | null) => await core!.guidance.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+    const control = async (scope: string | null) => await core!.guidance.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
       .run(`supervisor_control:${JSON.stringify(scope)}`, JSON.stringify({generation: 1, enabled: true, manual: true}));
     await control(null);
     await control(projectId);
@@ -343,7 +343,7 @@ export const within = async <A>(promise: Promise<A>, ms: number, label: string):
 };
 
 // an interpreted task with a source-bound proposal and its unsent introduction (values of test/support/int-workflow-fixture.ts:77-178)
-export const seedIntroduction = async /*s6d*/ (f: LinFixture, source: {messageId: string; runId: string; ordinal: number; text: string}) => {
+export const seedIntroduction = async (f: LinFixture, source: {messageId: string; runId: string; ordinal: number; text: string}) => {
   const binding = f.binding();
   const snapshot: ProjectDefinitionSnapshot = {projectId, threadId: mainThreadId, workspaceRoot: "/work/p", globalOnly: false, globalRevision: null,
     revision: "definition-revision-1", editingAvailable: true, status: "ready", steps: [], workflows: [], config: effectiveIndex({steps: [], workflows: []}),
@@ -372,7 +372,7 @@ export const seedIntroduction = async /*s6d*/ (f: LinFixture, source: {messageId
 };
 
 // a ready helper of the bound root assigned the operational child "branch" (seeding of test/support/int-helper-fixture.ts:109-129)
-export const seedTeam = async /*s6d*/ (f: LinFixture, options: {branchParent?: string} = {}) => {
+export const seedTeam = async (f: LinFixture, options: {branchParent?: string} = {}) => {
   const binding = f.binding();
   const team = f.core.supervision.team;
   const helper = projectionOf(thread("helper", binding.threadId, "subagent"));
@@ -438,7 +438,7 @@ export const helperBatch = (threadId: string): SupervisorMonitorBatch => {
   return {projectId, createdAt: detectedAt, trigger: "priority", finalizedActivityCount: 1, pendingItemCount: 1, truncated: false, threads: [batchThread]};
 };
 
-export const helperReceipt = async /*s6d*/ (f: LinFixture): Promise<Record<string, unknown> | null> => {
+export const helperReceipt = async (f: LinFixture): Promise<Record<string, unknown> | null> => {
   const binding = f.binding();
   const row = await f.core.guidance.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=?")
     .get(binding.threadId, binding.generation);
@@ -448,7 +448,7 @@ export const helperReceipt = async /*s6d*/ (f: LinFixture): Promise<Record<strin
 export type TeamEventRow = {rowid: number; id: string; createdAt: number; acknowledgedAt: unknown; document: Record<string, unknown>};
 
 // the stored team event rows of the bound Supervisor in insertion order
-export const teamEventRows = async /*s6d*/ (f: LinFixture): Promise<TeamEventRow[]> => {
+export const teamEventRows = async (f: LinFixture): Promise<TeamEventRow[]> => {
   const binding = f.binding();
   return (await f.core.guidance.db.prepare("SELECT rowid,id,created_at,acknowledged_at,document FROM supervisor_team_events WHERE owner_thread_id=? AND owner_generation=? ORDER BY rowid")
     .all(binding.threadId, binding.generation)).map(row => ({rowid: Number(row.rowid), id: String(row.id), createdAt: Number(row.created_at),

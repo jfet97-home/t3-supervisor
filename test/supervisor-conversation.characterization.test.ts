@@ -218,7 +218,7 @@ it("CT-CONV-03: aborting the Stop-notice POST keeps the notice 'uncertain' with 
   assert.deepEqual(fixture.calls.filter(item => item.payload.threadId === operativeThreadId), [call]);
 });
 
-const reviewState = async /*s6d*/ (db: DbFacade, supervisorThreadId: string, requestId: string) => {
+const reviewState = async (db: DbFacade, supervisorThreadId: string, requestId: string) => {
   const request = await db.prepare("SELECT document FROM supervisor_conversation_requests WHERE id=?").get(requestId);
   const binding = await db.prepare("SELECT document FROM supervisor_main_bindings WHERE main_thread_id=?").get(operativeThreadId);
   const clock = await db.prepare("SELECT review_misses FROM supervisor_monitor_binding_clock WHERE supervisor_thread_id=?").get(supervisorThreadId);
@@ -304,7 +304,7 @@ it("CT-CONV-09: a non-applied workflow agreement import logs one event with its 
 });
 
 // a sent introduction for a task of another binding, visible in its main
-const introduceBound = async /*s6d*/ (fixture: Fixture, bound: Awaited<ReturnType<Fixture["addBoundOperative"]>>) => {
+const introduceBound = async (fixture: Fixture, bound: Awaited<ReturnType<Fixture["addBoundOperative"]>>) => {
   const introduction = {taskId: bound.task.id, projectId, threadId: bound.task.threadId, supervisorThreadId: bound.binding.threadId, state: "sent" as const,
     text: workflowIntroductionText(bound.task), messageId: `supervisor-notice:workflow:${bound.task.id}`, targetRunId: String(bound.projection.thread.activeRunId), error: null};
   await fixture.conversation.requests.saveIntroduction(introduction);
@@ -403,13 +403,13 @@ it("CT-CONV-06: interleaved cycles of two bindings keep request identities and c
   assert.deepEqual([checkIns(fixture.binding.threadId), checkIns(second.binding.threadId)], [2, 2]);
 });
 
-const tableDigest = async /*s6d*/ (db: DbFacade): Promise<string> => {
+const tableDigest = async (db: DbFacade): Promise<string> => {
   const hash = createHash("sha256");
   for (const {name} of await db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as Array<{name: string}>)
     hash.update(`${name}\0${JSON.stringify(await db.prepare(`SELECT * FROM "${name}" ORDER BY rowid`).all())}\0`);
   return hash.digest("hex");
 };
-const totalChanges = async /*s6d*/ (db: DbFacade): Promise<number> => Number((await db.prepare("SELECT total_changes() AS n").get())?.n);
+const totalChanges = async (db: DbFacade): Promise<number> => Number((await db.prepare("SELECT total_changes() AS n").get())?.n);
 
 it("CT-CONV-07: an enabled binding without an inferred task or activity makes no native call and no write in run() and observe()", {timeout: 10_000}, async t => {
   const clock = {now: baseTime};
@@ -514,7 +514,7 @@ it("CT-CONV-08: an accepted but invisible introduction blocks only after strictl
 const conversationStore = async (t: TestContext) => {
   const directory = await mkdtemp(join(tmpdir(), "c1-conversation-store-"));
   const opened: GuidanceHandle[] = [];
-  const open = async /*s6d*/ () => {
+  const open = async () => {
     const guidance = await openGuidance(directory);
     opened.push(guidance);
     return {guidance, store: await openRequests(guidance)};
@@ -525,7 +525,7 @@ const conversationStore = async (t: TestContext) => {
   });
   return {open};
 };
-const requestCount = async /*s6d*/ (db: DbFacade) => Number((await db.prepare("SELECT count(*) AS n FROM supervisor_conversation_requests").get())?.n);
+const requestCount = async (db: DbFacade) => Number((await db.prepare("SELECT count(*) AS n FROM supervisor_conversation_requests").get())?.n);
 const reviewInput = (supervisorThreadId: string) => ({projectId, supervisorThreadId, kind: "review" as const, taskId: null, text: "Review.", batch: null, completionMarker: "done"});
 
 it("CT-CSTORE-01: prepare() beside a pending request throws supervisor_request_inflight before pruning or inserting", {timeout: 10_000}, async t => {

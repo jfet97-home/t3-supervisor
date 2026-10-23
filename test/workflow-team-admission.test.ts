@@ -3,49 +3,47 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "@effect/vitest";
-import { Cause, Deferred, Effect, Exit, Fiber, Predicate } from "effect";
-import { GuidanceStore } from "../src/guidance-store.js";
-import { defaultSupervisorModel, ProjectSupervisorStore } from "../src/project-supervisor-store.js";
-import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService, type GateGuard, type SupervisionGateShape } from "../src/supervision-gate.js";
-import { SupervisionStores } from "../src/supervision-stores.js";
-import { SupervisorConversationStore } from "../src/supervisor-conversation-store.js";
-import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.js";
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Predicate } from "effect";
+import { GuidanceDb } from "../src/db.js";
+import { defaultSupervisorModel } from "../src/project-supervisor-store.js";
+import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService, type GateGuard, type SupervisionGateShape, type SupervisionScopeStores } from "../src/supervision-gate.js";
 import { HelperTransport } from "../src/supervisor-helper-transport.js";
 import { NativeOperateRpc, type NativeRpcShape } from "../src/supervisor-native.js";
 import { SupervisorTeamController } from "../src/supervisor-team-controller.js";
-import { SupervisorTeamStore } from "../src/supervisor-team-store.js";
 import type { Projection, SupervisorConfig, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
 import { workflowToolNames } from "../src/workflow-write-evidence.js";
+import { openStores, openWorkflows, serviceOf } from "./support/store-units.js";
+import { scopeStores } from "./support/team-units.js";
 
 // CT-LIN-08 (target regression, plan 3.11): the workflow_write commit, a supervision_team mutation and a guide's reservation and
 // steer each run as one admission section. A writer that asks for the section while a Stop holds it waits: its guard reads the
 // Stop's commit and it writes nothing. A writer that committed before the Stop keeps its write.
 
-type Fixture = ReturnType<typeof setup>;
+type Fixture = Effect.Success<typeof setup>;
 
 // the display reads of the writers' early checks: the chat stop as the Stop sections commit it, every scope enabled
 class StopScope extends SupervisionScope {
-  constructor(store: ProjectSupervisorStore, private readonly stopped: ReadonlySet<string>) {
-    super({dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0} satisfies SupervisorConfig, store, true);
+  constructor(stores: SupervisionScopeStores, private readonly stopped: ReadonlySet<string>) {
+    super({dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0} satisfies SupervisorConfig, stores, true);
   }
-  override scopeEnabled(): boolean {return true;}
-  override workflowEditingEnabled(): boolean {return true;}
-  override supervisionStopped(threadId: string): boolean {return this.stopped.has(threadId);}
+  override scopeEnabled() {return Effect.succeed(true);}
+  override workflowEditingEnabled() {return Effect.succeed(true);}
+  override supervisionStopped(threadId: string) {return Effect.succeed(this.stopped.has(threadId));}
 }
 
-const setup = () => {
+const setup = Effect.gen(function* () {
   const directory = mkdtempSync(join(tmpdir(), "workflow-team-admission-"));
-  const guidance = new GuidanceStore(directory);
-  const supervisors = new ProjectSupervisorStore(guidance, new Set());
-  for (const scope of [null, "project"]) guidance.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-    .run(`supervisor_control:${JSON.stringify(scope)}`, JSON.stringify({generation: 1, enabled: true, manual: true}));
-  const binding = {...supervisors.reserve("project", "main", "main", defaultSupervisorModel, 1, 1), state: "ready" as const};
-  supervisors.setBinding(binding);
-  const team = new SupervisorTeamStore(supervisors);
-  const registered = team.registerMember(binding, {threadId: "helper", taskId: "task", bootstrapRunId: "bootstrap"});
-  const member = team.markReady(binding, registered.threadId, registered.epoch);
+  const stores = yield* Effect.promise(() => openStores(directory));
+  const sql = stores.sql;
+  const supervisors = serviceOf(stores.supervisors);
+  for (const scope of [null, "project"]) yield* sql`INSERT INTO meta VALUES(${`supervisor_control:${JSON.stringify(scope)}`},${JSON.stringify({generation: 1, enabled: true, manual: true})}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
+  const binding = {...(yield* supervisors.reserve("project", "main", "main", defaultSupervisorModel, 1, 1)), state: "ready" as const};
+  yield* supervisors.setBinding(binding);
+  const team = serviceOf(stores.team);
+  const registered = yield* team.registerMember(binding, {threadId: "helper", taskId: "task", bootstrapRunId: "bootstrap"});
+  const member = yield* team.markReady(binding, registered.threadId, registered.epoch);
   const modes = {runtimeMode: "full-access", interactionMode: "default"};
   const threads: ThreadInfo[] = [
     {id: "main", title: "main", projectId: "project", lineage: {parentThreadId: null, relationshipToParent: null}},
@@ -59,13 +57,13 @@ const setup = () => {
   branch.runs.push({id: "branch-run", threadId: "branch", ordinal: 1, status: "running", activeAttemptId: "branch-attempt", rootNodeId: "branch-root",
     requestedAt: "2026-10-19T00:00:00Z", startedAt: "2026-10-19T00:00:00Z", completedAt: null});
   branch.providerTurns = [{id: "branch-turn", runAttemptId: "branch-attempt", nodeId: "branch-root", status: "running"}];
-  const assignment = team.assign(binding, "branch", member.threadId, new Map<string, string | null>([["main", null], ["branch", "main"]]));
-  for (const notice of team.snapshot(binding).notifications.filter(value => value.assignmentEpoch === assignment.epoch)) {
-    team.updateNotificationDelivery(binding, binding.threadId, notice.id, "sending");
-    team.updateNotificationDelivery(binding, binding.threadId, notice.id, "delivered");
-    team.acknowledgeNotification(binding, notice.recipientThreadId, notice.id, notice.memberEpoch);
+  const assignment = yield* team.assign(binding, "branch", member.threadId, new Map<string, string | null>([["main", null], ["branch", "main"]]));
+  for (const notice of (yield* team.snapshot(binding)).notifications.filter(value => value.assignmentEpoch === assignment.epoch)) {
+    yield* team.updateNotificationDelivery(binding, binding.threadId, notice.id, "sending");
+    yield* team.updateNotificationDelivery(binding, binding.threadId, notice.id, "delivered");
+    yield* team.acknowledgeNotification(binding, notice.recipientThreadId, notice.id, notice.memberEpoch);
   }
-  team.completeTransfer(binding, "branch", assignment.epoch);
+  yield* team.completeTransfer(binding, "branch", assignment.epoch);
   const details = new Map<string, unknown>();
   // the caller's own completed native tool call whose complete arguments equal the request
   const proof = (input: Record<string, unknown>, actor: string, tool: "write" | "team" | "guide") => {
@@ -89,15 +87,16 @@ const setup = () => {
   // admission request and each stop read of the admission guard, which only a section reads
   const stopped = new Set<string>();
   const log: string[] = [];
-  const display = new StopScope(supervisors, stopped);
-  const guard: GateGuard = {scopeEnabled: () => true, supervisionStopped: (threadId) => {log.push("guard");return stopped.has(threadId);}, workflowEditingEnabled: () => true};
-  const close = () => {guidance.close();rmSync(directory, {recursive: true, force: true});};
-  return {guidance, supervisors, binding, team, member, assignment, threads, projections, details, proof, stopped, log, display, guard, close};
-};
+  const display = new StopScope(scopeStores(stores.supervisors), stopped);
+  const guard: GateGuard = {scopeEnabled: () => Effect.succeed(true), supervisionStopped: (threadId) => Effect.sync(() => {log.push("guard");return stopped.has(threadId);}),
+    workflowEditingEnabled: () => Effect.succeed(true)};
+  const close = Effect.promise(() => stores.close()).pipe(Effect.andThen(Effect.sync(() => rmSync(directory, {recursive: true, force: true}))));
+  return {stores, sql, supervisors, binding, team, member, assignment, threads, projections, details, proof, stopped, log, display, guard, close};
+});
 
 // the services over one admission gate, which records each admission request before it waits for the section
 const services = (f: Fixture) => Effect.gen(function* () {
-  const sections = yield* makeSupervisionGate(f.guard);
+  const sections = yield* makeSupervisionGate(f.guard).pipe(Effect.provideService(GuidanceDb, f.sql));
   const gate: SupervisionGateShape = {admit: (body) => Effect.andThen(Effect.sync(() => f.log.push("admit")), sections.admit(body))};
   const dispatched: Array<Record<string, unknown>> = [];
   const native = WorkflowNativeAccess.of({
@@ -112,11 +111,11 @@ const services = (f: Fixture) => Effect.gen(function* () {
       return {sent: Effect.succeed(true), result: Effect.succeed({sequence: dispatched.length}), release: Effect.void};
     }),
   };
-  const stores = SupervisionStores.of({supervisors: f.supervisors, requests: new SupervisorConversationStore(f.supervisors.store),
-    monitor: new ProjectSupervisorMonitorStore(f.supervisors.store), team: f.team, workflows: new WorkflowStateStore(f.supervisors, () => true)});
+  const workflows = yield* Effect.promise(() => openWorkflows(f.stores, () => true));
+  const stores = Context.add(f.stores.context, WorkflowStateStore, serviceOf(workflows));
   const writes = yield* WorkflowWriteController.make({maxEvidenceWaitMs: 0}).pipe(Effect.provideService(SupervisionGate, gate),
-    Effect.provideService(WorkflowNativeAccess, native), Effect.provideService(SupervisionStores, stores), Effect.provideService(SupervisionScopeService, f.display));
-  const team = yield* SupervisorTeamController.make().pipe(Effect.provideService(SupervisionStores, stores),
+    Effect.provideService(WorkflowNativeAccess, native), Effect.provideService(SupervisionScopeService, f.display), Effect.provide(stores));
+  const team = yield* SupervisorTeamController.make().pipe(Effect.provide(stores),
     Effect.provideService(WorkflowWriteController, writes), Effect.provideService(WorkflowNativeAccess, native),
     Effect.provideService(SupervisionGate, gate), Effect.provideService(NativeOperateRpc, operate),
     // the helper receipts are not read by these actions
@@ -147,9 +146,9 @@ const waitedBehindStop = (f: Fixture) => {
   return committed >= 0 && firstGuard > committed && f.log.slice(0, committed).filter(entry => entry === "admit").length === 2;
 };
 
-const count = (f: Fixture, table: string): number => Number(f.guidance.db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.n);
+const count = (f: Fixture, table: string) => Effect.map(f.sql.unsafe<{n: number}>(`SELECT count(*) AS n FROM ${table}`), (rows) => Number(rows[0]?.n));
 
-const fixture = Effect.acquireRelease(Effect.sync(setup), (f) => Effect.sync(f.close));
+const fixture = Effect.acquireRelease(setup, (f) => f.close);
 
 it.live("CT-LIN-08: workflow_write: a write asking for its commit section while a Stop holds it waits, reads the Stop and stores nothing", () => Effect.gen(function* () {
   const f = yield* fixture;
@@ -163,7 +162,7 @@ it.live("CT-LIN-08: workflow_write: a write asking for its commit section while 
   yield* stop.done;
   assert.deepEqual(yield* Fiber.join(writing), {status: "denied", operationId: "stop-before-commit", reason: "owner_changed"});
   assert.ok(waitedBehindStop(f), f.log.join());
-  assert.deepEqual([count(f, "supervisor_workflow_write_receipts"), count(f, "supervisor_workflow_write_evidence"), count(f, "supervisor_workflow_state")], [0, 0, 0]);
+  assert.deepEqual([yield* count(f, "supervisor_workflow_write_receipts"), yield* count(f, "supervisor_workflow_write_evidence"), yield* count(f, "supervisor_workflow_state")], [0, 0, 0]);
 
   // a write committed before the Stop keeps it
   f.stopped.clear();
@@ -173,7 +172,7 @@ it.live("CT-LIN-08: workflow_write: a write asking for its commit section while 
   const later = yield* stopSection(f, gate);
   yield* later.release;
   yield* later.done;
-  assert.deepEqual([count(f, "supervisor_workflow_write_receipts"), count(f, "supervisor_workflow_state")], [1, 1]);
+  assert.deepEqual([yield* count(f, "supervisor_workflow_write_receipts"), yield* count(f, "supervisor_workflow_state")], [1, 1]);
 }), {timeout: 10_000});
 
 it.live("CT-LIN-08: supervision_team: a mutation asking for its section while a Stop holds it waits, reads the Stop and writes no receipt or notification", () => Effect.gen(function* () {
@@ -182,7 +181,7 @@ it.live("CT-LIN-08: supervision_team: a mutation asking for its section while a 
   const args = {supervisorThreadId: f.binding.threadId, bindingGeneration: f.binding.generation, action: "note", operationId: "note-after-stop",
     memberThreadId: f.member.threadId, summary: "Check the failing test."};
   f.proof(args, f.binding.threadId, "team");
-  const before = f.team.snapshot(f.binding);
+  const before = yield* f.team.snapshot(f.binding);
   const stop = yield* stopSection(f, gate);
   const calling = yield* Effect.forkChild(team.call(args));
   yield* until(() => admissions(f) === 2);
@@ -190,8 +189,8 @@ it.live("CT-LIN-08: supervision_team: a mutation asking for its section while a 
   yield* stop.done;
   assert.deepEqual(yield* Fiber.join(calling), {status: "denied", reason: "actor_changed"});
   assert.ok(waitedBehindStop(f), f.log.join());
-  assert.deepEqual(f.team.snapshot(f.binding), before);
-  assert.equal(count(f, "supervisor_team_tool_receipts"), 0);
+  assert.deepEqual(yield* f.team.snapshot(f.binding), before);
+  assert.equal(yield* count(f, "supervisor_team_tool_receipts"), 0);
 }), {timeout: 10_000});
 
 it.live("CT-LIN-08: supervision_guide: a guide asking for its reservation section while a Stop holds it waits, reads the Stop, reserves nothing, sends no steer and rejects as guidance_assignment_changed", () => Effect.gen(function* () {
@@ -211,8 +210,8 @@ it.live("CT-LIN-08: supervision_guide: a guide asking for its reservation sectio
   assert.deepEqual(Predicate.isTagged(Cause.squash(exit.cause), "TeamDenied") ? (Cause.squash(exit.cause) as {reason: string}).reason : null, "guidance_assignment_changed");
   assert.ok(waitedBehindStop(f), f.log.join());
   assert.deepEqual(dispatched, []);
-  assert.equal(count(f, "supervisor_team_tool_receipts"), 0);
-  assert.deepEqual(f.team.unresolvedRequests(f.binding), []);
+  assert.equal(yield* count(f, "supervisor_team_tool_receipts"), 0);
+  assert.deepEqual(yield* f.team.unresolvedRequests(f.binding), []);
 
   // without a Stop the same guide reserves one attempt and sends one steer
   f.stopped.clear();

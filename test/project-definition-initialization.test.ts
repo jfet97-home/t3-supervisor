@@ -69,8 +69,8 @@ function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: 
   }})};
   const layer = ProjectDefinitions.layer({source, t3, files, options: {
     globalRoot: "~",
-    useGlobalDefinitions: () => false,
-    isScratchProject: () => false,
+    useGlobalDefinitions: () => Effect.succeed(false),
+    isScratchProject: () => Effect.succeed(false),
     ...(options.provideGitProbe === false ? {} : {gitProbe: (targetRoot: string) => Effect.sync((): FreshGitInfo => {
       const paths = targetRoot === "~" || options.isRepo === false ? [] : [...freshChangedPaths];
       freshProbeSnapshots.push(paths);

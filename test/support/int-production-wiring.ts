@@ -90,7 +90,7 @@ export const openIntSupervision = async (input: {directory: string; peerUrl: str
   return {directory: input.directory, config, policy, guidance, store, source, t3, readRpc, operateRpc, supervision, operate, services,
     writes: Context.get(controllers, WorkflowWriteController), team: Context.get(controllers, SupervisorTeamController),
     // a process exit also ends the supervision scope, which aborts any webhook POST still in flight
-    close: () => Effect.runPromise(Scope.close(scope, Exit.void)).then(async /*s6d*/ () => await guidance.close()).then(async /*s6d*/ () => await policy.close())};
+    close: () => Effect.runPromise(Scope.close(scope, Exit.void)).then(async () => await guidance.close()).then(async () => await policy.close())};
 };
 
 export type IntEndpoint = {

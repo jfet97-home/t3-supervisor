@@ -495,7 +495,7 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
   // the handles close once each; the handle itself ignores a second close
   const close = (store: {close(): Promise<void>}) => store.close();
   // one controller over one database connection, as one supervisor process owns it; the chat stop is the policy store's read
-  const makeController = async /*s6d*/ (store: Promised<ProjectSupervisorStore["Service"]>, policy: PolicyHandle) => {
+  const makeController = async (store: Promised<ProjectSupervisorStore["Service"]>, policy: PolicyHandle) => {
     const workflows = await openWorkflows(store, () => true);
     const conversation = supervisorConversationUnit(store, rpc, readProjection, definitionLoader, eligible, () => true, workflows);
     conversation.supervisionStopped = threadId => Effect.map(policyService(policy).get(), (current) => current.excludedThreadIds.includes(threadId));
@@ -526,7 +526,7 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
   );
   const signal = AbortSignal.timeout(10_000);
   /** a new process on the same files: fresh connections and a fresh controller with the same fake T3 */
-  const reopen = async /*s6d*/ () => {
+  const reopen = async () => {
     const reopenedGuidance: GuidanceHandle = await openGuidance(directory);
     const reopenedPolicy = await openPolicy(threadPolicyDirectory, {excludedThreadIds: []});
     closables.push(reopenedPolicy, reopenedGuidance);
@@ -536,7 +536,7 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
       run: async (runSignal: AbortSignal = signal) => controller.conversation.run(await store.binding(projectId, operativeThreadId) as BindingRecord, supervisor, threadList, runSignal)};
   };
   /** a second main with its own Supervisor binding in the same project */
-  const addBoundOperative = async /*s6d*/ (threadId: string, taskId: string) => {
+  const addBoundOperative = async (threadId: string, taskId: string) => {
     const reserved = await projectStore.reserve(projectId, threadId, "Project A", defaultSupervisorModel, 10, clock.now);
     await projectStore.setBinding({...reserved, state: "ready"});
     const ownSupervisor = makeProjection(makeThread({id: reserved.threadId, title: `Project Supervisor ${threadId}`}));
@@ -574,7 +574,7 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
       await rm(directory, { recursive: true, force: true });
     },
     /** ends this process's connections without any further write, as a crash would */
-    crash: async /*s6d*/ () => { await close(threadPolicy); await close(guidance); },
+    crash: async () => { await close(threadPolicy); await close(guidance); },
     reopen,
     addBoundOperative,
     guidance,
@@ -603,7 +603,7 @@ export const setInterpretationAnswer = (supervisor: Projection, task: TaskRecord
 
 // stores a task whose workflow is the service's parse of the Supervisor's own answer, as interpretation stores it
 
-export const appendNoticeForTask = async /*s6d*/ (
+export const appendNoticeForTask = async (
   fixture: Fixture,
   task: TaskRecord,
   projection: Projection,
@@ -632,11 +632,11 @@ export const appendNoticeForTask = async /*s6d*/ (
   return introduction;
 };
 
-export const appendNoticeToOperative = async /*s6d*/ (fixture: Fixture): Promise<WorkflowIntroduction> =>
+export const appendNoticeToOperative = async (fixture: Fixture): Promise<WorkflowIntroduction> =>
   await appendNoticeForTask(fixture, fixture.task, fixture.operative);
 
 // prepares a task context request and anchors the task to its prompt in one step, as the introduction path does
-export const prepareTaskContext = async /*s6d*/ (fixture: Fixture, input: {text: string; completionMarker: string}, now: number,
+export const prepareTaskContext = async (fixture: Fixture, input: {text: string; completionMarker: string}, now: number,
   anchored = true): Promise<ConversationRequest> => {
   const request = await fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "context",
     taskId: fixture.task.id, batch: null, ...input}, now);
@@ -720,12 +720,12 @@ export const appendAssistantTurn = (projection: Projection, id: string, text: st
   return {run, message};
 };
 
-export const appendSupervisorProposal = async /*s6d*/ (fixture: Fixture, proposalId = fixture.task.id,
+export const appendSupervisorProposal = async (fixture: Fixture, proposalId = fixture.task.id,
   workflow = workflowPlan(fixture.task), now = baseTime, recordTask = fixture.task) => appendAssistantTurn(fixture.supervisor,
   `supervisor-proposal-${proposalId}-${fixture.supervisor.runs.length}`,
   `I propose this workflow.\n${workflowFence("workflow-proposal", compactDraft(await fixture.projectStore.task(recordTask.threadId) ?? recordTask, workflowRecord(recordTask, proposalId, workflow)))}`, now);
 
-export const appendOperativeAcceptance = async /*s6d*/ (fixture: Fixture, value: unknown, now: number, options: {
+export const appendOperativeAcceptance = async (fixture: Fixture, value: unknown, now: number, options: {
   text?: string;
   streaming?: boolean;
   nodeKind?: string;

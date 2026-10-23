@@ -3,20 +3,18 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "@effect/vitest";
-import { Clock, Effect, Fiber } from "effect";
+import { Clock, Context, Effect, Fiber } from "effect";
 import { TestClock } from "effect/testing";
-import { GuidanceStore } from "../src/guidance-store.js";
-import { defaultSupervisorModel, ProjectSupervisorStore } from "../src/project-supervisor-store.js";
+import { GuidanceDb } from "../src/db.js";
+import { defaultSupervisorModel } from "../src/project-supervisor-store.js";
 import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService } from "../src/supervision-gate.js";
-import { SupervisionStores } from "../src/supervision-stores.js";
-import { SupervisorConversationStore } from "../src/supervisor-conversation-store.js";
-import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.js";
-import { SupervisorTeamStore } from "../src/supervisor-team-store.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
 import { workflowToolNames } from "../src/workflow-write-evidence.js";
+import { openStores, openWorkflows, serviceOf } from "./support/store-units.js";
+import { scopeStores } from "./support/team-units.js";
 
 // CT-WWC-07 (target regression): the 400 ms evidence budget runs on the Effect clock (monotonic time, 50 ms pauses) instead of
 // performance.now and setTimeout, so its polls and its single 100 ms detail retry are counted exactly under the TestClock
@@ -25,19 +23,19 @@ const thread = (id: string, projectId: string): ThreadInfo => ({id, title: id, p
   lineage: {parentThreadId: null, relationshipToParent: null}});
 
 // a ready binding on a temp guidance database, released with the test
-const store = Effect.acquireRelease(Effect.sync(() => {
+const store = Effect.acquireRelease(Effect.gen(function* () {
   const directory = mkdtempSync(join(tmpdir(), "workflow-write-evidence-clock-"));
-  const guidance = new GuidanceStore(directory);
-  const supervisors = new ProjectSupervisorStore(guidance, new Set());
-  for (const scope of [null, "project-workflows"]) guidance.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-    .run(`supervisor_control:${JSON.stringify(scope)}`, JSON.stringify({generation: 1, enabled: true, manual: true}));
-  const binding = {...supervisors.reserve("project-workflows", "main-workflows", "Main thread", defaultSupervisorModel, 1, 1), state: "ready" as const};
-  supervisors.setBinding(binding);
-  return {directory, guidance, supervisors, binding, workflows: new WorkflowStateStore(supervisors, id => supervisors.enabled(id))};
-}), ({directory, guidance}) => Effect.sync(() => {guidance.close();rmSync(directory, {recursive: true, force: true});}));
+  const stores = yield* Effect.promise(() => openStores(directory));
+  const supervisors = serviceOf(stores.supervisors);
+  for (const scope of [null, "project-workflows"]) yield* stores.sql`INSERT INTO meta VALUES(${`supervisor_control:${JSON.stringify(scope)}`},${JSON.stringify({generation: 1, enabled: true, manual: true})}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
+  const binding = {...(yield* supervisors.reserve("project-workflows", "main-workflows", "Main thread", defaultSupervisorModel, 1, 1)), state: "ready" as const};
+  yield* supervisors.setBinding(binding);
+  const workflows = serviceOf(yield* Effect.promise(() => openWorkflows(stores, id => supervisors.enabled(id))));
+  return {directory, stores, supervisors, binding, workflows};
+}), ({directory, stores}) => Effect.promise(() => stores.close()).pipe(Effect.andThen(Effect.sync(() => rmSync(directory, {recursive: true, force: true})))));
 
 it.effect("CT-WWC-07: with a 400 ms budget a pending write polls the projection every 50 ms nine times and retries one unavailable detail read once after 100 ms", () => Effect.gen(function* () {
-  const {supervisors, workflows, binding} = yield* store;
+  const {stores, workflows, binding} = yield* store;
   const args = {action: "ensure_main", supervisorThreadId: binding.threadId, bindingGeneration: binding.generation, operationId: "budget-op", note: "Wait for evidence."};
   const identity = {threadId: binding.threadId, runId: "supervisor-run", providerThreadId: "provider-thread"};
   // one snapshot candidate whose detail read always fails, so the write stays pending through the whole budget
@@ -55,13 +53,13 @@ it.effect("CT-WWC-07: with a 400 ms budget a pending write polls the projection 
     projection: () => Effect.map(Clock.currentTimeMillis, (now) => {polls.push(now);return projection;}),
     getTurnItem: () => Effect.flatMap(Clock.currentTimeMillis, (now) => {details.push(now);return Effect.fail(new SupervisorRpcError("uncertain"));}),
   });
-  const gate = yield* makeSupervisionGate({scopeEnabled: () => true, supervisionStopped: () => false, workflowEditingEnabled: () => true});
-  const stores = SupervisionStores.of({supervisors, requests: new SupervisorConversationStore(supervisors.store), monitor: new ProjectSupervisorMonitorStore(supervisors.store),
-    team: new SupervisorTeamStore(supervisors), workflows});
-  const scope = new SupervisionScope({dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0}, supervisors, true);
-  scope.rememberScratchProjects([]);
+  const gate = yield* makeSupervisionGate({scopeEnabled: () => Effect.succeed(true), supervisionStopped: () => Effect.succeed(false),
+    workflowEditingEnabled: () => Effect.succeed(true)}).pipe(Effect.provideService(GuidanceDb, stores.sql));
+  const scope = new SupervisionScope({dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0}, scopeStores(stores.supervisors), true);
+  yield* scope.rememberScratchProjects([]);
   const controller = yield* WorkflowWriteController.make({maxEvidenceWaitMs: 400, withoutTeam: true}).pipe(Effect.provideService(SupervisionGate, gate),
-    Effect.provideService(WorkflowNativeAccess, native), Effect.provideService(SupervisionStores, stores), Effect.provideService(SupervisionScopeService, scope));
+    Effect.provideService(WorkflowNativeAccess, native), Effect.provideService(SupervisionScopeService, scope),
+    Effect.provide(Context.add(stores.context, WorkflowStateStore, workflows)));
 
   const writing = yield* Effect.forkChild(controller.write(args));
   yield* Effect.yieldNow;
@@ -75,5 +73,5 @@ it.effect("CT-WWC-07: with a 400 ms budget a pending write polls the projection 
   assert.deepEqual(yield* Fiber.join(writing), {status: "pending", operationId: "budget-op", reason: "native_item_detail_unavailable", retryable: true});
   assert.deepEqual(polls, [0, 50, 100, 150, 200, 250, 300, 350, 400], "nine polls, the last at the 400 ms budget");
   assert.deepEqual(details, [0, 100], "the unavailable detail is read again once, 100 ms later");
-  assert.equal(Number(supervisors.store.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_write_receipts").get()?.n), 0);
+  assert.equal(Number((yield* stores.sql<{n: number}>`SELECT count(*) AS n FROM supervisor_workflow_write_receipts`)[0]?.n), 0);
 }), {timeout: 10_000});

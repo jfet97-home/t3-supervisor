@@ -20,8 +20,8 @@ const definitionsWith = (f: Fixture, options: {
   gitProbe?: ProjectDefinitionLoaderOptions["gitProbe"];
 } = {}) => f.makeDefinitions({files: options.files ?? f.projectFiles, options: {
   globalRoot: f.globalRoot,
-  useGlobalDefinitions: () => false,
-  isScratchProject: () => false,
+  useGlobalDefinitions: () => Effect.succeed(false),
+  isScratchProject: () => Effect.succeed(false),
   setupWriter: {
     writeFile: options.writeFile ?? ((root, path, contents) => Effect.sync(() => {f.writes.push({root, path, contents});f.addFile(root, path, contents);})),
     ...(options.commitFiles ? {commitFiles: options.commitFiles} : {}),

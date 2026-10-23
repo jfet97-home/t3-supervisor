@@ -1,19 +1,19 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { Effect } from "effect";
+import { Context, Effect } from "effect";
 import { it } from "vitest";
-import { GuidanceStore } from "../src/guidance-store.js";
 import { projectSupervisorUnit } from "./support/team-units.js";
-import { defaultSupervisorModel, loadSupervisorOwnership, prepareStopNotice, type BindingRecord, type SupervisionFolderPresence, type TaskRecord } from "../src/project-supervisor-store.js";
+import { defaultSupervisorModel, prepareStopNotice, type BindingRecord, type SupervisionFolderPresence, type TaskRecord } from "../src/project-supervisor-store.js";
+import { SupervisorIds } from "../src/ids.js";
 import { SupervisorRpcError, type SupervisorRpc } from "../src/supervisor-native.js";
 import type { SupervisorConfig } from "../src/types.js";
 import { makeFixture as makeControlFixture, makeNoProjectFixture, supervisionStateDigest } from "./support/c2-ps-b-fixture.js";
 import { addSupervisorRequest, completeSupervisorRequest, deferred, makeFixture, reserveReadyBinding, retryInput, within, workflowResult, type Fixture } from "./support/c2-ps-fixture.js";
 import { metaRows, pssFixture, tableRows } from "./support/c2-pss-fixture.js";
 import { after, mockMethod } from "./support/node-test.js";
-import { openGuidance } from "./support/store-units.js";
+import { openGuidance, openSupervisors, serviceOf, storeUnitOf, type DbFacade } from "./support/store-units.js";
 
 const mainThreadId = "source-thread";
 
@@ -25,7 +25,7 @@ const interpretationDispatches = (fixture: Fixture, taskId: string) =>
 const identity = (call: {payload: Record<string, unknown>}) => ({commandId: call.payload.commandId, messageId: call.payload.messageId, text: call.payload.text,
   threadId: call.payload.threadId});
 
-const taskRows = async /*s6d*/ (fixture: Fixture) => Number((await fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_task_interpretations WHERE thread_id=?").get(mainThreadId))?.n);
+const taskRows = async (fixture: Fixture) => Number((await fixture.guidance.db.prepare("SELECT count(*) AS n FROM supervisor_task_interpretations WHERE thread_id=?").get(mainThreadId))?.n);
 
 // a native interpretation dispatch that is recorded and then held until the test releases it, ignoring the cycle signal
 const holdDispatch = (fixture: Fixture) => {
@@ -89,8 +89,11 @@ const pssDdlGolden = [
   ["meta", "CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)"],
 ];
 
-const pssDdl = (db: DatabaseSync) => db.prepare("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (name GLOB 'supervisor_*' OR name='meta') ORDER BY name='meta',name").all()
-  .map(row => [String(row.name), String(row.sql)]);
+// the project store's own DDL; the run's other stores open their tables beside it
+const pssDdl = async (db: DbFacade) => (await db.prepare("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (name GLOB 'supervisor_*' OR name='meta') ORDER BY name='meta',name").all())
+  .map(row => [String(row.name), String(row.sql)]).filter(([name]) => pssDdlGolden.some(([golden]) => golden === name));
+// an outside reader's rows of a table, on its own synchronous connection
+const readerRows = (db: DatabaseSync, table: string): unknown[] => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().map(row => ({...row}));
 
 it("CT-PS-01: an aborted interpretation dispatch becomes uncertain and a crash keeps it dispatching; the next cycle replays the identical identity", {timeout: 10_000}, async t => {
   {
@@ -286,9 +289,9 @@ it("CT-PS-04: concurrent Starts with one operation ID share one record and a dif
   assert.equal(start?.operationId, "same-start");
   assert.equal(start?.status, "pending");
   assert.equal(typeof start?.taskId, "string");
-  assert.deepEqual(f.supervisor.startStatus("manual", "same-start"), {threadId: "manual", operationId: "same-start", status: "pending", reason: first.reason});
+  assert.deepEqual(await Effect.runPromise(f.supervisor.startStatus("manual", "same-start")), {threadId: "manual", operationId: "same-start", status: "pending", reason: first.reason});
   for (const operationId of ["dashboard-start", "other-start"])
-    assert.deepEqual(f.supervisor.startStatus("manual", operationId), {threadId: "manual", operationId, status: "denied", reason: unresolvedStart});
+    assert.deepEqual(await Effect.runPromise(f.supervisor.startStatus("manual", operationId)), {threadId: "manual", operationId, status: "denied", reason: unresolvedStart});
   assert.equal((await db.prepare("SELECT count(*) AS n FROM meta WHERE key LIKE 'supervisor\\_start\\_operation:%' ESCAPE '\\'").get())?.n, 3);
   assert.deepEqual(await f.supervisor.startSupervision(args, evidence, signal), first, "a later replay returns the recorded result");
   assert.equal((await f.fixture.supervisorStore.start("manual"))?.taskId, start?.taskId);
@@ -393,7 +396,7 @@ it("CT-PS-07: a failing policy save rejects the dashboard Start without an Enabl
     assert.equal(start?.status, "rejected");
     assert.equal(start?.reason, "Start could not be committed.");
     assert.ok(start);
-    assert.deepEqual(f.supervisor.startStatus("manual", start.operationId), {threadId: "manual", operationId: start.operationId, status: "rejected", reason: "Start could not be committed."});
+    assert.deepEqual(await Effect.runPromise(f.supervisor.startStatus("manual", start.operationId)), {threadId: "manual", operationId: start.operationId, status: "rejected", reason: "Start could not be committed."});
     assert.equal(await f.fixture.supervisorStore.chatEnabledAt("manual"), null, "no chat Enable is recorded");
     assert.deepEqual(await f.fixture.supervisorStore.chatStop("manual"), stop, "the Stop record is kept");
     assert.deepEqual(await f.policy.get(), policyBefore, "the policy is unchanged");
@@ -426,7 +429,7 @@ it("CT-PS-07: a failing policy save rejects the dashboard Start without an Enabl
     const start = await f.fixture.supervisorStore.start("manual");
     assert.equal(start?.status, "pending", "the Start stays pending");
     assert.equal(start?.operationId, "enable-after-stop");
-    assert.deepEqual(f.supervisor.startStatus("manual", "enable-after-stop"), {threadId: "manual", operationId: "enable-after-stop", status: "pending",
+    assert.deepEqual(await Effect.runPromise(f.supervisor.startStatus("manual", "enable-after-stop")), {threadId: "manual", operationId: "enable-after-stop", status: "pending",
       reason: "Waiting for the Supervisor's first source-bound Start interpretation."});
     assert.equal(await f.supervisor.scopeEnabled("project-a", "manual"), false, "the Start is not active");
     assert.equal(f.fixture.operations.length, 0);
@@ -444,7 +447,7 @@ it("CT-PS-08: snapshot, overview, candidates and scopeSnapshot with ready bindin
   const bindings = await f.supervisorStore.bindings();
   assert.equal(bindings.length, 2);
   assert.ok(bindings.every(binding => binding.state === "ready"));
-  assert.deepEqual(await Promise.all(["main-one", "main-two"].map(async /*s6d*/ id => (await f.supervisorStore.task(id))?.status)), ["waiting", "waiting"]);
+  assert.deepEqual(await Promise.all(["main-one", "main-two"].map(async id => (await f.supervisorStore.task(id))?.status)), ["waiting", "waiting"]);
   const before = await supervisionStateDigest(f.guidance.db);
   assert.ok(before.tables.includes("supervisor_main_bindings") && before.tables.includes("supervisor_task_interpretations"));
   const operations = f.operations.length;
@@ -473,11 +476,12 @@ it("CT-PS-09: a Stop saved while the final models() read is awaited leaves the t
   const supervisor = fixture.makeSupervisor();
   let reasonAtStop: string | null = null;
   // the Stop lands while the last read before dispatch is awaited: discovery has no task yet, the final read sees it queued
-  fixture.setReadHook(async /*s6d*/ () => {
-    const queued = await fixture.supervisorStore.task(mainThreadId);
+  // the hook's reads and the Stop run synchronously, before the read answers, as the baseline hook's did
+  fixture.setReadHook(() => {
+    const queued = Effect.runSync(serviceOf(fixture.supervisorStore).task(mainThreadId));
     if (queued?.status === "queued" && reasonAtStop === null) {
       reasonAtStop = queued.reason;
-      Effect.runSync(supervisor.saveThreadPolicy({...await policy.get(), excludedThreadIds: [mainThreadId]}));
+      Effect.runSync(Effect.flatMap(serviceOf(policy).get(), (current) => supervisor.saveThreadPolicy({...current, excludedThreadIds: [mainThreadId]})));
     }
   });
   await within(supervisor.runOnce(AbortSignal.timeout(5_000)), 5_000, "runOnce");
@@ -566,8 +570,9 @@ it("CT-PS-11: aborting runOnce during a hung Supervisor projection releases the 
   const hung = deferred();
   let hangs = 0;
   // the Supervisor projection hangs once a task is queued, which is the in-scope read of the batch (discovery reads it before saving the task)
-  fixture.setProjectionHook(async /*s6d*/ threadId => {
-    if (threadId !== binding.threadId || (await fixture.supervisorStore.task(mainThreadId))?.status !== "queued") return undefined;
+  // the store read is synchronous, on the projection read's turn, as the baseline hook's was
+  fixture.setProjectionHook(threadId => {
+    if (threadId !== binding.threadId || Effect.runSync(serviceOf(fixture.supervisorStore).task(mainThreadId))?.status !== "queued") return undefined;
     hangs += 1;
     hung.resolve();
     return Effect.never;
@@ -618,7 +623,7 @@ it("CT-PSS-01: a Start operation left preparing by a crash is rejected on reopen
   const untouched = (await metaRows(first.guidance.db)).filter(([key]) => key !== `supervisor_start_operation:${JSON.stringify(["main-a", "op-crash"])}`);
   await first.guidance.close();
   releaseCatalog();
-  await assert.rejects(crashed, /database is not open/u);
+  await assert.rejects(crashed, /guidance store sql failed/u);
 
   const native: string[] = [];
   const counted = (name: string) => () => {native.push(name);throw new Error(`${name} must not be called`);};
@@ -632,9 +637,9 @@ it("CT-PSS-01: a Start operation left preparing by a crash is rejected on reopen
   const rpc = new Proxy({}, {get: (_target, key) => counted(`rpc.${String(key)}`)}) as SupervisorRpc;
   const supervisor = projectSupervisorUnit(config, second.store, {catalog: counted("catalog") as never}, {projection: counted("projection") as never},
     rpc, rpc, async () => counted("activationSnapshot")());
-  assert.deepEqual(supervisor.startStatus("main-a", "op-crash"), {threadId: "main-a", operationId: "op-crash", status: "rejected", reason: interruptedStartReason});
-  assert.deepEqual(supervisor.startStatus("main-a", "op-pending"), {threadId: "main-a", operationId: "op-pending", status: "pending", reason: "Waiting."});
-  assert.equal(supervisor.startStatus("main-b", "op-active").status, "active");
+  assert.deepEqual(await Effect.runPromise(supervisor.startStatus("main-a", "op-crash")), {threadId: "main-a", operationId: "op-crash", status: "rejected", reason: interruptedStartReason});
+  assert.deepEqual(await Effect.runPromise(supervisor.startStatus("main-a", "op-pending")), {threadId: "main-a", operationId: "op-pending", status: "pending", reason: "Waiting."});
+  assert.equal((await Effect.runPromise(supervisor.startStatus("main-b", "op-active"))).status, "active");
   assert.deepEqual(await supervisor.dashboardStart("main-a", "op-crash", new AbortController().signal), {status: "rejected", reason: interruptedStartReason},
     "replaying the interrupted operation returns its rejection");
   assert.equal(await second.store.start("main-a"), null, "no Start record was activated");
@@ -654,7 +659,7 @@ it("CT-PSS-03: a stale binding copy keeps the stored stop and notice, and the no
   assert.deepEqual(stopped.supervisionStop, stop);
   assert.equal("manualKeepActive" in stopped || "stopObservedAt" in stopped, false, "a Stop clears keep-active and the observed stop marker");
 
-  const notice = prepareStopNotice(binding, 200, null);
+  const notice = await Effect.runPromise(prepareStopNotice(Context.get(storeUnitOf(store).context, SupervisorIds), binding, 200, null));
   await store.setStopNotice(binding, null, notice);
   assert.deepEqual((await store.binding("project-a", "main-a"))!.stopNotice, notice, "expected null on an absent notice succeeds");
   assert.equal((await store.binding("project-a", "main-a"))!.stopNotice!.enabledAt, null);
@@ -669,7 +674,7 @@ it("CT-PSS-03: a stale binding copy keeps the stored stop and notice, and the no
   assert.deepEqual((await store.binding("project-a", "main-a"))!.supervisionStop, stop, "a stale copy cannot replace the stored stop");
   assert.deepEqual((await store.binding("project-a", "main-a"))!.stopNotice, notice, "a stale copy cannot replace the stored notice");
 
-  const document = async /*s6d*/ () => String((await guidance.db.prepare("SELECT document FROM supervisor_main_bindings WHERE main_thread_id='main-a'").get())?.document);
+  const document = async () => String((await guidance.db.prepare("SELECT document FROM supervisor_main_bindings WHERE main_thread_id='main-a'").get())?.document);
   const beforeWrongCas = await document();
   await store.setStopNotice(binding, "supervisor-notice:stop:wrong", {...notice, state: "sent"});
   assert.equal(await document(), beforeWrongCas, "a wrong expected messageId is a no-op");
@@ -691,9 +696,9 @@ it("CT-PSS-04: a stale global definitions generation changes nothing; a success 
   await store.saveTask(queuedTask("main-queued", binding.threadId, null));
   await store.saveTask(queuedTask("main-dispatched", binding.threadId, 120));
   const tasksBefore = await tableRows(guidance.db, "supervisor_task_interpretations");
-  const controlKeys = async /*s6d*/ () => (await metaRows(guidance.db)).filter(([key]) => key.startsWith("supervisor_global_definitions_"));
+  const controlKeys = async () => (await metaRows(guidance.db)).filter(([key]) => key.startsWith("supervisor_global_definitions_"));
 
-  await assert.rejects(async /*s6d*/ () => await store.saveGlobalDefinitionsControl(3, true, "~/.t3-supervisor", "global-1"), /global_definitions_control_conflict/u);
+  await assert.rejects(async () => await store.saveGlobalDefinitionsControl(3, true, "~/.t3-supervisor", "global-1"), /global_definitions_control_conflict/u);
   assert.deepEqual(await tableRows(guidance.db, "supervisor_task_interpretations"), tasksBefore, "a stale generation leaves tasks untouched");
   assert.deepEqual(await controlKeys(), []);
 
@@ -703,7 +708,7 @@ it("CT-PSS-04: a stale global definitions generation changes nothing; a success 
   await guidance.db.exec(`CREATE TEMP TRIGGER c2_fail_queued BEFORE UPDATE ON main.supervisor_task_interpretations BEGIN
     SELECT c2_task_updated(NEW.thread_id);
     SELECT RAISE(ABORT, 'c2_task_update_failed') WHERE NEW.thread_id='main-queued'; END`);
-  await assert.rejects(async /*s6d*/ () => await store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-1"), /c2_task_update_failed/u);
+  await assert.rejects(async () => await store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-1"), /supervision_store_unavailable/u);
   assert.deepEqual(updated, ["main-inferred", "main-queued"], "the inferred task was rewritten before the failing update");
   assert.equal(guidance.db.isTransaction, false);
   assert.deepEqual(await tableRows(guidance.db, "supervisor_task_interpretations"), tasksBefore, "the earlier task update rolled back");
@@ -714,9 +719,9 @@ it("CT-PSS-04: a stale global definitions generation changes nothing; a success 
   // a second connection observing at every task update sees none of the commit until it completes
   const reader = fixture.track(new DatabaseSync(fixture.path, {readOnly: true}));
   const observed: unknown[] = [];
-  guidance.db.function("c2_observe", async /*s6d*/ () => {
+  guidance.db.function("c2_observe", () => {
     observed.push({control: reader.prepare("SELECT value FROM meta WHERE key='supervisor_global_definitions_control'").get()?.value ?? null,
-      tasks: await tableRows(reader, "supervisor_task_interpretations")});
+      tasks: readerRows(reader, "supervisor_task_interpretations")});
     return null;
   });
   await guidance.db.exec(`CREATE TEMP TRIGGER c2_observe_update AFTER UPDATE ON main.supervisor_task_interpretations BEGIN SELECT c2_observe(); END`);
@@ -746,35 +751,29 @@ it("CT-PSS-04: a stale global definitions generation changes nothing; a success 
   assert.equal(queued.workflow?.status, "pending");
   for (const key of ["definitionContext", "definitionSnapshot", "definitionReadAttempts", "revalidationAttempts"]) assert.equal(key in queued, false, `${key} is cleared`);
   assert.deepEqual(await store.task("main-dispatched"), queuedTask("main-dispatched", binding.threadId, 120), "a dispatched queued task keeps its context");
-  assert.deepEqual(await tableRows(reader, "supervisor_task_interpretations"), await tableRows(guidance.db, "supervisor_task_interpretations"), "the reader sees the whole commit afterwards");
+  assert.deepEqual(readerRows(reader, "supervisor_task_interpretations"), await tableRows(guidance.db, "supervisor_task_interpretations"), "the reader sees the whole commit afterwards");
 });
 
 it("CT-PSS-05: ownership preload creates nothing for absent state, tolerates a table-less file and reads committed IDs beside a live WAL writer", { timeout: 10_000 }, async (t) => {
+  // target: the preload is the project store layer's own read when a run opens its stores (cc-ownership); the separate
+  // read-only preload of an absent directory or under another connection's open write transaction is gone with it
   const fixture = await pssFixture(t, "c2-pss-05-");
-  const absent = join(fixture.directory, "absent");
-  assert.deepEqual(loadSupervisorOwnership(absent), new Set());
-  assert.equal(existsSync(absent), false, "an absent directory is not created");
-  assert.deepEqual(loadSupervisorOwnership(fixture.directory), new Set());
-  assert.deepEqual(readdirSync(fixture.directory), [], "an absent file is not created");
-
   const bare = join(fixture.directory, "bare");
   mkdirSync(bare);
   const legacy = new DatabaseSync(join(bare, "guidance.sqlite3"));
   legacy.exec("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
   legacy.close();
-  assert.deepEqual(loadSupervisorOwnership(bare), new Set(), "a file without supervisor_owned_threads yields no IDs");
-  assert.deepEqual(readdirSync(bare), ["guidance.sqlite3"]);
+  const bareOwned = new Set<string>();
+  await openSupervisors(fixture.track(await openGuidance(bare)), bareOwned);
+  assert.deepEqual(bareOwned, new Set(), "a file without supervisor_owned_threads yields no IDs");
 
-  const {guidance, store} = await fixture.open();
+  const {store} = await fixture.open();
   const first = await store.reserve("project-a", "main-a", "Main A", defaultSupervisorModel, 1, 100);
   const second = await store.reserve("project-a", "main-b", "Main B", defaultSupervisorModel, 1, 100);
   assert.equal(existsSync(`${fixture.path}-wal`), true, "the writer holds the WAL");
-  assert.deepEqual(loadSupervisorOwnership(fixture.directory), new Set([first.threadId, second.threadId]));
-  await guidance.db.exec("BEGIN IMMEDIATE");
-  await guidance.db.prepare("INSERT INTO supervisor_owned_threads VALUES(?)").run("supervisor-root:uncommitted");
-  assert.deepEqual(loadSupervisorOwnership(fixture.directory), new Set([first.threadId, second.threadId]), "an open write transaction is not visible");
-  await guidance.db.exec("ROLLBACK");
-  assert.deepEqual(loadSupervisorOwnership(fixture.directory), new Set([first.threadId, second.threadId]));
+  const owned = new Set<string>();
+  await openSupervisors(fixture.track(await openGuidance(fixture.directory)), owned);
+  assert.deepEqual(owned, new Set([first.threadId, second.threadId]));
 });
 
 it("CT-PSS-06: the supervision DDL and every meta key format are golden and read back unchanged after reopen", { timeout: 10_000 }, async (t) => {
@@ -793,12 +792,12 @@ it("CT-PSS-06: the supervision DDL and every meta key format are golden and read
   await writer.store.saveUnboundStop("main-b", {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: 1_790_000_000_000});
   fixed.mockRestore();
   assert.deepEqual(await metaRows(writer.guidance.db), pssMetaGolden);
-  assert.deepEqual(pssDdl(writer.guidance.db), pssDdlGolden);
+  assert.deepEqual(await pssDdl(writer.guidance.db), pssDdlGolden);
   await writer.guidance.close();
 
   const {guidance, store} = await fixture.open();
   assert.deepEqual(await metaRows(guidance.db), pssMetaGolden, "opening rewrites no meta row");
-  assert.deepEqual(pssDdl(guidance.db), pssDdlGolden);
+  assert.deepEqual(await pssDdl(guidance.db), pssDdlGolden);
   assert.equal(store.scopeCompatible, true);
   assert.deepEqual(await store.control(null), {projectId: null, generation: 1, enabled: true, manual: true, globallyEnabled: true, effectiveEnabled: true,
     detectionStatus: "not_checked", detectionError: null});
@@ -827,20 +826,19 @@ it("CT-PSS-06: the supervision DDL and every meta key format are golden and read
 it("CT-PSS-07: a legacy definition-save table gains expected_revision with an empty default exactly once and keeps its rows", { timeout: 10_000 }, async (t) => {
   const fixture = await pssFixture(t, "c2-pss-07-");
   // the legacy file is written by the guidance store alone, before the supervision store added the column
-  const legacy = await openGuidance(fixture.directory);
-  fixture.track(legacy.db);
+  const legacy = fixture.track(await openGuidance(fixture.directory));
   await legacy.db.exec(`CREATE TABLE supervisor_definition_user_saves(project_id TEXT NOT NULL,workspace_root TEXT NOT NULL,signature TEXT NOT NULL,saved_at INTEGER NOT NULL,PRIMARY KEY(project_id,workspace_root));
     INSERT INTO supervisor_definition_user_saves VALUES('project-a','/work/a','signature-a',100);
     INSERT INTO meta VALUES('supervisor_scope_version','main-v1');`);
   await legacy.close();
   const alters = (spy: {mock: {calls: unknown[][]}}) => spy.mock.calls.filter(([sql]) => String(sql).includes("ALTER TABLE supervisor_definition_user_saves")).length;
-  const columns = (db: DatabaseSync) => db.prepare("PRAGMA table_info(supervisor_definition_user_saves)").all().map(row => ({...row}));
+  const columns = async (db: DbFacade) => (await db.prepare("PRAGMA table_info(supervisor_definition_user_saves)").all()).map(row => ({...row}));
   const expectedRow = {project_id: "project-a", workspace_root: "/work/a", signature: "signature-a", saved_at: 100, expected_revision: ""};
 
   let firstSpy!: {mock: {calls: unknown[][]}};
-  const first = await fixture.open(guidance => {firstSpy = mockMethod(t, guidance.db, "exec");});
+  const first = await fixture.open(guidance => {firstSpy = mockMethod(t, guidance.db.connection, "prepare");});
   assert.equal(alters(firstSpy), 1);
-  const migratedColumns = columns(first.guidance.db);
+  const migratedColumns = await columns(first.guidance.db);
   assert.deepEqual(migratedColumns.filter(column => column.name === "expected_revision"),
     [{cid: 4, name: "expected_revision", type: "TEXT", notnull: 1, dflt_value: "''", pk: 0}]);
   assert.deepEqual(await tableRows(first.guidance.db, "supervisor_definition_user_saves"), [expectedRow]);
@@ -848,9 +846,9 @@ it("CT-PSS-07: a legacy definition-save table gains expected_revision with an em
   await first.guidance.close();
 
   let secondSpy!: {mock: {calls: unknown[][]}};
-  const second = await fixture.open(guidance => {secondSpy = mockMethod(t, guidance.db, "exec");});
+  const second = await fixture.open(guidance => {secondSpy = mockMethod(t, guidance.db.connection, "prepare");});
   assert.equal(alters(secondSpy), 0, "a migrated table is not altered again");
-  assert.deepEqual(columns(second.guidance.db), migratedColumns);
+  assert.deepEqual(await columns(second.guidance.db), migratedColumns);
   assert.equal((await second.guidance.db.prepare("SELECT sql FROM sqlite_master WHERE name='supervisor_definition_user_saves'").get())?.sql, migratedSql);
   assert.deepEqual(await tableRows(second.guidance.db, "supervisor_definition_user_saves"), [expectedRow]);
 });
@@ -865,29 +863,28 @@ it("CT-PSS-08: a start record never exists without its operation receipt and res
   const recordKey = "supervisor_start:main-a";
   const receiptKey = 'supervisor_start_operation:["main-a","op-1"]';
 
-  // saveStart runs outside a transaction: the receipt statement commits first, then the record statement
+  // target (s6d step 1, CT-PSS-08): saveStart is one transaction, so the receipt and the record commit together
   const views: unknown[] = [];
   guidance.db.function("c2_start_view", () => {views.push({receipt: readMeta(receiptKey) !== null, record: readMeta(recordKey) !== null});return null;});
   await guidance.db.exec(`CREATE TEMP TRIGGER c2_fail_record BEFORE INSERT ON main.meta WHEN NEW.key GLOB 'supervisor_start:*' BEGIN
     SELECT c2_start_view(); SELECT RAISE(ABORT, 'c2_record_failed'); END`);
   assert.equal(guidance.db.isTransaction, false);
-  await assert.rejects(async /*s6d*/ () => await store.saveStart(start), /c2_record_failed/u);
-  assert.deepEqual(views, [{receipt: true, record: false}], "the receipt is durable before the record statement runs");
+  await assert.rejects(async () => await store.saveStart(start), /supervision_store_unavailable/u);
+  assert.deepEqual(views, [{receipt: false, record: false}], "the receipt is not durable before the record statement runs");
   assert.equal(await store.start("main-a"), null);
-  assert.deepEqual(await store.startOperation("main-a", "op-1"), {threadId: "main-a", operationId: "op-1", requestHash: "hash-1", status: "pending", reason: start.reason},
-    "the failed record leaves the receipt alone, never a record without its receipt");
+  assert.equal(await store.startOperation("main-a", "op-1"), null, "the failed record rolls its receipt back, never a record without its receipt");
   await guidance.db.exec("DROP TRIGGER temp.c2_fail_record");
   await guidance.db.prepare("DELETE FROM meta WHERE key=?").run(receiptKey);
   await guidance.db.exec(`CREATE TEMP TRIGGER c2_fail_receipt BEFORE INSERT ON main.meta WHEN NEW.key GLOB 'supervisor_start_operation:*' BEGIN
     SELECT RAISE(ABORT, 'c2_receipt_failed'); END`);
-  await assert.rejects(async /*s6d*/ () => await store.saveStart(start), /c2_receipt_failed/u);
+  await assert.rejects(async () => await store.saveStart(start), /supervision_store_unavailable/u);
   assert.equal(await store.start("main-a"), null, "a failed receipt prevents the record");
   assert.equal(await store.startOperation("main-a", "op-1"), null);
   await guidance.db.exec("DROP TRIGGER temp.c2_fail_receipt");
   await guidance.db.exec(`CREATE TEMP TRIGGER c2_view_record BEFORE INSERT ON main.meta WHEN NEW.key GLOB 'supervisor_start:*' BEGIN SELECT c2_start_view(); END`);
   views.length = 0;
   await store.saveStart(start);
-  assert.deepEqual(views, [{receipt: true, record: false}]);
+  assert.deepEqual(views, [{receipt: false, record: false}]);
   assert.deepEqual({receipt: readMeta(receiptKey) !== null, record: readMeta(recordKey) !== null}, {receipt: true, record: true});
   await guidance.db.exec("DROP TRIGGER temp.c2_view_record");
 
@@ -896,7 +893,7 @@ it("CT-PSS-08: a start record never exists without its operation receipt and res
   await store.saveUnboundStop("main-b", stop);
   const metaBefore = await metaRows(guidance.db);
   await guidance.db.exec(`CREATE TEMP TRIGGER c2_fail_binding BEFORE INSERT ON main.supervisor_main_bindings BEGIN SELECT RAISE(ABORT, 'c2_binding_failed'); END`);
-  await assert.rejects(async /*s6d*/ () => await store.reserve("project-a", "main-b", "Main B", defaultSupervisorModel, 1, 200), /c2_binding_failed/u);
+  await assert.rejects(async () => await store.reserve("project-a", "main-b", "Main B", defaultSupervisorModel, 1, 200), /supervision_store_unavailable/u);
   assert.equal(guidance.db.isTransaction, false);
   assert.deepEqual(await metaRows(guidance.db), metaBefore, "the unbound stop is still stored");
   assert.deepEqual(await store.chatStop("main-b"), stop);

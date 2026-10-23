@@ -134,8 +134,8 @@ export function makeDefinitionFixture(options: {
   } satisfies ProjectDefinitionSetupWriter;
   const definitionScopeOptions = {
     globalRoot,
-    useGlobalDefinitions: () => options.globalEnabled ?? false,
-    isScratchProject: (_id: string, registeredRoot: string) => options.scratch === true && registeredRoot === root,
+    useGlobalDefinitions: () => Effect.succeed(options.globalEnabled ?? false),
+    isScratchProject: (_id: string, registeredRoot: string) => Effect.succeed(options.scratch === true && registeredRoot === root),
   };
   const definitionOptions: ProjectDefinitionLoaderOptions = {...definitionScopeOptions, setupWriter};
   // the in-memory native project writer: the regular project.yaml check reads the in-memory listing

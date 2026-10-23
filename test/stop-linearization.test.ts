@@ -27,8 +27,8 @@ const newSource = {messageId: newTurn.id, runId: `run-${newTurn.id}`, ordinal: 2
 const runOnce = (f: LinFixture) => within(f.core.supervision.runOnce(AbortSignal.timeout(8_000)), 9_000, "runOnce");
 const deadline = () => AbortSignal.timeout(8_000);
 
-const task = async /*s6d*/ (f: LinFixture): Promise<TaskRecord> => (await f.core.store.task(mainThreadId))!;
-const requests = async /*s6d*/ (f: LinFixture, supervisorThreadId: string): Promise<ConversationRequest[]> =>
+const task = async (f: LinFixture): Promise<TaskRecord> => (await f.core.store.task(mainThreadId))!;
+const requests = async (f: LinFixture, supervisorThreadId: string): Promise<ConversationRequest[]> =>
   await f.core.supervision.conversation.requests.requests(projectId, supervisorThreadId);
 const label = (entry: Entry): string => entry.kind === "rpc" ? `${entry.tag}${typeof entry.payload.type === "string" ? `:${entry.payload.type}` : ""}`
   : `${entry.method} ${entry.path}`;
@@ -216,7 +216,7 @@ it("CT-LIN-01: stopped settlement: an Enable committed during the fresh Supervis
 
 type PolicyProbe = {stopped: boolean; stop: unknown; notice: string | null; enabledAt: number | null; start: string | null};
 
-const observe = async /*s6d*/ (f: LinFixture): Promise<PolicyProbe> => ({stopped: (await f.core.policy.get()).excludedThreadIds.includes(mainThreadId),
+const observe = async (f: LinFixture): Promise<PolicyProbe> => ({stopped: (await f.core.policy.get()).excludedThreadIds.includes(mainThreadId),
   stop: await f.core.store.chatStop(mainThreadId) ?? null, notice: (await f.core.store.binding(projectId, mainThreadId))?.stopNotice?.state ?? null,
   enabledAt: await f.core.store.chatEnabledAt(mainThreadId), start: (await f.core.store.start(mainThreadId))?.status ?? null});
 
@@ -233,7 +233,7 @@ it("CT-LIN-02: each MCP, Settings and dashboard Stop or Enable commit is observe
   const f = await fixture(t, {mainTurns: [oldTurn, {id: "stop-turn", text: "Please stop supervising this chat."}]});
   const binding = await f.bindSupervisor();
   const seen = probePolicyCommits(f);
-  const policyGeneration = async /*s6d*/ () => (await f.core.policy.get()).generation;
+  const policyGeneration = async () => (await f.core.policy.get()).generation;
 
   // the MCP supervision_stop (project-supervisor.ts:980-985)
   const stopped = await f.core.supervision.stopSupervision({callerThreadId: binding.threadId, targetThreadId: mainThreadId, userMessageId: "stop-turn",
@@ -533,7 +533,7 @@ it("CT-LIN-06: guide: a Stop committed when the steer frame arrives keeps the ac
   assert.equal(result.commandId, `${result.requestId}:command:0`);
   assert.deepEqual(dispatches(f).map(value => ({...dispatched(value), dispatchMode: value.dispatchMode})), [{type: "message.dispatch",
     commandId: result.commandId, messageId: result.messageId, threadId: "branch", text: payload.text, dispatchMode: {type: "steer_active", targetRunId: "branch-run"}}]);
-  const receipts = async /*s6d*/ () => (await f.core.guidance.db.prepare("SELECT document FROM supervisor_team_tool_receipts").all()).map(row => JSON.parse(String(row.document)) as unknown);
+  const receipts = async () => (await f.core.guidance.db.prepare("SELECT document FROM supervisor_team_tool_receipts").all()).map(row => JSON.parse(String(row.document)) as unknown);
   assert.deepEqual(await receipts(), [result]);
   assert.deepEqual((await f.core.supervision.team.unresolvedRequests(binding)).map(request => ({requestId: request.requestId, state: request.state})),
     [{requestId: result.requestId, state: "pending"}]);

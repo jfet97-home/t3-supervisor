@@ -86,7 +86,7 @@ export const startWorkflowFixture = async (mainThread = thread("main-workflows",
     catalog: () => ({projects: [{project: {id: projectId, title: "Project workflows", workspaceRoot: "/workspace/project-workflows"}, available: true}],
       threads: catalogThreads})});
   const {guidance, store: supervisors} = core;
-  const supervisorControl = async /*s6d*/ (scope: string | null, enabled: boolean) => await guidance.db.prepare(
+  const supervisorControl = async (scope: string | null, enabled: boolean) => await guidance.db.prepare(
     "INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
   ).run(`supervisor_control:${JSON.stringify(scope)}`, JSON.stringify({generation: 1, enabled, manual: true}));
   await supervisorControl(null, true);
@@ -258,7 +258,7 @@ export const installEvidence = (fixture: Pick<IntWorkflowFixture, "supervisorThr
   return itemId;
 };
 
-export const applyArgs = async /*s6d*/ (fixture: IntWorkflowFixture, input: WorkflowApplyPatch) => {
+export const applyArgs = async (fixture: IntWorkflowFixture, input: WorkflowApplyPatch) => {
   const current = (await fixture.core.supervision.workflowStates.list(fixture.projectId, fixture.mainThreadId)).find(document => document.workflowId === input.workflowId);
   return {
   action: "apply",

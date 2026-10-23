@@ -42,7 +42,7 @@ const assertCredentials = (f: HelperFixture): void => {
   assert.deepEqual(f.peer.unexpected, []);
 };
 
-const channelState = async /*s6d*/ (f: HelperFixture): Promise<string | null> => {
+const channelState = async (f: HelperFixture): Promise<string | null> => {
   const row = await f.core.guidance.db.prepare("SELECT document FROM supervisor_helper_channels").get();
   return row ? (JSON.parse(String(row.document)) as {state: string}).state : null;
 };
@@ -227,7 +227,7 @@ it("CT-INT-03: H6 a 307 reply makes Node fetch re-POST the same body to the redi
 // sol-r19-01 on the real caller: the receipt of an accepted check-in replaced by bytes the transport did not write. The
 // team runtime's reconciliation reaches the send, which stays uncertain on the unreadable receipt; the request keeps
 // its identity, its fence stays unresolved, nothing is posted again and the row keeps its bytes, active or stopped
-const rawReceipt = async /*s6d*/ (f: HelperFixture): Promise<string> => String((await f.core.guidance.db.prepare("SELECT document FROM supervisor_helper_deliveries").get())!.document);
+const rawReceipt = async (f: HelperFixture): Promise<string> => String((await f.core.guidance.db.prepare("SELECT document FROM supervisor_helper_deliveries").get())!.document);
 for (const [label, corrupt] of [
   ["an unparsable", (_valid: string) => "{\"threadId\":"],
   ["a wrong-shape", (valid: string) => JSON.stringify({...JSON.parse(valid) as object, state: "delivered"})],

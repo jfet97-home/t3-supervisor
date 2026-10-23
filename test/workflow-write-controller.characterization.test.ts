@@ -5,8 +5,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it, vi } from "vitest";
-import { fingerprint, GuidanceStore } from "../src/guidance-store.js";
-import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
+import { fingerprint } from "../src/guidance-store.js";
+import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo } from "../src/project-supervisor-contract.js";
 import { proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
@@ -29,13 +29,15 @@ import {
 } from "../src/workflow-write-evidence.js";
 import { effectiveIndex, projectIndex } from "./project-definitions-fixture.js";
 import { after } from "./support/node-test.js";
+import { Effect } from "effect";
+import { openGuidance, openSupervisors, openWorkflows, serviceOf, type GuidanceHandle, type Promised, type SupervisorsFacade } from "./support/store-units.js";
 
 // fixture helpers copied from test/workflow-write-controller.test.ts (real temp-file guidance sqlite, fake native reads)
 type Fixture = {
   directory: string;
-  guidance: GuidanceStore;
-  supervisors: ProjectSupervisorStore;
-  workflows: WorkflowStateStore;
+  guidance: GuidanceHandle;
+  supervisors: SupervisorsFacade;
+  workflows: Promised<WorkflowStateStore["Service"]>;
   controller: WorkflowWriteController;
   binding: BindingRecord;
   projectId: string;
@@ -71,15 +73,15 @@ const sequencePlan = (nodes: readonly unknown[]): WorkflowPlanGroupInfo => ({kin
 
 const makeFixture = async (): Promise<Fixture> => {
   const directory = await mkdtemp(join(tmpdir(), "workflow-write-controller-characterization-"));
-  const guidance = new GuidanceStore(directory);
-  const supervisors = new ProjectSupervisorStore(guidance, new Set());
+  const guidance = await openGuidance(directory);
+  const supervisors = await openSupervisors(guidance, new Set());
   const projectId = "project-workflows";
   const mainThreadId = "main-workflows";
-  for (const scope of [null, projectId]) guidance.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+  for (const scope of [null, projectId]) await guidance.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
     .run(`supervisor_control:${JSON.stringify(scope)}`, JSON.stringify({generation: 1, enabled: true, manual: true}));
-  const binding = {...supervisors.reserve(projectId, mainThreadId, "Main thread", defaultSupervisorModel, 1, 1), state: "ready" as const};
-  supervisors.setBinding(binding);
-  const workflows = new WorkflowStateStore(supervisors, id => supervisors.enabled(id));
+  const binding = {...await supervisors.reserve(projectId, mainThreadId, "Main thread", defaultSupervisorModel, 1, 1), state: "ready" as const};
+  await supervisors.setBinding(binding);
+  const workflows = await openWorkflows(supervisors, id => serviceOf(supervisors).enabled(id));
   const supervisorThreadId = binding.threadId;
   const definitionSnapshot: ProjectDefinitionSnapshot = {
     projectId, threadId: mainThreadId, workspaceRoot: "/workspace/project-workflows", globalOnly: false, globalRevision: null,
@@ -102,7 +104,7 @@ const makeFixture = async (): Promise<Fixture> => {
     requestText: "Complete the current project task.", supervisorThreadId, messageId: "source-message-current", dispatchedAt: null,
     replayCount: 0, supervisorRunId: "source-run-current", sourceOrdinal: 1, definitionContext, definitionSnapshot,
   };
-  supervisors.saveTask(task);
+  await supervisors.saveTask(task);
   const sourceBinding: WorkflowSourceBindingInfo = {
     workspaceRoot: definitionSnapshot.workspaceRoot, revision: definitionSnapshot.revision, globalRevision: null, definitionsStatus: "ready",
     definitionsComplete: true, requirementsKnown: true, taskId: task.id, proposalId: "proposal-current", sourceHash,
@@ -122,13 +124,14 @@ const makeFixture = async (): Promise<Fixture> => {
     getTurnItem: async ({itemId}) => {calls.detail.push(itemId); return {item: details.get(itemId) ?? null};},
   };
   const controller = workflowWriteControllerUnit({supervisors, workflows, native, loadDefinitions: async () => definitionSnapshot,
-    isEnabled: id => supervisors.enabled(id), maxEvidenceWaitMs: 0});
+    isEnabled: id => serviceOf(supervisors).enabled(id), maxEvidenceWaitMs: 0});
   return {directory, guidance, supervisors, workflows, controller, binding, projectId, mainThreadId, supervisorThreadId, threads,
     projections, details, calls, native, proposal, sourceBinding};
 };
 
 const closeFixture = async (fixture: Fixture): Promise<void> => {
-  if (fixture.guidance.db.isOpen) fixture.guidance.close();
+  // a handle closes once; one the test already closed stays closed
+  await fixture.guidance.close();
   await rm(fixture.directory, {recursive: true, force: true});
 };
 
@@ -179,24 +182,24 @@ const installEvidence = (fixture: Fixture, args: Record<string, unknown>, itemId
   return itemId;
 };
 
-const rowCount = (fixture: Fixture, table: string, operationId?: string): number => Number((operationId === undefined
-  ? fixture.guidance.db.prepare(`SELECT count(*) AS n FROM ${table}`).get()
-  : fixture.guidance.db.prepare(`SELECT count(*) AS n FROM ${table} WHERE operation_id=?`).get(operationId))?.n);
+const rowCount = async (fixture: Fixture, table: string, operationId?: string): Promise<number> => Number((operationId === undefined
+  ? await fixture.guidance.db.prepare(`SELECT count(*) AS n FROM ${table}`).get()
+  : await fixture.guidance.db.prepare(`SELECT count(*) AS n FROM ${table} WHERE operation_id=?`).get(operationId))?.n);
 
-const assertNothingStored = (fixture: Fixture, label: string): void => {
-  assert.equal(rowCount(fixture, "supervisor_workflow_write_receipts"), 0, label);
-  assert.equal(rowCount(fixture, "supervisor_workflow_write_evidence"), 0, label);
-  assert.equal(rowCount(fixture, "supervisor_workflow_operations"), 0, label);
-  assert.equal(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null, label);
+const assertNothingStored = async (fixture: Fixture, label: string): Promise<void> => {
+  assert.equal(await rowCount(fixture, "supervisor_workflow_write_receipts"), 0, label);
+  assert.equal(await rowCount(fixture, "supervisor_workflow_write_evidence"), 0, label);
+  assert.equal(await rowCount(fixture, "supervisor_workflow_operations"), 0, label);
+  assert.equal(await fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null, label);
 };
 
-const storedDocument = (fixture: Fixture): string => JSON.stringify(Object.values(fixture.guidance.db.prepare(
+const storedDocument = async (fixture: Fixture): Promise<string> => JSON.stringify(Object.values(await fixture.guidance.db.prepare(
   "SELECT workflow_id,revision,document,updated_at FROM supervisor_workflow_state WHERE project_id=? AND main_thread_id=?",
 ).get(fixture.projectId, fixture.mainThreadId) ?? {}));
 
-const evidenceRows = (fixture: Fixture): string[][] => fixture.guidance.db.prepare(
+const evidenceRows = async (fixture: Fixture): Promise<string[][]> => (await fixture.guidance.db.prepare(
   "SELECT item_id,operation_id,successful,result FROM supervisor_workflow_write_evidence ORDER BY item_id",
-).all().map(row => [String(row.item_id), String(row.operation_id), String(row.successful), String(row.result)]);
+).all()).map(row => [String(row.item_id), String(row.operation_id), String(row.successful), String(row.result)]);
 
 it("CT-WWC-01: an abort during evidence polling or after listThreads returns the interrupted pending reason and stores nothing", {timeout: 10_000}, async t => {
   // abort while the controller waits between evidence polls and nothing matching is visible yet
@@ -215,7 +218,7 @@ it("CT-WWC-01: an abort during evidence polling or after listThreads returns the
       {status: "pending", operationId: "interrupted-poll", reason: "native_evidence_wait_interrupted", retryable: true});
     assert.deepEqual(fixture.calls.projection, [fixture.supervisorThreadId], "the abort ends the poll wait before another projection read");
     assert.equal(fixture.calls.listThreads, 0);
-    assertNothingStored(fixture, "poll");
+    await assertNothingStored(fixture, "poll");
     installEvidence(fixture, args, "interrupted-poll-item");
     assert.equal((await fixture.controller.write(args)).status, "created", "the interrupted request reserved nothing");
   }
@@ -235,7 +238,7 @@ it("CT-WWC-01: an abort during evidence polling or after listThreads returns the
       {status: "pending", operationId: "interrupted-detail", reason: "native_evidence_wait_interrupted", retryable: true});
     assert.deepEqual(fixture.calls.detail, ["interrupted-detail-item"]);
     assert.equal(fixture.calls.listThreads, 0);
-    assertNothingStored(fixture, "detail");
+    await assertNothingStored(fixture, "detail");
     assert.equal((await fixture.controller.write(args)).status, "created");
   }
   // abort while listThreads is awaited after verified evidence; the lineage read itself succeeds
@@ -254,7 +257,7 @@ it("CT-WWC-01: an abort during evidence polling or after listThreads returns the
       {status: "pending", operationId: "interrupted-lineage", reason: "native_lineage_interrupted", retryable: true});
     assert.deepEqual(fixture.calls.detail, ["interrupted-lineage-item"]);
     assert.equal(fixture.calls.listThreads, 1);
-    assertNothingStored(fixture, "lineage");
+    await assertNothingStored(fixture, "lineage");
     assert.equal((await fixture.controller.write(args)).status, "created");
   }
 });
@@ -284,25 +287,25 @@ it("CT-WWC-02: concurrent identical writes proven by two distinct native items m
   assert.deepEqual(right, left);
   assert.equal(JSON.stringify(right), JSON.stringify(left));
   assert.deepEqual(fixture.calls.detail.toSorted(), [first.itemId, second.itemId]);
-  const document = fixture.workflows.get(fixture.projectId, fixture.mainThreadId);
+  const document = await fixture.workflows.get(fixture.projectId, fixture.mainThreadId);
   assert.equal(document?.revision, 1);
   assert.equal(document?.evidence.length, 1, "one mutation");
-  assert.equal(rowCount(fixture, "supervisor_workflow_write_receipts", "concurrent-op"), 1);
-  assert.equal(rowCount(fixture, "supervisor_workflow_operations", "concurrent-op"), 1);
-  assert.deepEqual(evidenceRows(fixture), [
+  assert.equal(await rowCount(fixture, "supervisor_workflow_write_receipts", "concurrent-op"), 1);
+  assert.equal(await rowCount(fixture, "supervisor_workflow_operations", "concurrent-op"), 1);
+  assert.deepEqual(await evidenceRows(fixture), [
     [first.itemId, "concurrent-op", "1", JSON.stringify(left)],
     [second.itemId, "concurrent-op", "1", JSON.stringify(left)],
   ]);
 
-  const documentBefore = storedDocument(fixture);
+  const documentBefore = await storedDocument(fixture);
   const reuseArgs = ensureArgs(fixture, "reused-item-op", "A different request presented with an already used native item.");
   fixture.details.set(first.itemId, {...first.detail, input: reuseArgs});
   fixture.projections.set(fixture.supervisorThreadId, evidenceView(fixture, [first]));
   assert.deepEqual(await fixture.controller.write(reuseArgs), {status: "denied", operationId: "reused-item-op", reason: "native_evidence_reused"});
-  assert.equal(rowCount(fixture, "supervisor_workflow_write_receipts", "reused-item-op"), 0);
-  assert.equal(rowCount(fixture, "supervisor_workflow_write_evidence", "reused-item-op"), 0);
-  assert.equal(rowCount(fixture, "supervisor_workflow_write_evidence"), 2);
-  assert.equal(storedDocument(fixture), documentBefore);
+  assert.equal(await rowCount(fixture, "supervisor_workflow_write_receipts", "reused-item-op"), 0);
+  assert.equal(await rowCount(fixture, "supervisor_workflow_write_evidence", "reused-item-op"), 0);
+  assert.equal(await rowCount(fixture, "supervisor_workflow_write_evidence"), 2);
+  assert.equal(await storedDocument(fixture), documentBefore);
 });
 
 it("CT-WWC-04: a throw from applyInTransaction after its writes yields workflow_write_transaction_failed with no receipt, evidence or document change", {timeout: 10_000}, async t => {
@@ -316,32 +319,35 @@ it("CT-WWC-04: a throw from applyInTransaction after its writes yields workflow_
   const args = applyArgs(fixture, {operationId: "rollback-apply", workflowId: created.workflowId, expectedRevision: created.revision,
     status: "planned", plan: sequencePlan([localStep("Inspect exporter", "Find the current path.")]), note: "Add a step that never commits."});
   installEvidence(fixture, args, "rollback-apply-item");
-  const documentBefore = storedDocument(fixture);
-  const original = fixture.workflows.applyInTransaction.bind(fixture.workflows);
+  const documentBefore = await storedDocument(fixture);
+  // the controller's apply inside its transaction; the spy reads the partial state on that transaction, then fails as the
+  // baseline throw did
+  const workflows = serviceOf(fixture.workflows);
+  const original = workflows.apply.bind(workflows);
   const partial: Array<{status: string; revision: number | undefined; operations: number}> = [];
-  const spy = vi.spyOn(fixture.workflows, "applyInTransaction").mockImplementation((...parameters) => {
-    const result = original(...parameters);
-    partial.push({status: result.status, revision: fixture.workflows.get(fixture.projectId, fixture.mainThreadId)?.revision,
-      operations: rowCount(fixture, "supervisor_workflow_operations", "rollback-apply")});
-    throw new Error("injected_failure_after_partial_apply");
-  });
+  const spy = vi.spyOn(workflows, "apply").mockImplementation((...parameters) => Effect.gen(function* () {
+    const result = yield* original(...parameters);
+    const [operations] = yield* Effect.orDie(fixture.guidance.sql<{n: number}>`SELECT count(*) AS n FROM supervisor_workflow_operations WHERE operation_id=${"rollback-apply"}`);
+    partial.push({status: result.status, revision: (yield* workflows.get(fixture.projectId, fixture.mainThreadId))?.revision, operations: Number(operations?.n)});
+    return yield* Effect.die(new Error("injected_failure_after_partial_apply"));
+  }));
   after(t, () => spy.mockRestore());
   assert.deepEqual(await fixture.controller.write(args), {status: "denied", operationId: "rollback-apply", reason: "workflow_write_transaction_failed"});
   assert.deepEqual(partial, [{status: "applied", revision: 2, operations: 1}], "the document and its operation were written inside the transaction");
   assert.equal(fixture.guidance.db.isTransaction, false);
-  assert.equal(storedDocument(fixture), documentBefore);
-  assert.equal(rowCount(fixture, "supervisor_workflow_operations", "rollback-apply"), 0);
-  assert.equal(rowCount(fixture, "supervisor_workflow_write_receipts", "rollback-apply"), 0);
-  assert.equal(rowCount(fixture, "supervisor_workflow_write_evidence", "rollback-apply"), 0);
-  assert.equal(rowCount(fixture, "supervisor_workflow_write_receipts"), 1);
-  assert.equal(rowCount(fixture, "supervisor_workflow_write_evidence"), 1);
+  assert.equal(await storedDocument(fixture), documentBefore);
+  assert.equal(await rowCount(fixture, "supervisor_workflow_operations", "rollback-apply"), 0);
+  assert.equal(await rowCount(fixture, "supervisor_workflow_write_receipts", "rollback-apply"), 0);
+  assert.equal(await rowCount(fixture, "supervisor_workflow_write_evidence", "rollback-apply"), 0);
+  assert.equal(await rowCount(fixture, "supervisor_workflow_write_receipts"), 1);
+  assert.equal(await rowCount(fixture, "supervisor_workflow_write_evidence"), 1);
 });
 
 it("CT-WWC-05: successful receipts replay byte-identically through a new controller after the guidance store reopens", {timeout: 10_000}, async t => {
   const fixture = await makeFixture();
-  let reopened: GuidanceStore | null = null;
+  let reopened: GuidanceHandle | null = null;
   after(t, async () => {
-    if (reopened?.db.isOpen) reopened.close();
+    await reopened?.close();
     await closeFixture(fixture);
   });
   const ensure = ensureArgs(fixture, "reopen-create", "Create a draft before restart.");
@@ -354,24 +360,24 @@ it("CT-WWC-05: successful receipts replay byte-identically through a new control
   installEvidence(fixture, args, "reopen-apply-item");
   const applied = await fixture.controller.write(args);
   assert.equal(applied.status, "applied", JSON.stringify(applied));
-  const receipts = (guidance: GuidanceStore): string => JSON.stringify(guidance.db.prepare(
+  const receipts = async (guidance: GuidanceHandle): Promise<string> => JSON.stringify((await guidance.db.prepare(
     "SELECT operation_id,operation_namespace,request_hash,project_id,main_thread_id,supervisor_thread_id,binding_generation,result,created_at FROM supervisor_workflow_write_receipts ORDER BY operation_id",
-  ).all().map(row => Object.values(row)));
-  const receiptsBefore = receipts(fixture.guidance);
-  const documentBefore = storedDocument(fixture);
-  fixture.guidance.close();
+  ).all()).map(row => Object.values(row)));
+  const receiptsBefore = await receipts(fixture.guidance);
+  const documentBefore = await storedDocument(fixture);
+  await fixture.guidance.close();
 
-  const guidance = new GuidanceStore(fixture.directory);
+  const guidance = await openGuidance(fixture.directory);
   reopened = guidance;
-  const supervisors = new ProjectSupervisorStore(guidance, new Set());
-  const workflows = new WorkflowStateStore(supervisors, id => supervisors.enabled(id));
+  const supervisors = await openSupervisors(guidance, new Set());
+  const workflows = await openWorkflows(supervisors, id => serviceOf(supervisors).enabled(id));
   const nativeCalls: string[] = [];
   const native: WorkflowNativeAccess = {
     listThreads: async () => {nativeCalls.push("listThreads"); throw new Error("no_native_read_expected");},
     projection: async id => {nativeCalls.push(`projection:${id}`); throw new Error("no_native_read_expected");},
     getTurnItem: async ({itemId}) => {nativeCalls.push(`detail:${itemId}`); throw new Error("no_native_read_expected");},
   };
-  const controller = workflowWriteControllerUnit({supervisors, workflows, native, isEnabled: id => supervisors.enabled(id), maxEvidenceWaitMs: 0,
+  const controller = workflowWriteControllerUnit({supervisors, workflows, native, isEnabled: id => serviceOf(supervisors).enabled(id), maxEvidenceWaitMs: 0,
     loadDefinitions: async () => {nativeCalls.push("loadDefinitions"); throw new Error("no_definition_read_expected");}});
   const createReplay = await controller.write(ensure);
   const applyReplay = await controller.write(args);
@@ -380,10 +386,10 @@ it("CT-WWC-05: successful receipts replay byte-identically through a new control
   assert.deepEqual(createReplay, created);
   assert.deepEqual(applyReplay, applied);
   assert.deepEqual(nativeCalls, [], "a receipt replay reads no native evidence or definitions");
-  assert.equal(receipts(guidance), receiptsBefore);
+  assert.equal(await receipts(guidance), receiptsBefore);
   fixture.guidance = guidance;
-  assert.equal(storedDocument(fixture), documentBefore);
-  assert.equal(rowCount(fixture, "supervisor_workflow_write_evidence"), 2);
+  assert.equal(await storedDocument(fixture), documentBefore);
+  assert.equal(await rowCount(fixture, "supervisor_workflow_write_evidence"), 2);
 });
 
 it("CT-WWC-06: the four model-visible tool definitions serialize to the recorded golden JSON", {timeout: 10_000}, () => {
@@ -399,16 +405,16 @@ it("CT-WWC-08: a binding generation bump during an awaited native read after ver
     const operationId = `generation-${read}`;
     const args = ensureArgs(fixture, operationId, "Create the main workflow under the original binding.");
     const itemId = installEvidence(fixture, args, `${operationId}-item`);
-    const bump = (): void => fixture.supervisors.setBinding({...fixture.binding, generation: fixture.binding.generation + 1});
+    const bump = async (): Promise<void> => await fixture.supervisors.setBinding({...fixture.binding, generation: fixture.binding.generation + 1});
     const native: WorkflowNativeAccess = read === "detail"
-      ? {...fixture.native, getTurnItem: async (input, signal) => {bump(); return fixture.native.getTurnItem(input, signal);}}
-      : {...fixture.native, listThreads: async signal => {bump(); return fixture.native.listThreads(signal);}};
+      ? {...fixture.native, getTurnItem: async (input, signal) => {await bump(); return fixture.native.getTurnItem(input, signal);}}
+      : {...fixture.native, listThreads: async signal => {await bump(); return fixture.native.listThreads(signal);}};
     const controller = workflowWriteControllerUnit({...fixture.controller.options, native});
     assert.deepEqual(await controller.write(args), {status: "denied", operationId, reason: "owner_changed"}, read);
     assert.deepEqual(fixture.calls.detail, [itemId], read);
     assert.equal(fixture.calls.listThreads, 1, read);
-    assert.equal(fixture.supervisors.binding(fixture.projectId, fixture.mainThreadId)?.generation, fixture.binding.generation + 1, read);
-    assertNothingStored(fixture, read);
+    assert.equal((await fixture.supervisors.binding(fixture.projectId, fixture.mainThreadId))?.generation, fixture.binding.generation + 1, read);
+    await assertNothingStored(fixture, read);
   }
 });
 

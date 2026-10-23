@@ -26,7 +26,7 @@ import { WorkflowStateStore } from "../../src/workflow-state-store.js";
 export type StorePromise<A> = Promise<A> & {readonly "~storeCall"?: true};
 /** A service whose effectful methods return promises of their success; its other members are the service's own. */
 export type Promised<S> = {
-  readonly [K in keyof S]: S[K] extends (...args: infer P) => Effect.Effect<infer A, infer _E, never> ? (...args: P) => StorePromise<A> : S[K]
+  readonly [K in keyof S]: S[K] extends (...args: infer P) => Effect.Effect<infer A, unknown, never> ? (...args: P) => StorePromise<A> : S[K]
 } & {readonly "~service"?: S};
 
 type GuidanceServices = GuidanceDb | SupervisorIds | GuidanceStore;
@@ -38,6 +38,8 @@ type GuidanceServices = GuidanceDb | SupervisorIds | GuidanceStore;
  */
 export type DbFacade = {
   readonly isTransaction: boolean;
+  /** The client's own connection, for a seam that spies on the statements it prepares. */
+  readonly connection: DatabaseSync;
   function(name: string, implementation: (...args: Array<never>) => unknown): void;
   exec(statements: string): StorePromise<void>;
   prepare(statement: string): {
@@ -87,6 +89,7 @@ const dbFacade = (sql: GuidanceDb["Service"], path: string): DbFacade => {
   };
   return {
     get isTransaction() {return connection().isTransaction;},
+    get connection() {return connection();},
     function: (name, implementation) => connection().function(name, implementation as never),
     exec: (statements) => run(Effect.forEach(statementsOf(statements), (statement) => sql.unsafe(statement), {discard: true})),
     prepare: (statement) => ({
@@ -170,7 +173,7 @@ const promised = <S extends object, X extends object>(service: S, context: Conte
   }) as unknown as Promised<S> & X;
 
 /** A promise facade of `service` over `context` that belongs to `unit`. */
-export const storeFacade = <S extends object, X extends object = {}>(unit: StoreUnit | null, service: S, context: Context.Context<never>, extras?: X): Promised<S> & X => {
+export const storeFacade = <S extends object, X extends object = Record<never, never>>(unit: StoreUnit | null, service: S, context: Context.Context<never>, extras?: X): Promised<S> & X => {
   const facade = promised(service, context, extras ?? {} as X);
   owners.set(facade, {unit, service});
   return facade;

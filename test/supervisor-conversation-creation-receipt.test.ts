@@ -15,8 +15,8 @@ import { appendMessageToRun, appendRun, baseTime, makeFixture, operativeThreadId
 // identities, body and route, Retry never deletes or resets it, and nothing initiates it again
 
 const isIntroduction = (call: RpcCall) => call.payload.type === "message.dispatch" && call.payload.threadId === operativeThreadId;
-const binding = async /*s6d*/ (fixture: Fixture): Promise<BindingRecord> => (await fixture.projectStore.binding(projectId, operativeThreadId))!;
-const introduction = async /*s6d*/ (fixture: Fixture): Promise<WorkflowIntroduction | null> => await fixture.conversation.requests.introduction(fixture.task.id);
+const binding = async (fixture: Fixture): Promise<BindingRecord> => (await fixture.projectStore.binding(projectId, operativeThreadId))!;
+const introduction = async (fixture: Fixture): Promise<WorkflowIntroduction | null> => await fixture.conversation.requests.introduction(fixture.task.id);
 // the attempt's identities, body and route
 const attempt = (value: WorkflowIntroduction | null) => value && {state: value.state, messageId: value.messageId, commandId: value.commandId ?? null,
   text: value.text, dispatchMode: value.dispatchMode ?? null, targetRunId: value.targetRunId, definiteRejection: value.definiteRejection ?? null};
@@ -160,7 +160,7 @@ it("S6b-CONV-10: a public run reconciling a stale copy of a check-in another run
     if (id === fixture.binding.threadId && held < 2) {const index = held++;arrivals[index]!.resolve();await releases[index]!.promise;}
     return read(id, signal);
   });
-  const fibers = await Promise.all([0, 1].map(async /*s6d*/ () => Effect.runFork(conversation.run(await binding(fixture), fixture.supervisor, fixture.threadList))));
+  const fibers = await Promise.all([0, 1].map(async () => Effect.runFork(conversation.run(await binding(fixture), fixture.supervisor, fixture.threadList))));
   await withDeadline(Promise.all(arrivals.map(item => item.promise)), 3_000, "both runs at their last read");
   assert.deepEqual(await fixture.conversation.requests.pending(projectId, fixture.binding.threadId), sent, "both runs read the same waiting check-in");
   releases[0]!.resolve();

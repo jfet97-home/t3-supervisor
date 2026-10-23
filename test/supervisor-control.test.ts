@@ -4,20 +4,20 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
-import { GuidanceStore } from "../src/guidance-store.js";
 import { projectSupervisorUnit } from "./support/team-units.js";
 import { workflowIntroductionText } from "../src/supervisor-conversation.js";
-import { ProjectSupervisorStore, type SupervisorBaseline, type SupervisionFolderPresence } from "../src/project-supervisor-store.js";
+import { type SupervisorBaseline, type SupervisionFolderPresence } from "../src/project-supervisor-store.js";
 import type { TaskRecord } from "../src/project-supervisor-store.js";
 import { T3TransportError } from "../src/t3.js";
 import { requiredReferences, type ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import type { ProjectInfo, Projection, SupervisorConfig, ThreadInfo } from "../src/types.js";
 import { makeDefinitionFixture, stepSource } from "./project-definitions-fixture.js";
+import { openGuidance, openSupervisors, type SupervisorsFacade } from "./support/store-units.js";
 
 const baseline = (latestRunId: string | null = null): SupervisorBaseline => ({version: 2, snapshotSequence: 20,
   threads: latestRunId ? [{id: "main", latestRunId}] : []});
 
-const makeProjectSupervisor = (store: ProjectSupervisorStore, overrides: {
+const makeProjectSupervisor = (store: SupervisorsFacade, overrides: {
   presence?: (projectId: string, signal: AbortSignal) => Promise<SupervisionFolderPresence>;
   presenceGlobal?: (signal: AbortSignal) => Promise<SupervisionFolderPresence & {path?: string}>;
   globalFingerprint?: (signal: AbortSignal) => Promise<string | null>;
@@ -47,12 +47,12 @@ const makeProjectSupervisor = (store: ProjectSupervisorStore, overrides: {
     overrides.activationSnapshot ?? (async () => baseline()), definitions, overrides.now);
 };
 
-const withStore = async <A>(work: (store: ProjectSupervisorStore, directory: string) => Promise<A> | A): Promise<A> => {
+const withStore = async <A>(work: (store: SupervisorsFacade, directory: string) => Promise<A> | A): Promise<A> => {
   const directory = await mkdtemp(join(tmpdir(), "supervisor-control-"));
-  const guidance = new GuidanceStore(directory);
-  const store = new ProjectSupervisorStore(guidance, new Set());
+  const guidance = await openGuidance(directory);
+  const store = await openSupervisors(guidance, new Set());
   try {return await work(store, directory);}
-  finally {guidance.close();await rm(directory, {recursive: true, force: true});}
+  finally {await guidance.close();await rm(directory, {recursive: true, force: true});}
 };
 
 const scopedDefinitionSnapshot = async (globalEnabled: boolean, scratch = false, projectId = "project-a", root = "/work/project-a"): Promise<ProjectDefinitionSnapshot> => {
@@ -68,9 +68,9 @@ const scopedDefinitionSnapshot = async (globalEnabled: boolean, scratch = false,
 
 it("global master starts on while project auto-detection persists the first known folder result", async () => {
   await withStore(async (store, directory) => {
-    assert.equal(store.control(null).enabled, true);
-    assert.equal(store.control("project-a").enabled, false);
-    assert.equal(store.control("project-a").detectionStatus, "not_checked");
+    assert.equal((await store.control(null)).enabled, true);
+    assert.equal((await store.control("project-a")).enabled, false);
+    assert.equal((await store.control("project-a")).detectionStatus, "not_checked");
     let folderStatus: SupervisionFolderPresence = {status: "unavailable", message: "read denied"};
     const events: string[] = [];
     let now = 1_000_000;
@@ -78,31 +78,31 @@ it("global master starts on while project auto-detection persists the first know
       now: () => now,
       activationSnapshot: async () => {events.push("boundary");return baseline("run-2");}});
     await supervisor.control("project-a", AbortSignal.timeout(2000));
-    assert.equal(store.autoControlInitialized("project-a"), false);
-    assert.equal(store.control("project-a").detectionStatus, "unavailable");
+    assert.equal(await store.autoControlInitialized("project-a"), false);
+    assert.equal((await store.control("project-a")).detectionStatus, "unavailable");
     folderStatus = {status: "present"};
     now += 60_000;
     const enabled = await supervisor.control("project-a", AbortSignal.timeout(2000));
     assert.deepEqual(events, ["boundary"]);
     assert.equal(enabled.detectionStatus, "present");
     assert.equal(enabled.effectiveEnabled, true);
-    assert.equal(store.control("project-a").enabled, true);
+    assert.equal((await store.control("project-a")).enabled, true);
     folderStatus = {status: "missing"};
     await supervisor.control("project-a", AbortSignal.timeout(2000));
-    assert.equal(store.control("project-a").enabled, true);
-    store.recordFolderPresence("project-empty", {status: "missing"});
-    assert.equal(store.control("project-empty").enabled, false);
-    store.recordFolderPresence("project-auto", {status: "present"}, baseline("run-3"));
-    store.saveControl("project-auto", 0, true);
-    assert.equal(store.control("project-auto").manual, true);
-    assert.equal(store.control("project-auto").enabled, true);
-    const guidance = new GuidanceStore(directory);
-    const restarted = new ProjectSupervisorStore(guidance, new Set());
-    assert.equal(restarted.control("project-a").enabled, true);
-    assert.equal(restarted.control("project-a").manual, false);
-    assert.equal(restarted.control("project-empty").enabled, false);
-    assert.equal(restarted.autoControlInitialized("project-empty"), true);
-    guidance.close();
+    assert.equal((await store.control("project-a")).enabled, true);
+    await store.recordFolderPresence("project-empty", {status: "missing"});
+    assert.equal((await store.control("project-empty")).enabled, false);
+    await store.recordFolderPresence("project-auto", {status: "present"}, baseline("run-3"));
+    await store.saveControl("project-auto", 0, true);
+    assert.equal((await store.control("project-auto")).manual, true);
+    assert.equal((await store.control("project-auto")).enabled, true);
+    const guidance = await openGuidance(directory);
+    const restarted = await openSupervisors(guidance, new Set());
+    assert.equal((await restarted.control("project-a")).enabled, true);
+    assert.equal((await restarted.control("project-a")).manual, false);
+    assert.equal((await restarted.control("project-empty")).enabled, false);
+    assert.equal(await restarted.autoControlInitialized("project-empty"), true);
+    await guidance.close();
   });
 });
 
@@ -121,7 +121,7 @@ it("auto-enable stays unavailable and retries when the native activation boundar
     assert.equal(first.enabled, false);
     assert.equal(first.detectionStatus, "unavailable");
     assert.match(first.detectionError ?? "", /native enable boundary/);
-    assert.equal(store.autoControlInitialized("project-a"), false);
+    assert.equal(await store.autoControlInitialized("project-a"), false);
     failBoundary = false;
     now += 60_000;
     const retry = await supervisor.control("project-a", signal);
@@ -145,7 +145,7 @@ it("unavailable folder checks back off for a minute without rewriting their dura
     const signal = AbortSignal.timeout(2000);
     await supervisor.control("project-a", signal);
     const markerKey = `supervisor_control_presence_unavailable:${JSON.stringify("project-a")}`;
-    const markerBefore = store.store.db.prepare("SELECT value FROM meta WHERE key=?").get(markerKey)?.value;
+    const markerBefore = (await store.store.db.prepare("SELECT value FROM meta WHERE key=?").get(markerKey))?.value;
     assert.equal(presenceCalls, 1);
     assert.ok(markerBefore);
 
@@ -155,7 +155,7 @@ it("unavailable folder checks back off for a minute without rewriting their dura
     now += 1;
     await supervisor.control("project-a", signal);
     assert.equal(presenceCalls, 2);
-    assert.equal(store.store.db.prepare("SELECT value FROM meta WHERE key=?").get(markerKey)?.value, markerBefore,
+    assert.equal((await store.store.db.prepare("SELECT value FROM meta WHERE key=?").get(markerKey))?.value, markerBefore,
       "the durable unavailable marker is written only once");
 
     await supervisor.setupOptions("project-a", signal);
@@ -166,39 +166,39 @@ it("unavailable folder checks back off for a minute without rewriting their dura
 
 it("an auto-present record without a project boundary stays off until a fresh boundary is saved", async () => {
   await withStore(async store => {
-    store.store.db.prepare("INSERT INTO meta VALUES(?,?)").run(`supervisor_control_auto:${JSON.stringify("project-a")}`, JSON.stringify({status: "present", enabled: true, checkedAt: 1}));
-    assert.equal(store.autoControlInitialized("project-a"), false);
-    assert.equal(store.control("project-a").enabled, false);
+    await store.store.db.prepare("INSERT INTO meta VALUES(?,?)").run(`supervisor_control_auto:${JSON.stringify("project-a")}`, JSON.stringify({status: "present", enabled: true, checkedAt: 1}));
+    assert.equal(await store.autoControlInitialized("project-a"), false);
+    assert.equal((await store.control("project-a")).enabled, false);
     let captures = 0;
     const supervisor = makeProjectSupervisor(store, {presence: async () => ({status: "present"}),
       activationSnapshot: async () => {captures += 1;return baseline("run-4");}});
     const control = await supervisor.control("project-a", AbortSignal.timeout(2000));
     assert.equal(control.enabled, true);
     assert.equal(captures, 1);
-    assert.equal(store.autoControlInitialized("project-a"), true);
+    assert.equal(await store.autoControlInitialized("project-a"), true);
   });
 });
 
 it("manual project choice survives restart and global master off remains independent", async () => {
-  await withStore((store, directory) => {
-    store.recordFolderPresence("project-a", {status: "present"});
-    store.saveControl("project-a", 0, false);
-    store.recordFolderPresence("project-a", {status: "present"});
-    assert.equal(store.control("project-a").enabled, false);
-    assert.equal(store.control("project-a").manual, true);
-    store.saveControl(null, 0, false);
-    store.saveControl("project-a", 1, true);
-    assert.equal(store.control("project-a").enabled, true);
-    assert.equal(store.control("project-a").effectiveEnabled, false);
-    assert.equal(store.useGlobalDefinitions(), false);
-    const guidance = new GuidanceStore(directory);
-    const restarted = new ProjectSupervisorStore(guidance, new Set());
-    assert.equal(restarted.control(null).enabled, false);
-    assert.equal(restarted.control("project-a").enabled, true);
-    assert.equal(restarted.control("project-a").effectiveEnabled, false);
-    restarted.saveControl(null, 1, true, baseline("run-1"));
-    assert.equal(restarted.control("project-a").effectiveEnabled, true);
-    guidance.close();
+  await withStore(async (store, directory) => {
+    await store.recordFolderPresence("project-a", {status: "present"});
+    await store.saveControl("project-a", 0, false);
+    await store.recordFolderPresence("project-a", {status: "present"});
+    assert.equal((await store.control("project-a")).enabled, false);
+    assert.equal((await store.control("project-a")).manual, true);
+    await store.saveControl(null, 0, false);
+    await store.saveControl("project-a", 1, true);
+    assert.equal((await store.control("project-a")).enabled, true);
+    assert.equal((await store.control("project-a")).effectiveEnabled, false);
+    assert.equal(await store.useGlobalDefinitions(), false);
+    const guidance = await openGuidance(directory);
+    const restarted = await openSupervisors(guidance, new Set());
+    assert.equal((await restarted.control(null)).enabled, false);
+    assert.equal((await restarted.control("project-a")).enabled, true);
+    assert.equal((await restarted.control("project-a")).effectiveEnabled, false);
+    await restarted.saveControl(null, 1, true, baseline("run-1"));
+    assert.equal((await restarted.control("project-a")).effectiveEnabled, true);
+    await guidance.close();
   });
 });
 
@@ -210,7 +210,7 @@ it("explicit project enable asks for checkout setup when the folder is missing",
     assert.equal(current.enabled, false);
     const result = await supervisor.saveControl({projectId: "project-a", expectedGeneration: 0, enabled: true}, signal);
     assert.equal(result.status, "setup_required");
-    assert.equal(store.control("project-a").enabled, false);
+    assert.equal((await store.control("project-a")).enabled, false);
   });
 });
 
@@ -234,7 +234,7 @@ it("project setup captures the native enable boundary before writing and retains
       runs: [{id: "run-1", threadId: "main", ordinal: 1, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
         {id: "run-2", threadId: "main", ordinal: 2, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
         {id: "run-3", threadId: "main", ordinal: 3, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null}], messages: []};
-    assert.equal(store.baselineOrdinal("main", projection), 2);
+    assert.equal(await store.baselineOrdinal("main", projection), 2);
   });
 });
 
@@ -261,8 +261,8 @@ it("enable_existing adopts a present checkout without running the project initia
     assert.equal(result.control.enabled, true);
     assert.equal(result.control.manual, true);
     assert.equal(result.control.detectionStatus, "present");
-    assert.equal(store.projectBoundary("project-a")?.snapshotSequence, 20);
-    assert.equal(store.folderPresenceNeedsBoundary("project-a"), false);
+    assert.equal((await store.projectBoundary("project-a"))?.snapshotSequence, 20);
+    assert.equal(await store.folderPresenceNeedsBoundary("project-a"), false);
     assert.match(result.message, /No files were written or committed/);
   });
 });
@@ -285,9 +285,9 @@ it("enable_existing rechecks folder presence after capturing its boundary", asyn
     assert.equal(result.status, "conflict");
     assert.equal(checkoutPresenceChecks, 2);
     assert.equal(boundaryCaptures, 1);
-    assert.equal(store.control("project-a").enabled, false);
-    assert.equal(store.control("project-a").manual, false);
-    assert.equal(store.projectBoundary("project-a"), null, "a failed final presence check must not save the enable boundary");
+    assert.equal((await store.control("project-a")).enabled, false);
+    assert.equal((await store.control("project-a")).manual, false);
+    assert.equal(await store.projectBoundary("project-a"), null, "a failed final presence check must not save the enable boundary");
   });
 });
 
@@ -319,8 +319,8 @@ it("enable_existing rejects a worktree whose selected branch changed during setu
     assert.equal(result.status, "conflict");
     assert.equal(targetChecks, 2);
     assert.equal(presenceChecks, 1, "the changed branch is rejected before the final presence confirmation");
-    assert.equal(store.control("project-a").enabled, false);
-    assert.equal(store.projectBoundary("project-a"), null);
+    assert.equal((await store.control("project-a")).enabled, false);
+    assert.equal(await store.projectBoundary("project-a"), null);
   });
 });
 
@@ -343,8 +343,8 @@ it("enable_existing requires a present folder and create still rejects existing 
 
     const missing = await supervisor.setup({...input, action: "enable_existing"}, signal);
     assert.equal(missing.status, "conflict");
-    assert.equal(store.control("project-a").generation, current.generation);
-    assert.equal(store.control("project-a").enabled, false);
+    assert.equal((await store.control("project-a")).generation, current.generation);
+    assert.equal((await store.control("project-a")).enabled, false);
     assert.equal(boundaries, 0);
     assert.equal(initialized, 0);
 
@@ -365,7 +365,7 @@ it("unreadable project detection is not saved as an opt-out and another project 
     const blocked = await supervisor.control("project-a", signal);
     assert.equal(blocked.enabled, false);
     assert.equal(blocked.detectionStatus, "unavailable");
-    assert.equal(store.autoControlInitialized("project-a"), false);
+    assert.equal(await store.autoControlInitialized("project-a"), false);
     failure = false;
     const otherProject = {id: "project-b", title: "Project B", workspaceRoot: "/work/project-b"} as ProjectInfo;
     const otherSource = {catalog: () => Effect.succeed({projects: [{project: otherProject, available: true}], threads: []})};
@@ -373,7 +373,7 @@ it("unreadable project detection is not saved as an opt-out and another project 
       {projection: () => Effect.fail(new T3TransportError("unused"))}, async () => {throw new Error("unused");}, null, async () => baseline(),
       {load: async () => {throw new Error("unused");}, presence: async () => ({status: "present"})});
     assert.equal((await other.control("project-b", signal)).enabled, true);
-    assert.equal(store.autoControlInitialized("project-b"), true);
+    assert.equal(await store.autoControlInitialized("project-b"), true);
   });
 });
 
@@ -389,16 +389,16 @@ it("global definitions stay off by default until explicitly enabled, even when t
     const before = await supervisor.globalDefinitionsControl(signal);
     assert.equal(before.detectionStatus, "present");
     assert.equal(before.enabled, false);
-    assert.equal(store.useGlobalDefinitions("project-a"), false);
+    assert.equal(await store.useGlobalDefinitions("project-a"), false);
     const result = await supervisor.saveGlobalDefinitionsControl({expectedGeneration: 0, enabled: true}, signal);
     assert.equal(result.status, "saved");
-    assert.equal(store.useGlobalDefinitions("project-a"), true);
+    assert.equal(await store.useGlobalDefinitions("project-a"), true);
     assert.equal(events[0], "initializeGlobal");
     assert.equal(events.filter(event => event === "globalFingerprint").length, 2);
-    assert.equal(store.globalDefinitionsControl().homePath, "~/.t3-supervisor");
-    const guidance = new GuidanceStore(directory);
-    assert.equal(new ProjectSupervisorStore(guidance, new Set()).useGlobalDefinitions("project-a"), true);
-    guidance.close();
+    assert.equal((await store.globalDefinitionsControl()).homePath, "~/.t3-supervisor");
+    const guidance = await openGuidance(directory);
+    assert.equal(await (await openSupervisors(guidance, new Set())).useGlobalDefinitions("project-a"), true);
+    await guidance.close();
   });
 });
 
@@ -409,22 +409,22 @@ it("global definitions effectiveEnabled follows the master and definitions truth
     {master: true, definitions: false, effective: false},
     {master: true, definitions: true, effective: true},
   ];
-  for (const item of cases) await withStore(store => {
-    if (!item.master) store.saveControl(null, 0, false);
-    if (item.definitions) store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-sha");
-    const control = store.globalDefinitionsControl();
+  for (const item of cases) await withStore(async store => {
+    if (!item.master) await store.saveControl(null, 0, false);
+    if (item.definitions) await store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-sha");
+    const control = await store.globalDefinitionsControl();
     assert.equal(control.enabled, item.definitions);
     assert.equal(control.effectiveEnabled, item.effective);
-    assert.equal(store.useGlobalDefinitions("project-a"), item.definitions, "the loader sees the saved definition preference independently of the master");
+    assert.equal(await store.useGlobalDefinitions("project-a"), item.definitions, "the loader sees the saved definition preference independently of the master");
   });
 });
 
 it("first explicit global definitions enable initializes a missing server-home folder before switching on", async () => {
   await withStore(async store => {
     const events: string[] = [];
-    const settings = store.store.settings();
-    store.store.classify("project-a", "scratch", settings.generation);
-    store.saveControl("project-a", 0, true, baseline("run-1"));
+    const settings = await store.store.settings();
+    await store.store.classify("project-a", "scratch", settings.generation);
+    await store.saveControl("project-a", 0, true, baseline("run-1"));
     const supervisor = makeProjectSupervisor(store, {
       presenceGlobal: async () => ({status: "missing", path: "~/.t3-supervisor"}),
       initializeGlobal: async () => {events.push("initializeGlobal");return {status: "created", workspaceRoot: "~", branch: null, message: "created"};},
@@ -434,20 +434,20 @@ it("first explicit global definitions enable initializes a missing server-home f
     const result = await supervisor.saveGlobalDefinitionsControl({expectedGeneration: 0, enabled: true}, AbortSignal.timeout(2000));
     assert.equal(result.status, "saved");
     assert.deepEqual(events, ["initializeGlobal", "globalFingerprint", "globalFingerprint"]);
-    assert.equal(store.useGlobalDefinitions("project-a"), true);
+    assert.equal(await store.useGlobalDefinitions("project-a"), true);
     const projection: Projection = {thread: {id: "main", projectId: "project-a", title: "Main", lineage: {parentThreadId: null, relationshipToParent: null}},
       runs: [{id: "run-1", threadId: "main", ordinal: 1, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
         {id: "run-2", threadId: "main", ordinal: 2, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
         {id: "run-3", threadId: "main", ordinal: 3, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null}], messages: []};
-    assert.equal(store.baselineOrdinal("main", projection), 1);
+    assert.equal(await store.baselineOrdinal("main", projection), 1);
   });
 });
 
 it("No Project mode controls activation independently of shared definitions", async () => {
   await withStore(async store => {
-    const settings = store.store.settings();
-    store.store.classify("project-a", "scratch", settings.generation);
-    store.saveControl("project-a", 0, true, baseline("run-1"));
+    const settings = await store.store.settings();
+    await store.store.classify("project-a", "scratch", settings.generation);
+    await store.saveControl("project-a", 0, true, baseline("run-1"));
     const supervisor = makeProjectSupervisor(store, {presence: async () => ({status: "present"})});
     const signal = AbortSignal.timeout(2000);
     const control = await supervisor.control("project-a", signal);
@@ -456,7 +456,7 @@ it("No Project mode controls activation independently of shared definitions", as
     const result = await supervisor.saveControl({projectId: "project-a", expectedGeneration: control.generation, enabled: true}, signal);
     assert.equal(result.status, "unavailable");
     assert.match(result.message, /Use the No Project mode/);
-    store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-sha");
+    await store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-sha");
     assert.equal((await supervisor.control("project-a", signal)).effectiveEnabled, false);
     await supervisor.saveNoProjectControl({expectedGeneration: 0, mode: "automatic"}, signal);
     assert.equal((await supervisor.control("project-a", signal)).effectiveEnabled, true);
@@ -471,14 +471,14 @@ it("a global-definition toggle authorizes only that input scope and unchanged lo
   assert.ok(approved.globalRevision);
   assert.equal(approved.steps.some(step => step.origin === "global"), true);
   assert.equal(disabled.steps.some(step => step.origin === "global"), false);
-  await withStore(store => {
-    store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", approved.globalRevision!);
-    store.saveGlobalDefinitionsControl(1, false, "~/.t3-supervisor", approved.globalRevision!);
-    assert.equal(store.definitionUserGlobalToggle(disabled, approved, 0, approved.globalRevision!), true);
-    assert.equal(store.definitionUserGlobalToggle(disabled, approved, 0, "changed-global-sha"), false);
+  await withStore(async store => {
+    await store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", approved.globalRevision!);
+    await store.saveGlobalDefinitionsControl(1, false, "~/.t3-supervisor", approved.globalRevision!);
+    assert.equal(await store.definitionUserGlobalToggle(disabled, approved, 0, approved.globalRevision!), true);
+    assert.equal(await store.definitionUserGlobalToggle(disabled, approved, 0, "changed-global-sha"), false);
     const editedLocal: ProjectDefinitionSnapshot = {...disabled, steps: disabled.steps.map(step => step.id === "local-check"
       ? {...step, description: "Changed local step."} : step)};
-    assert.equal(store.definitionUserGlobalToggle(editedLocal, approved, 0, approved.globalRevision!), false);
+    assert.equal(await store.definitionUserGlobalToggle(editedLocal, approved, 0, approved.globalRevision!), false);
   });
 });
 

@@ -4,9 +4,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
-import { GuidanceStore } from "../../src/guidance-store.js";
 import { projectSupervisorUnit, type ProjectSupervisorUnitDefinitions } from "./team-units.js";
-import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../../src/project-supervisor-store.js";
+import { defaultSupervisorModel, type SupervisorBaseline } from "../../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../../src/project-supervisor-contract.js";
 import { ThreadPolicyStore, ThreadPolicyStoreError } from "../../src/thread-policy.js";
 import type { ThreadPolicySettings } from "../../src/thread-policy-contract.js";
@@ -150,7 +149,7 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
     get baselineReads() {return baselineReads;},
     addProject: (project: ProjectInfo) => {registeredProjects = [...registeredProjects, project];},
     setUnknownDispatches: (count: number) => {unknownDispatches = count;},
-    reserveReadyBinding: async /*s6d*/ (mainThreadId: string, projectId = "project-a") => {
+    reserveReadyBinding: async (mainThreadId: string, projectId = "project-a") => {
       const main = projections.get(mainThreadId);
       assert.ok(main);
       const binding = await supervisorStore.reserve(projectId, mainThreadId, main.thread.title, defaultSupervisorModel, activationSequence, Date.now());
@@ -179,7 +178,7 @@ export class FailingThreadPolicyStore {
   }
   get(): StorePromise<ThreadPolicySettings> {return Effect.runPromise(this.service.get());}
   save(input: ThreadPolicySettings): StorePromise<ThreadPolicySettings> {return Effect.runPromise(this.service.save(input));}
-  async /*s6d*/ close(): Promise<StorePromise<void>> {return await this.policy.close();}
+  async close(): Promise<StorePromise<void>> {return await this.policy.close();}
 }
 
 // a No Project chat with a human request, as in the baseline No Project fixture, with a failing-capable policy store
@@ -195,7 +194,7 @@ export const makeNoProjectFixture = async (now?: () => number) => {
 };
 
 // digest of every supervisor_* table and every meta row, independent of physical row order
-export const supervisionStateDigest = async /*s6d*/ (db: DbFacade): Promise<{tables: string[]; digest: string}> => {
+export const supervisionStateDigest = async (db: DbFacade): Promise<{tables: string[]; digest: string}> => {
   const tables = (await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'supervisor\\_%' ESCAPE '\\' ORDER BY name").all()).map(row => String(row.name));
   const hash = createHash("sha256");
   for (const table of [...tables, "meta"]) {

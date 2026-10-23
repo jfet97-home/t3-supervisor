@@ -77,7 +77,7 @@ default_workflow: local-flow # keep this default comment
 `;
   seedProject(f, oldConfig);
   let savedSnapshotRevision: string | undefined;
-  const {definitions, editor} = yield* services(f.configEditorLayer(f.projectWriter, definitions => {savedSnapshotRevision = definitions.revision ?? undefined;}));
+  const {definitions, editor} = yield* services(f.configEditorLayer(f.projectWriter, definitions => Effect.sync(() => {savedSnapshotRevision = definitions.revision ?? undefined;})));
   const observed = yield* definitions.load(f.projectId);
   assert.equal(observed.status, "ready");
   assert.deepEqual(requiredReferences(observed.projectConfig!), [{step: "local-step"}]);

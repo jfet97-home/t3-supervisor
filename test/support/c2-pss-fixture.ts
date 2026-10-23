@@ -19,7 +19,7 @@ export const pssFixture = async (t: TestContext, prefix: string) => {
   });
   const track = <A extends {close(): unknown}>(connection: A): A => {connections.push(connection);return connection;};
   // opens the guidance file the way the service does (guidance store first, then the project supervision store)
-  const open = async /*s6d*/ (beforeStore?: (guidance: GuidanceHandle) => Promise<void> | void): Promise<StoreHandle> => {
+  const open = async (beforeStore?: (guidance: GuidanceHandle) => Promise<void> | void): Promise<StoreHandle> => {
     const guidance = track(await openGuidance(directory));
     await beforeStore?.(guidance);
     const ownedIds = new Set<string>();
@@ -28,8 +28,8 @@ export const pssFixture = async (t: TestContext, prefix: string) => {
   return {directory, path: join(directory, "guidance.sqlite3"), open, track};
 };
 
-export const metaRows = async /*s6d*/ (db: DbFacade): Promise<Array<[string, string]>> =>
+export const metaRows = async (db: DbFacade): Promise<Array<[string, string]>> =>
   (await db.prepare("SELECT key,value FROM meta ORDER BY key").all()).map(row => [String(row.key), String(row.value)]);
 
-export const tableRows = async /*s6d*/ (db: DbFacade, table: string): Promise<unknown[]> =>
+export const tableRows = async (db: DbFacade, table: string): Promise<unknown[]> =>
   (await db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()).map(row => ({...row}));

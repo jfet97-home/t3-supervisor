@@ -27,7 +27,7 @@ const dueCheckIn = async (t: TestContext, clock: {now: number}) => {
   return fixture;
 };
 
-const binding = async /*s6d*/ (fixture: Fixture): Promise<BindingRecord> => (await fixture.projectStore.binding(projectId, operativeThreadId))!;
+const binding = async (fixture: Fixture): Promise<BindingRecord> => (await fixture.projectStore.binding(projectId, operativeThreadId))!;
 
 it("S6b-CONV-01: a Stop requested while a root check-in's reply is pending commits without waiting for it; the check-in keeps its identity", {timeout: 10_000}, async t => {
   const clock = {now: baseTime};

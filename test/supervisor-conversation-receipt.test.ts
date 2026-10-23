@@ -17,7 +17,7 @@ const isIntroduction = (call: RpcCall) => call.payload.type === "message.dispatc
 const isCheckIn = (fixture: Fixture) => (call: RpcCall) => call.payload.type === "message.dispatch" && call.payload.threadId === fixture.binding.threadId;
 
 // the prepared unsent introduction of the fixture task, as an earlier cycle reserved it
-const readyIntroduction = async /*s6d*/ (fixture: Fixture): Promise<WorkflowIntroduction> => {
+const readyIntroduction = async (fixture: Fixture): Promise<WorkflowIntroduction> => {
   const introduction: WorkflowIntroduction = {taskId: fixture.task.id, projectId, threadId: operativeThreadId, supervisorThreadId: fixture.binding.threadId,
     state: "ready", text: workflowIntroductionText(fixture.task), messageId: `supervisor-notice:workflow:${fixture.task.id}`, targetRunId: null, error: null};
   await fixture.conversation.requests.saveIntroduction(introduction);
@@ -46,7 +46,7 @@ const holdFinalReads = (t: TestContext, fixture: Fixture) => {
 };
 
 // two public runs of the same binding on the production conversation service, each on its own fiber
-const twoRuns = async /*s6d*/ (fixture: Fixture) => {
+const twoRuns = async (fixture: Fixture) => {
   const conversation = Context.get(fixture.conversation.context, SupervisorConversation);
   const binding: BindingRecord = (await fixture.projectStore.binding(projectId, operativeThreadId))!;
   const fibers = [0, 1].map(() => Effect.runFork(conversation.run(binding, fixture.supervisor, fixture.threadList)));

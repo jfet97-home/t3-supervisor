@@ -3,13 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
-import { GuidanceStore } from "../../src/guidance-store.js";
 import { projectSupervisorUnit, type ProjectSupervisorUnitDefinitions } from "./team-units.js";
 import type { ScopeLocksShape } from "../../src/scope-locks.js";
-import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../../src/project-supervisor-store.js";
+import { defaultSupervisorModel, type SupervisorBaseline } from "../../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../../src/project-supervisor-contract.js";
 import { T3TransportError, type T3ClientShape } from "../../src/t3.js";
-import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../../src/types.js";
 import { effectiveIndex } from "../project-definitions-fixture.js";
 import { openGuidance, openSupervisors, storeUnitOf } from "./store-units.js";
@@ -234,7 +232,7 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
     projectSupervisorUnit(config, supervisorStore, source, t3, readRpc, operateRpc, overrides.activationSnapshot ?? activationSnapshot,
       overrides.definitions ?? defaultDefinitions, overrides.now, overrides.locks ? {locks: overrides.locks} : {});
   // a process restart: the old connection is closed and a new store opens the same guidance.sqlite3
-  const restart = async /*s6d*/ (): Promise<void> => {
+  const restart = async (): Promise<void> => {
     await guidance.close();
     guidance = await openGuidance(directory);
     ownedIds = new Set<string>();
@@ -260,7 +258,7 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
 };
 export type Fixture = Awaited<ReturnType<typeof makeFixture>>;
 
-export const reserveReadyBinding = async /*s6d*/ (fixture: Fixture, mainThreadId = "source-thread", projectId = "project-a") => {
+export const reserveReadyBinding = async (fixture: Fixture, mainThreadId = "source-thread", projectId = "project-a") => {
   const main = fixture.projections.get(mainThreadId);
   assert.ok(main);
   const binding = await fixture.supervisorStore.reserve(projectId, mainThreadId, main.thread.title, defaultSupervisorModel, activationSequence, Date.now());

@@ -7,10 +7,10 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { stringify } from "yaml";
 import { Effect } from "effect";
-import { GuidanceStore, fingerprint } from "../src/guidance-store.js";
+import { fingerprint } from "../src/guidance-store.js";
 import type { ProjectDefinitionLoader } from "./support/root-facades.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { ProjectSupervisorStore, defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
+import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { projectSupervisorUnit, supervisorConversationUnit, type ProjectSupervisorUnit } from "./support/team-units.js";
 import { supervisionStopToolDefinition } from "../src/workflow-write-controller.js";
 import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText } from "../src/supervisor-conversation.js";
@@ -20,10 +20,8 @@ import type { ConversationRequest, WorkflowIntroduction } from "../src/superviso
 import { SupervisorRpcError, type SupervisorRpc } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
 import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
-import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { compactProposalDigest, parseWorkflowAgreementRecord, workflowAgreementPlanHash } from "../src/supervisor-workflow-agreement.js";
 import { SupervisorTeamStore } from "../src/supervisor-team-store.js";
-import { ThreadPolicyStore } from "../src/thread-policy.js";
 import type { SupervisionStopInput } from "../src/workflow-write-controller.js";
 import { workflowWriteControllerUnit, type WorkflowWriteControllerUnitOptions } from "./support/workflow-controller-units.js";
 import { effectiveIndex, indexSource, projectIndex, testSummary } from "./project-definitions-fixture.js";
@@ -620,7 +618,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     definitionLoader,
     () => clock.now,
   );
-  const addOperative = async /*s6d*/ (threadId: string, proposalId: string) => {
+  const addOperative = async (threadId: string, proposalId: string) => {
     const projection = makeProjection(makeThread({ id: threadId, title: `Operative ${proposalId}` }));
     const messageId = `${threadId}-task`;
     const messageText = `Implement ${proposalId}`;
@@ -656,7 +654,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     failNextIntroduction: () => { failNextIntroduction = true; },
     rejectNextIntroduction: (count = 1) => { introductionsToReject += count; },
     makeProjectSupervisor: () => projectSupervisor,
-    makeRestartedConversation: async /*s6d*/ () => {
+    makeRestartedConversation: async () => {
       const restarted = supervisorConversationUnit(projectStore, null, async threadId => {
         const failure = projectionFailures.get(threadId);
         if (failure) throw failure;
@@ -696,7 +694,7 @@ const setInterpretationAnswer = (supervisor: Projection, task: TaskRecord, raw: 
 };
 
 // stores a task whose workflow is the service's parse of the Supervisor's own answer, as interpretation stores it
-const interpretTask = async /*s6d*/ (fixture: Awaited<ReturnType<typeof makeFixture>>, raw: unknown, context: NonNullable<TaskRecord["definitionContext"]>,
+const interpretTask = async (fixture: Awaited<ReturnType<typeof makeFixture>>, raw: unknown, context: NonNullable<TaskRecord["definitionContext"]>,
   snapshot: ProjectDefinitionSnapshot, extra: Partial<TaskRecord> = {}): Promise<TaskRecord> => {
   const current = (await fixture.projectStore.task(fixture.task.threadId))!;
   const answer = JSON.stringify({objective: current.objective, reason: current.reason, sourceMessageIds: [current.sourceMessageId], supervision: "needed", workflow: raw});
@@ -708,7 +706,7 @@ const interpretTask = async /*s6d*/ (fixture: Awaited<ReturnType<typeof makeFixt
   return task;
 };
 
-const installTaskDefinitions = async /*s6d*/ (fixture: Awaited<ReturnType<typeof makeFixture>>, snapshot: ProjectDefinitionSnapshot, workflowIds: readonly string[]): Promise<TaskRecord> => {
+const installTaskDefinitions = async (fixture: Awaited<ReturnType<typeof makeFixture>>, snapshot: ProjectDefinitionSnapshot, workflowIds: readonly string[]): Promise<TaskRecord> => {
   const current = (await fixture.projectStore.task(fixture.task.threadId))!;
   const prepared = prepareWorkflowRequest(current.threadId, current.sourceMessageId, current.objective ?? sourceText, snapshot);
   assert.ok(prepared.context);
@@ -723,7 +721,7 @@ const installTaskDefinitions = async /*s6d*/ (fixture: Awaited<ReturnType<typeof
   return task;
 };
 
-const installNestedCatalog = async /*s6d*/ (fixture: Awaited<ReturnType<typeof makeFixture>>): Promise<TaskRecord> => {
+const installNestedCatalog = async (fixture: Awaited<ReturnType<typeof makeFixture>>): Promise<TaskRecord> => {
   const snapshot = nestedCatalogDefinitions();
   const current = (await fixture.projectStore.task(fixture.task.threadId))!;
   const prepared = prepareWorkflowRequest(current.threadId, current.sourceMessageId, sourceText, snapshot);
@@ -889,7 +887,7 @@ it("an oversized stale-agreement recovery is visible without a definition review
   assert.equal(fixture.calls.length, 1);
 });
 
-const appendNoticeForTask = async /*s6d*/ (
+const appendNoticeForTask = async (
   fixture: Awaited<ReturnType<typeof makeFixture>>,
   task: TaskRecord,
   projection: Projection,
@@ -918,11 +916,11 @@ const appendNoticeForTask = async /*s6d*/ (
   return introduction;
 };
 
-const appendNoticeToOperative = async /*s6d*/ (fixture: Awaited<ReturnType<typeof makeFixture>>): Promise<WorkflowIntroduction> =>
+const appendNoticeToOperative = async (fixture: Awaited<ReturnType<typeof makeFixture>>): Promise<WorkflowIntroduction> =>
   await appendNoticeForTask(fixture, fixture.task, fixture.operative);
 
 // prepares a task context request and anchors the task to its prompt in one step, as the introduction path does
-const prepareTaskContext = async /*s6d*/ (fixture: Awaited<ReturnType<typeof makeFixture>>, input: {text: string; completionMarker: string}, now: number,
+const prepareTaskContext = async (fixture: Awaited<ReturnType<typeof makeFixture>>, input: {text: string; completionMarker: string}, now: number,
   anchored = true): Promise<ConversationRequest> => {
   const request = await fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "context",
     taskId: fixture.task.id, batch: null, ...input}, now);
@@ -1048,12 +1046,12 @@ const appendAssistantTurn = (projection: Projection, id: string, text: string, n
   return {run, message};
 };
 
-const appendSupervisorProposal = async /*s6d*/ (fixture: Awaited<ReturnType<typeof makeFixture>>, proposalId = fixture.task.id,
+const appendSupervisorProposal = async (fixture: Awaited<ReturnType<typeof makeFixture>>, proposalId = fixture.task.id,
   workflow = workflowPlan(fixture.task), now = baseTime, recordTask = fixture.task) => appendAssistantTurn(fixture.supervisor,
   `supervisor-proposal-${proposalId}-${fixture.supervisor.runs.length}`,
   `I propose this workflow.\n${workflowFence("workflow-proposal", compactDraft(await fixture.projectStore.task(recordTask.threadId) ?? recordTask, workflowRecord(recordTask, proposalId, workflow)))}`, now);
 
-const appendOperativeAcceptance = async /*s6d*/ (fixture: Awaited<ReturnType<typeof makeFixture>>, value: unknown, now: number, options: {
+const appendOperativeAcceptance = async (fixture: Awaited<ReturnType<typeof makeFixture>>, value: unknown, now: number, options: {
   text?: string;
   streaming?: boolean;
   nodeKind?: string;
@@ -1082,7 +1080,7 @@ it("helper provider isolation is opt-in in root roles and uses the current nativ
   // the Supervisor's own conversation as ProjectSupervisor builds it: with its helper team and the configured helper instance
   const standard = await makeFixture(clock, {teamEnabled: true});
   after(t, standard.cleanup);
-  const roleFor = async /*s6d*/ (conversation: unknown, binding: BindingRecord): Promise<StorePromise<string>> =>
+  const roleFor = async (conversation: unknown, binding: BindingRecord): Promise<StorePromise<string>> =>
     await (conversation as {roleFor(binding: BindingRecord): StorePromise<string>}).roleFor(binding);
   const standardRole = await roleFor(standard.conversation, standard.binding);
   assert.doesNotMatch(standardRole, /t3_thread_configuration|target\.providerInstanceId/u);
@@ -3950,7 +3948,7 @@ it("stale evidence can be renegotiated with a fresh ID in the same chats after a
 const contributionFence = (value: unknown) => "```external-contribution\n" + JSON.stringify(value) + "\n```";
 const contributionValue = (task: TaskRecord, nodeId: string, overrides: Record<string, unknown> = {}) => ({taskId: task.id, contributionId: "external-review",
   nodeId, revision: 1, state: "awaiting_result", summary: "An external reviewer is checking the export.", references: [], externalRef: null, ...overrides});
-const appendMainReply = async /*s6d*/ (fixture: Awaited<ReturnType<typeof makeFixture>>, text: string, now: number, options: {streaming?: boolean; nodeKind?: string} = {}) =>
+const appendMainReply = async (fixture: Awaited<ReturnType<typeof makeFixture>>, text: string, now: number, options: {streaming?: boolean; nodeKind?: string} = {}) =>
   await appendOperativeAcceptance(fixture, null, now, {text, ...options});
 
 // forms the main workflow through the ordinary agreement flow and anchors main records to the current source revision
@@ -3971,7 +3969,7 @@ const agreeMainWorkflow = async (fixture: Awaited<ReturnType<typeof makeFixture>
   return node.nodeId;
 };
 
-const mainContributions = async /*s6d*/ (fixture: Awaited<ReturnType<typeof makeFixture>>) =>
+const mainContributions = async (fixture: Awaited<ReturnType<typeof makeFixture>>) =>
   (await fixture.workflows.get(projectId, operativeThreadId))?.contributions.map(item => [item.contributionId, item.revision, item.state, item.sourceMessageId]) ?? [];
 
 it("only the main's own completed replies after its introduction import external contributions", async t => {
@@ -5275,7 +5273,7 @@ it("a full-format record is exempt from the compact-protocol diagnostic only as 
   await fixture.conversation.requests.saveAgreementCandidate({taskId: task.id, projectId, proposalId: "retained-agreed", planHash: workflowAgreementPlanHash(parseWorkflowAgreementRecord(exact, task.id, task.definitionContext!)!),
     workflow: task.workflow!, supervisorMessageId: "original-evidence", supervisorRunId: "old-run", supervisorRunOrdinal: 1, supervisorTextHash: "original-text-hash", proposedAt: clock.now - 1});
   const changed = workflowRecord(task, "retained-agreed", withLocalStep(task, "Additional work", "Different content from the retained agreement"));
-  const problem = async /*s6d*/ (value: unknown, recordedAt: number) => await (fixture.conversation as unknown as {compactRecordProblem(task: TaskRecord, role: string, value: unknown, context: unknown,
+  const problem = async (value: unknown, recordedAt: number) => await (fixture.conversation as unknown as {compactRecordProblem(task: TaskRecord, role: string, value: unknown, context: unknown,
     agent: Projection, recordedAt: number): StorePromise<{code: string} | null>}).compactRecordProblem(task, "supervisor", value, task.definitionContext!, fixture.operative, recordedAt);
   assert.equal(await problem(exact, clock.now + 10), null, "the agreement's exact evidence stays valid history");
   assert.equal((await problem(changed, clock.now + 10))?.code, "legacy_record_format", "a changed record reusing the agreed ID is not that evidence");
@@ -5388,7 +5386,7 @@ it("Retry native access only re-observes unknown root check-ins and introduction
   const service = fixture.makeProjectSupervisor();
   const signal = AbortSignal.timeout(5_000);
   const conversation = fixture.conversation;
-  const pending = async /*s6d*/ () => await conversation.requests.pending(projectId, fixture.binding.threadId);
+  const pending = async () => await conversation.requests.pending(projectId, fixture.binding.threadId);
   // the Retry path is active for this project: it acknowledges a failed check-in
   const failed = await conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "review", taskId: null,
     text: "probe", batch: null, completionMarker: "probe completed"}, clock.now);

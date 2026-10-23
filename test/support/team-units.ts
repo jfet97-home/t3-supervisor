@@ -1,4 +1,3 @@
-import { NodeCrypto } from "@effect/platform-node";
 import { Cause, Clock, Context, Deferred, Effect, Exit, Layer, Scope } from "effect";
 import { FetchHttpClient } from "effect/http";
 import {
@@ -49,7 +48,6 @@ const transports = new WeakMap<object, Unit>();
 // the units live for the test process, as the baseline objects did; nothing is in flight once a test awaited its calls
 const build = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>): A => Effect.runSync(Scope.provide(Effect.runSync(Scope.make()))(effect));
 const buildUnit = build;
-const ids = SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer));
 const run: RootRun = (effect, options) => Effect.runPromise(effect, options);
 
 // a promise rpc as the operate client; a completed cancel ends a call as the aborted call it replaces. An initiation invokes
