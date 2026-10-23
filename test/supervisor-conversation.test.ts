@@ -13,7 +13,7 @@ import { supervisionInterpretationSubmitToolDefinition, supervisionStopToolDefin
 import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
 import { prepareWorkflowRequest, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, workflowInterpretationOutcome, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
-import type { ConversationRequest, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
+import type { ConversationRequest, ReviewOutcomeKind, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
 import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
@@ -29,6 +29,7 @@ import {
   interpretationSubmitter, TestWallClock, turnItemDetails, workflowStore, type DefinitionsLoader, type FixtureClock, type NativeHandler, type ProjectionRead,
   type ProjectSupervisorUnit,
 } from "./support/g1a-conversation.js";
+import { recordReview, rootNative, type ReviewRecordOptions } from "./support/review-record.js";
 
 // the conversation suite on the production SupervisorConversation, its store layers and the project supervisor's own services
 // (test/support/g1a-conversation.ts) over a temporary data directory, under the test clock: the baseline's mocked Date.now is a
@@ -156,6 +157,17 @@ const turnItemsOf = (projection: Projection): Array<Record<string, unknown>> => 
   if (!Array.isArray(projection.turnItems)) projection.turnItems = [];
   return projection.turnItems as Array<Record<string, unknown>>;
 };
+
+// the root records a review's outcome with workflow_write record_review in the review's own run, through the production controller.
+// the conversation here runs on an always-enabled stub, while the controller reads the project's stored supervision control (an
+// outcome, like a workflow edit, is refused while it is off), so the project is enabled first, as the stop cases do
+const recordOutcome = (fixture: Fixture, request: ConversationRequest, outcome: ReviewOutcomeKind = "no_change", options: ReviewRecordOptions = {}) =>
+  Effect.gen(function* () {
+    const control = yield* fixture.projectStore.control(projectId);
+    if (!control.effectiveEnabled) yield* fixture.projectStore.saveControl(projectId, control.generation, true, {snapshotSequence: 1, threads: []});
+    const controller = yield* writeController({stores: fixture.stores, workflows: fixture.workflows, native: rootNative(fixture.supervisor, () => fixture.threadList)});
+    return yield* recordReview(controller, fixture.supervisor, request, outcome, options);
+  });
 
 const appendRun = (input: {
   projection: Projection;
@@ -841,6 +853,7 @@ it.effect("a main and two reviewer children share one complete task context and 
   }
   assert.equal(request.text.split("END_correctness").length - 1, 0, "no definition guidance is pushed into a wake");
   const run = fixture.supervisor.runs.find(run => run.userMessageId === request.messageId)!;
+  assert.equal((yield* recordOutcome(fixture, request)).status, "recorded");
   completeRun(fixture.supervisor, run, `Reviewed all three chats. ${request.completionMarker}`, yield* clock.advance(1));
   yield* fixture.run();
   for (const row of request.batch.threads) assert.equal((yield* fixture.conversation.monitor.pending(projectId, row.threadId)).length, 0);
@@ -856,7 +869,9 @@ it.effect("a large stored objective stays pull-readable without inflating or blo
   yield* fixture.projectStore.saveTask({...task, objective});
   yield* fixture.run();
   const request = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
-  assert.equal(request?.kind, "review");assert.ok(request!.text.length < 4500);
+  // the first check-in of an instructions version carries the standing role once, including the review duty and outcome rules
+  // (about 0.9 KB of the 5.4 KB); the stored objective itself never enters it
+  assert.equal(request?.kind, "review");assert.ok(request!.text.length < 5500, `review prompt ${request!.text.length} characters`);
   assert.equal(request!.text.includes("An unusually long stored objective"), false);
   const context = yield* fixture.conversation.readContextView(fixture.binding, {view: "context"});
   assert.equal((context.task as {objective: string}).objective, objective);
@@ -1461,6 +1476,7 @@ it.effect("an unreadable introduced chat does not stop a healthy chat review or 
     assert.deepEqual(request?.batch?.threads.map(thread => thread.threadId), [healthy.task.threadId], failure.label);
     const reviewRun = fixture.supervisor.runs.find(run => run.userMessageId === request?.messageId);
     assert.ok(reviewRun);
+    assert.equal((yield* recordOutcome(fixture, request!)).status, "recorded");
     completeRun(fixture.supervisor, reviewRun, `Healthy chat review complete. ${request?.completionMarker}`, clock.now + 1);
     yield* clock.advance(1);
     yield* fixture.run();
@@ -1779,6 +1795,7 @@ it.effect("one review stays in flight while activity changes and acknowledges on
 
   const reviewRun = fixture.supervisor.runs.find(run => run.userMessageId === request.messageId);
   assert.ok(reviewRun);
+  assert.equal((yield* recordOutcome(fixture, request)).status, "recorded");
   completeRun(fixture.supervisor, reviewRun, `No intervention is needed. ${request.completionMarker}`, clock.now + 1);
   yield* clock.advance(1);
   yield* fixture.run();
@@ -1858,6 +1875,7 @@ it.effect("a direct peer reply with senderThreadId does not contaminate a valid 
     now: clock.now,
   });
   peer.senderThreadId = "peer-thread";
+  assert.equal((yield* recordOutcome(fixture, request)).status, "recorded");
   completeRun(fixture.supervisor, run, `Review complete. ${request.completionMarker}`, clock.now + 1);
   yield* clock.advance(1);
 
@@ -1865,6 +1883,108 @@ it.effect("a direct peer reply with senderThreadId does not contaminate a valid 
 
   assert.equal((yield* fixture.conversation.requests.requests(projectId)).find(item => item.id === request.id)?.state, "completed");
   assert.equal((yield* fixture.conversation.monitor.pending(projectId, operativeThreadId)).length, 0);
+}));
+
+// a root monitoring review over three finished operative commands, pinned and waiting in the root's run
+const pinnedReview = Effect.fnUntraced(function* (clock: FixtureClock, label: string) {
+  const fixture = yield* makeFixture(clock, {settings: {intervalMinutes: 2, activityThreshold: 3}});
+  yield* appendNoticeToOperative(fixture);
+  for (let index = 1; index <= 3; index++) addCommandActivity(fixture.operative, `${label}-${index}`, "Work", clock.now - index * 1_000);
+  yield* fixture.conversation.observe(fixture.threadList, clock.now);
+  yield* fixture.run();
+  const request = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.ok(request?.kind === "review" && request.batch && request.reviewPins);
+  const run = fixture.supervisor.runs.find(item => item.userMessageId === request.messageId);
+  assert.ok(run);
+  const operativeCalls = () => fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length;
+  return {fixture, request, run, operativeCalls, pendingIds: () => Effect.map(fixture.conversation.monitor.pending(projectId, operativeThreadId), (items) => items.map(item => item.id))};
+});
+const storedReview = (fixture: Fixture, id: string) =>
+  Effect.map(fixture.conversation.requests.requests(projectId), (requests) => requests.find(request => request.id === id));
+
+it.effect("a review that records no outcome stays visibly unconfirmed: nothing is acknowledged and it counts as a miss, never as no change", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const {fixture, request, run, pendingIds} = yield* pinnedReview(clock, "outcome-missing");
+  // the check-in names its request and carries the review duty with the standing instructions
+  assert.ok(request.text.includes(`record_review, requestId ${JSON.stringify(request.id)}`));
+  assert.ok(request.text.includes("send the operative concise corrective guidance"));
+  assert.ok(request.text.includes(`"reviewRequestId":${JSON.stringify(request.id)}`));
+  completeRun(fixture.supervisor, run, `No intervention is needed. ${request.completionMarker}`, clock.now + 1);
+  yield* clock.advance(1);
+  yield* fixture.run();
+  const closed = (yield* storedReview(fixture, request.id))!;
+  assert.equal(closed.state, "completed");
+  assert.equal(closed.error, "The check-in's review outcome was not confirmed (review_outcome_missing); pending activity will be checked again after the cooldown.");
+  assert.equal(yield* fixture.conversation.requests.reviewMisses(fixture.binding.threadId), 1);
+  assert.deepEqual((yield* pendingIds()).filter(id => id.startsWith("outcome-missing-")).length, 3, "the frozen batch stays pending");
+  assert.deepEqual((yield* fixture.conversation.status(projectId, fixture.binding.threadId)).review,
+    {lastConfirmed: null, current: {state: "missing", outcome: null, reason: null, problem: "review_outcome_missing", at: request.createdAt}});
+}));
+
+it.effect("a confirmed no_change acknowledges the frozen batch, sends the operative nothing and becomes the last confirmed review", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const {fixture, request, run, operativeCalls, pendingIds} = yield* pinnedReview(clock, "outcome-no-change");
+  const callsBefore = operativeCalls();
+  assert.equal((yield* pendingIds()).filter(id => id.startsWith("outcome-no-change-")).length, 3, "the batch is pending before the review");
+  assert.equal((yield* recordOutcome(fixture, request, "no_change")).status, "recorded");
+  assert.equal(operativeCalls(), callsBefore, "recording sends nothing");
+  completeRun(fixture.supervisor, run, `Nothing changed. ${request.completionMarker}`, clock.now + 1);
+  yield* clock.advance(1);
+  yield* fixture.run();
+  const closed = (yield* storedReview(fixture, request.id))!;
+  assert.deepEqual([closed.state, closed.error, closed.reviewOutcome?.state, closed.reviewOutcome?.problem], ["completed", null, "confirmed", null]);
+  assert.deepEqual((yield* pendingIds()).filter(id => id.startsWith("outcome-no-change-")), []);
+  assert.equal(operativeCalls(), callsBefore, "the service sends the operative nothing for no change");
+  assert.deepEqual((yield* fixture.conversation.status(projectId, fixture.binding.threadId)).review,
+    {lastConfirmed: {outcome: "no_change", reason: null, at: closed.reviewOutcome!.recordedAt}, current: null});
+}));
+
+it.effect("a demonstrated deviation keeps the root's own corrective guidance beside a confirmed needs_attention, which proves no correction", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const {fixture, request, run, operativeCalls} = yield* pinnedReview(clock, "outcome-attention");
+  const callsBefore = operativeCalls();
+  const taskBefore = yield* fixture.projectStore.task(operativeThreadId);
+  // the root's own native corrective guidance to the operative (t3_thread_send), which the service neither sends nor replaces
+  const active = fixture.operative.runs.find(item => item.id === fixture.operative.thread.activeRunId)!;
+  const guidance = appendMessageToRun(fixture.operative, active, {id: "corrective-guidance", role: "user", now: clock.now,
+    text: "The export step was marked done without its test run; run the exporter tests before completing it."});
+  guidance.senderThreadId = fixture.binding.threadId;
+  const reason = "The operative marked the export done without running its tests; guidance was sent.";
+  assert.equal((yield* recordOutcome(fixture, request, "needs_attention", {reason})).status, "recorded");
+  completeRun(fixture.supervisor, run, `Sent corrective guidance. ${request.completionMarker}`, clock.now + 1);
+  yield* clock.advance(1);
+  yield* fixture.run();
+  const closed = (yield* storedReview(fixture, request.id))!;
+  assert.deepEqual([closed.state, closed.reviewOutcome?.state, closed.reviewOutcome?.reason], ["completed", "confirmed", reason]);
+  assert.equal(operativeCalls(), callsBefore, "the outcome itself sends nothing; the guidance is the root's own message");
+  assert.ok(fixture.operative.messages.some(message => message.id === "corrective-guidance"), "the root's guidance stays in the operative chat");
+  assert.deepEqual(yield* fixture.projectStore.task(operativeThreadId), taskBefore, "neither the record nor the guidance marks anything corrected");
+  assert.deepEqual((yield* fixture.conversation.status(projectId, fixture.binding.threadId)).review?.lastConfirmed,
+    {outcome: "needs_attention", reason, at: closed.reviewOutcome!.recordedAt});
+}));
+
+it.effect("a no_change made stale by a workflow edit after its pins, or a call still running at completion, is not confirmed and acknowledges nothing", () => Effect.gen(function* () {
+  for (const fault of ["edited", "running"] as const) {
+    const clock = yield* pinnedClock(baseTime);
+    const {fixture, request, run, pendingIds} = yield* pinnedReview(clock, `outcome-${fault}`);
+    assert.deepEqual(request.reviewPins?.tasks.map(pin => pin.workflow.state), ["absent"]);
+    assert.equal((yield* recordOutcome(fixture, request, "no_change", fault === "running" ? {status: "running"} : {})).status, "recorded");
+    if (fault === "edited") {
+      const binding = fixture.binding;
+      const created = yield* fixture.workflows.ensureMain({projectId, mainThreadId: operativeThreadId, supervisorThreadId: binding.threadId,
+        bindingGeneration: binding.generation}, "edit-after-pins", "Created after the review was prepared.");
+      assert.equal(created.status, "created");
+    }
+    completeRun(fixture.supervisor, run, `Nothing changed. ${request.completionMarker}`, clock.now + 1);
+    yield* clock.advance(1);
+    yield* fixture.run();
+    const problem = fault === "edited" ? "review_no_change_after_edit" : "review_outcome_proof_incomplete";
+    const closed = (yield* storedReview(fixture, request.id))!;
+    assert.deepEqual([closed.state, closed.reviewOutcome?.state, closed.reviewOutcome?.problem], ["completed", "unconfirmed", problem], fault);
+    assert.equal((yield* pendingIds()).filter(id => id.startsWith(`outcome-${fault}-`)).length, 3, fault);
+    assert.deepEqual((yield* fixture.conversation.status(projectId, fixture.binding.threadId)).review?.current,
+      {state: "unconfirmed", outcome: "no_change", reason: null, problem, at: closed.reviewOutcome!.recordedAt}, fault);
+  }
 }));
 
 it.effect("a 100-item monitor burst freezes and acknowledges all activity while showing only two navigation handles in the prompt", () => Effect.gen(function* () {
@@ -1901,6 +2021,7 @@ it.effect("a 100-item monitor burst freezes and acknowledges all activity while 
 
   const reviewRun = fixture.supervisor.runs.find(run => run.userMessageId === request.messageId);
   assert.ok(reviewRun);
+  assert.equal((yield* recordOutcome(fixture, request)).status, "recorded");
   completeRun(fixture.supervisor, reviewRun, `Burst review complete. ${request.completionMarker}`, clock.now + 1);
   yield* clock.advance(1);
   yield* fixture.run();
@@ -2111,6 +2232,7 @@ it.effect("a fresh native child terminal record wakes the owning Supervisor with
   assert.equal(request.batch.threads[0]?.items[0]?.type, "native_child_lifecycle");
   const run = fixture.supervisor.runs.find(candidate => candidate.userMessageId === request.messageId);
   assert.ok(run);
+  assert.equal((yield* recordOutcome(fixture, request)).status, "recorded");
   completeRun(fixture.supervisor, run, `Terminal child record reviewed. ${request.completionMarker}`, clock.now + 1);
   yield* clock.advance(1);
   yield* fixture.run();
@@ -2150,6 +2272,7 @@ it.effect("an unavailable native parent retains ACKed lifecycle evidence while c
   assert.deepEqual(firstRequest.batch.threads.map(item => item.threadId), [child.thread.id]);
   const firstRun = fixture.supervisor.runs.find(candidate => candidate.userMessageId === firstRequest.messageId);
   assert.ok(firstRun);
+  assert.equal((yield* recordOutcome(fixture, firstRequest)).status, "recorded");
   completeRun(fixture.supervisor, firstRun, `Terminal grandchild reviewed. ${firstRequest.completionMarker}`, clock.now + 1);
   yield* clock.advance(1);
   yield* fixture.run();
@@ -2361,6 +2484,7 @@ it.effect("monitoring-only API saves update the live threshold without losing pe
   assert.ok(firstRequest?.kind === "review");
   const firstRun = fixture.supervisor.runs.find(run => run.userMessageId === firstRequest.messageId);
   assert.ok(firstRun);
+  assert.equal((yield* recordOutcome(fixture, firstRequest)).status, "recorded");
   completeRun(fixture.supervisor, firstRun, `Initial check complete. ${firstRequest.completionMarker}`, clock.now + 1);
   yield* clock.advance(1);
   yield* fixture.run();
@@ -4677,6 +4801,7 @@ it.effect("wake budgets: the concise standing role once per version, then a shor
     assert.equal(request?.kind, "review");
     texts.push(request!.text);
     const run = fixture.supervisor.runs.find(item => item.userMessageId === request!.messageId)!;
+    assert.equal((yield* recordOutcome(fixture, request!)).status, "recorded");
     completeRun(fixture.supervisor, run, `No intervention needed. ${request!.completionMarker}`, yield* clock.advance(1));
     yield* fixture.run();
     yield* clock.advance(61_000);

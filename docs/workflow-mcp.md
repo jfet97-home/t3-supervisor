@@ -216,7 +216,7 @@ enable supervision again. After a stop the chat's Supervisor and its helpers can
 read, but `workflow_write`, `supervision_team` actions and `supervision_guide` are refused
 at their first and their final authority check.
 
-`workflow_write` supports four actions:
+`workflow_write` supports five actions:
 
 - `ensure_main` creates an unaccepted main draft.
 - `link_child` creates a live child's workflow under its verified native parent.
@@ -233,6 +233,19 @@ at their first and their final authority check.
   `contribution_result_stale`, `contribution_not_a_result` or
   `contribution_not_found`. A child workflow returns `contribution_main_workflow_only`.
   It never changes a status.
+- `record_review` records the outcome of one root monitoring check-in, named by the
+  check-in's `requestId`: `progress_updated` with `applyOperationIds` (the `apply`
+  edits made in that check-in's own run), `no_change` (nothing changed and no edit was
+  made in that run), `needs_attention` with a `reason`, or `insufficient_evidence` with
+  a `reason` naming what is missing (at most 1,000 characters). It is root-only, bound to
+  the root's own native call in the check-in's run, and refused for an unknown, settled
+  or other-run check-in (`review_request_unknown`, `review_request_not_pending`,
+  `review_outcome_other_run`), for progress citing another run's edits
+  (`review_progress_apply_unverified`) and for `no_change` after an edit in the run
+  (`review_no_change_after_apply`). A later call of the same run replaces the outcome
+  until the check-in completes. It sends nothing: messaging the operative is a separate
+  decision, and neither the record nor delivered guidance shows that the operative
+  corrected anything.
 
 A valid unaccepted draft can be edited: formal agreement is not a write gate.
 During initialization the root publishes the supplied initial record unchanged and

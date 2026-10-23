@@ -17,6 +17,7 @@ import type {
   DefinitionReviewInfo,
   SupervisorModelInfo,
   SupervisorModelSelection,
+  SupervisorMonitoringReview,
   SupervisorMonitoringSettings,
   SupervisorTeamSettingsInfo,
   WorkflowAgreementInfo,
@@ -70,6 +71,18 @@ const readTeamSettings = (snapshot: ProjectSupervisorInfo): SupervisorTeamSettin
 const teamSettingsDraft = (settings: SupervisorTeamSettingsInfo): TeamSettingsDraft => ({maxHelpersPerRoot: String(settings.maxHelpersPerRoot)});
 const readTeamSettingsDraft = (snapshot: ProjectSupervisorInfo) => teamSettingsDraft(readTeamSettings(snapshot));
 const formatMonitoringTime = (value: number | null) => value === null ? "Not scheduled" : new Date(value).toLocaleString();
+const reviewOutcomeLabels = {progress_updated: "Progress updated", no_change: "No change", needs_attention: "Needs attention",
+  insufficient_evidence: "Insufficient evidence"} as const;
+const reviewStateLabels = {recorded: "recorded, awaiting confirmation", unconfirmed: "not confirmed", missing: "no outcome recorded"} as const;
+// the last confirmed check-in outcome and the current one that is not confirmed; an outcome is the Supervisor's assessment, not
+// evidence that the operative acted on it
+const ReviewOutcomes = ({review}: {readonly review: SupervisorMonitoringReview}) => <div className="stack">
+  <p><strong>Last confirmed review:</strong> {review.lastConfirmed
+    ? `${reviewOutcomeLabels[review.lastConfirmed.outcome]} (${formatMonitoringTime(review.lastConfirmed.at)})${review.lastConfirmed.reason ? `: ${review.lastConfirmed.reason}` : ""}`
+    : "None yet"}</p>
+  {review.current && <p><strong>Current review:</strong> {review.current.outcome ? reviewOutcomeLabels[review.current.outcome] : "No outcome"}, {reviewStateLabels[review.current.state]}
+    {review.current.reason ? `: ${review.current.reason}` : ""}{review.current.problem && review.current.state !== "recorded" ? ` (${review.current.problem})` : ""}</p>}
+</div>;
 const monitoringError = (value: string, minimum: number, maximum: number, field: string) => {
   if (!value.trim()) return `Enter ${field} from ${minimum} to ${maximum}.`;
   const number = Number(value);
@@ -943,6 +956,7 @@ export function ProjectSupervisorView({
           <p><strong>Next review:</strong> {formatMonitoringTime(snapshot.monitoringStatus.nextReviewAt)}</p>
           <p><strong>Last notice:</strong> {formatMonitoringTime(snapshot.monitoringStatus.lastNoticeAt)}</p>
           <p>{snapshot.monitoringStatus.message}</p>
+          {snapshot.monitoringStatus.review && <ReviewOutcomes review={snapshot.monitoringStatus.review} />}
         </section>}
     </div>
 

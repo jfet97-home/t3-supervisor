@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import { createHash } from "node:crypto";
-import { Console, Deferred, Effect, Fiber } from "effect";
+import { Console, Context, Deferred, Effect, Fiber } from "effect";
 import type { SqlClient } from "effect/sql";
 import type { ConversationRequest, WorkflowAgreementCandidate } from "../src/supervisor-conversation-store.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { workflowIntroductionText } from "../src/supervisor-conversation.js";
+import { SupervisionScopeService } from "../src/supervision-gate.js";
+import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
+import type { Projection } from "../src/types.js";
 import { abortCall, atWallTime, execute, openConversationStore, query, rejectionOf, temporaryDirectory, within } from "./support/g1b-conversation.js";
+import { recordReview, rootNative } from "./support/review-record.js";
 import {
   abortHonouringSend, addCommandActivity, appendMessageToRun, proceed, appendNoticeToOperative, appendOperativeAcceptance, appendSupervisorProposal, baseTime, completeRun,
   makeFixture, observeAgreement, operativeThreadId, projectId, setNow, workflowRecord, type Fixture, type FixtureClock, type RpcCall,
@@ -215,6 +219,15 @@ const reviewState = (sql: SqlClient.SqlClient, supervisorThreadId: string, reque
     reviewMisses: Number(clock?.review_misses), acknowledged: acknowledged.map(row => String(row.item_id))};
 });
 
+// the root records a review's outcome with workflow_write record_review in the review's own run, through the production controller
+// over this process's services; workflow editing needs the catalog classifications read first, which a supervision cycle does
+const recordOutcome = (fixture: Fixture, root: Projection, request: ConversationRequest) => Effect.gen(function* () {
+  yield* Context.get(fixture.process.context, SupervisionScopeService).rememberScratchProjects([]);
+  const controller = yield* WorkflowWriteController.make({withoutTeam: true, maxEvidenceWaitMs: 0}).pipe(
+    Effect.provideService(WorkflowNativeAccess, rootNative(root, () => fixture.threadList)), Effect.provide(fixture.process.context));
+  return yield* recordReview(controller, root, request, "no_change");
+});
+
 const waitingReview = (clock: FixtureClock) => Effect.gen(function* () {
   const fixture = yield* dueCheckIn(clock);
   yield* fixture.run;
@@ -229,6 +242,7 @@ it.effect("CT-CONV-04: a failure at the monitor acknowledgement rolls back compl
   const clock = {now: baseTime};
   const {fixture, request, run} = yield* waitingReview(clock);
   yield* fixture.requests.missedReview(fixture.binding.threadId);
+  assert.equal((yield* recordOutcome(fixture, fixture.supervisor, request)).status, "recorded");
   completeRun(fixture.supervisor, run, `No intervention is needed. ${request.completionMarker}`, clock.now + 1);
   yield* setNow(clock, clock.now + 1);
   const before = {state: "waiting", error: null, runId: run.id, deliveredRoleVersion: null, reviewMisses: 1, acknowledged: []};
@@ -357,6 +371,7 @@ it.effect("CT-CONV-06: interleaved cycles of two bindings keep request identitie
   // completing only the first review acknowledges only its own frozen batch
   const firstRun = fixture.supervisor.runs.find(run => run.userMessageId === first.messageId);
   assert.ok(firstRun);
+  assert.equal((yield* recordOutcome(fixture, fixture.supervisor, first)).status, "recorded");
   completeRun(fixture.supervisor, firstRun, `No intervention is needed. ${first.completionMarker}`, start + 20_000);
   yield* setNow(clock, start + 20_000);
   yield* fixture.run;
@@ -367,6 +382,7 @@ it.effect("CT-CONV-06: interleaved cycles of two bindings keep request identitie
   assert.ok((yield* Effect.forEach(["b-command-1", "b-command-2", "b-command-3"], id => Effect.map(fixture.monitor.pending(projectId, "operative-b"), items => items.some(item => item.id === id)))).every(Boolean));
   const otherRun = second.supervisor.runs.find(run => run.userMessageId === other.messageId);
   assert.ok(otherRun);
+  assert.equal((yield* recordOutcome(fixture, second.supervisor, other)).status, "recorded");
   completeRun(second.supervisor, otherRun, `No intervention is needed. ${other.completionMarker}`, start + 20_001);
   yield* setNow(clock, start + 20_001);
   yield* second.run;

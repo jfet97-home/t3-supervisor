@@ -265,6 +265,24 @@ the current root/helper responsible for that child. Priority bypasses age/count,
 while the existing cooldown and acknowledgement rules still apply. Repeated reads
 of the same terminal version do not create another review.
 
+Each root monitoring check-in names its request and is pinned when it is prepared: the
+binding generation and, per included task, its revision and its main workflow (or the
+explicit absence of one). The Supervisor assesses the evidence against the agreed
+workflow, records verified status changes, and sends the operative concise corrective
+guidance when evidence demonstrates a concrete, actionable mistake or deviation; it
+stays silent on routine progress and never invents a correction from uncertainty.
+Before its marker it records exactly one outcome with `workflow_write` `record_review`
+(progress updated, no change, needs attention or insufficient evidence). The outcome
+is confirmed only when the check-in completed with its marker, the recording call
+completed in that check-in's own run and the pins are still current (for no change,
+each main workflow unchanged; for progress, each cited edit still in place). Only a
+confirmed outcome acknowledges the frozen batch. A missing or unconfirmed outcome is
+never read as no change: the batch stays pending and the check-in counts as a miss,
+so the next one follows the cooldown and the third consecutive miss requires Retry.
+The dashboard's monitoring status shows the last confirmed outcome and the current one
+that is recorded, unconfirmed or missing. Recording sends nothing, and an outcome or
+guidance is the Supervisor's assessment, not evidence that the operative acted on it.
+
 Fresh native request state controls waiting: resolved, expired or cancelled requests
 clear matching stale waiting summaries, while missing or mismatched evidence stays
 explicitly unresolved. A genuinely pending owner request remains pending even if

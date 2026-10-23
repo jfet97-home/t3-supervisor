@@ -10,6 +10,7 @@ import { SupervisionControl } from "./supervision-control.js";
 import { SupervisionGate, SupervisionScopeService, type GateGuard } from "./supervision-gate.js";
 import { SupervisorTeamStore } from "./supervisor-team-store.js";
 import { SupervisorConversation } from "./supervisor-conversation.js";
+import { reviewOutcomes, SupervisorConversationStore, type ConversationRequest, type ReviewOutcomeKind } from "./supervisor-conversation-store.js";
 import { StoreError } from "./store.js";
 import { NativeRpc, NativeShell, record, type SupervisorRpcError } from "./supervisor-native.js";
 import { T3Client, type T3TransportError } from "./t3.js";
@@ -131,6 +132,7 @@ export type WorkflowWritePayload = WorkflowLocator & (
   | {action: "apply"; input: WorkflowApplyPatch}
   | {action: "assess_contribution"; operationId: string; workflowId: string; expectedRevision: number; contributionId: string;
     resultRevision: number; decision: ExternalContributionDecision; note: string}
+  | {action: "record_review"; operationId: string; requestId: string; outcome: ReviewOutcomeKind; reason?: string; applyOperationIds?: string[]}
 );
 
 export type SupervisorContextViewName = "context" | "definitions" | "instructions" | "interpretation" | "check";
@@ -154,6 +156,11 @@ export type WorkflowReadPayload = WorkflowLocator & {
 };
 
 export type WorkflowWriteResult = WorkflowEnsureResult | WorkflowMutationResult | {
+  status: "recorded";
+  operationId: string;
+  requestId: string;
+  outcome: ReviewOutcomeKind;
+} | {
   status: "pending" | "denied" | "invalid" | "unavailable" | "too_large";
   operationId?: string;
   reason: string;
@@ -252,6 +259,19 @@ const EvidenceRow = Schema.Struct({operation_id: Schema.String, operation_namesp
 const decodeProofRow = Schema.decodeUnknownExit(ProofRow);
 const decodeEvidenceRow = Schema.decodeUnknownExit(EvidenceRow);
 const decodeStoredJson = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
+// a successful evidence row as record_review reads it: the native run, the native input and the revision the edit produced
+const decodeAppliedRow = Schema.decodeUnknownExit(Schema.Struct({
+  operation_id: Schema.String,
+  native_evidence: Schema.fromJsonString(Schema.Struct({runId: Schema.String, nativeInputCanonical: Schema.String})),
+  result: Schema.fromJsonString(Schema.Struct({status: Schema.String, workflowId: Schema.String, revision: Schema.Number})),
+}));
+// the workflow_write action a recorded native input named, called directly or through the mcpx wrapper
+const appliedAction = (nativeInputCanonical: string): unknown => {
+  const parsed = decodeStoredJson(nativeInputCanonical);
+  if (Exit.isFailure(parsed) || !isRecord(parsed.value)) return undefined;
+  const input = parsed.value;
+  return isRecord(input.arguments) && input.action === undefined ? input.arguments.action : input.action;
+};
 // a stored receipt or evidence row that does not decode; inside the commit it denies the write as any failed statement does
 class WorkflowWriteRowInvalid extends Data.TaggedError("WorkflowWriteRowInvalid") {}
 // the result a stored row recorded
@@ -485,6 +505,21 @@ const parseWritePayload = (value: unknown): ParsedInput => {
       expectedRevision: value.expectedRevision as number, contributionId: value.contributionId, resultRevision: value.resultRevision as number,
       decision: value.decision as ExternalContributionDecision, note: value.note}};
   }
+  if (value.action === "record_review") {
+    const outcome = reviewOutcomes.find(item => item === value.outcome);
+    const applyIds = value.applyOperationIds;
+    const validApplies = applyIds === undefined || Array.isArray(applyIds) && applyIds.length >= 1 && applyIds.length <= reviewLimits.maxApplies &&
+      applyIds.every(id => isId(id)) && new Set(applyIds).size === applyIds.length;
+    // a reason is required where the outcome needs one; applies are cited by progress_updated and only by it
+    if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "operationId", "requestId", "outcome"], [...authorityKeys, "reason", "applyOperationIds"]) ||
+      !isId(value.operationId) || !isId(value.requestId) || outcome === undefined || !validApplies ||
+      value.reason !== undefined && !isText(value.reason, reviewLimits.maxReasonLength) ||
+      (outcome === "needs_attention" || outcome === "insufficient_evidence") && value.reason === undefined ||
+      (outcome === "progress_updated") !== (applyIds !== undefined))
+      return {ok: false, reason: "invalid_record_review", ...(isId(value.operationId) ? {operationId: value.operationId} : {})};
+    return {ok: true, value: {...locator, action: "record_review", operationId: value.operationId, requestId: value.requestId, outcome,
+      ...(typeof value.reason === "string" ? {reason: value.reason} : {}), ...(applyIds !== undefined ? {applyOperationIds: applyIds as string[]} : {})}};
+  }
   if (value.action === "apply") {
     if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "input"], authorityKeys))
       return {ok: false, reason: "invalid_apply"};
@@ -544,7 +579,10 @@ const sameOwner = (left: WorkflowOwner, right: WorkflowOwner): boolean =>
   left.supervisorThreadId === right.supervisorThreadId && left.bindingGeneration === right.bindingGeneration;
 
 const isSuccessfulResult = (result: WorkflowWriteResult): boolean =>
-  result.status === "created" || result.status === "applied" || result.status === "exists";
+  result.status === "created" || result.status === "applied" || result.status === "exists" || result.status === "recorded";
+
+/** Bounds of record_review: the applies a progress outcome cites and its reason. */
+export const reviewLimits = {maxApplies: 20, maxReasonLength: 1_000} as const;
 
 const operationIdOf = (value: WorkflowWritePayload): string =>
   value.action === "apply" ? value.input.operationId : value.operationId;
@@ -746,7 +784,7 @@ export const workflowReadToolDefinition = {
 
 export const workflowWriteToolDefinition = {
   name: "workflow_write",
-  description: "Create the main draft, link a verified live descendant, assess a main-reported external contribution result, or update one semantic workflow with revision CAS. apply accepts a nested sequence/parallel plan and its unchanged source-bound requirements; omitted fields retain current values. Newly introduced nodes receive stable service IDs only after exact native submitted-argument verification. Keep operationId unique within this Supervisor binding and edit namespace. Status and notes are the Supervisor's assessment, not proof of execution. New live steps start \"planned\"; mark them underway or completed in a separate later apply with status_changed evidence. On rejection, read the reason, code, and path. Optional sourceThreadId/sourceRunId/sourceMessageId/sourceItemId values link to existing in-scope T3 activity; when no sourceThreadId is supplied, the workflow target thread is used. A reference is for navigation and never proves success or grants authority. assess_contribution is root-only for the main workflow: it records accepted or needs_more for the contribution's current result revision with expectedRevision CAS and never changes any status; complete the step separately with apply and status_changed evidence.",
+  description: "Create the main draft, link a verified live descendant, assess a main-reported external contribution result, or update one semantic workflow with revision CAS. apply accepts a nested sequence/parallel plan and its unchanged source-bound requirements; omitted fields retain current values. Newly introduced nodes receive stable service IDs only after exact native submitted-argument verification. Keep operationId unique within this Supervisor binding and edit namespace. Status and notes are the Supervisor's assessment, not proof of execution. New live steps start \"planned\"; mark them underway or completed in a separate later apply with status_changed evidence. On rejection, read the reason, code, and path. Optional sourceThreadId/sourceRunId/sourceMessageId/sourceItemId values link to existing in-scope T3 activity; when no sourceThreadId is supplied, the workflow target thread is used. A reference is for navigation and never proves success or grants authority. assess_contribution is root-only for the main workflow: it records accepted or needs_more for the contribution's current result revision with expectedRevision CAS and never changes any status; complete the step separately with apply and status_changed evidence. record_review is root-only: it records the outcome of the monitoring check-in requestId in that check-in's own run: progress_updated citing applyOperationIds of the apply edits made in that run, no_change when nothing changed and no edit was made, needs_attention with a reason, or insufficient_evidence with a reason naming what is missing. It sends nothing; messaging the operative is a separate decision.",
   inputSchema: {
     $defs: workflowPlanDefinitions,
     type: "object",
@@ -754,7 +792,7 @@ export const workflowWriteToolDefinition = {
     required: ["action", "supervisorThreadId", "bindingGeneration"],
     properties: {
       ...locatorProperties,
-      action: {type: "string", enum: ["ensure_main", "link_child", "apply", "assess_contribution"]},
+      action: {type: "string", enum: ["ensure_main", "link_child", "apply", "assess_contribution", "record_review"]},
       operationId: operationIdSchema,
       note: textSchema(workflowMutationLimits.maxTextLength),
       childThreadId: idSchema(),
@@ -764,6 +802,10 @@ export const workflowWriteToolDefinition = {
       contributionId: {type: "string", pattern: "^[A-Za-z0-9._:-]{1,64}$"},
       resultRevision: {type: "integer", minimum: 1, maximum: externalContributionLimits.maxRevision},
       decision: {type: "string", enum: externalContributionDecisions},
+      requestId: idSchema(),
+      outcome: {type: "string", enum: reviewOutcomes},
+      reason: textSchema(reviewLimits.maxReasonLength),
+      applyOperationIds: {type: "array", minItems: 1, maxItems: reviewLimits.maxApplies, uniqueItems: true, items: idSchema()},
     },
     oneOf: [
       {properties: {action: {const: "ensure_main"}}, required: ["operationId", "note"]},
@@ -771,6 +813,7 @@ export const workflowWriteToolDefinition = {
       {properties: {action: {const: "apply"}}, required: ["input"]},
       {properties: {action: {const: "assess_contribution"}},
         required: ["operationId", "workflowId", "expectedRevision", "contributionId", "resultRevision", "decision", "note"]},
+      {properties: {action: {const: "record_review"}}, required: ["operationId", "requestId", "outcome"]},
     ],
   },
 } as const;
@@ -839,6 +882,8 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
   const definitions = Option.getOrNull(yield* Effect.serviceOption(ProjectDefinitions));
   // bounded on-demand Supervisor context for the verified current binding: task, definitions, instructions and dry-run checks
   const conversation = Option.getOrNull(yield* Effect.serviceOption(SupervisorConversation));
+  // the monitoring requests whose outcomes record_review records (absent in a unit without them)
+  const conversationRequests = Option.getOrNull(yield* Effect.serviceOption(SupervisorConversationStore));
   // the Start and Stop of verified native calls (a native Start on own-thread evidence; a durable per-chat stop on genuine human
   // evidence, backed by the same thread policy as the dashboard control)
   const control = Option.getOrNull(yield* Effect.serviceOption(SupervisionControl));
@@ -1093,6 +1138,50 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     requestHash: string, reason: string): Effect.Effect<WorkflowWriteResult> =>
     commit(guard, now, owner, payload, evidence, requestHash, () => Effect.succeed({status: "denied", operationId: operationIdOf(payload), reason}));
 
+  // the apply edits this owner's root committed in one native run: operationId to the revision each produced
+  const runApplies = (owner: WorkflowOwner, runId: string) => guidanceSql(Effect.map(
+    sql`SELECT operation_id,native_evidence,result FROM supervisor_workflow_write_evidence WHERE supervisor_thread_id=${owner.supervisorThreadId} AND project_id=${owner.projectId} AND main_thread_id=${owner.mainThreadId} AND binding_generation=${owner.bindingGeneration} AND operation_namespace=${writeOperationNamespace} AND successful=1`,
+    (rows) => {
+      const applies = new Map<string, {workflowId: string; revision: number}>();
+      for (const row of rows) {
+        const decoded = decodeAppliedRow(row);
+        if (Exit.isFailure(decoded)) continue;
+        const {operation_id, native_evidence, result} = decoded.value;
+        if (native_evidence.runId !== runId || result.status !== "applied" || appliedAction(native_evidence.nativeInputCanonical) !== "apply") continue;
+        applies.set(operation_id, {workflowId: result.workflowId, revision: result.revision});
+      }
+      return applies;
+    }));
+
+  // record_review inside the write's transaction: the outcome of this root's own pending monitoring check-in, bound to this
+  // native call; reconciling the check-in's completion confirms it or leaves it unconfirmed
+  const recordReview = (owner: WorkflowOwner, payload: Extract<WorkflowWritePayload, {action: "record_review"}>, evidence: WorkflowEvidenceMatch,
+    now: number) => Effect.gen(function* (): Effect.fn.Return<WorkflowWriteResult, SupervisionStoreError> {
+    const denied = (reason: string): WorkflowWriteResult => ({status: "denied", operationId: payload.operationId, reason});
+    if (!conversationRequests) return {status: "unavailable", operationId: payload.operationId, reason: "review_outcomes_unavailable"};
+    const request: ConversationRequest | undefined = (yield* conversationRequests.requests(owner.projectId, owner.supervisorThreadId))
+      .find(item => item.id === payload.requestId);
+    if (!request || request.kind !== "review" || !request.reviewPins) return denied("review_request_unknown");
+    if (!["sending", "waiting", "uncertain"].includes(request.state)) return denied("review_request_not_pending");
+    if (request.reviewPins.bindingGeneration !== owner.bindingGeneration) return denied("review_request_binding_changed");
+    if (request.runId !== null && request.runId !== evidence.runId) return denied("review_outcome_other_run");
+    // the latest call of the run decides; an earlier call arriving later never replaces it
+    if (request.reviewOutcome && request.reviewOutcome.runId === evidence.runId && request.reviewOutcome.ordinal > evidence.ordinal)
+      return denied("review_outcome_superseded");
+    const applied = yield* runApplies(owner, evidence.runId);
+    const applies: Array<{operationId: string; workflowId: string; revision: number}> = [];
+    for (const operationId of payload.applyOperationIds ?? []) {
+      const found = applied.get(operationId);
+      if (!found) return denied("review_progress_apply_unverified");
+      applies.push({operationId, ...found});
+    }
+    if (payload.outcome === "no_change" && applied.size > 0) return denied("review_no_change_after_apply");
+    yield* conversationRequests.saveRequest({...request, reviewOutcome: {outcome: payload.outcome, reason: payload.reason ?? null, applies,
+      itemId: evidence.itemId, runId: evidence.runId, ordinal: evidence.ordinal, operationId: payload.operationId, recordedAt: now,
+      state: "recorded", problem: null}});
+    return {status: "recorded", operationId: payload.operationId, requestId: request.id, outcome: payload.outcome};
+  });
+
   const commitWrite = (
     guard: GateGuard,
     now: number,
@@ -1104,6 +1193,8 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     validation?: WorkflowApplyValidationContext,
     validatedEvidence?: WorkflowStateEvidenceInput[],
   ): Effect.Effect<WorkflowWriteResult> => commit(guard, now, owner, payload, evidence, requestHash, () => Effect.gen(function* (): Effect.fn.Return<WorkflowWriteResult, SupervisionStoreError> {
+    // root-only (checked at entry): the outcome of the root's own pending check-in, which no team assignment governs
+    if (payload.action === "record_review") return yield* recordReview(owner, payload, evidence, now);
     if (team) {
       const binding = yield* resolveBinding(payload, false, "effect", guard);
       const targetWorkflowId = payload.action === "apply" ? payload.input.workflowId : payload.action === "assess_contribution" ? payload.workflowId : null;
@@ -1609,6 +1700,8 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     // only the root that owns the main workflow assesses external results; helpers and other actors never do
     if (payload.action === "assess_contribution" && payload.supervisorThreadId !== binding.threadId)
       return {status: "denied", operationId: payload.operationId, reason: "contribution_assessment_root_only"};
+    if (payload.action === "record_review" && payload.supervisorThreadId !== binding.threadId)
+      return {status: "denied", operationId: payload.operationId, reason: "review_outcome_root_only"};
     const owner = ownerFor(binding);
     const operationId = operationIdOf(payload);
     const requestHash = workflowRequestHash({owner, arguments: payload});

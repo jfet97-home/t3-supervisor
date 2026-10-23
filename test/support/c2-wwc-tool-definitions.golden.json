@@ -464,7 +464,7 @@
   },
   "workflowWriteToolDefinition": {
     "name": "workflow_write",
-    "description": "Create the main draft, link a verified live descendant, assess a main-reported external contribution result, or update one semantic workflow with revision CAS. apply accepts a nested sequence/parallel plan and its unchanged source-bound requirements; omitted fields retain current values. Newly introduced nodes receive stable service IDs only after exact native submitted-argument verification. Keep operationId unique within this Supervisor binding and edit namespace. Status and notes are the Supervisor's assessment, not proof of execution. New live steps start \"planned\"; mark them underway or completed in a separate later apply with status_changed evidence. On rejection, read the reason, code, and path. Optional sourceThreadId/sourceRunId/sourceMessageId/sourceItemId values link to existing in-scope T3 activity; when no sourceThreadId is supplied, the workflow target thread is used. A reference is for navigation and never proves success or grants authority. assess_contribution is root-only for the main workflow: it records accepted or needs_more for the contribution's current result revision with expectedRevision CAS and never changes any status; complete the step separately with apply and status_changed evidence.",
+    "description": "Create the main draft, link a verified live descendant, assess a main-reported external contribution result, or update one semantic workflow with revision CAS. apply accepts a nested sequence/parallel plan and its unchanged source-bound requirements; omitted fields retain current values. Newly introduced nodes receive stable service IDs only after exact native submitted-argument verification. Keep operationId unique within this Supervisor binding and edit namespace. Status and notes are the Supervisor's assessment, not proof of execution. New live steps start \"planned\"; mark them underway or completed in a separate later apply with status_changed evidence. On rejection, read the reason, code, and path. Optional sourceThreadId/sourceRunId/sourceMessageId/sourceItemId values link to existing in-scope T3 activity; when no sourceThreadId is supplied, the workflow target thread is used. A reference is for navigation and never proves success or grants authority. assess_contribution is root-only for the main workflow: it records accepted or needs_more for the contribution's current result revision with expectedRevision CAS and never changes any status; complete the step separately with apply and status_changed evidence. record_review is root-only: it records the outcome of the monitoring check-in requestId in that check-in's own run: progress_updated citing applyOperationIds of the apply edits made in that run, no_change when nothing changed and no edit was made, needs_attention with a reason, or insufficient_evidence with a reason naming what is missing. It sends nothing; messaging the operative is a separate decision.",
     "inputSchema": {
       "$defs": {
         "group": {
@@ -880,7 +880,8 @@
             "ensure_main",
             "link_child",
             "apply",
-            "assess_contribution"
+            "assess_contribution",
+            "record_review"
           ]
         },
         "operationId": {
@@ -1229,6 +1230,36 @@
             "accepted",
             "needs_more"
           ]
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "progress_updated",
+            "no_change",
+            "needs_attention",
+            "insufficient_evidence"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "applyOperationIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
         }
       },
       "oneOf": [
@@ -1279,6 +1310,18 @@
             "resultRevision",
             "decision",
             "note"
+          ]
+        },
+        {
+          "properties": {
+            "action": {
+              "const": "record_review"
+            }
+          },
+          "required": [
+            "operationId",
+            "requestId",
+            "outcome"
           ]
         }
       ]

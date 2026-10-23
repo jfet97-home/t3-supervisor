@@ -301,6 +301,21 @@ export const DefinitionReview = Schema.Struct({
   updatedAt: Schema.Number,
 });
 export type DefinitionReviewInfo = typeof DefinitionReview.Type;
+/** The four results a root monitoring review records; none sends anything by itself. */
+export const reviewOutcomes = ["progress_updated", "no_change", "needs_attention", "insufficient_evidence"] as const;
+const ReviewOutcomeKind = Schema.Literals(reviewOutcomes);
+/** The last confirmed review outcome and the current one not (yet) confirmed: recorded, unconfirmed, or missing. */
+export const MonitoringReview = Schema.Struct({
+  lastConfirmed: Schema.NullOr(Schema.Struct({outcome: ReviewOutcomeKind, reason: Schema.NullOr(Schema.String), at: Schema.Number})),
+  current: Schema.NullOr(Schema.Struct({
+    state: Schema.Literals(["recorded", "unconfirmed", "missing"]),
+    outcome: Schema.NullOr(ReviewOutcomeKind),
+    reason: Schema.NullOr(Schema.String),
+    problem: Schema.NullOr(Schema.String),
+    at: Schema.Number,
+  })),
+});
+export type SupervisorMonitoringReview = typeof MonitoringReview.Type;
 export const MonitoringStatus = Schema.Struct({
   state: Schema.Literals(["idle", "busy", "unavailable", "uncertain"]),
   message: Schema.String,
@@ -308,6 +323,7 @@ export const MonitoringStatus = Schema.Struct({
   nextReviewAt: Schema.NullOr(Schema.Number),
   lastNoticeAt: Schema.NullOr(Schema.Number),
   retryable: Schema.optionalKey(Schema.Boolean),
+  review: Schema.optionalKey(MonitoringReview),
 });
 export type SupervisorMonitoringStatus = typeof MonitoringStatus.Type;
 export const TaskInterpretation = Schema.Struct({

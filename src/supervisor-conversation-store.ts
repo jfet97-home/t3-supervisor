@@ -4,8 +4,38 @@ import { GuidanceDb, untracedSql } from "./db.js";
 import { decodeGuidanceRow, documentRow, GuidanceStoreError, guidanceSql, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan, tableColumns } from "./guidance-sql.js";
 import { SupervisorIds } from "./ids.js";
 import type { SupervisorMonitorBatch } from "./supervisor-monitor.js";
-import { WorkflowProposal, type WorkflowProposalInfo } from "./project-supervisor-contract.js";
+import { reviewOutcomes, WorkflowProposal, type WorkflowProposalInfo } from "./project-supervisor-contract.js";
 import { InterpretationEvidence } from "./interpretation-evidence.js";
+
+export {reviewOutcomes};
+export type ReviewOutcomeKind = typeof reviewOutcomes[number];
+/** What a monitoring review was prepared against: the binding and, per included task, its revision and its main workflow, or none. */
+export type ReviewPins = {
+  bindingGeneration: number;
+  tasks: Array<{
+    taskId: string;
+    mainThreadId: string;
+    taskRevision: string;
+    workflow: {state: "absent"} | {state: "present"; workflowId: string; revision: number};
+  }>;
+};
+/**
+ * The outcome the root recorded for a monitoring review through workflow_write record_review, bound to its native call. It is
+ * "recorded" until the review's completion is reconciled: "confirmed" needs the completed call in the review's own run, the
+ * completion marker and current pins; otherwise it stays "unconfirmed" with the problem.
+ */
+export type ReviewOutcomeRecord = {
+  outcome: ReviewOutcomeKind;
+  reason: string | null;
+  applies: Array<{operationId: string; workflowId: string; revision: number}>;
+  itemId: string;
+  runId: string;
+  ordinal: number;
+  operationId: string;
+  recordedAt: number;
+  state: "recorded" | "confirmed" | "unconfirmed";
+  problem: string | null;
+};
 
 export type ConversationRequest = {
   id: string;
@@ -28,6 +58,9 @@ export type ConversationRequest = {
   teamMemberEpoch?: number;
   /** Version of the full standing instructions this request carried; confirmed completion records their delivery. */
   roleVersion?: string;
+  /** A root monitoring review: what it was prepared against; its completion needs a confirmed outcome. */
+  reviewPins?: ReviewPins;
+  reviewOutcome?: ReviewOutcomeRecord;
 };
 export type WorkflowIntroduction = {
   taskId: string;
@@ -107,6 +140,30 @@ const MonitorBatch = Schema.Struct({
   pendingItemCount: Schema.Number, truncated: Schema.Boolean, threads: Schema.mutable(Schema.Array(MonitorThreadBatch)),
 });
 const StringList = Schema.mutable(Schema.Array(Schema.String));
+const ReviewPinsDocument = Schema.Struct({
+  bindingGeneration: Schema.Number,
+  tasks: Schema.mutable(Schema.Array(Schema.Struct({
+    taskId: Schema.String,
+    mainThreadId: Schema.String,
+    taskRevision: Schema.String,
+    workflow: Schema.Union([
+      Schema.Struct({state: Schema.Literal("absent")}),
+      Schema.Struct({state: Schema.Literal("present"), workflowId: Schema.String, revision: Schema.Number}),
+    ]),
+  }))),
+});
+const ReviewOutcomeDocument = Schema.Struct({
+  outcome: Schema.Literals(reviewOutcomes),
+  reason: Schema.NullOr(Schema.String),
+  applies: Schema.mutable(Schema.Array(Schema.Struct({operationId: Schema.String, workflowId: Schema.String, revision: Schema.Number}))),
+  itemId: Schema.String,
+  runId: Schema.String,
+  ordinal: Schema.Number,
+  operationId: Schema.String,
+  recordedAt: Schema.Number,
+  state: Schema.Literals(["recorded", "confirmed", "unconfirmed"]),
+  problem: Schema.NullOr(Schema.String),
+});
 const ConversationRequestDocument = Schema.Struct({
   id: Schema.String,
   projectId: Schema.String,
@@ -127,6 +184,8 @@ const ConversationRequestDocument = Schema.Struct({
   teamEventIds: Schema.optionalKey(StringList),
   teamMemberEpoch: Schema.optionalKey(Schema.Number),
   roleVersion: Schema.optionalKey(Schema.String),
+  reviewPins: Schema.optionalKey(ReviewPinsDocument),
+  reviewOutcome: Schema.optionalKey(ReviewOutcomeDocument),
 });
 const DispatchMode = Schema.Union([
   Schema.Struct({ type: Schema.Literal("steer_active"), targetRunId: Schema.String }),
@@ -184,7 +243,7 @@ const decodeNoticeClockRow = decodeGuidanceRow(Schema.Struct({ last_notice_at: S
 const decodeReviewMissesRow = decodeGuidanceRow(Schema.Struct({ review_misses: Schema.Number }), "notice_clock");
 
 type PrepareInput = Pick<ConversationRequest, "projectId" | "supervisorThreadId" | "kind" | "taskId" | "text" | "batch" | "completionMarker"> &
-  Partial<Pick<ConversationRequest, "id" | "teamNotificationIds" | "teamEventIds" | "teamMemberEpoch" | "roleVersion">>;
+  Partial<Pick<ConversationRequest, "id" | "teamNotificationIds" | "teamEventIds" | "teamMemberEpoch" | "roleVersion" | "reviewPins">>;
 
 /** The conversation store: the durable Supervisor requests, workflow introductions, agreement candidates and notice clocks. */
 export interface SupervisorConversationStoreShape {

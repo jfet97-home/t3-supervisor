@@ -2580,9 +2580,19 @@ it.effect("a main contribution import and Supervisor writes race only through re
 it.effect("workflow_write advertises the root-only contribution assessment action", () => Effect.sync(() => {
   const schema = workflowWriteToolDefinition.inputSchema;
   assert.ok(schema.properties.action.enum.includes("assess_contribution"));
-  assert.deepEqual(schema.oneOf.at(-1), {properties: {action: {const: "assess_contribution"}},
+  assert.deepEqual(schema.oneOf.find(entry => entry.properties.action.const === "assess_contribution"), {properties: {action: {const: "assess_contribution"}},
     required: ["operationId", "workflowId", "expectedRevision", "contributionId", "resultRevision", "decision", "note"]});
   assert.match(workflowWriteToolDefinition.description, /never changes any status/u);
+}));
+
+it.effect("workflow_write advertises the root-only review outcome record, which sends nothing", () => Effect.sync(() => {
+  const schema = workflowWriteToolDefinition.inputSchema;
+  assert.ok(schema.properties.action.enum.includes("record_review"));
+  assert.deepEqual(schema.oneOf.find(entry => entry.properties.action.const === "record_review"),
+    {properties: {action: {const: "record_review"}}, required: ["operationId", "requestId", "outcome"]});
+  assert.deepEqual(schema.properties.outcome.enum, ["progress_updated", "no_change", "needs_attention", "insufficient_evidence"]);
+  assert.match(workflowWriteToolDefinition.description, /record_review is root-only/u);
+  assert.match(workflowWriteToolDefinition.description, /It sends nothing; messaging the operative is a separate decision/u);
 }));
 
 it.live("workflow_read view definitions accepts nonempty definitionIds through the real controller and MCP endpoint", () => Effect.gen(function* () {
