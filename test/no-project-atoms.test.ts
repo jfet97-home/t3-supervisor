@@ -26,7 +26,7 @@ const control = (generation: number, mode: string) => ({ generation, mode, globa
 // a registry of the running test: the subscriptions made through it are stopped and the registry is disposed when the test
 // ends, also after a failed assertion, so the leak gate reports only real leaks; stopping or disposing earlier is the test's
 // own step and is not repeated
-const testRegistry = (registry: Effect.Effect<AtomRegistry.AtomRegistry, never, Scope.Scope> = scopedRegistry()) => Effect.map(registry, (registry) => ({
+const pageRegistry = (registry: Effect.Effect<AtomRegistry.AtomRegistry, never, Scope.Scope> = scopedRegistry()) => Effect.map(registry, (registry) => ({
   registry,
   subscribe: (atom: Atom.Atom<unknown>) => subscribed(registry, atom),
 }));
@@ -35,7 +35,7 @@ const settled = (registry: AtomRegistry.AtomRegistry, atom: Atom.Atom<AsyncResul
   until(registry, atom, (result) => AsyncResult.isNotInitial(result) && !result.waiting, "the action settled");
 
 it.effect("CT-UI-NOPROJ-01 No Project save sends expectedGeneration, an unconfirmed result keeps the panel uncertain until Reload, and the draft mode survives a reload failure", () => Effect.gen(function* () {
-  const { registry, subscribe } = yield* testRegistry();
+  const { registry, subscribe } = yield* pageRegistry();
   const stop = yield* subscribe(ui.noProjectState);
   browser.sent.length = 0;
   let read: () => Response = () => json(control(7, "on_request"));
@@ -86,7 +86,7 @@ const status = (intent: { threadId: string; operationId: string }, value: string
 it.effect("CT-UI-START-01 a retained Start intent blocks any new Start, survives reload, keeps its fence through an unknown POST and a denied read, and a terminal status clears it exactly once", () => Effect.gen(function* () {
   browser.session.clear();
   browser.sent.length = 0;
-  const { registry: first, subscribe: subscribeFirst } = yield* testRegistry();
+  const { registry: first, subscribe: subscribeFirst } = yield* pageRegistry();
   const stopFirst = yield* subscribeFirst(ui.startState);
   assert.deepEqual(first.get(ui.startState), { intent: null, busy: false, message: "" });
   browser.state.reply = () => json({ message: "Unexpected." }, 500);
@@ -111,7 +111,7 @@ it.effect("CT-UI-START-01 a retained Start intent blocks any new Start, survives
   first.dispose();
 
   // a reload of the page keeps the fence
-  const { registry: second, subscribe: subscribeSecond } = yield* testRegistry();
+  const { registry: second, subscribe: subscribeSecond } = yield* pageRegistry();
   const stopSecond = yield* subscribeSecond(ui.startState);
   assert.deepEqual(second.get(ui.startState), { intent, busy: false, message: "" });
 
@@ -149,7 +149,7 @@ it.effect("CT-UI-START-01 a retained Start intent blocks any new Start, survives
 it.effect("no Start is sent without a persisted fence, a POST answer clears only a terminal status, and a pending answer keeps the fence", () => Effect.gen(function* () {
   browser.session.clear();
   browser.sent.length = 0;
-  const { registry, subscribe } = yield* testRegistry();
+  const { registry, subscribe } = yield* pageRegistry();
   const stop = yield* subscribe(ui.startState);
   browser.state.sessionBlocked = true;
   registry.set(ui.startSupervision, "thread-1");
@@ -184,7 +184,7 @@ it.effect("no Start is sent without a persisted fence, a POST answer clears only
 
 it.effect("a candidate search waits 200 ms for a typed query, a newer query interrupts it, and a 401 refreshes access", () => Effect.gen(function* () {
   browser.sent.length = 0;
-  const { registry, subscribe } = yield* testRegistry(clockedRegistry(atoms.uiRuntime));
+  const { registry, subscribe } = yield* pageRegistry(clockedRegistry(atoms.uiRuntime));
   const candidates = { exceptions: [], candidates: [{ id: "thread-1", projectId: "", title: "Chat", updatedAt: null, active: false, excluded: false }], message: "1 recent chat." };
   browser.state.reply = (request) => request.path === "/api/csrf" ? json({ csrf: "token" }) : json(candidates);
   const superseded = yield* subscribe(ui.chatCandidates("start")("cha")(0));
