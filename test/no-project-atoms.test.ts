@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { AsyncResult, type Atom, AtomRegistry } from "effect/reactivity";
-import { afterAll, beforeAll, it } from "vitest";
+import { afterAll, beforeAll, it, onTestFinished } from "vitest";
 import { json, makeBrowser, until } from "./support/ui-browser.js";
 
 // target regressions of the No Project panels over atoms (CT-UI-NOPROJ-01, CT-UI-START-01): the mode save and its
@@ -18,13 +18,31 @@ beforeAll(async () => {
 afterAll(() => browser.restore());
 
 const control = (generation: number, mode: string) => ({ generation, mode, globallyEnabled: true });
+// a registry of the running test: the subscriptions made through it are stopped and the registry is disposed when the test
+// ends, also after a failed assertion, so the leak gate reports only real leaks; stopping or disposing earlier is the test's
+// own step and is not repeated
+const testRegistry = () => {
+  const registry = AtomRegistry.make();
+  const active = new Set<() => void>();
+  onTestFinished(() => {
+    for (const stop of [...active]) stop();
+    registry.dispose();
+  });
+  const subscribe = (atom: Atom.Atom<unknown>) => {
+    const stop = registry.subscribe(atom, () => undefined, { immediate: true });
+    const once = () => { if (active.delete(once)) stop(); };
+    active.add(once);
+    return once;
+  };
+  return { registry, subscribe };
+};
 // resolves once an action written to the registry has finished
 const settled = (registry: AtomRegistry.AtomRegistry, atom: Atom.Atom<AsyncResult.AsyncResult<unknown, unknown>>) =>
   until(registry, atom, (result) => AsyncResult.isNotInitial(result) && !result.waiting, "the action settled");
 
 it("CT-UI-NOPROJ-01 No Project save sends expectedGeneration, an unconfirmed result keeps the panel uncertain until Reload, and the draft mode survives a reload failure", { timeout: 10_000 }, async () => {
-  const registry = AtomRegistry.make();
-  const stop = registry.subscribe(ui.noProjectState, () => undefined, { immediate: true });
+  const { registry, subscribe } = testRegistry();
+  const stop = subscribe(ui.noProjectState);
   browser.sent.length = 0;
   let read: () => Response = () => json(control(7, "on_request"));
   let save: () => Response = () => json({ message: "Unexpected." }, 500);
@@ -74,8 +92,8 @@ const status = (intent: { threadId: string; operationId: string }, value: string
 it("CT-UI-START-01 a retained Start intent blocks any new Start, survives reload, keeps its fence through an unknown POST and a denied read, and a terminal status clears it exactly once", { timeout: 10_000 }, async () => {
   browser.session.clear();
   browser.sent.length = 0;
-  const first = AtomRegistry.make();
-  const stopFirst = first.subscribe(ui.startState, () => undefined, { immediate: true });
+  const { registry: first, subscribe: subscribeFirst } = testRegistry();
+  const stopFirst = subscribeFirst(ui.startState);
   assert.deepEqual(first.get(ui.startState), { intent: null, busy: false, message: "" });
   browser.state.reply = () => json({ message: "Unexpected." }, 500);
 
@@ -99,8 +117,8 @@ it("CT-UI-START-01 a retained Start intent blocks any new Start, survives reload
   first.dispose();
 
   // a reload of the page keeps the fence
-  const second = AtomRegistry.make();
-  const stopSecond = second.subscribe(ui.startState, () => undefined, { immediate: true });
+  const { registry: second, subscribe: subscribeSecond } = testRegistry();
+  const stopSecond = subscribeSecond(ui.startState);
   assert.deepEqual(second.get(ui.startState), { intent, busy: false, message: "" });
 
   const revision = () => second.get(ui.candidatesRevision("start"));
@@ -137,8 +155,8 @@ it("CT-UI-START-01 a retained Start intent blocks any new Start, survives reload
 it("no Start is sent without a persisted fence, a POST answer clears only a terminal status, and a pending answer keeps the fence", { timeout: 10_000 }, async () => {
   browser.session.clear();
   browser.sent.length = 0;
-  const registry = AtomRegistry.make();
-  const stop = registry.subscribe(ui.startState, () => undefined, { immediate: true });
+  const { registry, subscribe } = testRegistry();
+  const stop = subscribe(ui.startState);
   browser.state.sessionBlocked = true;
   registry.set(ui.startSupervision, "thread-1");
   await settled(registry, ui.startSupervision);
@@ -172,13 +190,13 @@ it("no Start is sent without a persisted fence, a POST answer clears only a term
 
 it("a candidate search waits 200 ms for a typed query, a newer query interrupts it, and a 401 refreshes access", { timeout: 10_000 }, async () => {
   browser.sent.length = 0;
-  const registry = AtomRegistry.make();
+  const { registry, subscribe } = testRegistry();
   const candidates = { exceptions: [], candidates: [{ id: "thread-1", projectId: "", title: "Chat", updatedAt: null, active: false, excluded: false }], message: "1 recent chat." };
   browser.state.reply = (request) => request.path === "/api/csrf" ? json({ csrf: "token" }) : json(candidates);
-  const superseded = registry.subscribe(ui.chatCandidates("start")("cha")(0), () => undefined, { immediate: true });
+  const superseded = subscribe(ui.chatCandidates("start")("cha")(0));
   superseded();
   const atom = ui.chatCandidates("start")("chat")(0);
-  const stop = registry.subscribe(atom, () => undefined, { immediate: true });
+  const stop = subscribe(atom);
   const result = await until(registry, atom, AsyncResult.isSuccess, "the search answered");
   assert.deepEqual(AsyncResult.isSuccess(result) ? result.value : undefined, candidates);
   assert.deepEqual(browser.sent.map((request) => [request.path, Object.fromEntries(request.search)]), [["/api/guidance/supervision-candidates", { query: "chat", purpose: "start" }]],
@@ -188,7 +206,7 @@ it("a candidate search waits 200 ms for a typed query, a newer query interrupts 
   browser.sent.length = 0;
   browser.state.reply = (request) => request.path === "/api/csrf" ? json({ csrf: "token" }) : json({ message: "Sign in to Supervisor." }, 401);
   const recent = ui.chatCandidates("exclude")("")(0);
-  const stopRecent = registry.subscribe(recent, () => undefined, { immediate: true });
+  const stopRecent = subscribe(recent);
   await until(registry, recent, AsyncResult.isFailure, "the search failed");
   await browser.request((request) => request.path === "/api/csrf", "the access refresh");
   assert.deepEqual(browser.sent.map((request) => request.path), ["/api/guidance/supervision-candidates", "/api/csrf"]);
