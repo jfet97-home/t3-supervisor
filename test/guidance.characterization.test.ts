@@ -295,7 +295,7 @@ const inTransaction = (sql: SqlClient.SqlClient) => Effect.flatMap(Effect.exit(s
 // CC-NESTTX): the baseline store's transaction() refused a nested call at its BEGIN, so the nested block never ran. A nested
 // guidance transaction now runs as a savepoint of the outer one; when it fails, the outer work is still rolled back, nothing
 // is committed, no transaction stays open and the store stays usable. The name keeps the baseline's characterization
-it.live("CT-GDB-06: a nested transaction() fails at its BEGIN and rolls back the outer work", () => Effect.gen(function* () {
+it.live("CT-GDB-06: a nested transaction() joins the caller's transaction as a savepoint, and its failure rolls back the outer work and leaves the store usable", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("c3b-gdb-nested-");
   yield* withStore(directory, (_store, sql) => Effect.gen(function* () {
     const transaction = guidanceTransaction(sql);
