@@ -23999,7 +23999,7 @@
   }
  ],
  "completion": {
-  "scannedCommit": "4337bc8d612182476df61656dc86cd122238ed3e",
+  "scannedCommit": "bafcba531e9303ca5211b2e664dd92aa6086e686",
   "note": "the parent of the commit that writes this record; that commit changes only this file",
   "generator": "owner helper manifest-completion.py (scans comments-stripped text of every tracked file)",
   "statuses": {
