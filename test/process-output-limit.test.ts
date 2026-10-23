@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { it } from "@effect/vitest";
-import { Cause, Effect, Exit } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber } from "effect";
 import { startProcess } from "./support/g8-process.js";
 
 // the process helper's maxBuffer against node's execFile: each of stdout and stderr counts the raw bytes it received,
@@ -32,11 +32,23 @@ const helper = (plan: Plan) => Effect.scoped(Effect.gen(function* () {
   return {exceeded: true as const, message: String(Cause.squash(exit.cause)), signal: running.child.signalCode};
 }));
 
-// node's execFile with the same limit and its default utf8 decoding: rejected or resolved
-const oracle = (plan: Plan) => Effect.callback<boolean>((resume) => {
-  execFile(process.execPath, ["-e", childScript], {env: env(plan), cwd: tmpdir(), maxBuffer: limit, timeout: 10_000},
+// node's execFile with the same limit and its default utf8 decoding: rejected or resolved. the wait owns its child: an
+// interruption kills it and waits for its close, so no oracle process outlives its wait
+const oracle = (plan: Plan, onSpawn: (pid: number) => void = () => {}) => Effect.callback<boolean>((resume) => {
+  let closed = false;
+  const child = execFile(process.execPath, ["-e", childScript], {env: env(plan), cwd: tmpdir(), maxBuffer: limit, timeout: 10_000},
     (error) => resume(Effect.succeed(error !== null && (error as {code?: unknown}).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")));
+  child.once("close", () => { closed = true; });
+  if (child.pid !== undefined) onSpawn(child.pid);
+  return Effect.callback<void>((ended) => {
+    if (closed) return ended(Effect.void);
+    child.once("close", () => ended(Effect.void));
+    child.kill("SIGKILL");
+  });
 });
+const alive = (pid: number) => {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+};
 
 const multibyte = (bytes: number) => {
   const text = euro.repeat(Math.floor(bytes / 3)) + "a".repeat(bytes % 3);
@@ -94,4 +106,13 @@ it.live("invalid utf-8 counts its raw bytes, not the replacement characters it d
   assert.equal(atLimit.exceeded, false);
   if (!atLimit.exceeded) assert.equal(atLimit.stdout, "�".repeat(4096));
   assert.equal((yield* helper({writes: [write("stdout", Buffer.alloc(4097, 0xff))], keepAlive: true})).exceeded, true);
+}));
+
+it.live("an interrupted execFile oracle kills its child at once and leaves no process behind", () => Effect.gen(function* () {
+  const spawned = yield* Deferred.make<number>();
+  const waiting = yield* Effect.forkChild(oracle({writes: [], keepAlive: true}, (pid) => Deferred.doneUnsafe(spawned, Exit.succeed(pid))));
+  const pid = yield* Deferred.await(spawned);
+  assert.equal(alive(pid), true, "the oracle's child runs while its wait is pending");
+  yield* Fiber.interrupt(waiting);
+  assert.equal(alive(pid), false, "interrupting the oracle must end its child before the interruption completes");
 }));
