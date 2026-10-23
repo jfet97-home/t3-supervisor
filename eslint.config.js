@@ -1,11 +1,23 @@
 import tseslint from "typescript-eslint";
 
+// src and ui/src start no raw timer (plan S8): no timer global, also through globalThis or window, and no timers module
+const timerMessage = "src and ui/src start no raw timer; wait and repeat with Effect's Clock and Schedule (Effect.sleep, Schedule.spaced)";
+const timerNames = ["setTimeout", "setInterval", "setImmediate", "clearTimeout", "clearInterval", "clearImmediate"];
+const timerModules = ["timers", "node:timers", "timers/promises", "node:timers/promises"];
+const loadExtension = { property: "loadExtension", message: "SQLite extension loading stays disabled (plan 3.2)" };
+const timerRules = {
+  "no-restricted-globals": ["error", ...timerNames.map((name) => ({ name, message: timerMessage }))],
+  "no-restricted-properties": ["error", loadExtension,
+    ...["globalThis", "window"].flatMap((object) => timerNames.map((property) => ({ object, property, message: timerMessage })))],
+};
+
 // only src/db.ts opens SQLite clients (plan 3.2); only src/native-envelope.ts opens native T3 websockets in src (D-08);
 // suites run on vitest; the package barrel and every subpath (for example @effect/sql-sqlite-node/SqliteClient)
-const restrictedImports = ({ sqlite, ws }) => ["error", {
+const restrictedImports = ({ sqlite, ws, timers = false }) => ["error", {
   paths: [
     { name: "node:test", message: "the suites run on vitest" },
     ...(ws ? [{ name: "ws", message: "native T3 websockets go through src/native-envelope.ts (D-08)" }] : []),
+    ...(timers ? timerModules.map((name) => ({ name, message: timerMessage })) : []),
   ],
   patterns: sqlite ? [{ group: ["@effect/sql-sqlite-node", "@effect/sql-sqlite-node/*"], message: "only src/db.ts opens SQLite clients (plan 3.2)" }] : [],
 }];
@@ -32,13 +44,14 @@ export default tseslint.config(
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
       "@typescript-eslint/no-explicit-any": "error",
       "no-restricted-imports": restrictedImports({ sqlite: true, ws: false }),
-      "no-restricted-properties": ["error", { property: "loadExtension", message: "SQLite extension loading stays disabled (plan 3.2)" }],
+      "no-restricted-properties": ["error", loadExtension],
     },
   },
-  { files: ["src/**/*.ts", "src/**/*.tsx"], rules: { "no-restricted-imports": restrictedImports({ sqlite: true, ws: true }),
-    "no-restricted-syntax": runSyntax({ runMain: false, fiberRuntimes: false }) } },
+  { files: ["src/**/*.ts", "src/**/*.tsx"], rules: { "no-restricted-imports": restrictedImports({ sqlite: true, ws: true, timers: true }),
+    "no-restricted-syntax": runSyntax({ runMain: false, fiberRuntimes: false }), ...timerRules } },
+  { files: ["ui/src/**/*.ts", "ui/src/**/*.tsx"], rules: { "no-restricted-imports": restrictedImports({ sqlite: true, ws: false, timers: true }), ...timerRules } },
   { files: ["src/main.ts", "src/cli.ts"], rules: { "no-restricted-syntax": runSyntax({ runMain: true, fiberRuntimes: false }) } },
   { files: ["src/workflow-mcp.ts"], rules: { "no-restricted-syntax": runSyntax({ runMain: false, fiberRuntimes: true }) } },
-  { files: ["src/db.ts"], rules: { "no-restricted-imports": restrictedImports({ sqlite: false, ws: true }) } },
-  { files: ["src/native-envelope.ts"], rules: { "no-restricted-imports": restrictedImports({ sqlite: true, ws: false }) } },
+  { files: ["src/db.ts"], rules: { "no-restricted-imports": restrictedImports({ sqlite: false, ws: true, timers: true }) } },
+  { files: ["src/native-envelope.ts"], rules: { "no-restricted-imports": restrictedImports({ sqlite: true, ws: false, timers: true }) } },
 );
