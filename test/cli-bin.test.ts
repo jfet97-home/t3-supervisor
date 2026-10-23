@@ -1,21 +1,22 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterAll, beforeAll, describe, it, type TestContext } from "vitest";
-import { createServiceAuth } from "./support/service-auth-harness.js";
-import { prepareInstalledBin, type InstalledBin } from "./support/cli-bin.js";
-import { groupAlive, leakedSecrets, nodePath, repositoryRoot, runProcess, startProcess, tokenLineShape, tsxLoader,
+import { NodeFileSystem } from "@effect/platform-node";
+import { it, layer } from "@effect/vitest";
+import { Clock, Effect, FileSystem, Layer } from "effect";
+import { openServiceAuth, temporaryDirectory } from "./support/g8-auth.js";
+import { groupAlive, leakedSecrets, nodePath, repositoryRoot, tokenLineShape, tsxLoader,
   type ProcessResult } from "./support/cli-process.js";
+import { runProcess, startProcess, type RunningProcess } from "./support/g8-process.js";
 import { privately } from "./support/private-assert.js";
-import { dataFiles, listenerStates, quickChecks, supervisorHarness, waitUntilDescriptorRetry, waitUntilReady,
-  type SupervisorHarness } from "./support/cli-supervisor.js";
-import { after } from "./support/node-test.js";
+import { dataFiles, InstalledBin, installedBinLayer, listenerStates, quickChecks, supervisorHarness, waitUntilDescriptorRetry,
+  waitUntilReady, type SupervisorHarness } from "./support/g8-cli.js";
 import { forgeHelp, relativeDataDirectory, rootHelp, usageError } from "./support/cli-help.js";
 
-// process-level characterization of the supervisor entries: tsx source (main.ts, cli.ts) and the built/installed bin
+// process-level characterization of the supervisor entries: tsx source (main.ts, cli.ts) and the built/installed bin.
+// every case runs on the live clock: it.live, and inside the installed bin layer it.effect without the test services,
+// for the child processes, loopback listeners and the real busy wait timing
 
 const mainSource = join(repositoryRoot, "src", "main.ts");
 const cliSource = join(repositoryRoot, "src", "cli.ts");
@@ -43,48 +44,49 @@ const classified = (stdout: string): unknown[] => stdout.split("\n").filter(Bool
   return fields;
 });
 
-const signalAndWait = async (child: ReturnType<SupervisorHarness["start"]>, signal: NodeJS.Signals): Promise<ProcessResult> => {
+const signalAndWait = (child: RunningProcess, signal: NodeJS.Signals): Effect.Effect<ProcessResult> => Effect.suspend(() => {
   process.kill(child.pid, signal);
   return child.closed(exitTimeoutMs);
-};
+});
 
 // after exit: listeners refused, no process left in the group, no wal/shm/journal sidecar, every database reopens with quick_check ok
-const assertReleased = async (harness: SupervisorHarness, pid: number, files: ReadonlyArray<string>, databases: ReadonlyArray<string>) => {
-  assert.deepEqual(await listenerStates(harness), { health: "refused", ui: "refused", mcp: "refused" });
+const assertReleased = (harness: SupervisorHarness, pid: number, files: ReadonlyArray<string>, databases: ReadonlyArray<string>) => Effect.gen(function* () {
+  assert.deepEqual(yield* listenerStates(harness), { health: "refused", ui: "refused", mcp: "refused" });
   assert.equal(groupAlive(pid), false, "no process of the supervisor group outlives it");
-  assert.deepEqual(await dataFiles(harness), files);
+  assert.deepEqual(yield* dataFiles(harness), files);
   assert.deepEqual(quickChecks(harness, databases), Object.fromEntries(databases.map((name) => [name, "ok"])));
-  assert.deepEqual(await dataFiles(harness), files, "reopening leaves no sidecar behind");
-};
+  assert.deepEqual(yield* dataFiles(harness), files, "reopening leaves no sidecar behind");
+});
 
-it("CT-MAIN-01: SIGTERM after readiness exits 130, closes the health, UI and MCP listeners and every database", { timeout: 60_000 }, async (t) => {
-  const harness = await supervisorHarness(t, { activeThreads: 1, archiveThreads: 1 });
-  const child = harness.start(process.execPath, ["--import", tsxLoader, mainSource]);
-  await waitUntilReady(harness, child);
-  assert.deepEqual(await listenerStates(harness), { health: "open", ui: "open", mcp: "open" });
-  const result = await signalAndWait(child, "SIGTERM");
+it.live("CT-MAIN-01: SIGTERM after readiness exits 130, closes the health, UI and MCP listeners and every database", () => Effect.gen(function* () {
+  const harness = yield* supervisorHarness({ activeThreads: 1, archiveThreads: 1 });
+  const child = yield* harness.start(process.execPath, ["--import", tsxLoader, mainSource]);
+  yield* waitUntilReady(harness, child);
+  assert.deepEqual(yield* listenerStates(harness), { health: "open", ui: "open", mcp: "open" });
+  const result = yield* signalAndWait(child, "SIGTERM");
   assert.deepEqual({ code: result.code, signal: result.signal }, interruptExit);
   privately("SIGTERM output", [harness.token], () => {
     assert.equal(result.stderr, "");
     assert.deepEqual(events(result.stdout), ["supervisor_started"]);
   });
-  await assertReleased(harness, child.pid, readyFiles, readyDatabases);
-});
+  yield* assertReleased(harness, child.pid, readyFiles, readyDatabases);
+}).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
-it("CT-MAIN-03: startup failures exit 1 with one classified line and no stack, token bytes or token path: missing token file and invalid helper id",
-  { timeout: 60_000 }, async (t) => {
-    const harness = await supervisorHarness(t);
+it.live("CT-MAIN-03: startup failures exit 1 with one classified line and no stack, token bytes or token path: missing token file and invalid helper id",
+  () => Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const harness = yield* supervisorHarness();
     const canaries = ["guidance", "project-write", "project-commit", "git-probe"].map((name) => `${name}-canary-${harness.token.slice(0, 16)}`);
-    const canaryFiles = await Promise.all(canaries.map(async (canary, index) => {
+    const canaryFiles = yield* Effect.forEach(canaries, (canary, index) => Effect.gen(function* () {
       const path = join(harness.home, `canary-${index}`);
-      await writeFile(path, canary, { mode: 0o600 });
+      yield* fs.writeFileString(path, canary, { mode: 0o600 });
       return path;
-    }));
+    }), { concurrency: "unbounded" });
     const missingTokenFile = join(harness.home, "missing-t3-read-token");
     const entries = [["main.ts", [mainSource]], ["cli start", [cliSource, "start"]]] as const;
     for (const [label, entry] of entries) {
-      const dataDirectory = await mkdtemp(join(harness.home, "data-"));
-      const missing = await runProcess(process.execPath, ["--import", tsxLoader, ...entry], {
+      const dataDirectory = yield* fs.makeTempDirectory({ directory: harness.home, prefix: "data-" });
+      const missing = yield* runProcess(process.execPath, ["--import", tsxLoader, ...entry], {
         cwd: harness.home, timeoutMs: exitTimeoutMs,
         env: { ...harness.env, DATA_DIRECTORY: dataDirectory, T3_TOKEN_FILE: missingTokenFile,
           T3_GUIDANCE_TOKEN_FILE: canaryFiles[0], T3_PROJECT_WRITE_TOKEN_FILE: canaryFiles[1],
@@ -101,7 +103,7 @@ it("CT-MAIN-03: startup failures exit 1 with one classified line and no stack, t
       });
 
       const invalidDataDirectory = join(harness.home, `invalid-${label.replace(/\W/gu, "-")}`);
-      const invalid = await runProcess(process.execPath, ["--import", tsxLoader, ...entry], {
+      const invalid = yield* runProcess(process.execPath, ["--import", tsxLoader, ...entry], {
         cwd: harness.home, timeoutMs: exitTimeoutMs,
         env: { ...harness.env, DATA_DIRECTORY: invalidDataDirectory, SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: "a b" },
       });
@@ -113,40 +115,30 @@ it("CT-MAIN-03: startup failures exit 1 with one classified line and no stack, t
         assert.deepEqual(classified(invalid.stdout), [{ event: "supervisor_failed", reason: "invalid_helper_provider_instance_id" }]);
         assert.doesNotMatch(invalid.stdout, /^\s+at /mu);
       });
-      await assert.rejects(stat(invalidDataDirectory), { code: "ENOENT" }, "configuration fails before any store opens");
+      assert.equal((yield* Effect.flip(fs.stat(invalidDataDirectory))).reason._tag, "NotFound", "configuration fails before any store opens");
     }
-  });
+  }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
-describe("built and installed bin", () => {
-  let prepared: InstalledBin | undefined;
-  // build + pack + offline install of the packed package; bounded separately because it runs tsc and npm
-  beforeAll(async () => { prepared = await prepareInstalledBin(); }, 120_000);
-  afterAll(async () => { if (prepared) await rm(prepared.root, { recursive: true, force: true }); });
-  const bin = (): InstalledBin => {
-    if (prepared === undefined) throw new Error("the installed bin was not prepared");
-    return prepared;
-  };
-
-  const entry = (variant: "built dist/cli.js" | "installed bin"): [string, string[]] =>
-    variant === "installed bin" ? [bin().installedBin, []] : [process.execPath, [bin().builtCli]];
+// build + pack + offline install of the packed package, shared by the block and removed after it; its hooks are bounded
+// separately because the build runs tsc and npm. without the test services every case runs on the live clock
+layer(installedBinLayer.pipe(Layer.provideMerge(NodeFileSystem.layer)), { timeout: "120 seconds", excludeTestServices: true })("built and installed bin", (it) => {
+  const entry = (bin: InstalledBin["Service"], variant: "built dist/cli.js" | "installed bin"): [string, string[]] =>
+    variant === "installed bin" ? [bin.installedBin, []] : [process.execPath, [bin.builtCli]];
 
   // a private home with an initialized instance whose auth state stays open in this process
-  const forgeState = async (t: TestContext, prefix: string) => {
-    const home = await mkdtemp(join(tmpdir(), prefix));
+  const forgeState = (prefix: string) => Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const home = yield* temporaryDirectory(prefix);
     const state = join(home, "state");
-    const auth = await createServiceAuth(state);
-    after(t, async () => {
-      auth.close();
-      await rm(home, { recursive: true, force: true });
-    });
-    const workflowToken = await readFile(join(state, "access", "workflow-mcp-token"), "utf8");
+    const auth = yield* openServiceAuth(state);
+    const workflowToken = yield* fs.readFileString(join(state, "access", "workflow-mcp-token"));
     return { home, state, auth, workflowToken, env: { PATH: nodePath(), HOME: home, TMPDIR: home } };
-  };
+  });
 
-  it.for(["built dist/cli.js", "installed bin"] as const)("CT-CLI-BIN-01: %s representative argv keeps usage, exit codes and token-only forge output",
-    { timeout: 60_000 }, async (variant, t) => {
-      const { home, state, auth, workflowToken, env } = await forgeState(t, "cli-bin-argv-");
-      const [command, prefix] = entry(variant);
+  it.effect.each(["built dist/cli.js", "installed bin"] as const)("CT-CLI-BIN-01: %s representative argv keeps usage, exit codes and token-only forge output",
+    (variant) => Effect.gen(function* () {
+      const { home, state, auth, workflowToken, env } = yield* forgeState("cli-bin-argv-");
+      const [command, prefix] = entry(yield* InstalledBin, variant);
       // recorded from today's build; the target differs only by BC-CLI-01..04: effect/cli renders the help (01) and a
       // usage error prints it on stdout with the parse error, if any, on stderr, still exit 2 (02)
       const table: ReadonlyArray<{ argv: string[]; expected: Omit<ProcessResult, "signal"> }> = [
@@ -160,13 +152,13 @@ describe("built and installed bin", () => {
       ];
       const outputs: string[] = [];
       for (const row of table) {
-        const result = await runProcess(command, [...prefix, ...row.argv], { env, cwd: home, timeoutMs: exitTimeoutMs });
+        const result = yield* runProcess(command, [...prefix, ...row.argv], { env, cwd: home, timeoutMs: exitTimeoutMs });
         outputs.push(result.stdout, result.stderr);
         privately(`${variant} ${row.argv.join(" ")}`, [workflowToken], () => assert.deepEqual(result, { ...row.expected, signal: null }));
       }
       const issued: string[] = [];
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const success = await runProcess(command, [...prefix, "auth", "forge", "--data-dir", state], { env, cwd: home, timeoutMs: exitTimeoutMs });
+        const success = yield* runProcess(command, [...prefix, "auth", "forge", "--data-dir", state], { env, cwd: home, timeoutMs: exitTimeoutMs });
         outputs.push(success.stderr);
         // exactly one 43-character token line, empty stderr (so no ExperimentalWarning), compared by shape only
         privately(variant, [workflowToken, success.stdout.trim(), ...issued], () =>
@@ -176,49 +168,53 @@ describe("built and installed bin", () => {
       }
       // compared as a boolean, so a repeated token never appears in the failure
       assert.equal(issued[0] === issued[1], false, "every forge issues a new token");
-      for (const token of issued) privately(`${variant} token signs in`, issued, () => assert.equal(typeof auth.login(token), "string"));
+      for (const token of issued) {
+        const session = yield* auth.login(token);
+        privately(`${variant} token signs in`, issued, () => assert.equal(typeof session, "string"));
+      }
       assert.deepEqual(leakedSecrets(outputs.join("\n"), [workflowToken, ...issued]), [], "no output other than the forge stdout carries a token");
-    });
+    }), { timeout: 60_000 });
 
-  it.for(["SIGINT", "SIGTERM"] as const)("CT-CLI-BIN-02: %s after readiness exits 130 and releases listeners and databases", { timeout: 60_000 },
-    async (signal, t) => {
-      const harness = await supervisorHarness(t, { activeThreads: 1, archiveThreads: 1 });
-      const child = harness.start(bin().installedBin, ["start"]);
-      await waitUntilReady(harness, child);
-      assert.deepEqual(await listenerStates(harness), { health: "open", ui: "open", mcp: "open" });
-      const result = await signalAndWait(child, signal);
+  it.effect.each(["SIGINT", "SIGTERM"] as const)("CT-CLI-BIN-02: %s after readiness exits 130 and releases listeners and databases",
+    (signal) => Effect.gen(function* () {
+      const harness = yield* supervisorHarness({ activeThreads: 1, archiveThreads: 1 });
+      const child = yield* harness.start((yield* InstalledBin).installedBin, ["start"]);
+      yield* waitUntilReady(harness, child);
+      assert.deepEqual(yield* listenerStates(harness), { health: "open", ui: "open", mcp: "open" });
+      const result = yield* signalAndWait(child, signal);
       assert.deepEqual({ code: result.code, signal: result.signal }, interruptExit);
       privately(`${signal} output`, [harness.token], () => {
         assert.equal(result.stderr, "");
         assert.deepEqual(events(result.stdout), ["supervisor_started"]);
       });
-      await assertReleased(harness, child.pid, readyFiles, readyDatabases);
-    });
+      yield* assertReleased(harness, child.pid, readyFiles, readyDatabases);
+    }), { timeout: 60_000 });
 
-  it.for(["SIGINT", "SIGTERM"] as const)("CT-CLI-BIN-02: %s during partial acquisition (store open, descriptor retry pending) exits 130 and releases what was acquired",
-    { timeout: 60_000 }, async (signal, t) => {
-      const harness = await supervisorHarness(t, { descriptor: "unavailable" });
-      const child = harness.start(bin().installedBin, ["start"]);
-      await waitUntilDescriptorRetry(harness, child);
+  it.effect.each(["SIGINT", "SIGTERM"] as const)("CT-CLI-BIN-02: %s during partial acquisition (store open, descriptor retry pending) exits 130 and releases what was acquired",
+    (signal) => Effect.gen(function* () {
+      const harness = yield* supervisorHarness({ descriptor: "unavailable" });
+      const child = yield* harness.start((yield* InstalledBin).installedBin, ["start"]);
+      yield* waitUntilDescriptorRetry(harness, child);
       // supervision starts only after the descriptor, so the UI and MCP listeners were never acquired
-      assert.deepEqual(await listenerStates(harness), { health: "open", ui: "refused", mcp: "refused" });
-      const result = await signalAndWait(child, signal);
+      assert.deepEqual(yield* listenerStates(harness), { health: "open", ui: "refused", mcp: "refused" });
+      const result = yield* signalAndWait(child, signal);
       assert.deepEqual({ code: result.code, signal: result.signal }, interruptExit);
       privately(`${signal} output`, [harness.token], () => {
         assert.equal(result.stderr, "");
         assert.deepEqual(events(result.stdout), ["supervisor_started"]);
       });
       assert.deepEqual(harness.fake.traffic.requests, [], "no subscription before a descriptor");
-      await assertReleased(harness, child.pid, ["catalog.sqlite3", "thread-settings.sqlite3"], ["catalog.sqlite3", "thread-settings.sqlite3"]);
-    });
+      yield* assertReleased(harness, child.pid, ["catalog.sqlite3", "thread-settings.sqlite3"], ["catalog.sqlite3", "thread-settings.sqlite3"]);
+    }), { timeout: 60_000 });
 
-  it("CT-CLI-BIN-03: SIGINT during a forge waiting on the login lock writes no grant, prints no token and leaves the lock holder unaffected",
-    { timeout: 60_000 }, async (t) => {
-      const { home, state, workflowToken, env } = await forgeState(t, "cli-bin-lock-");
+  it.effect("CT-CLI-BIN-03: SIGINT during a forge waiting on the login lock writes no grant, prints no token and leaves the lock holder unaffected",
+    () => Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { home, state, workflowToken, env } = yield* forgeState("cli-bin-lock-");
       const database = join(state, "access", "login.sqlite3");
       const holderHash = createHash("sha256").update(randomBytes(32)).digest("hex");
       // a second process holds BEGIN IMMEDIATE until told to insert its own grant and commit
-      const holder = startProcess(process.execPath, ["-e", [
+      const holder = yield* startProcess(process.execPath, ["-e", [
         "const {DatabaseSync} = require('node:sqlite');",
         "const database = new DatabaseSync(process.argv[1]);",
         "database.exec('PRAGMA busy_timeout=0; BEGIN IMMEDIATE');",
@@ -228,33 +224,31 @@ describe("built and installed bin", () => {
         "  database.exec('COMMIT'); database.close(); process.stdout.write('committed\\n'); process.stdin.destroy();",
         "});",
       ].join("\n"), database, holderHash], { env, cwd: home, stdin: "pipe" });
-      after(t, () => holder.dispose());
-      await holder.waitForStdout((stdout) => stdout === "locked\n", 15_000, "the held lock");
+      yield* holder.waitForStdout((stdout) => stdout === "locked\n", 15_000, "the held lock");
 
       // forge chmods the database to 0600 right before its busy wait on BEGIN IMMEDIATE; a looser mode makes that step observable
-      await chmod(database, 0o640);
-      const forge = startProcess(bin().installedBin, ["auth", "forge", "--data-dir", state], { env, cwd: home });
-      after(t, () => forge.dispose());
-      const deadline = performance.now() + 15_000;
-      while (((await stat(database)).mode & 0o777) !== 0o600) {
-        if (performance.now() > deadline || forge.child.exitCode !== null) throw new Error("forge did not reach the login database");
-        await new Promise((resolve) => setTimeout(resolve, 2));
+      yield* fs.chmod(database, 0o640);
+      const forge = yield* startProcess((yield* InstalledBin).installedBin, ["auth", "forge", "--data-dir", state], { env, cwd: home });
+      const deadline = (yield* Clock.currentTimeMillis) + 15_000;
+      while (((yield* fs.stat(database)).mode & 0o777) !== 0o600) {
+        if ((yield* Clock.currentTimeMillis) > deadline || forge.child.exitCode !== null) return yield* Effect.die(new Error("forge did not reach the login database"));
+        yield* Effect.sleep("2 millis");
       }
-      const signalledAt = performance.now();
+      const signalledAt = yield* Clock.currentTimeMillis;
       process.kill(forge.pid, "SIGINT");
-      const interrupted = await forge.closed(exitTimeoutMs);
-      const exitMs = performance.now() - signalledAt;
+      const interrupted = yield* forge.closed(exitTimeoutMs);
+      const exitMs = (yield* Clock.currentTimeMillis) - signalledAt;
       // target: runMain interrupts the forge, which prints nothing and exits 130; a signal that lands in the synchronous busy
       // wait takes effect only when the wait ends, so the exit is bounded by busy_timeout (5000 ms) plus the release
       privately("interrupted forge", [], () => assert.deepEqual(interrupted, { code: 130, signal: null, stdout: "", stderr: "" }));
       assert.ok(exitMs < 5_000 + 2_000, `exit took ${Math.round(exitMs)} ms`);
 
       holder.child.stdin?.write("commit\n");
-      await holder.waitForStdout((stdout) => stdout === "locked\ncommitted\n", 15_000, "the holder commit");
-      const held = await holder.closed(exitTimeoutMs);
+      yield* holder.waitForStdout((stdout) => stdout === "locked\ncommitted\n", 15_000, "the holder commit");
+      const held = yield* holder.closed(exitTimeoutMs);
       privately("holder output", [workflowToken], () => assert.deepEqual(held, { code: 0, signal: null, stdout: "locked\ncommitted\n", stderr: "" }));
 
-      assert.deepEqual((await readdir(join(state, "access"))).sort(), ["login.sqlite3", "workflow-mcp-token"], "no hot journal is left");
+      assert.deepEqual((yield* fs.readDirectory(join(state, "access"))).sort(), ["login.sqlite3", "workflow-mcp-token"], "no hot journal is left");
       const check = new DatabaseSync(database);
       try {
         assert.deepEqual({ ...check.prepare("PRAGMA quick_check").get() }, { quick_check: "ok" });
@@ -263,5 +257,5 @@ describe("built and installed bin", () => {
         check.close();
       }
       assert.deepEqual(leakedSecrets(interrupted.stdout + interrupted.stderr, [workflowToken]), []);
-    });
+    }), { timeout: 60_000 });
 });
