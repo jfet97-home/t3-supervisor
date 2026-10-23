@@ -138,7 +138,8 @@ it("CT-HTX-03: global fetch issues one POST for 2xx, 4xx and 5xx replies, with n
     }});
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(3_000)), outcome, String(status));
     assert.deepEqual(responses.map(response => [response.status, response.bodyUsed]), [[status, status === 202]], String(status));
-    for (const response of responses) if (!response.bodyUsed) await response.body?.cancel();
+    // the transport now ends an unread reply's request itself, which errors its body with an AbortError; only that is tolerated
+    for (const response of responses) if (!response.bodyUsed) await response.body?.cancel().catch((error: unknown) => {if (!(error instanceof Error && error.name === "AbortError")) throw error;});
     assert.equal(f.receipt(f.db, input.messageId)?.state, state, String(status));
     // a later send of the same identity only reconciles it
     await transport.send(f.binding, input, AbortSignal.timeout(3_000));

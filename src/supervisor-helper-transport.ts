@@ -1,4 +1,4 @@
-import {Cause, Context, Data, Deferred, Effect, Fiber, FiberMap, Layer, Option, Schema} from "effect";
+import {Cause, Context, Data, Deferred, Effect, Exit, Fiber, FiberMap, Layer, Option, Schema, Scope} from "effect";
 import {HttpClient, HttpClientRequest, type HttpClientResponse} from "effect/http";
 import {workflowRequestHash} from "./workflow-write-evidence.js";
 import {NativeOperateRpc, record, type NativeRpcShape, type SupervisorRpcError} from "./supervisor-native.js";
@@ -427,13 +427,19 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
   });
   // the POST, started by the admission section's initiation and awaited outside it. A webhook has no client
   // idempotency key, so an uncertain post is never repeated; an interruption leaves the receipt 'posting', which is
-  // uncertain from then on, and the release aborts the request exactly once
+  // uncertain from then on
   const initiate = (binding: BindingRecord, posting: Delivery, endpoint: URL, messages: readonly MessageInfo[],
-    cancel: Deferred.Deferred<void> | undefined): Effect.Effect<AdmittedInFlight<Admission>> => {
+    cancel: Deferred.Deferred<void> | undefined): Effect.Effect<AdmittedInFlight<Admission>> => Effect.gen(function* () {
+    // the request belongs to this exchange from its start: the release closes it, which aborts whatever is still open
+    // (a reply held between its headers and its body read, a reply whose body is never read, an interrupted wait); a
+    // completed read is unaffected
+    const exchange = yield* Scope.make();
     // no client span and no trace headers: a span would carry the webhook path, which holds the hook token
-    const request = client.execute(HttpClientRequest.post(endpoint).pipe(HttpClientRequest.bodyText(helperDeliveryBody(posting.messageId, posting.text), "application/json")))
-      .pipe(Effect.provideService(HttpClient.TracerDisabledWhen, () => true));
-    return Effect.map(Effect.forkDetach(request, {startImmediately: true}), (post) => ({
+    const request = HttpClient.withScope(client).execute(HttpClientRequest.post(endpoint).pipe(
+      HttpClientRequest.bodyText(helperDeliveryBody(posting.messageId, posting.text), "application/json")))
+      .pipe(Scope.provide(exchange), Effect.provideService(HttpClient.TracerDisabledWhen, () => true));
+    const post = yield* Effect.forkDetach(request, {startImmediately: true});
+    return {
       result: Effect.gen(function* () {
         const settle = (value: SupervisorHelperSendResult) => settled(binding, posting.messageId, value);
         const response: HttpClientResponse.HttpClientResponse = yield* untilCancelled(Fiber.join(post), cancel);
@@ -456,9 +462,10 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
         // a delivery id in the reply does not outweigh a contradiction stored while the POST was in flight
         return sent(settle(nativeDeliveryId || attributed ? "waiting" : "uncertain"));
       }).pipe(otherwise(sent("uncertain"))),
-      release: Effect.asVoid(Fiber.interrupt(post)),
-    }));
-  };
+      // exactly once, at any end of the operation
+      release: Scope.close(exchange, Exit.void).pipe(Effect.andThen(Fiber.interrupt(post)), Effect.asVoid),
+    };
+  });
   // `authorized` is re-checked with the admission guard after this method's own awaits, immediately before the
   // receipt and POST, so authority revoked meanwhile (for example a quarantine) posts nothing.
   const send = (binding: BindingRecord, input: SupervisorHelperMessage, sendOptions: HelperSendOptions = {}): Effect.Effect<SupervisorHelperSendResult> => Effect.gen(function* () {

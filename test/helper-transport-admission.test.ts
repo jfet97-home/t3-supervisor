@@ -4,8 +4,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "@effect/vitest";
-import { Deferred, Effect, Exit, Fiber, Scope } from "effect";
-import { FetchHttpClient } from "effect/http";
+import { Deferred, Effect, Exit, Fiber, Option, Scope } from "effect";
+import { FetchHttpClient, HttpClient, type HttpClientResponse } from "effect/http";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { defaultSupervisorModel, ProjectSupervisorStore } from "../src/project-supervisor-store.js";
 import { makeSupervisionGate, SupervisionGate, type GateGuard, type SupervisionGateShape } from "../src/supervision-gate.js";
@@ -24,11 +24,24 @@ import { operateClient, projectionClient } from "./support/team-units.js";
 const webhookPath = "/api/hooks/fixture/admission-only-token";
 const input: SupervisorHelperMessage = { threadId: "helper", commandId: "admission-command", messageId: "admission-message", text: "Check the assigned branch." };
 
-type Peer = { readonly baseUrl: string; readonly posts: string[]; readonly arrived: Deferred.Deferred<void>; readonly reply: Deferred.Deferred<void> };
+type Peer = {
+  readonly baseUrl: string;
+  readonly posts: string[];
+  readonly arrived: Deferred.Deferred<void>;
+  readonly reply: Deferred.Deferred<void>;
+  // a POST's request ended on the peer: its exchange closed, finished or not
+  readonly ended: Deferred.Deferred<void>;
+  // replies whose connection closed before the peer finished writing them
+  readonly cut: number[];
+};
 
-// one held POST at a time: the reply is a 202 with a delivery id once `reply` completes
-const peer = Effect.acquireRelease(Effect.gen(function* () {
+// "held": a complete 202 with a delivery id once `reply` completes; a status: that status's headers and the first byte of
+// a declared body at once, the rest never sent, so the request stays open until the client ends it
+
+const peer = (mode: "held" | number) => Effect.acquireRelease(Effect.gen(function* () {
   const arrived = yield* Deferred.make<void>();
+  const ended = yield* Deferred.make<void>();
+  const cut: number[] = [];
   const reply = yield* Deferred.make<void>();
   const posts: string[] = [];
   const waiting = new Set<ServerResponse>();
@@ -41,8 +54,18 @@ const peer = Effect.acquireRelease(Effect.gen(function* () {
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
     request.on("end", () => {
       posts.push(Buffer.concat(chunks).toString("utf8"));
-      waiting.add(response);
+      const index = posts.length;
+      response.once("close", () => {
+        if (!response.writableFinished) cut.push(index);
+        Deferred.doneUnsafe(ended, Effect.void);
+      });
       Deferred.doneUnsafe(arrived, Effect.void);
+      if (mode !== "held") {
+        response.writeHead(mode, { "content-type": "application/json", "content-length": "64" });
+        response.write("{");
+        return;
+      }
+      waiting.add(response);
       if (Deferred.isDoneUnsafe(reply)) answer(response);
     });
   });
@@ -50,13 +73,13 @@ const peer = Effect.acquireRelease(Effect.gen(function* () {
   const address = server.address();
   assert.ok(address !== null && typeof address === "object");
   yield* Effect.forkScoped(Deferred.await(reply).pipe(Effect.andThen(Effect.sync(() => {for (const response of [...waiting]) answer(response);}))));
-  return { server, peer: { baseUrl: `http://127.0.0.1:${address.port}`, posts, arrived, reply } satisfies Peer };
+  return { server, peer: { baseUrl: `http://127.0.0.1:${address.port}`, posts, arrived, reply, ended, cut } satisfies Peer };
 }), ({ server }) => Effect.callback<void>((resume) => {
   server.close(() => resume(Effect.void));
   server.closeAllConnections();
 })).pipe(Effect.map(({ peer }) => peer));
 
-const fixture = Effect.gen(function* () {
+const fixtureWith = (mode: "held" | number) => Effect.gen(function* () {
   const directory = yield* Effect.acquireRelease(Effect.promise(() => mkdtemp(join(tmpdir(), "helper-admission-"))),
     (path) => Effect.promise(() => rm(path, { recursive: true, force: true })));
   const guidance = yield* Effect.acquireRelease(Effect.sync(() => new GuidanceStore(directory)), (db) => Effect.sync(() => db.close()));
@@ -67,7 +90,7 @@ const fixture = Effect.gen(function* () {
   const helper: Projection = { thread: { id: "helper", projectId: "p", title: "helper", modelSelection: defaultSupervisorModel,
     runtimeMode: "full-access", interactionMode: "default", lineage: { parentThreadId: binding.threadId, relationshipToParent: "subagent" } },
   runs: [], messages: [], runtimeRequests: [] };
-  const http = yield* peer;
+  const http = yield* peer(mode);
   const log: string[] = [];
   const rpcs: string[] = [];
   const tasks: Record<string, unknown>[] = [];
@@ -114,8 +137,9 @@ const fixture = Effect.gen(function* () {
   let projectionGate: Promise<void> | null = null;
   let projectionReads = 0;
   const projection = async () => {projectionReads += 1;if (projectionGate) await projectionGate;return helper;};
-  // a transport in its own scope, as the supervision run builds it
-  const transport = (scope: Scope.Scope) => HelperTransport.make({ store, baseUrl: http.baseUrl }).pipe(
+  // a transport in its own scope, as the supervision run builds it; `wrap` stands between it and the fetch client
+  const transport = (scope: Scope.Scope, wrap: (client: HttpClient.HttpClient) => HttpClient.HttpClient = (client) => client) => HttpClient.HttpClient.pipe(
+    Effect.flatMap((client) => HelperTransport.make({ store, baseUrl: http.baseUrl }).pipe(Effect.provideService(HttpClient.HttpClient, wrap(client)))),
     Effect.provideService(NativeOperateRpc, operateClient(rpc)),
     Effect.provideService(SupervisionGate, gate),
     Effect.provideService(T3Client, projectionClient(projection)),
@@ -134,6 +158,8 @@ const fixture = Effect.gen(function* () {
     onGuard: (action: (read: number) => void) => {onGuard = action;},
     holdProjection: (gateOn: Promise<void>) => {projectionGate = gateOn;} };
 });
+
+const fixture = fixtureWith("held");
 
 describe("CT-LIN-05 on the helper webhook transport", () => {
   it.live("a: a send admitted before a Stop starts its POST before the Stop's policy commit, and the Stop completes while the POST awaits its reply", () =>
@@ -157,7 +183,7 @@ describe("CT-LIN-05 on the helper webhook transport", () => {
       assert.equal(f.receipt()?.state, "posted");
       assert.equal(f.receipt()?.nativeDeliveryId, "native-delivery-1");
       assert.deepEqual(f.http.posts, [helperDeliveryBody(input.messageId, input.text)]);
-      assert.equal(f.aborts(), 0);
+      assert.deepEqual(f.http.cut, [], "the peer finished its reply; the Stop cut nothing");
     }), { timeout: 10_000 });
 
   for (const [change, label, outcome] of [
@@ -229,5 +255,50 @@ describe("CT-LIN-05 on the helper webhook transport", () => {
     assert.equal(f.log.filter((entry) => entry === "initiate").length, 1);
     assert.equal(f.rpcs.includes("scheduledTasks.listWebhookDeliveries"), false, "the duplicate joined instead of reconciling a receipt");
     assert.equal(f.receipt()?.state, "posted");
+  }), { timeout: 10_000 });
+});
+
+// the webhook POST's response belongs to the admitted operation: whatever ends it (the caller giving up, the transport
+// closing, a settled reply whose body is never read) ends an open request, as NRPC-08 does for the shell read
+describe("webhook POST release", () => {
+  for (const [label, ending] of [["the caller gives up", "cancel"], ["the transport scope closes", "close"]] as const) {
+    it.live(`HTX-REL-01: a 2xx response held at the handoff to its body read is ended when ${label}`, () => Effect.gen(function* () {
+      const f = yield* fixtureWith(202);
+      // the reviewers' fault: the response is taken and held between its headers and its body read
+      const headers = yield* Deferred.make<void>();
+      let held: HttpClientResponse.HttpClientResponse | undefined;
+      const atHandoff = (client: HttpClient.HttpClient) => HttpClient.transformResponse(client, (effect) => effect.pipe(Effect.tap((response) => {
+        held = response;
+        return Deferred.succeed(headers, undefined).pipe(Effect.andThen(Effect.never));
+      })));
+      const transportScope = yield* Scope.make();
+      const transport = yield* f.transport(transportScope, atHandoff);
+      const cancel = yield* Deferred.make<void>();
+      const send = yield* Effect.forkChild(transport.send(f.binding, input, { cancel }));
+      yield* Deferred.await(headers);
+      if (ending === "cancel") yield* Deferred.succeed(cancel, undefined);
+      else yield* Scope.close(transportScope, Exit.void);
+      assert.equal(yield* Fiber.join(send), "uncertain");
+      assert.ok(held !== undefined, "the response was taken");
+      // bounded only so that a request left open fails here by name; the peer closes it at teardown
+      const closed = yield* Deferred.await(f.http.ended).pipe(Effect.timeoutOption("2 seconds"));
+      assert.ok(Option.isSome(closed), "the POST's request ended with its operation");
+      assert.deepEqual(f.http.cut, [1]);
+      assert.equal(f.receipt()?.state, "posting");
+      assert.deepEqual(f.http.posts, [helperDeliveryBody(input.messageId, input.text)]);
+    }), { timeout: 10_000 });
+  }
+
+  it.live("HTX-REL-02: an unread 4xx reply's request is ended when its send settles rejected, and a later send only reconciles", () => Effect.gen(function* () {
+    const f = yield* fixtureWith(400);
+    const transport = yield* f.transport(yield* Effect.scope);
+    assert.equal(yield* transport.send(f.binding, input), "rejected");
+    // bounded only so that a request left open fails here by name; the peer closes it at teardown
+    const closed = yield* Deferred.await(f.http.ended).pipe(Effect.timeoutOption("2 seconds"));
+    assert.ok(Option.isSome(closed), "the unread 4xx request ended with its operation");
+    assert.deepEqual(f.http.cut, [1]);
+    assert.equal(f.receipt()?.state, "rejected");
+    assert.equal(yield* transport.send(f.binding, input), "rejected");
+    assert.deepEqual(f.http.posts, [helperDeliveryBody(input.messageId, input.text)]);
   }), { timeout: 10_000 });
 });
