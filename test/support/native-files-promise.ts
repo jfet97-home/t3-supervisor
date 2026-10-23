@@ -1,15 +1,13 @@
-import { NodeCrypto } from "@effect/platform-node";
-import { type Crypto, Deferred, Effect, Layer } from "effect";
-import { GitProbe, type GitProbeError } from "../../src/git-probe.js";
-import type { GuidanceStore } from "../../src/guidance-store.js";
+import { Deferred, Effect } from "effect";
+import type { GitProbeError } from "../../src/git-probe.js";
 import { cancelOnAbort, NativeEnvelope } from "../../src/native-envelope.js";
 import type { ProjectConfigWriter } from "../../src/project-config-editor.js";
 import type { ProjectDefinitionLoaderOptions as LoaderOptions } from "../../src/project-definitions.js";
 import { ProjectCommitter as Committer, ProjectFiles as Files, ProjectWriter as Writer, type CommitOutcome, type FreshGitInfo, type GitOperationState,
   type ListEntries, type ProjectFileError, type ReadFileResult, type VcsInfo } from "../../src/project-files.js";
 
-// the baseline promise call shapes of the native file clients and the git probe, for in-memory fakes and the characterizations
-// (tests are not business code): fakes become the services through the as* adapters, and make* hand the services out as promises
+// the baseline promise call shapes of the native file clients, for in-memory fakes and the characterizations (tests are not
+// business code): fakes become the services through the as* adapters, and make* hand the file clients out as promises
 
 export interface ProjectFiles {
   directoryExists(root: string, signal: AbortSignal): Promise<boolean>;
@@ -74,8 +72,7 @@ export const asLoaderOptions = ({setupWriter, gitProbe, ...options}: ProjectDefi
   ...(gitProbe ? {gitProbe: (root: string, cancel?: Deferred.Deferred<void>) => promised<FreshGitInfo, GitProbeError>(signal => gitProbe(root, signal), cancel)} : {}),
 });
 
-const nativeClients = Layer.merge(NativeEnvelope.layer, NodeCrypto.layer);
-const build = <S>(make: Effect.Effect<S, never, NativeEnvelope | Crypto.Crypto>): S => Effect.runSync(Effect.provide(make, nativeClients));
+const build = <S>(make: Effect.Effect<S, never, NativeEnvelope>): S => Effect.runSync(Effect.provide(make, NativeEnvelope.layer));
 // one service call whose cancel trigger is the caller's signal, as the composition root hands its callers' signals to the services
 const settle = <A, E>(signal: AbortSignal, call: (cancel: Deferred.Deferred<void>) => Effect.Effect<A, E>): Promise<A> =>
   Effect.runPromise(Effect.scoped(Effect.flatMap(cancelOnAbort(signal), call)));
@@ -103,12 +100,4 @@ export const makeProjectWriter = (baseUrl: string, token: string): Required<Proj
 export const makeProjectCommitter = (baseUrl: string, token: string): ProjectCommitter => {
   const committer = build(Committer.make({baseUrl, token}));
   return {commitFiles: (root, paths, message, actionId, signal) => settle(signal, cancel => committer.commitFiles(root, paths, message, actionId, cancel))};
-};
-
-export const makeGitProbe = (baseUrl: string, token: string, store: GuidanceStore) => {
-  const probe = build(GitProbe.make({baseUrl, token}, store));
-  return {
-    probe: (root: string, signal: AbortSignal): Promise<FreshGitInfo> => settle(signal, cancel => probe.probe(root, cancel)),
-    cleanup: (): Promise<void> => Effect.runPromise(probe.cleanup),
-  };
 };

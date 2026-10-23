@@ -1,35 +1,33 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { Duplex } from "node:stream";
-import { it, vi, type TestContext } from "vitest";
+import { it } from "@effect/vitest";
+import { Clock, Deferred, Effect, Fiber } from "effect";
+import { TestClock } from "effect/testing";
 import { WebSocketServer, type WebSocket } from "ws";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { Effect } from "effect";
-import { SupervisorRpcError } from "../src/supervisor-native.js";
-import { makeSupervisorRpc } from "./support/supervisor-native-client.js";
+import { NativeEnvelope } from "../src/native-envelope.js";
+import { NativeRpc, SupervisorRpcError } from "../src/supervisor-native.js";
 import { makeT3Client, T3Client, T3TransportError } from "../src/t3.js";
-import { ProjectFileError } from "../src/project-files.js";
+import { ProjectCommitter, ProjectFileError, ProjectFiles } from "../src/project-files.js";
 import { GitProbeError } from "../src/git-probe.js";
-import { makeGitProbe, makeProjectCommitter, makeProjectFiles } from "./support/native-files-promise.js";
-import { GuidanceStore } from "../src/guidance-store.js";
 import { fakeT3 } from "./support/c1-git-probe-peer.js";
-import { after } from "./support/node-test.js";
-import { turn, withDeadline } from "./support/c1-loopback.js";
+import { probeGuidance } from "./support/g10-probe-guidance.js";
+
+// every client here talks to a real loopback T3 peer (ws or http sockets), so the tests are it.live; the two CT-NATIVE-01
+// deadline tests are it.effect over the same real peers because they step the client's own deadlines on the TestClock
 
 type Frame = { readonly data: string; readonly binary: boolean };
 
-// a loopback T3 peer that records every client frame and connection
-const startPeer = async (t: TestContext, onFrame: (socket: WebSocket, frame: Record<string, unknown>) => void) => {
+// a loopback T3 peer that records every client frame and connection, for the test's scope
+const startPeer = (onFrame: (socket: WebSocket, frame: Record<string, unknown>) => void) => Effect.acquireRelease(Effect.promise(async () => {
   const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   const frames: Frame[] = [];
   const requests: Array<Record<string, unknown>> = [];
-  const firstRequest = Promise.withResolvers<void>();
-  const clientClosed = Promise.withResolvers<void>();
+  const firstRequest = Deferred.makeUnsafe<void>();
+  const clientClosed = Deferred.makeUnsafe<void>();
   let connections = 0;
   server.on("connection", (socket) => {
     connections += 1;
@@ -39,34 +37,61 @@ const startPeer = async (t: TestContext, onFrame: (socket: WebSocket, frame: Rec
       const frame = JSON.parse(text) as Record<string, unknown>;
       if (frame._tag === "Request") {
         requests.push(frame);
-        firstRequest.resolve();
+        Deferred.doneUnsafe(firstRequest, Effect.void);
       }
       onFrame(socket, frame);
     });
-    socket.once("close", () => clientClosed.resolve());
-  });
-  after(t, async () => {
-    for (const client of server.clients) client.terminate();
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-    firstRequest.resolve();
-    clientClosed.resolve();
+    socket.once("close", () => Deferred.doneUnsafe(clientClosed, Effect.void));
   });
   return {
+    server,
     url: `http://127.0.0.1:${address.port}`,
     frames,
     requests,
     connections: () => connections,
-    firstRequest: firstRequest.promise,
-    clientClosed: clientClosed.promise,
+    firstRequest: Deferred.await(firstRequest),
+    clientClosed: Deferred.await(clientClosed),
   };
-};
+}), ({ server }) => Effect.promise(() => {
+  for (const client of server.clients) client.terminate();
+  return new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}));
 
-const settledState = <A>(promise: Promise<A>) => {
-  const state: { settled: boolean } = { settled: false };
-  const outcome = promise.then((value) => ({ value }), (error: unknown) => ({ error }));
-  void outcome.then(() => { state.settled = true; });
-  return { state, outcome };
-};
+// a loopback http server that holds every websocket upgrade unanswered and records the bytes sent after it, for the test's scope
+const startHungServer = Effect.acquireRelease(Effect.promise(async () => {
+  const held: Duplex[] = [];
+  let bytes = "";
+  const upgraded = Deferred.makeUnsafe<void>();
+  const server: Server = createServer(() => undefined);
+  server.on("upgrade", (_request, socket: Duplex) => {
+    held.push(socket);
+    socket.on("data", (data: Buffer) => { bytes += data.toString("latin1"); });
+    socket.on("error", () => undefined);
+    Deferred.doneUnsafe(upgraded, Effect.void);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  return { server, held, url: `http://127.0.0.1:${address.port}`, bytes: () => bytes, upgraded: Deferred.await(upgraded) };
+}), ({ server, held }) => Effect.promise(() => {
+  for (const socket of held) socket.destroy();
+  return new Promise<void>((resolve) => server.close(() => resolve()));
+}));
+
+// the c1 git probe peer for the test's scope
+const gitProbePeer = (...args: Parameters<typeof fakeT3>) => Effect.acquireRelease(Effect.promise(() => fakeT3(...args)), (peer) => Effect.promise(() => peer.close()));
+
+// the production native clients on the shared envelope
+const nativeRpc = (baseUrl: string, token: string) => NativeRpc.make({ baseUrl, token }).pipe(Effect.provide(NativeEnvelope.layer));
+const projectFiles = (baseUrl: string, token: string) => ProjectFiles.make({ baseUrl, token }).pipe(Effect.provide(NativeEnvelope.layer));
+const projectCommitter = (baseUrl: string, token: string) => ProjectCommitter.make({ baseUrl, token }).pipe(Effect.provide(NativeEnvelope.layer));
+
+// a call's outcome as a value, and whether a forked call has settled
+const outcomeOf = <A, E>(call: Effect.Effect<A, E>) => Effect.match(call, { onSuccess: (value) => ({ value }), onFailure: (error) => ({ error }) });
+const settled = (call: Fiber.Fiber<unknown, unknown>): boolean => call.pollUnsafe() !== undefined;
 
 const rpcError = (outcome: { value?: unknown; error?: unknown }): SupervisorRpcError => {
   assert.ok("error" in outcome, "the call must reject");
@@ -76,91 +101,76 @@ const rpcError = (outcome: { value?: unknown; error?: unknown }): SupervisorRpcE
 
 const exit = (requestId: string, value: unknown) => ({ _tag: "Exit", requestId, exit: { _tag: "Success", value } });
 
-it("CT-NATIVE-01: a received request frame left unanswered settles uncertain at exactly 20000 ms", { timeout: 10_000 }, async (t) => {
-  const peer = await startPeer(t, () => {});
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  try {
-    const call = settledState(makeSupervisorRpc(peer.url, "timeout-token")("orchestration.dispatchCommand", { commandId: "command-a" }, new AbortController().signal));
-    await withDeadline(peer.firstRequest, 3_000, "request frame");
-    vi.advanceTimersByTime(19_999);
-    await turn();
-    assert.equal(call.state.settled, false);
-    vi.advanceTimersByTime(1);
-    const error = rpcError(await withDeadline(call.outcome, 3_000, "timeout outcome"));
-    assert.equal(error.outcome, "uncertain");
-    assert.equal(error.definiteRejection, false);
-    assert.equal(error.dispatchCommandFailure, false);
-    assert.equal(error.message.includes("timeout-token"), false);
-  } finally {
-    vi.useRealTimers();
-  }
-  await withDeadline(peer.clientClosed, 3_000, "client close");
+it.effect("CT-NATIVE-01: a received request frame left unanswered settles uncertain at exactly 20000 ms", () => Effect.gen(function* () {
+  const peer = yield* startPeer(() => {});
+  const rpc = yield* nativeRpc(peer.url, "timeout-token");
+  const call = yield* Effect.forkChild(outcomeOf(rpc.call("orchestration.dispatchCommand", { commandId: "command-a" })));
+  yield* peer.firstRequest;
+  yield* TestClock.adjust("19999 millis");
+  assert.equal(settled(call), false);
+  yield* TestClock.adjust("1 millis");
+  const error = rpcError(yield* Fiber.join(call));
+  assert.equal(error.outcome, "uncertain");
+  assert.equal(error.definiteRejection, false);
+  assert.equal(error.dispatchCommandFailure, false);
+  assert.equal(error.message.includes("timeout-token"), false);
+  yield* peer.clientClosed;
   assert.equal(peer.requests.length, 1);
   assert.equal(peer.frames.length, 1);
   assert.equal(peer.connections(), 1);
-});
+}), { timeout: 10_000 });
 
-it("CT-NATIVE-01: a hung handshake is rejected before open by the 5 s handshake timeout and no frame is sent", { timeout: 60_000 }, async (t) => {
-  const held: Duplex[] = [];
-  let bytes = "";
-  const server: Server = createServer(() => undefined);
-  server.on("upgrade", (_request, socket: Duplex) => {
-    held.push(socket);
-    socket.on("data", (data: Buffer) => { bytes += data.toString("latin1"); });
-    socket.on("error", () => undefined);
-  });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  after(t, async () => {
-    for (const socket of held) socket.destroy();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  });
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  const started = performance.now();
-  const call = settledState(makeSupervisorRpc(`http://127.0.0.1:${address.port}`, "hung-token")("orchestration.dispatchCommand", { commandId: "command-a" }, new AbortController().signal));
-  const error = rpcError(await withDeadline(call.outcome, 15_000, "handshake timeout"));
-  const elapsed = performance.now() - started;
+it.effect("CT-NATIVE-01: a hung handshake is rejected before open by the 5 s handshake timeout and no frame is sent", () => Effect.gen(function* () {
+  const hung = yield* startHungServer;
+  const rpc = yield* nativeRpc(hung.url, "hung-token");
+  const started = yield* Clock.currentTimeMillis;
+  // the call's outcome with the clock reading at which it settled
+  const call = yield* Effect.forkChild(Effect.zip(outcomeOf(rpc.call("orchestration.dispatchCommand", { commandId: "command-a" })), Clock.currentTimeMillis));
+  // the server holds the upgrade before the clock moves, so the handshake is hung rather than never started
+  yield* hung.upgraded;
+  yield* TestClock.adjust("20 seconds");
+  const [outcome, settledAt] = yield* Fiber.join(call);
+  const error = rpcError(outcome);
+  const elapsed = settledAt - started;
   assert.equal(error.outcome, "rejected");
   assert.equal(error.definiteRejection, false);
   assert.ok(elapsed >= 4_990 && elapsed < 20_000, `rejected after ${Math.round(elapsed)} ms`);
-  assert.equal(held.length, 1);
-  assert.equal(bytes, "");
-});
+  assert.equal(hung.held.length, 1);
+  assert.equal(hung.bytes(), "");
+}), { timeout: 60_000 });
 
-it("CT-NATIVE-02: aborting after the peer received the request frame is uncertain, not definite, with no second frame", { timeout: 10_000 }, async (t) => {
-  const peer = await startPeer(t, () => {});
-  const controller = new AbortController();
-  const call = settledState(makeSupervisorRpc(peer.url, "abort-token")("orchestration.dispatchCommand", { commandId: "command-a" }, controller.signal));
-  await withDeadline(peer.firstRequest, 3_000, "request frame");
-  assert.equal(call.state.settled, false);
-  controller.abort();
-  const error = rpcError(await withDeadline(call.outcome, 3_000, "abort outcome"));
+it.live("CT-NATIVE-02: aborting after the peer received the request frame is uncertain, not definite, with no second frame", () => Effect.gen(function* () {
+  const peer = yield* startPeer(() => {});
+  const rpc = yield* nativeRpc(peer.url, "abort-token");
+  const cancel = yield* Deferred.make<void>();
+  const call = yield* Effect.forkChild(outcomeOf(rpc.call("orchestration.dispatchCommand", { commandId: "command-a" }, cancel)));
+  yield* peer.firstRequest;
+  assert.equal(settled(call), false);
+  yield* Deferred.succeed(cancel, undefined);
+  const error = rpcError(yield* Fiber.join(call));
   assert.equal(error.outcome, "uncertain");
   assert.equal(error.definiteRejection, false);
   assert.equal(error.providerDisabled, false);
   assert.equal(error.dispatchCommandFailure, false);
-  await withDeadline(peer.clientClosed, 3_000, "client close");
+  yield* peer.clientClosed;
   assert.deepEqual(peer.requests, [{ _tag: "Request", id: "supervisor", tag: "orchestration.dispatchCommand", payload: { commandId: "command-a" }, headers: [] }]);
   assert.equal(peer.frames.length, 1);
   assert.equal(peer.connections(), 1);
-});
+}), { timeout: 10_000 });
 
-it("CT-NATIVE-03: a binary frame after send is uncertain even when it carries a valid Exit", { timeout: 10_000 }, async (t) => {
-  const peer = await startPeer(t, (socket, frame) => {
+it.live("CT-NATIVE-03: a binary frame after send is uncertain even when it carries a valid Exit", () => Effect.gen(function* () {
+  const peer = yield* startPeer((socket, frame) => {
     if (frame._tag === "Request") socket.send(Buffer.from(JSON.stringify(exit("supervisor", { ok: true }))), { binary: true });
   });
-  const call = settledState(makeSupervisorRpc(peer.url, "binary-token")("server.getConfig", {}, new AbortController().signal));
-  const error = rpcError(await withDeadline(call.outcome, 3_000, "binary outcome"));
+  const rpc = yield* nativeRpc(peer.url, "binary-token");
+  const error = rpcError(yield* outcomeOf(rpc.call("server.getConfig", {})));
   assert.equal(error.outcome, "uncertain");
   assert.equal(error.definiteRejection, false);
   assert.equal(peer.requests.length, 1);
-});
+}), { timeout: 10_000 });
 
-it("CT-NATIVE-03: an Exit for another requestId is ignored and the matching Exit settles the call", { timeout: 10_000 }, async (t) => {
-  const peer = await startPeer(t, (socket, frame) => {
+it.live("CT-NATIVE-03: an Exit for another requestId is ignored and the matching Exit settles the call", () => Effect.gen(function* () {
+  const peer = yield* startPeer((socket, frame) => {
     if (frame._tag === "Request") {
       socket.send(JSON.stringify(exit("other", "wrong")));
       socket.send(JSON.stringify({ _tag: "Exit", requestId: "other", exit: { _tag: "Failure", cause: { _tag: "Fail", failure: { name: "OrchestratorCommandPreviouslyRejectedError" } } } }));
@@ -170,30 +180,30 @@ it("CT-NATIVE-03: an Exit for another requestId is ignored and the matching Exit
       socket.send(JSON.stringify(exit("supervisor", "right")));
     }
   });
-  const call = settledState(makeSupervisorRpc(peer.url, "foreign-token")("server.getConfig", {}, new AbortController().signal));
-  const outcome = await withDeadline(call.outcome, 3_000, "matching exit");
+  const rpc = yield* nativeRpc(peer.url, "foreign-token");
+  const outcome = yield* outcomeOf(rpc.call("server.getConfig", {}));
   assert.deepEqual(outcome, { value: "right" });
   assert.deepEqual(peer.frames.map((frame) => (JSON.parse(frame.data) as { _tag: string })._tag), ["Request", "Pong"]);
-});
+}), { timeout: 10_000 });
 
-it("CT-NATIVE-03: batched array frames are flattened up to four levels and deeper nesting fails closed", { timeout: 10_000 }, async (t) => {
+it.live("CT-NATIVE-03: batched array frames are flattened up to four levels and deeper nesting fails closed", () => Effect.gen(function* () {
   const success = exit("supervisor", { batched: true });
-  const peer = await startPeer(t, (socket, frame) => {
+  const peer = yield* startPeer((socket, frame) => {
     if (frame._tag === "Request") socket.send(JSON.stringify([[{ _tag: "Ping" }]]));
     else if (frame._tag === "Pong") socket.send(JSON.stringify([[[[exit("other", "wrong")]]], [[[[success]]]]]));
   });
-  const call = settledState(makeSupervisorRpc(peer.url, "batch-token")("server.getConfig", {}, new AbortController().signal));
-  assert.deepEqual(await withDeadline(call.outcome, 3_000, "batched exit"), { value: { batched: true } });
+  const rpc = yield* nativeRpc(peer.url, "batch-token");
+  assert.deepEqual(yield* outcomeOf(rpc.call("server.getConfig", {})), { value: { batched: true } });
   assert.deepEqual(peer.frames.map((frame) => (JSON.parse(frame.data) as { _tag: string })._tag), ["Request", "Pong"]);
 
-  const deep = await startPeer(t, (socket, frame) => {
+  const deep = yield* startPeer((socket, frame) => {
     if (frame._tag === "Request") socket.send(JSON.stringify([[[[[[success]]]]]]));
   });
-  const deepCall = settledState(makeSupervisorRpc(deep.url, "deep-token")("server.getConfig", {}, new AbortController().signal));
-  const error = rpcError(await withDeadline(deepCall.outcome, 3_000, "deep batch"));
+  const deepRpc = yield* nativeRpc(deep.url, "deep-token");
+  const error = rpcError(yield* outcomeOf(deepRpc.call("server.getConfig", {})));
   assert.equal(error.outcome, "uncertain");
   assert.equal(error.definiteRejection, false);
-});
+}), { timeout: 10_000 });
 
 // the shared envelope goldens: exact client frame text, compared byte for byte
 const pongFrame = '{"_tag":"Pong"}';
@@ -201,41 +211,43 @@ const exitFrame = (requestId: string, exit: unknown) => JSON.stringify({ _tag: "
 const failureExit = (failure: unknown) => ({ _tag: "Failure", cause: { _tag: "Fail", failure } });
 const raw = (peer: { frames: Frame[] }) => peer.frames.map((frame) => frame.data);
 
-it("CT-WSFRAME-01: supervisor-native sends the exact Request frame, answers Ping with Pong and decodes Exit Success and Failure", { timeout: 10_000 }, async (t) => {
+it.live("CT-WSFRAME-01: supervisor-native sends the exact Request frame, answers Ping with Pong and decodes Exit Success and Failure", () => Effect.gen(function* () {
   for (const outcome of ["Success", "Failure"] as const) {
-    const peer = await startPeer(t, (socket, frame) => {
+    const peer = yield* startPeer((socket, frame) => {
       if (frame._tag === "Request") socket.send(JSON.stringify({ _tag: "Ping" }));
       else if (frame._tag === "Pong") socket.send(exitFrame("supervisor", outcome === "Success" ? { _tag: "Success", value: { ok: true } } : failureExit({ name: "UnrelatedServerError" })));
     });
-    const call = settledState(makeSupervisorRpc(peer.url, "frame-token")("server.getConfig", { probe: 1 }, new AbortController().signal));
-    const result = await withDeadline(call.outcome, 3_000, `native ${outcome}`);
+    const rpc = yield* nativeRpc(peer.url, "frame-token");
+    const result = yield* outcomeOf(rpc.call("server.getConfig", { probe: 1 }));
     if (outcome === "Success") assert.deepEqual(result, { value: { ok: true } });
     else assert.deepEqual([rpcError(result).outcome, rpcError(result).definiteRejection], ["uncertain", false]);
     assert.deepEqual(raw(peer), ['{"_tag":"Request","id":"supervisor","tag":"server.getConfig","payload":{"probe":1},"headers":[]}', pongFrame]);
   }
-});
+}), { timeout: 10_000 });
 
-it("CT-WSFRAME-01: project-files sends exact Request frames, answers Ping, Acks commit Chunks, not snapshot Chunks, and decodes Exits", { timeout: 10_000 }, async (t) => {
-  const signal = () => AbortSignal.timeout(3_000);
+it.live("CT-WSFRAME-01: project-files sends exact Request frames, answers Ping, Acks commit Chunks, not snapshot Chunks, and decodes Exits", () => Effect.gen(function* () {
   for (const outcome of ["Success", "Failure"] as const) {
-    const peer = await startPeer(t, (socket, frame) => {
+    const peer = yield* startPeer((socket, frame) => {
       if (frame._tag === "Request") socket.send(JSON.stringify({ _tag: "Ping" }));
       else if (frame._tag === "Pong") socket.send(exitFrame("definitions", outcome === "Success"
         ? { _tag: "Success", value: { contents: "steps: []\n", byteLength: 10, truncated: false } } : failureExit({ code: "ENOENT" })));
     });
-    const read = makeProjectFiles(peer.url, "frame-token").read("/work", ".t3-supervisor/project.yaml", signal());
-    if (outcome === "Success") assert.deepEqual(await read, { contents: "steps: []\n", byteLength: 10, truncated: false });
-    else await assert.rejects(read, (error: unknown) => error instanceof ProjectFileError && error.code === "missing");
+    const read = (yield* projectFiles(peer.url, "frame-token")).read("/work", ".t3-supervisor/project.yaml");
+    if (outcome === "Success") assert.deepEqual(yield* read, { contents: "steps: []\n", byteLength: 10, truncated: false });
+    else {
+      const error = yield* Effect.flip(read);
+      assert.ok(error instanceof ProjectFileError && error.code === "missing");
+    }
     assert.deepEqual(raw(peer), ['{"_tag":"Request","id":"definitions","tag":"projects.readFile","payload":{"cwd":"/work","relativePath":".t3-supervisor/project.yaml"},"headers":[]}', pongFrame]);
   }
 
-  const commit = await startPeer(t, (socket, frame) => {
+  const commit = yield* startPeer((socket, frame) => {
     if (frame._tag === "Request") socket.send(JSON.stringify({ _tag: "Ping" }));
     else if (frame._tag === "Pong") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "definition-setup-commit",
       values: [{ actionId: "action-1", kind: "action_finished", result: { commit: { status: "created", commitSha: "abc123" } } }] }));
     else if (frame._tag === "Ack") socket.send(exitFrame("definition-setup-commit", { _tag: "Success", value: null }));
   });
-  assert.deepEqual(await makeProjectCommitter(commit.url, "frame-token").commitFiles("/work", [".t3-supervisor/project.yaml"], "Add definitions", "action-1", signal()),
+  assert.deepEqual(yield* (yield* projectCommitter(commit.url, "frame-token")).commitFiles("/work", [".t3-supervisor/project.yaml"], "Add definitions", "action-1"),
     { status: "committed", commitSha: "abc123" });
   assert.deepEqual(raw(commit), [
     '{"_tag":"Request","id":"definition-setup-commit","tag":"git.runStackedAction","payload":{"actionId":"action-1","cwd":"/work","action":"commit","commitMessage":"Add definitions","filePaths":[".t3-supervisor/project.yaml"]},"headers":[]}',
@@ -243,23 +255,23 @@ it("CT-WSFRAME-01: project-files sends exact Request frames, answers Ping, Acks 
     '{"_tag":"Ack","requestId":"definition-setup-commit"}',
   ]);
 
-  const vcs = await startPeer(t, (socket, frame) => {
+  const vcs = yield* startPeer((socket, frame) => {
     if (frame._tag === "Request" && frame.tag === "vcs.listRefs") socket.send(exitFrame("definitions", { _tag: "Success", value: { isRepo: true, refs: [{ current: true, name: "main" }] } }));
     else if (frame._tag === "Request" && frame.tag === "subscribeVcsStatus") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "definition-vcs-snapshot",
       values: [{ _tag: "snapshot", local: { isRepo: true, workingTree: { files: [{ path: "README.md" }] } } }] }));
   });
-  const files = makeProjectFiles(vcs.url, "frame-token");
+  const files = yield* projectFiles(vcs.url, "frame-token");
   assert.ok(files.vcsInfo);
-  assert.deepEqual(await files.vcsInfo("/work", signal()), { isRepo: true, branch: "main", changedPaths: ["README.md"] });
+  assert.deepEqual(yield* files.vcsInfo("/work"), { isRepo: true, branch: "main", changedPaths: ["README.md"] });
   assert.deepEqual(raw(vcs), [
     '{"_tag":"Request","id":"definitions","tag":"vcs.listRefs","payload":{"cwd":"/work","refKind":"local","limit":200},"headers":[]}',
     '{"_tag":"Request","id":"definition-vcs-snapshot","tag":"subscribeVcsStatus","payload":{"cwd":"/work","includeRemote":false},"headers":[]}',
   ]);
-});
+}), { timeout: 10_000 });
 
-it("CT-WSFRAME-01: t3.ts subscriptions send exact Request frames, answer Ping with Pong, Ack each Chunk and end on any Exit", { timeout: 10_000 }, async (t) => {
+it.live("CT-WSFRAME-01: t3.ts subscriptions send exact Request frames, answer Ping with Pong, Ack each Chunk and end on any Exit", () => Effect.gen(function* () {
   for (const outcome of ["Success", "Failure"] as const) {
-    const peer = await startPeer(t, (socket, frame) => {
+    const peer = yield* startPeer((socket, frame) => {
       if (frame._tag === "Request" && frame.id === "2") socket.send(JSON.stringify({ _tag: "Ping" }));
       else if (frame._tag === "Pong") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "1", values: [{ kind: "synchronized" }] }));
       else if (frame._tag === "Ack") socket.send(exitFrame("1", outcome === "Success" ? { _tag: "Success", value: null } : failureExit({ message: "ended" })));
@@ -267,7 +279,7 @@ it("CT-WSFRAME-01: t3.ts subscriptions send exact Request frames, answer Ping wi
     const items: unknown[] = [];
     const watch = T3Client.use((client) => client.watch(7, (item) => Effect.sync(() => { items.push(item); })))
       .pipe(Effect.flip, Effect.provide(makeT3Client({ baseUrl: peer.url, token: "frame-token" })));
-    const error = await withDeadline(Effect.runPromise(watch), 5_000, `t3 ${outcome}`);
+    const error = yield* watch;
     assert.ok(error instanceof T3TransportError);
     assert.equal(error.message, "T3 subscription ended");
     assert.deepEqual(items, [{ stream: "active", item: { kind: "synchronized" } }]);
@@ -278,21 +290,14 @@ it("CT-WSFRAME-01: t3.ts subscriptions send exact Request frames, answer Ping wi
       '{"_tag":"Ack","requestId":"1"}',
     ]);
   }
-});
+}), { timeout: 10_000 });
 
-it("CT-WSFRAME-01: git-probe sends exact Request frames, answers Ping with Pong, Acks every attach Chunk and decodes Exit Success and Failure", { timeout: 10_000 }, async (t) => {
-  const directory = mkdtempSync(join(tmpdir(), "c1-git-probe-frames-"));
-  const store = new GuidanceStore(directory);
-  const peers: Array<{ close(): Promise<void> }> = [];
-  after(t, async () => {
-    for (const peer of peers) await peer.close();
-    store.close();
-    rmSync(directory, { recursive: true, force: true });
-  });
+it.live("CT-WSFRAME-01: git-probe sends exact Request frames, answers Ping with Pong, Acks every attach Chunk and decodes Exit Success and Failure", () => Effect.gen(function* () {
+  // the peers close first, then the guidance client, then its directory is removed
+  const state = yield* probeGuidance("c1-git-probe-frames-");
   const root = "/work/repository";
-  const t3 = await fakeT3(() => ({ workspaceRoot: root, branch: "main", isRepo: true, changedPaths: [], operationState: { status: "safe" } }), 0, { pingBeforeOpenExit: true });
-  peers.push(t3);
-  assert.deepEqual(await makeGitProbe(t3.url, "frame-token", store).probe(root, AbortSignal.timeout(5_000)),
+  const t3 = yield* gitProbePeer(() => ({ workspaceRoot: root, branch: "main", isRepo: true, changedPaths: [], operationState: { status: "safe" } }), 0, { pingBeforeOpenExit: true });
+  assert.deepEqual(yield* (yield* state.gitProbe(t3.url, "frame-token")).probe(root),
     { workspaceRoot: root, branch: "main", isRepo: true, changedPaths: [], operationState: { status: "safe" } });
   const frames = t3.frames.map((text) => ({ text, frame: JSON.parse(text) as { _tag: string; id?: string; tag?: string; payload?: unknown; requestId?: string } }));
   const requests = frames.filter(({ frame }) => frame._tag === "Request");
@@ -307,11 +312,10 @@ it("CT-WSFRAME-01: git-probe sends exact Request frames, answers Ping with Pong,
   assert.deepEqual(acks, Array.from({ length: 5 }, () => `{"_tag":"Ack","requestId":"${streamId}"}`));
   assert.equal(frames.length, requests.length + 1 + acks.length);
 
-  const refusing = await fakeT3(() => ({ workspaceRoot: root, branch: null, isRepo: false, changedPaths: [], operationState: { status: "safe" } }), 0, { failOpen: true });
-  peers.push(refusing);
-  await assert.rejects(makeGitProbe(refusing.url, "frame-token", store).probe(root, AbortSignal.timeout(5_000)),
-    (error: unknown) => error instanceof GitProbeError && error.message === "T3 rejected a terminal Git probe request.");
+  const refusing = yield* gitProbePeer(() => ({ workspaceRoot: root, branch: null, isRepo: false, changedPaths: [], operationState: { status: "safe" } }), 0, { failOpen: true });
+  const refused = yield* Effect.flip((yield* state.gitProbe(refusing.url, "frame-token")).probe(root));
+  assert.ok(refused instanceof GitProbeError && refused.message === "T3 rejected a terminal Git probe request.");
   // the refused open is still followed by a history-deleting close of the same session
   assert.deepEqual(refusing.requests.map((request) => request.tag), ["terminal.open", "terminal.close"]);
   assert.deepEqual(refusing.closes.map((payload) => payload.deleteHistory), [true]);
-});
+}), { timeout: 10_000 });
