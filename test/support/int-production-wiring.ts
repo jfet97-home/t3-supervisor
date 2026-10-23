@@ -3,7 +3,8 @@ import { FetchHttpClient } from "effect/http";
 import { request as httpRequest } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { supervisorTeamControllerFacade, supervisorTeamServices, supervisorWorkflowControllers, workflowWriteControllerFacade } from "../../src/guidance-application.js";
+import { supervisorTeamServices, supervisorWorkflowControllers } from "../../src/guidance-application.js";
+import { supervisorTeamControllerFacade, workflowWriteControllerFacade } from "./root-facades.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { NativeEnvelope } from "../../src/native-envelope.js";
 import { GuidanceRuntime } from "../../src/guidance.js";
@@ -116,14 +117,16 @@ export type IntEndpoint = {
   close(): Promise<void>;
 };
 
-// wires the MCP endpoint and UI server exactly as guidance-application.ts does: the api handlers yield the supervision services,
-// the MCP endpoint calls the controllers' b-03 facades
+// wires the MCP endpoint and UI server exactly as guidance-application.ts does: the api handlers yield the supervision services
+// and the MCP endpoint consumes the write and team controllers; the suites call the controllers through their promise facades
 export const startIntEndpoint = async (core: IntSupervision): Promise<IntEndpoint> => {
   const {config} = core;
   const workflowReader = workflowWriteControllerFacade((effect, options) => Effect.runPromise(effect, options), core.writes);
   const teamController = supervisorTeamControllerFacade((effect, options) => Effect.runPromise(effect, options), core.team);
   const ui = await startGuidanceUi(config, Effect.runSync(GuidanceRuntime.make(config, core.guidance, core.source)),
-    undefined, undefined, {supervisor: core.supervision.service, control: core.supervision.supervisionControl}, WorkflowMcp.layer(workflowReader, teamController), core.writes);
+    undefined, undefined, {supervisor: core.supervision.service, control: core.supervision.supervisionControl},
+    WorkflowMcp.layer.pipe(Layer.provide(Layer.mergeAll(Layer.succeed(WorkflowWriteController, core.writes), Layer.succeed(SupervisorTeamController, core.team)))),
+    core.writes);
   const address = ui.server.address();
   if (address === null || typeof address === "string") throw new Error("ui did not bind a TCP port");
   const token = await readFile(join(config.dataDirectory, "access", "workflow-mcp-token"), "utf8");

@@ -1,7 +1,7 @@
 import { Context, Effect, Layer, Scope } from "effect";
 import { ProjectDefinitions, type ProjectDefinitionSources } from "../src/project-definitions.js";
 import { ProjectConfigEditorService, type DefinitionSaveRecorder, type ProjectConfigDefinitions } from "../src/project-config-editor.js";
-import { projectConfigEditorFacade, projectDefinitionsFacade } from "../src/guidance-application.js";
+import { projectConfigEditorFacade, projectDefinitionsFacade } from "./support/root-facades.js";
 import { ProjectFileError } from "../src/project-files.js";
 import { asLoaderOptions, asProjectFiles, asProjectWriter, type ProjectDefinitionLoaderOptions, type ProjectFiles, type ProjectWriter } from "./support/native-files-promise.js";
 import { stringify } from "yaml";
@@ -134,7 +134,7 @@ export function makeDefinitionFixture(options: {
     isScratchProject: (_id, registeredRoot) => options.scratch === true && registeredRoot === root,
     setupWriter,
   };
-  // the definitions service and its promise facade, built as the composition root builds them (plan 3.9 b-03), for the fixture's lifetime
+  // the definitions service and its baseline promise facade (./support/root-facades.ts), for the fixture's lifetime
   const run = Effect.runPromiseWith(Context.empty());
   const scope = Effect.runSync(Scope.make());
   const definitionsWith = (replaced: {files?: ProjectFiles; options?: ProjectDefinitionLoaderOptions; t3?: ProjectDefinitionSources["t3"]} = {}) =>

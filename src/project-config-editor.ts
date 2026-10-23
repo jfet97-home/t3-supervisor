@@ -147,7 +147,3 @@ export class ProjectConfigEditorService extends Context.Service<ProjectConfigEdi
     }));
 }
 
-// the baseline promise call shape of the editor for unported callers (plan 3.9 b-03); the composition root builds it over the service
-export interface ProjectConfigEditor {
-  save(input: ProjectConfigSave, parentSignal?: AbortSignal): Promise<ProjectConfigSaveOutcome>;
-}

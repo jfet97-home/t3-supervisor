@@ -215,7 +215,7 @@ it.live("project-configuration endpoint keeps session, origin and CSRF checks", 
     created => Effect.promise(() => rm(created, {recursive: true, force: true})));
   const f = makeDefinitionFixture();
   seedProject(f);
-  // the dashboard server is not ported yet (S6c), so it serves the Promise facades of the loader and the editor
+  // the dashboard harness takes the loader and the editor in their promise shapes and serves them as the handlers' services
   const editor = f.editor(f.writer);
   const config: SupervisorConfig = {
     dataDirectory: directory, t3Url: "unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0,

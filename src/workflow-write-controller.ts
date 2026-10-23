@@ -46,7 +46,7 @@ import type {WorkflowPlanGroupInfo, WorkflowPlanStepInfo, WorkflowPlanWorkflowIn
 export class WorkflowNativeItemUnavailable extends Data.TaggedError("WorkflowNativeItemUnavailable") {}
 
 // a call's cancel: it completes at the call's deadline, as the baseline AbortSignal aborted, and an awaited read then ends as
-// the aborted read did; a b-03 promise caller passes its own signal as one, otherwise the tool's 10 s deadline completes it
+// the aborted read did; the workflow mcp route passes one its 9 s deadline completes, otherwise the tool's 10 s deadline does
 export type WorkflowCallCancel = Deferred.Deferred<void>;
 
 // a read ended by the call's cancel, as the aborted baseline read rejected
@@ -693,7 +693,7 @@ const settled = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<Option.
 const pause = (cancel: WorkflowCallCancel) => Effect.raceFirst(Effect.sleep(evidencePause), Deferred.await(cancel));
 // in-memory budgets read monotonic time (CC-CLOCK-ELAPSED)
 const elapsedMillis = Effect.map(Clock.monotonicTimeNanos, (nanos) => Number(nanos) / 1_000_000);
-// a tool call's cancel: the b-03 caller's own, else one completed by the tool's 10 s deadline (the baseline
+// a tool call's cancel: the caller's own, else one completed by the tool's 10 s deadline (the baseline
 // AbortSignal.timeout(10_000) default), released with the call
 const withToolDeadline = <A>(cancel: WorkflowCallCancel | undefined, body: (cancel: WorkflowCallCancel) => Effect.Effect<A>): Effect.Effect<A> =>
   cancel !== undefined ? body(cancel) : Effect.scoped(Effect.gen(function* () {
@@ -719,16 +719,6 @@ export interface WorkflowWriteControllerShape {
    */
   readonly resolveBinding: (locator: WorkflowLocator, allowRegistering?: boolean, purpose?: "effect" | "read" | "status",
     reads?: WorkflowScopeReads) => BindingRecord | null;
-}
-
-// the baseline promise call shapes of the root facade (b-03): the unported workflow mcp endpoint calls the tools; the read
-// shape serves the unit seams of the controller suites
-export interface WorkflowWriteControllerPromises {
-  read(input: unknown, signal?: AbortSignal): Promise<WorkflowReadResult>;
-  readTool(input: unknown, signal?: AbortSignal): Promise<WorkflowReadResult | SupervisorContextViewResult>;
-  write(input: unknown, signal?: AbortSignal): Promise<WorkflowWriteResult>;
-  startSupervision(input: unknown, signal?: AbortSignal): Promise<SupervisionStartResult>;
-  stopSupervision(input: unknown, signal?: AbortSignal): Promise<SupervisionStopResult>;
 }
 
 const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {}) => Effect.gen(function* () {
@@ -1497,10 +1487,4 @@ export class WorkflowWriteController extends Context.Service<WorkflowWriteContro
   static readonly layer = (options: WorkflowWriteControllerOptions = {}): Layer.Layer<WorkflowWriteController, never,
     SupervisionGate | WorkflowNativeAccess | SupervisionStores | SupervisionScopeService> =>
     Layer.effect(WorkflowWriteController, makeWorkflowWriteController(options));
-  // b-03 (plan 3.9): the promise call shapes the unported workflow mcp endpoint types this name with; the root facade
-  // (guidance-application.ts) is their only value, and they go when that caller consumes the service
-  declare readonly readTool: WorkflowWriteControllerPromises["readTool"];
-  declare readonly write: WorkflowWriteControllerPromises["write"];
-  declare readonly startSupervision: WorkflowWriteControllerPromises["startSupervision"];
-  declare readonly stopSupervision: WorkflowWriteControllerPromises["stopSupervision"];
 }

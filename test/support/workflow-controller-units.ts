@@ -1,6 +1,6 @@
 import { Clock, Deferred, Effect, Scope } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { supervisorTeamControllerFacade, workflowWriteControllerFacade, type RootRun } from "../../src/guidance-application.js";
+import { supervisorTeamControllerFacade, workflowWriteControllerFacade, type RootRun } from "./root-facades.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import { ProjectDefinitions } from "../../src/project-definitions.js";
 import type { BindingRecord, ProjectSupervisorStore } from "../../src/project-supervisor-store.js";
@@ -25,7 +25,7 @@ import type { WorkflowEvidenceMatch } from "../../src/workflow-write-evidence.js
 import { projectionClient } from "./team-units.js";
 
 // the baseline WorkflowWriteController and SupervisorTeamController constructors, rebuilt over the ported services and the
-// production b-03 facades (src/guidance-application.ts); each unit keeps its constructor options
+// baseline promise facades (./root-facades.ts); each unit keeps its constructor options
 
 // the baseline promise fakes of the native reads, each honouring the call's signal
 export type WorkflowNativeFake = {
@@ -178,6 +178,13 @@ export const workflowWriteControllerUnit = (options: WorkflowWriteControllerUnit
   const unit = Object.assign(workflowWriteControllerFacade(run, service), {options});
   units.set(unit, {service, gate, native, stores});
   return unit;
+};
+
+// the write controller service of a unit, for the workflow MCP endpoint that consumes it
+export const workflowWriteControllerService = (workflows: WorkflowWriteControllerUnit): WorkflowWriteController["Service"] => {
+  const unit = units.get(workflows);
+  if (!unit) throw new Error("not a workflow write controller unit");
+  return unit.service;
 };
 
 // the team controller over the write unit's gate and native reads, its helper receipts read through a receipt-only helper

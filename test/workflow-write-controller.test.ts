@@ -14,7 +14,7 @@ import type { Projection, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import type { WorkflowAgreementImport, WorkflowOwner } from "../src/workflow-state-contract.js";
 import { submittedApplyPointer, workflowReadToolDefinition, workflowWriteToolDefinition, type WorkflowApplyPatch } from "../src/workflow-write-controller.js";
-import { supervisorTeamControllerUnit, workflowWriteControllerUnit, type WorkflowNativeFake as WorkflowNativeAccess, type WorkflowWriteControllerUnit as WorkflowWriteController } from "./support/workflow-controller-units.js";
+import { supervisorTeamControllerUnit, workflowWriteControllerService, workflowWriteControllerUnit, type WorkflowNativeFake as WorkflowNativeAccess, type WorkflowWriteControllerUnit as WorkflowWriteController } from "./support/workflow-controller-units.js";
 import { workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, workflowTurnItemDetailMaxBytes } from "../src/workflow-write-evidence.js";
 import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo } from "../src/project-supervisor-contract.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
@@ -24,7 +24,8 @@ import { WebSocketServer } from "ws";
 import { NodeHttpServer } from "@effect/platform-node";
 import { Effect, Exit, Layer, Scope } from "effect";
 import { HttpRouter } from "effect/http";
-import { WorkflowMcp, WorkflowMcpRoute } from "../src/workflow-mcp.js";
+import { WorkflowMcpRoute } from "../src/workflow-mcp.js";
+import { workflowMcpLayer } from "./support/mcp-controllers.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { makeSupervisorRpc } from "./support/supervisor-native-client.js";
 
@@ -2940,7 +2941,7 @@ it("workflow_read view definitions accepts nonempty definitionIds through the re
     const endpoint = Effect.runSync(Scope.make());
     const server = createServer();
     await Effect.runPromise(Layer.buildWithScope(HttpRouter.serve(WorkflowMcpRoute, {disableLogger: true, disableListenLog: true}).pipe(
-      Layer.provide(WorkflowMcp.layer(controller)),
+      Layer.provide(workflowMcpLayer(workflowWriteControllerService(controller))),
       Layer.provide(NodeHttpServer.layer(() => server, {port: 0, host: "127.0.0.1"})),
     ), endpoint));
     try {

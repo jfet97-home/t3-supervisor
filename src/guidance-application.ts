@@ -1,4 +1,4 @@
-import {SupervisorTeamController, type SupervisorTeamControllerPromises} from "./supervisor-team-controller.js";
+import { SupervisorTeamController } from "./supervisor-team-controller.js";
 import { Cause, Clock, Context, Deferred, Effect, Exit, Fiber, Layer } from "effect";
 import { GuidanceStore } from "./guidance-store.js";
 import { GuidanceRuntime } from "./guidance.js";
@@ -10,8 +10,8 @@ import { posix } from "node:path";
 import { cancelOnAbort } from "./native-envelope.js";
 import type { NativeTransport } from "./supervisor.js";
 import { ProjectCommitter, ProjectFiles, ProjectWriter } from "./project-files.js";
-import { ProjectDefinitions, type DefinitionCheckoutUnavailable, type DefinitionSourceFailure, type ProjectDefinitionLoader } from "./project-definitions.js";
-import { ProjectConfigEditorService, type ProjectConfigEditor } from "./project-config-editor.js";
+import { ProjectDefinitions } from "./project-definitions.js";
+import { ProjectConfigEditorService } from "./project-config-editor.js";
 import { existsSync } from "node:fs";
 import { ProjectSupervisorStore, loadSupervisorOwnership } from "./project-supervisor-store.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
@@ -32,37 +32,12 @@ import { WorkflowStateStore } from "./workflow-state-store.js";
 import { SupervisorIds } from "./ids.js";
 import { T3Client } from "./t3.js";
 import { GitProbe } from "./git-probe.js";
-import { WorkflowNativeAccess, WorkflowWriteController, type WorkflowWriteControllerPromises } from "./workflow-write-controller.js";
+import { WorkflowNativeAccess, WorkflowWriteController } from "./workflow-write-controller.js";
 import { WorkflowMcp } from "./workflow-mcp.js";
 import { ServiceAuth } from "./service-auth.js";
 
-// the root context's promise runner (b-01) that the b-03 facades call; an aborted signal interrupts the run
+// the promise runner the remaining b-03 facades of the test seams take; an aborted signal interrupts the run
 export type RootRun = <A, E>(effect: Effect.Effect<A, E>, options?: {readonly signal?: AbortSignal}) => Promise<A>;
-// a failed definitions call rejects with its baseline value: the native, catalog or projection error itself, or the fixed checkout reason
-const definitionsRejection = (failure: DefinitionSourceFailure | DefinitionCheckoutUnavailable): unknown =>
-  failure._tag === "DefinitionSourceFailure" ? failure.error : new Error(failure.reason);
-// b-03 (plan 3.9): the baseline promise call shapes over the definitions service; a call's signal is the service's own cancel signal, so a cancelled call settles with its baseline outcome
-export const projectDefinitionsFacade = (run: RootRun, definitions: ProjectDefinitions["Service"]): ProjectDefinitionLoader => {
-  const settle = <A>(effect: Effect.Effect<A, DefinitionSourceFailure | DefinitionCheckoutUnavailable>) => run(Effect.mapError(effect, definitionsRejection));
-  return {
-    globalHomePath: () => definitions.globalHomePath,
-    globalDefinitionsPath: () => definitions.globalDefinitionsPath,
-    currentWorkspace: (projectId, threadId, signal) => settle(definitions.currentWorkspace(projectId, threadId, signal)),
-    presenceGlobal: signal => run(definitions.presenceGlobal(signal)),
-    presence: (projectId, signal) => run(definitions.presence(projectId, signal)),
-    presenceForCheckout: (projectId, threadId, signal) => run(definitions.presenceForCheckout(projectId, threadId, signal)),
-    globalFingerprint: signal => run(definitions.globalFingerprint(signal)),
-    checkoutTargets: (projectId, signal) => settle(definitions.checkoutTargets(projectId, signal)),
-    initializeGlobal: signal => settle(definitions.initializeGlobal(signal)),
-    initialize: (projectId, threadId, input, signal) => settle(definitions.initialize(projectId, threadId, input, signal)),
-    load: (projectId, threadId = null, signal) => run(definitions.load(projectId, threadId, signal)),
-  };
-};
-// b-03 (plan 3.9): the baseline promise call shape over the config editor service
-export const projectConfigEditorFacade = (run: RootRun, editor: ProjectConfigEditorService["Service"]): ProjectConfigEditor => ({
-  save: (input, signal) => run(Effect.mapError(editor.save(input, signal), definitionsRejection)),
-});
-
 // a call's AbortSignal is the service's cancel trigger for the lifetime of that call, as for the native rpc facade
 const cancelled = <A>(run: RootRun, signal: AbortSignal, call: (cancel: Deferred.Deferred<void>) => Effect.Effect<A>): Promise<A> =>
   run(Effect.scoped(Effect.flatMap(cancelOnAbort(signal), call)));
@@ -140,36 +115,6 @@ export const supervisorLifecycleFacade = (run: RootRun, lifecycle: SupervisorLif
   check: (input, threads, signal, now) => settleCall(run, signal, atWallClock(now)(lifecycle.check(input, threads))),
   parkInactive: (input, signal, stillInactive) => settleCall(run, signal, lifecycle.parkInactive(input, stillInactive)),
 });
-// b-03 (plan 3.9): the baseline promise shapes of the write controller for the workflow mcp endpoint; a call's signal is its
-// cancel, as the baseline signal stood for its deadline, and without one the tool's own 10 s applies. The read shape serves the
-// unit seams of the controller suites
-export const workflowWriteControllerFacade = (run: RootRun, controller: WorkflowWriteController["Service"]): WorkflowWriteController & Pick<WorkflowWriteControllerPromises, "read"> => {
-  const call = <A>(start: (cancel?: Deferred.Deferred<void>) => Effect.Effect<A>, signal: AbortSignal | undefined): Promise<A> =>
-    signal ? cancelled(run, signal, start) : run(start());
-  const facade: WorkflowWriteControllerPromises = {
-    read: (input, signal) => call((cancel) => controller.read(input, cancel), signal),
-    readTool: (input, signal) => call((cancel) => controller.readTool(input, cancel), signal),
-    write: (input, signal) => call((cancel) => controller.write(input, cancel), signal),
-    startSupervision: (input, signal) => call((cancel) => controller.startSupervision(input, cancel), signal),
-    stopSupervision: (input, signal) => call((cancel) => controller.stopSupervision(input, cancel), signal),
-  };
-  // the only value of the service's promise-shaped instance type, which the unported caller names
-  return facade as unknown as WorkflowWriteController & Pick<WorkflowWriteControllerPromises, "read">;
-};
-// b-03 (plan 3.9): the baseline promise shapes of the team controller for the workflow mcp endpoint; the reconcile shapes serve
-// the unit seams of the controller suites
-export const supervisorTeamControllerFacade = (run: RootRun, controller: SupervisorTeamController["Service"]):
-  SupervisorTeamController & Pick<SupervisorTeamControllerPromises, "reconcile" | "reconcileStopped"> => {
-  const facade: SupervisorTeamControllerPromises = {
-    call: (input, signal) => cancelled(run, signal, (cancel) => controller.call(input, cancel)),
-    // a refusal that escaped the guide rejects the call with its baseline message
-    guide: (input, signal) => run(Effect.scoped(Effect.flatMap(cancelOnAbort(signal), (cancel) => controller.guide(input, cancel)))),
-    reconcile: (binding, signal) => cancelled(run, signal, (cancel) => controller.reconcile(binding, false, cancel)),
-    reconcileStopped: (binding, signal) => cancelled(run, signal, (cancel) => controller.reconcileStopped(binding, cancel)),
-  };
-  // the only value of the service's promise-shaped instance type, which the unported caller names
-  return facade as unknown as SupervisorTeamController & Pick<SupervisorTeamControllerPromises, "reconcile" | "reconcileStopped">;
-};
 // i-01/i-02 (plan 3.9): the helper transport, the team runtime, the conversation and the lifecycle of one supervision run, built
 // once over one record of the interim stores and the supervisor's scope predicates, with the run's admission gate, as the
 // context of the services above them
@@ -189,8 +134,7 @@ export const supervisorTeamServices = (store: ProjectSupervisorStore, baseUrl: s
     Context.add(SupervisorLifecycle, lifecycle));
 });
 
-// the Start/Stop control and the workflow write and team controllers of the supervision run, built once over its services; the
-// mcp endpoint receives the controllers' b-03 facades
+// the Start/Stop control and the workflow write and team controllers of the supervision run, built once over its services
 export const supervisorWorkflowControllers = (helperProviderInstanceId: string | undefined) => Effect.gen(function* () {
   const control = yield* SupervisionControl.make;
   const writes = yield* WorkflowWriteController.make().pipe(Effect.provideService(SupervisionControl, control));
@@ -206,8 +150,6 @@ export const runGuidanceApplication = (
   onReady: () => void = () => {},
 ) =>
   Effect.gen(function* () {
-    // the root context, captured once per supervision run, runs root effects for the unported promise callers (B-01)
-    const run = Effect.runPromiseWith(yield* Effect.context<never>());
     const store = yield* Effect.acquireRelease(
       Effect.sync(() => new GuidanceStore(config.dataDirectory)),
       (store) => Effect.sync(() => store.close()),
@@ -242,7 +184,7 @@ export const runGuidanceApplication = (
       ...(commitWriter ? {commitFiles: commitWriter.commitFiles} : {}),
     } : undefined;
     const managedScratchRoot = config.managedScratchRoot && posix.isAbsolute(config.managedScratchRoot) ? posix.normalize(config.managedScratchRoot) : null;
-    // the definitions and the config editor are built once in the supervision run scope; unported callers receive their b-03 facades
+    // the definitions and the config editor are built once in the supervision run scope
     const definitionsService = yield* ProjectDefinitions.make({source, t3, files: yield* Effect.provide(ProjectFiles.make(endpoint(readToken.trim())), nativeClients), options: {
       globalRoot: "~",
       useGlobalDefinitions: () => supervisionStore.useGlobalDefinitions(),
@@ -254,9 +196,8 @@ export const runGuidanceApplication = (
       ...(setupWriter ? {setupWriter} : {}),
       ...(gitProbe ? {gitProbe: gitProbe.probe} : {}),
     }});
-    const definitions = projectDefinitionsFacade(run, definitionsService);
-    const editor = projectWriter ? projectConfigEditorFacade(run, yield* ProjectConfigEditorService.make({definitions: definitionsService, writer: projectWriter,
-      onSaved: (snapshot, expectedRevision) => supervisionStore.recordDefinitionUserSave(snapshot, expectedRevision)})) : undefined;
+    const editor = projectWriter ? yield* ProjectConfigEditorService.make({definitions: definitionsService, writer: projectWriter,
+      onSaved: (snapshot, expectedRevision) => supervisionStore.recordDefinitionUserSave(snapshot, expectedRevision)}) : undefined;
     const operateToken = config.guidanceTokenFile && existsSync(config.guidanceTokenFile) ? yield* Effect.tryPromise(() => readFile(config.guidanceTokenFile!, "utf8")) : "";
     // one native client per credential and the shell reads on the read client
     const nativeClient = (token: string) => NativeRpc.make(endpoint(token)).pipe(Effect.provide(nativeClients));
@@ -280,13 +221,12 @@ export const runGuidanceApplication = (
     const controllers = yield* supervisorWorkflowControllers(config.helperProviderInstanceId).pipe(
       Effect.provideServiceEffect(WorkflowNativeAccess, WorkflowNativeAccess.make), Effect.provide(runServices));
     const supervision = yield* ProjectSupervisor.make().pipe(Effect.provide(Context.merge(runServices, controllers)));
-    const workflows = Context.get(controllers, WorkflowWriteController);
-    // the dashboard's access client, runtime and workflow MCP endpoint, provided once in this scope; the listeners are
-    // acquired after them and released before them. The api handlers yield the services; the mcp endpoint calls the
-    // controllers' b-03 facades
-    yield* Layer.build(GuidanceUi.layer(config, {definitions, editor, supervision: {supervisor: supervision, control: Context.get(controllers, SupervisionControl)},
-      workflowReader: workflows}).pipe(Layer.provide(Layer.mergeAll(ServiceAuth.layer(config.dataDirectory), Layer.succeed(GuidanceRuntime, guidanceRuntime),
-      WorkflowMcp.layer(workflowWriteControllerFacade(run, workflows), supervisorTeamControllerFacade(run, Context.get(controllers, SupervisorTeamController)))))));
+    // the dashboard's access client, runtime and workflow MCP endpoint over the run's controllers, provided once in this scope;
+    // the listeners are acquired after them and released before them, and the api handlers yield the run's services
+    yield* Layer.build(GuidanceUi.layer(config, {definitions: definitionsService, editor, supervision: {supervisor: supervision,
+      control: Context.get(controllers, SupervisionControl)}, workflowReader: Context.get(controllers, WorkflowWriteController)}).pipe(
+      Layer.provide(Layer.mergeAll(ServiceAuth.layer(config.dataDirectory), Layer.succeed(GuidanceRuntime, guidanceRuntime), WorkflowMcp.layer)),
+      Layer.provide(Layer.succeedContext(controllers))));
     yield* Effect.sync(onReady);
     // one supervision cycle at a time, each bounded to 120 s and followed by a 5 s pause; any failure but an interruption is
     // reported by its event alone

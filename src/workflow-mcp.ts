@@ -7,6 +7,7 @@ import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema } from "@model
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
   WorkflowWriteController,
+  type WorkflowCallCancel,
   supervisionStopToolDefinition,
   supervisionStartToolDefinition,
   workflowReadToolDefinition,
@@ -14,11 +15,12 @@ import {
 } from "./workflow-write-controller.js";
 
 // the sdk's stateless streamable http transport stays a scoped adapter inside this effect route (plan 3.7, d-03): effect's
-// McpServer is sessionful, and the sdk calls promise tool callbacks, which run their effects through FiberSets (o-06)
+// McpServer is sessionful, and the sdk calls promise tool callbacks, which run their effects through FiberSets (o-06); these
+// FiberSet runtimes are the route's only run* allowance (the lint guard in eslint.config.js)
 
 const maxMcpRequestBodyBytes = 1024 * 1024;
 const callDeadline = "9 seconds";
-// how long a caller still waits for the controller's own answer after the deadline aborted its signal
+// how long a caller still waits for the controller's own answer after the deadline's soft cancel
 const abortGrace = "1 second";
 const serverInfo = {name: "t3-supervisor-workflows", version: "0.1.0"};
 
@@ -26,7 +28,7 @@ const serverInfo = {name: "t3-supervisor-workflows", version: "0.1.0"};
 export class McpClosed extends Data.TaggedError("McpClosed") {}
 // the sdk server or transport failed before it answered: 500 workflow_mcp_unavailable
 export class McpUnavailable extends Data.TaggedError("McpUnavailable") {}
-// a controller threw or rejected: the sdk answers this fixed json-rpc internal error, never the controller's own error
+// a controller call failed or died: the sdk answers this fixed json-rpc internal error, never the controller's own error
 export class ToolFailed extends Data.TaggedError("ToolFailed") {
   readonly code = ErrorCode.InternalError;
   override readonly message = "Internal error";
@@ -49,14 +51,15 @@ const errorResponse = (error: McpClosed | McpUnavailable): Response => new Respo
 
 const record = (value: unknown): Record<string, unknown> => typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
 
-// the controller did not answer within the grace after its deadline abort, so its outcome is unknown, never "not applied";
+// the controller did not answer within the grace after its deadline cancel, so its outcome is unknown, never "not applied";
 // the caller's operation id comes back verbatim, and a retry with it gets the controller's own receipt
 const outcomeUnknown = (args: unknown) => {
   const operationId = record(args).operationId ?? record(record(args).input).operationId;
   return {status: "uncertain", reason: "tool_outcome_unknown", retryable: true, ...(typeof operationId === "string" ? {operationId} : {})};
 };
 
-type ToolCall = (signal: AbortSignal) => Promise<unknown>;
+// one controller call; the cancel is its soft cancel, which the call's deadline completes
+type ToolCall = (cancel: WorkflowCallCancel) => Effect.Effect<unknown, unknown>;
 
 export interface WorkflowMcpShape {
   // the /mcp/workflows handler: answers each request through a fresh stateless sdk server and transport; a closed
@@ -68,10 +71,10 @@ export interface WorkflowMcpShape {
   readonly close: Effect.Effect<void>;
 }
 
-const make = Effect.fnUntraced(function* (controller: WorkflowWriteController, team?: SupervisorTeamController) {
+const make = Effect.fnUntraced(function* (controller: WorkflowWriteController["Service"], team?: SupervisorTeamController["Service"]) {
   const tools = [workflowReadToolDefinition, workflowWriteToolDefinition, supervisionStartToolDefinition, supervisionStopToolDefinition, ...(team ? [supervisionTeamToolDefinition, supervisionGuideToolDefinition] : [])] as unknown as Tool[];
-  // the endpoint's hold on every admitted request, and every started controller call, which outlives its request until it
-  // settles or close()
+  // the endpoint's hold on every admitted request, and every started controller call, which outlives its request after an
+  // outcome-unknown answer until it settles or close()
   const requests = yield* FiberSet.make<void, never>();
   const admit = yield* FiberSet.runtime(requests)();
   const calls = yield* FiberSet.make<unknown, ToolFailed>();
@@ -85,30 +88,31 @@ const make = Effect.fnUntraced(function* (controller: WorkflowWriteController, t
   yield* Effect.addFinalizer(() => close);
 
   const toolCall = (name: string, args: unknown): ToolCall | undefined => {
-    if (name === "workflow_read") return signal => controller.readTool(args, signal);
-    if (name === "workflow_write") return signal => controller.write(args, signal);
-    if (name === "supervision_start") return signal => controller.startSupervision(args, signal);
-    if (name === "supervision_stop") return signal => controller.stopSupervision(args, signal);
-    if (name === "supervision_team" && team) return signal => team.call(args, signal);
-    if (name === "supervision_guide" && team) return signal => team.guide(args, signal);
+    if (name === "workflow_read") return cancel => controller.readTool(args, cancel);
+    if (name === "workflow_write") return cancel => controller.write(args, cancel);
+    if (name === "supervision_start") return cancel => controller.startSupervision(args, cancel);
+    if (name === "supervision_stop") return cancel => controller.stopSupervision(args, cancel);
+    if (name === "supervision_team" && team) return cancel => team.call(args, cancel);
+    if (name === "supervision_guide" && team) return cancel => team.guide(args, cancel);
     return undefined;
   };
 
-  // starts the controller call unless the endpoint is closed, then waits for its own result: the 9 s deadline aborts its
-  // signal with a TimeoutError, and an answer still missing after the grace is an outcome-unknown result; the request's
-  // end aborts the signal, while the call stays owned by the endpoint until it settles or close() interrupts it
+  // starts the controller call unless the endpoint is closed, then waits for its own result: the 9 s deadline completes its
+  // soft cancel, and an answer still missing after the grace is an outcome-unknown result while the call stays owned by the
+  // endpoint until it settles or close() interrupts it; the request's end interrupts the call it still waits for
   const answer = (start: ToolCall, args: unknown) => Effect.suspend(() => {
     if (MutableRef.get(closed)) return Effect.interrupt;
-    const signal = new AbortController();
-    const call = runCall(Effect.tryPromise({try: () => start(signal.signal), catch: () => new ToolFailed()}).pipe(
-      Effect.onInterrupt(() => Effect.sync(() => signal.abort()))));
+    const cancel = Deferred.makeUnsafe<void>();
+    // any failure or defect of the call is the fixed internal error; an interruption stays one
+    const call = runCall(Effect.suspend(() => start(cancel)).pipe(
+      Effect.mapError(() => new ToolFailed()), Effect.catchDefect(() => Effect.fail(new ToolFailed()))));
     return Fiber.join(call).pipe(
       Effect.timeout(callDeadline),
       Effect.catchTag("TimeoutError", () => Effect.andThen(
-        Effect.sync(() => signal.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"))),
+        Deferred.succeed(cancel, undefined),
         Fiber.join(call).pipe(Effect.timeoutOption(abortGrace), Effect.map(Option.getOrElse(() => outcomeUnknown(args)))),
       )),
-      Effect.onInterrupt(() => Effect.sync(() => signal.abort())),
+      Effect.onInterrupt(() => Fiber.interrupt(call)),
     );
   }).pipe(
     Effect.map(toolResult),
@@ -138,8 +142,8 @@ const make = Effect.fnUntraced(function* (controller: WorkflowWriteController, t
     const transport = new WebStandardStreamableHTTPServerTransport({enableJsonResponse: true, maxRequestBodySize: maxMcpRequestBodyBytes});
     let pending: Promise<Response> | undefined;
     // ending the request closes its callbacks first: none starts a call any more and the waiting ones are interrupted,
-    // aborting their calls' signals; the sdk then settles its own json answer from those rejections and the ended body,
-    // and that answer is dropped with the request before the sdk server closes
+    // interrupting their calls; the sdk then settles its own json answer from those rejections and the ended body, and that
+    // answer is dropped with the request before the sdk server closes
     yield* Effect.addFinalizer(exit => Effect.gen(function* () {
       yield* Scope.close(callbacks, exit);
       if (source !== undefined)
@@ -178,10 +182,13 @@ const make = Effect.fnUntraced(function* (controller: WorkflowWriteController, t
 
 // the workflow mcp endpoint: one stateless mcp server and transport for each http request
 export class WorkflowMcp extends Context.Service<WorkflowMcp, WorkflowMcpShape>()("t3-supervisor/WorkflowMcp") {
+  // over the given write controller and, when given, the team controller's two tools
   static readonly make = make;
-  // releasing the layer closes the endpoint
-  static readonly layer = (controller: WorkflowWriteController, team?: SupervisorTeamController): Layer.Layer<WorkflowMcp> =>
-    Layer.effect(WorkflowMcp, make(controller, team));
+  // the endpoint over the supervision run's write and team controllers; releasing the layer closes it
+  static readonly layer: Layer.Layer<WorkflowMcp, never, WorkflowWriteController | SupervisorTeamController> = Layer.effect(WorkflowMcp,
+    Effect.gen(function* () {
+      return yield* make(yield* WorkflowWriteController, yield* SupervisorTeamController);
+    }));
 }
 
 // /mcp/workflows for the ui router and the mcp-only router; the host, origin and bearer checks stay in front of it

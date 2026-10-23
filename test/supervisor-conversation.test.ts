@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { stringify } from "yaml";
 import { Effect } from "effect";
 import { GuidanceStore, fingerprint } from "../src/guidance-store.js";
-import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
+import type { ProjectDefinitionLoader } from "./support/root-facades.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { ProjectSupervisorStore, defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { projectSupervisorUnit, supervisorConversationUnit, type ProjectSupervisorUnit } from "./support/team-units.js";

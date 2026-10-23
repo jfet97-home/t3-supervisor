@@ -9,8 +9,8 @@ import { ListenerUnavailable } from "./errors.js";
 import { LoginRequest, SupervisorApi, UiError } from "./guidance-contract.js";
 import { GuidanceRuntime } from "./guidance.js";
 import type { SupervisorConfig } from "./types.js";
-import type { ProjectDefinitionLoader } from "./project-definitions.js";
-import type { ProjectConfigEditor } from "./project-config-editor.js";
+import type { ProjectDefinitions } from "./project-definitions.js";
+import type { ProjectConfigEditorService } from "./project-config-editor.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
 import type { SupervisionControl } from "./supervision-control.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
@@ -26,10 +26,10 @@ export interface GuidanceSupervision {
   readonly control: SupervisionControl["Service"];
 }
 
-// the definitions and the config editor are unported objects the api handlers call through their promise shapes (b-03)
+// the services the api handlers yield; without definitions, an editor or supervision their handlers answer unavailable
 export interface GuidanceUiOptions {
-  readonly definitions?: ProjectDefinitionLoader | undefined;
-  readonly editor?: ProjectConfigEditor | undefined;
+  readonly definitions?: ProjectDefinitions["Service"] | undefined;
+  readonly editor?: ProjectConfigEditorService["Service"] | undefined;
   readonly supervision?: GuidanceSupervision | undefined;
   readonly workflowReader?: WorkflowWriteController["Service"] | undefined;
 }
@@ -110,10 +110,12 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
   const mcp = yield* WorkflowMcp;
   yield* fs.remove(join(config.dataDirectory, "ui-login-code"), { force: true });
   const { definitions, editor, supervision, workflowReader } = options;
-  // a supervision call answers its fixed UiError for any failure or defect, and for absent supervision; an interruption stays one
+  // a service call answers its fixed UiError for any failure or defect; an interruption stays one
+  const failingWith = <A, E, R>(message: string, call: Effect.Effect<A, E, R>): Effect.Effect<A, UiError, R> => Effect.catchCause(call,
+    (cause) => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause as Cause.Cause<never>) : Effect.fail(new UiError({message})));
+  // a supervision call answers its fixed UiError for any failure or defect, and for absent supervision
   const supervised = <A, E, R>(message: string, call: (services: GuidanceSupervision) => Effect.Effect<A, E, R>): Effect.Effect<A, UiError, R> =>
-    !supervision ? Effect.fail(new UiError({message})) : Effect.catchCause(Effect.suspend(() => call(supervision)),
-      (cause) => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause as Cause.Cause<never>) : Effect.fail(new UiError({message})));
+    !supervision ? Effect.fail(new UiError({message})) : failingWith(message, Effect.suspend(() => call(supervision)));
   const handlers = HttpApiBuilder.group(SupervisorApi, "guidance", (h) =>
     h.handleAll({
       snapshot: () => Effect.orDie(runtime.snapshot),
@@ -144,17 +146,12 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
       retryProjectSupervisor: ({payload}) => supervised("Native access retry could not be confirmed. Refresh to inspect the retained state.", ({supervisor}) => supervisor.retry(payload)),
       chatSupervision: ({payload}) => supervised("The chat supervision change could not be confirmed. Refresh to inspect the saved state.",
         ({supervisor}) => supervisor.setChatSupervision(payload)),
-      projectConfiguration: ({query}) => Effect.tryPromise({
-        try: (signal) => {
-          if (!definitions) throw new Error("Project definition access is not configured.");
-          return definitions.load(query.projectId, query.threadId ?? null, signal).then(result => ({...result, editingAvailable: Boolean(editor)}));
-        },
-        catch: () => new UiError({message: "Project definition access is unavailable."}),
-      }),
-      saveProjectConfiguration: ({payload}) => Effect.tryPromise({
-        try: signal => editor ? editor.save(payload, signal) : Promise.resolve({status: "permission_required" as const, message: "Project editing needs a dedicated filesystem:read/filesystem:write credential through deployment setup.", definitions: null}),
-        catch: () => new UiError({message: "The save outcome could not be confirmed. Refresh and inspect project.yaml before retrying."}),
-      }),
+      projectConfiguration: ({query}) => !definitions ? Effect.fail(new UiError({message: "Project definition access is unavailable."}))
+        : failingWith("Project definition access is unavailable.", Effect.map(Effect.suspend(() => definitions.load(query.projectId, query.threadId ?? null)),
+          (result) => ({...result, editingAvailable: Boolean(editor)}))),
+      saveProjectConfiguration: ({payload}) => !editor
+        ? Effect.succeed({status: "permission_required" as const, message: "Project editing needs a dedicated filesystem:read/filesystem:write credential through deployment setup.", definitions: null})
+        : failingWith("The save outcome could not be confirmed. Refresh and inspect project.yaml before retrying.", Effect.suspend(() => editor.save(payload))),
       threadPolicy: ({ payload }) => {
         const invalid = (cause: unknown) => new UiError({ message: cause instanceof Error ? cause.message : "Chat settings invalid. Reload first." });
         const policy = config.threadPolicy;

@@ -118,7 +118,7 @@ const failureCode = (cause: Cause.Cause<unknown>): string | null => {
 const otherwise = <B>(fallback: (cause: Cause.Cause<unknown>) => B) => <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A | B, never, R> =>
   Effect.catchCauseIf(effect, (cause) => !Cause.hasInterruptsOnly(cause), (cause) => Effect.sync(() => fallback(cause))) as Effect.Effect<A | B, never, R>;
 
-// a team call's cancel: the b-03 caller's own signal; an effect caller relies on interruption alone
+// a team call's cancel: the caller's own (the workflow mcp route's deadline); without one a call relies on interruption alone
 const withCancel = <A, E>(cancel: WorkflowCallCancel | undefined, body: (cancel: WorkflowCallCancel) => Effect.Effect<A, E>): Effect.Effect<A, E> =>
   cancel !== undefined ? body(cancel) : Effect.flatMap(Deferred.make<void>(), body);
 
@@ -143,15 +143,6 @@ export interface SupervisorTeamControllerShape {
    * or escalation is closed as not sent because a stop never sends another route. An unknown send keeps its identities.
    */
   readonly reconcileStopped: (binding: BindingRecord, cancel?: WorkflowCallCancel) => Effect.Effect<void>;
-}
-
-// the baseline promise call shapes of the root facade (b-03): the unported workflow mcp endpoint calls and guides; the
-// reconcile shapes serve the unit seams of the controller suites
-export interface SupervisorTeamControllerPromises {
-  call(input: unknown, signal: AbortSignal): Promise<unknown>;
-  guide(input: unknown, signal: AbortSignal): Promise<unknown>;
-  reconcile(binding: BindingRecord, signal: AbortSignal): Promise<void>;
-  reconcileStopped(binding: BindingRecord, signal: AbortSignal): Promise<void>;
 }
 
 /** Mediates team changes and guidance using the existing private database and native proof. */
@@ -797,8 +788,4 @@ export class SupervisorTeamController extends Context.Service<SupervisorTeamCont
   static readonly layer = (options: SupervisorTeamControllerOptions = {}): Layer.Layer<SupervisorTeamController, never,
     WorkflowWriteController | WorkflowNativeAccess | SupervisionGate | HelperTransport | SupervisionStores> =>
     Layer.effect(SupervisorTeamController, makeSupervisorTeamController(options));
-  // b-03 (plan 3.9): the promise call shapes the unported workflow mcp endpoint types this name with; the root facade
-  // (guidance-application.ts) is their only value, and they go when that caller consumes the service
-  declare readonly call: SupervisorTeamControllerPromises["call"];
-  declare readonly guide: SupervisorTeamControllerPromises["guide"];
 }

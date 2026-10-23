@@ -8,6 +8,7 @@ import {it, type TestContext} from "vitest";
 import {WorkflowMcp, WorkflowMcpRoute} from "../src/workflow-mcp.js";
 import type {SupervisorTeamController} from "../src/supervisor-team-controller.js";
 import type {WorkflowWriteController} from "../src/workflow-write-controller.js";
+import {promiseTeamController, promiseWorkflowController, workflowMcpLayer} from "./support/mcp-controllers.js";
 import {nodePath, repositoryRoot, startProcess} from "./support/cli-process.js";
 import {after} from "./support/node-test.js";
 
@@ -15,7 +16,7 @@ type Served = {url: string; port: number; handled: Set<Promise<void>>; endpoint:
 
 // serves the endpoint's route through effect's node server on its own loopback port; each request is handled until its
 // server chain, answer write included, ends; cleanup closes the endpoint, waits for every handling and releases the server
-const serve = async (t: TestContext, controller: WorkflowWriteController, team?: SupervisorTeamController): Promise<Served> => {
+const serve = async (t: TestContext, controller: WorkflowWriteController["Service"], team?: SupervisorTeamController["Service"]): Promise<Served> => {
   const handled = new Set<Promise<void>>();
   const track = <A, E, R>(request: Effect.Effect<A, E, R>) => Effect.suspend(() => {
     let settle!: () => void;
@@ -26,7 +27,7 @@ const serve = async (t: TestContext, controller: WorkflowWriteController, team?:
   });
   const scope = Effect.runSync(Scope.make());
   const context = await Effect.runPromise(Layer.buildWithScope(HttpRouter.serve(WorkflowMcpRoute, {disableLogger: true, disableListenLog: true, middleware: track}).pipe(
-    Layer.provideMerge(WorkflowMcp.layer(controller, team)),
+    Layer.provideMerge(workflowMcpLayer(controller, team)),
     Layer.provideMerge(NodeHttpServer.layer(createServer, {port: 0, host: "127.0.0.1"})),
   ), scope));
   const address = Context.get(context, HttpServer.HttpServer).address;
@@ -92,7 +93,7 @@ const abortWaitingTool = (): Gate & {tool: (args: unknown, signal: AbortSignal) 
 };
 
 it("CT-MCP-02: tools/list without initialize or session header succeeds statelessly and no response carries Mcp-Session-Id", {timeout: 10_000}, async t => {
-  const controller = {readTool: async (args: unknown) => ({status: "ok", received: args})} as unknown as WorkflowWriteController;
+  const controller = promiseWorkflowController({readTool: async (args: unknown) => ({status: "ok", received: args})});
   const {url} = await serve(t, controller);
 
   const listed = await postJson(url, {jsonrpc: "2.0", id: 1, method: "tools/list", params: {}});
@@ -125,7 +126,7 @@ it("CT-MCP-02: tools/list without initialize or session header succeeds stateles
 
 it("CT-MCP-03: a client disconnect during a slow tool call aborts the controller signal", {timeout: 10_000}, async t => {
   const gate = abortWaitingTool();
-  const controller = {readTool: gate.tool} as unknown as WorkflowWriteController;
+  const controller = promiseWorkflowController({readTool: gate.tool});
   const {port, handled} = await serve(t, controller);
 
   const body = JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
@@ -151,7 +152,7 @@ it("CT-MCP-03: a client disconnect during a slow tool call aborts the controller
 
 it("CT-MCP-03: the hard-coded 9 s call deadline aborts the controller signal and the call returns its result", {timeout: 60_000}, async t => {
   const gate = abortWaitingTool();
-  const controller = {readTool: gate.tool} as unknown as WorkflowWriteController;
+  const controller = promiseWorkflowController({readTool: gate.tool});
   const {url} = await serve(t, controller);
 
   const response = postJson(url, {jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
@@ -170,7 +171,7 @@ it("CT-MCP-03: the hard-coded 9 s call deadline aborts the controller signal and
 
 it("CT-MCP-04: after endpoint.close() every POST is answered 503 workflow_mcp_closed without reaching the controller", {timeout: 10_000}, async t => {
   let calls = 0;
-  const controller = {readTool: async () => {calls++;return {status: "ok"};}} as unknown as WorkflowWriteController;
+  const controller = promiseWorkflowController({readTool: async () => {calls++;return {status: "ok"};}});
   const {url, handled, endpoint} = await serve(t, controller);
 
   const open = await postJson(url, {jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
@@ -270,11 +271,11 @@ it("CT-MCP-04 (in-flight, route): close() aborts the controller signal and the p
 
 it("CT-MCP-05: with a team the tool list has six tools in fixed order and an unknown tool is an isError unknown_tool result", {timeout: 10_000}, async t => {
   const teamCalls: unknown[] = [];
-  const controller = {readTool: async () => ({status: "ok"})} as unknown as WorkflowWriteController;
-  const team = {
+  const controller = promiseWorkflowController({readTool: async () => ({status: "ok"})});
+  const team = promiseTeamController({
     call: async (args: unknown) => {teamCalls.push(["call", args]);return {status: "ok", tool: "team"};},
     guide: async (args: unknown) => {teamCalls.push(["guide", args]);return {status: "ok", tool: "guide"};},
-  } as unknown as SupervisorTeamController;
+  });
   const {url} = await serve(t, controller, team);
 
   const listed = await postJson(url, {jsonrpc: "2.0", id: 1, method: "tools/list", params: {}});

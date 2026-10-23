@@ -14,13 +14,11 @@ import { ListenerUnavailable } from "../src/errors.js";
 import { GuidanceRuntime } from "../src/guidance.js";
 import { SupervisorApi } from "../src/guidance-contract.js";
 import { GuidanceStore } from "../src/guidance-store.js";
-import type { ProjectConfigEditor } from "../src/project-config-editor.js";
-import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
+import type { ProjectConfigEditor, ProjectDefinitionLoader } from "./support/root-facades.js";
 import { forgeDashboardToken, startGuidanceUi } from "./support/service-auth-harness.js";
 import { ThreadPolicyStore } from "../src/thread-policy.js";
 import type { ProjectInfo } from "../src/types.js";
-import { WorkflowMcp } from "../src/workflow-mcp.js";
-import type { WorkflowWriteController } from "../src/workflow-write-controller.js";
+import { promiseWorkflowController, workflowMcpLayer } from "./support/mcp-controllers.js";
 import { mockMethod } from "./support/node-test.js";
 import { connectRefused, defer, freePort, jsonBody, openDescriptors, portBindable, rawRequest, readCsrf, signIn, within, type RawResponse } from "./support/c3b-http.js";
 import { startUi, tempDirectory, uiConfig, type StartedUi } from "./support/c3b-ui.js";
@@ -320,8 +318,8 @@ const mcpPost = (port: number, headers: Record<string, string>) => rawRequest(po
   headers: {"Content-Type": "application/json", Accept: "application/json, text/event-stream", ...headers}});
 
 it("CT-MCP-01: the workflow MCP route enforces Host, Origin and bearer before the endpoint, and the MCP-only listener serves nothing else", {timeout: 10_000}, async t => {
-  const controller = {readTool: async () => ({status: "ok"})} as unknown as WorkflowWriteController;
-  const started = await startUi(t, {workflows: WorkflowMcp.layer(controller),
+  const controller = promiseWorkflowController({readTool: async () => ({status: "ok"})});
+  const started = await startUi(t, {workflows: workflowMcpLayer(controller),
     config: {workflowMcpBindHost: "127.0.0.1", workflowMcpPort: 0, workflowMcpHosts: ["supervisor.internal:9100"]}});
   const {port, origin, directory} = started;
   const mcpPort = started.mcpPort!;

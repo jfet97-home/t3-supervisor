@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { GuidanceStore, fingerprint } from "../../src/guidance-store.js";
-import type { ProjectDefinitionLoader } from "../../src/project-definitions.js";
+import type { ProjectDefinitionLoader } from "./root-facades.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import { ProjectSupervisorStore, defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../../src/project-supervisor-store.js";
 import { projectSupervisorUnit, supervisorConversationUnit } from "./team-units.js";

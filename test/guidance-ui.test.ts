@@ -13,11 +13,11 @@ import { failureReason, ListenerUnavailable } from "../src/errors.js";
 import { GuidanceRuntime } from "../src/guidance.js";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { GuidanceUi } from "../src/guidance-ui.js";
-import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
+import { definitionsService, type ProjectDefinitionLoader } from "./support/root-facades.js";
 import { ServiceAuth } from "../src/service-auth.js";
 import type { SupervisorConfig } from "../src/types.js";
-import { WorkflowMcp } from "../src/workflow-mcp.js";
 import type { WorkflowWriteController } from "../src/workflow-write-controller.js";
+import { promiseWorkflowController, workflowMcpLayer } from "./support/mcp-controllers.js";
 import { connectRefused, jsonBody, rawRequest, readCsrf, signIn } from "./support/c3b-http.js";
 import { forgeDashboardToken } from "./support/service-auth-harness.js";
 import { privately } from "./support/private-assert.js";
@@ -38,7 +38,7 @@ const temporaryDirectory = Effect.acquireRelease(
 
 // the dashboard listeners over the root's node file system and crypto, in the given scope
 // `auth` and `files` stand between the listeners and the real access service and file system
-const buildUi = (config: SupervisorConfig, controller: WorkflowWriteController, options: {definitions?: ProjectDefinitionLoader;
+const buildUi = (config: SupervisorConfig, controller: WorkflowWriteController["Service"], options: {definitions?: ProjectDefinitionLoader;
   auth?: (real: ServiceAuth["Service"]) => ServiceAuth["Service"]; files?: (real: FileSystem.FileSystem) => FileSystem.FileSystem} = {}) =>
   Effect.gen(function* () {
     const store = yield* Effect.acquireRelease(Effect.sync(() => new GuidanceStore(config.dataDirectory)), (store) => Effect.sync(() => store.close()));
@@ -49,8 +49,8 @@ const buildUi = (config: SupervisorConfig, controller: WorkflowWriteController, 
     const files = options.files
       ? Layer.effect(FileSystem.FileSystem, Effect.map(FileSystem.FileSystem, options.files)).pipe(Layer.provide(NodeFileSystem.layer))
       : NodeFileSystem.layer;
-    const context = yield* Layer.build(GuidanceUi.layer(config, options).pipe(
-      Layer.provide(Layer.mergeAll(auth, Layer.succeed(GuidanceRuntime, runtime), WorkflowMcp.layer(controller))),
+    const context = yield* Layer.build(GuidanceUi.layer(config, {definitions: options.definitions && definitionsService(options.definitions)}).pipe(
+      Layer.provide(Layer.mergeAll(auth, Layer.succeed(GuidanceRuntime, runtime), workflowMcpLayer(controller))),
       Layer.provide(Layer.mergeAll(files, NodeCrypto.layer)),
     ));
     const ui = Context.get(context, GuidanceUi);
@@ -61,7 +61,7 @@ const buildUi = (config: SupervisorConfig, controller: WorkflowWriteController, 
 // a counting controller whose workflow_read answers at once
 const countingController = () => {
   const calls = {count: 0};
-  const controller = {readTool: async () => {calls.count++;return {status: "ok"};}} as unknown as WorkflowWriteController;
+  const controller = promiseWorkflowController({readTool: async () => {calls.count++;return {status: "ok"};}});
   return {calls, controller};
 };
 
@@ -156,7 +156,7 @@ describe("guidance ui listeners", () => {
       if (entered.push(signal) === 2) bothEntered();
       return new Promise<never>((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), {once: true}));
     };
-    const controller = {readTool: (_args: unknown, signal: AbortSignal) => waitForAbort(signal)} as unknown as WorkflowWriteController;
+    const controller = promiseWorkflowController({readTool: (_args: unknown, signal: AbortSignal) => waitForAbort(signal)});
     const definitions = {load: (_projectId: string, _threadId: string | null, signal: AbortSignal) => waitForAbort(signal)} as unknown as ProjectDefinitionLoader;
     const scope = yield* Scope.make();
     const ui = yield* buildUi(uiConfig(directory, {workflowMcpBindHost: "127.0.0.1", workflowMcpPort: 0}), controller, {definitions}).pipe(Scope.provide(scope));

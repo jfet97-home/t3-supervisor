@@ -2,8 +2,9 @@ import { NodeCrypto } from "@effect/platform-node";
 import { Cause, Clock, Context, Deferred, Effect, Exit, Layer, Scope } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { helperTransportFacade, supervisorConversationFacade, supervisorLifecycleFacade, supervisorTeamServices, teamRuntimeFacade, type RootRun } from "../../src/guidance-application.js";
+import { definitionsService, type DefinitionsLoader, type ProjectDefinitionLoader } from "./root-facades.js";
 import { SupervisorIds } from "../../src/ids.js";
-import { DefinitionSourceFailure, ProjectDefinitions, type ProjectDefinitionLoader, type ProjectDefinitionSetupInput } from "../../src/project-definitions.js";
+import { DefinitionSourceFailure, ProjectDefinitions, type ProjectDefinitionSetupInput } from "../../src/project-definitions.js";
 import type { BindingRecord, ProjectSupervisorStore, SupervisionFolderPresence, SupervisorBaseline, TaskRecord } from "../../src/project-supervisor-store.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, ProjectSupervisorTeamInfo, ProjectSupervisorRetryInput, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome } from "../../src/project-supervisor-contract.js";
@@ -33,6 +34,8 @@ import type { WorkflowStateStore } from "../../src/workflow-state-store.js";
 
 // the baseline constructors of the helper transport, the team runtime and their two owners, rebuilt over the ported
 // services and the production b-03 facades (src/guidance-application.ts); each unit keeps its constructor options
+
+export { definitionsService };
 
 type Unit = { readonly service: HelperTransportShape; readonly gate: SupervisionGateShape; readonly guard: GateGuard };
 const transports = new WeakMap<object, Unit>();
@@ -175,21 +178,6 @@ const teamRuntimeFacadeUnit = (options: TeamRuntimeUnitOptions, runtime: Supervi
 // the team runtime over the transport unit's gate (or its own), the fake transport as a service, and `now` as its clock
 export const teamRuntimeUnit = (options: TeamRuntimeUnitOptions): SupervisorTeamRuntimeFacade & { options: TeamRuntimeUnitOptions } =>
   teamRuntimeFacadeUnit(options, teamRuntimeService(options));
-
-// a definitions loader as the definitions service, read through the loader when called; a loader without a global
-// fingerprint reads none. A rejected load is a defect, as the baseline rejection it replaces
-type DefinitionsLoader = Pick<ProjectDefinitionLoader, "load"> & Partial<Pick<ProjectDefinitionLoader, "globalFingerprint">>;
-export const definitionsService = (loader: DefinitionsLoader): ProjectDefinitions["Service"] => {
-  const unused = () => Effect.die(new Error("unused definitions operation"));
-  return ProjectDefinitions.of({
-    globalHomePath: "~",
-    globalDefinitionsPath: "~/.t3-supervisor",
-    load: (projectId, threadId = null) => Effect.promise((signal) => loader.load(projectId, threadId, signal)),
-    globalFingerprint: () => loader.globalFingerprint ? Effect.promise((signal) => loader.globalFingerprint!(signal)) : Effect.succeed(null),
-    presence: unused, presenceGlobal: unused, presenceForCheckout: unused, checkoutTargets: unused, currentWorkspace: unused,
-    initialize: unused, initializeGlobal: unused, readProjectConfig: unused,
-  });
-};
 
 type ConversationCallbacks = {
   projection: (threadId: string, signal: AbortSignal) => Promise<Projection>;

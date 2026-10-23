@@ -5,7 +5,7 @@ import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import { TestClock } from "effect/testing";
 import { vi } from "vitest";
 import {WorkflowMcp, type WorkflowMcpShape} from "../src/workflow-mcp.js";
-import type {WorkflowWriteController} from "../src/workflow-write-controller.js";
+import {promiseWorkflowController} from "./support/mcp-controllers.js";
 
 // request and call ownership at the sdk boundary (plan 3.7, CC-MCP): every admitted request, its sdk server and its body
 // read end with close() or layer release, no controller call starts afterwards, a controller that ignores its deadline
@@ -65,13 +65,13 @@ const noncooperative = () => {
       entered();
     });
   };
-  return {controller: {write} as unknown as WorkflowWriteController, invocations, entry};
+  return {controller: promiseWorkflowController({write}), invocations, entry};
 };
 
 describe("workflow MCP request and call ownership", () => {
   it.live("MCP-LIFE-01: a tools/call body held across close() starts no controller call, and the request ends with its body read cancelled", () => Effect.gen(function* () {
     let calls = 0;
-    const mcp = yield* WorkflowMcp.make({write: async () => {calls++;return {status: "created"};}} as unknown as WorkflowWriteController);
+    const mcp = yield* WorkflowMcp.make(promiseWorkflowController({write: async () => {calls++;return {status: "created"};}}));
     const body = heldBody();
     const request = yield* Effect.forkChild(respond(mcp, body.request));
     yield* Effect.promise(() => body.reading);
@@ -88,7 +88,7 @@ describe("workflow MCP request and call ownership", () => {
   }), { timeout: 10_000 });
 
   it.live("MCP-LIFE-02: close() ends tools/list, initialize and slow-body requests that have no call yet, cancelling their body reads", () => Effect.gen(function* () {
-    const mcp = yield* WorkflowMcp.make({} as unknown as WorkflowWriteController);
+    const mcp = yield* WorkflowMcp.make(promiseWorkflowController({}));
     const bodies = [heldBody(), heldBody(), heldBody()];
     const requests = yield* Effect.forEach(bodies, body => Effect.forkChild(respond(mcp, body.request)));
     yield* Effect.forEach(bodies, body => Effect.promise(() => body.reading));
@@ -106,7 +106,7 @@ describe("workflow MCP request and call ownership", () => {
 
   it.live("MCP-LIFE-03: layer release ends a pending tools/list request and its body read, and later requests get 503", () => Effect.gen(function* () {
     const scope = yield* Scope.make();
-    const mcp = yield* WorkflowMcp.make({} as unknown as WorkflowWriteController).pipe(Scope.provide(scope));
+    const mcp = yield* WorkflowMcp.make(promiseWorkflowController({})).pipe(Scope.provide(scope));
     const body = heldBody();
     const request = yield* Effect.forkChild(respond(mcp, body.request));
     yield* Effect.promise(() => body.reading);
@@ -123,7 +123,7 @@ describe("workflow MCP request and call ownership", () => {
 
   it.live("MCP-LIFE-04: a request arriving after close() is answered 503 without its body being read or a controller call", () => Effect.gen(function* () {
     let calls = 0;
-    const mcp = yield* WorkflowMcp.make({write: async () => {calls++;return {status: "created"};}} as unknown as WorkflowWriteController);
+    const mcp = yield* WorkflowMcp.make(promiseWorkflowController({write: async () => {calls++;return {status: "created"};}}));
     yield* mcp.close;
     const body = heldBody();
     const response = yield* respond(mcp, body.request);
@@ -138,7 +138,7 @@ describe("workflow MCP request and call ownership", () => {
 
   it.live("MCP-LIFE-05: interrupting the caller (a client disconnect) ends a request whose body is still arriving and cancels its body read", () => Effect.gen(function* () {
     let calls = 0;
-    const mcp = yield* WorkflowMcp.make({write: async () => {calls++;return {status: "created"};}} as unknown as WorkflowWriteController);
+    const mcp = yield* WorkflowMcp.make(promiseWorkflowController({write: async () => {calls++;return {status: "created"};}}));
     const body = heldBody();
     const request = yield* Effect.forkChild(respond(mcp, body.request));
     yield* Effect.promise(() => body.reading);
@@ -196,11 +196,11 @@ describe("workflow MCP request and call ownership", () => {
     const marker = "synthetic-private-marker-mcp-life-08";
     const invocations = {throws: 0, rejects: 0, pending: 0};
     const pending = {status: "pending", operationId: "op-pending", reason: "native_evidence_wait_interrupted", retryable: true};
-    const controller = {
+    const controller = promiseWorkflowController({
       write: () => {invocations.throws++;throw new Error(`${marker} token=secret-${marker}`);},
       readTool: () => {invocations.rejects++;return Promise.reject(new Error(`${marker} SQLITE_BUSY ${marker}`));},
       stopSupervision: async () => {invocations.pending++;return pending;},
-    } as unknown as WorkflowWriteController;
+    });
     const mcp = yield* WorkflowMcp.make(controller);
     const output: string[] = [];
     const capture = (...values: unknown[]) => {output.push(values.map(String).join(" "));return true;};

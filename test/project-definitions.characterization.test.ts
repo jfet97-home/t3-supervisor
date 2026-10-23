@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "vitest";
-import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
+import type { ProjectDefinitionLoader } from "./support/root-facades.js";
 import { ProjectFileError, type FreshGitInfo } from "../src/project-files.js";
 import type { ProjectFiles } from "./support/native-files-promise.js";
 import { deferred, loopTurn, within } from "./support/c3b-http.js";

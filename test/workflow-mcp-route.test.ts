@@ -7,6 +7,7 @@ import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "e
 import { TestClock } from "effect/testing";
 import {WorkflowMcp, type WorkflowMcpShape} from "../src/workflow-mcp.js";
 import type {WorkflowWriteController} from "../src/workflow-write-controller.js";
+import {promiseWorkflowController, workflowMcpLayer} from "./support/mcp-controllers.js";
 
 // target regressions of the effect MCP route (plan 3.7, CC-MCP): request fiber interruption aborts the in-flight call,
 // close() interrupts and completes in-flight requests, the 9 s deadline runs on the effect clock and a handler failure is
@@ -51,7 +52,7 @@ const abortWaitingTool = (): Gate => {
 };
 
 // serves the endpoint's route on a loopback port 0; each request fiber's start and exit are recorded around mcp.route
-const serveRoute = (controller: WorkflowWriteController) => Effect.gen(function* () {
+const serveRoute = (controller: WorkflowWriteController["Service"]) => Effect.gen(function* () {
   const started = yield* Deferred.make<void>();
   const ended = yield* Deferred.make<Exit.Exit<unknown, unknown>>();
   const route = HttpRouter.use(router => Effect.gen(function* () {
@@ -60,7 +61,7 @@ const serveRoute = (controller: WorkflowWriteController) => Effect.gen(function*
       Effect.andThen(mcp.route), Effect.onExit(exit => Deferred.succeed(ended, exit))));
   }));
   const context = yield* Layer.build(HttpRouter.serve(route, {disableLogger: true, disableListenLog: true}).pipe(
-    Layer.provideMerge(WorkflowMcp.layer(controller)),
+    Layer.provideMerge(workflowMcpLayer(controller)),
     Layer.provideMerge(NodeHttpServer.layer(createServer, {port: 0, host: "127.0.0.1"})),
   ));
   const address = Context.get(context, HttpServer.HttpServer).address;
@@ -92,7 +93,7 @@ const rawPost = (port: number, body: string, contentLength = Buffer.byteLength(b
 describe("workflow MCP route", () => {
   it.live("MCP-ROUTE-01: a client disconnect interrupts the request fiber and aborts the controller signal of its call", () => Effect.gen(function* () {
     const gate = abortWaitingTool();
-    const {port, ended} = yield* serveRoute({readTool: gate.tool} as unknown as WorkflowWriteController);
+    const {port, ended} = yield* serveRoute(promiseWorkflowController({readTool: gate.tool}));
     const {client} = yield* rawPost(port, callBody);
     const signal = yield* Effect.promise(() => gate.entered);
     assert.equal(signal.aborted, false);
@@ -105,7 +106,7 @@ describe("workflow MCP route", () => {
   it.live("MCP-ROUTE-02: close() interrupts the in-flight call and completes its request without an MCP answer, and later requests get 503 without the controller", () => Effect.gen(function* () {
     const gate = abortWaitingTool();
     let calls = 0;
-    const controller = {readTool: (args: unknown, signal: AbortSignal) => {calls++;return gate.tool(args, signal);}} as unknown as WorkflowWriteController;
+    const controller = promiseWorkflowController({readTool: (args: unknown, signal: AbortSignal) => {calls++;return gate.tool(args, signal);}});
     const {port, mcp, ended, endedNow} = yield* serveRoute(controller);
     const inflight = yield* rawPost(port, callBody);
     yield* Effect.promise(() => gate.entered);
@@ -129,7 +130,7 @@ describe("workflow MCP route", () => {
 
   it.effect("MCP-ROUTE-03: the 9 s call deadline on the effect clock aborts the controller signal with a TimeoutError and the call answers the controller's result", () => Effect.gen(function* () {
     const gate = abortWaitingTool();
-    const mcp = yield* WorkflowMcp.make({readTool: gate.tool} as unknown as WorkflowWriteController);
+    const mcp = yield* WorkflowMcp.make(promiseWorkflowController({readTool: gate.tool}));
     const answer = yield* Effect.forkChild(respond(mcp, new Request("http://127.0.0.1/mcp/workflows", {method: "POST", headers, body: callBody})));
     const signal = yield* Effect.promise(() => gate.entered);
     yield* TestClock.adjust("8999 millis");
@@ -144,7 +145,7 @@ describe("workflow MCP route", () => {
   }), { timeout: 10_000 });
 
   it.effect("MCP-ROUTE-04: a transport failure before the answer is a 500 workflow_mcp_unavailable answer", () => Effect.gen(function* () {
-    const mcp = yield* WorkflowMcp.make({} as unknown as WorkflowWriteController);
+    const mcp = yield* WorkflowMcp.make(promiseWorkflowController({}));
     // the sdk transport reads the method first; a request that cannot report it makes the transport reject. the route's
     // request conversion reads only its url
     const broken = Object.create(new Request("http://127.0.0.1/mcp/workflows", {method: "POST", headers, body: callBody}), {
@@ -159,7 +160,7 @@ describe("workflow MCP route", () => {
 
   it.live("MCP-ROUTE-05: a client disconnect while the body is still arriving completes the request fiber without a controller call", () => Effect.gen(function* () {
     let calls = 0;
-    const {port, started, ended} = yield* serveRoute({readTool: async () => {calls++;return {status: "ok"};}} as unknown as WorkflowWriteController);
+    const {port, started, ended} = yield* serveRoute(promiseWorkflowController({readTool: async () => {calls++;return {status: "ok"};}}));
     // the declared length is never reached, so the sdk is still reading the body when the client goes away
     const {client} = yield* rawPost(port, callBody.slice(0, 20), Buffer.byteLength(callBody));
     yield* started;

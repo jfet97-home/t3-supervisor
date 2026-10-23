@@ -8,7 +8,7 @@ import { Effect } from "effect";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { projectSupervisorUnit } from "./support/team-units.js";
 import { ProjectSupervisorStore } from "../src/project-supervisor-store.js";
-import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
+import type { ProjectDefinitionLoader } from "./support/root-facades.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import type { SupervisorModelSelection } from "../src/project-supervisor-contract.js";
 import type { WorkflowIntroduction } from "../src/supervisor-conversation-store.js";

@@ -4,8 +4,10 @@ import { GuidanceRuntime } from "../../src/guidance.js";
 import { GuidanceUi, type GuidanceUiOptions } from "../../src/guidance-ui.js";
 import { forgeDashboardToken as forge, ServiceAuth as ServiceAuthService } from "../../src/service-auth.js";
 import type { SupervisorConfig } from "../../src/types.js";
-import { WorkflowMcp } from "../../src/workflow-mcp.js";
+import type { WorkflowMcp } from "../../src/workflow-mcp.js";
 import type { WorkflowWriteController } from "../../src/workflow-write-controller.js";
+import { workflowMcpLayer } from "./mcp-controllers.js";
+import { definitionsService, promiseEditorService, type DefinitionsLoader, type ProjectConfigEditor } from "./root-facades.js";
 
 // the baseline call shapes of the auth suites over the Effect API (test harness only): a service instance is the
 // layer built in its own scope, its checks run to completion on the calling thread, and close releases the scope
@@ -71,14 +73,16 @@ export const forgeDashboardToken = (dataDirectory: string, options: ServiceAuthO
 
 // the dashboard server in its own scope over its own service auth, runtime and workflow MCP endpoint, with the node file
 // system and crypto the supervisor root provides; a failed start releases them and rejects with its typed failure.
-// without a workflow MCP layer the endpoint has no controller tools, which these suites never call
+// without a workflow MCP layer the endpoint has no controller tools, which these suites never call. The definitions and the
+// editor are the suites' baseline promise shapes, which the api handlers yield as services
 export const startGuidanceUi = async (config: SupervisorConfig, runtime: GuidanceRuntime["Service"],
-  definitions?: GuidanceUiOptions["definitions"], editor?: GuidanceUiOptions["editor"], supervision?: GuidanceUiOptions["supervision"],
+  definitions?: DefinitionsLoader, editor?: ProjectConfigEditor, supervision?: GuidanceUiOptions["supervision"],
   workflows?: Layer.Layer<WorkflowMcp>, workflowReader?: GuidanceUiOptions["workflowReader"]) => {
   const scope = Effect.runSync(Scope.make());
   const services = Layer.mergeAll(ServiceAuthService.layer(config.dataDirectory), Layer.succeed(GuidanceRuntime, runtime),
-    workflows ?? WorkflowMcp.layer({} as WorkflowWriteController)).pipe(Layer.provideMerge(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer)));
-  const ui = await Effect.runPromise(Layer.buildWithScope(GuidanceUi.layer(config, {definitions, editor, supervision, workflowReader}).pipe(
+    workflows ?? workflowMcpLayer({} as WorkflowWriteController["Service"])).pipe(Layer.provideMerge(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer)));
+  const ui = await Effect.runPromise(Layer.buildWithScope(GuidanceUi.layer(config, {definitions: definitions && definitionsService(definitions),
+    editor: editor && promiseEditorService(editor), supervision, workflowReader}).pipe(
     Layer.provide(services)), scope).pipe(
     Effect.map(context => Context.get(context, GuidanceUi)),
   )).catch(async (error: unknown) => {

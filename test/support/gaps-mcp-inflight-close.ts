@@ -4,7 +4,7 @@ import { NodeHttpServer } from "@effect/platform-node";
 import { Context, Effect, Layer, Scope } from "effect";
 import { HttpRouter } from "effect/http";
 import {WorkflowMcp, WorkflowMcpRoute} from "../../src/workflow-mcp.js";
-import type {WorkflowWriteController} from "../../src/workflow-write-controller.js";
+import {promiseWorkflowController, workflowMcpLayer} from "./mcp-controllers.js";
 
 // isolated runner for the in-flight half of CT-MCP-04: the endpoint's route is served through effect's node server on
 // this process's own node:http server, and a request is handled until its server chain, answer write included, ends.
@@ -16,7 +16,7 @@ const emit = (event: Record<string, unknown>): void => {
 
 let toolSignal: AbortSignal | undefined;
 let toolReturned = false;
-const controller = {
+const controller = promiseWorkflowController({
   readTool: async (_args: unknown, signal: AbortSignal) => {
     toolSignal = signal;
     emit({event: "entered", aborted: signal.aborted});
@@ -24,7 +24,7 @@ const controller = {
     toolReturned = true;
     return {status: "unavailable", reason: (signal.reason as {name?: string}).name};
   },
-} as unknown as WorkflowWriteController;
+});
 
 let handleSettled = false;
 let handles = 0;
@@ -35,7 +35,7 @@ const handle = <A, E, R>(request: Effect.Effect<A, E, R>) => Effect.suspend(() =
 });
 // the layer scope lives as long as this process; close-server closes the node server underneath it
 const context = await Effect.runPromise(Layer.buildWithScope(HttpRouter.serve(WorkflowMcpRoute, {disableLogger: true, disableListenLog: true, middleware: handle}).pipe(
-  Layer.provideMerge(WorkflowMcp.layer(controller)),
+  Layer.provideMerge(workflowMcpLayer(controller)),
   Layer.provideMerge(NodeHttpServer.layerServer(() => server, {port: 0, host: "127.0.0.1", disablePreemptiveShutdown: true})),
 ), Scope.makeUnsafe()));
 const mcp = Context.get(context, WorkflowMcp);

@@ -4,8 +4,9 @@ import { NodeHttpServer } from "@effect/platform-node";
 import { it } from "@effect/vitest";
 import { Context, Effect, Layer } from "effect";
 import { HttpRouter, HttpServer } from "effect/http";
-import {WorkflowMcp, WorkflowMcpRoute} from "../src/workflow-mcp.js";
+import {WorkflowMcpRoute} from "../src/workflow-mcp.js";
 import type {WorkflowWriteController} from "../src/workflow-write-controller.js";
+import {promiseWorkflowController, workflowMcpLayer} from "./support/mcp-controllers.js";
 
 type WorkflowJsonSchema = {
   $ref?: string;
@@ -24,9 +25,9 @@ const postJson = async (url: string, body: unknown): Promise<Response> => fetch(
 
 // serves the mcp route through a node server on a loopback port 0 with the controller stub as the endpoint's layer;
 // the test scope closes the endpoint and the server
-const serveMcp = (controller: WorkflowWriteController) => Effect.gen(function* () {
+const serveMcp = (controller: WorkflowWriteController["Service"]) => Effect.gen(function* () {
   const context = yield* Layer.build(HttpRouter.serve(WorkflowMcpRoute, {disableLogger: true, disableListenLog: true}).pipe(
-    Layer.provide(WorkflowMcp.layer(controller)),
+    Layer.provide(workflowMcpLayer(controller)),
     Layer.provideMerge(NodeHttpServer.layer(createServer, {port: 0, host: "127.0.0.1"})),
   ));
   const address = Context.get(context, HttpServer.HttpServer).address;
@@ -38,11 +39,11 @@ it.live("workflow MCP exposes read, write and the scoped stop tool and serves st
   const invalidWrite = {status: "invalid", reason: "pinned_definition_context_mismatch", diagnostic: {
     code: "local_step_definition_id_required", path: "/input/plan/nodes/0/definitionId", expected: "definitionId: null",
   }};
-  const controller = {
+  const controller = promiseWorkflowController({
     readTool: async (args: unknown) => ({status: "ok", received: args}),
     write: async () => invalidWrite,
     stopSupervision: async (args: unknown) => ({status: "denied", reason: "user_message_not_genuine", received: args}),
-  } as unknown as WorkflowWriteController;
+  });
   const address = yield* serveMcp(controller);
   const url = `http://127.0.0.1:${address.port}/mcp/workflows`;
   const initialized = yield* Effect.promise(() => postJson(url, {
@@ -98,7 +99,7 @@ it.live("workflow MCP exposes read, write and the scoped stop tool and serves st
 }));
 
 it.live("workflow MCP rejects requests above its HTTP body bound", () => Effect.gen(function* () {
-  const controller = {read: async () => ({status: "ok"}), write: async () => ({status: "created"})} as unknown as WorkflowWriteController;
+  const controller = promiseWorkflowController({write: async () => ({status: "created"})});
   const address = yield* serveMcp(controller);
   const response = yield* Effect.promise(() => postJson(`http://127.0.0.1:${address.port}/mcp/workflows`, {
     jsonrpc: "2.0", id: 4, method: "tools/list", params: {}, padding: "x".repeat(1024 * 1024),

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import { Effect, Exit, Fiber } from "effect";
-import { projectDefinitionsFacade } from "../src/guidance-application.js";
+import { projectDefinitionsFacade } from "./support/root-facades.js";
 import { ProjectConfigEditorService, type ProjectConfigDefinitions } from "../src/project-config-editor.js";
 import { ProjectDefinitions, type ProjectDefinitionSetupInput } from "../src/project-definitions.js";
 import type { ProjectConfigSave } from "../src/project-definitions-contract.js";

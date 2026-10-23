@@ -54,7 +54,7 @@ interface DefinitionScopeRead extends MutableScopeSnapshot {
   inputs: unknown[];
 }
 
-// a native, catalog or projection call failed; the original value serves only the baseline classification and the root facade's rejection, never a log
+// a native, catalog or projection call failed; the original value serves only the baseline classification, never a log
 export class DefinitionSourceFailure extends Data.TaggedError("DefinitionSourceFailure")<{readonly error: unknown}> {}
 // a source exceeded the read bounds; its fixed message becomes the source diagnostic
 export class DefinitionReadLimit extends Schema.TaggedError<DefinitionReadLimit>()("DefinitionReadLimit", {message: Schema.String}) {}
@@ -1096,17 +1096,3 @@ export class ProjectDefinitions extends Context.Service<ProjectDefinitions, {
   static readonly layer = (sources: ProjectDefinitionSources): Layer.Layer<ProjectDefinitions> => Layer.effect(ProjectDefinitions, makeProjectDefinitions(sources));
 }
 
-// the baseline promise call shape of the definitions for unported callers (plan 3.9 b-03); the composition root builds it over the service
-export interface ProjectDefinitionLoader {
-  globalHomePath(): string;
-  globalDefinitionsPath(): string;
-  currentWorkspace(projectId: string, threadId: string | null, signal: AbortSignal): Promise<string | null>;
-  presenceGlobal(signal: AbortSignal): Promise<GlobalDefinitionPresence>;
-  presence(projectId: string, signal: AbortSignal): Promise<DefinitionPresence>;
-  presenceForCheckout(projectId: string, threadId: string | null, signal: AbortSignal): Promise<DefinitionPresence>;
-  globalFingerprint(signal: AbortSignal): Promise<string | null>;
-  checkoutTargets(projectId: string, signal: AbortSignal): Promise<DefinitionCheckoutTarget[]>;
-  initializeGlobal(signal: AbortSignal): Promise<ProjectDefinitionGlobalSetupOutcome>;
-  initialize(projectId: string, threadId: string | null, input: ProjectDefinitionSetupInput, signal: AbortSignal): Promise<ProjectDefinitionSetupOutcome>;
-  load(projectId: string, threadId?: string | null, parentSignal?: AbortSignal): Promise<ProjectDefinitionSnapshot>;
-}
