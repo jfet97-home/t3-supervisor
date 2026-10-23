@@ -270,9 +270,13 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) =
     // the member state, its closed requests, their service events and the settled fences commit together
     const lost = yield* transaction(Effect.gen(function* () {
       const current = (yield* teamStore.snapshot(binding)).members.find(value => value.threadId === member.threadId);
+      // the loss applies only to the exact member state and epoch its caller observed: a transition committed since that
+      // observation (for example ready at a newer epoch) is never marked missing, its requests are never closed and its
+      // channel is never retired
+      if (current?.state !== member.state || current.epoch !== member.epoch) return false;
       // quarantine is terminal for service handling: its requests and notices stay fenced and it never becomes missing
-      if (current?.state === "quarantined") return false;
-      if (current && current.state !== "missing" && current.state !== "retired") yield* teamStore.markMissing(binding, member.threadId);
+      if (current.state === "quarantined") return false;
+      if (current.state !== "missing" && current.state !== "retired") yield* teamStore.markMissing(binding, member.threadId);
       const owned = (yield* requests.requests(binding.projectId, member.threadId)).filter(request => request.kind === "review" &&
         (request.id.startsWith("team-review:") || request.id.startsWith("team-ready:")) &&
         (["prepared", "sending", "waiting", "uncertain"].includes(request.state) || request.state === "failed" && !request.failureAcknowledged));
@@ -292,7 +296,8 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) =
   const readMemberProjection = (binding: BindingRecord, member: TeamMember, cancel: Cancel, observeOnly = false) => Effect.gen(function* () {
     if ((yield* cancelled(cancel)) || !(yield* consumeReadBudget(binding))) return null;
     // the member can change during the awaited read (for example a root quarantine); a lost conversation
-    // only applies to the exact member state and epoch that was read
+    // only applies to the exact member state and epoch that was read: this early check avoids a needless transaction, and
+    // the loss transaction itself checks again
     const unchanged = memberUnchanged(binding, member);
     const read = yield* Effect.exit(Effect.gen(function* () {
       const snapshot = yield* (cancel === undefined ? t3.projection(member.threadId)
