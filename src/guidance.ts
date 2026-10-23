@@ -114,9 +114,3 @@ export class GuidanceRuntime extends Context.Service<GuidanceRuntime, {
       return yield* makeGuidanceRuntime(config, store, yield* Store);
     }));
 }
-
-// the baseline promise shape the unported dashboard handlers read until the http port (b-03)
-export interface GuidanceRuntimeReader {
-  readonly config: SupervisorConfig;
-  snapshot(): Promise<GuidanceSnapshot>;
-}

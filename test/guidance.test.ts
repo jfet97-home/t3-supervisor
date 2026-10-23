@@ -6,7 +6,6 @@ import {it} from "@effect/vitest";
 import {Effect, Layer} from "effect";
 import {SupervisorConfig as Configuration} from "../src/config.js";
 import {GuidanceRuntime} from "../src/guidance.js";
-import {guidanceRuntimeFacade} from "../src/guidance-application.js";
 import {GuidanceStore} from "../src/guidance-store.js";
 import {forgeDashboardToken, startGuidanceUi} from "./support/service-auth-harness.js";
 import {SupervisorOwnership} from "../src/project-supervisor-store.js";
@@ -94,7 +93,7 @@ it.live("dashboard sessions retain authenticated snapshot and excluded-thread se
     const policy = yield* ThreadPolicy;
     // the unported dashboard handlers read the thread policy from the configuration they receive (b-02)
     const readers = {...settings, threadPolicy: policy};
-    const runtime = guidanceRuntimeFacade(Effect.runPromise, yield* GuidanceRuntime, readers);
+    const runtime = yield* GuidanceRuntime;
     const ui = yield* Effect.acquireRelease(Effect.promise(() => startGuidanceUi(readers, runtime)), ui => Effect.promise(() => ui.close()));
     const address = ui.server.address();
     assert.ok(address && typeof address === "object");

@@ -1,9 +1,8 @@
 import {SupervisorTeamController} from "./supervisor-team-controller.js";
-import { NodeFileSystem } from "@effect/platform-node";
-import { Cause, Context, type Deferred, Effect, Layer } from "effect";
+import { Cause, type Deferred, Effect, Layer } from "effect";
 import { GuidanceStore } from "./guidance-store.js";
-import { GuidanceRuntime, type GuidanceRuntimeReader } from "./guidance.js";
-import { startGuidanceUi } from "./guidance-ui.js";
+import { GuidanceRuntime } from "./guidance.js";
+import { GuidanceUi } from "./guidance-ui.js";
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import type { SupervisorConfig } from "./types.js";
@@ -28,7 +27,7 @@ import { SupervisorIds } from "./ids.js";
 import { T3Client } from "./t3.js";
 import { GitProbe } from "./git-probe.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
-import { createWorkflowMcpEndpoint } from "./workflow-mcp.js";
+import { WorkflowMcp } from "./workflow-mcp.js";
 import { ServiceAuth } from "./service-auth.js";
 
 // the root context's promise runner (b-01) that the b-03 facades call
@@ -56,11 +55,6 @@ export const projectDefinitionsFacade = (run: RootRun, definitions: ProjectDefin
 // b-03 (plan 3.9): the baseline promise call shape over the config editor service
 export const projectConfigEditorFacade = (run: RootRun, editor: ProjectConfigEditorService["Service"]): ProjectConfigEditor => ({
   save: (input, signal) => run(Effect.mapError(editor.save(input, signal), definitionsRejection)),
-});
-// b-03 (plan 3.9): the baseline promise shape the unported dashboard handlers read the runtime through
-export const guidanceRuntimeFacade = (run: RootRun, runtime: GuidanceRuntime["Service"], config: SupervisorConfig): GuidanceRuntimeReader => ({
-  config,
-  snapshot: () => run(runtime.snapshot),
 });
 
 // a call's AbortSignal is the service's cancel trigger for the lifetime of that call, as for the native rpc facade
@@ -115,7 +109,6 @@ export const runGuidanceApplication = (
       (store) => Effect.sync(() => store.close()),
     );
     const guidanceRuntime = yield* GuidanceRuntime.make(config, store, source);
-    const runtime = guidanceRuntimeFacade(run, guidanceRuntime, config);
     const descriptor = yield* t3.descriptor();
     yield* guidanceRuntime.recordDescriptor(descriptor);
     store.bind(descriptor.environmentId);
@@ -210,13 +203,10 @@ export const runGuidanceApplication = (
     });
     const teamController = new SupervisorTeamController(workflowReader, supervision.team, supervision.operateRpc, supervision.conversation.requests);
     supervision.teamEffects = teamController;
-    const workflows = createWorkflowMcpEndpoint(workflowReader, teamController);
-    // the dashboard's access client, acquired in this scope right before the listeners and released after them
-    const auth = Context.get(yield* Layer.build(ServiceAuth.layer(config.dataDirectory).pipe(Layer.provide(NodeFileSystem.layer))), ServiceAuth);
-    yield* Effect.acquireRelease(
-      Effect.promise(() => startGuidanceUi(config, runtime, auth, run, definitions, editor, supervision, workflows, workflowReader)),
-      (ui) => Effect.promise(() => ui.close()),
-    );
+    // the dashboard's access client, runtime and workflow MCP endpoint, provided once in this scope; the listeners are
+    // acquired after them and released before them
+    yield* Layer.build(GuidanceUi.layer(config, {definitions, editor, supervision, workflowReader}).pipe(Layer.provide(Layer.mergeAll(
+      ServiceAuth.layer(config.dataDirectory), Layer.succeed(GuidanceRuntime, guidanceRuntime), WorkflowMcp.layer(workflowReader, teamController)))));
     yield* Effect.sync(onReady);
     const interpretation = Effect.tryPromise({try: signal => supervision.runOnce(AbortSignal.any([signal, AbortSignal.timeout(120_000)])), catch: () => new Error("task_interpretation_cycle_failed")}).pipe(
       Effect.catch(() => Effect.sync(() => console.log(JSON.stringify({event: "task_interpretation_unavailable"})))),

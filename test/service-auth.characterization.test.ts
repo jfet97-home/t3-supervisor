@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { it } from "vitest";
-import type { GuidanceRuntimeReader } from "../src/guidance.js";
+import type { GuidanceRuntime } from "../src/guidance.js";
 import { createServiceAuth, forgeDashboardToken, startGuidanceUi } from "./support/service-auth-harness.js";
 import { childFailure, privately } from "./support/private-assert.js";
 import type { SupervisorConfig } from "../src/types.js";
@@ -250,7 +250,7 @@ const uiConfig = (directory: string): SupervisorConfig => ({
 
 it("CT-AUTH-05: concurrent HTTP logins and child-process forges keep one session per grant and the delete-mode schema", { timeout: 60_000 }, async () => {
   await withTemporaryDirectory(async (directory) => {
-    const ui = await startGuidanceUi(uiConfig(directory), {} as GuidanceRuntimeReader);
+    const ui = await startGuidanceUi(uiConfig(directory), {} as GuidanceRuntime["Service"]);
     try {
       const address = ui.server.address();
       assert.ok(address && typeof address === "object");

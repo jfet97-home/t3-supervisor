@@ -2,17 +2,16 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect } from "effect";
+import { Effect, type Layer } from "effect";
 import type { TestContext } from "vitest";
 import { GuidanceRuntime } from "../../src/guidance.js";
-import { guidanceRuntimeFacade } from "../../src/guidance-application.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
-import type { WorkflowMcpEndpoint } from "../../src/guidance-ui.js";
 import { startGuidanceUi } from "./service-auth-harness.js";
 import type { ProjectConfigEditor } from "../../src/project-config-editor.js";
 import type { ProjectDefinitionLoader } from "../../src/project-definitions.js";
 import type { ProjectSupervisor } from "../../src/project-supervisor.js";
 import type { SupervisorConfig } from "../../src/types.js";
+import type { WorkflowMcp } from "../../src/workflow-mcp.js";
 import { defer } from "./c3b-http.js";
 
 // the dashboard server of guidance-ui.ts on a temp data directory, closed and removed when the test finishes
@@ -52,12 +51,12 @@ export const startUi = async (t: TestContext, options: {
   definitions?: ProjectDefinitionLoader;
   editor?: ProjectConfigEditor;
   supervision?: ProjectSupervisor;
-  workflows?: WorkflowMcpEndpoint;
+  workflows?: Layer.Layer<WorkflowMcp>;
 } = {}): Promise<StartedUi> => {
   const directory = options.directory ?? await tempDirectory(t, "c3b-ui-");
   const config = uiConfig(directory, options.config);
   const store = new GuidanceStore(directory);
-  const runtime = guidanceRuntimeFacade(Effect.runPromise, Effect.runSync(GuidanceRuntime.make(config, store, { catalog: () => Effect.succeed({ projects: [], threads: [] }) })), config);
+  const runtime = Effect.runSync(GuidanceRuntime.make(config, store, { catalog: () => Effect.succeed({ projects: [], threads: [] }) }));
   let ui: StartedUi["ui"];
   try {
     ui = await startGuidanceUi(config, runtime, options.definitions, options.editor, options.supervision, options.workflows);

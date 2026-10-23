@@ -1,7 +1,11 @@
-import { NodeFileSystem } from "@effect/platform-node";
+import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Clock, Context, Effect, Exit, Layer, Redacted, Scope } from "effect";
-import { startGuidanceUi as startGuidanceUiWith } from "../../src/guidance-ui.js";
+import { GuidanceRuntime } from "../../src/guidance.js";
+import { GuidanceUi, type GuidanceUiOptions } from "../../src/guidance-ui.js";
 import { forgeDashboardToken as forge, ServiceAuth as ServiceAuthService } from "../../src/service-auth.js";
+import type { SupervisorConfig } from "../../src/types.js";
+import { WorkflowMcp } from "../../src/workflow-mcp.js";
+import type { WorkflowWriteController } from "../../src/workflow-write-controller.js";
 
 // the baseline call shapes of the auth suites over the Effect API (test harness only): a service instance is the
 // layer built in its own scope, its checks run to completion on the calling thread, and close releases the scope
@@ -65,27 +69,28 @@ export const forgeDashboardToken = (dataDirectory: string, options: ServiceAuthO
     Effect.provide(NodeFileSystem.layer),
   ));
 
-type UiArguments = Parameters<typeof startGuidanceUiWith> extends [infer C, infer G, unknown, unknown, ...infer Rest] ? [C, G, ...Rest] : never;
-
-// the dashboard server over its own service auth, acquired before the listeners and released after them as the
-// supervision run does; a failed start releases it before rejecting
-export const startGuidanceUi = async (...[config, runtime, ...rest]: UiArguments) => {
-  const auth = await createServiceAuth(config.dataDirectory);
-  let ui: Awaited<ReturnType<typeof startGuidanceUiWith>>;
-  try {
-    ui = await startGuidanceUiWith(config, runtime, auth.service, Effect.runPromise, ...rest);
-  } catch (error) {
-    auth.close();
+// the dashboard server in its own scope over its own service auth, runtime and workflow MCP endpoint, with the node file
+// system and crypto the supervisor root provides; a failed start releases them and rejects with the listen error itself.
+// without a workflow MCP layer the endpoint has no controller tools, which these suites never call
+export const startGuidanceUi = async (config: SupervisorConfig, runtime: GuidanceRuntime["Service"],
+  definitions?: GuidanceUiOptions["definitions"], editor?: GuidanceUiOptions["editor"], supervision?: GuidanceUiOptions["supervision"],
+  workflows?: Layer.Layer<WorkflowMcp>, workflowReader?: GuidanceUiOptions["workflowReader"]) => {
+  const scope = Effect.runSync(Scope.make());
+  const services = Layer.mergeAll(ServiceAuthService.layer(config.dataDirectory), Layer.succeed(GuidanceRuntime, runtime),
+    workflows ?? WorkflowMcp.layer({} as WorkflowWriteController)).pipe(Layer.provideMerge(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer)));
+  const ui = await Effect.runPromise(Layer.buildWithScope(GuidanceUi.layer(config, {definitions, editor, supervision, workflowReader}).pipe(
+    Layer.provide(services)), scope).pipe(
+    Effect.map(context => Context.get(context, GuidanceUi)),
+    Effect.mapError(error => error._tag === "ServeError" ? error.cause : error),
+  )).catch(async (error: unknown) => {
+    await Effect.runPromise(Scope.close(scope, Exit.void));
     throw error;
-  }
+  });
   return {
     ...ui,
-    close: async () => {
-      try {
-        await ui.close();
-      } finally {
-        auth.close();
-      }
-    },
+    // the bound ports in the node listener call shape the suites read
+    server: {address: () => ({port: ui.port})},
+    mcpServer: ui.mcpPort === null ? undefined : {address: () => ({port: ui.mcpPort})},
+    close: () => Effect.runPromise(Scope.close(scope, Exit.void)),
   };
 };

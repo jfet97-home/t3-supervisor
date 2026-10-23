@@ -11,7 +11,6 @@ import { HttpApi } from "effect/http-api";
 import { TestClock } from "effect/testing";
 import { it } from "vitest";
 import { GuidanceRuntime } from "../src/guidance.js";
-import { guidanceRuntimeFacade } from "../src/guidance-application.js";
 import { SupervisorApi } from "../src/guidance-contract.js";
 import { GuidanceStore } from "../src/guidance-store.js";
 import type { ProjectConfigEditor } from "../src/project-config-editor.js";
@@ -19,7 +18,7 @@ import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
 import { forgeDashboardToken, startGuidanceUi } from "./support/service-auth-harness.js";
 import { ThreadPolicyStore } from "../src/thread-policy.js";
 import type { ProjectInfo } from "../src/types.js";
-import { createWorkflowMcpEndpoint } from "../src/workflow-mcp.js";
+import { WorkflowMcp } from "../src/workflow-mcp.js";
 import type { WorkflowWriteController } from "../src/workflow-write-controller.js";
 import { mockMethod } from "./support/node-test.js";
 import { connectRefused, defer, freePort, jsonBody, openDescriptors, portBindable, rawRequest, readCsrf, signIn, within, type RawResponse } from "./support/c3b-http.js";
@@ -321,7 +320,7 @@ const mcpPost = (port: number, headers: Record<string, string>) => rawRequest(po
 
 it("CT-MCP-01: the workflow MCP route enforces Host, Origin and bearer before the endpoint, and the MCP-only listener serves nothing else", {timeout: 10_000}, async t => {
   const controller = {readTool: async () => ({status: "ok"})} as unknown as WorkflowWriteController;
-  const started = await startUi(t, {workflows: createWorkflowMcpEndpoint(controller),
+  const started = await startUi(t, {workflows: WorkflowMcp.layer(controller),
     config: {workflowMcpBindHost: "127.0.0.1", workflowMcpPort: 0, workflowMcpHosts: ["supervisor.internal:9100"]}});
   const {port, origin, directory} = started;
   const mcpPort = started.mcpPort!;
@@ -557,8 +556,8 @@ it("CT-UI-06: a listen failure on the MCP bind host closes the UI listener and t
   const store = new GuidanceStore(directory);
   defer(t, () => store.close());
   const runtimeConfig = uiConfig(directory);
-  const runtime = guidanceRuntimeFacade(Effect.runPromise,
-    Effect.runSync(GuidanceRuntime.make(runtimeConfig, store, {catalog: () => Effect.succeed({projects: [], threads: []})})), runtimeConfig);
+  const runtime =
+    Effect.runSync(GuidanceRuntime.make(runtimeConfig, store, {catalog: () => Effect.succeed({projects: [], threads: []})}));
   const login = join(directory, "access", "login.sqlite3");
   assert.equal(openDescriptors(login), 0);
 

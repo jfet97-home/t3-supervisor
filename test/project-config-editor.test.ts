@@ -12,7 +12,7 @@ import type {ProjectConfigSave} from "../src/project-definitions-contract.js";
 import {ProjectFileError} from "../src/project-files.js";
 import {makeProjectWriter, type ProjectWriter} from "./support/native-files-promise.js";
 import {forgeDashboardToken, startGuidanceUi} from "./support/service-auth-harness.js";
-import type {GuidanceRuntimeReader} from "../src/guidance.js";
+import type {GuidanceRuntime} from "../src/guidance.js";
 import type {SupervisorConfig} from "../src/types.js";
 import {requiredReferences, type DefinitionReference} from "../src/project-definitions-contract.js";
 import {indexEntry, indexSource, makeDefinitionFixture, projectIndex, stepSource, workflowSource} from "./project-definitions-fixture.js";
@@ -221,7 +221,7 @@ it.live("project-configuration endpoint keeps session, origin and CSRF checks", 
     dataDirectory: directory, t3Url: "unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0,
     uiPort: 0, uiHost: "127.0.0.1", uiAssetsDirectory: directory,
   };
-  const ui = yield* Effect.acquireRelease(Effect.promise(() => startGuidanceUi(config, {} as GuidanceRuntimeReader, f.loader, editor)), started => Effect.promise(() => started.close()));
+  const ui = yield* Effect.acquireRelease(Effect.promise(() => startGuidanceUi(config, {} as GuidanceRuntime["Service"], f.loader, editor)), started => Effect.promise(() => started.close()));
   yield* Effect.promise(async () => {
     const address = ui.server.address();assert.ok(address && typeof address !== "string");
     const origin = `http://127.0.0.1:${address.port}`;
