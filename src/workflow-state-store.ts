@@ -1,8 +1,12 @@
 import {definitionReferenceFields, validDefinitionReferences} from "./definition-references.js";
 import {Buffer} from "node:buffer";
 import {randomUUID} from "node:crypto";
+import {Clock, Context, Data, Effect, Exit, Layer, Schema} from "effect";
+import {SqlClient, type SqlError} from "effect/sql";
+import {GuidanceDb, untracedSql} from "./db.js";
 import {fingerprint} from "./guidance-store.js";
-import type {ProjectSupervisorStore} from "./project-supervisor-store.js";
+import {SupervisorIds} from "./ids.js";
+import {ProjectSupervisorStoreService, type ProjectSupervisorStore, type ProjectSupervisorStoreError} from "./project-supervisor-store.js";
 import {validateWorkflowApplyAgainstPinnedContext} from "./supervisor-workflow.js";
 import {
   externalContributionDecisions,
@@ -11,6 +15,8 @@ import {
   externalContributionStates,
   workflowExecutionStatuses,
   workflowMutationLimits,
+  WorkflowMutationReceiptSchema,
+  WorkflowStateDocumentSchema,
   type AcceptedWorkflowAgreementRecord,
   type ExternalContribution,
   type ExternalContributionDiagnosticCode,
@@ -435,6 +441,7 @@ export const contributionImportDecision = (document: WorkflowStateDocument, inpu
   return {kind: "record", existing, node};
 };
 
+// removed by the s6d switch: its callers move to WorkflowStateStoreService
 /** Persists workflow plans without treating them as a scheduler or execution claim. */
 export class WorkflowStateStore {
   constructor(readonly supervisors: ProjectSupervisorStore,
@@ -1023,3 +1030,600 @@ const validDocument = (value: Record<string, unknown>): boolean => value.formatV
     (item.sourceItemId === undefined || item.sourceItemId === null || validId(item.sourceItemId)) &&
     (item.agreementKey === null || validText(item.agreementKey)) && validText(item.note)) &&
   Number.isFinite(value.createdAt) && Number.isFinite(value.updatedAt);
+
+// the s6d store service over GuidanceDb (step 1): built and tested on its own temporary database; nothing in production is
+// wired to it until the switch, which deletes the synchronous class above and names this service WorkflowStateStore
+
+export type WorkflowStateStoreReason = "workflow_revision_conflict" | "workflow_store_unavailable" | "workflow_row_invalid";
+
+// a database failure carries no query, value or driver text; a stored row whose columns are unreadable names its kind (an
+// unreadable document is classified incompatible instead, as at baseline)
+export class WorkflowStateStoreError extends Data.TaggedError("WorkflowStateStoreError")<{
+  readonly reason: WorkflowStateStoreReason;
+  readonly row?: "workflow" | "operation" | undefined;
+}> {
+  override readonly message: string = this.reason;
+}
+
+/** Whether workflow editing is enabled for a scope; it runs inside the store's transaction, so it forks nothing and calls nothing natively. */
+export type WorkflowEditingEnabled = (projectId: string, mainThreadId?: string) => Effect.Effect<boolean, ProjectSupervisorStoreError>;
+type WorkflowScope = Pick<WorkflowOwner, "projectId" | "mainThreadId">;
+type WorkflowFailure = WorkflowStateStoreError | ProjectSupervisorStoreError | SqlError.SqlError;
+type WorkflowEffect<A> = Effect.Effect<A, WorkflowStateStoreError | ProjectSupervisorStoreError>;
+
+/**
+ * The synchronous class's methods; each joins the caller's transaction when it runs inside one, so the `*InTransaction`
+ * variants are the plain methods (apply takes apply's arguments; getByIdForOwner serves both lookups).
+ */
+export interface WorkflowStateStoreShape {
+  readonly get: (projectId: string, mainThreadId: string, threadId?: string) => WorkflowEffect<WorkflowStateDocument | null>;
+  readonly getState: (projectId: string, mainThreadId: string, threadId?: string) => WorkflowEffect<WorkflowStateLookupResult>;
+  readonly getByIdForOwner: (owner: WorkflowOwner, workflowId: string) => WorkflowEffect<WorkflowStateLookupResult>;
+  readonly listResult: (projectId: string, mainThreadId: string) => WorkflowEffect<{documents: WorkflowStateDocument[]; incompatible: Array<{workflowId: string; formatVersion: number | null}>}>;
+  readonly list: (projectId: string, mainThreadId: string) => WorkflowEffect<WorkflowStateDocument[]>;
+  readonly hasNeedsAttention: (projectId: string, mainThreadId: string, threadIds: readonly string[], limit?: number) => WorkflowEffect<WorkflowNeedsAttentionScan>;
+  readonly apply: (owner: WorkflowOwner, input: WorkflowApplyInput, validation: WorkflowApplyValidationContext | undefined, now?: number) => WorkflowEffect<WorkflowApplyResult>;
+  readonly ensureMain: (owner: WorkflowOwner, operationId: string, note: string, now?: number) => WorkflowEffect<WorkflowEnsureResult>;
+  readonly linkChild: (owner: WorkflowOwner, input: {operationId: string; lineage: WorkflowControllerLineage; note: string}, now?: number) => WorkflowEffect<WorkflowMutationResult>;
+  readonly importAcceptedAgreement: (owner: WorkflowOwner, source: WorkflowAgreementImport, now?: number) => WorkflowEffect<WorkflowMutationResult>;
+  readonly recordContribution: (owner: WorkflowOwner, input: ExternalContributionImport, now?: number) => WorkflowEffect<ExternalContributionImportResult>;
+  readonly assessContribution: (owner: WorkflowOwner, input: WorkflowContributionAssessmentInput, now?: number) => WorkflowEffect<WorkflowMutationResult>;
+}
+
+const workflowColumns = "workflow_id,project_id,main_thread_id,thread_id,parent_workflow_id,parent_thread_id,revision,document";
+const decodeWorkflowRow = Schema.decodeUnknownEffect(Schema.Struct({workflow_id: Schema.String, project_id: Schema.String, main_thread_id: Schema.String,
+  thread_id: Schema.String, parent_workflow_id: Schema.NullOr(Schema.String), parent_thread_id: Schema.NullOr(Schema.String), revision: Schema.Finite, document: Schema.String}));
+const decodeOperationRow = Schema.decodeUnknownEffect(Schema.Struct({request_hash: Schema.String, result: Schema.String}));
+const decodeWorkflowJson = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
+const decodeStoredDocument = Schema.decodeUnknownExit(WorkflowStateDocumentSchema);
+const decodeStoredReceipt = Schema.decodeUnknownExit(WorkflowMutationReceiptSchema);
+
+// a stored document must decode with the stored-shape schema and pass the store's own limits and row identity; it is
+// returned as stored (key order included), since its fingerprint is the receipt's stateHash
+const classifyWorkflowRow = (row: WorkflowRow): WorkflowStateDecode => {
+  const parsed = decodeWorkflowJson(row.document);
+  if (Exit.isFailure(parsed)) return {status: "incompatible", workflowId: row.workflow_id, formatVersion: null};
+  const value = parsed.value;
+  if (!isRecord(value) || value.formatVersion !== 2 || Exit.isFailure(decodeStoredDocument(value)) || !validDocument(value) || value.workflowId !== row.workflow_id ||
+    value.projectId !== row.project_id || value.mainThreadId !== row.main_thread_id || value.threadId !== row.thread_id ||
+    value.revision !== row.revision || value.parentWorkflowId !== row.parent_workflow_id || value.parentThreadId !== row.parent_thread_id)
+    return {status: "incompatible", workflowId: row.workflow_id,
+      formatVersion: isRecord(value) && Number.isSafeInteger(value.formatVersion) ? Number(value.formatVersion) : null};
+  return {status: "found", document: {...value, contributions: value.contributions ?? []} as unknown as WorkflowStateDocument};
+};
+
+// a stored receipt replays only when it decodes with the receipt schema; anything else is reported incompatible, never as a write
+const classifyReceipt = (operationId: string, text: string): WorkflowMutationResult => {
+  const parsed = decodeWorkflowJson(text);
+  if (Exit.isFailure(parsed)) return {status: "incompatible", operationId, workflowId: "unknown", formatVersion: null};
+  const result = parsed.value;
+  if (!isRecord(result) || result.formatVersion !== 2 || !validId(result.workflowId) || Exit.isFailure(decodeStoredReceipt(result)))
+    return {status: "incompatible", operationId, workflowId: isRecord(result) && validId(result.workflowId) ? result.workflowId : "unknown",
+      formatVersion: isRecord(result) && Number.isSafeInteger(result.formatVersion) ? Number(result.formatVersion) : null};
+  return result as unknown as WorkflowMutationReceipt;
+};
+
+const workflowReceipt = (status: "applied" | "created", operationId: string, document: WorkflowStateDocument): WorkflowMutationReceipt =>
+  ({status, operationId, workflowId: document.workflowId, revision: document.revision, stateHash: fingerprint(document), formatVersion: 2});
+
+// the plan and evidence checks of the synchronous class, as pure functions
+const normalizeWorkflowPlan = (input: WorkflowStatePlan, existing: WorkflowStatePlan, submittedNodeIds: ReadonlySet<string>):
+  {ok: true; plan: WorkflowStatePlan} | {ok: false; diagnostic: WorkflowApplyDiagnostic | null} => {
+  if (!validPlan(input)) return {ok: false, diagnostic: null};
+  const existingEntities = collectPlanEntities(existing);
+  const existingById = new Map(existingEntities.map(node => [node.nodeId, node]));
+  const nextEntities = collectPlanEntities(input);
+  const existingByIdentity = new Map<string, PlanEntity[]>();
+  const nextByIdentity = new Map<string, PlanEntity[]>();
+  for (const node of existingEntities) existingByIdentity.set(identityKey(node), [...(existingByIdentity.get(identityKey(node)) ?? []), node]);
+  for (const node of nextEntities) nextByIdentity.set(identityKey(node), [...(nextByIdentity.get(identityKey(node)) ?? []), node]);
+  for (const [key, previous] of existingByIdentity) {
+    const missingPreviousIds = previous.filter(node => !submittedNodeIds.has(node.nodeId));
+    const generatedSameIdentity = (nextByIdentity.get(key) ?? []).some(node => !submittedNodeIds.has(node.nodeId));
+    if (missingPreviousIds.length && generatedSameIdentity) return {ok: false, diagnostic: null};
+  }
+  for (const node of nextEntities) {
+    const previous = existingById.get(node.nodeId);
+    if (!previous && node.status !== "planned") {
+      const path = planStatusPointer(input, node);
+      return {ok: false, diagnostic: path ? {code: "new_node_must_start_planned", path, expected: newNodeMustStartPlannedExpected} : null};
+    }
+  }
+  return {ok: true, plan: copyPlan(input)};
+};
+
+const workflowStatusEvidenceProblem = (current: WorkflowStateDocument, input: WorkflowApplyInput, nextPlan: WorkflowStatePlan): WorkflowApplyDiagnostic | "generic" | null => {
+  const evidence = input.evidence ?? [];
+  const previousNodes = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node]));
+  const nextNodes = new Map(collectPlanEntities(nextPlan).map(node => [node.nodeId, node]));
+  for (const node of nextNodes.values()) {
+    const previous = previousNodes.get(node.nodeId);
+    if (!previous) continue;
+    if (previous.status !== node.status && !evidence.some(item => item.kind === "status_changed" && item.targetNodeId === node.nodeId)) {
+      const path = planStatusPointer(nextPlan, node);
+      return path ? {code: "missing_status_changed_evidence", path, expected: missingStatusChangedEvidenceExpected} : "generic";
+    }
+  }
+  if (current.status !== input.status && !evidence.some(item => item.kind === "status_changed" && (item.targetNodeId === null || item.targetNodeId === undefined)))
+    return {code: "missing_status_changed_evidence", path: "/status", expected: missingStatusChangedEvidenceExpected};
+  if (!evidence.every(item => item.targetNodeId === null || item.targetNodeId === undefined || nextNodes.has(item.targetNodeId))) return "generic";
+  return null;
+};
+
+const validWorkflowAgreementImport = (source: WorkflowAgreementImport): boolean => {
+  if (!isRecord(source) || !validId(source.taskId) || !validId(source.sourceThreadId) || !validId(source.sourceRunId) || !validId(source.sourceMessageId) ||
+    !validText(source.sourceHash) || !validText(source.objective) || !isRecord(source.agreement) || source.agreement.status !== "agreed" ||
+    !validId(source.agreement.proposalId) || !validText(source.agreement.supervisorMessageId) || !validText(source.agreement.agentMessageId) ||
+    !Number.isFinite(source.agreement.agreedAt) || !isRecord(source.agreement.workflow) || source.agreement.workflow.status !== "proposed") return false;
+  const workflow = source.agreement.workflow;
+  const binding = sourceBindingOf(source.agreement.workflow, source.taskId, source.agreement.proposalId, source.sourceHash);
+  return validSourceBinding(binding) && binding.definitionsStatus === "ready" && binding.definitionsComplete && binding.requirementsKnown &&
+    validText(binding.workspaceRoot) && validText(binding.revision) && validRequirements(workflow.requirements) &&
+    validIssues(workflow.issues) && workflow.issues.length === 0 &&
+    workflow.requirements.every(item => item.state === "included" || item.state === "not_applicable") &&
+    validPlan(workflow.plan) && workflow.plan !== null &&
+    collectPlanEntities(workflow.plan).every(node => node.resolution === "resolved") &&
+    workflow.definitionsStatus === binding.definitionsStatus && workflow.definitionsComplete === binding.definitionsComplete &&
+    workflow.requirementsKnown === binding.requirementsKnown;
+};
+
+const acceptedWorkflowPlanHash = (source: WorkflowAgreementImport): string => {
+  const workflow = source.agreement.workflow;
+  const binding = sourceBindingOf(workflow, source.taskId, source.agreement.proposalId, source.sourceHash);
+  return fingerprint({objective: source.objective, sourceBinding: binding, requirements: workflow.requirements,
+    issues: workflow.issues, plan: staticPlan(workflow.plan)});
+};
+
+const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.gen(function* () {
+  const sql = yield* GuidanceDb;
+  const ids = yield* SupervisorIds;
+  const supervisors = yield* ProjectSupervisorStoreService;
+  const isEnabled: WorkflowEditingEnabled = enabledFor ?? (projectId => supervisors.enabled(projectId));
+
+  const unavailable = new WorkflowStateStoreError({reason: "workflow_store_unavailable"});
+  // the sql cause is dropped here: it may hold statement text or stored values, and no caller may log it
+  const run = <A>(effect: Effect.Effect<A, WorkflowFailure>): WorkflowEffect<A> =>
+    effect.pipe(Effect.catchTag("SqlError", () => Effect.fail(unavailable)), untracedSql);
+  // every write is one transaction, or a savepoint of the caller's: the owner check, the revision CAS and the receipt commit together
+  const write = <A>(body: Effect.Effect<A, WorkflowFailure>): WorkflowEffect<A> => run(sql.withTransaction(body));
+  const read = <A>(body: Effect.Effect<A, WorkflowFailure>): WorkflowEffect<A> =>
+    run(sql.withTransaction(body).pipe(Effect.provideService(SqlClient.BeginTransaction, "BEGIN")));
+  const nowOr = (now: number | undefined) => now === undefined ? Clock.currentTimeMillis : Effect.succeed(now);
+  const workflowRows = (rows: ReadonlyArray<unknown>) =>
+    Effect.forEach(rows, (row) => decodeWorkflowRow(row).pipe(Effect.mapError(() => new WorkflowStateStoreError({reason: "workflow_row_invalid", row: "workflow"}))));
+  const firstWorkflow = (rows: ReadonlyArray<unknown>) => Effect.map(workflowRows(rows.slice(0, 1)), ([row]): WorkflowRow | null => row ?? null);
+
+  const workflowByThread = (scope: WorkflowScope, threadId: string) =>
+    sql.unsafe(`SELECT ${workflowColumns} FROM supervisor_workflow_state WHERE project_id=? AND main_thread_id=? AND thread_id=?`, [scope.projectId, scope.mainThreadId, threadId]).pipe(Effect.flatMap(firstWorkflow));
+  const workflowById = (owner: WorkflowScope, workflowId: string) =>
+    sql.unsafe(`SELECT ${workflowColumns} FROM supervisor_workflow_state WHERE workflow_id=? AND project_id=? AND main_thread_id=?`, [workflowId, owner.projectId, owner.mainThreadId]).pipe(Effect.flatMap(firstWorkflow));
+  const currentRevision = (owner: WorkflowOwner, workflowId: string) => Effect.map(workflowById(owner, workflowId), (latest) => {
+    if (!latest) return null;
+    const decoded = classifyWorkflowRow(latest);
+    return decoded.status === "found" ? decoded.document.revision : null;
+  });
+  // the revision cas: exactly one row changes only when the stored revision is still the expected one
+  const casUpdate = (owner: WorkflowScope, workflowId: string, revision: number, serialized: string, updatedAt: number, expectedRevision: number) =>
+    sql`UPDATE supervisor_workflow_state SET revision=${revision},document=${serialized},updated_at=${updatedAt} WHERE workflow_id=${workflowId} AND project_id=${owner.projectId} AND main_thread_id=${owner.mainThreadId} AND revision=${expectedRevision} RETURNING workflow_id`.pipe(
+      Effect.map((rows) => rows.length === 1));
+  const insertWorkflow = (document: WorkflowStateDocument, serialized: string) =>
+    sql`INSERT INTO supervisor_workflow_state(workflow_id,project_id,main_thread_id,thread_id,parent_workflow_id,parent_thread_id,revision,document,created_at,updated_at) VALUES(${document.workflowId},${document.projectId},${document.mainThreadId},${document.threadId},${document.parentWorkflowId},${document.parentThreadId},${document.revision},${serialized},${document.createdAt},${document.updatedAt})`;
+  const replaceWorkflow = Effect.fnUntraced(function* (document: WorkflowStateDocument, serialized: string, expectedRevision: number) {
+    if (!(yield* casUpdate(document, document.workflowId, document.revision, serialized, document.updatedAt, expectedRevision)))
+      return yield* new WorkflowStateStoreError({reason: "workflow_revision_conflict"});
+  });
+
+  const currentOwner = Effect.fnUntraced(function* (owner: WorkflowOwner) {
+    if (!supervisors.scopeCompatible || !validId(owner.projectId) || !validId(owner.mainThreadId) || !validId(owner.supervisorThreadId) ||
+      !Number.isSafeInteger(owner.bindingGeneration) || owner.bindingGeneration < 1) return false;
+    const binding = yield* supervisors.binding(owner.projectId, owner.mainThreadId);
+    if (!(yield* isEnabled(owner.projectId, owner.mainThreadId))) return false;
+    return binding?.state === "ready" && binding.threadId === owner.supervisorThreadId && binding.generation === owner.bindingGeneration;
+  });
+  // receipts are keyed (project, main, actor, binding generation, namespace, operation id); another request hash under the same
+  // id is operation_id_reused, an identical one replays the stored receipt
+  const operationReplay = Effect.fnUntraced(function* (owner: WorkflowOwner, namespace: WorkflowOperationNamespace, operationId: string, requestHash: string) {
+    const [stored] = yield* sql`SELECT request_hash,result FROM supervisor_workflow_operations WHERE project_id=${owner.projectId} AND main_thread_id=${owner.mainThreadId} AND actor_thread_id=${owner.supervisorThreadId} AND binding_generation=${owner.bindingGeneration} AND operation_namespace=${namespace} AND operation_id=${operationId}`;
+    if (stored === undefined) return null;
+    const row = yield* decodeOperationRow(stored).pipe(Effect.mapError(() => new WorkflowStateStoreError({reason: "workflow_row_invalid", row: "operation"})));
+    if (row.request_hash !== requestHash) return {status: "conflict", operationId, reason: "operation_id_reused", currentRevision: null} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    return classifyReceipt(operationId, row.result);
+  });
+  const recordOperation = (owner: WorkflowOwner, namespace: WorkflowOperationNamespace, operationId: string, requestHash: string, receipt: WorkflowMutationReceipt, now: number) =>
+    sql`INSERT INTO supervisor_workflow_operations(project_id,main_thread_id,actor_thread_id,binding_generation,operation_namespace,operation_id,request_hash,result,workflow_id,created_at) VALUES(${owner.projectId},${owner.mainThreadId},${owner.supervisorThreadId},${owner.bindingGeneration},${namespace},${operationId},${requestHash},${json(receipt)},${receipt.workflowId},${now})`;
+  const emptyDocument = Effect.fnUntraced(function* (owner: WorkflowOwner, threadId: string, parentWorkflowId: string | null, parentThreadId: string | null, revision: number, now: number) {
+    return {formatVersion: 2, workflowId: yield* ids.uuid, projectId: owner.projectId, mainThreadId: owner.mainThreadId, threadId,
+      parentWorkflowId, parentThreadId, revision, status: "planned", objective: null, sourceBinding: null, requirements: [], issues: [], plan: null,
+      currentAgreementKey: null, acceptedAgreements: [], contributions: [], evidence: [], createdAt: now, updatedAt: now} satisfies WorkflowStateDocument as WorkflowStateDocument;
+  });
+  const makeEvidence = Effect.fnUntraced(function* (input: Omit<WorkflowStateEvidence, "id" | "recordedAt" | "actorSupervisorThreadId"> & {owner: WorkflowOwner; now: number}) {
+    const {owner, now, ...rest} = input;
+    return {...rest, sourceItemId: rest.sourceItemId ?? null, id: yield* ids.uuid, recordedAt: now, actorSupervisorThreadId: owner.supervisorThreadId} satisfies WorkflowStateEvidence as WorkflowStateEvidence;
+  });
+
+  const getState = (projectId: string, mainThreadId: string, threadId = mainThreadId) => run(Effect.gen(function* () {
+    const row = yield* workflowByThread({projectId, mainThreadId}, threadId);
+    return row ? classifyWorkflowRow(row) : {status: "not_found"} satisfies WorkflowStateLookupResult as WorkflowStateLookupResult;
+  }));
+  const get = (projectId: string, mainThreadId: string, threadId = mainThreadId) =>
+    Effect.map(getState(projectId, mainThreadId, threadId), (decoded) => decoded.status === "found" ? decoded.document : null);
+  /** Looks up a workflow by ID only for the current owner; joins the caller's transaction. */
+  const getByIdForOwner = (owner: WorkflowOwner, workflowId: string) => read(Effect.gen(function* () {
+    if (!(yield* currentOwner(owner))) return {status: "owner_mismatch"} satisfies WorkflowStateLookupResult as WorkflowStateLookupResult;
+    if (!validId(workflowId)) return {status: "not_found"} satisfies WorkflowStateLookupResult as WorkflowStateLookupResult;
+    const row = yield* workflowById(owner, workflowId);
+    return row ? classifyWorkflowRow(row) : {status: "not_found"} satisfies WorkflowStateLookupResult as WorkflowStateLookupResult;
+  }));
+  const listResult = (projectId: string, mainThreadId: string) => run(Effect.gen(function* () {
+    const rows = yield* sql.unsafe(`SELECT ${workflowColumns} FROM supervisor_workflow_state WHERE project_id=? AND main_thread_id=? ORDER BY created_at,thread_id`, [projectId, mainThreadId]).pipe(
+      Effect.flatMap(workflowRows));
+    const documents: WorkflowStateDocument[] = [];
+    const incompatible: Array<{workflowId: string; formatVersion: number | null}> = [];
+    for (const row of rows) {
+      const decoded = classifyWorkflowRow(row);
+      if (decoded.status === "found") documents.push(decoded.document);
+      else incompatible.push({workflowId: decoded.workflowId, formatVersion: decoded.formatVersion});
+    }
+    return {documents, incompatible};
+  }));
+  const list = (projectId: string, mainThreadId: string) => Effect.map(listResult(projectId, mainThreadId), (result) => result.documents);
+  // bounded: at most 512 rows, thread ids chunked by 400; an unreadable query or row makes the scan incomplete
+  const hasNeedsAttention = (projectId: string, mainThreadId: string, threadIds: readonly string[], limit = maxNeedsAttentionScan) => {
+    if (!validId(projectId) || !validId(mainThreadId) || !Array.isArray(threadIds) || threadIds.length < 1 || threadIds.length > 10_000 ||
+      !threadIds.every(id => validId(id)) || new Set(threadIds).size !== threadIds.length || !threadIds.includes(mainThreadId))
+      return Effect.succeed<WorkflowNeedsAttentionScan>({status: "incomplete", needsAttention: false, inspected: 0, reason: "invalid_scope"});
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > maxNeedsAttentionScan)
+      return Effect.succeed<WorkflowNeedsAttentionScan>({status: "incomplete", needsAttention: false, inspected: 0, reason: "limit_exceeded"});
+    return read(Effect.gen(function* () {
+      let inspected = 0;
+      for (let start = 0; start < threadIds.length; start += needsAttentionThreadChunkSize) {
+        const chunk = threadIds.slice(start, start + needsAttentionThreadChunkSize);
+        const remaining = limit - inspected;
+        const queryLimit = remaining + 1;
+        const placeholders = chunk.map(() => "?").join(",");
+        const rows = yield* sql.unsafe(`SELECT ${workflowColumns} FROM supervisor_workflow_state WHERE project_id=? AND main_thread_id=? AND thread_id IN (${placeholders}) ORDER BY thread_id LIMIT ${queryLimit}`,
+          [projectId, mainThreadId, ...chunk]).pipe(Effect.flatMap(workflowRows), Effect.option);
+        if (rows._tag === "None") return {status: "incomplete", needsAttention: false, inspected, reason: "unreadable_workflow"} satisfies WorkflowNeedsAttentionScan as WorkflowNeedsAttentionScan;
+        for (const row of rows.value.slice(0, remaining)) {
+          inspected++;
+          const decoded = classifyWorkflowRow(row);
+          if (decoded.status !== "found")
+            return {status: "incomplete", needsAttention: false, inspected, reason: "unreadable_workflow"} satisfies WorkflowNeedsAttentionScan as WorkflowNeedsAttentionScan;
+          if (decoded.document.status === "needs_attention" || collectPlanEntities(decoded.document.plan).some(node => node.status === "needs_attention"))
+            return {status: "complete", needsAttention: true, inspected} satisfies WorkflowNeedsAttentionScan as WorkflowNeedsAttentionScan;
+        }
+        if (rows.value.length > remaining)
+          return {status: "incomplete", needsAttention: false, inspected, reason: "limit_exceeded"} satisfies WorkflowNeedsAttentionScan as WorkflowNeedsAttentionScan;
+      }
+      return {status: "complete", needsAttention: false, inspected} satisfies WorkflowNeedsAttentionScan as WorkflowNeedsAttentionScan;
+    }));
+  };
+
+  /** Applies a full editable document; joins the caller's transaction. */
+  const apply = (owner: WorkflowOwner, input: WorkflowApplyInput, validation: WorkflowApplyValidationContext | undefined, now?: number) => write(Effect.gen(function* () {
+    if (!validApplyInput(input)) return {status: "invalid", operationId: input.operationId, reason: "invalid_workflow_document"} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    const at = yield* nowOr(now);
+    const submittedNodeIds = collectSubmittedNodeIds(input.plan);
+    if (!(yield* currentOwner(owner))) return {status: "owner_mismatch", operationId: input.operationId} satisfies WorkflowApplyResult as WorkflowApplyResult;
+
+    const requestHash = requestFingerprint({kind: "apply", owner, input});
+    const replay = yield* operationReplay(owner, "edit", input.operationId, requestHash);
+    if (replay) return replay;
+
+    const row = yield* workflowById(owner, input.workflowId);
+    if (!row) return {status: "not_found", operationId: input.operationId} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    const decoded = classifyWorkflowRow(row);
+    if (decoded.status === "incompatible") return {...decoded, operationId: input.operationId};
+    const current = decoded.document;
+    if (current.revision !== input.expectedRevision) return {status: "conflict", operationId: input.operationId,
+      reason: "revision", currentRevision: current.revision} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    if (!validation || !isRecord(validation.pinnedContext) || !isRecord(validation.originalProposal) ||
+      !validId(validation.expectedTaskId) || !validId(validation.expectedProposalId) ||
+      !Object.hasOwn(validation, "acceptedTaskAgreement") || !Object.hasOwn(validation, "acceptedTaskAgreementSourceHash") || !input.sourceBinding)
+      return {status: "invalid", operationId: input.operationId, reason: "pinned_definition_context_required"} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    let canonical: ReturnType<typeof validateWorkflowApplyAgainstPinnedContext> = null;
+    try {
+      const currentBinding = current.sourceBinding;
+      const currentPlan = currentBinding?.taskId === validation.expectedTaskId &&
+        currentBinding.sourceHash === validation.expectedSourceHash &&
+        currentBinding.workspaceRoot === validation.pinnedContext.workspaceRoot &&
+        currentBinding.revision === validation.pinnedContext.revision &&
+        currentBinding.globalRevision === (validation.pinnedContext.globalRevision ?? null) &&
+        currentBinding.definitionsStatus === "ready" && currentBinding.definitionsComplete && currentBinding.requirementsKnown
+        ? current.plan : null;
+      const trustedBinding = sourceBindingOf(validation.originalProposal, validation.expectedTaskId, validation.expectedProposalId, validation.expectedSourceHash);
+      const acceptedTaskPlan = current.threadId === owner.mainThreadId ? acceptedTaskPlanForBinding(validation.acceptedTaskAgreement,
+        validation.acceptedTaskAgreementSourceHash, validation.expectedSourceHash, trustedBinding) : null;
+      const acceptedPlans = [...acceptedWorkflowPlansForBinding(current, trustedBinding), ...(acceptedTaskPlan ? [acceptedTaskPlan] : [])];
+      canonical = validateWorkflowApplyAgainstPinnedContext({plan: input.plan, requirements: input.requirements, issues: input.issues,
+        sourceBinding: input.sourceBinding as WorkflowSourceBindingInfo}, validation.pinnedContext, validation.originalProposal,
+      validation.expectedTaskId, validation.expectedProposalId, validation.expectedSourceHash,
+      {targetThreadId: current.threadId, mainThreadId: owner.mainThreadId}, acceptedPlans, currentPlan);
+    } catch {canonical = null;}
+    if (!canonical) return {status: "invalid", operationId: input.operationId, reason: "pinned_definition_context_mismatch"} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    const validatedInput: WorkflowApplyInput = {...input, plan: canonical.plan, requirements: canonical.requirements, issues: canonical.issues};
+
+    const normalized = normalizeWorkflowPlan(validatedInput.plan, current.plan, submittedNodeIds);
+    if (!normalized.ok) return {status: "invalid", operationId: input.operationId,
+      reason: normalized.diagnostic?.code ?? "invalid_plan_or_missing_status_evidence",
+      ...(normalized.diagnostic ? {diagnostic: normalized.diagnostic} : {})} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    const evidenceProblem = workflowStatusEvidenceProblem(current, validatedInput, normalized.plan);
+    if (evidenceProblem) return {status: "invalid", operationId: input.operationId,
+      reason: evidenceProblem === "generic" ? "invalid_plan_or_missing_status_evidence" : evidenceProblem.code,
+      ...(evidenceProblem === "generic" ? {} : {diagnostic: evidenceProblem})} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    const nextPlan = normalized.plan;
+    const evidenceInputs = validatedInput.evidence ?? [];
+    const previousNodes = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node]));
+    const nextNodes = new Map(collectPlanEntities(nextPlan).map(node => [node.nodeId, node]));
+    const evidence = [...current.evidence];
+    for (const item of evidenceInputs) {
+      const nodeId = item.targetNodeId ?? null;
+      const previous = nodeId ? previousNodes.get(nodeId) : null;
+      const next = nodeId ? nextNodes.get(nodeId) : null;
+      evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: item.kind, now: at,
+        targetNodeId: nodeId, targetNodeName: next?.name ?? previous?.name ?? null,
+        statusFrom: previous?.status ?? (nodeId === null ? current.status : null),
+        statusTo: next?.status ?? (nodeId === null ? validatedInput.status : null),
+        sourceThreadId: item.sourceThreadId ?? ((item.sourceRunId ?? item.sourceMessageId ?? item.sourceItemId) ? current.threadId : null),
+        sourceRunId: item.sourceRunId ?? null,
+        sourceMessageId: item.sourceMessageId ?? null, sourceItemId: item.sourceItemId ?? null, agreementKey: null, note: item.note}));
+    }
+    for (const node of previousNodes.values()) {
+      if (!nextNodes.has(node.nodeId)) evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: "node_removed", now: at,
+        targetNodeId: node.nodeId, targetNodeName: node.name, statusFrom: node.status, statusTo: null,
+        sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null, agreementKey: null, note: input.note}));
+    }
+
+    const oldPlanHash = workflowPlanSignature(current.objective, current.sourceBinding, current.requirements, current.issues, current.plan);
+    const newPlanHash = workflowPlanSignature(validatedInput.objective, validatedInput.sourceBinding, validatedInput.requirements, validatedInput.issues, nextPlan);
+    evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: "plan_updated", now: at,
+      targetNodeId: null, targetNodeName: null, statusFrom: current.status, statusTo: validatedInput.status,
+      sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null, agreementKey: null, note: input.note}));
+    if (evidence.length > workflowMutationLimits.maxEvidence) return {status: "invalid", operationId: input.operationId, reason: "evidence_capacity"} satisfies WorkflowApplyResult as WorkflowApplyResult;
+
+    const next: WorkflowStateDocument = {...current, revision: current.revision + 1, status: validatedInput.status, objective: validatedInput.objective,
+      sourceBinding: copyBinding(validatedInput.sourceBinding), requirements: copyRequirements(validatedInput.requirements), issues: copyIssues(validatedInput.issues),
+      plan: nextPlan, currentAgreementKey: oldPlanHash === newPlanHash ? current.currentAgreementKey : null,
+      evidence, updatedAt: at};
+    const serialized = json(next);
+    if (!documentFits(serialized)) return {status: "invalid", operationId: input.operationId, reason: "document_capacity"} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    if (!(yield* casUpdate(owner, current.workflowId, next.revision, serialized, at, input.expectedRevision))) {
+      const latest = yield* workflowById(owner, current.workflowId);
+      const latestState = latest ? classifyWorkflowRow(latest) : null;
+      return {status: "conflict", operationId: input.operationId, reason: "revision",
+        currentRevision: latestState?.status === "found" ? latestState.document.revision : null} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    }
+    const receipt = workflowReceipt("applied", input.operationId, next);
+    yield* recordOperation(owner, "edit", input.operationId, requestHash, receipt, at);
+    return receipt;
+  }));
+
+  /** Creates an unaccepted main draft; joins the caller's verified transaction. */
+  const ensureMain = (owner: WorkflowOwner, operationId: string, note: string, now?: number) => write(Effect.gen(function* () {
+    if (!validId(operationId) || !validText(note)) return {status: "invalid", operationId, reason: "invalid_main_workflow_draft"} satisfies WorkflowEnsureResult as WorkflowEnsureResult;
+    const at = yield* nowOr(now);
+    if (!(yield* currentOwner(owner))) return {status: "owner_mismatch", operationId} satisfies WorkflowEnsureResult as WorkflowEnsureResult;
+    const requestHash = requestFingerprint({kind: "ensure-main", owner, note});
+    const replay = yield* operationReplay(owner, "edit", operationId, requestHash);
+    if (replay) return replay;
+    const existing = yield* workflowByThread(owner, owner.mainThreadId);
+    if (existing) {
+      const decoded = classifyWorkflowRow(existing);
+      if (decoded.status === "incompatible") return {...decoded, operationId};
+      return {status: "exists", operationId, workflowId: decoded.document.workflowId, revision: decoded.document.revision,
+        stateHash: fingerprint(decoded.document), formatVersion: 2} satisfies WorkflowEnsureResult as WorkflowEnsureResult;
+    }
+    const document = yield* emptyDocument(owner, owner.mainThreadId, null, null, 1, at);
+    document.evidence.push(yield* makeEvidence({operationId, owner, kind: "draft_created", now: at,
+      targetNodeId: null, targetNodeName: null, statusFrom: null, statusTo: "planned",
+      sourceThreadId: null, sourceRunId: null, sourceMessageId: null, agreementKey: null, note}));
+    const serialized = json(document);
+    if (!documentFits(serialized)) return {status: "invalid", operationId, reason: "document_capacity"} satisfies WorkflowEnsureResult as WorkflowEnsureResult;
+    yield* insertWorkflow(document, serialized);
+    const receipt = workflowReceipt("created", operationId, document);
+    yield* recordOperation(owner, "edit", operationId, requestHash, receipt, at);
+    return receipt;
+  }));
+
+  /** Links a native descendant without inferring a proposal or agreement for it; joins the caller's transaction. */
+  const linkChild = (owner: WorkflowOwner, input: {operationId: string; lineage: WorkflowControllerLineage; note: string}, now?: number) => write(Effect.gen(function* () {
+    const {operationId, lineage} = input;
+    if (!validId(operationId) || !validId(lineage.threadId) || !validId(lineage.parentThreadId) ||
+      lineage.relationshipToParent !== "subagent" || lineage.threadId === owner.mainThreadId || !validText(input.note))
+      return {status: "invalid", operationId, reason: "invalid_child_lineage"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const at = yield* nowOr(now);
+    if (!(yield* currentOwner(owner))) return {status: "owner_mismatch", operationId} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const requestHash = requestFingerprint({kind: "link-child", owner, lineage, note: input.note});
+    const replay = yield* operationReplay(owner, "edit", operationId, requestHash);
+    if (replay) return replay;
+
+    const parent = yield* workflowByThread(owner, lineage.parentThreadId);
+    if (!parent) return {status: "conflict", operationId, reason: "parent_missing", currentRevision: null} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const parentResult = classifyWorkflowRow(parent);
+    if (parentResult.status === "incompatible") return {...parentResult, operationId};
+    const existing = yield* workflowByThread(owner, lineage.threadId);
+    if (existing) {
+      const decoded = classifyWorkflowRow(existing);
+      if (decoded.status === "incompatible") return {...decoded, operationId};
+      return {status: "conflict", operationId, reason: "child_already_linked", currentRevision: decoded.document.revision} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    }
+    const parentDocument = parentResult.document;
+    const document = yield* emptyDocument(owner, lineage.threadId, parentDocument.workflowId, lineage.parentThreadId, 1, at);
+    document.evidence.push(yield* makeEvidence({operationId, owner, kind: "lineage_linked", now: at,
+      targetNodeId: null, targetNodeName: null, statusFrom: null, statusTo: "planned",
+      sourceThreadId: lineage.threadId, sourceRunId: null, sourceMessageId: null, agreementKey: null, note: input.note}));
+    const serialized = json(document);
+    if (!documentFits(serialized)) return {status: "invalid", operationId, reason: "document_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    yield* insertWorkflow(document, serialized);
+    const receipt = workflowReceipt("created", operationId, document);
+    yield* recordOperation(owner, "edit", operationId, requestHash, receipt, at);
+    return receipt;
+  }));
+
+  /** Imports a validated acceptance without changing an already populated broad plan; joins the caller's transaction. */
+  const importAcceptedAgreement = (owner: WorkflowOwner, source: WorkflowAgreementImport, now?: number) => write(Effect.gen(function* () {
+    const operationId = acceptedKey(source.taskId, source.agreement.proposalId);
+    if (!validWorkflowAgreementImport(source)) return {status: "invalid", operationId, reason: "invalid_accepted_agreement"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const at = yield* nowOr(now);
+    if (!(yield* currentOwner(owner))) return {status: "owner_mismatch", operationId} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const requestHash = requestFingerprint({kind: "agreement-import", owner, source});
+    const replay = yield* operationReplay(owner, "agreement", operationId, requestHash);
+    if (replay) return replay;
+
+    const row = yield* workflowByThread(owner, source.sourceThreadId);
+    const creatingMain = !row && source.sourceThreadId === owner.mainThreadId;
+    if (!row && !creatingMain) return {status: "not_found", operationId} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const decoded = row ? classifyWorkflowRow(row) : null;
+    if (decoded?.status === "incompatible") return {...decoded, operationId};
+    const current = decoded?.status === "found" ? decoded.document :
+      yield* emptyDocument(owner, owner.mainThreadId, null, null, 0, at);
+    if (current.acceptedAgreements.some(item => item.key === acceptedKey(source.taskId, source.agreement.proposalId))) {
+      const receipt = workflowReceipt("applied", operationId, current);
+      yield* recordOperation(owner, "agreement", operationId, requestHash, receipt, at);
+      return receipt;
+    }
+    if (current.acceptedAgreements.length >= workflowMutationLimits.maxAcceptedAgreements)
+      return {status: "invalid", operationId, reason: "agreement_history_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    if (current.evidence.length >= workflowMutationLimits.maxEvidence)
+      return {status: "invalid", operationId, reason: "evidence_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+
+    const binding = sourceBindingOf(source.agreement.workflow, source.taskId, source.agreement.proposalId, source.sourceHash);
+    const acceptedPlan = copyPlan(source.agreement.workflow.plan);
+    const acceptedRequirements = copyRequirements(source.agreement.workflow.requirements);
+    const acceptedIssues = copyIssues(source.agreement.workflow.issues);
+    const key = acceptedKey(source.taskId, source.agreement.proposalId);
+    const accepted: AcceptedWorkflowAgreementRecord = {key, taskId: source.taskId, sourceThreadId: source.sourceThreadId,
+      sourceRunId: source.sourceRunId, sourceMessageId: source.sourceMessageId, sourceHash: source.sourceHash,
+      objective: source.objective, planHash: acceptedWorkflowPlanHash(source), sourceBinding: binding,
+      requirements: acceptedRequirements, issues: acceptedIssues, plan: acceptedPlan, agreement: source.agreement};
+    const emptyPlan = current.objective === null && current.plan === null;
+    const currentMatches = workflowPlanSignature(current.objective, current.sourceBinding, current.requirements, current.issues, current.plan) ===
+      workflowPlanSignature(source.objective, binding, acceptedRequirements, acceptedIssues, acceptedPlan);
+    const shouldSeed = emptyPlan;
+    const next: WorkflowStateDocument = {...current, revision: current.revision + 1,
+      ...(shouldSeed ? {objective: source.objective, sourceBinding: copyBinding(binding), requirements: acceptedRequirements,
+        issues: acceptedIssues, plan: acceptedPlan} : {}),
+      currentAgreementKey: shouldSeed || currentMatches ? key : current.currentAgreementKey,
+      acceptedAgreements: [...current.acceptedAgreements, accepted],
+      evidence: [...current.evidence, yield* makeEvidence({operationId, owner, kind: "agreement_imported", now: at,
+        targetNodeId: null, targetNodeName: null, statusFrom: null, statusTo: null,
+        sourceThreadId: source.sourceThreadId, sourceRunId: source.sourceRunId, sourceMessageId: source.sourceMessageId,
+        agreementKey: key, note: "A validated workflow agreement was retained as historical source evidence."})],
+      updatedAt: at};
+    const serialized = json(next);
+    if (!documentFits(serialized)) return {status: "invalid", operationId, reason: "document_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    if (creatingMain) yield* insertWorkflow(next, serialized);
+    else if (row?.revision === 0) yield* replaceWorkflow(next, serialized, 0);
+    else if (!(yield* casUpdate(owner, next.workflowId, next.revision, serialized, at, row!.revision)))
+      return {status: "conflict", operationId, reason: "revision", currentRevision: yield* currentRevision(owner, next.workflowId)} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const receipt = workflowReceipt("applied", operationId, next);
+    yield* recordOperation(owner, "agreement", operationId, requestHash, receipt, at);
+    return receipt;
+  }));
+
+  /**
+   * Records one revision of a main-authored external contribution on the main workflow; joins the caller's transaction. It
+   * never changes a node status or the plan, writes no receipt, and a later revision clears the current assessment.
+   */
+  const recordContribution = (owner: WorkflowOwner, input: ExternalContributionImport, now?: number) => write(Effect.gen(function* () {
+    if (!validContributionImport(input)) return {status: "rejected", code: "contribution_record_invalid"} satisfies ExternalContributionImportResult as ExternalContributionImportResult;
+    const at = yield* nowOr(now);
+    if (!(yield* currentOwner(owner))) return {status: "owner_mismatch"} satisfies ExternalContributionImportResult as ExternalContributionImportResult;
+    const row = yield* workflowByThread(owner, owner.mainThreadId);
+    if (!row) return {status: "rejected", code: "contribution_node_unknown"} satisfies ExternalContributionImportResult as ExternalContributionImportResult;
+    const decoded = classifyWorkflowRow(row);
+    if (decoded.status === "incompatible") return decoded;
+    const current = decoded.document;
+    if (current.parentWorkflowId !== null || current.threadId !== owner.mainThreadId) return {status: "not_found"} satisfies ExternalContributionImportResult as ExternalContributionImportResult;
+    const decision = contributionImportDecision(current, input);
+    if (decision.kind === "unchanged") return {status: "unchanged", workflowId: current.workflowId, revision: current.revision} satisfies ExternalContributionImportResult as ExternalContributionImportResult;
+    if (decision.kind === "rejected") return {status: "rejected", code: decision.code} satisfies ExternalContributionImportResult as ExternalContributionImportResult;
+    const {existing, node} = decision;
+
+    const entry: ExternalContribution = {contributionId: input.contributionId, nodeId: input.nodeId, state: input.state, revision: input.revision,
+      summary: input.summary, references: input.references.map(item => ({kind: item.kind, value: item.value})), externalRef: input.externalRef,
+      sourceThreadId: input.sourceThreadId, sourceRunId: input.sourceRunId, sourceMessageId: input.sourceMessageId, recordedAt: at, assessment: null};
+    const evidence = yield* makeEvidence({operationId: `contribution:${fingerprint([input.contributionId, input.revision])}`, owner, kind: "contribution_recorded", now: at,
+      targetNodeId: validNodeId(input.nodeId) ? input.nodeId : null, targetNodeName: node?.name ?? null, statusFrom: null, statusTo: null,
+      sourceThreadId: input.sourceThreadId, sourceRunId: input.sourceRunId, sourceMessageId: input.sourceMessageId, agreementKey: null,
+      note: `The main reported external contribution ${input.contributionId} revision ${input.revision} as ${input.state}; this is untrusted evidence, not observed execution.`,
+      contribution: {contributionId: input.contributionId, revision: input.revision, state: input.state, decision: null}});
+    const next: WorkflowStateDocument = {...current, revision: current.revision + 1,
+      contributions: existing ? current.contributions.map(item => item.contributionId === entry.contributionId ? entry : item) : [...current.contributions, entry],
+      evidence: [...current.evidence, evidence], updatedAt: at};
+    const serialized = json(next);
+    if (!documentFits(serialized)) return {status: "rejected", code: "contribution_capacity"} satisfies ExternalContributionImportResult as ExternalContributionImportResult;
+    if (!(yield* casUpdate(owner, next.workflowId, next.revision, serialized, at, row.revision)))
+      return {status: "conflict", reason: "revision", currentRevision: yield* currentRevision(owner, next.workflowId)} satisfies ExternalContributionImportResult as ExternalContributionImportResult;
+    return workflowReceipt("applied", evidence.operationId, next);
+  }));
+
+  /** Records the owning root's assessment of one exact result revision without changing any status; joins the caller's transaction. */
+  const assessContribution = (owner: WorkflowOwner, input: WorkflowContributionAssessmentInput, now?: number) => write(Effect.gen(function* () {
+    const operationId = isRecord(input) && validId(input.operationId) ? input.operationId : "";
+    if (!validContributionAssessmentInput(input)) return {status: "invalid", operationId, reason: "invalid_contribution_assessment"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const at = yield* nowOr(now);
+    if (!(yield* currentOwner(owner))) return {status: "owner_mismatch", operationId} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const requestHash = requestFingerprint({kind: "assess-contribution", owner, input});
+    const replay = yield* operationReplay(owner, "edit", operationId, requestHash);
+    if (replay) return replay;
+    const row = yield* workflowById(owner, input.workflowId);
+    if (!row) return {status: "not_found", operationId} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const decoded = classifyWorkflowRow(row);
+    if (decoded.status === "incompatible") return {...decoded, operationId};
+    const current = decoded.document;
+    if (current.threadId !== owner.mainThreadId || current.parentWorkflowId !== null)
+      return {status: "invalid", operationId, reason: "contribution_main_workflow_only"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    if (current.revision !== input.expectedRevision) return {status: "conflict", operationId, reason: "revision", currentRevision: current.revision} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const contribution = current.contributions.find(item => item.contributionId === input.contributionId);
+    if (!contribution) return {status: "invalid", operationId, reason: "contribution_not_found"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    if (contribution.revision !== input.resultRevision)
+      return {status: "conflict", operationId, reason: "contribution_result_stale", currentRevision: current.revision} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    if (contribution.state !== "result") return {status: "invalid", operationId, reason: "contribution_not_a_result"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    if (current.evidence.length >= workflowMutationLimits.maxEvidence) return {status: "invalid", operationId, reason: "evidence_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const node = collectPlanEntities(current.plan).find(item => item.nodeId === contribution.nodeId) ?? null;
+    const evidence = yield* makeEvidence({operationId, owner, kind: "contribution_assessed", now: at,
+      targetNodeId: validNodeId(contribution.nodeId) ? contribution.nodeId : null, targetNodeName: node?.name ?? null, statusFrom: null, statusTo: null,
+      sourceThreadId: contribution.sourceThreadId, sourceRunId: contribution.sourceRunId, sourceMessageId: contribution.sourceMessageId,
+      agreementKey: null, note: input.note,
+      contribution: {contributionId: contribution.contributionId, revision: contribution.revision, state: contribution.state, decision: input.decision}});
+    const assessed: ExternalContribution = {...contribution, assessment: {decision: input.decision, resultRevision: input.resultRevision, note: input.note,
+      actorSupervisorThreadId: owner.supervisorThreadId, evidenceId: evidence.id, recordedAt: at}};
+    const next: WorkflowStateDocument = {...current, revision: current.revision + 1,
+      contributions: current.contributions.map(item => item.contributionId === assessed.contributionId ? assessed : item),
+      evidence: [...current.evidence, evidence], updatedAt: at};
+    const serialized = json(next);
+    if (!documentFits(serialized)) return {status: "invalid", operationId, reason: "document_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    if (!(yield* casUpdate(owner, current.workflowId, next.revision, serialized, at, input.expectedRevision)))
+      return {status: "conflict", operationId, reason: "revision", currentRevision: yield* currentRevision(owner, current.workflowId)} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const receipt = workflowReceipt("applied", operationId, next);
+    yield* recordOperation(owner, "edit", operationId, requestHash, receipt, at);
+    return receipt;
+  }));
+
+  // acquisition: the workflow schema, statement for statement as the synchronous constructor writes it
+  yield* run(Effect.gen(function* () {
+    yield* sql.unsafe("CREATE TABLE IF NOT EXISTS supervisor_workflow_state (" +
+      "workflow_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,thread_id TEXT NOT NULL," +
+      "parent_workflow_id TEXT,parent_thread_id TEXT,revision INTEGER NOT NULL,document TEXT NOT NULL," +
+      "created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(project_id,main_thread_id,thread_id))");
+    yield* sql.unsafe("CREATE INDEX IF NOT EXISTS supervisor_workflow_scope ON supervisor_workflow_state(project_id,main_thread_id)");
+    yield* sql.unsafe("CREATE TABLE IF NOT EXISTS supervisor_workflow_operations (" +
+      "project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,actor_thread_id TEXT NOT NULL,binding_generation INTEGER NOT NULL," +
+      "operation_namespace TEXT NOT NULL,operation_id TEXT NOT NULL,request_hash TEXT NOT NULL,result TEXT NOT NULL,workflow_id TEXT NOT NULL," +
+      "created_at INTEGER NOT NULL,PRIMARY KEY(project_id,main_thread_id,actor_thread_id,binding_generation,operation_namespace,operation_id))");
+  }));
+
+  return {get, getState, getByIdForOwner, listResult, list, hasNeedsAttention, apply, ensureMain, linkChild, importAcceptedAgreement,
+    recordContribution, assessContribution} satisfies WorkflowStateStoreShape;
+});
+
+// effect/sql spans carry statement text, so the construction and every operation run untraced
+export class WorkflowStateStoreService extends Context.Service<WorkflowStateStoreService, WorkflowStateStoreShape>()("t3-supervisor/WorkflowStateStore") {
+  /** The store whose owner check reads the project's effective enable state. */
+  static readonly layer: Layer.Layer<WorkflowStateStoreService, WorkflowStateStoreError | ProjectSupervisorStoreError, GuidanceDb | SupervisorIds | ProjectSupervisorStoreService> =
+    Layer.effect(WorkflowStateStoreService, untracedSql(makeWorkflowStateStore()));
+  /** The store whose owner check reads the given workflow-editing predicate (the supervision gate's at the switch). */
+  static readonly layerWith = (isEnabled: WorkflowEditingEnabled): Layer.Layer<WorkflowStateStoreService, WorkflowStateStoreError | ProjectSupervisorStoreError, GuidanceDb | SupervisorIds | ProjectSupervisorStoreService> =>
+    Layer.effect(WorkflowStateStoreService, untracedSql(makeWorkflowStateStore(isEnabled)));
+}
