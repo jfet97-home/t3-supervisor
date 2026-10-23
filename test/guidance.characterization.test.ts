@@ -353,12 +353,12 @@ it.live("CT-MCP-01: the workflow MCP route enforces Host, Origin and bearer befo
   const forbidden = [403, {message: "Workflow MCP request origin is not allowed."}];
   const unauthorized = [401, {message: "A workflow MCP token is required."}];
 
-  assert.deepEqual(yield* outcome(mcpPost(port, {Host: local, ...bearer})), [200, 4]);
+  assert.deepEqual(yield* outcome(mcpPost(port, {Host: local, ...bearer})), [200, 5]);
   assert.deepEqual(yield* outcome(mcpPost(port, {Host: `localhost:${port}`, ...bearer})), forbidden);
   assert.deepEqual(yield* outcome(mcpPost(port, {Host: "evil.example:9100", ...bearer})), forbidden);
   assert.deepEqual(yield* outcome(mcpPost(port, {Host: local, Origin: "http://evil.example", ...bearer})), forbidden);
   assert.deepEqual(yield* outcome(mcpPost(port, {Host: local, "Sec-Fetch-Site": "cross-site", ...bearer})), forbidden);
-  assert.deepEqual(yield* outcome(mcpPost(port, {Host: local, Origin: origin, ...bearer})), [200, 4]);
+  assert.deepEqual(yield* outcome(mcpPost(port, {Host: local, Origin: origin, ...bearer})), [200, 5]);
   // the Host check comes before the bearer check
   assert.deepEqual(yield* outcome(mcpPost(port, {Host: "evil.example:9100"})), forbidden);
   assert.deepEqual(yield* outcome(mcpPost(port, {Host: local})), unauthorized);
@@ -368,9 +368,9 @@ it.live("CT-MCP-01: the workflow MCP route enforces Host, Origin and bearer befo
   assert.deepEqual(yield* outcome(mcpPost(port, {Host: local, Authorization: "Bearer " + "A".repeat(token.length)})), unauthorized);
   assert.deepEqual(yield* outcome(mcpPost(port, {Host: local, Authorization: "bearer " + token})), unauthorized);
   // a configured host is accepted on both listeners, case-insensitively
-  assert.deepEqual(yield* outcome(mcpPost(port, {Host: "supervisor.internal:9100", ...bearer})), [200, 4]);
-  assert.deepEqual(yield* outcome(mcpPost(mcpPort, {Host: "SUPERVISOR.INTERNAL:9100", ...bearer})), [200, 4]);
-  assert.deepEqual(yield* outcome(mcpPost(mcpPort, {Host: `127.0.0.1:${mcpPort}`, ...bearer})), [200, 4]);
+  assert.deepEqual(yield* outcome(mcpPost(port, {Host: "supervisor.internal:9100", ...bearer})), [200, 5]);
+  assert.deepEqual(yield* outcome(mcpPost(mcpPort, {Host: "SUPERVISOR.INTERNAL:9100", ...bearer})), [200, 5]);
+  assert.deepEqual(yield* outcome(mcpPost(mcpPort, {Host: `127.0.0.1:${mcpPort}`, ...bearer})), [200, 5]);
   assert.deepEqual(yield* outcome(mcpPost(mcpPort, {Host: local, ...bearer})), forbidden, "the loopback host must name the receiving listener");
 
   const notFound = [404, {message: "Not found."}];
