@@ -1,67 +1,46 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
-import { createServer as createNetServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
+import { NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
-import { Cause, Context, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Scope, Tracer } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber, FileSystem, Scope, Tracer } from "effect";
 import { HttpMiddleware } from "effect/http";
 import { failureReason, ListenerUnavailable } from "../src/errors.js";
-import { GuidanceRuntime } from "../src/guidance.js";
-import { GuidanceStore } from "../src/guidance-store.js";
-import { GuidanceUi } from "../src/guidance-ui.js";
-import { definitionsService, type ProjectDefinitionLoader } from "./support/root-facades.js";
-import { ServiceAuth } from "../src/service-auth.js";
+import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
+import type { ServiceAuth } from "../src/service-auth.js";
 import type { SupervisorConfig } from "../src/types.js";
 import type { WorkflowWriteController } from "../src/workflow-write-controller.js";
-import { promiseWorkflowController, workflowMcpLayer } from "./support/mcp-controllers.js";
-import { connectRefused, jsonBody, rawRequest, readCsrf, signIn } from "./support/c3b-http.js";
-import { forgeDashboardToken } from "./support/service-auth-harness.js";
 import { privately } from "./support/private-assert.js";
-import { uiConfig } from "./support/c3b-ui.js";
+import { dashboard, definitionsOf, grant, readCsrf, signIn, uiConfig, workflowController } from "./support/g11-dashboard.js";
+import { blockedPort, connectRefused, jsonBody, openRequest, rawRequest } from "./support/g11-http.js";
+import { temporaryDirectory as dataDirectory } from "./support/g11-stores.js";
 
 // target regressions of the dashboard listeners on effect (plan 3.7, CC-WEBSEC, CC-MCP, CC-REDACT, CC-SHUTDOWN): the
 // checks stay in front of the workflow MCP route on both routers, the host checks read the Host header as sent, session
 // and csrf header values are redacted in rendered request headers, startup validation precedes any effect, and closing
-// the scope drops in-flight requests without a graceful wait
+// the scope drops in-flight requests without a graceful wait. it.live: every case serves real loopback listeners over the
+// production stores on database files
 
 const mcpHeaders = {"Content-Type": "application/json", Accept: "application/json, text/event-stream"};
 const toolCall = JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
 
-const temporaryDirectory = Effect.acquireRelease(
-  Effect.promise(() => mkdtemp(join(tmpdir(), "guidance-ui-"))),
-  (directory) => Effect.promise(() => rm(directory, {recursive: true, force: true})),
-);
+const temporaryDirectory = dataDirectory("guidance-ui-");
 
-// the dashboard listeners over the root's node file system and crypto, in the given scope
+// a file the case writes into its data directory
+const writeText = (path: string, text: string) => Effect.flatMap(FileSystem.FileSystem, (fs) => fs.writeFileString(path, text)).pipe(
+  Effect.orDie, Effect.provide(NodeFileSystem.layer));
+
+// the dashboard listeners over the production stores and runtime, the root's node file system and crypto, in the given scope
 // `auth` and `files` stand between the listeners and the real access service and file system
-const buildUi = (config: SupervisorConfig, controller: WorkflowWriteController["Service"], options: {definitions?: ProjectDefinitionLoader;
+const buildUi = (config: SupervisorConfig, controller: WorkflowWriteController["Service"], options: {
+  definitions?: (projectId: string, threadId: string | null) => Effect.Effect<ProjectDefinitionSnapshot>;
   auth?: (real: ServiceAuth["Service"]) => ServiceAuth["Service"]; files?: (real: FileSystem.FileSystem) => FileSystem.FileSystem} = {}) =>
-  Effect.gen(function* () {
-    const store = yield* Effect.acquireRelease(Effect.sync(() => new GuidanceStore(config.dataDirectory)), (store) => Effect.sync(() => store.close()));
-    const runtime = yield* GuidanceRuntime.make(config, store, {catalog: () => Effect.succeed({projects: [], threads: []})});
-    const auth = options.auth
-      ? Layer.effect(ServiceAuth, Effect.map(ServiceAuth, options.auth)).pipe(Layer.provide(ServiceAuth.layer(config.dataDirectory)))
-      : ServiceAuth.layer(config.dataDirectory);
-    const files = options.files
-      ? Layer.effect(FileSystem.FileSystem, Effect.map(FileSystem.FileSystem, options.files)).pipe(Layer.provide(NodeFileSystem.layer))
-      : NodeFileSystem.layer;
-    const context = yield* Layer.build(GuidanceUi.layer(config, {definitions: options.definitions && definitionsService(options.definitions)}).pipe(
-      Layer.provide(Layer.mergeAll(auth, Layer.succeed(GuidanceRuntime, runtime), workflowMcpLayer(controller))),
-      Layer.provide(Layer.mergeAll(files, NodeCrypto.layer)),
-    ));
-    const ui = Context.get(context, GuidanceUi);
-    const token = (yield* Effect.promise(() => readFile(join(config.dataDirectory, "access", "workflow-mcp-token"), "utf8"))).trim();
-    return {...ui, origin: `http://127.0.0.1:${ui.port}`, token};
-  });
+  dashboard(config, {controller, ui: {definitions: options.definitions && definitionsOf(options.definitions)}, auth: options.auth, files: options.files});
 
 // a counting controller whose workflow_read answers at once
 const countingController = () => {
   const calls = {count: 0};
-  const controller = promiseWorkflowController({readTool: async () => {calls.count++;return {status: "ok"};}});
+  const controller = workflowController({readTool: () => Effect.sync(() => {calls.count++;return {status: "ok"};})});
   return {calls, controller};
 };
 
@@ -71,10 +50,9 @@ describe("guidance ui listeners", () => {
     const {calls, controller} = countingController();
     const ui = yield* buildUi(uiConfig(directory, {workflowMcpBindHost: "127.0.0.1", workflowMcpPort: 0}), controller);
     const mcpPort = ui.mcpPort!;
-    const call = (port: number, path: string, headers: Record<string, string>) => Effect.promise(async () => {
-      const response = await rawRequest(port, {method: "POST", path, body: toolCall, headers: {...mcpHeaders, ...headers}});
-      return [response.status, response.status === 200 ? "answered" : jsonBody(response)];
-    });
+    const call = (port: number, path: string, headers: Record<string, string>) => Effect.map(
+      rawRequest(port, {method: "POST", path, body: toolCall, headers: {...mcpHeaders, ...headers}}),
+      (response) => [response.status, response.status === 200 ? "answered" : jsonBody(response)]);
     const bearer = {Authorization: "Bearer " + ui.token};
     for (const port of [ui.port, mcpPort]) {
       const local = {Host: `127.0.0.1:${port}`};
@@ -99,10 +77,9 @@ describe("guidance ui listeners", () => {
     const {calls, controller} = countingController();
     const ui = yield* buildUi(uiConfig(directory), controller);
     const self = `http://127.0.0.1:${ui.port}`;
-    const ask = (path: string, headers: Record<string, string>, method = "GET") => Effect.promise(async () => {
-      const response = await rawRequest(ui.port, {method, path, headers, ...(method === "POST" ? {body: toolCall} : {})});
-      return [response.status, jsonBody(response)];
-    });
+    const ask = (path: string, headers: Record<string, string>, method = "GET") => Effect.map(
+      rawRequest(ui.port, {method, path, headers, ...(method === "POST" ? {body: toolCall} : {})}),
+      (response) => [response.status, jsonBody(response)]);
     const loopback = [403, {message: "Open the supervisor through its loopback address."}];
     assert.deepEqual(yield* ask(self + "/api/csrf", {Host: `localhost:${ui.port}`}), loopback);
     assert.deepEqual(yield* ask(self + "/auth/status", {Host: "evil.example:9100"}), loopback);
@@ -120,10 +97,10 @@ describe("guidance ui listeners", () => {
       Effect.provideService(Tracer.Tracer, tracer),
       Effect.provideService(HttpMiddleware.TracerHeaderFilter, (_name, phase) => phase === "request"),
     );
-    const session = yield* Effect.promise(() => signIn(ui.origin, directory));
-    const csrf = yield* Effect.promise(() => readCsrf(ui.origin, session));
-    const response = yield* Effect.promise(() => rawRequest(ui.port, {method: "POST", path: "/api/guidance/thread-policy", body: "{}",
-      headers: {Host: `127.0.0.1:${ui.port}`, Origin: ui.origin, "Content-Type": "application/json", "x-supervisor-session": session, "x-csrf-token": csrf, "x-probe": "visible"}}));
+    const session = yield* signIn(ui.origin, directory);
+    const csrf = yield* readCsrf(ui.origin, session);
+    const response = yield* rawRequest(ui.port, {method: "POST", path: "/api/guidance/thread-policy", body: "{}",
+      headers: {Host: `127.0.0.1:${ui.port}`, Origin: ui.origin, "Content-Type": "application/json", "x-supervisor-session": session, "x-csrf-token": csrf, "x-probe": "visible"}});
     assert.equal(response.status, 400);
     const captured = spans.find((span) => span.attributes.get("http.request.header.x-probe") === "visible");
     assert.ok(captured, "the request headers were captured");
@@ -138,7 +115,7 @@ describe("guidance ui listeners", () => {
   it.live("GUI-04: an inexact WORKFLOW_MCP_HOSTS entry fails startup with the fixed message before the legacy login code is removed", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     const legacy = join(directory, "ui-login-code");
-    yield* Effect.promise(() => writeFile(legacy, "legacy"));
+    yield* writeText(legacy, "legacy");
     const failed = yield* Effect.exit(Effect.scoped(buildUi(uiConfig(directory, {workflowMcpHosts: ["supervisor.internal"]}), countingController().controller)));
     assert.ok(Exit.isFailure(failed));
     assert.equal(failed.cause.reasons.some((reason) => reason._tag === "Fail" && (reason.error as {message?: unknown}).message === "Workflow MCP hosts must be exact host:port values."), true);
@@ -149,50 +126,44 @@ describe("guidance ui listeners", () => {
 
   it.live("GUI-05: closing the scope with an in-flight api request and an in-flight workflow MCP call drops both promptly and aborts their signals", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
-    const entered: Array<AbortSignal> = [];
-    let bothEntered!: () => void;
-    const handlersEntered = new Promise<void>((resolve) => {bothEntered = resolve;});
-    const waitForAbort = (signal: AbortSignal) => {
-      if (entered.push(signal) === 2) bothEntered();
-      return new Promise<never>((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), {once: true}));
-    };
-    const controller = promiseWorkflowController({readTool: (_args: unknown, signal: AbortSignal) => waitForAbort(signal)});
-    const definitions = {load: (_projectId: string, _threadId: string | null, signal: AbortSignal) => waitForAbort(signal)} as unknown as ProjectDefinitionLoader;
+    // each handler's work, entered and then held until it is interrupted; the interruption is the effect form of the
+    // baseline signal's abort
+    const entered: Array<{interrupted: boolean}> = [];
+    const bothEntered = yield* Deferred.make<void>();
+    const waitForInterruption = Effect.suspend(() => {
+      const handler = {interrupted: false};
+      if (entered.push(handler) === 2) Deferred.doneUnsafe(bothEntered, Effect.void);
+      return Effect.never.pipe(Effect.onInterrupt(() => Effect.sync(() => {handler.interrupted = true;})));
+    });
+    const controller = workflowController({readTool: () => waitForInterruption});
+    const definitions = () => waitForInterruption;
     const scope = yield* Scope.make();
     const ui = yield* buildUi(uiConfig(directory, {workflowMcpBindHost: "127.0.0.1", workflowMcpPort: 0}), controller, {definitions}).pipe(Scope.provide(scope));
-    const session = yield* Effect.promise(() => signIn(ui.origin, directory));
-    const open = (port: number, path: string, method: string, headers: Record<string, string>, body?: string) => {
-      const client = httpRequest({host: "127.0.0.1", port, path, method, agent: false, headers});
-      const settled = new Promise<string>((resolve) => {
-        client.once("response", (response) => {response.resume();response.once("end", () => resolve(`response ${response.statusCode}`));});
-        client.once("error", (error) => resolve(`error ${(error as NodeJS.ErrnoException).code}`));
-      });
-      client.end(body);
-      return settled;
-    };
-    const api = open(ui.port, "/api/guidance/project-configuration?projectId=p", "GET", {"x-supervisor-session": session});
-    const mcp = open(ui.mcpPort!, "/mcp/workflows", "POST", {...mcpHeaders, Authorization: "Bearer " + ui.token, "Content-Length": String(Buffer.byteLength(toolCall))}, toolCall);
-    yield* Effect.promise(() => handlersEntered);
-    assert.deepEqual(entered.map((signal) => signal.aborted), [false, false]);
+    const session = yield* signIn(ui.origin, directory);
+    const api = yield* openRequest(ui.port, {path: "/api/guidance/project-configuration?projectId=p", method: "GET", headers: {"x-supervisor-session": session}});
+    const mcp = yield* openRequest(ui.mcpPort!, {path: "/mcp/workflows", method: "POST", body: toolCall,
+      headers: {...mcpHeaders, Authorization: "Bearer " + ui.token, "Content-Length": String(Buffer.byteLength(toolCall))}});
+    yield* Deferred.await(bothEntered);
+    assert.deepEqual(entered.map((handler) => handler.interrupted), [false, false]);
     const started = performance.now();
     yield* Scope.close(scope, Exit.void);
     assert.ok(performance.now() - started < 2_000, "no graceful wait");
-    assert.deepEqual(entered.map((signal) => signal.aborted), [true, true]);
-    for (const settled of yield* Effect.promise(() => Promise.all([api, mcp]))) assert.match(settled, /^(?:error ECONNRESET|response \d+)$/u);
-    assert.equal(yield* Effect.promise(() => connectRefused(ui.port)), true);
-    assert.equal(yield* Effect.promise(() => connectRefused(ui.mcpPort!)), true);
+    assert.deepEqual(entered.map((handler) => handler.interrupted), [true, true]);
+    for (const settled of yield* Effect.all([api.settled, mcp.settled])) assert.match(settled, /^(?:error ECONNRESET|response \d+)$/u);
+    assert.equal(yield* connectRefused(ui.port), true);
+    assert.equal(yield* connectRefused(ui.mcpPort!), true);
   }), {timeout: 10_000});
 
   // sol-r20: effect's server runs a request uninterruptibly until its route matches, so the checks in front of the router
   // own their reads' interruption: a client that goes away or the listener scope closing ends a held access check or file
   // read at once, while a started sign-in still completes when its client goes away
-  type Held = {entered: Deferred.Deferred<void>; release: Deferred.Deferred<void>; interrupted: boolean};
+  type Held = {entered: Deferred.Deferred<void>; release: Deferred.Deferred<void>; interruption: Deferred.Deferred<void>; interrupted: boolean};
   const holding = Effect.gen(function* () {
-    return {entered: yield* Deferred.make<void>(), release: yield* Deferred.make<void>(), interrupted: false} satisfies Held;
+    return {entered: yield* Deferred.make<void>(), release: yield* Deferred.make<void>(), interruption: yield* Deferred.make<void>(), interrupted: false} satisfies Held;
   });
   const held = <A, E, R>(hold: Held, effect: Effect.Effect<A, E, R>) => Deferred.succeed(hold.entered, undefined).pipe(
     Effect.andThen(Deferred.await(hold.release)),
-    Effect.onInterrupt(() => Effect.sync(() => {hold.interrupted = true;})),
+    Effect.onInterrupt(() => Effect.andThen(Effect.sync(() => {hold.interrupted = true;}), Deferred.succeed(hold.interruption, undefined))),
     Effect.andThen(effect));
 
   const reads = [
@@ -210,15 +181,9 @@ describe("guidance ui listeners", () => {
         auth: (real) => ({...real, authenticated: (session) => armed && target === "authenticated" ? held(hold, real.authenticated(session)) : real.authenticated(session)}),
         files: (real) => FileSystem.FileSystem.of({...real, readFile: (file) => target === "file" && file.endsWith("held.html") ? held(hold, real.readFile(file)) : real.readFile(file)}),
       }).pipe(Scope.provide(scope));
-      const session = yield* Effect.promise(() => signIn(ui.origin, directory));
+      const session = yield* signIn(ui.origin, directory);
       armed = true;
-      const client = httpRequest({host: "127.0.0.1", port: ui.port, path, method: "GET", agent: false,
-        headers: {"x-supervisor-session": session}});
-      const settled = new Promise<string>((resolve) => {
-        client.once("response", (response) => {response.resume();resolve(`response ${response.statusCode}`);});
-        client.once("error", (error) => resolve(`error ${(error as NodeJS.ErrnoException).code}`));
-      });
-      client.end();
+      const {client, settled} = yield* openRequest(ui.port, {path, method: "GET", headers: {"x-supervisor-session": session}, settleOn: "response"});
       yield* Deferred.await(hold.entered);
       const ended = ending === "the client goes away"
         ? Effect.sync(() => client.destroy())
@@ -227,38 +192,36 @@ describe("guidance ui listeners", () => {
       const closing = yield* Effect.forkChild(ended);
       const done = yield* Effect.timeoutOption(Effect.gen(function* () {
         yield* Fiber.join(closing);
-        while (!hold.interrupted) yield* Effect.sleep("10 millis");
+        yield* Deferred.await(hold.interruption);
       }), "2 seconds");
       const interrupted = hold.interrupted;
       yield* Deferred.succeed(hold.release, undefined);
       yield* Fiber.join(closing);
       if (ending === "the client goes away") yield* Scope.close(scope, Exit.void);
       assert.ok(done._tag === "Some" && interrupted, "the held read ended with its request, before its hold was released");
-      assert.match(yield* Effect.promise(() => settled), /^(?:error ECONNRESET|error ECONNREFUSED|response \d+)$/u);
+      assert.match(yield* settled, /^(?:error ECONNRESET|error ECONNREFUSED|response \d+)$/u);
     }), {timeout: 10_000});
   }
 
   it.live("GUI-07: a started sign-in completes when its client goes away", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     const hold = yield* holding;
-    let loggedIn: unknown = undefined;
+    const loggedIn = yield* Deferred.make<unknown>();
     const scope = yield* Scope.make();
     const ui = yield* buildUi(uiConfig(directory), countingController().controller, {
-      auth: (real) => ({...real, login: (token) => held(hold, real.login(token)).pipe(Effect.tap((value) => Effect.sync(() => {loggedIn = value;})))}),
+      auth: (real) => ({...real, login: (token) => held(hold, real.login(token)).pipe(Effect.tap((value) => Deferred.succeed(loggedIn, value)))}),
     }).pipe(Scope.provide(scope));
-    const token = (yield* Effect.promise(() => forgeDashboardToken(directory))).token;
+    const token = yield* grant(directory);
     const body = JSON.stringify({token});
-    const client = httpRequest({host: "127.0.0.1", port: ui.port, path: "/auth/login", method: "POST", agent: false,
+    const {client} = yield* openRequest(ui.port, {path: "/auth/login", method: "POST", body,
       headers: {origin: ui.origin, "content-type": "application/json", "content-length": String(Buffer.byteLength(body))}});
-    client.once("error", () => undefined);
-    client.end(body);
     yield* Deferred.await(hold.entered);
     client.destroy();
+    // the window in which an interruption with the client would have reached the held sign-in
     yield* Effect.sleep("200 millis");
     assert.equal(hold.interrupted, false, "the sign-in was not interrupted with its client");
     yield* Deferred.succeed(hold.release, undefined);
-    while (loggedIn === undefined) yield* Effect.sleep("10 millis");
-    assert.notEqual(loggedIn, null, "the started sign-in completed and issued its session");
+    assert.notEqual(yield* Deferred.await(loggedIn), null, "the started sign-in completed and issued its session");
     yield* Scope.close(scope, Exit.void);
   }), {timeout: 10_000});
 
@@ -266,9 +229,7 @@ describe("guidance ui listeners", () => {
   for (const [listener, reason] of [["dashboard", "dashboard_listener_unavailable"], ["standalone workflow MCP", "workflow_mcp_listener_unavailable"]] as const) {
     it.live(`GUI-08: a ${listener} listener whose port is taken fails startup with ${reason} and no address or cause`, () => Effect.gen(function* () {
       const directory = yield* temporaryDirectory;
-      const blocker = createNetServer();
-      yield* Effect.acquireRelease(Effect.callback<void>((resume) => {blocker.listen(0, "127.0.0.1", () => resume(Effect.void));}),
-        () => Effect.callback<void>((resume) => {blocker.close(() => resume(Effect.void));}));
+      const blocker = yield* blockedPort;
       const taken = (blocker.address() as {port: number}).port;
       const config = listener === "dashboard" ? uiConfig(directory, {uiPort: taken})
         : uiConfig(directory, {workflowMcpBindHost: "127.0.0.1", workflowMcpPort: taken});
