@@ -1,4 +1,4 @@
-import { Cause, Clock, Console, Context, Effect, FiberMap, HashMap, Layer, Option, Ref } from "effect";
+import { Cause, Clock, Console, Context, Deferred, Effect, FiberMap, HashMap, Layer, Option, Ref, type Scope } from "effect";
 import { mainRunNodeReader, nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { isCurrentMainGraphRun, SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch, type SupervisorNativeChildLifecycleEvidence } from "./supervisor-monitor.js";
 import type { ConversationRequest, WorkflowAgreementCandidate, WorkflowIntroduction } from "./supervisor-conversation-store.js";
@@ -290,6 +290,15 @@ const attempt = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<Attempt
 const notFound = (cause: unknown): boolean => cause instanceof T3TransportError && cause.httpStatus === 404;
 const uncertainCheckIn = "Supervisor request delivery is uncertain; its original identity is retained and only observed, never resent.";
 const uncertainIntroduction = "Proposal delivery is uncertain. Its exact message identity is retained.";
+// a caller's soft cancel as the abort signal of a read for the scope's lifetime: completing the deferred aborts it, and the read's
+// own outcome (a failure, or a late valid value) still decides, as the baseline signal-bound read did
+const cancelSignal = (cancel: Deferred.Deferred<void> | undefined): Effect.Effect<AbortSignal | undefined, never, Scope.Scope> =>
+  cancel === undefined ? Effect.succeed(undefined) : Effect.gen(function* () {
+    const controller = new AbortController();
+    yield* Effect.forkScoped(Effect.andThen(Deferred.await(cancel), Effect.sync(() => controller.abort())), {startImmediately: true});
+    return controller.signal;
+  });
+
 
 export interface SupervisorConversationShape {
   // one supervision pass of a bound main: introductions, the in-flight check-in and the next due check-in
@@ -297,7 +306,8 @@ export interface SupervisorConversationShape {
   readonly observe: (threads: readonly ThreadInfo[]) => Effect.Effect<void>;
   readonly reconcileStopNotice: (owner: BindingRecord) => Effect.Effect<void>;
   readonly reconcileStopped: (binding: BindingRecord, threads: readonly ThreadInfo[], supervisor?: Projection) => Effect.Effect<void, T3TransportError>;
-  readonly readContextView: (binding: BindingRecord, input: SupervisorContextViewInput) => Effect.Effect<SupervisorContextViewResult>;
+  // `cancel` is the calling tool's soft cancel; it reaches the check view's definitions read as that read's abort signal
+  readonly readContextView: (binding: BindingRecord, input: SupervisorContextViewInput, cancel?: Deferred.Deferred<void>) => Effect.Effect<SupervisorContextViewResult>;
   // t-03 (plan 3.9): synchronous reads and writes over the interim stores until S6d
   readonly status: (projectId: string, supervisorThreadId: string | null) => SupervisorMonitoringStatus;
   readonly hasInflight: (projectId: string, supervisorThreadId: string) => boolean;
@@ -390,7 +400,7 @@ const makeSupervisorConversation = Effect.gen(function* () {
     };
   };
   /** Bounded on-demand context for the verified current binding; the service never pushes these payloads into wakes. */
-  const readContextView = (binding: BindingRecord, input: SupervisorContextViewInput): Effect.Effect<SupervisorContextViewResult> => Effect.gen(function* () {
+  const readContextView = (binding: BindingRecord, input: SupervisorContextViewInput, cancel?: Deferred.Deferred<void>): Effect.Effect<SupervisorContextViewResult> => Effect.gen(function* () {
     const view = input.view;
     if (view === "interpretation") return {status: "ok", view, instructions: readerWorkflowInstruction};
     if (view === "context" && supervisionStopped(binding.mainThreadId)) return {status: "ok", view, supervision: "stopped", mainThreadId: binding.mainThreadId};
@@ -428,7 +438,9 @@ const makeSupervisorConversation = Effect.gen(function* () {
     }
     const context = task.definitionContext;
     if (!context || !definitions) return {status: "unavailable", view, reason: "definitions_unavailable"};
-    const read = yield* attempt(definitions.load(task.projectId, task.threadId));
+    // the read observes the call's soft cancel and is awaited to its own end: a read failed by the abort is unavailable, a valid
+    // value it still completes with is used
+    const read = yield* attempt(Effect.scoped(Effect.flatMap(cancelSignal(cancel), (signal) => definitions.load(task.projectId, task.threadId, signal))));
     if (!read.ok) return {status: "unavailable", view, reason: "definitions_unavailable"};
     const fresh = read.value;
     if (!proposalContextMatches(context, fresh)) return {status: "stale", view, reason: "definitions_changed", revision: fresh.revision};

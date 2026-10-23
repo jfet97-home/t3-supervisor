@@ -141,15 +141,16 @@ export const projectConfigEditorFacade = (run: RootRun, editor: ProjectConfigEdi
 });
 
 // a definitions loader as the definitions service, read through the loader when called: the read's signal aborts when its
-// caller is interrupted, a rejected read is a defect, as the baseline rejection it replaces, and a loader without a global
-// fingerprint reads none; no other definitions operation is used
+// caller is interrupted or on the caller's soft cancel, as the service's operation signal does, a rejected read is a defect,
+// as the baseline rejection it replaces, and a loader without a global fingerprint reads none; no other definitions operation
+// is used
 export type DefinitionsLoader = Pick<ProjectDefinitionLoader, "load"> & Partial<Pick<ProjectDefinitionLoader, "globalFingerprint">>;
 export const definitionsService = (loader: DefinitionsLoader): ProjectDefinitions["Service"] => {
   const unused = () => Effect.die(new Error("unused definitions operation"));
   return ProjectDefinitions.of({
     globalHomePath: "~",
     globalDefinitionsPath: "~/.t3-supervisor",
-    load: (projectId, threadId = null) => Effect.promise((signal) => loader.load(projectId, threadId, signal)),
+    load: (projectId, threadId = null, cancel) => Effect.promise((signal) => loader.load(projectId, threadId, cancel ? AbortSignal.any([signal, cancel]) : signal)),
     globalFingerprint: () => loader.globalFingerprint ? Effect.promise((signal) => loader.globalFingerprint!(signal)) : Effect.succeed(null),
     presence: unused, presenceGlobal: unused, presenceForCheckout: unused, checkoutTargets: unused, currentWorkspace: unused,
     initialize: unused, initializeGlobal: unused, readProjectConfig: unused,

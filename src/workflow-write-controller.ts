@@ -1407,9 +1407,9 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     if (!binding) return {status: "denied", reason: "owner_not_current_ready_enabled"};
     if (!conversation) return {status: "unavailable", reason: "context_views_unavailable"};
     const {view, definitionIds, includeSources, record: viewRecord} = parsed.value;
-    // the ported view takes no cancel: the call's deadline no longer cuts its definitions read short, an interruption still ends it
+    // the call's cancel (the caller's own or the 10 s tool deadline) reaches the view's definitions read as its abort signal
     const result = yield* conversation.readContextView(binding, {view, ...(definitionIds ? {definitionIds} : {}),
-      ...(includeSources !== undefined ? {includeSources} : {}), ...(viewRecord !== undefined ? {record: viewRecord} : {})});
+      ...(includeSources !== undefined ? {includeSources} : {}), ...(viewRecord !== undefined ? {record: viewRecord} : {})}, cancel);
     return Buffer.byteLength(JSON.stringify(result), "utf8") > maxWorkflowReadBytes ? {status: "too_large", reason: "workflow_read_exceeds_response_limit"} : result;
   });
 
