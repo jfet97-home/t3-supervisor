@@ -3,7 +3,7 @@ import { it } from "@effect/vitest";
 import { Effect, Exit, Option } from "effect";
 import { AsyncResult, AtomRegistry } from "effect/reactivity";
 import { afterAll, beforeAll } from "vitest";
-import type { DashboardOverviewInfo } from "../src/dashboard-overview.js";
+import { OverviewRangeError, readOverviewPages, type DashboardOverviewInfo } from "../src/dashboard-overview.js";
 import { held, json, makeBrowser, until, type SentRequest } from "./support/ui-browser.js";
 
 // target regressions of the work overview over atoms (CT-UI-OVERVIEW-01): the loaded range and load-more, the retained
@@ -113,20 +113,20 @@ it("the overview polls only while enabled and visible", { timeout: 10_000 }, asy
 
 it.effect("the Effect range reader keeps the loaded range, restarts a reordered prefix once and rejects incoherent pages", () => Effect.gen(function* () {
   const calls: number[] = [];
-  const retained = yield* ui.readOverviewPages((offset) => Effect.sync(() => { calls.push(offset); return page(offset); }), 200);
+  const retained = yield* readOverviewPages((offset) => Effect.sync(() => { calls.push(offset); return page(offset); }), 200);
   assert.equal(retained.work.length, 200);
   assert.equal(retained.work[150]?.mainThreadId, "work-150");
   assert.deepEqual(calls, [0, 100]);
   let count = 0;
   const promoted = [all[220]!, ...all.filter((item) => item.mainThreadId !== "work-220")];
-  const reordered = yield* ui.readOverviewPages((offset) => Effect.sync(() => page(offset, ++count === 1 ? "one" : "two", count === 1 ? all : promoted)), 200);
+  const reordered = yield* readOverviewPages((offset) => Effect.sync(() => page(offset, ++count === 1 ? "one" : "two", count === 1 ? all : promoted)), 200);
   assert.equal(count, 4, "a changed second page restarts the full prefix");
   assert.equal(reordered.work[0]?.mainThreadId, "work-220");
   assert.equal(new Set(reordered.work.map((item) => item.mainThreadId)).size, 200);
-  const changing = yield* Effect.exit(ui.readOverviewPages((offset) => Effect.sync(() => page(offset, String(++count))), 200));
-  assert.deepEqual(changing, Exit.fail(new ui.OverviewRangeError({reason: "overview_changed_during_read"})));
-  const shifted = yield* Effect.exit(ui.readOverviewPages(() => Effect.succeed(page(5)), 100));
-  assert.deepEqual(shifted, Exit.fail(new ui.OverviewRangeError({reason: "invalid_overview_page"})));
-  const duplicated = yield* Effect.exit(ui.readOverviewPages((offset) => Effect.succeed({...page(offset), work: page(0).work}), 200));
-  assert.deepEqual(duplicated, Exit.fail(new ui.OverviewRangeError({reason: "invalid_overview_page"})));
+  const changing = yield* Effect.exit(readOverviewPages((offset) => Effect.sync(() => page(offset, String(++count))), 200));
+  assert.deepEqual(changing, Exit.fail(new OverviewRangeError({reason: "overview_changed_during_read"})));
+  const shifted = yield* Effect.exit(readOverviewPages(() => Effect.succeed(page(5)), 100));
+  assert.deepEqual(shifted, Exit.fail(new OverviewRangeError({reason: "invalid_overview_page"})));
+  const duplicated = yield* Effect.exit(readOverviewPages((offset) => Effect.succeed({...page(offset), work: page(0).work}), 200));
+  assert.deepEqual(duplicated, Exit.fail(new OverviewRangeError({reason: "invalid_overview_page"})));
 }), { timeout: 10_000 });

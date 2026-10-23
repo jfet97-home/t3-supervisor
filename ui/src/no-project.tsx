@@ -2,19 +2,14 @@ import {useEffect, useState} from "react";
 import {useAtomSet, useAtomValue} from "@effect/atom-react";
 import {Effect, Exit, Option} from "effect";
 import {KeyValueStore} from "effect/persistence";
-import {AsyncResult, Atom, AtomRegistry} from "effect/reactivity";
+import {AsyncResult, Atom, type AtomRegistry} from "effect/reactivity";
 import {SupervisionStart, type NoProjectControl, type NoProjectControlInput, type NoProjectModeValue, type SupervisionCandidates, type SupervisionStartStatus} from "../../src/supervisor-control-contract.js";
 import {ApiClient, classifyMutation} from "./api.js";
-import {admittedMutation, scopeKey, uiRuntime} from "./atoms.js";
+import {admit, admittedMutation, authEpoch, authEpochAtom, environmentAtom, scopeKey, uiRuntime} from "./atoms.js";
 import {type ControlActivity} from "./supervisor-control.js";
 
 // a new operation id for one user action
 const newOperationId = Effect.sync(() => crypto.randomUUID());
-
-// writes one admitted mutation and waits for its settled outcome; actions use the registry rather than their own context,
-// which a later invocation of the same action disposes
-export const admit = <I, A, E>(registry: AtomRegistry.AtomRegistry, mutation: Atom.Writable<AsyncResult.AsyncResult<A, E>, I>, input: I) =>
-  Effect.suspend(() => {registry.set(mutation, input);return AtomRegistry.getResult(registry, mutation, {suspendOnWaiting: true});});
 
 // the typed client with the baseline access refresh on 401 and 403 for every request of these panels
 const request = <A, E>(call: (client: ApiClient["Service"]) => Effect.Effect<A, E>) =>
@@ -29,15 +24,26 @@ export interface NoProjectState {
   readonly uncertain: boolean;
   readonly message: string;
 }
-export const noProjectState = Atom.keepAlive(Atom.make<NoProjectState>({control: null, mode: "on_request", busy: false, uncertain: false, message: ""}));
+// the panel state, including the mode draft, of each T3 environment
+const noProjectStates = Atom.family((_environmentKey: string) =>
+  Atom.keepAlive(Atom.make<NoProjectState>({control: null, mode: "on_request", busy: false, uncertain: false, message: ""})));
+// the panel state of the current T3 environment
+export const noProjectState = Atom.keepAlive(Atom.writable((get) => get(noProjectStates(scopeKey(get(environmentAtom)))),
+  (context, value: NoProjectState) => context.set(noProjectStates(scopeKey(context.get(environmentAtom))), value)));
+// the state an action works on: the one of the environment it started in, whatever the environment is when it settles
+const actionState = (registry: AtomRegistry.AtomRegistry) => {
+  const environmentId = registry.get(environmentAtom);
+  return {environmentId, state: noProjectStates(scopeKey(environmentId))};
+};
 
 // reads the saved mode: a read replaces the draft, a failed read keeps it and holds the panel uncertain until a read works
 export const reloadNoProject = Atom.keepAlive(uiRuntime.fn((_: void, {registry}) => Effect.gen(function* () {
-  if (registry.get(noProjectState).busy) return;
-  registry.set(noProjectState, {...registry.get(noProjectState), busy: true});
+  const {state: stateAtom} = actionState(registry);
+  if (registry.get(stateAtom).busy) return;
+  registry.set(stateAtom, {...registry.get(stateAtom), busy: true});
   const exit = yield* Effect.exit(request((client) => client.guidance.noProjectControl()));
-  const state = registry.get(noProjectState);
-  registry.set(noProjectState, Exit.match(exit, {
+  const state = registry.get(stateAtom);
+  registry.set(stateAtom, Exit.match(exit, {
     onSuccess: (control) => ({...state, control, mode: control.mode, busy: false, uncertain: false, message: ""}),
     onFailure: () => ({...state, busy: false, uncertain: true, message: "Mode unavailable. Reload before changing it."}),
   }));
@@ -48,17 +54,25 @@ const saveNoProjectMode = admittedMutation((payload: NoProjectControlInput) =>
 
 // saves the draft against the generation it was read at; an unconfirmed save holds the panel uncertain until a reload
 export const saveNoProject = Atom.keepAlive(uiRuntime.fn((_: void, {registry}) => Effect.gen(function* () {
-  const state = registry.get(noProjectState);
+  const {environmentId, state: stateAtom} = actionState(registry);
+  const state = registry.get(stateAtom);
   if (!state.control || state.busy || state.uncertain) return;
-  registry.set(noProjectState, {...state, busy: true});
-  const operation = saveNoProjectMode({scope: scopeKey("no-project-mode"), operationId: yield* newOperationId});
+  registry.set(stateAtom, {...state, busy: true});
+  const operation = saveNoProjectMode({scope: scopeKey("no-project-mode", environmentId), operationId: yield* newOperationId});
   const exit = yield* Effect.exit(admit(registry, operation, {expectedGeneration: state.control.generation, mode: state.mode}));
-  const latest = registry.get(noProjectState);
-  registry.set(noProjectState, Exit.match(exit, {
+  const latest = registry.get(stateAtom);
+  registry.set(stateAtom, Exit.match(exit, {
     onSuccess: (result) => ({...latest, control: result.control, mode: result.control.mode, busy: false, uncertain: result.status !== "saved", message: result.message}),
     onFailure: () => ({...latest, busy: false, uncertain: true, message: "The mode change is unconfirmed. Reload its saved status before trying again."}),
   }));
 }).pipe(Effect.uninterruptible), {concurrent: true}));
+
+// the session a hidden panel follows: none
+const hiddenEpoch = Atom.keepAlive(Atom.make(AsyncResult.initial<number>()));
+// whether the shown panel reads the saved mode now: for a session or environment key it has not read yet, and never over a
+// mode draft or a change in flight
+export const noProjectReadDue = (panel: {active: boolean; loaded: string | null; readKey: string; dirty: boolean; busy: boolean}) =>
+  panel.active && panel.loaded !== panel.readKey && !panel.dirty && !panel.busy;
 
 export function NoProjectPanel({active, onStateChange}: {active: boolean; onStateChange: (value: ControlActivity) => void}) {
   const {control, mode, busy, uncertain, message} = useAtomValue(noProjectState);
@@ -68,9 +82,12 @@ export function NoProjectPanel({active, onStateChange}: {active: boolean; onStat
   const setMode = (value: NoProjectModeValue) => setState((state) => ({...state, mode: value}));
   const dirty = control !== null && mode !== control.mode;
   useEffect(() => onStateChange({busy, uncertain, dirty}), [busy, uncertain, dirty, onStateChange]);
-  // the saved mode is read when the panel is first shown
-  const [loaded, setLoaded] = useState(false);
-  useEffect(() => {if (active && !loaded) {setLoaded(true);reload();}}, [active, loaded, reload]);
+  // the saved mode is read when the panel is first shown and again for a new session or T3 environment, but never over a
+  // mode draft or a change in flight; a hidden panel does not follow the session and catches up when it is shown
+  const epoch = useAtomValue(active ? authEpochAtom : hiddenEpoch, (result) => Option.getOrElse(AsyncResult.value(result), () => 0));
+  const readKey = scopeKey(useAtomValue(environmentAtom), epoch);
+  const [loaded, setLoaded] = useState<string | null>(null);
+  useEffect(() => {if (noProjectReadDue({active, loaded, readKey, dirty, busy})) {setLoaded(readKey);reload();}}, [active, loaded, readKey, dirty, busy, reload]);
   return <form className="panel stack" onSubmit={event => {event.preventDefault();save();}}>
     <h2>No Project supervision</h2>
     <p>Choose how chats outside projects receive supervision. The master switch overrides every mode.</p>
@@ -90,10 +107,14 @@ type CandidatePurpose = "start" | "exclude";
 // the reload counter of each candidate search
 export const candidatesRevision = Atom.family((_purpose: CandidatePurpose) => Atom.keepAlive(Atom.make(0)));
 // one candidate search, requested 200 ms after a typed query and at once for the recent list; a new query, purpose or
-// reload is a new search, and the search it replaces is interrupted with its pending delay or request
+// reload is a new search, and the search it replaces is interrupted with its pending delay or request; a new session
+// searches again
 export const chatCandidates = Atom.family((purpose: CandidatePurpose) => Atom.family((query: string) => Atom.family((_revision: number) =>
-  uiRuntime.atom((query ? Effect.sleep("200 millis") : Effect.void).pipe(
-    Effect.andThen(request((client) => client.guidance.supervisionCandidates({query: {query, purpose}}))))))));
+  uiRuntime.atom((get) => {
+    authEpoch(get);
+    return (query ? Effect.sleep("200 millis") : Effect.void).pipe(
+      Effect.andThen(request((client) => client.guidance.supervisionCandidates({query: {query, purpose}}))));
+  }))));
 // the search of an inactive panel: nothing is requested
 const noCandidates = Atom.keepAlive(Atom.make(AsyncResult.initial<ChatCandidates>()));
 

@@ -28,13 +28,14 @@ export interface LoadedDefinitions {
   readonly loadedAt: number;
 }
 
-// the family key of one definitions read: the checkout selection, the panel's reload count and the auth epoch
-export const definitionsReadKey = (projectId: string, threadId: string | null, reload: number, authEpoch: number): string =>
-  scopeKey(projectId, threadId, reload, authEpoch);
+// the family key of one definitions read: the T3 environment, the checkout selection and the auth epoch; a refresh reads
+// the same key again, so a failed refresh keeps the latest successful read
+export const definitionsReadKey = (environmentId: string | null, projectId: string, threadId: string | null, authEpoch: number): string =>
+  scopeKey(environmentId, projectId, threadId, authEpoch);
 
 // the definitions read of one key (definitionsReadKey); a new key disposes and interrupts the previous read
 export const projectDefinitionsAtom = Atom.family((key: string) => {
-  const [projectId, threadId] = JSON.parse(key) as [string, string | null];
+  const [, projectId, threadId] = JSON.parse(key) as [string | null, string, string | null];
   return uiRuntime.atom(Effect.zipWith(loadProjectDefinitions(projectId, threadId), Clock.currentTimeMillis,
     (definitions, loadedAt): LoadedDefinitions => ({definitions, loadedAt})));
 });

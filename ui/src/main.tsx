@@ -1,5 +1,5 @@
-import {admit, NoProjectPanel, StartSupervisionPanel, useChatCandidates} from "./no-project.js";
-import { getCsrfToken, loadAccess, SessionAccess } from "./access.js";
+import {NoProjectPanel, StartSupervisionPanel, useChatCandidates} from "./no-project.js";
+import { SessionAccess } from "./access.js";
 import { useEffect, useState, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -11,7 +11,7 @@ import {
 } from "@effect/atom-react";
 import { Effect, Exit, Option, Schedule, Schema, Stream } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
-import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import type {
   GuidanceActivity,
   GuidanceSnapshot,
@@ -20,9 +20,8 @@ import type { ThreadPolicySettings } from "../../src/thread-policy-contract.js";
 import {
   ApiClient,
   sessionHttpClient,
-  snapshotAtom,
 } from "./api.js";
-import { admittedMutation, authEpoch, authEpochAtom, draftFamily, scopeKey, uiRuntime } from "./atoms.js";
+import { admit, admittedMutation, authEpoch, authEpochAtom, draftFamily, scopeKey, snapshotAtom, uiRuntime, type MutationKey } from "./atoms.js";
 import "./style.css";
 import { directoryRoute, homeRoute, RouteLink, useNavigation, type Route } from "./navigation.js";
 import { Home, ReadTime, useOverview } from "./overview.js";
@@ -79,10 +78,9 @@ export const accessAtom = uiRuntime.atom((get) => {
   return Effect.gen(function* () {
     const access = yield* SessionAccess;
     if (!(yield* access.session)) return {epoch, state: "signedOut" as AccessState};
-    // transitional: SessionAccess.load folds an unreachable server into false, and the baseline told them apart
-    const authenticated = yield* Effect.tryPromise(loadAccess);
+    const authenticated = yield* access.check;
     return {epoch, state: (authenticated ? "signedIn" : "signedOut") as AccessState};
-  }).pipe(Effect.catch(() => Effect.succeed({epoch, state: "unreachable" as AccessState})));
+  }).pipe(Effect.catchTag("AccessUnreachable", () => Effect.succeed({epoch, state: "unreachable" as AccessState})));
 });
 const currentEpoch = (registry: AtomRegistry.AtomRegistry) => Option.getOrElse(AsyncResult.value(registry.get(authEpochAtom)), () => 0);
 // the first settled access check made after the given auth epoch
@@ -120,21 +118,30 @@ export interface SignInState {
   readonly error: string;
 }
 export const signInState = Atom.keepAlive(Atom.make<SignInState>({busy: false, error: ""}));
-// signs in with a token and waits for the access check of the stored session; true once the session is stored
-export const signInAction = Atom.keepAlive(uiRuntime.fn((token: string, {registry}) => Effect.gen(function* () {
-  if (registry.get(signInState).busy) return false;
-  registry.set(signInState, {busy: true, error: ""});
-  const epoch = currentEpoch(registry);
-  const exit = yield* Effect.exit(admit(registry, login({scope: scopeKey("sign-in"), operationId: yield* newOperationId}), token));
+// the outcome of one sign-in: it waits for the admitted login and then for the access check of the stored session; once
+// the login's outcome is applied the operation is reset, so no atom keeps the consumed token as its argument
+const signInOutcome = Atom.keepAlive(uiRuntime.fn((attempt: {readonly key: MutationKey; readonly epoch: number}, {registry}) => Effect.gen(function* () {
+  const operation = login(attempt.key);
+  const exit = yield* Effect.exit(AtomRegistry.getResult(registry, operation, {suspendOnWaiting: true}));
+  registry.set(operation, Atom.Reset);
   const outcome: LoginOutcome = Exit.isSuccess(exit) ? exit.value : "unreachable";
   if (outcome !== "stored") {
     registry.set(signInState, {busy: false, error: loginMessages[outcome]});
     return false;
   }
-  const access = yield* accessAfter(epoch);
+  const access = yield* accessAfter(attempt.epoch);
   registry.set(signInState, {busy: false, error: access === "signedIn" ? "" : access === "unreachable" ? loginMessages.unreachable : "Sign-in could not be confirmed. Try again."});
   return true;
 }).pipe(Effect.uninterruptible), {concurrent: true}));
+// signs in with a token and waits for the access check of the stored session; true once the session is stored. the
+// token goes only to the admitted login, which is reset once its outcome is applied; nothing else keeps it
+export const signInAction = Atom.keepAlive(Atom.writable((get) => get(signInOutcome), (context, token: string) => {
+  if (context.get(signInState).busy) return;
+  context.set(signInState, {busy: true, error: ""});
+  const attempt = {key: {scope: scopeKey("sign-in"), operationId: crypto.randomUUID()}, epoch: Option.getOrElse(AsyncResult.value(context.get(authEpochAtom)), () => 0)};
+  context.set(login(attempt.key), token);
+  context.set(signInOutcome, attempt);
+}));
 
 type LogoutOutcome = "signedOut" | "kept" | "failed";
 // one sign-out: the server session ends, and this tab forgets it unless another tab signed in meanwhile
@@ -399,7 +406,7 @@ function Dashboard({onSignedOut}: {onSignedOut: () => void}) {
         {signOutError && <p className="notice" role="alert">{signOutError}</p>}
         {alert && <p className="notice" role="alert">{alert}</p>}
         <div hidden={view !== "home"}><Home data={data} overview={overview} navigate={navigate} startPanel={<StartSupervisionPanel active={view === "home"} onStateChange={setStartPending} onChanged={refresh}/>}/></div>
-        <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} overview={overview} route={route} navigate={navigate} guard={guard} csrfToken={getCsrfToken()} onDirtyChange={setProjectDirty} onDraftTargetChange={setProjectDraftTarget}/></div>
+        <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} overview={overview} route={route} navigate={navigate} guard={guard} onDirtyChange={setProjectDirty} onDraftTargetChange={setProjectDraftTarget}/></div>
         {view === "guide" && <StepsAndWorkflowsGuide />}
         {view === "activity" && <History items={data.activity} title="Supervision activity" />}
         {settingsOpened && <div hidden={view !== "settings"}><Settings data={data} active={view === "settings"} onDirtyChange={setSettingsDirty}/></div>}

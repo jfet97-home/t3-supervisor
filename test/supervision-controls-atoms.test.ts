@@ -80,7 +80,7 @@ const options = {projectId: "project-a", generation: 7, available: true, message
 it("a switch change is admitted once against the shown generation and applies its outcome with no panel mounted; a result for another project is unconfirmed", {timeout: 10_000}, async () => {
   const registry = AtomRegistry.make();
   sent.length = 0;
-  const stateKey = sc.supervisionControlKey("project-a");
+  const stateKey = sc.supervisionControlKey(null, "project-a");
   const stateAtom = sc.supervisionControlState(stateKey);
   registry.set(stateAtom, {...registry.get(stateAtom), control: control(3, true)});
   const post = pending();
@@ -112,7 +112,7 @@ it("a switch change is admitted once against the shown generation and applies it
 it("an unconfirmed setup stays fenced until a setup read that started after the request ended; a verified setup releases the fence and completes setup", {timeout: 10_000}, async () => {
   const registry = AtomRegistry.make();
   sent.length = 0;
-  const stateKey = sc.supervisionControlKey("project-a");
+  const stateKey = sc.supervisionControlKey(null, "project-a");
   const setupAtom = sc.supervisionSetupState(stateKey);
   const controlAtom = sc.supervisionControlState(stateKey);
   registry.set(controlAtom, {...registry.get(controlAtom), control: control(3, false), setupRequested: true});
@@ -127,7 +127,7 @@ it("an unconfirmed setup stays fenced until a setup read that started after the 
   sc.startSetup(registry, stateKey, intent);
   await post.reached;
   assert.deepEqual(registry.get(setupAtom).fence, {active: 1, epoch: 1, fenced: true});
-  const during = sc.supervisionSetupRead({projectId: "project-a", revision: 0, epoch: 0});
+  const during = sc.supervisionSetupRead({environmentId: null, projectId: "project-a", revision: 0, epoch: 0});
   const read = await until(registry, during, value => AsyncResult.isSuccess(value) && !value.waiting, "read during the request");
   const staleEpoch = AsyncResult.isSuccess(read) ? read.value.readEpoch : -1;
   post.release(json({message: "unavailable"}, 500));
@@ -139,7 +139,7 @@ it("an unconfirmed setup stays fenced until a setup read that started after the 
   sc.startSetup(registry, stateKey, intent);
   assert.equal(posts("/api/guidance/supervision-setup").length, 1, "nothing is replayed or started while the outcome is unconfirmed");
 
-  const after = sc.supervisionSetupRead({projectId: "project-a", revision: 1, epoch: 0});
+  const after = sc.supervisionSetupRead({environmentId: null, projectId: "project-a", revision: 1, epoch: 0});
   const fresh = await until(registry, after, value => AsyncResult.isSuccess(value) && !value.waiting, "read after the request");
   const verified = sc.settleSetupRead(unconfirmed, AsyncResult.isSuccess(fresh) ? fresh.value.readEpoch : -1);
   assert.deepEqual([verified.fence.fenced, verified.uncertain, verified.blocked, verified.message], [false, false, false, ""]);
@@ -167,10 +167,11 @@ it("a shared definitions change carries the shown generation; anything but a sav
   const registry = AtomRegistry.make();
   sent.length = 0;
   const definitions = {generation: 2, enabled: false, manual: false, effectiveEnabled: false, homePath: "~/.t3-supervisor", detectionStatus: "missing" as const, detectionError: null};
-  registry.set(sc.globalDefinitionsState, {...registry.get(sc.globalDefinitionsState), control: definitions});
+  const stateKey = sc.globalDefinitionsKey(null);
+  registry.set(sc.globalDefinitionsState(stateKey), {...registry.get(sc.globalDefinitionsState(stateKey)), control: definitions});
   reply = async () => json({status: "conflict", message: "Changed in another tab.", control: {...definitions, generation: 3}});
-  sc.startGlobalDefinitionsChange(registry);
-  const conflict = await until(registry, sc.globalDefinitionsState, state => state.toggling === null, "conflict");
+  sc.startGlobalDefinitionsChange(registry, stateKey);
+  const conflict = await until(registry, sc.globalDefinitionsState(stateKey), state => state.toggling === null, "conflict");
   assert.deepEqual(posts("/api/guidance/global-definitions-control").map(request => request.body), [{expectedGeneration: 2, enabled: true}]);
   assert.deepEqual([conflict.control?.generation, conflict.blocked, conflict.uncertain, conflict.message], [3, true, true, "Changed in another tab."]);
   const failed = sc.settleDefinitionsChange({...conflict, toggling: "x"}, Result.fail(new api.Unconfirmed()), 4);

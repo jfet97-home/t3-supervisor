@@ -5,7 +5,7 @@ import { RegistryContext, useAtom, useAtomValue } from "@effect/atom-react";
 import { type SupervisionSetupOptions, type SupervisionControlInfo, type GlobalDefinitionsControlInfo, type SupervisionSetupInput, type SupervisionControlInput,
   type GlobalDefinitionsControlInput, type SupervisionControlResult, type SupervisionSetupResult, type GlobalDefinitionsControlResult } from "../../src/supervisor-control-contract.js";
 import { ApiClient, type MutationFailure } from "./api.js";
-import { admittedMutation, authEpochAtom, draftFamily, scopeKey, uiRuntime, type MutationKey } from "./atoms.js";
+import { admit, admittedMutation, authEpochAtom, draftFamily, environmentAtom, scopeKey, uiRuntime, type MutationKey } from "./atoms.js";
 import { ScopeMismatch } from "./project-supervisor-api.js";
 
 export type ControlActivity = {busy: boolean; dirty: boolean; uncertain: boolean};
@@ -59,7 +59,7 @@ export type SupervisionControlState = {
 };
 const idleControlState: SupervisionControlState = {control: null, readAt: null, message: "", blocked: false, uncertain: false, setupRequested: false,
   toggling: null, saved: 0};
-export const supervisionControlKey = (projectId: string | null) => scopeKey("supervision-control", projectId);
+export const supervisionControlKey = (environmentId: string | null, projectId: string | null) => scopeKey("supervision-control", environmentId, projectId);
 export const supervisionControlState = Atom.family((_key: string) => Atom.keepAlive(Atom.make(idleControlState)));
 
 // the first-time setup of one project: its fence, the setup change in flight and the outcome of the last setup
@@ -69,7 +69,7 @@ export const supervisionSetupState = Atom.family((_key: string) => Atom.keepAliv
 // the checkout chosen for setup, kept like a draft until a setup read or a verified setup clears it
 export const supervisionSetupSelection = draftFamily(() => "");
 
-type ControlReadScope = {readonly projectId: string | null; readonly revision: number; readonly epoch: number};
+type ControlReadScope = {readonly environmentId: string | null; readonly projectId: string | null; readonly revision: number; readonly epoch: number};
 
 // one read of a supervision switch per scope revision; a response for another project is rejected
 export const supervisionControlRead = Atom.family((scope: ControlReadScope) => uiRuntime.atom(Effect.gen(function* () {
@@ -79,12 +79,12 @@ export const supervisionControlRead = Atom.family((scope: ControlReadScope) => u
   return {control, readAt: yield* Clock.currentTimeMillis};
 })));
 
-type SetupReadScope = {readonly projectId: string; readonly revision: number; readonly epoch: number};
+type SetupReadScope = {readonly environmentId: string | null; readonly projectId: string; readonly revision: number; readonly epoch: number};
 
 // one read of the setup choices per scope revision; it carries the fence epoch at its start so only a read that started
 // after every setup request ended can verify an unconfirmed outcome
 export const supervisionSetupRead = Atom.family((scope: SetupReadScope) => uiRuntime.atom((get) => {
-  const readEpoch = get.once(supervisionSetupState(supervisionControlKey(scope.projectId))).fence.epoch;
+  const readEpoch = get.once(supervisionSetupState(supervisionControlKey(scope.environmentId, scope.projectId))).fence.epoch;
   return Effect.gen(function* () {
     const client = yield* ApiClient;
     const options = yield* client.guidance.supervisionSetupOptions({query: {projectId: scope.projectId}});
@@ -93,7 +93,7 @@ export const supervisionSetupRead = Atom.family((scope: SetupReadScope) => uiRun
   });
 }));
 
-type GlobalDefinitionsReadScope = {readonly revision: number; readonly refreshKey: number; readonly epoch: number};
+type GlobalDefinitionsReadScope = {readonly environmentId: string | null; readonly revision: number; readonly refreshKey: number; readonly epoch: number};
 
 export const globalDefinitionsRead = Atom.family((_scope: GlobalDefinitionsReadScope) => uiRuntime.atom(Effect.gen(function* () {
   const client = yield* ApiClient;
@@ -101,11 +101,12 @@ export const globalDefinitionsRead = Atom.family((_scope: GlobalDefinitionsReadS
   return {control, readAt: yield* Clock.currentTimeMillis};
 })));
 
-// the state of the shared definitions switch that outlives the panel
+// the state of the shared definitions switch of one T3 environment that outlives the panel
 export type GlobalDefinitionsState = {control: GlobalDefinitionsControlInfo | null; readAt: number | null; message: string; blocked: boolean; uncertain: boolean;
   toggling: string | null};
-export const globalDefinitionsState = Atom.keepAlive(Atom.make<GlobalDefinitionsState>({control: null, readAt: null, message: "", blocked: false, uncertain: false,
-  toggling: null}));
+export const globalDefinitionsKey = (environmentId: string | null) => scopeKey("global-definitions", environmentId);
+export const globalDefinitionsState = Atom.family((_key: string) => Atom.keepAlive(Atom.make<GlobalDefinitionsState>({control: null, readAt: null, message: "",
+  blocked: false, uncertain: false, toggling: null})));
 
 // the admitted switch and setup requests; every change carries the generation it was made against (expectedGeneration)
 const controlRequest = admittedMutation((input: SupervisionControlInput) => Effect.flatMap(ApiClient, client => client.guidance.saveSupervisionControl({payload: input})));
@@ -127,7 +128,7 @@ export const settleControlChange = (state: SupervisionControlState, projectId: s
 
 // awaits an admitted switch change and applies its outcome to the switch state, mounted or not, once
 export const changeSupervisionControl = Atom.family((_key: string) => Atom.keepAlive(uiRuntime.fn((change: ControlChange<SupervisionControlInput>, get) => Effect.gen(function* () {
-  const outcome = yield* Effect.result(get.setResult(controlRequest(change.key), change.input));
+  const outcome = yield* Effect.result(admit(get.registry, controlRequest(change.key), change.input));
   const now = yield* Clock.currentTimeMillis;
   get.registry.update(supervisionControlState(change.stateKey), state =>
     state.toggling === change.key.operationId ? settleControlChange(state, change.input.projectId, outcome, now) : state);
@@ -150,7 +151,7 @@ export const settleSetup = (setup: SupervisionSetupState, input: SupervisionSetu
 
 // awaits an admitted setup request and applies its outcome to the project's setup and switch state, mounted or not, once
 export const runSupervisionSetup = Atom.family((_key: string) => Atom.keepAlive(uiRuntime.fn((change: ControlChange<SupervisionSetupInput>, get) => Effect.gen(function* () {
-  const outcome = yield* Effect.result(get.setResult(setupRequest(change.key), change.input));
+  const outcome = yield* Effect.result(admit(get.registry, setupRequest(change.key), change.input));
   const registry = get.registry;
   const setupAtom = supervisionSetupState(change.stateKey);
   const setup = registry.get(setupAtom);
@@ -199,18 +200,19 @@ export const settleDefinitionsChange = (state: GlobalDefinitionsState, outcome: 
 };
 
 export const changeGlobalDefinitions = Atom.family((_key: string) => Atom.keepAlive(uiRuntime.fn((change: ControlChange<GlobalDefinitionsControlInput>, get) => Effect.gen(function* () {
-  const outcome = yield* Effect.result(get.setResult(definitionsRequest(change.key), change.input));
+  const outcome = yield* Effect.result(admit(get.registry, definitionsRequest(change.key), change.input));
   const now = yield* Clock.currentTimeMillis;
-  get.registry.update(globalDefinitionsState, state => state.toggling === change.key.operationId ? settleDefinitionsChange(state, outcome, now) : state);
+  get.registry.update(globalDefinitionsState(change.stateKey), state => state.toggling === change.key.operationId ? settleDefinitionsChange(state, outcome, now) : state);
 }), {concurrent: true})));
 
 // admits one shared definitions switch change against the shown control's generation unless the switch is busy or blocked
-export const startGlobalDefinitionsChange = (registry: AtomRegistry.AtomRegistry) => {
-  const current = registry.get(globalDefinitionsState);
+export const startGlobalDefinitionsChange = (registry: AtomRegistry.AtomRegistry, stateKey: string) => {
+  const stateAtom = globalDefinitionsState(stateKey);
+  const current = registry.get(stateAtom);
   if (!current.control || current.toggling || current.blocked) return;
-  const key = {scope: "global-definitions", operationId: crypto.randomUUID()};
-  registry.set(globalDefinitionsState, {...current, toggling: key.operationId, message: ""});
-  registry.set(changeGlobalDefinitions(scopeKey(key.scope, key.operationId)), {stateKey: key.scope, key,
+  const key = {scope: stateKey, operationId: crypto.randomUUID()};
+  registry.set(stateAtom, {...current, toggling: key.operationId, message: ""});
+  registry.set(changeGlobalDefinitions(scopeKey(key.scope, key.operationId)), {stateKey, key,
     input: {expectedGeneration: current.control.generation, enabled: !current.control.enabled}});
 };
 
@@ -240,7 +242,8 @@ export function SupervisionControlView({control, busy, blocked, message, onToggl
 
 export function SupervisionControlPanel({projectId = null, onChanged, onStateChange, active = true}: {active?: boolean; projectId?: string | null; onChanged?: () => void; onStateChange?: (activity: ControlActivity) => void}) {
   const registry = useContext(RegistryContext);
-  const stateKey = supervisionControlKey(projectId);
+  const environmentId = useAtomValue(environmentAtom);
+  const stateKey = supervisionControlKey(environmentId, projectId);
   const epoch = useAtomValue(authEpochAtom, currentEpoch);
   const [state, setState] = useAtom(supervisionControlState(stateKey));
   const setup = useAtomValue(supervisionSetupState(stateKey));
@@ -266,8 +269,8 @@ export function SupervisionControlPanel({projectId = null, onChanged, onStateCha
     wasActive.current = active;
   }, [active, busy, uncertain, setupRequested]);
   // each read shows the loading state until it settles; a read for another project is unavailable
-  const readKey = scopeKey(projectId, revision, epoch);
-  const read = useAtomValue(supervisionControlRead({projectId, revision, epoch}));
+  const readKey = scopeKey(environmentId, projectId, revision, epoch);
+  const read = useAtomValue(supervisionControlRead({environmentId, projectId, revision, epoch}));
   useEffect(() => {setState(current => ({...current, control: null}));}, [readKey, setState]);
   useEffect(() => {
     if (AsyncResult.isSuccess(read) && !read.waiting)
@@ -323,11 +326,12 @@ export function SupervisionSetupView({options, selected, busy, blocked, message,
 
 function SupervisionSetupPanel({projectId, stateKey, locked}: {projectId: string; stateKey: string; locked: boolean}) {
   const registry = useContext(RegistryContext);
+  const environmentId = useAtomValue(environmentAtom);
   const epoch = useAtomValue(authEpochAtom, currentEpoch);
   const [setupState, setSetupState] = useAtom(supervisionSetupState(stateKey));
   const [selected, setSelected] = useAtom(supervisionSetupSelection(stateKey));
   const [revision, setRevision] = useState(0);
-  const read = useAtomValue(supervisionSetupRead({projectId, revision, epoch}));
+  const read = useAtomValue(supervisionSetupRead({environmentId, projectId, revision, epoch}));
   const options = AsyncResult.isSuccess(read) && !read.waiting ? read.value.options : null;
   // a settled read resets the choice and the last outcome; a read that started after every setup request ended verifies the fence
   useEffect(() => {
@@ -369,8 +373,10 @@ export function GlobalDefinitionsControlView({control, busy, blocked, message, o
 
 export function GlobalDefinitionsControlPanel({refreshKey = 0, onStateChange, active = true}: {active?: boolean; refreshKey?: number; onStateChange?: (activity: ControlActivity) => void}) {
   const registry = useContext(RegistryContext);
+  const environmentId = useAtomValue(environmentAtom);
+  const stateKey = globalDefinitionsKey(environmentId);
   const epoch = useAtomValue(authEpochAtom, currentEpoch);
-  const [state, setState] = useAtom(globalDefinitionsState);
+  const [state, setState] = useAtom(globalDefinitionsState(stateKey));
   const [revision, setRevision] = useState(0);
   const {control, blocked, message, uncertain} = state;
   const busy = state.toggling !== null;
@@ -380,8 +386,8 @@ export function GlobalDefinitionsControlPanel({refreshKey = 0, onStateChange, ac
     if (active && !wasActive.current && !busy && !uncertain) setRevision(value => value + 1);
     wasActive.current = active;
   }, [active, busy, uncertain]);
-  const readKey = scopeKey(revision, refreshKey, epoch);
-  const read = useAtomValue(globalDefinitionsRead({revision, refreshKey, epoch}));
+  const readKey = scopeKey(environmentId, revision, refreshKey, epoch);
+  const read = useAtomValue(globalDefinitionsRead({environmentId, revision, refreshKey, epoch}));
   useEffect(() => {setState(current => ({...current, control: null}));}, [readKey, setState]);
   useEffect(() => {
     if (AsyncResult.isSuccess(read) && !read.waiting)
@@ -390,5 +396,5 @@ export function GlobalDefinitionsControlPanel({refreshKey = 0, onStateChange, ac
   }, [read, setState]);
   if (!control) return <section className="panel"><p role="status">{message || "Loading global definitions status…"}</p><button type="button" onClick={() => setRevision(value => value + 1)}>Reload status</button></section>;
   return <div className="stack"><GlobalDefinitionsControlView control={control} busy={busy} blocked={blocked} message={message} onReload={() => setRevision(value => value + 1)}
-    onToggle={() => startGlobalDefinitionsChange(registry)} />{state.readAt && <p className="small muted">Status read at {new Date(state.readAt).toLocaleTimeString()}. Reload global definitions status after changes in another tab.</p>}</div>;
+    onToggle={() => startGlobalDefinitionsChange(registry, stateKey)} />{state.readAt && <p className="small muted">Status read at {new Date(state.readAt).toLocaleTimeString()}. Reload global definitions status after changes in another tab.</p>}</div>;
 }

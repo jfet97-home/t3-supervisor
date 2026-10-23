@@ -774,7 +774,7 @@ it("a retry 403 refreshes the latest CSRF token without automatically repeating 
       return new Response(JSON.stringify({status: "saved", message: "Retry accepted.", snapshot}), {status: 200});
     };
 
-    const {loadAccess} = await import("../ui/src/access.js");
+    const {loadAccess} = await import("./support/ui-run.js");
     assert.equal(await loadAccess(), true);
     await assert.rejects(runUi(retryProjectSupervisor(retryInput)), (error: unknown) => error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved);
     assert.equal(retryWrites, 1);
@@ -802,7 +802,7 @@ it("a 403 refreshes CSRF without retrying the POST and the next explicit save us
       return new Response(JSON.stringify({status: "saved", message: "Saved", snapshot}), {status: 200});
     };
 
-    const {loadAccess} = await import("../ui/src/access.js");
+    const {loadAccess} = await import("./support/ui-run.js");
     assert.equal(await loadAccess(), true);
     await assert.rejects(runUi(saveProjectSupervisor(input)), (error: unknown) =>
       error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved && /Session refreshed/.test(error.message));

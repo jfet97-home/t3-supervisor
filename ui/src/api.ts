@@ -4,7 +4,6 @@ import { AtomHttpApi } from "effect/reactivity";
 import { SupervisorApi } from "../../src/guidance-contract.js";
 
 import { SessionAccess } from "./access.js";
-export { getCsrfToken, loadAccess } from "./access.js";
 
 // every dashboard request: no cookies, and the session and CSRF headers read from SessionAccess when the request is sent
 export const sessionHttpClient: Layer.Layer<HttpClient.HttpClient> = Layer.effect(HttpClient.HttpClient, Effect.gen(function* () {
@@ -25,8 +24,6 @@ export class ApiClient extends AtomHttpApi.Service<ApiClient>()(
     httpClient: sessionHttpClient,
   },
 ) {}
-export const snapshotAtom = ApiClient.query("guidance", "snapshot", {});
-export const threadPolicyAtom = ApiClient.mutation("guidance", "threadPolicy");
 
 // why a mutation was definitely not performed; each panel keeps its own golden text for each reason
 export type MutationRefusal = "refreshed" | "refresh_failed" | "too_large" | "format";

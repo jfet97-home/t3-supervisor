@@ -4,21 +4,19 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Effect } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { AtomRegistry } from "effect/reactivity";
 import { DefinitionsContent } from "../ui/src/project-definitions.js";
 import { ProjectCatalogFields, ProjectConfigurationEditor } from "../ui/src/project-configuration-editor.js";
 import { loadProjectDefinitions } from "../ui/src/project-definitions-api.js";
 import { ProjectConfigRequestError, saveProjectConfiguration } from "../ui/src/project-definitions-api.js";
 import { normalizeProjectConfiguration, projectConfigurationError, type ProjectConfigSave, type ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { clearAccess, loadAccess, type SessionAccess } from "../ui/src/access.js";
+import type { SessionAccess } from "../ui/src/access.js";
 import type { ApiClient } from "../ui/src/api.js";
-import { uiRuntime } from "../ui/src/atoms.js";
+import { clearAccess, loadAccess, pageContext } from "./support/ui-run.js";
 
 // the client helpers are effects on the dashboard page runtime; its requests resolve their paths against the page origin
 // and, as the baseline helpers did, call the fetch installed when they are sent
-const pageLayer = AtomRegistry.make().get(uiRuntime.layer);
 const onPage = <A, E>(effect: Effect.Effect<A, E, ApiClient | SessionAccess>, signal?: AbortSignal) =>
-  Effect.runPromise(effect.pipe(Effect.provide(pageLayer), Effect.provideService(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init))),
+  Effect.runPromise(effect.pipe(Effect.provide(pageContext()), Effect.provideService(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init))),
     signal ? {signal} : undefined);
 const pageOrigin = "http://supervisor.test";
 beforeAll(() => {Object.defineProperty(globalThis, "location", {configurable: true, writable: true, value: {origin: pageOrigin, pathname: "/"}});});

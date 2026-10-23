@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { Effect } from "effect";
 import { AsyncResult, type Atom, AtomRegistry } from "effect/reactivity";
 import { afterAll, beforeAll, it, vi } from "vitest";
 import { json, makeBrowser, until } from "./support/ui-browser.js";
@@ -16,16 +17,26 @@ vi.mock("react-dom/client", () => ({ createRoot: () => ({ render: () => undefine
 const browser = makeBrowser();
 type Shell = typeof import("../ui/src/main.js");
 type Access = typeof import("../ui/src/access.js");
+type Atoms = typeof import("../ui/src/atoms.js");
 let shell: Shell;
 let access: Access;
+let atoms: Atoms;
 
 beforeAll(async () => {
   browser.install();
   browser.state.root = {};
   access = await import("../ui/src/access.js");
+  atoms = await import("../ui/src/atoms.js");
   shell = await import("../ui/src/main.js");
 });
 afterAll(() => browser.restore());
+
+// the session stored for the SessionAccess of a registry's page runtime
+const storedSession = (registry: AtomRegistry.AtomRegistry) => {
+  const runtime = registry.get(atoms.uiRuntime);
+  assert.ok(AsyncResult.isSuccess(runtime));
+  return Effect.runSync(Effect.flatMap(access.SessionAccess, (service) => service.session).pipe(Effect.provide(runtime.value)));
+};
 
 const snapshot = (connected: boolean, tokensUsed = 0) => ({
   environmentId: "environment", serverVersion: "build", connected, lastCycleAt: 1, sendingReady: true, sendingReason: "",
@@ -134,6 +145,8 @@ it("CT-UI-SHELL-01 an expired session keeps the open dashboard and its drafts, a
   assert.equal(registry.get(shell.dashboardOpened).opened, true, "the dashboard stays open behind Sign in again");
   assert.deepEqual(registry.get(shell.chatSettingsDraft), draft);
   assert.equal(shell.snapshotView(registry.get(shell.dashboardSnapshot)).alert, "Supervisor connection unavailable. Your drafts are kept.");
+  // the expiry is a new auth epoch: the snapshot is read once more without a session and still fails
+  await until(registry, shell.dashboardSnapshot, (result) => AsyncResult.isFailure(result) && !result.waiting, "the re-read after the expiry");
 
   csrf = () => json({ csrf: "csrf-2" });
   answer = () => json(snapshot(true));
@@ -146,8 +159,13 @@ it("CT-UI-SHELL-01 an expired session keeps the open dashboard and its drafts, a
   assert.deepEqual([login.method, login.body, login.contentType, login.session], ["POST", JSON.stringify({ token: "single-use-token" }), "application/json", ""]);
   assert.equal(browser.local.get("supervisor-session"), session);
   assert.ok(![...browser.local.values(), ...browser.session.values()].some((value) => value.includes("single-use-token")), "the token is never stored");
-  assert.deepEqual(browser.sent.map((request) => [request.path, request.session]), [["/auth/login", ""], ["/api/csrf", session]],
-    "one sign-in and one access check of the stored session");
+  // the sign-in is a new auth epoch: the snapshot is read once more, and its first connected answer refreshes access as a
+  // reconnect does
+  await until(registry, shell.dashboardSnapshot, (result) => AsyncResult.isSuccess(result) && !result.waiting, "the re-read after the sign-in");
+  await browser.request(() => csrfReads().length === 2, "the access refresh on reconnect");
+  assert.deepEqual(browser.sent.map((request) => [request.path, request.session]).sort(),
+    [["/api/csrf", session], ["/api/csrf", session], ["/api/guidance/snapshot", session], ["/auth/login", ""]],
+    "one sign-in, one access check of the stored session, one snapshot re-read and the reconnect refresh");
   const check = registry.get(shell.accessAtom);
   assert.ok(AsyncResult.isSuccess(check) && check.value.state === "signedIn");
   assert.equal(registry.get(shell.dashboardOpened).opened, true);
@@ -216,7 +234,7 @@ it("sign-out sends one request however often it is asked, forgets only its own s
   assert.deepEqual(posts.map((request) => [request.method, request.body, request.session]), [["POST", "{}", "session-1"]]);
   assert.equal(browser.local.has("supervisor-session"), false);
   assert.equal(registry.get(shell.dashboardOpened).opened, false);
-  assert.equal(access.getSessionToken(), "");
+  assert.equal(storedSession(registry), "");
   for (const stop of stops) stop();
   registry.dispose();
 });

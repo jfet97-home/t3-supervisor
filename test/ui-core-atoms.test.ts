@@ -135,12 +135,9 @@ it("disposing the registry aborts a pending admitted request and runs its finali
   assert.equal(await settled(finalized, "finalized"), "finalized");
   assert.equal(signal?.aborted, true);
   assert.deepEqual(finalizers, ["scoped resource", "request"]);
-  // the same operation in a new registry reports the unknown outcome and sends nothing
+  // the claim belongs to the disposed registry: in a new registry the operation starts initial and sends nothing until written
   const next = AtomRegistry.make();
-  next.set(mutation, policy);
-  const failed = await until(next, mutation, AsyncResult.isFailure, "unconfirmed");
-  const error = AsyncResult.error(failed);
-  assert.equal(error._tag === "Some" ? error.value._tag : "none", "Unconfirmed");
+  assert.ok(AsyncResult.isInitial(next.get(mutation)));
   assert.equal(sent.length, 1);
   next.dispose();
 });
@@ -210,6 +207,8 @@ it("drafts are keep-alive per scope and survive unmount; the auth epoch advances
   const runIn = core.uiRuntime.fn(() => signIn);
   registry.set(runIn, undefined);
   await until(registry, core.authEpochAtom, (value) => AsyncResult.isSuccess(value) && value.value >= 1, "sign-in advances the epoch");
+  // another tab stores a different session; the epoch counts changes of the stored value
+  storage.set("supervisor-session", "session-3");
   const event = new Event("storage");
   Object.defineProperties(event, { key: { value: "supervisor-session" }, storageArea: { value: globalThis.localStorage } });
   browser.dispatchEvent(event);

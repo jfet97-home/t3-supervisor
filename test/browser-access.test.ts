@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "vitest";
-import { clearAccess, getCsrfToken, getSessionToken, loadAccess, setSessionToken, watchSession } from "../ui/src/access.js";
+import { clearAccess, getCsrfToken, getSessionToken, loadAccess, setSessionToken, watchSession } from "./support/ui-run.js";
 
 const storage = () => {
   const values = new Map<string, string>();

@@ -4,13 +4,12 @@ import { Schema } from "effect";
 import { it, type TestContext } from "vitest";
 import { ProjectSupervisorSaveResult, ProjectSupervisorSnapshot, type ProjectSupervisorChatSupervisionInput, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput } from "../src/project-supervisor-contract.js";
 import type { ProjectConfigSave } from "../src/project-definitions-contract.js";
-import { getCsrfToken } from "../ui/src/access.js";
 import { ProjectConfigRequestError, saveProjectConfiguration } from "../ui/src/project-definitions-api.js";
 import { loadProjectSupervisor, ProjectSupervisorRequestError, retryProjectSupervisor, saveProjectSupervisor, setChatSupervision } from "../ui/src/project-supervisor-api.js";
 import { defer, readCsrf, signIn } from "./support/c3b-http.js";
 import { fakeSupervision, supervisorSnapshot } from "./support/c3b-project-supervisor.js";
 import { startUi } from "./support/c3b-ui.js";
-import { installPageLocation, runUi } from "./support/ui-run.js";
+import { getCsrfToken, installPageLocation, runUi } from "./support/ui-run.js";
 
 type Golden = {snapshot: unknown; saveResult: unknown; retryResult: unknown};
 const golden = JSON.parse(readFileSync(new URL("./support/c3b-project-supervisor.golden.json", import.meta.url), "utf8")) as Golden;

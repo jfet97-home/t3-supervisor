@@ -3,7 +3,7 @@ import { useAtom, useAtomSet, useAtomValue } from "@effect/atom-react";
 import { Cause, Exit, Option } from "effect";
 import { AsyncResult } from "effect/reactivity";
 import { catalogEntryId, catalogSummaryLimits, normalizeProjectConfiguration, projectConfigurationError, requiredReferences, type ProjectConfigSave, type ProjectConfigSaveOutcome, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
-import { draftFamily, scopeKey } from "./atoms.js";
+import { draftFamily, environmentAtom, scopeKey } from "./atoms.js";
 import { resolveSave, saveProjectConfigurationAtom, type ProjectConfigRequestError } from "./project-definitions-api.js";
 
 const emptyConfiguration = (): ProjectConfigurationInfo => ({workflows: [], steps: []});
@@ -30,8 +30,9 @@ export interface ConfigurationDraft {
 export const freshDraft = (): ConfigurationDraft =>
   ({editing: false, config: null, operationId: crypto.randomUUID(), blocked: false, message: "", messageAlert: false});
 export const configurationDrafts = draftFamily(freshDraft);
-// the draft scope of a loaded snapshot: project, checkout and the revision its save is compared against
-export const configurationScope = (definitions: ProjectDefinitionSnapshot): string => scopeKey(definitions.projectId, definitions.threadId, definitions.revision);
+// the draft scope of a loaded snapshot: T3 environment, project, checkout and the revision its save is compared against
+export const configurationScope = (environmentId: string | null, definitions: ProjectDefinitionSnapshot): string =>
+  scopeKey(environmentId, definitions.projectId, definitions.threadId, definitions.revision);
 
 export type SavePlan =
   | {readonly _tag: "Invalid"; readonly message: string}
@@ -125,7 +126,7 @@ export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange,
   onDirtyChange: (dirty: boolean) => void;
   onSavingChange: (saving: boolean) => void;
 }) {
-  const scope = configurationScope(definitions);
+  const scope = configurationScope(useAtomValue(environmentAtom), definitions);
   const [draft, setDraft] = useAtom(configurationDrafts(scope));
   const attempt = saveProjectConfigurationAtom({scope, operationId: draft.operationId});
   const save = useAtomSet(attempt, {mode: "promiseExit"});

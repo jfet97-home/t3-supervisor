@@ -81,7 +81,7 @@ const isRead = (request: Sent) => request.method === "GET" && request.path === "
 
 const snapshot: ProjectSupervisorInfo = supervisorSnapshot;
 const scopeA = () => core.scopeKey("project", "task-thread");
-const projectKey = () => ps.projectSupervisorKey("project");
+const projectKey = () => ps.projectSupervisorKey(null, "project");
 const saveInput = (expectedGeneration: number): ProjectSupervisorSaveInput => ({projectId: "project", mainThreadId: "task-thread", expectedGeneration,
   modelSelection: snapshot.settings.modelSelection, monitoring: {intervalMinutes: 12, activityThreshold: 10}, teamSettings: {maxHelpersPerRoot: 3}});
 // a panel showing the snapshot for chat A with a dirty monitoring draft
@@ -275,7 +275,7 @@ it("the chat poll reads nothing when mounted, re-reads on each refresh and repla
   sent.length = 0;
   const stopped = {...snapshot, message: "a newer message", chatSupervision: {...snapshot.chatSupervision!, stopped: true, stoppedBy: "relay" as const, stoppedAt: 3}};
   reply = async () => json(stopped);
-  const scope = {projectId: "project", mainThreadId: "task-thread", epoch: 0};
+  const scope = {environmentId: null, projectId: "project", mainThreadId: "task-thread", epoch: 0};
   const stop = registry.subscribe(ps.chatSupervisionPoll(scope), () => undefined, {immediate: true});
   await until(registry, ps.chatSupervisionRead(scope), value => AsyncResult.isSuccess(value) && !value.waiting, "mounted");
   assert.equal(sent.length, 0, "mounting reads nothing");
@@ -306,7 +306,7 @@ it("live progress appends Load more pages, re-reads the loaded pages in order an
     if (mode === "fail") return json({message: "unavailable"}, 500);
     return json(page(workflowOffset, lineageOffset, mode === "incomplete" ? "unavailable" : "ok"));
   };
-  const scope = {projectId: "project", mainThreadId: "task-thread", bindingThreadId: null, bindingGeneration: null, epoch: 0};
+  const scope = {environmentId: null, projectId: "project", mainThreadId: "task-thread", bindingThreadId: null, bindingGeneration: null, epoch: 0};
   const read = ps.workflowProgressRead(scope);
   const settled = (predicate: (state: {pages: readonly WorkflowProgressSnapshot[]; error: string | null}) => boolean, label: string) =>
     until(registry, read, value => AsyncResult.isSuccess(value) && !value.waiting && predicate(value.value), label)
@@ -369,11 +369,11 @@ it("a new scope revision interrupts the snapshot read of the previous one and ab
     first.arrive();
     return first.response;
   };
-  const previous = ps.projectSupervisorRead({projectId: "project", mainThreadId: "task-thread", revision: 0, epoch: 0});
+  const previous = ps.projectSupervisorRead({environmentId: null, projectId: "project", mainThreadId: "task-thread", revision: 0, epoch: 0});
   const stopPrevious = registry.subscribe(previous, () => undefined, {immediate: true});
   await first.reached;
   stopPrevious();
-  const next = ps.projectSupervisorRead({projectId: "project", mainThreadId: "task-thread", revision: 1, epoch: 0});
+  const next = ps.projectSupervisorRead({environmentId: null, projectId: "project", mainThreadId: "task-thread", revision: 1, epoch: 0});
   const stopNext = registry.subscribe(next, () => undefined, {immediate: true});
   const read = await until(registry, next, value => AsyncResult.isSuccess(value) && !value.waiting, "next revision");
   assert.equal(AsyncResult.isSuccess(read) ? read.value.snapshot.projectId : null, "project");

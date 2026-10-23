@@ -27,8 +27,8 @@ import type {
 import type { WorkflowProgressContribution, WorkflowProgressCoverage, WorkflowProgressSnapshot, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
 import { defaultMonitoringSettings, defaultSupervisorTeamSettings } from "../../src/project-supervisor-contract.js";
 import { loadProjectSupervisor, loadWorkflowProgress, type ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor, setChatSupervision } from "./project-supervisor-api.js";
-import { admittedMutation, authEpochAtom, draftFamily, pollWhileVisible, scopeKey, uiRuntime, type MutationKey, type MutationResult } from "./atoms.js";
-import { idleControlActivity, SupervisionControlPanel } from "./supervisor-control.js";
+import { admit, admittedMutation, authEpochAtom, draftFamily, environmentAtom, pollWhileVisible, scopeKey, uiRuntime, type MutationKey, type MutationResult } from "./atoms.js";
+import { idleControlActivity, SupervisionControlPanel, supervisionControlKey, supervisionSetupSelection } from "./supervisor-control.js";
 
 type MonitoringDraft = {
   intervalMinutes: string;
@@ -1171,11 +1171,18 @@ export type ProjectSupervisorView = {
 const idleView: ProjectSupervisorView = {scope: null, snapshot: null, readAt: null, message: null, blocked: false, operation: null, chat: null,
   chatMessage: null};
 
-export const projectSupervisorKey = (projectId: string) => scopeKey("project-supervisor", projectId);
+export const projectSupervisorKey = (environmentId: string | null, projectId: string) => scopeKey("project-supervisor", environmentId, projectId);
 export const projectSupervisorView = Atom.family((_projectKey: string) => Atom.keepAlive(Atom.make(idleView)));
 export const projectSupervisorDraft = draftFamily<Draft | null>(() => null);
 
-type SnapshotScope = {readonly projectId: string; readonly mainThreadId: string | null; readonly revision: number; readonly epoch: number};
+// the confirmed discard of a project's Supervisor drafts: the settings draft is dropped, so the panel takes the saved
+// settings from its next read, and the setup checkout choice is cleared
+export const discardSupervisorDrafts = (registry: AtomRegistry.AtomRegistry, environmentId: string | null, projectId: string) => {
+  registry.set(projectSupervisorDraft(projectSupervisorKey(environmentId, projectId)), null);
+  registry.set(supervisionSetupSelection(supervisionControlKey(environmentId, projectId)), "");
+};
+
+type SnapshotScope = {readonly environmentId: string | null; readonly projectId: string; readonly mainThreadId: string | null; readonly revision: number; readonly epoch: number};
 
 // one snapshot read per scope; a scope change or unmount interrupts it, and a refresh is a new scope revision
 export const projectSupervisorRead = Atom.family((scope: SnapshotScope) => uiRuntime.atom(Effect.gen(function* () {
@@ -1183,7 +1190,7 @@ export const projectSupervisorRead = Atom.family((scope: SnapshotScope) => uiRun
   return {snapshot, readAt: yield* Clock.currentTimeMillis};
 })));
 
-type ChatPollScope = {readonly projectId: string; readonly mainThreadId: string; readonly epoch: number};
+type ChatPollScope = {readonly environmentId: string | null; readonly projectId: string; readonly mainThreadId: string; readonly epoch: number};
 
 // the selected chat's saved supervision state; the first evaluation reads nothing because the snapshot read has just read it,
 // every refresh reads it again
@@ -1198,6 +1205,7 @@ export const chatSupervisionRead = Atom.family((scope: ChatPollScope) => uiRunti
 export const chatSupervisionPoll = Atom.family((scope: ChatPollScope) => chatSupervisionRead(scope).pipe(pollWhileVisible(30_000)));
 
 type ProgressScope = {
+  readonly environmentId: string | null;
   readonly projectId: string;
   readonly mainThreadId: string;
   readonly bindingThreadId: string | null;
@@ -1261,9 +1269,9 @@ const settleChange = <I,>(
   request: (key: MutationKey) => Atom.Writable<MutationResult<Result.Result<ProjectSupervisorSaveOutcome, ProjectSupervisorRequestError>>, I>,
   settle: (state: SettingsState, scope: string, input: I, outcome: ChangeOutcome) => SettingsState,
 ) => Atom.family((_key: string) => Atom.keepAlive(uiRuntime.fn((change: SettingsChange<I>, get) => Effect.gen(function* () {
-  const outcome: ChangeOutcome = yield* get.setResult(request(change.key), change.input).pipe(
-    Effect.catch(() => Effect.succeed(Result.fail(undefined))));
   const registry = get.registry;
+  const outcome: ChangeOutcome = yield* admit(registry, request(change.key), change.input).pipe(
+    Effect.catch(() => Effect.succeed(Result.fail(undefined))));
   const viewAtom = projectSupervisorView(change.projectKey);
   const view = registry.get(viewAtom);
   if (view.operation?.operationId !== change.key.operationId || view.operation.scope !== change.key.scope) return;
@@ -1291,7 +1299,7 @@ export const changeChatSupervision = Atom.family((_key: string) => Atom.keepAliv
     const registry = get.registry;
     const viewAtom = projectSupervisorView(change.projectKey);
     const outcome = yield* confirmChatSupervisionChange(
-      get.setResult(chatRequest(change.key), change.input).pipe(Effect.flatMap(result => Result.isSuccess(result) ? Effect.succeed(result.success) : Effect.fail(result.failure))),
+      admit(registry, chatRequest(change.key), change.input).pipe(Effect.flatMap(result => Result.isSuccess(result) ? Effect.succeed(result.success) : Effect.fail(result.failure))),
       chatSupervisionConfirmRead(change.input.projectId, change.input.mainThreadId),
       () => registry.get(viewAtom).scope === change.key.scope);
     registry.update(viewAtom, view => view.chat?.operationId !== change.key.operationId ? view : {...view, chat: null,
@@ -1327,15 +1335,14 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
   section?: "all" | "progress" | "plan" | "supervision" | "definitions" | "settings";
   attentionEnabled?: boolean;
   connected: boolean;
-  // requests carry the session's CSRF token themselves; the prop is accepted for its caller
-  csrfToken?: string;
   onDirtyChange?: (dirty: boolean) => void;
   onSavingChange?: (saving: boolean) => void;
 }) {
   const registry = useContext(RegistryContext);
-  const projectKey = projectSupervisorKey(projectId);
+  const environmentId = useAtomValue(environmentAtom);
+  const projectKey = projectSupervisorKey(environmentId, projectId);
   const mainThreadId = threadId || null;
-  const scope = scopeKey(projectId, mainThreadId);
+  const scope = scopeKey(environmentId, projectId, mainThreadId);
   const epoch = useAtomValue(authEpochAtom, result => Option.getOrElse(AsyncResult.value(result), () => 0));
   const [view, setView] = useAtom(projectSupervisorView(projectKey));
   const [activeDraft, setDraft] = useAtom(projectSupervisorDraft(projectKey));
@@ -1354,9 +1361,9 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
 
   // no read while saving, and no automatic read over a dirty draft of the shown snapshot: only an explicit refresh moves
   // the draft's expected generation; each scope revision is read once
-  const requestKey = scopeKey(projectId, mainThreadId, revision, epoch);
+  const requestKey = scopeKey(environmentId, projectId, mainThreadId, revision, epoch);
   const readNeeded = snapshotReadNeeded({projectId, connected, saving, forceRefresh, dirty, shown: activeSnapshot !== null, completedKey: completedRead?.key ?? null, requestKey});
-  const read = useAtomValue(readNeeded ? projectSupervisorRead({projectId, mainThreadId, revision, epoch}) : idleAtom);
+  const read = useAtomValue(readNeeded ? projectSupervisorRead({environmentId, projectId, mainThreadId, revision, epoch}) : idleAtom);
   const isLoading = readNeeded;
   const loadError = completedRead?.key === requestKey && completedRead.failed;
   const fieldsBusy = saving || isLoading;
@@ -1392,20 +1399,20 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
 
   // the chat supervision poll is not mounted while a change is in flight; it replaces only the chat's supervision state
   const pollScope = chatPollScope(view, {projectId, threadId, connected, epoch});
-  const polled = useAtomValue(pollScope ? chatSupervisionPoll(pollScope) : idleAtom);
+  const polled = useAtomValue(pollScope ? chatSupervisionPoll({...pollScope, environmentId}) : idleAtom);
   const polledSnapshot = AsyncResult.isSuccess(polled) && !polled.waiting ? Option.getOrNull(polled.value) : null;
   useEffect(() => {
     if (polledSnapshot) setView(current => settlePoll(current, scope, polledSnapshot));
   }, [polledSnapshot]);
 
   const progressMain = projectId && connected ? activeSnapshot?.mainThreadId ?? null : null;
-  const progressScope: ProgressScope | null = progressMain ? {projectId, mainThreadId: progressMain, bindingThreadId: activeSnapshot?.binding?.threadId ?? null,
+  const progressScope: ProgressScope | null = progressMain ? {environmentId, projectId, mainThreadId: progressMain, bindingThreadId: activeSnapshot?.binding?.threadId ?? null,
     bindingGeneration: activeSnapshot?.binding?.generation ?? null, epoch} : null;
   const progress = useAtomValue(progressScope ? workflowProgressRead(progressScope) : idleAtom);
   const progressPages = Option.getOrNull(AsyncResult.value(progress));
   const progressLoading = progressScope !== null && (AsyncResult.isInitial(progress) || progress.waiting);
   useAtomMount(progressScope && !progressLoading ? workflowProgressPoll(progressScope) : idleAtom);
-  const workflowProgressKey = scopeKey(projectId, activeSnapshot?.mainThreadId ?? mainThreadId, activeSnapshot?.binding?.threadId ?? null, activeSnapshot?.binding?.generation ?? null);
+  const workflowProgressKey = scopeKey(environmentId, projectId, activeSnapshot?.mainThreadId ?? mainThreadId, activeSnapshot?.binding?.threadId ?? null, activeSnapshot?.binding?.generation ?? null);
   const workflowProgressState: WorkflowProgressPanelState = {key: workflowProgressKey, pages: progressScope ? [...progressPages?.pages ?? []] : [],
     loading: progressLoading, error: progressScope ? progressPages?.error ?? null : null};
 

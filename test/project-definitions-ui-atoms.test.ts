@@ -5,13 +5,13 @@ import { afterAll, beforeAll, it, type TestContext } from "vitest";
 import type { ProjectConfigEditor } from "../src/project-config-editor.js";
 import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
 import type { ProjectConfigSave, ProjectConfigSaveOutcome, ProjectConfigurationInfo, ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { clearAccess, loadAccess } from "../ui/src/access.js";
 import { NotPerformed, Unconfirmed } from "../ui/src/api.js";
 import { definitionsReadKey, projectDefinitionsAtom, resolveSave, saveProjectConfigurationAtom } from "../ui/src/project-definitions-api.js";
 import { configurationScope, freshDraft, planSave, savedDefinitions, settleSave, type ConfigurationDraft } from "../ui/src/project-configuration-editor.js";
 import { confirmDiscard, draftTarget, heldView, scopeChange, type DefinitionsSelection, type DefinitionsView } from "../ui/src/project-definitions.js";
 import { defer, deferred, signIn, within } from "./support/c3b-http.js";
 import { startUi } from "./support/c3b-ui.js";
+import { sessionAccessOf } from "./support/ui-run.js";
 
 // target regressions of the definitions panel and configuration editor ports (WP-S7-DEFS) over a stubbed browser and the
 // real dashboard server: the held definitions read, guarded navigation, the draft target route, validation before
@@ -66,10 +66,10 @@ const signedIn = async (t: TestContext, options: {definitions: ProjectDefinition
   const started = await startUi(t, options);
   page.origin = started.origin;
   storage.set("supervisor-session", await signIn(started.origin, started.directory));
-  assert.equal(await loadAccess(), true);
-  defer(t, () => {clearAccess();storage.clear();});
   const registry = AtomRegistry.make();
   defer(t, () => registry.dispose());
+  assert.equal(await Effect.runPromise(sessionAccessOf(registry).load), true);
+  defer(t, () => {Effect.runSync(sessionAccessOf(registry).clear());storage.clear();});
   return registry;
 };
 
@@ -110,7 +110,7 @@ it("no definitions reload starts while the configuration is dirty or saving, and
   let view: DefinitionsView = {key: "", read: null};
   let mounted: {read: string; stop: () => void} | null = null;
   const render = (reload: number, epoch: number, holding: boolean, threadId: string | null = null) => {
-    view = heldView(view, {key: JSON.stringify(["project", threadId ?? "", reload, true]), read: definitionsReadKey("project", threadId, reload, epoch)}, holding);
+    view = heldView(view, {key: JSON.stringify(["project", threadId ?? "", reload, true]), read: definitionsReadKey(null, "project", threadId, epoch)}, holding);
     if (mounted?.read === view.read) return projectDefinitionsAtom(mounted.read);
     mounted?.stop();
     const read = view.read!;
@@ -161,9 +161,10 @@ it("a save compares against the loaded revision: a concurrent change answers con
   }} as unknown as ProjectConfigEditor;
   const registry = await signedIn(t, {definitions, editor});
   const read = async (reload: number) => {
-    const atom = projectDefinitionsAtom(definitionsReadKey("project", null, reload, 0));
+    const atom = projectDefinitionsAtom(definitionsReadKey(null, "project", null, 0));
     const stop = registry.subscribe(atom, () => undefined, {immediate: true});
-    const loaded = await until(registry, atom, AsyncResult.isSuccess, `read ${reload}`);
+    if (reload > 0) registry.refresh(atom);
+    const loaded = await until(registry, atom, (result) => AsyncResult.isSuccess(result) && !result.waiting, `read ${reload}`);
     stop();
     assert.ok(AsyncResult.isSuccess(loaded));
     return loaded.value.definitions;
@@ -175,7 +176,7 @@ it("a save compares against the loaded revision: a concurrent change answers con
   const plan = planSave(loaded, edited, () => true);
   assert.ok(plan._tag === "Save");
   assert.equal(plan.input.expectedRevision, revisionA, "the save carries the revision it was edited from");
-  const scope = configurationScope(loaded);
+  const scope = configurationScope(null, loaded);
   const draft = {...freshDraft(), editing: true, config: edited};
   const conflict = resolveSave(plan.input)(await admittedSave(registry, draft, scope, plan.input));
   const blocked = settleSave(draft, conflict, plan.normalized);
@@ -189,7 +190,7 @@ it("a save compares against the loaded revision: a concurrent change answers con
   const retry = planSave(fresh, edited, () => true);
   assert.ok(retry._tag === "Save");
   assert.equal(retry.input.expectedRevision, revisionB);
-  const saved = resolveSave(retry.input)(await admittedSave(registry, {...freshDraft(), editing: true, config: edited}, configurationScope(fresh), retry.input));
+  const saved = resolveSave(retry.input)(await admittedSave(registry, {...freshDraft(), editing: true, config: edited}, configurationScope(null, fresh), retry.input));
   assert.equal(savedDefinitions(saved)?.revision, revisionC);
   const cleared = settleSave({...freshDraft(), editing: true, config: edited}, saved, retry.normalized);
   assert.deepEqual([cleared.editing, cleared.blocked, cleared.config, cleared.message, cleared.messageAlert], [false, false, edited, "Saved project.yaml.", false]);
@@ -215,7 +216,7 @@ it("an answered conflict, uncertain, unavailable or permission_required save blo
     const plan = planSave(loaded, edited, () => true);
     assert.ok(plan._tag === "Save");
     const draft = {...freshDraft(), editing: true, config: edited};
-    const outcome = resolveSave(plan.input)(await admittedSave(registry, draft, configurationScope(loaded), plan.input));
+    const outcome = resolveSave(plan.input)(await admittedSave(registry, draft, configurationScope(null, loaded), plan.input));
     const settled = settleSave(draft, outcome, plan.normalized);
     assert.deepEqual([settled.blocked, settled.message, settled.messageAlert, settled.editing, settled.config], [blocks, message, true, true, edited], reply.status);
   }

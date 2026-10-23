@@ -4,11 +4,15 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import { it } from "vitest";
 import {Effect, Schema} from "effect";
-import {DashboardOverview, overviewPage, workAttention, readOverviewRange, type DashboardOverviewInfo} from "../src/dashboard-overview.js";
+import {DashboardOverview, overviewPage, workAttention, readOverviewPages, type DashboardOverviewInfo} from "../src/dashboard-overview.js";
 import {GuidanceStore} from "../src/guidance-store.js";
 import {ProjectSupervisorStore, defaultSupervisorModel, type TaskRecord} from "../src/project-supervisor-store.js";
 import {ProjectSupervisor} from "../src/project-supervisor.js";
 import type {ThreadInfo, SupervisorConfig} from "../src/types.js";
+
+// the range cases call the Effect range reader with the promise page reads they were written for
+const readOverviewRange = (read: (offset: number) => Promise<DashboardOverviewInfo>, count: number) =>
+  Effect.runPromise(readOverviewPages((offset) => Effect.promise(() => read(offset)), count));
 
 const nativeThread = (id: string): ThreadInfo => ({id, title: `Work ${id}`, projectId: "project", activeRunId: id === "active" ? "run" : null,
   lineage: {parentThreadId: null, relationshipToParent: null}});
