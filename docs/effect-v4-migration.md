@@ -157,8 +157,17 @@ all I/O goes through platform, socket, HTTP or SQL services, untrusted data is d
 One `SqliteClient` per database file, provided to every store on that file through one of
 four named interfaces, `CatalogDb`, `GuidanceDb`, `PolicyDb` and `AccessDb` (each a
 `Context.Service` whose value is that file's `SqlClient`), so a generic `SqlClient` tag can
-never shadow another file's client. Only the database layer module may call
-`SqliteClient.make`/`layer` (lint rule). No fifth database and no compatibility API.
+never shadow another file's client. Only the database layer module `src/db.ts` and its
+database worker (`src/db-worker-serve.ts`) may import `@effect/sql-sqlite-node` (lint rule).
+No fifth database and no compatibility API. Each client's single connection lives in its own
+Node worker thread: the worker opens the file with `SqliteClient.make` and leases its one
+connection for life, and the main fiber runs the stock `SqlClient` (same acquirers, savepoints
+and failed-COMMIT cleanup) over that worker connection. Requests and replies are
+Schema-decoded. A failure crosses only as its tag, message, operation and SQLite code. A
+transport fault, malformed reply or worker exit poisons the client permanently and
+terminates the thread, because a statement in flight has an unknown outcome. A call that
+was sent is awaited before its lease is released. The reason for this adapter: `node:sqlite`
+is synchronous, and a worker keeps its busy waits off the main event loop.
 Client lifetimes match today's connections: catalog and policy for the process; guidance
 and the server's access client for one supervision run (re-acquired after a degraded
 restart, as `guidance-application.ts:28-31` and `guidance-ui.ts:144` do today; never two at
@@ -181,9 +190,11 @@ statement, so sequences outside a transaction can interleave. Rules:
    IDs) are committed before any native send (CC-RECEIPT-FIRST).
 4. Interruption inside a transaction rolls it back. This failure mode does not exist in the
    baseline and gets target-regression tests.
-5. `busy_timeout` waits still block the event loop (`node:sqlite` is synchronous). This
-   known limitation is preserved, not erased (O-05): the plan only proves that the port
-   adds no new in-process self-contention, using a measured single-client workload.
+5. `busy_timeout` waits (5 s) run in the connection's worker thread. The main event loop
+   keeps running while a client waits for a lock held by another connection (dist smoke:
+   LockTimeoutError after 5,009 ms with 99 ticks of a 50 ms main-thread timer). A waiting
+   transaction still holds its own client, so rule 1 and short SQL-only transactions
+   still apply (O-05).
 6. Acquisition is interruptible in the pinned 4.0.6 (`SqlClient.ts:288` and `:433-438`
    restore interruption around the connection acquisition and the semaphore wait):
    interrupting a fiber that waits for the connection returns at once, its body never
@@ -204,7 +215,7 @@ BEGIN IMMEDIATE.
 | File | Owner | Journal | Guarantees | Client | Slice |
 | --- | --- | --- | --- | --- | --- |
 | `catalog.sqlite3` | `store.ts` | WAL | `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`, `wal_autocheckpoint=256`, `secure_delete=ON`, `max_page_count`; dir 0700, db/-wal/-shm 0600 | `CatalogDb`; file created and chmodded 0600 before open, pragmas after open; process lifetime | S3 |
-| `access/login.sqlite3` | `service-auth.ts` (server and `auth forge`) | **DELETE** (validated) | `synchronous=FULL`, `busy_timeout=5000`, `max_page_count`; exactly two STRICT tables; caps/TTL; `quick_check`; O_NOFOLLOW + dev/ino identity before open and lstat re-check after open; size bounds; CLI never bootstraps | `AccessDb` = `SqliteClient.make({disableWAL: true})` after the private-files checks: **one client for the lifetime of the dashboard HTTP server** shared by every login/session/revocation operation (baseline `createServiceAuth`, `service-auth.ts:420-528`, opened at `guidance-ui.ts:144` and closed with the server at `:333/:348`; re-acquired with the server after a degraded supervision restart, released after the server's listeners), and **one short-lived client per forge operation in the separate CLI process** (`forgeDashboardToken`, `:530-566`). Never two clients in one process: a second client's synchronous busy wait would block the event loop while the first is suspended inside a transaction (Astra's 4.0.5 probe: `harness-probe/auth-client-contention`, LockTimeoutError after 53 ms). Cross-process contention stays BEGIN IMMEDIATE + `busy_timeout` (CT-AUTH-05, CT-SQL-04) | S6c (with its only callers: the HTTP auth checks and the CLI; 3.9 T-01) |
+| `access/login.sqlite3` | `service-auth.ts` (server and `auth forge`) | **DELETE** (validated) | `synchronous=FULL`, `busy_timeout=5000`, `max_page_count`; exactly two STRICT tables; caps/TTL; `quick_check`; O_NOFOLLOW + dev/ino identity before open and lstat re-check after open; size bounds; CLI never bootstraps | `AccessDb` = `SqliteClient.make({disableWAL: true})` after the private-files checks: **one client for the lifetime of the dashboard HTTP server** shared by every login/session/revocation operation (baseline `createServiceAuth`, `service-auth.ts:420-528`, opened at `guidance-ui.ts:144` and closed with the server at `:333/:348`; re-acquired with the server after a degraded supervision restart, released after the server's listeners), and **one short-lived client per forge operation in the separate CLI process** (`forgeDashboardToken`, `:530-566`). Never two clients in one process (rule 1). The event-loop block that a second in-process client once caused (Astra's 4.0.5 probe `harness-probe/auth-client-contention`, LockTimeoutError after 53 ms) no longer happens, because each connection has its own worker. Cross-process contention stays BEGIN IMMEDIATE + `busy_timeout` (CT-AUTH-05, CT-SQL-04) | S6c (with its only callers: the HTTP auth checks and the CLI; 3.9 T-01) |
 | `guidance.sqlite3` | `guidance-store.ts`; shared by project-supervisor, workflow-state, conversation, monitor and team stores, helper transport, write controller, git probe | WAL | `synchronous=FULL`, `busy_timeout=5000`, `secure_delete=ON`, `max_page_count=16384`; idempotent DDL at open; restart recovery (CC-RECOVERY) | `GuidanceDb` (S6d); until then the existing synchronous store (3.4); ownership preload from the same layer | S6d |
 | `thread-settings.sqlite3` | `thread-policy.ts` | WAL | `synchronous=FULL`, `busy_timeout=5000`; single-row document read on every Stop check (`thread-policy.ts:22-24`, no cache) | `PolicyDb` (S6d); reads stay authoritative DB reads; Stop/Enable commits are ordered against send admission by the admission section (3.11) | S6d |
 
@@ -1504,8 +1515,8 @@ historical closed requests, and the no-contact Stop behaviour stays unchanged.
   rejected.
 - **After S6d:** cut-over on the Lab `guidance.sqlite3` under concurrent MCP writes and the
   supervision cycle: no SQLITE_BUSY and no newly introduced self-contention (measured
-  event-loop delay against the S1 baseline workload; the synchronous `busy_timeout`
-  limitation remains), pragmas unchanged, team/monitor/receipt rows intact, definitions
+  event-loop delay against the S1 baseline workload; `busy_timeout` waits run in the
+  connection workers), pragmas unchanged, team/monitor/receipt rows intact, definitions
   revision identical.
 - **After S6e:** run the one-off cut-over (3.12 item 11) when no interpretation is in
   flight where possible and confirm retained agreements stay valid. (Done 2026-10-23 on the

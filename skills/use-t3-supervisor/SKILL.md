@@ -113,6 +113,18 @@ assessments and source links. Refresh does not wake chats or write workflow stat
 Idle/no-AppRun mirrors do not prove completion. Quiet scopes may park while unresolved
 work stays unresolved; relevant activity reuses the same Supervisor identity.
 
+Monitoring check-ins become due after ten finished activities by default, or once the
+oldest has waited the chosen interval (one or two minutes in Project settings, two by
+default), with a 30-second cooldown per main. A busy Supervisor, a check-in in flight or
+Stop still defers them, so this is not a reply-time promise. Each check-in records one
+outcome: Progress updated, No change, Needs attention or Insufficient evidence.
+Supervision shows the last confirmed review and the current one, which may be awaiting
+confirmation, not confirmed or missing. Only a confirmed outcome acknowledges the
+reviewed activity. A missing or unconfirmed one leaves it pending, and the third
+consecutive miss needs Retry. The Supervisor sends corrective guidance only for a
+concrete operative mistake. An outcome or guidance is its assessment, not proof that the
+operative corrected anything.
+
 ## Stopping supervision of one chat
 
 - Use the selected chat's Stop supervision button in Overview or Supervision; Enable supervision resumes it.
