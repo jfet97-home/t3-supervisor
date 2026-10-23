@@ -1,12 +1,13 @@
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
+import {GuidanceDb} from "./db.js";
+import {decodeGuidanceRow, guidanceSql, snapshotRead, type SupervisionStoreError} from "./guidance-sql.js";
 import type {ProjectSupervisorTeamInfo} from "./project-supervisor-contract.js";
 import type {BindingRecord} from "./project-supervisor-store.js";
-import {SupervisionStores} from "./supervision-stores.js";
-import {notificationClosed, type SupervisorTeamSnapshot, type TeamNotification, type TeamRequest} from "./supervisor-team-store.js";
+import {notificationClosed, SupervisorTeamStore, type SupervisorTeamSnapshot, type TeamNotification, type TeamRequest} from "./supervisor-team-store.js";
 import type {ThreadInfo} from "./types.js";
-import type {ConversationRequest} from "./supervisor-conversation-store.js";
+import {SupervisorConversationStore, type ConversationRequest} from "./supervisor-conversation-store.js";
 
-// the retained team records the view presents, read in one synchronous step from the interim stores; nothing is read natively
+// the retained team records the view presents, read as one snapshot of the guidance file; nothing is read natively
 export interface TeamViewData {
   readonly snapshot: SupervisorTeamSnapshot;
   // the unresolved guidance requests of the team
@@ -18,28 +19,39 @@ export interface TeamViewData {
   readonly members: ReadonlyMap<string, {readonly pending: ConversationRequest | null; readonly latest: ConversationRequest | undefined}>;
 }
 
+// a deferred guidance receipt: its actor and the stored request id, which a reader checks before using
+const decodeDeferredGuidanceRow = decodeGuidanceRow(Schema.Struct({actor_thread_id: Schema.String, request_id: Schema.Unknown}), "supervisor_team_tool_receipt");
+
 /** Reads the team records of one binding without waking or polling any helper conversation. */
-export const readTeamViewData = (binding: BindingRecord): Effect.Effect<TeamViewData, never, SupervisionStores> => Effect.gen(function* () {
-  const {team, requests} = yield* SupervisionStores;
-  return yield* Effect.sync((): TeamViewData => {
-    const snapshot = team.snapshot(binding);
-    const guideRequests = team.unresolvedRequests(binding).filter(request => request.requestId.startsWith("guide:"));
-    const guideRequestIds = new Set(guideRequests.map(request => request.requestId));
-    const deferredGuidanceMembers = new Set<string>();
-    if (guideRequestIds.size > 0) {
-      const rows = team.supervisors.store.db.prepare(`SELECT actor_thread_id,json_extract(document,'$.requestId') AS request_id
-        FROM supervisor_team_tool_receipts WHERE owner_thread_id=? AND binding_generation=?
-        AND json_extract(document,'$.status')='needs_fallback' AND json_extract(document,'$.reason')='target_pending_owner_input'`)
-        .all(binding.threadId, binding.generation);
-      for (const row of rows) {
-        if (typeof row.request_id === "string" && guideRequestIds.has(row.request_id)) deferredGuidanceMembers.add(String(row.actor_thread_id));
+export const readTeamViewData = (binding: BindingRecord): Effect.Effect<TeamViewData, SupervisionStoreError, GuidanceDb | SupervisorTeamStore | SupervisorConversationStore> =>
+  Effect.gen(function* () {
+    const team = yield* SupervisorTeamStore;
+    const requests = yield* SupervisorConversationStore;
+    const sql = yield* GuidanceDb;
+    // the baseline synchronous read as one read transaction: the team, its deferred guidance receipts and the check-ins agree
+    return yield* guidanceSql(snapshotRead(sql)(Effect.gen(function* () {
+      const snapshot = yield* team.snapshot(binding);
+      const guideRequests = (yield* team.unresolvedRequests(binding)).filter(request => request.requestId.startsWith("guide:"));
+      const guideRequestIds = new Set(guideRequests.map(request => request.requestId));
+      const deferredGuidanceMembers = new Set<string>();
+      if (guideRequestIds.size > 0) {
+        const rows = yield* sql`SELECT actor_thread_id,json_extract(document,'$.requestId') AS request_id
+          FROM supervisor_team_tool_receipts WHERE owner_thread_id=${binding.threadId} AND binding_generation=${binding.generation}
+          AND json_extract(document,'$.status')='needs_fallback' AND json_extract(document,'$.reason')='target_pending_owner_input'`;
+        for (const stored of rows) {
+          const row = yield* decodeDeferredGuidanceRow(stored);
+          if (typeof row.request_id === "string" && guideRequestIds.has(row.request_id)) deferredGuidanceMembers.add(row.actor_thread_id);
+        }
       }
-    }
-    const members = new Map(snapshot.members.slice(0, 100).map(member => [member.threadId, {pending: requests.pending(binding.projectId, member.threadId),
-      latest: requests.requests(binding.projectId, member.threadId).at(-1)}]));
-    return {snapshot, guideRequests, deferredGuidanceMembers, rootPending: Boolean(requests.pending(binding.projectId, binding.threadId)), members};
+      const members = new Map(yield* Effect.forEach(snapshot.members.slice(0, 100), (member) => Effect.gen(function* () {
+        const pending = yield* requests.pending(binding.projectId, member.threadId);
+        const latest = (yield* requests.requests(binding.projectId, member.threadId)).at(-1);
+        return [member.threadId, {pending, latest}] as const;
+      })));
+      const rootPending = Boolean(yield* requests.pending(binding.projectId, binding.threadId));
+      return {snapshot, guideRequests, deferredGuidanceMembers, rootPending, members} satisfies TeamViewData;
+    })));
   });
-});
 
 /** Presents existing team records without waking or polling every helper conversation. */
 export const supervisorTeamView = (data: TeamViewData, binding: BindingRecord, threads: readonly ThreadInfo[], observedAt: number): ProjectSupervisorTeamInfo => {
