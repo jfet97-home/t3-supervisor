@@ -1,26 +1,27 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect } from "effect";
+import { Effect, type Scope } from "effect";
+import { TestClock } from "effect/testing";
 import { fingerprint } from "../../src/guidance-store.js";
-import type { ProjectDefinitionLoader } from "./root-facades.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
-import { defaultSupervisorModel, type BindingRecord, type ProjectSupervisorStore, type TaskRecord } from "../../src/project-supervisor-store.js";
-import { projectSupervisorUnit, supervisorConversationUnit } from "./team-units.js";
+import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../../src/project-supervisor-store.js";
 import { workflowIntroductionText } from "../../src/supervisor-conversation.js";
 import { prepareWorkflowRequest, validateWorkflowPlan, type WorkflowPlanValue } from "../../src/supervisor-workflow.js";
-import type { ConversationRequest, WorkflowIntroduction } from "../../src/supervisor-conversation-store.js";
-import { SupervisorRpcError, type SupervisorRpc } from "../../src/supervisor-native.js";
-import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../../src/types.js";
+import type { WorkflowIntroduction } from "../../src/supervisor-conversation-store.js";
+import { SupervisorRpcError } from "../../src/supervisor-native.js";
+import type { MessageInfo, Projection, RunInfo, ThreadInfo } from "../../src/types.js";
 import { compactProposalDigest } from "../../src/supervisor-workflow-agreement.js";
-import { openGuidance, openPolicy, openSupervisors, openWorkflows, policyService, type GuidanceHandle, type PolicyHandle, type Promised } from "./store-units.js";
 import { effectiveIndex, indexSource, projectIndex, testSummary } from "../project-definitions-fixture.js";
-import { recordInterpretationSubmission, turnItemReader } from "./interpretation-evidence-fixture.js";
+import { recordInterpretationSubmission } from "./interpretation-evidence-fixture.js";
+import {
+  atWallTime, makeFakeT3, noNativeRead, openConversationProcess, openProjectSupervisor, runSettings, temporaryDirectory, type ConversationProcess, type RpcCall,
+} from "./g1b-conversation.js";
 
-// copied from test/supervisor-conversation.test.ts (frozen baseline suite) and extended with an rpc interceptor,
-// a reopened controller on the same files and a second bound main
+export { abortHonouringSend, proceed, type Flight, type RpcCall } from "./g1b-conversation.js";
+
+// copied from test/supervisor-conversation.test.ts (frozen baseline suite) and extended with an rpc interceptor, a reopened
+// process on the same files and a second bound main; the processes are the production services of ./g1b-conversation.ts over
+// the fake T3 below, opened in the test's scope
 
 export const projectId = "project-a";
 export const operativeThreadId = "operative-a";
@@ -85,12 +86,12 @@ export const makeProjection = (thread: ThreadInfo): Projection => ({
   turnItems: [],
 });
 
-export const nodesOf = (projection: Projection): Array<Record<string, unknown>> => {
+const nodesOf = (projection: Projection): Array<Record<string, unknown>> => {
   if (!Array.isArray(projection.nodes)) projection.nodes = [];
   return projection.nodes as Array<Record<string, unknown>>;
 };
 
-export const turnItemsOf = (projection: Projection): Array<Record<string, unknown>> => {
+const turnItemsOf = (projection: Projection): Array<Record<string, unknown>> => {
   if (!Array.isArray(projection.turnItems)) projection.turnItems = [];
   return projection.turnItems as Array<Record<string, unknown>>;
 };
@@ -154,64 +155,6 @@ export const appendRun = (input: {
   };
   projection.messages.push(message);
   return run;
-};
-
-export const activateProviderTurn = (projection: Projection, run: RunInfo, attemptId = `${run.id}-attempt-ready`): void => {
-  run.status = "running";
-  run.activeAttemptId = attemptId;
-  run.startedAt = iso(baseTime);
-  const root = nodesOf(projection).find(node => node.id === run.rootNodeId);
-  assert.ok(root);
-  root.status = "running";
-  (projection.providerTurns as Record<string, unknown>[]).push({id: `${attemptId}-provider-turn`, runAttemptId: attemptId,
-    nodeId: run.rootNodeId, status: "running"});
-};
-
-export const restartRun = (projection: Projection, run: RunInfo, input: {messageId: string; text: string; now: number; oldRootStatus?: string}) => {
-  const oldRootId = run.rootNodeId;
-  assert.ok(oldRootId);
-  const oldRoot = nodesOf(projection).find(node => node.id === oldRootId);
-  assert.ok(oldRoot);
-  const oldMessages = projection.messages.filter(message => message.runId === run.id).map(message => [message.id, message.nodeId] as const);
-  oldRoot.status = input.oldRootStatus ?? "interrupted";
-  const rootNodeId = `${input.messageId}-root`;
-  const providerThreadId = String(run.providerThreadId);
-  nodesOf(projection).push({
-    id: rootNodeId,
-    threadId: projection.thread.id,
-    runId: run.id,
-    parentNodeId: null,
-    rootNodeId,
-    kind: "root_turn",
-    status: "running",
-    providerThreadId,
-  });
-  run.rootNodeId = rootNodeId;
-  run.userMessageId = input.messageId;
-  run.status = "running";
-  const activeAttemptId = `${run.id}-attempt-${(projection.providerTurns as Record<string, unknown>[]).length + 1}`;
-  run.activeAttemptId = activeAttemptId;
-  run.startedAt = iso(input.now);
-  run.completedAt = null;
-  (projection.providerTurns as Record<string, unknown>[]).push({id: `${activeAttemptId}-provider-turn`, runAttemptId: activeAttemptId,
-    nodeId: rootNodeId, status: "running"});
-  const message: MessageInfo = {
-    id: input.messageId,
-    threadId: projection.thread.id,
-    runId: run.id,
-    nodeId: rootNodeId,
-    role: "user",
-    text: input.text,
-    streaming: false,
-    createdAt: iso(input.now),
-    updatedAt: iso(input.now),
-    createdBy: "user",
-    creationSource: "web",
-  };
-  projection.messages.push(message);
-  projection.thread.activeRunId = run.id;
-  for (const [messageId, nodeId] of oldMessages) assert.equal(projection.messages.find(item => item.id === messageId)?.nodeId, nodeId);
-  return {oldRootId, rootNodeId, message};
 };
 
 export const appendMessageToRun = (
@@ -312,30 +255,99 @@ export interface FixtureOptions {
   settings?: { intervalMinutes: number; activityThreshold: number };
 }
 
-export interface Clock { now: number }
+/** The suite's wall time: the fake T3 stamps what it records with it; `setNow` moves the services' test clock with it. */
+export interface FixtureClock { now: number }
 
-export type RpcCall = { tag: string; payload: Record<string, unknown> };
-/** an interceptor settlement that hands the held call back to the default fake T3 behaviour */
-export const proceed: unique symbol = Symbol("proceed");
-/** returns a settlement for a recorded call to take over its outcome, or null for the default fake T3 behaviour */
-export type RpcInterceptor = (call: RpcCall, signal: AbortSignal) => Promise<unknown> | null;
+/** A suite clock at `time`, with the services' test clock there too, as the baseline suites mocked Date.now to the suite clock. */
+export const suiteClock = (time: number): Effect.Effect<FixtureClock> => Effect.as(TestClock.setTime(time), {now: time});
+/** Moves the suite clock and the services' test clock to `time`. */
+export const setNow = (clock: FixtureClock, time: number): Effect.Effect<void> => Effect.andThen(Effect.sync(() => {clock.now = time;}), TestClock.setTime(time));
 
-// a send that reached the fake peer and settles only through the caller's abort, classified as the real client does after sending
-export const abortHonouringSend = (signal: AbortSignal): Promise<unknown> => new Promise((_resolve, reject) => {
-  if (signal.aborted) {reject(new SupervisorRpcError("uncertain"));return;}
-  signal.addEventListener("abort", () => reject(new SupervisorRpcError("uncertain")), {once: true});
-});
+const eligible = (thread: ThreadInfo) => thread.id.startsWith("operative-") && thread.projectId === projectId;
 
-export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
-  const directory = await mkdtemp(join(tmpdir(), "c1-conversation-"));
+/** One process's run of a binding of the operative main: its current binding record, the Supervisor projection and the threads. */
+const runOf = (process: ConversationProcess, mainThreadId: string, supervisor: Projection, threads: readonly ThreadInfo[]) =>
+  Effect.flatMap(process.store.binding(projectId, mainThreadId), (binding) => process.conversation.run(binding as BindingRecord, supervisor, threads));
+
+export const makeFixture = (clock: FixtureClock, options: FixtureOptions = {}) => Effect.gen(function* () {
+  const directory = yield* temporaryDirectory("c1-conversation-");
   const threadPolicyDirectory = join(directory, "thread-policy");
-  const guidance = await openGuidance(directory);
-  const threadPolicy = await openPolicy(threadPolicyDirectory, {excludedThreadIds: []});
-  const projectStore = await openSupervisors(guidance, new Set(), {policy: threadPolicy});
-  const binding = await projectStore.reserve(projectId, operativeThreadId, "Project A", defaultSupervisorModel, 10, clock.now);
-  await projectStore.setBinding({ ...binding, state: "ready" });
-  const settings = await projectStore.settings(projectId);
-  await projectStore.saveSettings(projectId, settings.generation, settings.modelSelection, options.settings ?? {
+  const definitionSnapshot = definitions();
+  const projections = new Map<string, Projection>();
+  const supervisorThreadIds = new Set<string>();
+  let nextSupervisorRun = 0;
+  // T3's own handling of a command: a settle shows the thread settled; a message dispatch starts or queues a Supervisor run, starts
+  // a notice run on an idle operative or steers the operative's active run; anything else fails as the real client classifies a
+  // failure after sending
+  const unexpected = Effect.fail(new SupervisorRpcError("uncertain"));
+  const answer = (call: RpcCall, calls: ReadonlyArray<RpcCall>) => Effect.suspend(() => {
+    const {tag, payload} = call;
+    if (tag === "orchestration.dispatchCommand" && payload.type === "thread.settle") {
+      const projection = projections.get(String(payload.threadId));
+      if (!projection) return unexpected;
+      projection.thread.settledAt = iso(clock.now);projection.thread.settledOverride = "settled";
+      return Effect.succeed({sequence: calls.length});
+    }
+    if (tag !== "orchestration.dispatchCommand" || payload.type !== "message.dispatch") return unexpected;
+
+    const targetThreadId = String(payload.threadId);
+    const supervisorTarget = supervisorThreadIds.has(targetThreadId) ? projections.get(targetThreadId) : undefined;
+    if (supervisorTarget) {
+      nextSupervisorRun++;
+      const isBusy = supervisorTarget.runs.some(run => ["preparing", "queued", "starting", "running", "waiting"].includes(run.status));
+      const status = payload.dispatchMode && (payload.dispatchMode as Record<string, unknown>).type === "queue_after_active" && isBusy
+        ? "queued"
+        : "running";
+      const run = appendRun({
+        projection: supervisorTarget,
+        id: `supervisor-run-${nextSupervisorRun}`,
+        // native run ordinals only grow within a thread
+        ordinal: Math.max(nextSupervisorRun + supervisorTarget.runs.length, ...supervisorTarget.runs.map(item => item.ordinal + 1)),
+        status,
+        messageId: String(payload.messageId),
+        text: String(payload.text),
+        createdBy: "system",
+        creationSource: "server",
+        now: clock.now,
+      });
+      run.queuePosition = status === "queued" ? 1 : null;
+      return Effect.succeed({ sequence: calls.length });
+    }
+
+    const operativeTarget = projections.get(targetThreadId);
+    if (operativeTarget) {
+      const dispatchMode = payload.dispatchMode as Record<string, unknown> | undefined;
+      if (dispatchMode?.type === "queue_after_active" && !operativeTarget.runs.some(candidate => ["running", "waiting", "starting", "queued"].includes(candidate.status))) {
+        appendRun({projection: operativeTarget, id: `operative-notice-run-${calls.length}`,
+          ordinal: Math.max(0, ...operativeTarget.runs.map(candidate => candidate.ordinal)) + 1, status: "running",
+          messageId: String(payload.messageId), text: String(payload.text), createdBy: "user", creationSource: "server", now: clock.now});
+        return Effect.succeed({sequence: calls.length});
+      }
+      const runId = String(dispatchMode?.targetRunId ?? operativeTarget.thread.activeRunId ?? "operative-active-run");
+      const run = operativeTarget.runs.find(candidate => candidate.id === runId);
+      if (!run) return unexpected;
+      appendMessageToRun(operativeTarget, run, {
+        id: String(payload.messageId),
+        role: "user",
+        text: String(payload.text),
+        createdBy: "system",
+        creationSource: "server",
+        now: clock.now,
+      });
+      return Effect.succeed({ sequence: calls.length });
+    }
+
+    return unexpected;
+  });
+  const fake = yield* makeFakeT3({projections, answer, definitions: (loadedProjectId, threadId) => ({...definitionSnapshot, projectId: loadedProjectId, threadId})});
+  /** a process on the suite's files over the fake T3: its own database clients and services, closed with the test */
+  const openProcess = openConversationProcess({directory, policyDirectory: threadPolicyDirectory, fake, eligible});
+  const process = yield* openProcess;
+  const projectStore = process.store;
+  const binding = yield* projectStore.reserve(projectId, operativeThreadId, "Project A", defaultSupervisorModel, 10, clock.now);
+  yield* projectStore.setBinding({ ...binding, state: "ready" });
+  const settings = yield* projectStore.settings(projectId);
+  yield* projectStore.saveSettings(projectId, settings.generation, settings.modelSelection, options.settings ?? {
     intervalMinutes: 5,
     activityThreshold: 3,
   });
@@ -369,9 +381,9 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
     interactionMode: options.supervisorInteractionMode ?? "default",
   }));
   supervisor.thread.modelSelection = defaultSupervisorModel;
-  const projections = new Map([[operativeThreadId, operative], [binding.threadId, supervisor]]);
-  const supervisorThreadIds = new Set([binding.threadId]);
-  const definitionSnapshot = definitions();
+  projections.set(operativeThreadId, operative);
+  projections.set(binding.threadId, supervisor);
+  supervisorThreadIds.add(binding.threadId);
   const prepared = prepareWorkflowRequest(operativeThreadId, sourceMessageId, sourceText, definitionSnapshot);
   assert.ok(prepared.context);
   const initialPlan = requiredPlanForContext(prepared.context);
@@ -407,140 +419,16 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
     }),
   };
   const task = options.task === false || options.workflow === false ? draftTask : setInterpretationSubmission(supervisor, draftTask, requiredRawPlan());
-  if (options.task !== false) await projectStore.saveTask(task);
-  await projectStore.baseline({snapshotSequence: 1, threads: []});
+  if (options.task !== false) yield* projectStore.saveTask(task);
+  yield* projectStore.baseline({snapshotSequence: 1, threads: []});
 
-  let nextSupervisorRun = 0;
-  let interceptor: RpcInterceptor | null = null;
-  const calls: RpcCall[] = [];
-  const projectionReads: string[] = [];
-  const rpc: SupervisorRpc = async (tag, payload, signal) => {
-    const call = { tag, payload: { ...payload } };
-    calls.push(call);
-    const intercepted = interceptor?.(call, signal) ?? null;
-    if (intercepted) {
-      const outcome = await intercepted;
-      if (outcome !== proceed) return outcome;
-    }
-    if (tag === "orchestration.dispatchCommand" && payload.type === "thread.settle") {
-      const projection = projections.get(String(payload.threadId));assert.ok(projection);
-      projection.thread.settledAt = iso(clock.now);projection.thread.settledOverride = "settled";
-      return {sequence: calls.length};
-    }
-    if (tag !== "orchestration.dispatchCommand" || payload.type !== "message.dispatch")
-      throw new Error(`unexpected fake native command ${tag}/${String(payload.type)}`);
-
-    const targetThreadId = String(payload.threadId);
-    const supervisorTarget = supervisorThreadIds.has(targetThreadId) ? projections.get(targetThreadId) : undefined;
-    if (supervisorTarget) {
-      nextSupervisorRun++;
-      const isBusy = supervisorTarget.runs.some(run => ["preparing", "queued", "starting", "running", "waiting"].includes(run.status));
-      const status = payload.dispatchMode && (payload.dispatchMode as Record<string, unknown>).type === "queue_after_active" && isBusy
-        ? "queued"
-        : "running";
-      const run = appendRun({
-        projection: supervisorTarget,
-        id: `supervisor-run-${nextSupervisorRun}`,
-        // native run ordinals only grow within a thread
-        ordinal: Math.max(nextSupervisorRun + supervisorTarget.runs.length, ...supervisorTarget.runs.map(item => item.ordinal + 1)),
-        status,
-        messageId: String(payload.messageId),
-        text: String(payload.text),
-        createdBy: "system",
-        creationSource: "server",
-        now: clock.now,
-      });
-      run.queuePosition = status === "queued" ? 1 : null;
-      return { sequence: calls.length };
-    }
-
-    const operativeTarget = projections.get(targetThreadId);
-    if (operativeTarget) {
-      const dispatchMode = payload.dispatchMode as Record<string, unknown> | undefined;
-      if (dispatchMode?.type === "queue_after_active" && !operativeTarget.runs.some(candidate => ["running", "waiting", "starting", "queued"].includes(candidate.status))) {
-        appendRun({projection: operativeTarget, id: `operative-notice-run-${calls.length}`,
-          ordinal: Math.max(0, ...operativeTarget.runs.map(candidate => candidate.ordinal)) + 1, status: "running",
-          messageId: String(payload.messageId), text: String(payload.text), createdBy: "user", creationSource: "server", now: clock.now});
-        return {sequence: calls.length};
-      }
-      const runId = String(dispatchMode?.targetRunId ?? operativeTarget.thread.activeRunId ?? "operative-active-run");
-      const run = operativeTarget.runs.find(candidate => candidate.id === runId);
-      assert.ok(run);
-      appendMessageToRun(operativeTarget, run, {
-        id: String(payload.messageId),
-        role: "user",
-        text: String(payload.text),
-        createdBy: "system",
-        creationSource: "server",
-        now: clock.now,
-      });
-      return { sequence: calls.length };
-    }
-
-    throw new Error(`unexpected fake target ${targetThreadId}`);
-  };
-  const definitionLoader: Pick<ProjectDefinitionLoader, "load"> = {
-    load: async (loadedProjectId, threadId) => ({ ...definitionSnapshot, projectId: loadedProjectId, threadId: threadId ?? null }),
-  };
-  const readProjection = async (threadId: string) => {
-    projectionReads.push(threadId);
-    const projection = projections.get(threadId);
-    if (!projection) throw new Error(`missing test projection ${threadId}`);
-    return projection;
-  };
-  const eligible = (thread: ThreadInfo) => thread.id.startsWith("operative-") && thread.projectId === projectId;
-  // the read credential serves a recorded submission's native item detail from the projection that shows it
-  const readItems = turnItemReader(threadId => projections.get(threadId));
   const threadList = [supervisor.thread, operative.thread];
-  const closables: Array<{close(): Promise<void>}> = [threadPolicy, guidance];
-  // the handles close once each; the handle itself ignores a second close
-  const close = (store: {close(): Promise<void>}) => store.close();
-  // one controller over one database connection, as one supervisor process owns it; the chat stop is the policy store's read
-  const makeController = async (store: Promised<ProjectSupervisorStore["Service"]>, policy: PolicyHandle) => {
-    const workflows = await openWorkflows(store, () => true);
-    const conversation = supervisorConversationUnit(store, rpc, readProjection, definitionLoader, eligible, () => true, workflows,
-      undefined, undefined, undefined, undefined, readItems);
-    conversation.supervisionStopped = threadId => Effect.map(policyService(policy).get(), (current) => current.excludedThreadIds.includes(threadId));
-    return {conversation, workflows};
-  };
-  const {conversation, workflows} = await makeController(projectStore, threadPolicy);
-  const apiConfig = {
-    dataDirectory: directory,
-    t3Url: "http://localhost",
-    t3TokenFile: "",
-    excludedThreadIds: [],
-    healthPort: 0,
-  } satisfies SupervisorConfig;
-  const makeProjectSupervisor = () => projectSupervisorUnit(
-    apiConfig,
-    projectStore,
-    { catalog: () => Effect.succeed({ projects: [{ project: { id: projectId, title: "Project A", workspaceRoot }, available: true }], threads: threadList }) },
-    { projection: (threadId) => {
-      const projection = projections.get(threadId);
-      if (!projection) throw new Error(`missing test projection ${threadId}`);
-      return Effect.succeed({ snapshotSequence: 1, projection });
-    } },
-    async () => { throw new Error("no native read is expected"); },
-    rpc,
-    async () => ({ snapshotSequence: 1, threads: [] }),
-    definitionLoader,
-    () => clock.now,
-  );
-  const signal = AbortSignal.timeout(10_000);
-  /** a new process on the same files: fresh connections and a fresh controller with the same fake T3 */
-  const reopen = async () => {
-    const reopenedGuidance: GuidanceHandle = await openGuidance(directory);
-    const reopenedPolicy = await openPolicy(threadPolicyDirectory, {excludedThreadIds: []});
-    closables.push(reopenedPolicy, reopenedGuidance);
-    const store = await openSupervisors(reopenedGuidance, new Set(), {policy: reopenedPolicy});
-    const controller = await makeController(store, reopenedPolicy);
-    return {guidance: reopenedGuidance, projectStore: store, ...controller,
-      run: async (runSignal: AbortSignal = signal) => controller.conversation.run(await store.binding(projectId, operativeThreadId) as BindingRecord, supervisor, threadList, runSignal)};
-  };
+  /** a new process on the same files: fresh database clients and services over the same fake T3 */
+  const reopen = Effect.map(openProcess, (reopened) => ({...reopened, run: runOf(reopened, operativeThreadId, supervisor, threadList)}));
   /** a second main with its own Supervisor binding in the same project */
-  const addBoundOperative = async (threadId: string, taskId: string) => {
-    const reserved = await projectStore.reserve(projectId, threadId, "Project A", defaultSupervisorModel, 10, clock.now);
-    await projectStore.setBinding({...reserved, state: "ready"});
+  const addBoundOperative = (threadId: string, taskId: string) => Effect.gen(function* () {
+    const reserved = yield* projectStore.reserve(projectId, threadId, "Project A", defaultSupervisorModel, 10, clock.now);
+    yield* projectStore.setBinding({...reserved, state: "ready"});
     const ownSupervisor = makeProjection(makeThread({id: reserved.threadId, title: `Project Supervisor ${threadId}`}));
     ownSupervisor.thread.modelSelection = defaultSupervisorModel;
     const projection = makeProjection(makeThread({id: threadId, title: `Operative ${threadId}`}));
@@ -560,39 +448,47 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
       messageId: `supervisor-objective:${taskId}`, supervisorThreadId: reserved.threadId,
       workflow: {status: "proposed", message: "A draft is ready.", workspaceRoot, revision, globalRevision: null, ...requiredPlanForContext(context)}};
     const boundTask = setInterpretationSubmission(ownSupervisor, draftBound, requiredRawPlan());
-    await projectStore.saveTask(boundTask);
-    const boundBinding = await projectStore.binding(projectId, threadId) as BindingRecord;
-    return {binding: boundBinding, supervisor: ownSupervisor, projection, task: boundTask,
-      run: async (runSignal: AbortSignal = signal) => conversation.run(await projectStore.binding(projectId, threadId) as BindingRecord, ownSupervisor, threadList, runSignal)};
-  };
+    yield* projectStore.saveTask(boundTask);
+    const boundBinding = (yield* projectStore.binding(projectId, threadId)) as BindingRecord;
+    return {binding: boundBinding, supervisor: ownSupervisor, projection, task: boundTask, run: runOf(process, threadId, ownSupervisor, threadList)};
+  }).pipe(Effect.orDie);
+  /** the production project supervisor beside the process, over its stores, with its own scope predicates and team services */
+  const makeProjectSupervisor: Effect.Effect<Effect.Success<ReturnType<typeof openProjectSupervisor>>, never, Scope.Scope> = Effect.suspend(() => openProjectSupervisor(process, fake, {
+    settings: runSettings(directory, "http://localhost"),
+    read: noNativeRead,
+    catalog: () => Effect.succeed({ projects: [{ project: { id: projectId, title: "Project A", workspaceRoot }, available: true }], threads: threadList }),
+    baseline: {snapshotSequence: 1, threads: []},
+    now: () => clock.now,
+  }));
   return {
     directory,
-    binding: await projectStore.binding(projectId, operativeThreadId) as BindingRecord,
-    calls,
-    projectionReads,
-    intercept: (next: RpcInterceptor | null) => { interceptor = next; },
-    cleanup: async () => {
-      for (const store of closables) await close(store);
-      await rm(directory, { recursive: true, force: true });
-    },
+    clock,
+    binding: (yield* projectStore.binding(projectId, operativeThreadId)) as BindingRecord,
+    fake,
+    calls: fake.calls,
+    projectionReads: fake.projectionReads,
+    intercept: fake.intercept,
+    process,
+    sql: process.sql,
+    projectStore,
+    requests: process.requests,
+    monitor: process.monitor,
+    threadPolicy: process.policy,
+    workflows: process.workflows,
+    conversation: process.conversation,
     /** ends this process's connections without any further write, as a crash would */
-    crash: async () => { await close(threadPolicy); await close(guidance); },
+    crash: process.crash,
     reopen,
     addBoundOperative,
-    guidance,
-    threadPolicy,
-    conversation,
     makeProjectSupervisor,
     operative,
-    projectStore,
-    run: async (runSignal: AbortSignal = signal) => conversation.run(await projectStore.binding(projectId, operativeThreadId) as BindingRecord, supervisor, threadList, runSignal),
+    run: runOf(process, operativeThreadId, supervisor, threadList),
     supervisor,
     task,
     threadList,
-    workflows,
   };
-};
-export type Fixture = Awaited<ReturnType<typeof makeFixture>>;
+}).pipe(Effect.orDie);
+export type Fixture = Effect.Success<ReturnType<typeof makeFixture>>;
 
 // the Supervisor's own completed interpretation run (the root's first turn) and its recorded typed submission: the task as
 // finalization leaves it holds the attempt, the evidence pinning the executed tool item and the submitted plan
@@ -603,12 +499,7 @@ export const setInterpretationSubmission = (supervisor: Projection, task: TaskRe
   return recordInterpretationSubmission({supervisor, run, task, bindingGeneration: 1, workflow: raw, objective}).task;
 };
 
-
-export const appendNoticeForTask = async (
-  fixture: Fixture,
-  task: TaskRecord,
-  projection: Projection,
-): Promise<WorkflowIntroduction> => {
+export const appendNoticeForTask = (fixture: Fixture, task: TaskRecord, projection: Projection) => Effect.gen(function* () {
   const introduction: WorkflowIntroduction = {
     taskId: task.id,
     projectId,
@@ -620,7 +511,7 @@ export const appendNoticeForTask = async (
     targetRunId: String(projection.thread.activeRunId ?? "operative-active-run"),
     error: null,
   };
-  await fixture.conversation.requests.saveIntroduction(introduction);
+  yield* fixture.requests.saveIntroduction(introduction);
   const run = projection.runs.find(candidate => candidate.id === introduction.targetRunId);
   assert.ok(run);
   appendMessageToRun(projection, run, {
@@ -631,29 +522,11 @@ export const appendNoticeForTask = async (
     creationSource: "server",
   });
   return introduction;
-};
+});
 
-export const appendNoticeToOperative = async (fixture: Fixture): Promise<WorkflowIntroduction> =>
-  await appendNoticeForTask(fixture, fixture.task, fixture.operative);
+export const appendNoticeToOperative = (fixture: Fixture) => appendNoticeForTask(fixture, fixture.task, fixture.operative);
 
-// prepares a task context request and anchors the task to its prompt in one step, as the introduction path does
-export const prepareTaskContext = async (fixture: Fixture, input: {text: string; completionMarker: string}, now: number,
-  anchored = true): Promise<ConversationRequest> => {
-  const request = await fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "context",
-    taskId: fixture.task.id, batch: null, ...input}, now);
-  const task = (await fixture.projectStore.task(fixture.task.threadId))!;
-  if (anchored) await fixture.projectStore.saveTask({...task, protocolAnchor: {supervisorThreadId: fixture.binding.threadId, sourceHash: task.sourceHash,
-    promptMessageId: request.messageId}});
-  return request;
-};
-
-// records the native turn item T3 assigns to a message: ordinals continue within the run's own ordinal range
-
-export const supervisorRequestCall = (fixture: Fixture, kind?: "context" | "review") =>
-  fixture.calls.find(call => call.payload.threadId === fixture.binding.threadId &&
-    (kind === undefined || String(call.payload.text).includes(kind === "context" ? "This initializes supervision" : "Review this factual change index.")));
-
-export const workflowValue = (task: TaskRecord): WorkflowPlanValue => ({
+export const workflowPlan = (task: TaskRecord): WorkflowPlanValue => ({
   definitionsStatus: task.workflow!.definitionsStatus,
   definitionsComplete: task.workflow!.definitionsComplete,
   requirementsKnown: task.workflow!.requirementsKnown,
@@ -661,20 +534,6 @@ export const workflowValue = (task: TaskRecord): WorkflowPlanValue => ({
   issues: task.workflow!.issues,
   plan: task.workflow!.plan,
 });
-export const workflowPlan = (task: TaskRecord): WorkflowPlanValue => workflowValue(task);
-export const withLocalStep = (task: TaskRecord, name: string, reason: string): WorkflowPlanValue => {
-  const value = workflowPlan(task);
-  assert.ok(value.plan);
-  return {...value, plan: {...value.plan, nodes: [...value.plan.nodes, {kind: "step", nodeId: randomUUID(), definitionId: null,
-    localId: `local-${randomUUID()}`, templatePath: null, name, description: reason, source: null, resolution: "resolved", reason,
-    status: "planned", contributorThreadIds: []}]}};
-};
-export const workflowWithoutRequiredStep = (task: TaskRecord): WorkflowPlanValue => {
-  const value = validateWorkflowPlan({requirements: [{kind: "step", id: "test-plan", applies: true, reason: "The verification remains required."}],
-    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: null, localId: "skip-verification", name: "Skip verification", description: "No verification will be done.", reason: "Skip."}]}}, task.definitionContext!);
-  assert.ok(value);
-  return value;
-};
 export const workflowRecord = (task: TaskRecord, proposalId: string, workflow = workflowPlan(task)) => ({
   taskId: task.id,
   proposalId,
@@ -682,70 +541,38 @@ export const workflowRecord = (task: TaskRecord, proposalId: string, workflow = 
   revision: task.workflow!.revision,
   workflow,
 });
-export const workflowFence = (kind: "workflow-proposal" | "workflow-acceptance", value: unknown) => "```" + kind + "\n" + JSON.stringify(value) + "\n```";
-export type FullWorkflowRecord = ReturnType<typeof workflowRecord>;
-export const isFullRecord = (value: unknown): value is FullWorkflowRecord => typeof value === "object" && value !== null && "workflow" in value && "workspaceRoot" in value;
-export const draftRequirements = (workflow: WorkflowPlanValue) => workflow.requirements.map(item => ({kind: item.kind, id: item.id,
+const workflowFence = (kind: "workflow-proposal" | "workflow-acceptance", value: unknown) => "```" + kind + "\n" + JSON.stringify(value) + "\n```";
+type FullWorkflowRecord = ReturnType<typeof workflowRecord>;
+const isFullRecord = (value: unknown): value is FullWorkflowRecord => typeof value === "object" && value !== null && "workflow" in value && "workspaceRoot" in value;
+const draftRequirements = (workflow: WorkflowPlanValue) => workflow.requirements.map(item => ({kind: item.kind, id: item.id,
   applies: item.state === "not_applicable" ? false : item.state === "unknown" ? "unknown" as const : true, reason: item.reason}));
 /** The compact draft a root publishes for a canonical plan; the service re-derives the identical canonical record. */
 export const compactDraft = (task: TaskRecord, record: FullWorkflowRecord) => ({taskId: record.taskId, taskRevision: task.sourceHash, proposalId: record.proposalId,
   revision: record.revision, draft: {requirements: draftRequirements(record.workflow), plan: record.workflow.plan}});
 /** The operative's compact acceptance of a canonical record: its task, proposal and exact digest. */
-export const acceptanceReference = (task: TaskRecord, record: FullWorkflowRecord) => ({taskId: record.taskId, proposalId: record.proposalId,
+const acceptanceReference = (task: TaskRecord, record: FullWorkflowRecord) => ({taskId: record.taskId, proposalId: record.proposalId,
   digest: compactProposalDigest({taskId: task.id, taskRevision: task.sourceHash}, {workspaceRoot: record.workspaceRoot!, revision: record.revision, workflow: record.workflow})});
-export const projectDefinitionDecisionFence = (value: unknown) => `\`\`\`project-definition-decision\n${JSON.stringify(value)}\n\`\`\``;
 
-export const appendActualUserMessage = (projection: Projection, id: string, text: string, now: number): MessageInfo => {
+const appendAssistantTurn = (projection: Projection, id: string, text: string, now: number) => {
   const ordinal = projection.runs.reduce((value, run) => Math.max(value, run.ordinal), 0) + 1;
-  const run = appendRun({projection, id: `${id}-run`, ordinal, status: "completed", messageId: id, text, now});
-  return projection.messages.find(message => message.id === run.userMessageId)!;
-};
-
-export const appendDefinitionDecision = (fixture: Fixture, value: unknown, now: number) =>
-  appendAssistantTurn(fixture.supervisor, `definition-decision-${fixture.supervisor.runs.length}`, projectDefinitionDecisionFence(value), now);
-
-export const appendAssistantTurn = (projection: Projection, id: string, text: string, now: number, options: {
-  runStatus?: string;
-  streaming?: boolean;
-  nodeKind?: string;
-} = {}) => {
-  const ordinal = projection.runs.reduce((value, run) => Math.max(value, run.ordinal), 0) + 1;
-  const run = appendRun({projection, id: `${id}-run`, ordinal, status: options.runStatus ?? "completed", messageId: `${id}-input`, text: "Review this workflow.", now});
+  const run = appendRun({projection, id: `${id}-run`, ordinal, status: "completed", messageId: `${id}-input`, text: "Review this workflow.", now});
   const message = appendMessageToRun(projection, run, {id: `${id}-answer`, role: "assistant", text, now});
-  if (options.streaming) message.streaming = true;
-  if (options.nodeKind) {
-    const node = nodesOf(projection).find(candidate => candidate.id === message.nodeId);
-    assert.ok(node);
-    node.kind = options.nodeKind;
-  }
   return {run, message};
 };
 
-export const appendSupervisorProposal = async (fixture: Fixture, proposalId = fixture.task.id,
-  workflow = workflowPlan(fixture.task), now = baseTime, recordTask = fixture.task) => appendAssistantTurn(fixture.supervisor,
-  `supervisor-proposal-${proposalId}-${fixture.supervisor.runs.length}`,
-  `I propose this workflow.\n${workflowFence("workflow-proposal", compactDraft(await fixture.projectStore.task(recordTask.threadId) ?? recordTask, workflowRecord(recordTask, proposalId, workflow)))}`, now);
+export const appendSupervisorProposal = (fixture: Fixture, proposalId = fixture.task.id, workflow = workflowPlan(fixture.task), now = baseTime, recordTask = fixture.task) =>
+  Effect.map(fixture.projectStore.task(recordTask.threadId), (stored) => appendAssistantTurn(fixture.supervisor,
+    `supervisor-proposal-${proposalId}-${fixture.supervisor.runs.length}`,
+    `I propose this workflow.\n${workflowFence("workflow-proposal", compactDraft(stored ?? recordTask, workflowRecord(recordTask, proposalId, workflow)))}`, now));
 
-export const appendOperativeAcceptance = async (fixture: Fixture, value: unknown, now: number, options: {
-  text?: string;
-  streaming?: boolean;
-  nodeKind?: string;
-  run?: RunInfo;
-} = {}) => {
-  const run = options.run ?? fixture.operative.runs.find(item => item.id === fixture.operative.thread.activeRunId);
+export const appendOperativeAcceptance = (fixture: Fixture, value: unknown, now: number) => Effect.map(fixture.projectStore.task(fixture.task.threadId), (stored) => {
+  const run = fixture.operative.runs.find(item => item.id === fixture.operative.thread.activeRunId);
   assert.ok(run);
-  const task = await fixture.projectStore.task(fixture.task.threadId) ?? fixture.task;
+  const task = stored ?? fixture.task;
   const record = isFullRecord(value) ? acceptanceReference(task, value) : value;
-  const message = appendMessageToRun(fixture.operative, run, {id: `operative-acceptance-${fixture.operative.messages.length}`,
-    role: "assistant", text: options.text ?? workflowFence("workflow-acceptance", record), now});
-  if (options.streaming) message.streaming = true;
-  if (options.nodeKind) {
-    const node = nodesOf(fixture.operative).find(candidate => candidate.id === message.nodeId);
-    assert.ok(node);
-    node.kind = options.nodeKind;
-  }
-  return message;
-};
+  return appendMessageToRun(fixture.operative, run, {id: `operative-acceptance-${fixture.operative.messages.length}`,
+    role: "assistant", text: workflowFence("workflow-acceptance", record), now});
+});
 
-export const observeAgreement = (fixture: Fixture, now: number) =>
-  fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), now);
+/** One observation of every thread at the wall time `now`. */
+export const observeAgreement = (fixture: Fixture, now: number) => fixture.conversation.observe(fixture.threadList).pipe(atWallTime(now));
