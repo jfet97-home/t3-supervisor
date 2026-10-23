@@ -14,9 +14,10 @@ import { privately } from "./support/private-assert.js";
 // the auth CLI in real child processes against service auth state on real files: live (it.live)
 
 const command = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
-// the CLI run to its exit within 5 s: its output on exit 0, otherwise a failure carrying the exit code and output
+// the CLI run to its exit within 5 s and 4096 characters per stream: its output on exit 0, otherwise a failure carrying
+// the exit code and output
 const execute = (env: NodeJS.ProcessEnv, args: ReadonlyArray<string>) => Effect.flatMap(runProcess(process.execPath,
-  ["--disable-warning=ExperimentalWarning", "--import", tsxLoader, command, ...args], {env, cwd: tmpdir(), timeoutMs: 5_000}),
+  ["--disable-warning=ExperimentalWarning", "--import", tsxLoader, command, ...args], {env, cwd: tmpdir(), timeoutMs: 5_000, maxBuffer: 4096}),
   (result): Effect.Effect<ProcessResult, ProcessResult> => result.code === 0 ? Effect.succeed(result) : Effect.fail(result));
 const invoke = (directory: string, args = ["auth", "forge"]) => execute({...process.env, DATA_DIRECTORY: directory}, args);
 const sessionRows = (directory: string): Array<Record<string, unknown>> => {

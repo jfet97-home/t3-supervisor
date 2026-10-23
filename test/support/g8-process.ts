@@ -30,9 +30,15 @@ export interface RunningProcess {
 
 const outputLimit = 1024 * 1024;
 
+// with `maxBuffer`, as node's execFile, a stdout or stderr beyond that many characters terminates the child and its result
+// dies
+export interface ProcessOptions extends StartOptions {
+  readonly maxBuffer?: number;
+}
+
 // a child process for the caller's scope; the release sends SIGKILL to the whole group if anything is still alive and
 // waits for the close
-export const startProcess = (command: string, args: ReadonlyArray<string>, options: StartOptions): Effect.Effect<RunningProcess, never, Scope.Scope> =>
+export const startProcess = (command: string, args: ReadonlyArray<string>, options: ProcessOptions): Effect.Effect<RunningProcess, never, Scope.Scope> =>
   Effect.acquireRelease(Effect.gen(function* () {
     const startedAt = yield* Clock.currentTimeMillis;
     const child = spawn(command, args, { env: options.env, cwd: options.cwd, detached: true, stdio: [options.stdin ?? "ignore", "pipe", "pipe"] });
@@ -43,17 +49,29 @@ export const startProcess = (command: string, args: ReadonlyArray<string>, optio
     let stderr = "";
     let result: ProcessResult | undefined;
     const watchers = new Set<() => void>();
+    let exceeded = false;
+    const limit = () => {
+      if (options.maxBuffer === undefined || exceeded || (stdout.length <= options.maxBuffer && stderr.length <= options.maxBuffer)) return;
+      exceeded = true;
+      child.kill("SIGTERM");
+    };
     child.stdout?.setEncoding("utf8").on("data", (chunk: string) => {
       if (stdout.length < outputLimit) stdout += chunk;
+      limit();
       for (const watcher of [...watchers]) watcher();
     });
-    child.stderr?.setEncoding("utf8").on("data", (chunk: string) => { if (stderr.length < outputLimit) stderr += chunk; });
+    child.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
+      if (stderr.length < outputLimit) stderr += chunk;
+      limit();
+    });
     child.once("close", (code, signal) => {
       result = { code, signal, stdout, stderr };
       Deferred.doneUnsafe(done, Exit.succeed(result));
       for (const watcher of [...watchers]) watcher();
     });
-    const closed = (timeoutMs?: number) => bounded(Deferred.await(done), timeoutMs, () => `process ${pid} did not exit within ${timeoutMs} ms`);
+    const exited = (timeoutMs?: number) => bounded(Deferred.await(done), timeoutMs, () => `process ${pid} did not exit within ${timeoutMs} ms`);
+    const closed = (timeoutMs?: number) => Effect.tap(exited(timeoutMs), () =>
+      exceeded ? Effect.die(new Error(`process ${pid} exceeded its ${options.maxBuffer} character output limit`)) : Effect.void);
     const running: RunningProcess = {
       child, pid, startedAt,
       stdout: () => stdout,
@@ -74,16 +92,16 @@ export const startProcess = (command: string, args: ReadonlyArray<string>, optio
       }), timeoutMs, () => `no ${label} from process ${pid} within ${timeoutMs} ms`),
       closed,
     };
-    return running;
-  }), (running) => Effect.gen(function* () {
+    return { running, exited };
+  }), ({ running, exited }) => Effect.gen(function* () {
     if (groupAlive(running.pid)) process.kill(-running.pid, "SIGKILL");
     if (running.child.exitCode === null && running.child.signalCode === null) running.child.kill("SIGKILL");
     running.child.stdin?.destroy();
-    yield* running.closed(10_000);
-  }));
+    yield* exited(10_000);
+  })).pipe(Effect.map(({ running }) => running));
 
 // a process run to its exit within the bound, then released
-export const runProcess = (command: string, args: ReadonlyArray<string>, options: StartOptions & { readonly timeoutMs: number }): Effect.Effect<ProcessResult> =>
+export const runProcess = (command: string, args: ReadonlyArray<string>, options: ProcessOptions & { readonly timeoutMs: number }): Effect.Effect<ProcessResult> =>
   Effect.scoped(Effect.flatMap(startProcess(command, args, options), (running) => running.closed(options.timeoutMs)));
 
 // a port that was free a moment ago on the loopback interface

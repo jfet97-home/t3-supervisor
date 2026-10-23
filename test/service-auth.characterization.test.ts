@@ -45,7 +45,7 @@ const command = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const forgeInChild = (directory: string) => Effect.gen(function* () {
   const result = yield* runProcess(process.execPath,
     ["--disable-warning=ExperimentalWarning", "--import", tsxLoader, command, "auth", "forge"],
-    { env: { ...process.env, DATA_DIRECTORY: directory }, cwd: tmpdir(), timeoutMs: 30_000 });
+    { env: { ...process.env, DATA_DIRECTORY: directory }, cwd: tmpdir(), timeoutMs: 30_000, maxBuffer: 4096 });
   if (result.code !== 0) return yield* Effect.die(childFailure("auth forge child", result));
   const { stdout, stderr } = result;
   assert.equal(tokenLine.test(stdout), true, `auth forge printed one token line (${stdout.length} bytes)`);
@@ -242,7 +242,10 @@ it.live("CT-AUTH-05: concurrent HTTP logins and child-process forges keep one se
   const directory = yield* temporary;
   // the dashboard server closes with the test's scope
   const ui = yield* guidanceUi(uiConfig(directory), {} as GuidanceRuntime["Service"]);
-  const origin = `http://127.0.0.1:${ui.port}`;
+  // the service reports its bound port where the node listener reported an address object
+  const port = ui.port;
+  assert.ok(port && typeof port === "number");
+  const origin = `http://127.0.0.1:${port}`;
   const client = yield* HttpClient.HttpClient;
   const login = (token: string) => Effect.gen(function* () {
     const response = yield* client.post(`${origin}/auth/login`, {
