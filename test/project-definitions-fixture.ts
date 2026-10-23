@@ -1,14 +1,10 @@
-import { Effect, Layer, Scope } from "effect";
+import { Effect, Layer } from "effect";
 import { ProjectDefinitions, type ProjectDefinitionLoaderOptions, type ProjectDefinitionSetupWriter, type ProjectDefinitionSources } from "../src/project-definitions.js";
 import { ProjectConfigEditorService, type DefinitionSaveRecorder, type ProjectConfigDefinitions, type ProjectConfigWriter } from "../src/project-config-editor.js";
 import { ProjectFileError, type ProjectFiles, type ProjectWriter } from "../src/project-files.js";
-import {
-  asLoaderOptions, asProjectFiles, asProjectWriter, type ProjectDefinitionLoaderOptions as PromiseLoaderOptions, type ProjectFiles as PromiseProjectFiles,
-  type ProjectWriter as PromiseProjectWriter,
-} from "./support/native-files-promise.js";
 import { stringify } from "yaml";
 import {
-  definitionCatalogPath, type DefinitionCatalogKind, type DefinitionReference, type EffectiveConfigurationInfo, type ProjectConfigSave, type ProjectConfigurationInfo,
+  definitionCatalogPath, type DefinitionCatalogKind, type DefinitionReference, type EffectiveConfigurationInfo, type ProjectConfigurationInfo,
 } from "../src/project-definitions-contract.js";
 
 /** A navigation summary for test definitions; real summaries say what a definition is for and when it applies. */
@@ -166,45 +162,8 @@ export function makeDefinitionFixture(options: {
     addFile(targetRoot, ".t3-supervisor/project.yaml", indexSource({...options, steps: present("steps", "md"), workflows: present("workflows", "yaml")}));
   };
 
-  // the baseline promise surface over the same in-memory checkout, kept only for the suites that still read it (the project-definitions,
-  // project-definitions-service, definition-references, project-config-editor characterization, supervisor-control,
-  // supervisor-workflow and project-supervisor suites); it goes once they use the services above. Its clients are promise views of the
-  // in-memory ones, its layers read the views on every call, so a replaced view method takes effect, and its loader and editor run
-  // the definitions over the views and reject a failed save with the native, catalog or projection error itself, as the baseline did
-  const files: PromiseProjectFiles = {
-    directoryExists: path => Effect.runPromise(projectFiles.directoryExists(path)),
-    list: (targetRoot, path) => Effect.runPromise(projectFiles.list(targetRoot, path)),
-    read: (targetRoot, path) => Effect.runPromise(projectFiles.read(targetRoot, path)),
-    vcsInfo: targetRoot => Effect.runPromise(projectFiles.vcsInfo(targetRoot)),
-    gitOperationState: () => Effect.runPromise(projectFiles.gitOperationState()),
-  };
-  const writeFile = (targetRoot: string, path: string, contents: string) => Effect.runPromise(setupWriter.writeFile(targetRoot, path, contents));
-  const loaderOptions: PromiseLoaderOptions = {...definitionScopeOptions,
-    setupWriter: {writeFile, commitFiles: (targetRoot, paths) => Effect.runPromise(setupWriter.commitFiles(targetRoot, paths))}};
-  const writer: PromiseProjectWriter = {
-    checkProjectConfigFile: async (targetRoot, signal) => {
-      const folder = await files.list(targetRoot, ".t3-supervisor", signal);
-      return !folder.truncated && folder.entries.some(entry => entry.path === ".t3-supervisor/project.yaml" && entry.kind === "file");
-    },
-    writeProjectConfig: (targetRoot, contents) => Effect.runPromise(projectWriter.writeProjectConfig(targetRoot, contents)),
-    writeFile,
-  };
-  const promiseSources = {source, t3, files: asProjectFiles(files), options: asLoaderOptions(loaderOptions)};
-  const layer = ProjectDefinitions.layer(promiseSources);
-  const editorLayer = (configWriter: PromiseProjectWriter = writer, onSaved?: DefinitionSaveRecorder) =>
-    ProjectConfigEditorService.layer(asProjectWriter(configWriter), onSaved).pipe(Layer.provideMerge(layer));
-  const baselineScope = Scope.makeUnsafe();
-  let baselineDefinitions: ProjectDefinitions["Service"] | undefined;
-  const definitions = () => baselineDefinitions ??= Effect.runSync(Scope.provide(baselineScope)(ProjectDefinitions.make(promiseSources)));
-  const loader = {load: (projectId: string, threadId: string | null = null, signal?: AbortSignal) => Effect.runPromise(definitions().load(projectId, threadId, signal))};
-  const editor = (configWriter: PromiseProjectWriter = writer, over: ProjectConfigDefinitions = definitions()) => {
-    const service = Effect.runSync(Scope.provide(baselineScope)(ProjectConfigEditorService.make({definitions: over, writer: asProjectWriter(configWriter)})));
-    return {save: (input: ProjectConfigSave, signal?: AbortSignal) => Effect.runPromise(Effect.mapError(service.save(input, signal), failure => failure.error))};
-  };
-
   return {
     projectFiles, projectWriter, setupWriter, definitionOptions, makeDefinitions, makeConfigEditor, definitionsLayer, configEditorLayer,
     source, t3, trees, directories, failures, truncatedPaths, truncatedFiles, calls, writes, addFile, addDirectory, writeIndex, root, projectId, globalRoot, threadRoot,
-    files, loaderOptions, writer, layer, editorLayer, get definitions() {return definitions();}, loader, editor,
   };
 }

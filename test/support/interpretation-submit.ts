@@ -1,17 +1,11 @@
 import assert from "node:assert/strict";
-import { Effect } from "effect";
-import type { InterpretationSubmitResponse } from "../../src/interpretation-submission.js";
-import type { ProjectSupervisorStore, TaskRecord } from "../../src/project-supervisor-store.js";
-import { T3TransportError } from "../../src/t3.js";
+import type { TaskRecord } from "../../src/project-supervisor-store.js";
 import type { Projection } from "../../src/types.js";
-import type { WorkflowStateStore } from "../../src/workflow-state-store.js";
 import { workflowToolNames } from "../../src/workflow-write-evidence.js";
-import type { Promised } from "./store-units.js";
-import { workflowWriteControllerService, workflowWriteControllerUnit } from "./workflow-controller-units.js";
 
 // a Supervisor root's typed interpretation submission as the native graph records it: one executed dynamic_tool item of the
 // supervision_interpretation_submit tool (direct or through MCPX) in the run of the task's persisted request message, with its item
-// detail as orchestration.getTurnItem answers it; the submission goes through the real write controller and its intake
+// detail as orchestration.getTurnItem answers it
 
 // the item details of each root projection, as the native turn-item read answers them
 const details = new WeakMap<Projection, Map<string, Record<string, unknown>>>();
@@ -84,36 +78,4 @@ export const setSubmissionStatus = (root: Projection, itemId: string, status: "r
   detail.status = status;
   const node = (Array.isArray(root.nodes) ? root.nodes as Array<Record<string, unknown>> : []).find(value => value.id === detail.nodeId);
   if (node) node.status = nodeStatus;
-};
-
-export type InterpretationSubmitter = {
-  // installs the native item for the arguments (unless told not to) and calls the tool through the write controller
-  submit(task: TaskRecord, args: Record<string, unknown>, options?: SubmissionItemOptions & {install?: boolean}): Promise<InterpretationSubmitResponse>;
-};
-
-/** The write controller over the given stores and projections as the root's native reads; its intake records into the same guidance file. */
-export const interpretationSubmitter = (input: {
-  supervisors: Promised<ProjectSupervisorStore["Service"]>;
-  workflows: Promised<WorkflowStateStore["Service"]>;
-  projections: ReadonlyMap<string, Projection>;
-  isChatStopped?: (mainThreadId: string) => boolean | Promise<boolean>;
-}): InterpretationSubmitter => {
-  const projectionOf = async (threadId: string) => {
-    const projection = input.projections.get(threadId);
-    if (!projection) throw new T3TransportError("missing projection", 404);
-    return projection;
-  };
-  const unit = workflowWriteControllerUnit({supervisors: input.supervisors, workflows: input.workflows, maxEvidenceWaitMs: 0,
-    ...(input.isChatStopped ? {isChatStopped: input.isChatStopped} : {}),
-    native: {listThreads: async () => [], projection: projectionOf,
-      getTurnItem: async ({threadId, itemId}) => ({item: submissionDetail(input.projections.get(threadId), itemId)})}});
-  const service = workflowWriteControllerService(unit);
-  return {
-    submit: async (task, args, options = {}) => {
-      const root = input.projections.get(task.supervisorThreadId);
-      assert.ok(root, "the bound root's projection");
-      if (options.install !== false) installSubmission(root, task, args, options);
-      return await Effect.runPromise(service.submitInterpretation(args));
-    },
-  };
 };
