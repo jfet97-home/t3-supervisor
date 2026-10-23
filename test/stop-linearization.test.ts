@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { it, type TestContext } from "vitest";
 import { after } from "./support/node-test.js";
+import { Effect } from "effect";
 import type { TaskRecord } from "../src/project-supervisor-store.js";
+import { policyService, replaceMethod, serviceOf } from "./support/store-units.js";
 import type { ConversationRequest } from "../src/supervisor-conversation-store.js";
 import { helperDeliveryBody } from "../src/supervisor-helper-transport.js";
 import { SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
@@ -25,9 +27,9 @@ const newSource = {messageId: newTurn.id, runId: `run-${newTurn.id}`, ordinal: 2
 const runOnce = (f: LinFixture) => within(f.core.supervision.runOnce(AbortSignal.timeout(8_000)), 9_000, "runOnce");
 const deadline = () => AbortSignal.timeout(8_000);
 
-const task = (f: LinFixture): TaskRecord => f.core.store.task(mainThreadId)!;
-const requests = (f: LinFixture, supervisorThreadId: string): ConversationRequest[] =>
-  f.core.supervision.conversation.requests.requests(projectId, supervisorThreadId);
+const task = async /*s6d*/ (f: LinFixture): Promise<TaskRecord> => (await f.core.store.task(mainThreadId))!;
+const requests = async /*s6d*/ (f: LinFixture, supervisorThreadId: string): Promise<ConversationRequest[]> =>
+  await f.core.supervision.conversation.requests.requests(projectId, supervisorThreadId);
 const label = (entry: Entry): string => entry.kind === "rpc" ? `${entry.tag}${typeof entry.payload.type === "string" ? `:${entry.payload.type}` : ""}`
   : `${entry.method} ${entry.path}`;
 const writes = (f: LinFixture): string[] => nativeWrites(f.peer).map(label);
@@ -49,8 +51,8 @@ const stopOnArrival = (f: LinFixture, tag = "orchestration.dispatchCommand") => 
 
 it("CT-LIN-01: helper: a Stop committed during the channel upsert fails the final guard; the send is busy, unposted and leaves no receipt", {timeout: 10_000}, async t => {
   const f = await fixture(t);
-  const binding = f.bindSupervisor();
-  seedTeam(f);
+  const binding = await f.bindSupervisor();
+  await seedTeam(f);
   let stoppedDuringUpsert = false;
   // the upsert is the transport's last await before the guard (supervisor-helper-transport.ts:244, :389)
   f.peer.onUpsert = () => {f.stop();stoppedDuringUpsert = f.stopped();};
@@ -58,14 +60,14 @@ it("CT-LIN-01: helper: a Stop committed during the channel upsert fails the fina
     messageId: "supervisor-review:lin-helper", text: "Check in on the assigned branch."}, deadline()), 9_000, "helper send");
   assert.equal(stoppedDuringUpsert, true);
   assert.equal(result, "busy");
-  assert.equal(helperReceipt(f), null);
+  assert.equal(await helperReceipt(f), null);
   assert.deepEqual(writes(f), ["scheduledTasks.upsert"], "only the channel upsert that carried the Stop; no webhook POST");
   assert.deepEqual(f.peer.unexpected, []);
 });
 
 it("CT-LIN-01: Stop notice: an Enable committed during the Supervisor read fails the final guard; the ready notice is superseded unsent", {timeout: 10_000}, async t => {
   const f = await fixture(t);
-  const binding = f.bindSupervisor();
+  const binding = await f.bindSupervisor();
   // an earlier Supervisor message in the main makes the notice due (supervisor-conversation.ts:1728-1730)
   f.main.messages.push({id: "supervisor-contact", threadId: mainThreadId, runId: null, nodeId: null, role: "user", text: "Supervisor update.",
     streaming: false, createdAt: baseTime, updatedAt: baseTime, senderThreadId: binding.threadId});
@@ -83,7 +85,7 @@ it("CT-LIN-01: Stop notice: an Enable committed during the Supervisor read fails
   assert.equal(f.stopped(), false);
   assert.deepEqual(f.binding().stopNotice, {...notice, state: "superseded"});
   assert.equal(f.binding().supervisionStop, undefined);
-  assert.equal(typeof f.core.store.chatEnabledAt(mainThreadId), "number");
+  assert.equal(typeof await f.core.store.chatEnabledAt(mainThreadId), "number");
   assert.deepEqual(dispatches(f).filter(payload => payload.commandId === notice.commandId), []);
   assert.deepEqual(writes(f), []);
   assert.deepEqual(f.peer.unexpected, []);
@@ -91,8 +93,8 @@ it("CT-LIN-01: Stop notice: an Enable committed during the Supervisor read fails
 
 it("CT-LIN-01: introduction: a Stop committed during the Supervisor read fails the final guard; the introduction stays ready and unsent", {timeout: 10_000}, async t => {
   const f = await fixture(t, newRequest);
-  const binding = f.bindSupervisor();
-  const {introduction} = seedIntroduction(f, newSource);
+  const binding = await f.bindSupervisor();
+  const {introduction} = await seedIntroduction(f, newSource);
   let definitionsRead = false;
   const definitions = f.definitions.current;
   f.definitions.current = threadId => {definitionsRead = true;return definitions(threadId);};
@@ -100,20 +102,20 @@ it("CT-LIN-01: introduction: a Stop committed during the Supervisor read fails t
   f.peer.onProjection = once((threadId: string) => threadId === binding.threadId && definitionsRead, () => f.stop());
   await runOnce(f);
   assert.equal(f.stopped(), true);
-  assert.deepEqual(f.core.supervision.conversation.requests.introduction(introduction.taskId), introduction);
+  assert.deepEqual(await f.core.supervision.conversation.requests.introduction(introduction.taskId), introduction);
   assert.deepEqual(writes(f), []);
   assert.deepEqual(f.peer.unexpected, []);
 });
 
 it("CT-LIN-01: guide: a Stop committed during the ancestor read is denied by the assignment recheck with no receipt and no request", {timeout: 10_000}, async t => {
   const f = await fixture(t);
-  const binding = f.bindSupervisor();
+  const binding = await f.bindSupervisor();
   // the target's parent is an operational child, so the walk rechecks the assignment after the parent read (supervisor-team-controller.ts:397, :407)
-  const {helper, member, assignment} = seedTeam(f, {branchParent: "middle"});
+  const {helper, member, assignment} = await seedTeam(f, {branchParent: "middle"});
   const payload = {supervisorThreadId: helper.thread.id, bindingGeneration: binding.generation, memberEpoch: member.epoch, assignmentRootThreadId: "branch",
     assignmentEpoch: assignment.epoch, operationId: "lin-guide-stop", targetThreadId: "branch", text: "Continue with the plan."};
   installToolCall(f, helper, workflowToolNames.guide.direct[0], payload);
-  const events = f.core.supervision.team.snapshot(binding).events;
+  const events = (await f.core.supervision.team.snapshot(binding)).events;
   let targetRead = false;
   const stopOnParentRead = once((threadId: string) => threadId === "middle" && targetRead, () => f.stop());
   f.peer.onProjection = threadId => {
@@ -125,9 +127,9 @@ it("CT-LIN-01: guide: a Stop committed during the ancestor read is denied by the
   assert.deepEqual(f.peer.log.filter(entry => entry.kind === "http").map(label).slice(-2),
     ["GET /api/orchestration/threads/branch", "GET /api/orchestration/threads/middle"], "the Stop landed during the parent read");
   assert.deepEqual(result, {status: "denied", reason: "guidance_assignment_changed"});
-  assert.deepEqual(f.core.guidance.db.prepare("SELECT * FROM supervisor_team_tool_receipts").all(), []);
-  assert.deepEqual(f.core.supervision.team.unresolvedRequests(binding), []);
-  assert.deepEqual(f.core.supervision.team.snapshot(binding).events, events);
+  assert.deepEqual(await f.core.guidance.db.prepare("SELECT * FROM supervisor_team_tool_receipts").all(), []);
+  assert.deepEqual(await f.core.supervision.team.unresolvedRequests(binding), []);
+  assert.deepEqual((await f.core.supervision.team.snapshot(binding)).events, events);
   assert.deepEqual(writes(f), []);
   assert.deepEqual(f.peer.unexpected, []);
 });
@@ -136,14 +138,14 @@ it("CT-LIN-01: guide: a Stop committed during the ancestor read is denied by the
 // a Stop committed during the walk leaves no durable write
 it("CT-LIN-01: guide: a Stop committed during the ancestor read of a guide whose target is directly under the main writes no escalation and the guide is denied guidance_assignment_changed", {timeout: 10_000}, async t => {
   const f = await fixture(t);
-  const binding = f.bindSupervisor();
+  const binding = await f.bindSupervisor();
   // the target's parent is the main, so the main read is the walk's last await and the walk then ends without a route (supervisor-team-controller.ts:407, :414)
-  const {helper, member, assignment} = seedTeam(f);
+  const {helper, member, assignment} = await seedTeam(f);
   const payload = {supervisorThreadId: helper.thread.id, bindingGeneration: binding.generation, memberEpoch: member.epoch, assignmentRootThreadId: "branch",
     assignmentEpoch: assignment.epoch, operationId: "lin-guide-direct-stop", targetThreadId: "branch", text: "Continue with the plan."};
   installToolCall(f, helper, workflowToolNames.guide.direct[0], payload);
-  const before = teamEventRows(f);
-  const assessmentBefore = f.core.supervision.team.snapshot(binding).members.find(value => value.threadId === "helper")?.lastAssessment;
+  const before = await teamEventRows(f);
+  const assessmentBefore = (await f.core.supervision.team.snapshot(binding)).members.find(value => value.threadId === "helper")?.lastAssessment;
   const order: Array<{step: string; stopped: boolean}> = [];
   let targetRead = false;
   const stopOnParentRead = once((threadId: string) => threadId === mainThreadId && targetRead, () => {
@@ -155,24 +157,22 @@ it("CT-LIN-01: guide: a Stop committed during the ancestor read of a guide whose
     stopOnParentRead(threadId);
   };
   // records any escalation write, which runs in the escalation's admission section (supervisor-team-controller.ts:700-707)
-  const team = f.core.supervision.team;
-  const escalate = team.escalate.bind(team);
-  team.escalate = (...args) => {
+  replaceMethod(serviceOf(f.core.supervision.team), "escalate", (escalate) => (...args) => Effect.suspend(() => {
     order.push({step: "escalation", stopped: f.stopped()});
     return escalate(...args);
-  };
+  }));
   const result = await within(f.endpoint.teamController.guide(payload, deadline()), 9_000, "guide");
   assert.equal(f.stopped(), true);
   assert.deepEqual(f.peer.log.filter(entry => entry.kind === "http").map(label).slice(-2),
     ["GET /api/orchestration/threads/branch", "GET /api/orchestration/threads/main"], "the Stop landed during the main read");
   assert.deepEqual(result, {status: "denied", reason: "guidance_assignment_changed"});
   assert.deepEqual(order, [{step: "stop", stopped: true}], "the Stop commits first and no escalation write starts after it");
-  assert.deepEqual(teamEventRows(f), before, "no team event row is written after the Stop");
-  assert.equal(f.core.supervision.team.snapshot(binding).members.find(value => value.threadId === "helper")?.lastAssessment, assessmentBefore,
+  assert.deepEqual(await teamEventRows(f), before, "no team event row is written after the Stop");
+  assert.equal((await f.core.supervision.team.snapshot(binding)).members.find(value => value.threadId === "helper")?.lastAssessment, assessmentBefore,
     "the helper's last assessment is unchanged");
   assert.equal(f.binding().supervisionStop!.route, "ui");
-  assert.deepEqual(f.core.guidance.db.prepare("SELECT * FROM supervisor_team_tool_receipts").all(), []);
-  assert.deepEqual(f.core.supervision.team.unresolvedRequests(binding), []);
+  assert.deepEqual(await f.core.guidance.db.prepare("SELECT * FROM supervisor_team_tool_receipts").all(), []);
+  assert.deepEqual(await f.core.supervision.team.unresolvedRequests(binding), []);
   assert.deepEqual(writes(f), []);
   assert.deepEqual(f.peer.unexpected, []);
 });
@@ -201,7 +201,7 @@ it("CT-LIN-01: creation: a Stop committed during the fresh main read throws main
 
 it("CT-LIN-01: stopped settlement: an Enable committed during the fresh Supervisor read leaves the settlement unsent", {timeout: 10_000}, async t => {
   const f = await fixture(t);
-  const binding = f.bindSupervisor();
+  const binding = await f.bindSupervisor();
   f.stop();
   let supervisorReads = 0;
   // check() reads the Supervisor (supervisor-lifecycle.ts:271); settleStopped re-reads it last before the guard (:390, :395)
@@ -216,96 +216,90 @@ it("CT-LIN-01: stopped settlement: an Enable committed during the fresh Supervis
 
 type PolicyProbe = {stopped: boolean; stop: unknown; notice: string | null; enabledAt: number | null; start: string | null};
 
-const observe = (f: LinFixture): PolicyProbe => ({stopped: f.core.policy.get().excludedThreadIds.includes(mainThreadId),
-  stop: f.core.store.chatStop(mainThreadId) ?? null, notice: f.core.store.binding(projectId, mainThreadId)?.stopNotice?.state ?? null,
-  enabledAt: f.core.store.chatEnabledAt(mainThreadId), start: f.core.store.start(mainThreadId)?.status ?? null});
+const observe = async /*s6d*/ (f: LinFixture): Promise<PolicyProbe> => ({stopped: (await f.core.policy.get()).excludedThreadIds.includes(mainThreadId),
+  stop: await f.core.store.chatStop(mainThreadId) ?? null, notice: (await f.core.store.binding(projectId, mainThreadId))?.stopNotice?.state ?? null,
+  enabledAt: await f.core.store.chatEnabledAt(mainThreadId), start: (await f.core.store.start(mainThreadId))?.status ?? null});
 
-// every policy commit queues a probe that runs as soon as the committing turn yields (thread-policy.ts:25-33)
-const probePolicyCommits = (f: LinFixture): PolicyProbe[] => {
-  const seen: PolicyProbe[] = [];
-  const save = f.core.policy.save.bind(f.core.policy);
-  f.core.policy.save = input => {
-    const saved = save(input);
-    queueMicrotask(() => seen.push(observe(f)));
-    return saved;
-  };
+// every policy commit queues a probe that starts as soon as the committing turn yields (thread-policy.ts:25-33); its guidance
+// reads queue behind any open guidance transaction, so it observes what a reader can see once the commit's turn yields
+const probePolicyCommits = (f: LinFixture): Array<Promise<PolicyProbe>> => {
+  const seen: Array<Promise<PolicyProbe>> = [];
+  replaceMethod(policyService(f.core.policy), "save", (save) => (input) =>
+    Effect.tap(save(input), () => Effect.sync(() => queueMicrotask(() => seen.push(observe(f))))));
   return seen;
 };
 
 it("CT-LIN-02: each MCP, Settings and dashboard Stop or Enable commit is observed only together with its guidance bookkeeping", {timeout: 10_000}, async t => {
   const f = await fixture(t, {mainTurns: [oldTurn, {id: "stop-turn", text: "Please stop supervising this chat."}]});
-  const binding = f.bindSupervisor();
+  const binding = await f.bindSupervisor();
   const seen = probePolicyCommits(f);
-  const policyGeneration = () => f.core.policy.get().generation;
+  const policyGeneration = async /*s6d*/ () => (await f.core.policy.get()).generation;
 
   // the MCP supervision_stop (project-supervisor.ts:980-985)
   const stopped = await f.core.supervision.stopSupervision({callerThreadId: binding.threadId, targetThreadId: mainThreadId, userMessageId: "stop-turn",
     operationId: "lin-stop"}, {}, deadline());
   assert.deepEqual(stopped, {status: "stopped", targetThreadId: mainThreadId, route: "relay", alreadyStopped: false});
   assert.equal(seen.length, 1);
-  assert.deepEqual(seen[0], {stopped: true, stop: {route: "relay", callerThreadId: binding.threadId, userMessageId: "stop-turn", stoppedAt: Date.parse(baseTime)},
+  assert.deepEqual(await seen[0], {stopped: true, stop: {route: "relay", callerThreadId: binding.threadId, userMessageId: "stop-turn", stoppedAt: Date.parse(baseTime)},
     notice: "ready", enabledAt: null, start: null});
 
   // the Settings excluded-chat editor's Enable and Stop (:997-1001)
   f.enable();
   await Promise.resolve();
   assert.equal(seen.length, 2);
-  assert.deepEqual(seen[1], {...observe(f), stopped: false, stop: null, notice: "superseded"});
-  assert.equal(typeof seen[1]!.enabledAt, "number");
+  assert.deepEqual(await seen[1], {...await observe(f), stopped: false, stop: null, notice: "superseded"});
+  assert.equal(typeof (await seen[1]!).enabledAt, "number");
   f.stop();
   await Promise.resolve();
   assert.equal(seen.length, 3);
-  assert.deepEqual(seen[2], {...observe(f), stopped: true, notice: "ready", enabledAt: seen[1]!.enabledAt});
-  assert.equal((seen[2]!.stop as {route: string}).route, "ui");
+  assert.deepEqual(await seen[2], {...await observe(f), stopped: true, notice: "ready", enabledAt: (await seen[1]!).enabledAt});
+  assert.equal(((await seen[2]!).stop as {route: string}).route, "ui");
 
   // the dashboard Enable and Stop (:1014-1020)
-  const enabled = await f.core.supervision.setChatSupervision({projectId, mainThreadId, enabled: true, policyGeneration: policyGeneration()}, deadline());
+  const enabled = await f.core.supervision.setChatSupervision({projectId, mainThreadId, enabled: true, policyGeneration: await policyGeneration()}, deadline());
   assert.equal(enabled.status, "saved");
   assert.equal(seen.length, 4);
-  assert.deepEqual(seen[3], {...observe(f), stopped: false, stop: null, notice: "superseded"});
-  assert.ok(seen[3]!.enabledAt! >= seen[1]!.enabledAt!);
-  const stoppedAgain = await f.core.supervision.setChatSupervision({projectId, mainThreadId, enabled: false, policyGeneration: policyGeneration()}, deadline());
+  assert.deepEqual(await seen[3], {...await observe(f), stopped: false, stop: null, notice: "superseded"});
+  assert.ok((await seen[3]!).enabledAt! >= (await seen[1]!).enabledAt!);
+  const stoppedAgain = await f.core.supervision.setChatSupervision({projectId, mainThreadId, enabled: false, policyGeneration: await policyGeneration()}, deadline());
   assert.equal(stoppedAgain.status, "saved");
   assert.equal(seen.length, 5);
-  assert.deepEqual(seen[4], {...observe(f), stopped: true, notice: "ready", enabledAt: seen[3]!.enabledAt});
-  assert.equal((seen[4]!.stop as {route: string}).route, "ui");
+  assert.deepEqual(await seen[4], {...await observe(f), stopped: true, notice: "ready", enabledAt: (await seen[3]!).enabledAt});
+  assert.equal(((await seen[4]!).stop as {route: string}).route, "ui");
 });
 
 it("CT-LIN-02: a dashboard Start activation's policy commit is observed only together with the Enable record and the active Start", {timeout: 10_000}, async t => {
   const f = await fixture(t);
   // the project is the managed scratch root, so the chat is a No Project chat activated by Start (project-supervisor.ts:369-372)
   f.core.config.managedScratchRoot = "/work/p";
-  const policy = f.core.policy.get();
-  f.core.policy.save({...policy, excludedThreadIds: [mainThreadId]});
-  f.core.store.saveUnboundStop(mainThreadId, {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: Date.now() - 60_000});
+  const policy = await f.core.policy.get();
+  await f.core.policy.save({...policy, excludedThreadIds: [mainThreadId]});
+  await f.core.store.saveUnboundStop(mainThreadId, {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: Date.now() - 60_000});
   const seen = probePolicyCommits(f);
-  const result = await f.core.supervision.setChatSupervision({projectId, mainThreadId, enabled: true, policyGeneration: f.core.policy.get().generation}, deadline());
+  const result = await f.core.supervision.setChatSupervision({projectId, mainThreadId, enabled: true, policyGeneration: (await f.core.policy.get()).generation}, deadline());
   assert.equal(result.status, "saved");
-  const start = f.core.store.start(mainThreadId)!;
+  const start = (await f.core.store.start(mainThreadId))!;
   assert.equal(start.status, "active");
   // the policy write (:673) and the bookkeeping (:675-677) share one guidance transaction
-  assert.deepEqual(seen, [{stopped: false, stop: null, notice: null, enabledAt: start.intentAt, start: "active"}]);
+  assert.deepEqual(await Promise.all(seen), [{stopped: false, stop: null, notice: null, enabledAt: start.intentAt, start: "active"}]);
 });
 
 it("CT-LIN-03: a dashboard Stop whose notice bookkeeping fails keeps the policy stop; sends stay fenced, a retry conflicts, settlement dates from observation and an MCP replay records the stop", {timeout: 10_000}, async t => {
   const f = await fixture(t, {mainTurns: [oldTurn, {id: "stop-turn", text: "Please stop supervising this chat."}]});
-  const binding = f.bindSupervisor();
-  const checkIn = f.core.supervision.conversation.requests.prepare({projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: null,
+  const binding = await f.bindSupervisor();
+  const checkIn = await f.core.supervision.conversation.requests.prepare({projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: null,
     text: "Check in on the current activity.", batch: null, completionMarker: "Supervisor check-in completed"}, Date.now());
-  const setStopNotice = f.core.store.setStopNotice.bind(f.core.store);
   let noticeWrites = 0;
-  f.core.store.setStopNotice = (...args) => {
-    if (noticeWrites++ === 0) throw new Error("injected_stop_notice_failure");
-    setStopNotice(...args);
-  };
+  replaceMethod(serviceOf(f.core.store), "setStopNotice", (setStopNotice) => (...args) =>
+    Effect.suspend(() => noticeWrites++ === 0 ? Effect.die(new Error("injected_stop_notice_failure")) : setStopNotice(...args)));
   const ui = await dashboard(f);
   const path = "/api/guidance/project-supervisor/chat-supervision";
-  const generation = f.core.policy.get().generation;
+  const generation = (await f.core.policy.get()).generation;
   const first = await ui.post(path, {projectId, mainThreadId, enabled: false, policyGeneration: generation});
   assert.equal(first.status, 400);
   assert.deepEqual(first.body, {_tag: "UiError", message: "The chat supervision change could not be confirmed. Refresh to inspect the saved state."});
   assert.equal(f.stopped(), true);
-  assert.equal(f.core.policy.get().generation, generation + 1);
+  assert.equal((await f.core.policy.get()).generation, generation + 1);
   assert.equal(f.binding().supervisionStop, undefined, "the per-binding transaction rolled back (project-supervisor.ts:909-917)");
   assert.equal(f.binding().stopNotice, undefined);
 
@@ -317,10 +311,10 @@ it("CT-LIN-03: a dashboard Stop whose notice bookkeeping fails keeps the policy 
   assert.equal(f.binding().supervisionStop, undefined);
 
   await runOnce(f);
-  const fenced = requests(f, binding.threadId).find(request => request.id === checkIn.id)!;
+  const fenced = (await requests(f, binding.threadId)).find(request => request.id === checkIn.id)!;
   assert.equal(fenced.state, "failed");
   assert.equal(fenced.error, "Supervision was stopped for this chat before this check-in was sent; it was not sent.");
-  assert.equal(f.core.store.task(mainThreadId), null, "the new human request is not interpreted");
+  assert.equal(await f.core.store.task(mainThreadId), null, "the new human request is not interpreted");
   const settled = f.binding();
   assert.equal(typeof settled.stopObservedAt, "number", "without a stop record the settlement dates from its observation (supervisor-lifecycle.ts:376-379)");
   assert.equal(settled.settlement?.state, "settled");
@@ -331,7 +325,7 @@ it("CT-LIN-03: a dashboard Stop whose notice bookkeeping fails keeps the policy 
   const replay = await f.core.supervision.stopSupervision({callerThreadId: binding.threadId, targetThreadId: mainThreadId, userMessageId: "stop-turn",
     operationId: "lin-replay"}, {}, deadline());
   assert.deepEqual(replay, {status: "stopped", targetThreadId: mainThreadId, route: "relay", alreadyStopped: true});
-  assert.equal(f.core.policy.get().generation, generation + 1, "the replay writes no policy");
+  assert.equal((await f.core.policy.get()).generation, generation + 1, "the replay writes no policy");
   const recorded = f.binding();
   assert.deepEqual(recorded.supervisionStop, {route: "relay", callerThreadId: binding.threadId, userMessageId: "stop-turn", stoppedAt: Date.parse(baseTime)});
   assert.equal(recorded.stopNotice?.state, "ready");
@@ -342,18 +336,15 @@ it("CT-LIN-03: a dashboard Stop whose notice bookkeeping fails keeps the policy 
 it("CT-LIN-03: a dashboard Enable whose bookkeeping fails keeps a stale enable time, so a request written while stopped is interpreted", {timeout: 10_000}, async t => {
   const prepare = async (failEnable: boolean) => {
     const f = await fixture(t);
-    f.bindSupervisor();
+    await f.bindSupervisor();
     f.stop();
     const stoppedAt = f.binding().supervisionStop!.stoppedAt;
     addTurn(f.main, {id: "stopped-turn", text: "Request written while supervision was stopped.", createdAt: new Date(stoppedAt).toISOString()});
-    const recordChatEnable = f.core.store.recordChatEnable.bind(f.core.store);
-    f.core.store.recordChatEnable = (...args) => {
-      if (failEnable) throw new Error("injected_enable_failure");
-      recordChatEnable(...args);
-    };
+    replaceMethod(serviceOf(f.core.store), "recordChatEnable", (recordChatEnable) => (...args) =>
+      failEnable ? Effect.die(new Error("injected_enable_failure")) : recordChatEnable(...args));
     const ui = await dashboard(f);
     const reply = await ui.post("/api/guidance/project-supervisor/chat-supervision", {projectId, mainThreadId, enabled: true,
-      policyGeneration: f.core.policy.get().generation});
+      policyGeneration: (await f.core.policy.get()).generation});
     return {f, reply, stoppedAt};
   };
 
@@ -361,11 +352,11 @@ it("CT-LIN-03: a dashboard Enable whose bookkeeping fails keeps a stale enable t
   assert.equal(failed.reply.status, 400);
   assert.deepEqual(failed.reply.body, {_tag: "UiError", message: "The chat supervision change could not be confirmed. Refresh to inspect the saved state."});
   assert.equal(failed.f.stopped(), false);
-  assert.equal(failed.f.core.store.chatEnabledAt(mainThreadId), null);
+  assert.equal(await failed.f.core.store.chatEnabledAt(mainThreadId), null);
   assert.equal(failed.f.binding().supervisionStop?.stoppedAt, failed.stoppedAt, "the stop record was not cleared");
   assert.equal(failed.f.binding().stopNotice?.state, "ready", "the notice was not superseded");
   await runOnce(failed.f);
-  const interpreted = task(failed.f);
+  const interpreted = await task(failed.f);
   assert.equal(interpreted.sourceMessageId, "stopped-turn");
   assert.equal(interpreted.status, "waiting");
   assert.deepEqual(dispatches(failed.f).map(payload => payload.commandId), [`supervisor-objective:${interpreted.id}`]);
@@ -373,29 +364,28 @@ it("CT-LIN-03: a dashboard Enable whose bookkeeping fails keeps a stale enable t
   // control: a complete Enable records its time, and the same request is not interpreted (project-supervisor.ts:1179)
   const enabled = await prepare(false);
   assert.equal(enabled.reply.status, 200);
-  assert.ok(enabled.f.core.store.chatEnabledAt(mainThreadId)! >= enabled.stoppedAt);
+  assert.ok((await enabled.f.core.store.chatEnabledAt(mainThreadId))! >= enabled.stoppedAt);
   await runOnce(enabled.f);
-  assert.equal(enabled.f.core.store.task(mainThreadId), null);
+  assert.equal(await enabled.f.core.store.task(mainThreadId), null);
   assert.deepEqual(dispatches(enabled.f), []);
 });
 
 it("CT-LIN-04: interpretation: a Stop committed right after the dispatching receipt is fenced by the guard; the task returns to queued unsent", {timeout: 10_000}, async t => {
   const f = await fixture(t, newRequest);
-  f.bindSupervisor();
-  const saveTask = f.core.store.saveTask.bind(f.core.store);
+  await f.bindSupervisor();
   let receipt: TaskRecord | null = null;
-  // the receipt write returns, then the Stop is saved before the guard runs (project-supervisor.ts:1350, :1355-1358)
-  f.core.store.saveTask = (value: TaskRecord) => {
-    saveTask(value);
-    if (value.status === "dispatching" && receipt === null) {
-      receipt = value;
-      f.stop();
-    }
-  };
+  let stopSaved = false;
+  // the receipt write returns, then the Stop is saved before the guard runs: the receipt commits in its own admission section,
+  // so the Stop is its own section entered right after it, ahead of the dispatch section (project-supervisor.ts dispatching receipt)
+  replaceMethod(serviceOf(f.core.store), "saveTask", (saveTask) => (value) => Effect.tap(saveTask(value), () => Effect.sync(() => {
+    if (value.status === "dispatching" && receipt === null) receipt = value;
+  })));
+  replaceMethod(f.core.supervision.admission.gate, "admit", (admit) => (body) => receipt !== null && !stopSaved
+    ? Effect.andThen(Effect.sync(() => {stopSaved = true;f.stop();}), admit(body)) : admit(body));
   await runOnce(f);
   assert.ok(receipt);
   assert.equal(typeof (receipt as TaskRecord).dispatchedAt, "number");
-  const fenced = task(f);
+  const fenced = await task(f);
   assert.equal(fenced.id, (receipt as TaskRecord).id);
   assert.equal(fenced.status, "queued");
   assert.equal(fenced.dispatchedAt, null);
@@ -407,14 +397,14 @@ it("CT-LIN-04: interpretation: a Stop committed right after the dispatching rece
 
 it("CT-LIN-06: interpretation: a Stop committed when the frame arrives keeps the accepted identity, later cycles only observe it", {timeout: 10_000}, async t => {
   const f = await fixture(t, newRequest);
-  const binding = f.bindSupervisor();
+  const binding = await f.bindSupervisor();
   const {seen, commit} = stopOnArrival(f);
   let runId = "";
   // the peer records the accepted message and starts its run, as T3 does
   f.peer.onRpc = entry => {if (commit(entry)) runId = addDispatchedMessage(f.supervisor(), entry.payload);return undefined;};
   await runOnce(f);
   assert.equal(seen.stoppedAtArrival, true);
-  const sent = task(f);
+  const sent = await task(f);
   assert.equal(sent.status, "waiting");
   assert.equal(sent.reason, "T3 accepted the interpretation request; waiting for its result.");
   assert.deepEqual(dispatches(f).map(dispatched), [{type: "message.dispatch", commandId: `supervisor-objective:${sent.id}`, messageId: sent.messageId,
@@ -422,12 +412,12 @@ it("CT-LIN-06: interpretation: a Stop committed when the frame arrives keeps the
 
   f.peer.onRpc = null;
   await runOnce(f);
-  assert.deepEqual(task(f), sent, "a running native outcome is only observed");
+  assert.deepEqual(await task(f), sent, "a running native outcome is only observed");
   const run = f.supervisor().runs.find(value => value.id === runId)!;
   run.status = "completed";
   run.completedAt = new Date().toISOString();
   await runOnce(f);
-  const closed = task(f);
+  const closed = await task(f);
   assert.equal(closed.id, sent.id);
   assert.equal(closed.supervisorRunId, runId);
   assert.equal(closed.status, "unavailable");
@@ -441,72 +431,72 @@ it("CT-LIN-06: interpretation: a Stop committed when the frame arrives keeps the
 
 it("CT-LIN-06: interpretation: a Stop committed when the frame arrives and a lost reply leave the identity uncertain, never resent", {timeout: 10_000}, async t => {
   const f = await fixture(t, newRequest);
-  f.bindSupervisor();
+  await f.bindSupervisor();
   const {seen, commit} = stopOnArrival(f);
   f.peer.onRpc = entry => commit(entry) ? {drop: true} : undefined;
   await runOnce(f);
   assert.equal(seen.stoppedAtArrival, true);
-  const sent = task(f);
+  const sent = await task(f);
   assert.equal(sent.status, "uncertain");
   assert.equal(sent.reason, "Interpretation dispatch is uncertain; retry native access to reconcile the original request identity.");
   assert.deepEqual(dispatches(f).map(payload => payload.commandId), [`supervisor-objective:${sent.id}`]);
   f.peer.onRpc = null;
   await runOnce(f);
-  assert.deepEqual(task(f), sent);
+  assert.deepEqual(await task(f), sent);
   assert.deepEqual(writes(f), ["orchestration.dispatchCommand:message.dispatch"]);
   assert.equal(f.binding().settlementBlockedBy, "stopped_interpretation_unresolved");
 });
 
 it("CT-LIN-06: root check-in: a Stop committed when the frame arrives keeps the accepted identity; later cycles match its run without resending", {timeout: 10_000}, async t => {
   const f = await fixture(t);
-  const binding = f.bindSupervisor();
-  const prepared = f.core.supervision.conversation.requests.prepare({projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: null,
+  const binding = await f.bindSupervisor();
+  const prepared = await f.core.supervision.conversation.requests.prepare({projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: null,
     text: "Check in on the current activity.", batch: null, completionMarker: "Supervisor check-in completed"}, Date.now());
   const {seen, commit} = stopOnArrival(f);
   let runId = "";
   f.peer.onRpc = entry => {if (commit(entry)) runId = addDispatchedMessage(f.supervisor(), entry.payload);return undefined;};
   await runOnce(f);
   assert.equal(seen.stoppedAtArrival, true);
-  const sent = requests(f, binding.threadId).find(request => request.id === prepared.id)!;
+  const sent = (await requests(f, binding.threadId)).find(request => request.id === prepared.id)!;
   assert.equal(sent.state, "waiting");
   assert.equal(typeof sent.sentAt, "number");
   assert.deepEqual(dispatches(f).map(dispatched), [{type: "message.dispatch", commandId: `supervisor-review:${prepared.id}`, messageId: prepared.messageId,
     threadId: binding.threadId, text: prepared.text}]);
   f.peer.onRpc = null;
   await runOnce(f);
-  assert.deepEqual(requests(f, binding.threadId), [{...sent, runId}]);
+  assert.deepEqual(await requests(f, binding.threadId), [{...sent, runId}]);
   assert.deepEqual(writes(f), ["orchestration.dispatchCommand:message.dispatch"]);
   assert.deepEqual(f.peer.unexpected, []);
 });
 
 it("CT-LIN-06: root check-in: a Stop committed when the frame arrives and a lost reply leave the identity uncertain, never resent", {timeout: 10_000}, async t => {
   const f = await fixture(t);
-  const binding = f.bindSupervisor();
-  const prepared = f.core.supervision.conversation.requests.prepare({projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: null,
+  const binding = await f.bindSupervisor();
+  const prepared = await f.core.supervision.conversation.requests.prepare({projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: null,
     text: "Check in on the current activity.", batch: null, completionMarker: "Supervisor check-in completed"}, Date.now());
   const {seen, commit} = stopOnArrival(f);
   f.peer.onRpc = entry => commit(entry) ? {drop: true} : undefined;
   await runOnce(f);
   assert.equal(seen.stoppedAtArrival, true);
-  const sent = requests(f, binding.threadId).find(request => request.id === prepared.id)!;
+  const sent = (await requests(f, binding.threadId)).find(request => request.id === prepared.id)!;
   assert.equal(sent.state, "uncertain");
   assert.equal(sent.error, "Supervisor request delivery is uncertain; its original identity is retained and only observed, never resent.");
   f.peer.onRpc = null;
   await runOnce(f);
-  assert.deepEqual(requests(f, binding.threadId), [sent]);
+  assert.deepEqual(await requests(f, binding.threadId), [sent]);
   assert.deepEqual(dispatches(f).map(payload => payload.commandId), [`supervisor-review:${prepared.id}`]);
 });
 
 it("CT-LIN-06: introduction: a Stop committed when the frame arrives keeps the accepted introduction; later cycles never resend it", {timeout: 10_000}, async t => {
   const f = await fixture(t, newRequest);
-  f.bindSupervisor();
-  const {introduction} = seedIntroduction(f, newSource);
+  await f.bindSupervisor();
+  const {introduction} = await seedIntroduction(f, newSource);
   const {seen, commit} = stopOnArrival(f);
   // the peer queues the introduction after the active run, as T3 does; it completes before the next cycle
   f.peer.onRpc = entry => {if (commit(entry)) addDispatchedMessage(f.main, entry.payload, "completed");return undefined;};
   await runOnce(f);
   assert.equal(seen.stoppedAtArrival, true);
-  const accepted = f.core.supervision.conversation.requests.introduction(introduction.taskId)!;
+  const accepted = (await f.core.supervision.conversation.requests.introduction(introduction.taskId))!;
   assert.equal(accepted.state, "accepted");
   assert.equal(typeof accepted.acceptedAt, "number");
   assert.deepEqual(accepted.dispatchMode, {type: "queue_after_active"});
@@ -515,7 +505,7 @@ it("CT-LIN-06: introduction: a Stop committed when the frame arrives keeps the a
   f.peer.onRpc = null;
   await runOnce(f);
   await runOnce(f);
-  assert.deepEqual(f.core.supervision.conversation.requests.introduction(introduction.taskId), accepted);
+  assert.deepEqual(await f.core.supervision.conversation.requests.introduction(introduction.taskId), accepted);
   // the Stop then produces exactly one operative notice, after the introduction became visible, and the Supervisor settles
   const notice = f.binding().stopNotice!;
   assert.equal(notice.state, "accepted");
@@ -529,8 +519,8 @@ it("CT-LIN-06: introduction: a Stop committed when the frame arrives keeps the a
 
 it("CT-LIN-06: guide: a Stop committed when the steer frame arrives keeps the accepted guide record and sends no other route", {timeout: 10_000}, async t => {
   const f = await fixture(t);
-  const binding = f.bindSupervisor();
-  const {helper, member, assignment} = seedTeam(f);
+  const binding = await f.bindSupervisor();
+  const {helper, member, assignment} = await seedTeam(f);
   const payload = {supervisorThreadId: helper.thread.id, bindingGeneration: binding.generation, memberEpoch: member.epoch, assignmentRootThreadId: "branch",
     assignmentEpoch: assignment.epoch, operationId: "lin-guide-sent", targetThreadId: "branch", text: "Continue with the plan."};
   installToolCall(f, helper, workflowToolNames.guide.direct[0], payload);
@@ -543,22 +533,22 @@ it("CT-LIN-06: guide: a Stop committed when the steer frame arrives keeps the ac
   assert.equal(result.commandId, `${result.requestId}:command:0`);
   assert.deepEqual(dispatches(f).map(value => ({...dispatched(value), dispatchMode: value.dispatchMode})), [{type: "message.dispatch",
     commandId: result.commandId, messageId: result.messageId, threadId: "branch", text: payload.text, dispatchMode: {type: "steer_active", targetRunId: "branch-run"}}]);
-  const receipts = () => f.core.guidance.db.prepare("SELECT document FROM supervisor_team_tool_receipts").all().map(row => JSON.parse(String(row.document)) as unknown);
-  assert.deepEqual(receipts(), [result]);
-  assert.deepEqual(f.core.supervision.team.unresolvedRequests(binding).map(request => ({requestId: request.requestId, state: request.state})),
+  const receipts = async /*s6d*/ () => (await f.core.guidance.db.prepare("SELECT document FROM supervisor_team_tool_receipts").all()).map(row => JSON.parse(String(row.document)) as unknown);
+  assert.deepEqual(await receipts(), [result]);
+  assert.deepEqual((await f.core.supervision.team.unresolvedRequests(binding)).map(request => ({requestId: request.requestId, state: request.state})),
     [{requestId: result.requestId, state: "pending"}]);
   f.peer.onRpc = null;
   await runOnce(f);
-  assert.deepEqual(receipts(), [result]);
+  assert.deepEqual(await receipts(), [result]);
   assert.deepEqual(writes(f), ["orchestration.dispatchCommand:message.dispatch"]);
   assert.deepEqual(f.peer.unexpected, []);
 });
 
 it("CT-LIN-06: settlement: a Stop committed when the settle frame arrives keeps the settled identity; later cycles send no other settlement", {timeout: 10_000}, async t => {
   const f = await fixture(t);
-  const binding = f.bindSupervisor();
+  const binding = await f.bindSupervisor();
   // a closed not-needed task leaves nothing to supervise, so the quiet Supervisor settles (supervisor-lifecycle.ts:124-137)
-  f.core.store.saveTask({id: "task-done", threadId: mainThreadId, projectId, sourceRunId: `run-${oldTurn.id}`, sourceMessageId: oldTurn.id, sourceOrdinal: 1,
+  await f.core.store.saveTask({id: "task-done", threadId: mainThreadId, projectId, sourceRunId: `run-${oldTurn.id}`, sourceMessageId: oldTurn.id, sourceOrdinal: 1,
     sourceHash: "not-needed", status: "not_supervised", objective: null, reason: "Supervision is not needed.", updatedAt: Date.now(), requestText: "",
     supervisorThreadId: binding.threadId, messageId: "supervisor-objective:task-done", supervisorRunId: null, dispatchedAt: null, replayCount: 0});
   const now = Date.now();
@@ -582,11 +572,11 @@ it("CT-LIN-06: settlement: a Stop committed when the settle frame arrives keeps 
 
 it("CT-LIN-06: helper: a Stop committed when the webhook POST arrives keeps the posted delivery; later cycles post nothing", {timeout: 10_000}, async t => {
   const f = await fixture(t);
-  const binding = f.bindSupervisor();
-  const {helper} = seedTeam(f);
+  const binding = await f.bindSupervisor();
+  const {helper} = await seedTeam(f);
   const threads = [helper.thread, ...f.threads];
   const runtime = f.core.supervision.conversation.teamRuntime!;
-  const batches = runtime.partition(binding, threads, helperBatch("branch")).helperBatches;
+  const batches = (await runtime.partition(binding, threads, helperBatch("branch"))).helperBatches;
   let stoppedAtArrival: boolean | null = null;
   f.peer.webhook = (_entry, _request, response, deliveryId) => {
     f.stop();
@@ -596,19 +586,19 @@ it("CT-LIN-06: helper: a Stop committed when the webhook POST arrives keeps the 
   runtime.startCycle(f.binding());
   await within(runtime.runHelperBatch(f.binding(), threads, batches, deadline()), 9_000, "helper batch");
   assert.equal(stoppedAtArrival, true);
-  const request = requests(f, "helper").find(value => value.id.startsWith("team-review:"))!;
+  const request = (await requests(f, "helper")).find(value => value.id.startsWith("team-review:"))!;
   assert.equal(request.state, "waiting");
-  const receipt = helperReceipt(f)!;
+  const receipt = (await helperReceipt(f))!;
   assert.equal(receipt.state, "posted");
   assert.equal(receipt.nativeDeliveryId, "native-delivery-1");
   assert.equal(receipt.messageId, request.messageId);
   const posts = f.peer.log.filter((entry): entry is Extract<Entry, {kind: "http"}> => entry.kind === "http" && entry.method === "POST");
   assert.deepEqual(posts.map(entry => entry.body), [helperDeliveryBody(request.messageId, request.text)]);
   await runOnce(f);
-  const observed = helperReceipt(f)!;
+  const observed = (await helperReceipt(f))!;
   assert.deepEqual({...observed, renderedText: undefined}, {...receipt, renderedText: undefined}, "the stopped cycle binds the rendering only");
   assert.equal(observed.renderedText, publishedWrapper(request.text));
-  assert.equal(requests(f, "helper").find(value => value.id === request.id)?.messageId, request.messageId);
+  assert.equal((await requests(f, "helper")).find(value => value.id === request.id)?.messageId, request.messageId);
   assert.deepEqual(writes(f), ["scheduledTasks.upsert", "POST /api/hooks/fixture/fixture-only-token"]);
   assert.deepEqual(f.peer.unexpected, []);
 });

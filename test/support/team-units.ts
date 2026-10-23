@@ -8,7 +8,7 @@ import {
 } from "./root-facades.js";
 import { SupervisorIds } from "../../src/ids.js";
 import { DefinitionSourceFailure, ProjectDefinitions, type ProjectDefinitionSetupInput } from "../../src/project-definitions.js";
-import type { BindingRecord, ProjectSupervisorStore, SupervisionFolderPresence, SupervisorBaseline, TaskRecord } from "../../src/project-supervisor-store.js";
+import { ProjectSupervisorStore, type BindingRecord, type SupervisionFolderPresence, type SupervisorBaseline, type TaskRecord } from "../../src/project-supervisor-store.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, ProjectSupervisorTeamInfo, ProjectSupervisorRetryInput, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome } from "../../src/project-supervisor-contract.js";
 import { ProjectSupervisor, type ProjectSupervisorScopeSnapshotOptions, type ProjectSupervisorSeams, type SupervisorDefinitionsAccess } from "../../src/project-supervisor.js";
@@ -20,10 +20,13 @@ import type { WorkflowWriteController } from "../../src/workflow-write-controlle
 import type { GlobalDefinitionsControlInput, NoProjectControlInput, SupervisionControlInput, SupervisionSetupInput } from "../../src/supervisor-control-contract.js";
 import type { ThreadPolicySettings } from "../../src/thread-policy-contract.js";
 import type { SupervisionStartInput, SupervisionStartResult, SupervisionStopInput, SupervisionStopResult } from "../../src/workflow-write-controller.js";
-import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService, type GateGuard, type SupervisionGateShape } from "../../src/supervision-gate.js";
-import { SupervisionStores } from "../../src/supervision-stores.js";
+import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService, type GateGuard, type SupervisionGateShape, type SupervisionScopeStores } from "../../src/supervision-gate.js";
 import { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import { SupervisorConversationStore, type WorkflowIntroduction } from "../../src/supervisor-conversation-store.js";
+import { GuidanceStore } from "../../src/guidance-store.js";
+import type { SupervisionStoreError } from "../../src/guidance-sql.js";
+import { ThreadPolicyStore, type ThreadPolicyStoreError } from "../../src/thread-policy.js";
+import { serviceOf, storeContext, storeFacade, storeUnitOf, type Promised, type StorePromise, type StoreServices } from "./store-units.js";
 import { HelperTransport, type HelperTransportShape } from "../../src/supervisor-helper-transport.js";
 import { SupervisorLifecycle } from "../../src/supervisor-lifecycle.js";
 import { ProjectSupervisorMonitorStore } from "../../src/supervisor-monitor-store.js";
@@ -33,7 +36,7 @@ import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { readTeamViewData, supervisorTeamView as presentTeamView } from "../../src/supervisor-team-view.js";
 import { T3Client, T3TransportError, type T3ClientShape } from "../../src/t3.js";
 import type { Projection, SupervisorConfig, ThreadInfo } from "../../src/types.js";
-import type { WorkflowStateStore } from "../../src/workflow-state-store.js";
+import { WorkflowStateStore } from "../../src/workflow-state-store.js";
 
 // the baseline constructors of the helper transport, the team runtime and their two owners, rebuilt over the ported
 // services and the baseline promise facades (./root-facades.ts); each unit keeps its constructor options
@@ -86,30 +89,46 @@ export const projectionClient = (projection: (threadId: string, signal: AbortSig
 const withOperate = (rpc: SupervisorRpc | null | undefined) => <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   rpc ? Effect.provideService(effect, NativeOperateRpc, operateClient(rpc)) : effect;
 
+/** A baseline predicate's answer: plain, promised, or the effectful read itself (a store read inside the guard's transaction). */
+export type Answer<E = SupervisionStoreError> = boolean | Promise<boolean> | Effect.Effect<boolean, E>;
+const answer = <E>(value: Answer<E>): Effect.Effect<boolean, E> =>
+  Effect.isEffect(value) ? value : typeof value === "boolean" ? Effect.succeed(value) : Effect.promise(() => value);
+// a baseline predicate as an effect, called when the effect runs
+export const predicate = <E>(read: () => Answer<E>): Effect.Effect<boolean, E> => Effect.suspend(() => answer(read()));
+
+// the scope predicates' stores of a unit's binding store
+export const scopeStores = (store: Promised<ProjectSupervisorStore["Service"]>, policy?: ThreadPolicyStore["Service"]): SupervisionScopeStores => {
+  const unit = storeUnitOf(store);
+  return {guidance: Context.get(unit.context, GuidanceStore), supervisors: serviceOf(store), policy: policy ?? Context.get(unit.context, ThreadPolicyStore)};
+};
+
 export type HelperTransportUnitOptions = {
-  store: ProjectSupervisorStore;
+  store: Promised<ProjectSupervisorStore["Service"]>;
   rpc: SupervisorRpc | null;
   baseUrl: string;
   projection(threadId: string, signal: AbortSignal): Promise<Projection>;
-  enabled?: (projectId: string, mainThreadId: string) => boolean;
+  enabled?: (projectId: string, mainThreadId: string) => Answer;
   fetch?: typeof fetch;
 };
 
 // the helper transport over its own admission gate: the project or global scope is `enabled`, else the stored control;
 // the webhook POST goes through the fetch HTTP client over `fetch`
 export const helperTransportUnit = (options: HelperTransportUnitOptions): SupervisorHelperDeliveryTransport & { options: HelperTransportUnitOptions } => {
+  const stores = storeUnitOf(options.store);
+  const supervisors = serviceOf(options.store);
   const guard: GateGuard = {
-    scopeEnabled: (projectId, mainThreadId) => options.enabled ? options.enabled(projectId, mainThreadId ?? "") : options.store.enabled(projectId),
-    supervisionStopped: () => false,
-    workflowEditingEnabled: () => true,
+    scopeEnabled: (projectId, mainThreadId) => options.enabled ? predicate(() => options.enabled!(projectId, mainThreadId ?? "")) : supervisors.enabled(projectId),
+    supervisionStopped: () => Effect.succeed(false),
+    workflowEditingEnabled: () => Effect.succeed(true),
   };
-  const gate = Effect.runSync(makeSupervisionGate(guard));
-  const service = build(HelperTransport.make({ store: options.store, baseUrl: options.baseUrl }).pipe(
+  const gate = Effect.runSync(makeSupervisionGate(guard).pipe(Effect.provide(stores.context)));
+  const service = build(HelperTransport.make({ baseUrl: options.baseUrl }).pipe(
     withOperate(options.rpc),
     Effect.provideService(SupervisionGate, gate),
     Effect.provideService(T3Client, projectionClient(options.projection)),
     Effect.provide(FetchHttpClient.layer),
     Effect.provideService(FetchHttpClient.Fetch, options.fetch ?? globalThis.fetch),
+    Effect.provide(stores.context),
   ));
   const unit = Object.assign(helperTransportFacade(run, service), { options });
   transports.set(unit, { service, gate, guard });
@@ -119,11 +138,11 @@ export const helperTransportUnit = (options: HelperTransportUnitOptions): Superv
 // a promise transport (a test fake) as the service; its authority closure is evaluated when the fake calls it
 const promiseTransport = (transport: SupervisorHelperDeliveryTransport, guard: GateGuard): HelperTransportShape => ({
   send: (binding, input, options) => Effect.promise((signal) => transport.send(binding, input, signal,
-    ...(options?.authorized ? [() => options.authorized!(guard)] : []))),
-  hasDelivery: (binding, input) => Effect.sync(() => transport.hasDelivery(binding, input)),
+    ...(options?.authorized ? [() => Effect.runSync(options.authorized!(guard))] : []))),
+  hasDelivery: (binding, input) => Effect.promise(async () => transport.hasDelivery(binding, input)),
   reconcileDelivery: (binding, input) => Effect.promise((signal) => transport.reconcileDelivery(binding, input, signal)),
-  receiptText: (binding, logicalMessageId) => Effect.sync(() => transport.receiptText(binding, logicalMessageId)),
-  matchesMessage: (binding, logicalMessageId, text, message, messages) => Effect.sync(() => transport.matchesMessage(binding, logicalMessageId, text, message, messages)),
+  receiptText: (binding, logicalMessageId) => Effect.promise(async () => transport.receiptText(binding, logicalMessageId)),
+  matchesMessage: (binding, logicalMessageId, text, message, messages) => Effect.promise(async () => transport.matchesMessage(binding, logicalMessageId, text, message, messages)),
   receiptDocument: () => Effect.die(new Error("a fake transport keeps no receipt documents")),
   retire: (binding, helperThreadId) => Effect.promise((signal) => transport.retire(binding, helperThreadId, signal)),
 });
@@ -142,32 +161,38 @@ const clockOf = (now: () => number): Clock.Clock => {
   };
 };
 
-const openGuard: GateGuard = { scopeEnabled: () => true, supervisionStopped: () => false, workflowEditingEnabled: () => true };
+const openGuard: GateGuard = { scopeEnabled: () => Effect.succeed(true), supervisionStopped: () => Effect.succeed(false), workflowEditingEnabled: () => Effect.succeed(true) };
 
 export type TeamRuntimeUnitOptions = {
-  store: ProjectSupervisorStore;
-  teamStore: SupervisorTeamStore;
-  requests: SupervisorConversationStore;
-  monitor: ProjectSupervisorMonitorStore;
+  store: Promised<ProjectSupervisorStore["Service"]>;
+  teamStore: Promised<SupervisorTeamStore["Service"]>;
+  requests: Promised<SupervisorConversationStore["Service"]>;
+  monitor: Promised<ProjectSupervisorMonitorStore["Service"]>;
   rpc?: SupervisorRpc | null;
   helperTransport?: SupervisorHelperDeliveryTransport;
   now?: () => number;
   projection: (threadId: string, signal: AbortSignal) => Promise<Projection>;
-  supervisionStopped?: (mainThreadId: string) => boolean;
+  supervisionStopped?: (mainThreadId: string) => Answer;
 };
+
+// the unit's services with the given binding, team, request and monitor stores
+const runtimeContext = (options: Pick<TeamRuntimeUnitOptions, "store" | "teamStore" | "requests" | "monitor">) => storeContext(options.store).pipe(
+  Context.add(ProjectSupervisorStore, serviceOf(options.store)), Context.add(SupervisorTeamStore, serviceOf(options.teamStore)),
+  Context.add(SupervisorConversationStore, serviceOf(options.requests)), Context.add(ProjectSupervisorMonitorStore, serviceOf(options.monitor)));
 
 // the team runtime service over the transport unit's gate (or its own), the fake transport as a service
 const teamRuntimeService = (options: TeamRuntimeUnitOptions): SupervisorTeamRuntime["Service"] => {
   const unit = options.helperTransport ? transports.get(options.helperTransport) : undefined;
+  const context = runtimeContext(options);
   const guard = unit?.guard ?? openGuard;
-  const gate = unit?.gate ?? Effect.runSync(makeSupervisionGate(guard));
+  const gate = unit?.gate ?? Effect.runSync(makeSupervisionGate(guard).pipe(Effect.provide(context)));
   const transport = unit?.service ?? (options.helperTransport ? promiseTransport(options.helperTransport, guard) : undefined);
-  return Effect.runSync(SupervisorTeamRuntime.make({ store: options.store, teamStore: options.teamStore, requests: options.requests,
-    monitor: options.monitor, stopped: (_guard, mainThreadId) => options.supervisionStopped?.(mainThreadId) === true }).pipe(
+  const stopped = options.supervisionStopped;
+  return Effect.runSync(SupervisorTeamRuntime.make({ stopped: (_guard, mainThreadId) => stopped ? predicate(() => stopped(mainThreadId)) : Effect.succeed(false) }).pipe(
     (effect) => transport ? Effect.provideService(effect, HelperTransport, transport) : effect,
     Effect.provideService(SupervisionGate, gate),
     Effect.provideService(T3Client, projectionClient(options.projection)),
-    Effect.provide(ids),
+    Effect.provide(context),
   ));
 };
 
@@ -184,31 +209,31 @@ export const teamRuntimeUnit = (options: TeamRuntimeUnitOptions): SupervisorTeam
 
 type ConversationCallbacks = {
   projection: (threadId: string, signal: AbortSignal) => Promise<Projection>;
-  eligible: (thread: ThreadInfo, threads: readonly ThreadInfo[]) => boolean;
-  enabled: (projectId: string, mainThreadId?: string, purpose?: "effect" | "interpretation" | "reconcile") => boolean;
-  supervisionStopped: (mainThreadId: string) => boolean;
+  eligible: (thread: ThreadInfo, threads: readonly ThreadInfo[]) => Answer;
+  enabled: (projectId: string, mainThreadId?: string, purpose?: "effect" | "interpretation" | "reconcile") => Answer;
+  supervisionStopped: (mainThreadId: string) => Answer<ThreadPolicyStoreError>;
 };
 
 // the baseline constructor callbacks as the scope predicates, read through the unit when called, so a suite may replace them
 class UnitScope extends SupervisionScope {
-  constructor(config: SupervisorConfig, store: ProjectSupervisorStore, private readonly unit: ConversationCallbacks) {super(config, store, true);}
-  override scopeEnabled(projectId: string, mainThreadId?: string, purpose?: "effect" | "interpretation" | "reconcile"): boolean {return this.unit.enabled(projectId, mainThreadId, purpose);}
-  override supervisionStopped(threadId: string): boolean {return this.unit.supervisionStopped(threadId);}
-  override eligible(thread: ThreadInfo, threads: readonly ThreadInfo[]): boolean {return this.unit.eligible(thread, threads);}
+  constructor(config: SupervisorConfig, stores: SupervisionScopeStores, private readonly unit: ConversationCallbacks) {super(config, stores, true);}
+  override scopeEnabled(projectId: string, mainThreadId?: string, purpose?: "effect" | "interpretation" | "reconcile") {return predicate(() => this.unit.enabled(projectId, mainThreadId, purpose));}
+  override supervisionStopped(threadId: string) {return predicate(() => this.unit.supervisionStopped(threadId));}
+  override eligible(thread: ThreadInfo, threads: readonly ThreadInfo[]) {return predicate(() => this.unit.eligible(thread, threads));}
 }
 
-type ConversationContext = SupervisionStores | SupervisionGate | SupervisorConversation | SupervisorIds;
+type ConversationContext = StoreServices | WorkflowStateStore | SupervisionScopeService | SupervisionGate | SupervisorConversation;
 type Seams = Effect.Success<typeof SupervisorConversation.makeUnit>["seams"];
 export type SupervisorConversationUnit = SupervisorConversationFacade & ConversationCallbacks & {
-  readonly store: ProjectSupervisorStore;
+  readonly store: Promised<ProjectSupervisorStore["Service"]>;
   readonly definitions: DefinitionsLoader | undefined;
   readonly teamRuntime: (SupervisorTeamRuntimeFacade & { options: TeamRuntimeUnitOptions }) | null;
   // internal steps on their own (the service's test seams), in their baseline shapes
   sendIntroduction(task: TaskRecord, introduction: WorkflowIntroduction, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void>;
-  roleFor(binding: BindingRecord): string;
+  roleFor(binding: BindingRecord): StorePromise<string>;
   cachedProvisionalDefinitions(task: TaskRecord): ProjectDefinitionSnapshot | null;
   dialogueDefinitions(task: TaskRecord, signal: AbortSignal): Promise<ProjectDefinitionSnapshot | null>;
-  compactRecordProblem(...args: Parameters<Seams["compactRecordProblem"]>): ReturnType<Seams["compactRecordProblem"]>;
+  compactRecordProblem(...args: Parameters<Seams["compactRecordProblem"]>): StorePromise<Effect.Success<ReturnType<Seams["compactRecordProblem"]>>>;
   humanMessageSince(mainThreadId: string, since: number, signal: AbortSignal): Promise<boolean>;
   // the services the conversation was built over, for a lifecycle unit of the same process
   readonly context: Context.Context<ConversationContext>;
@@ -220,10 +245,10 @@ export type SupervisorConversationUnit = SupervisorConversationFacade & Conversa
 // runtime did. Descendant contactability comes from the scope configuration
 export const supervisorConversationUnit = (...[store, rpc, projection, definitions, eligible, enabled, workflows, descendantContactable, teamStore,
   helperTransport, helperProviderInstanceId]: [
-  store: ProjectSupervisorStore, rpc: SupervisorRpc | null, projection: (threadId: string, signal: AbortSignal) => Promise<Projection>,
+  store: Promised<ProjectSupervisorStore["Service"]>, rpc: SupervisorRpc | null, projection: (threadId: string, signal: AbortSignal) => Promise<Projection>,
   definitions: DefinitionsLoader | undefined, eligible: ConversationCallbacks["eligible"],
-  enabled?: ConversationCallbacks["enabled"], workflows?: WorkflowStateStore,
-  descendantContactable?: (thread: ThreadInfo, threads: readonly ThreadInfo[]) => boolean, teamStore?: SupervisorTeamStore,
+  enabled?: ConversationCallbacks["enabled"], workflows?: Promised<WorkflowStateStore["Service"]>,
+  descendantContactable?: (thread: ThreadInfo, threads: readonly ThreadInfo[]) => boolean, teamStore?: Promised<SupervisorTeamStore["Service"]>,
   helperTransport?: SupervisorHelperDeliveryTransport, helperProviderInstanceId?: string,
 ]): SupervisorConversationUnit => {
   if (descendantContactable) throw new Error("a conversation unit derives descendant contactability from its scope");
@@ -231,29 +256,32 @@ export const supervisorConversationUnit = (...[store, rpc, projection, definitio
   const unit = callbacks as SupervisorConversationUnit;
   const config: SupervisorConfig = { dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0,
     ...(helperProviderInstanceId ? { helperProviderInstanceId } : {}) };
-  const scope = new UnitScope(config, store, unit);
-  const gate = Effect.runSync(makeSupervisionGate(scope));
-  const stores = SupervisionStores.of({ supervisors: store, requests: new SupervisorConversationStore(store.store), monitor: new ProjectSupervisorMonitorStore(store.store),
-    team: teamStore ?? new SupervisorTeamStore(store), workflows: workflows ?? null });
+  const stores = storeUnitOf(store);
+  const scope = new UnitScope(config, scopeStores(store), unit);
+  const storeServices = storeContext(store, workflows ?? null).pipe((context) => teamStore ? Context.add(context, SupervisorTeamStore, serviceOf(teamStore)) : context);
+  const gate = Effect.runSync(makeSupervisionGate(scope).pipe(Effect.provide(storeServices)));
+  const supervisors = serviceOf(store);
   const teamOptions: TeamRuntimeUnitOptions | null = teamStore ? { store, teamStore, requests: stores.requests, monitor: stores.monitor, rpc, projection: (threadId, signal) => unit.projection(threadId, signal),
     ...(helperTransport ? { helperTransport } : {}),
-    supervisionStopped: (mainThreadId): boolean => unit.supervisionStopped(mainThreadId) ||
-      !unit.enabled(store.bindings().find((item) => item.mainThreadId === mainThreadId)?.projectId ?? "", mainThreadId) } : null;
+    supervisionStopped: (mainThreadId) => Effect.gen(function* () {
+      if (yield* predicate(() => unit.supervisionStopped(mainThreadId))) return true;
+      const projectId = (yield* supervisors.bindings()).find((item) => item.mainThreadId === mainThreadId)?.projectId ?? "";
+      return !(yield* predicate(() => unit.enabled(projectId, mainThreadId)));
+    }) } : null;
   const runtime = teamOptions ? teamRuntimeService(teamOptions) : null;
   const built = build(Effect.gen(function* () {
     const parts = yield* SupervisorConversation.makeUnit;
-    const context = Context.make(SupervisorConversation, parts.service).pipe(Context.add(SupervisionStores, stores), Context.add(SupervisionGate, gate),
-      Context.add(SupervisorIds, yield* SupervisorIds));
+    const context = Context.make(SupervisorConversation, parts.service).pipe(Context.add(SupervisionGate, gate), Context.add(SupervisionScopeService, scope),
+      Context.merge(storeServices));
     return { ...parts, context };
   }).pipe(
-    Effect.provideService(SupervisionStores, stores),
     Effect.provideService(SupervisionScopeService, scope),
     Effect.provideService(SupervisionGate, gate),
     Effect.provideService(T3Client, projectionClient((threadId, signal) => unit.projection(threadId, signal))),
     withOperate(rpc),
     (effect) => definitions ? Effect.provideService(effect, ProjectDefinitions, definitionsService(definitions)) : effect,
     (effect) => runtime ? Effect.provideService(effect, SupervisorTeamRuntime, runtime) : effect,
-    Effect.provide(ids),
+    Effect.provide(storeServices),
   ));
   const teamRuntime = teamOptions && runtime ? teamRuntimeFacadeUnit(teamOptions, runtime) : null;
   const seams = built.seams;
@@ -261,25 +289,26 @@ export const supervisorConversationUnit = (...[store, rpc, projection, definitio
     store, definitions, teamRuntime, context: built.context, runtime,
     sendIntroduction: (task: TaskRecord, introduction: WorkflowIntroduction, threads: readonly ThreadInfo[], signal: AbortSignal) =>
       run(seams.sendIntroduction(task, introduction, threads), { signal }),
-    roleFor: (binding: BindingRecord) => Effect.runSync(seams.roleFor(binding)),
+    roleFor: (binding: BindingRecord) => run(seams.roleFor(binding)),
     cachedProvisionalDefinitions: seams.cachedProvisionalDefinitions,
     dialogueDefinitions: (task: TaskRecord, signal: AbortSignal) => run(seams.dialogueDefinitions(task), { signal }),
-    compactRecordProblem: seams.compactRecordProblem,
+    compactRecordProblem: (...args: Parameters<Seams["compactRecordProblem"]>) => run(seams.compactRecordProblem(...args)),
     humanMessageSince: (mainThreadId: string, since: number, signal: AbortSignal) => run(seams.humanMessageSince(mainThreadId, since), { signal }),
   });
 };
 
 // the baseline SupervisorLifecycle constructor over the ported service, beside the conversation unit it observes: its own T3
 // projection, operate rpc and workflow state; its requests, monitor, scope and admission gate are the conversation's
-export const supervisorLifecycleUnit = (store: ProjectSupervisorStore, conversation: SupervisorConversationUnit,
-  projection: (threadId: string, signal: AbortSignal) => Promise<Projection>, rpc: SupervisorRpc | null, workflows?: WorkflowStateStore): SupervisorLifecycleFacade => {
-  const stores = Context.get(conversation.context, SupervisionStores);
+export const supervisorLifecycleUnit = (store: Promised<ProjectSupervisorStore["Service"]>, conversation: SupervisorConversationUnit,
+  projection: (threadId: string, signal: AbortSignal) => Promise<Projection>, rpc: SupervisorRpc | null,
+  workflows?: Promised<WorkflowStateStore["Service"]>): SupervisorLifecycleFacade => {
+  const context = Context.add(Context.omit(WorkflowStateStore)(conversation.context), ProjectSupervisorStore, serviceOf(store)).pipe(
+    (merged) => workflows ? Context.add(merged, WorkflowStateStore, serviceOf(workflows)) : merged);
   const lifecycle = build(SupervisorLifecycle.make.pipe(
-    Effect.provideService(SupervisionStores, SupervisionStores.of({ ...stores, supervisors: store, workflows: workflows ?? null })),
     Effect.provideService(T3Client, projectionClient(projection)),
     withOperate(rpc),
     (effect) => conversation.runtime ? Effect.provideService(effect, SupervisorTeamRuntime, conversation.runtime) : effect,
-    Effect.provide(conversation.context),
+    Effect.provide(context),
   ));
   return supervisorLifecycleFacade(run, lifecycle);
 };
@@ -323,18 +352,19 @@ const settledCall = (work: Effect.Effect<void, unknown>, signal?: AbortSignal): 
 const resultCall = <A>(work: Effect.Effect<A, unknown>, signal?: AbortSignal): Promise<A> =>
   Effect.runPromiseExit(work, signal ? {signal} : undefined).then((exit) => Exit.isSuccess(exit) ? exit.value : Promise.reject(Cause.squash(exit.cause)));
 
-// the services one supervision unit runs over: the team services, the Start/Stop control and the project supervisor
-type SupervisionUnitContext = Effect.Success<ReturnType<typeof supervisorTeamServices>>;
+// the services one supervision unit runs over: its stores and scope predicates, the workflow state store and the team services
+type TeamServices = Effect.Success<ReturnType<typeof supervisorTeamServices>> extends Context.Context<infer S> ? S : never;
+type SupervisionUnitContext = Context.Context<StoreServices | WorkflowStateStore | SupervisionScopeService | TeamServices>;
 
 /** The baseline ProjectSupervisor promise shapes over the ported services, for the suites written against them. */
 export type ProjectSupervisorUnit = {
   readonly config: SupervisorConfig;
-  readonly store: ProjectSupervisorStore;
+  readonly store: Promised<ProjectSupervisorStore["Service"]>;
   readonly t3: Pick<T3ClientShape, "projection">;
   readonly definitions: ProjectSupervisorUnitDefinitions | undefined;
   readonly gate: SupervisionScope;
-  readonly team: SupervisorTeamStore;
-  readonly workflowStates: WorkflowStateStore;
+  readonly team: Promised<SupervisorTeamStore["Service"]>;
+  readonly workflowStates: Promised<WorkflowStateStore["Service"]>;
   readonly helperTransport: SupervisorHelperDeliveryTransport;
   readonly conversation: SupervisorConversationFacade;
   readonly lifecycle: SupervisorLifecycleFacade;
@@ -347,9 +377,9 @@ export type ProjectSupervisorUnit = {
   readonly supervisionControl: SupervisionControl["Service"];
   readonly service: ProjectSupervisor["Service"];
   runOnce(signal?: AbortSignal): Promise<void>;
-  scopeEnabled(projectId: string, mainThreadId?: string, purpose?: "effect" | "interpretation" | "reconcile"): boolean;
-  workflowEditingEnabled(projectId: string, mainThreadId?: string, purpose?: "effect" | "status" | "read"): boolean;
-  supervisionStopped(threadId: string): boolean;
+  scopeEnabled(projectId: string, mainThreadId?: string, purpose?: "effect" | "interpretation" | "reconcile"): StorePromise<boolean>;
+  workflowEditingEnabled(projectId: string, mainThreadId?: string, purpose?: "effect" | "status" | "read"): StorePromise<boolean>;
+  supervisionStopped(threadId: string): StorePromise<boolean>;
   noProjectControl(): ReturnType<ProjectSupervisor["Service"]["noProjectControl"]>;
   workflowLocator(projectId: string, mainThreadId: string): ReturnType<ProjectSupervisor["Service"]["workflowLocator"]>;
   startStatus(threadId: string, operationId: string): ReturnType<SupervisionControl["Service"]["startStatus"]>;
@@ -374,19 +404,20 @@ export type ProjectSupervisorUnit = {
   ensureBinding(projectId: string, mainThreadId: string, title: string, signal: AbortSignal): Promise<BindingRecord>;
   // one interpretation dispatch with its final stop and scope checks; the scope check of the supervisor's own work as a delegate
   dispatch(task: TaskRecord, signal: AbortSignal): Promise<void>;
-  projectEnabled(projectId: string, mainThreadId?: string): boolean;
+  projectEnabled(projectId: string, mainThreadId?: string): StorePromise<boolean>;
 };
 
 // the promise shapes of one built supervision unit
-export const projectSupervisorFacade = (parts: {config: SupervisorConfig; store: ProjectSupervisorStore; t3: Pick<T3ClientShape, "projection">;
+export const projectSupervisorFacade = (parts: {config: SupervisorConfig; store: Promised<ProjectSupervisorStore["Service"]>; t3: Pick<T3ClientShape, "projection">;
   definitions: ProjectSupervisorUnitDefinitions | undefined; scope: SupervisionScope; services: SupervisionUnitContext; control: SupervisionControl["Service"];
   supervisor: ProjectSupervisor["Service"]; seams: ProjectSupervisorSeams; locks: ScopeLocks["Service"]}): ProjectSupervisorUnit => {
   const {services, control, supervisor, seams, scope, locks} = parts;
-  const stores = Context.get(services, SupervisionStores);
+  const stores = storeUnitOf(parts.store);
   const runtime = Context.get(services, SupervisorTeamRuntime);
   const teamRuntime = teamRuntimeFacade(run, runtime);
   return {
-    config: parts.config, store: parts.store, t3: parts.t3, definitions: parts.definitions, gate: scope, team: stores.team, workflowStates: stores.workflows!,
+    config: parts.config, store: parts.store, t3: parts.t3, definitions: parts.definitions, gate: scope, team: stores.team,
+    workflowStates: storeFacade(stores, Context.get(services, WorkflowStateStore), services as Context.Context<never>),
     helperTransport: helperTransportFacade(run, Context.get(services, HelperTransport)),
     conversation: supervisorConversationFacade(run, Context.get(services, SupervisorConversation), stores, teamRuntime),
     lifecycle: supervisorLifecycleFacade(run, Context.get(services, SupervisorLifecycle)),
@@ -394,9 +425,9 @@ export const projectSupervisorFacade = (parts: {config: SupervisorConfig; store:
     services, admission: {gate: Context.get(services, SupervisionGate)}, supervisionControl: control, service: supervisor,
     // the baseline default deadline of a cycle is 120 s
     runOnce: (signal) => settledCall(signal ? supervisor.cycle : Effect.asVoid(Effect.timeoutOption(supervisor.cycle, "120 seconds")), signal),
-    scopeEnabled: (projectId, mainThreadId, purpose) => scope.scopeEnabled(projectId, mainThreadId, purpose),
-    workflowEditingEnabled: (projectId, mainThreadId, purpose) => scope.workflowEditingEnabled(projectId, mainThreadId, purpose),
-    supervisionStopped: (threadId) => scope.supervisionStopped(threadId),
+    scopeEnabled: (projectId, mainThreadId, purpose) => run(scope.scopeEnabled(projectId, mainThreadId, purpose)),
+    workflowEditingEnabled: (projectId, mainThreadId, purpose) => run(scope.workflowEditingEnabled(projectId, mainThreadId, purpose)),
+    supervisionStopped: (threadId) => run(scope.supervisionStopped(threadId)),
     noProjectControl: () => supervisor.noProjectControl(),
     workflowLocator: (projectId, mainThreadId) => supervisor.workflowLocator(projectId, mainThreadId),
     startStatus: (threadId, operationId) => control.startStatus(threadId, operationId),
@@ -420,7 +451,7 @@ export const projectSupervisorFacade = (parts: {config: SupervisorConfig; store:
     retry: (input, signal) => resultCall(supervisor.retry(input), signal),
     ensureBinding: (projectId, mainThreadId, title, signal) => resultCall(seams.ensureBinding(projectId, mainThreadId, title), signal),
     dispatch: (task, signal) => resultCall(seams.dispatch(task), signal),
-    projectEnabled: (projectId, mainThreadId) => scope.projectEnabled(projectId, mainThreadId),
+    projectEnabled: (projectId, mainThreadId) => run(scope.projectEnabled(projectId, mainThreadId)),
   };
 };
 
@@ -440,14 +471,14 @@ type UnitServices = ServicesOf<SupervisionUnitContext> | ScopeLocks | Supervisor
 export const buildProjectSupervisor = (input: {services: SupervisionUnitContext; source: Pick<StoreShape, "catalog">; t3: Pick<T3ClientShape, "projection">;
   read: NativeRpcShape; shell: NativeShell["Service"]; operate: NativeRpcShape | null; definitions: ProjectSupervisorUnitDefinitions | undefined;
   now?: (() => number) | undefined;
-  controllers?: ((context: Context.Context<UnitServices>) => Effect.Effect<Context.Context<UnitControllers>, never, Scope.Scope>) | undefined;
+  controllers?: ((context: Context.Context<UnitServices>) => Effect.Effect<Context.Context<UnitControllers>, unknown, Scope.Scope>) | undefined;
   // the scope the services live in, else the test process
   scope?: Scope.Scope | undefined;
   // the per-scope locks the two services see, for a suite that observes them
   locks?: ((locks: ScopeLocksShape) => ScopeLocksShape) | undefined}) => {
   const build = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>): A => input.scope ? Effect.runSync(Scope.provide(input.scope)(effect)) : buildUnit(effect);
   const clocked = <A, E, R>(effect: Effect.Effect<A, E, R>) => input.now ? Effect.provideService(effect, Clock.Clock, clockOf(input.now)) : effect;
-  const built = build(Layer.build(Layer.mergeAll(ScopeLocks.layer, ids)));
+  const built = build(Layer.build(ScopeLocks.layer));
   const shared = input.locks ? Context.add(built, ScopeLocks, input.locks(Context.get(built, ScopeLocks))) : built;
   const clients = Context.merge(input.services, shared).pipe(Context.add(Store, input.source as StoreShape),
     Context.add(T3Client, {descriptor: () => Effect.die(new Error("unused")), watch: () => Effect.die(new Error("unused")),
@@ -464,30 +495,53 @@ export const buildProjectSupervisor = (input: {services: SupervisionUnitContext;
     controllers: controlled as Context.Context<Partial<UnitControllers> | SupervisionControl>};
 };
 
+// the scope predicates and the services of one supervision run over a run's stores, as src/supervision-live.ts builds them: the
+// workflow state store over the scope's workflow-editing predicate, the admission gate, the helper transport, the team runtime,
+// the conversation and the lifecycle, over the operate client, the T3 client, the definitions and the fetch client; `policy`,
+// when given, is the run's policy store in place of the stores' own, and `scope` the scope they live in (else the test process)
+export const supervisionServices = (input: {config: SupervisorConfig; store: Promised<ProjectSupervisorStore["Service"]>; operate: NativeRpcShape | null;
+  t3: T3ClientShape; definitions?: ProjectDefinitions["Service"] | undefined; fetch?: typeof globalThis.fetch | undefined;
+  policy?: ThreadPolicyStore["Service"] | undefined; scope?: Scope.Scope | undefined}) => {
+  const built = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>): A => input.scope ? Effect.runSync(Scope.provide(input.scope)(effect)) : build(effect);
+  const {policy, definitions} = input;
+  const scope = new SupervisionScope(input.config, scopeStores(input.store, policy), input.operate !== null);
+  const workflows = built(Layer.build(WorkflowStateStore.layerWith((projectId, mainThreadId) => scope.workflowEditingEnabled(projectId, mainThreadId))).pipe(
+    Effect.provide(storeContext(input.store))));
+  const stores = Context.merge(storeContext(input.store), workflows).pipe(Context.add(SupervisionScopeService, scope),
+    (context) => policy ? Context.add(context, ThreadPolicyStore, policy) : context);
+  const team = built(supervisorTeamServices(input.config.t3Url).pipe(
+    (effect) => input.operate ? Effect.provideService(effect, NativeOperateRpc, input.operate) : effect,
+    (effect) => definitions ? Effect.provideService(effect, ProjectDefinitions, definitions) : effect,
+    Effect.provideService(T3Client, input.t3),
+    Effect.provide(FetchHttpClient.layer),
+    // a test may observe the synchronous start of each request; the request itself is the platform fetch's
+    (effect) => input.fetch ? Effect.provideService(effect, FetchHttpClient.Fetch, input.fetch) : effect,
+    Effect.provide(stores),
+  ));
+  const services: SupervisionUnitContext = Context.merge(stores, team);
+  return {scope, services};
+};
+
 // the baseline ProjectSupervisor constructor: the scope predicates and the team, conversation and lifecycle services are built
 // as the root builds them, over the operate rpc, the T3 client (read through `t3` when called), the definitions and global
 // fetch, with an admission gate that guards with those scope predicates; no workflow controllers are wired, as the baseline
-// unit had no team effects
-export const projectSupervisorUnit = (config: SupervisorConfig, store: ProjectSupervisorStore, source: Pick<StoreShape, "catalog">,
+// unit had no team effects. `policy` stands for the baseline config.threadPolicy
+export const projectSupervisorUnit = (config: SupervisorConfig, store: Promised<ProjectSupervisorStore["Service"]>, source: Pick<StoreShape, "catalog">,
   t3: Pick<T3ClientShape, "projection">, readRpc: SupervisorRpc, operateRpc: SupervisorRpc | null,
   activationSnapshot: (signal: AbortSignal) => Promise<SupervisorBaseline>, definitions?: ProjectSupervisorUnitDefinitions,
-  now?: () => number, options: {locks?: (locks: ScopeLocksShape) => ScopeLocksShape} = {}): ProjectSupervisorUnit => {
-  const scope = new SupervisionScope(config, store, Boolean(operateRpc));
-  const services = build(supervisorTeamServices(store, config.t3Url, scope).pipe(
-    withOperate(operateRpc),
-    Effect.provideServiceEffect(SupervisionGate, makeSupervisionGate(scope)),
-    (effect) => definitions ? Effect.provideService(effect, ProjectDefinitions, definitionsService(definitions)) : effect,
-    Effect.provideService(T3Client, { descriptor: () => Effect.die(new Error("unused")), watch: () => Effect.die(new Error("unused")),
-      projection: (threadId) => Effect.suspend(() => t3.projection(threadId)) }),
-    Effect.provide(Layer.mergeAll(FetchHttpClient.layer, ids)),
-  ));
+  now?: () => number, options: {locks?: (locks: ScopeLocksShape) => ScopeLocksShape; policy?: ThreadPolicyStore["Service"]} = {}): ProjectSupervisorUnit => {
+  const operate = operateRpc ? operateClient(operateRpc) : null;
+  const {scope, services} = supervisionServices({config, store, operate, policy: options.policy,
+    definitions: definitions && definitionsService(definitions),
+    t3: {descriptor: () => Effect.die(new Error("unused")), watch: () => Effect.die(new Error("unused")), projection: (threadId) => Effect.suspend(() => t3.projection(threadId))}});
   const built = buildProjectSupervisor({services, source, t3, read: operateClient(readRpc), shell: activationShell(activationSnapshot), definitions,
-    operate: operateRpc ? operateClient(operateRpc) : null, now, locks: options.locks});
+    operate, now, locks: options.locks});
   return projectSupervisorFacade({config, store, t3, definitions, scope, services, ...built});
 };
 
-// the team view of retained records in the baseline call shape: the read step over the given stores, then the presentation
-export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRecord, threads: readonly ThreadInfo[], requests: SupervisorConversationStore,
-  now = Date.now()): ProjectSupervisorTeamInfo =>
-  presentTeamView(Effect.runSync(readTeamViewData(binding).pipe(Effect.provideService(SupervisionStores, {team, requests} as SupervisionStores["Service"]))),
-    binding, threads, now);
+// the team view of retained records in the baseline call shape: the read step over the given stores, then the presentation;
+// the read, synchronous at baseline, answers as a promise
+export const supervisorTeamView = (team: Promised<SupervisorTeamStore["Service"]>, binding: BindingRecord, threads: readonly ThreadInfo[],
+  requests: Promised<SupervisorConversationStore["Service"]>, now = Date.now()): StorePromise<ProjectSupervisorTeamInfo> =>
+  storeUnitOf(team).run(readTeamViewData(binding).pipe(Effect.provideService(SupervisorTeamStore, serviceOf(team)),
+    Effect.provideService(SupervisorConversationStore, serviceOf(requests)))).then((data) => presentTeamView(data, binding, threads, now));

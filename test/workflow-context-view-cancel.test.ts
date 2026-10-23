@@ -5,11 +5,12 @@ import { TestClock } from "effect/testing";
 import { withDeadline } from "./support/c1-loopback.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { SupervisionGate, SupervisionScope, SupervisionScopeService } from "../src/supervision-gate.js";
-import { SupervisionStores } from "../src/supervision-stores.js";
 import { SupervisorConversation } from "../src/supervisor-conversation.js";
 import type { SupervisorConfig } from "../src/types.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
 import { baseTime, compactDraft, makeFixture, workflowRecord, type Fixture } from "./support/c1-conversation-fixture.js";
+import { serviceOf } from "./support/store-units.js";
+import { scopeStores } from "./support/team-units.js";
 
 // target regressions of the workflow_read view "check" (S6b): the call's soft cancel, the caller's own or the 10 s tool
 // deadline, reaches the definitions read of the production conversation as its abort signal, and the read's own outcome
@@ -18,8 +19,8 @@ import { baseTime, compactDraft, makeFixture, workflowRecord, type Fixture } fro
 
 // the read scope of a verified Supervisor binding
 class ReadScope extends SupervisionScope {
-  override workflowEditingEnabled(): boolean {return true;}
-  override supervisionStopped(): boolean {return false;}
+  override workflowEditingEnabled() {return Effect.succeed(true);}
+  override supervisionStopped() {return Effect.succeed(false);}
 }
 
 const config: SupervisorConfig = {dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0};
@@ -32,20 +33,20 @@ const unusedNative = WorkflowNativeAccess.of({
 // the production write controller over the fixture's production conversation service, its stores and its admission gate
 const controllerOf = (fixture: Fixture) => WorkflowWriteController.make({withoutTeam: true}).pipe(
   Effect.provideService(SupervisorConversation, Context.get(fixture.conversation.context, SupervisorConversation)),
-  Effect.provideService(SupervisionStores, Context.get(fixture.conversation.context, SupervisionStores)),
   Effect.provideService(SupervisionGate, Context.get(fixture.conversation.context, SupervisionGate)),
-  Effect.provideService(SupervisionScopeService, new ReadScope(config, fixture.projectStore, true)),
+  Effect.provideService(SupervisionScopeService, new ReadScope(config, scopeStores(fixture.projectStore), true)),
   Effect.provideService(WorkflowNativeAccess, unusedNative),
+  Effect.provide(fixture.conversation.context),
 );
 
 const fixtureScoped = Effect.acquireRelease(Effect.promise(() => makeFixture({now: baseTime})), (fixture) => Effect.promise(() => fixture.cleanup()));
 
 // the check of a valid compact draft of the fixture task
-const checkInput = (fixture: Fixture) => {
-  const task = fixture.projectStore.task(fixture.task.threadId)!;
+const checkInput = (fixture: Fixture) => Effect.map(serviceOf(fixture.projectStore).task(fixture.task.threadId), (stored) => {
+  const task = stored!;
   return {supervisorThreadId: fixture.binding.threadId, bindingGeneration: fixture.binding.generation, view: "check",
     record: compactDraft(task, workflowRecord(task, "checked-proposal"))};
-};
+});
 
 // the definitions read held at the boundary until its abort signal fires: then it fails, or still completes with the valid
 // snapshot the fixture serves
@@ -77,7 +78,7 @@ it.effect("S6b-WWC-CTX-01: the caller's cancel fails an abort-observing definiti
   yield* Effect.addFinalizer(() => read.restore);
   const controller = yield* controllerOf(fixture);
   const cancel = yield* Deferred.make<void>();
-  const call = yield* Effect.forkChild(controller.readTool(checkInput(fixture), cancel));
+  const call = yield* Effect.forkChild(controller.readTool(yield* checkInput(fixture), cancel));
   yield* read.entered;
   yield* Deferred.succeed(cancel, undefined);
   yield* read.aborted;
@@ -89,7 +90,7 @@ it.effect("S6b-WWC-CTX-02: the 10 s tool deadline fails an abort-observing defin
   const read = holdDefinitions(fixture, "fail");
   yield* Effect.addFinalizer(() => read.restore);
   const controller = yield* controllerOf(fixture);
-  const call = yield* Effect.forkChild(controller.readTool(checkInput(fixture)));
+  const call = yield* Effect.forkChild(controller.readTool(yield* checkInput(fixture)));
   yield* read.entered;
   yield* TestClock.adjust("9999 millis");
   assert.equal(call.pollUnsafe(), undefined, "the call is still reading before its deadline");
@@ -104,7 +105,7 @@ it.effect("S6b-WWC-CTX-03: a valid definitions read that still completes after t
   yield* Effect.addFinalizer(() => read.restore);
   const controller = yield* controllerOf(fixture);
   const cancel = yield* Deferred.make<void>();
-  const call = yield* Effect.forkChild(controller.readTool(checkInput(fixture), cancel));
+  const call = yield* Effect.forkChild(controller.readTool(yield* checkInput(fixture), cancel));
   yield* read.entered;
   yield* Deferred.succeed(cancel, undefined);
   yield* read.aborted;

@@ -17,10 +17,10 @@ const isIntroduction = (call: RpcCall) => call.payload.type === "message.dispatc
 const isCheckIn = (fixture: Fixture) => (call: RpcCall) => call.payload.type === "message.dispatch" && call.payload.threadId === fixture.binding.threadId;
 
 // the prepared unsent introduction of the fixture task, as an earlier cycle reserved it
-const readyIntroduction = (fixture: Fixture): WorkflowIntroduction => {
+const readyIntroduction = async /*s6d*/ (fixture: Fixture): Promise<WorkflowIntroduction> => {
   const introduction: WorkflowIntroduction = {taskId: fixture.task.id, projectId, threadId: operativeThreadId, supervisorThreadId: fixture.binding.threadId,
     state: "ready", text: workflowIntroductionText(fixture.task), messageId: `supervisor-notice:workflow:${fixture.task.id}`, targetRunId: null, error: null};
-  fixture.conversation.requests.saveIntroduction(introduction);
+  await fixture.conversation.requests.saveIntroduction(introduction);
   return introduction;
 };
 
@@ -46,9 +46,9 @@ const holdFinalReads = (t: TestContext, fixture: Fixture) => {
 };
 
 // two public runs of the same binding on the production conversation service, each on its own fiber
-const twoRuns = (fixture: Fixture) => {
+const twoRuns = async /*s6d*/ (fixture: Fixture) => {
   const conversation = Context.get(fixture.conversation.context, SupervisorConversation);
-  const binding: BindingRecord = fixture.projectStore.binding(projectId, operativeThreadId)!;
+  const binding: BindingRecord = (await fixture.projectStore.binding(projectId, operativeThreadId))!;
   const fibers = [0, 1].map(() => Effect.runFork(conversation.run(binding, fixture.supervisor, fixture.threadList)));
   return {
     // the run released first ends while the other is still held
@@ -60,18 +60,18 @@ const twoRuns = (fixture: Fixture) => {
 it("S6b-CONV-04: two concurrent public runs holding the same prepared introduction initiate it once; the later one answers from the unknown receipt", {timeout: 10_000}, async t => {
   const fixture = await makeFixture({now: baseTime});
   after(t, fixture.cleanup);
-  const held = readyIntroduction(fixture);
+  const held = await readyIntroduction(fixture);
   const reads = holdFinalReads(t, fixture);
   // the reply is lost, so the first send records an unknown outcome
   fixture.intercept(call => isIntroduction(call) ? Promise.reject(new SupervisorRpcError("uncertain")) : null);
-  const runs = twoRuns(fixture);
+  const runs = await twoRuns(fixture);
   await reads.arrived(0);
   await reads.arrived(1);
-  assert.deepEqual(fixture.conversation.requests.introduction(fixture.task.id), held, "both runs hold the same prepared copy");
+  assert.deepEqual(await fixture.conversation.requests.introduction(fixture.task.id), held, "both runs hold the same prepared copy");
 
   reads.release(0);
   await runs.firstEnded();
-  const unknown = fixture.conversation.requests.introduction(fixture.task.id);
+  const unknown = await fixture.conversation.requests.introduction(fixture.task.id);
   assert.deepEqual(unknown, {...held, state: "uncertain", dispatchMode: unknown?.dispatchMode, targetRunId: unknown?.targetRunId, definiteRejection: false,
     error: "Proposal delivery is uncertain. Its exact message identity is retained."});
   assert.equal(fixture.calls.filter(isIntroduction).length, 1);
@@ -79,26 +79,26 @@ it("S6b-CONV-04: two concurrent public runs holding the same prepared introducti
   reads.release(1);
   await runs.bothEnded();
   assert.equal(fixture.calls.filter(isIntroduction).length, 1, "the later run initiates nothing from its stale copy");
-  assert.deepEqual(fixture.conversation.requests.introduction(fixture.task.id), unknown, "the unknown receipt keeps its identity and state");
+  assert.deepEqual(await fixture.conversation.requests.introduction(fixture.task.id), unknown, "the unknown receipt keeps its identity and state");
 });
 
 it("S6b-CONV-05: a public run holding a stale prepared check-in answers from the unknown receipt another run recorded and sends nothing", {timeout: 10_000}, async t => {
   // plan-mode Supervisor modes keep the introduction unsent, so only the root check-in is posted
   const fixture = await makeFixture({now: baseTime}, {supervisorInteractionMode: "plan"});
   after(t, fixture.cleanup);
-  readyIntroduction(fixture);
-  const prepared = fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "review", taskId: null,
+  await readyIntroduction(fixture);
+  const prepared = await fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId, kind: "review", taskId: null,
     text: "Check in on the current activity.", batch: null, completionMarker: "Supervisor check-in completed"}, baseTime);
   const reads = holdFinalReads(t, fixture);
   fixture.intercept(call => isCheckIn(fixture)(call) ? Promise.reject(new SupervisorRpcError("uncertain")) : null);
-  const runs = twoRuns(fixture);
+  const runs = await twoRuns(fixture);
   await reads.arrived(0);
   await reads.arrived(1);
-  assert.deepEqual(fixture.conversation.requests.pending(projectId, fixture.binding.threadId), prepared, "both runs read the same unsent check-in");
+  assert.deepEqual(await fixture.conversation.requests.pending(projectId, fixture.binding.threadId), prepared, "both runs read the same unsent check-in");
 
   reads.release(0);
   await runs.firstEnded();
-  const unknown = fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  const unknown = await fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.deepEqual(unknown, {...prepared, state: "uncertain", sentAt: unknown?.sentAt,
     error: "Supervisor request delivery is uncertain; its original identity is retained and only observed, never resent."});
   assert.equal(fixture.calls.filter(isCheckIn(fixture)).length, 1);
@@ -106,14 +106,14 @@ it("S6b-CONV-05: a public run holding a stale prepared check-in answers from the
   reads.release(1);
   await runs.bothEnded();
   assert.equal(fixture.calls.filter(isCheckIn(fixture)).length, 1, "the later run sends nothing from its stale copy");
-  assert.deepEqual(fixture.conversation.requests.pending(projectId, fixture.binding.threadId), unknown, "the unknown receipt keeps its identity and state");
+  assert.deepEqual(await fixture.conversation.requests.pending(projectId, fixture.binding.threadId), unknown, "the unknown receipt keeps its identity and state");
   assert.deepEqual(fixture.calls.filter(isIntroduction), [], "the introduction stays unsent");
 });
 
 it("S6b-CONV-06: a public run released while the same introduction send is in flight initiates nothing, and both runs settle on the one send", {timeout: 10_000}, async t => {
   const fixture = await makeFixture({now: baseTime});
   after(t, fixture.cleanup);
-  const held = readyIntroduction(fixture);
+  const held = await readyIntroduction(fixture);
   const reads = holdFinalReads(t, fixture);
   const reached = Promise.withResolvers<RpcCall>();
   const reply = Promise.withResolvers<unknown>();
@@ -123,18 +123,18 @@ it("S6b-CONV-06: a public run released while the same introduction send is in fl
     reached.resolve(call);
     return reply.promise;
   });
-  const runs = twoRuns(fixture);
+  const runs = await twoRuns(fixture);
   await reads.arrived(0);
   await reads.arrived(1);
   reads.release(0);
   const call = await withDeadline(reached.promise, 3_000, "the introduction POST");
-  assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "sending");
+  assert.equal((await fixture.conversation.requests.introduction(fixture.task.id))?.state, "sending");
   // the second run reaches the send while the first one's reply is still pending
   reads.release(1);
   reply.resolve(proceed);
   await runs.bothEnded();
   assert.deepEqual(fixture.calls.filter(isIntroduction), [call], "one initiation for both runs");
-  const accepted = fixture.conversation.requests.introduction(fixture.task.id);
+  const accepted = await fixture.conversation.requests.introduction(fixture.task.id);
   assert.equal(accepted?.state, "accepted");
   assert.equal(accepted?.messageId, held.messageId);
 });

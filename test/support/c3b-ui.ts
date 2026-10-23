@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect, type Layer } from "effect";
+import { Context, Effect, type Layer } from "effect";
 import type { TestContext } from "vitest";
 import { GuidanceRuntime } from "../../src/guidance.js";
-import { GuidanceStore } from "../../src/guidance-store.js";
+import { SupervisorOwnership } from "../../src/project-supervisor-store.js";
+import { openGuidance, openPolicy, policyService } from "./store-units.js";
 import { startGuidanceUi } from "./service-auth-harness.js";
 import type { ProjectConfigEditor, ProjectDefinitionLoader } from "./root-facades.js";
 import type { GuidanceUiOptions } from "../../src/guidance-ui.js";
@@ -24,7 +25,6 @@ export const uiConfig = (directory: string, overrides: Partial<SupervisorConfig>
   uiPort: 0,
   uiHost: "127.0.0.1",
   uiAssetsDirectory: join(directory, "assets"),
-  supervisorOwnedThreadIds: new Set(),
   ...overrides,
 });
 
@@ -54,20 +54,24 @@ export const startUi = async (t: TestContext, options: {
 } = {}): Promise<StartedUi> => {
   const directory = options.directory ?? await tempDirectory(t, "c3b-ui-");
   const config = uiConfig(directory, options.config);
-  const store = new GuidanceStore(directory);
-  const runtime = Effect.runSync(GuidanceRuntime.make(config, store, { catalog: () => Effect.succeed({ projects: [], threads: [] }) }));
+  // the guidance store and the process's policy store and ownership set the runtime reads
+  const store = await openGuidance(directory);
+  const policy = await openPolicy(directory, { excludedThreadIds: config.excludedThreadIds });
+  const closeStores = async () => { try { await store.close(); } finally { await policy.close(); } };
   let ui: StartedUi["ui"];
   try {
-    ui = await startGuidanceUi(config, runtime, options.definitions, options.editor, options.supervision, options.workflows);
+    const runtime = Effect.runSync(GuidanceRuntime.make(config, { catalog: () => Effect.succeed({ projects: [], threads: [] }) }).pipe(
+      Effect.provide(Context.merge(store.context, policy.context)), Effect.provideService(SupervisorOwnership, new Set())));
+    ui = await startGuidanceUi(config, runtime, options.definitions, options.editor, options.supervision, options.workflows, undefined, policyService(policy));
   } catch (error) {
-    store.close();
+    await closeStores();
     throw error;
   }
   let closed = false;
   const close = async () => {
     if (closed) return;
     closed = true;
-    try { await ui.close(); } finally { store.close(); }
+    try { await ui.close(); } finally { await closeStores(); }
   };
   defer(t, close);
   const address = ui.server.address();

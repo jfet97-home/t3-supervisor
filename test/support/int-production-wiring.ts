@@ -3,27 +3,22 @@ import { FetchHttpClient } from "effect/http";
 import { request as httpRequest } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { supervisorTeamControllerFacade, supervisorTeamServices, supervisorWorkflowControllers, workflowWriteControllerFacade } from "./root-facades.js";
-import { GuidanceStore } from "../../src/guidance-store.js";
+import { supervisorTeamControllerFacade, supervisorWorkflowControllers, workflowWriteControllerFacade } from "./root-facades.js";
 import { NativeEnvelope } from "../../src/native-envelope.js";
 import { GuidanceRuntime } from "../../src/guidance.js";
 import { startGuidanceUi } from "./service-auth-harness.js";
-import { ProjectSupervisorStore, loadSupervisorOwnership } from "../../src/project-supervisor-store.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import type { StoreShape } from "../../src/store.js";
-import { makeSupervisionGate, SupervisionGate, SupervisionScope } from "../../src/supervision-gate.js";
 import { ProjectDefinitions } from "../../src/project-definitions.js";
-import { buildProjectSupervisor, definitionsService, projectSupervisorFacade, type ProjectSupervisorUnit } from "./team-units.js";
-import { NativeOperateRpc, NativeRpc, NativeShell, type NativeRpcShape, type SupervisorRpc } from "../../src/supervisor-native.js";
+import { buildProjectSupervisor, definitionsService, projectSupervisorFacade, supervisionServices, type ProjectSupervisorUnit } from "./team-units.js";
+import { NativeRpc, NativeShell, type NativeRpcShape, type SupervisorRpc } from "../../src/supervisor-native.js";
 import { makeSupervisorRpc } from "./supervisor-native-client.js";
 import { SupervisorTeamController } from "../../src/supervisor-team-controller.js";
 import { makeT3Client, T3Client, type T3ClientShape } from "../../src/t3.js";
-import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { ProjectInfo, SupervisorConfig, ThreadInfo } from "../../src/types.js";
 import { WorkflowMcp } from "../../src/workflow-mcp.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../../src/workflow-write-controller.js";
-import { SupervisorIds } from "../../src/ids.js";
-import { NodeCrypto } from "@effect/platform-node";
+import { openGuidance, openPolicy, openSupervisors, policyService, storeContext, type GuidanceHandle, type PolicyHandle, type StorePromise, type SupervisorsFacade } from "./store-units.js";
 
 // the production object graph of src/main.ts, src/guidance-application.ts and src/supervision-live.ts, built over a loopback
 // peer and temp files
@@ -37,9 +32,9 @@ export type IntDefinitions = {load(projectId: string, threadId: string, signal: 
 export type IntSupervision = {
   directory: string;
   config: SupervisorConfig;
-  policy: ThreadPolicyStore;
-  guidance: GuidanceStore;
-  store: ProjectSupervisorStore;
+  policy: PolicyHandle;
+  guidance: GuidanceHandle;
+  store: SupervisorsFacade;
   source: Pick<StoreShape, "catalog">;
   t3: T3ClientShape;
   readRpc: SupervisorRpc;
@@ -52,7 +47,7 @@ export type IntSupervision = {
   writes: WorkflowWriteController["Service"];
   team: SupervisorTeamController["Service"];
   // closes both database files, as a process exit would
-  close(): void;
+  close(): StorePromise<void>;
 };
 
 const buildT3Client = (baseUrl: string, token: string): Promise<T3ClientShape> =>
@@ -67,12 +62,10 @@ export const openIntSupervision = async (input: {directory: string; peerUrl: str
   definitions?: IntDefinitions; fetch?: typeof globalThis.fetch}): Promise<IntSupervision> => {
   const config: SupervisorConfig = {dataDirectory: input.directory, t3Url: input.peerUrl, t3TokenFile: "unused", excludedThreadIds: [],
     healthPort: 0, uiPort: 0, uiHost: "127.0.0.1", uiAssetsDirectory: input.directory};
-  config.supervisorOwnedThreadIds = loadSupervisorOwnership(config.dataDirectory);
-  const policy = new ThreadPolicyStore(config.dataDirectory, {excludedThreadIds: config.excludedThreadIds});
-  config.threadPolicy = policy;
-  const guidance = new GuidanceStore(config.dataDirectory);
-  const owned = config.supervisorOwnedThreadIds ??= loadSupervisorOwnership(config.dataDirectory);
-  const store = new ProjectSupervisorStore(guidance, owned);
+  // the process's policy store and ownership set, then the run's guidance client and stores, which reload the ownership
+  const policy = await openPolicy(config.dataDirectory, {excludedThreadIds: config.excludedThreadIds});
+  const guidance = await openGuidance(config.dataDirectory);
+  const store = await openSupervisors(guidance, new Set(), {policy});
   const source: Pick<StoreShape, "catalog"> = {catalog: () => Effect.succeed(input.catalog())};
   const t3 = await buildT3Client(config.t3Url, readToken);
   const readRpc = makeSupervisorRpc(config.t3Url, readToken);
@@ -81,19 +74,10 @@ export const openIntSupervision = async (input: {directory: string; peerUrl: str
   // the T3 client, the definitions and global fetch in the supervision scope, with the admission gate guarding through the
   // supervisor's scope predicates
   const scope = Effect.runSync(Scope.make());
-  const supervisorScope = new SupervisionScope(config, store, true);
   const operate = Effect.runSync(NativeRpc.make({baseUrl: config.t3Url, token: operateToken}).pipe(Effect.provide(NativeEnvelope.layer)));
   const withDefinitions = <A, E, R>(effect: Effect.Effect<A, E, R>) => input.definitions ? Effect.provideService(effect, ProjectDefinitions, definitionsService(input.definitions)) : effect;
-  const services = await Effect.runPromise(supervisorTeamServices(store, config.t3Url, supervisorScope).pipe(
-    Effect.provideService(NativeOperateRpc, operate),
-    Effect.provideServiceEffect(SupervisionGate, makeSupervisionGate(supervisorScope)),
-    withDefinitions,
-    Effect.provideService(T3Client, t3),
-    Effect.provide(Layer.mergeAll(FetchHttpClient.layer, SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer)))),
-    // a test may observe the synchronous start of each request; the request itself is the platform fetch's
-    (effect) => input.fetch ? Effect.provideService(effect, FetchHttpClient.Fetch, input.fetch) : effect,
-    Scope.provide(scope),
-  ));
+  const {scope: supervisorScope, services} = supervisionServices({config, store, operate, t3, scope, fetch: input.fetch,
+    definitions: input.definitions && definitionsService(input.definitions)});
   // the read credential's native reads, the shell boundary and the workflow controllers' proof and scope
   const nativeRead = Effect.runSync(NativeRpc.make({baseUrl: config.t3Url, token: readToken}).pipe(Effect.provide(NativeEnvelope.layer)));
   const nativeShell = Effect.runSync(NativeShell.make({baseUrl: config.t3Url, token: readToken}).pipe(
@@ -106,7 +90,7 @@ export const openIntSupervision = async (input: {directory: string; peerUrl: str
   return {directory: input.directory, config, policy, guidance, store, source, t3, readRpc, operateRpc, supervision, operate, services,
     writes: Context.get(controllers, WorkflowWriteController), team: Context.get(controllers, SupervisorTeamController),
     // a process exit also ends the supervision scope, which aborts any webhook POST still in flight
-    close: () => {Effect.runFork(Scope.close(scope, Exit.void));guidance.close();policy.close();}};
+    close: () => Effect.runPromise(Scope.close(scope, Exit.void)).then(async /*s6d*/ () => await guidance.close()).then(async /*s6d*/ () => await policy.close())};
 };
 
 export type IntEndpoint = {
@@ -123,10 +107,10 @@ export const startIntEndpoint = async (core: IntSupervision): Promise<IntEndpoin
   const {config} = core;
   const workflowReader = workflowWriteControllerFacade((effect, options) => Effect.runPromise(effect, options), core.writes);
   const teamController = supervisorTeamControllerFacade((effect, options) => Effect.runPromise(effect, options), core.team);
-  const ui = await startGuidanceUi(config, Effect.runSync(GuidanceRuntime.make(config, core.guidance, core.source)),
+  const ui = await startGuidanceUi(config, Effect.runSync(GuidanceRuntime.make(config, core.source).pipe(Effect.provide(storeContext(core.store)))),
     undefined, undefined, {supervisor: core.supervision.service, control: core.supervision.supervisionControl},
     WorkflowMcp.layer.pipe(Layer.provide(Layer.mergeAll(Layer.succeed(WorkflowWriteController, core.writes), Layer.succeed(SupervisorTeamController, core.team)))),
-    core.writes);
+    core.writes, policyService(core.policy));
   const address = ui.server.address();
   if (address === null || typeof address === "string") throw new Error("ui did not bind a TCP port");
   const token = await readFile(join(config.dataDirectory, "access", "workflow-mcp-token"), "utf8");

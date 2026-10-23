@@ -15,6 +15,7 @@ import type { MessageInfo, Projection, RunInfo, ThreadInfo } from "../../src/typ
 import { effectiveIndex, projectIndex } from "../project-definitions-fixture.js";
 import { openIntSupervision, startIntEndpoint, type IntEndpoint, type IntSupervision } from "./int-production-wiring.js";
 import {Effect} from "effect";
+import { policyService, serviceOf, type StorePromise } from "./store-units.js";
 
 // a loopback T3 peer (shape of int-native-peer.ts) that can answer, fail or drop an arrived frame, wired as int-production-wiring.ts over temp files
 
@@ -243,11 +244,13 @@ export type LinFixture = {
   main: Projection;
   // the catalog threads; projections are served separately by the peer
   threads: ThreadInfo[];
-  // a ready Supervisor binding for the main, created by bindSupervisor()
+  // a ready Supervisor binding for the main, created by bindSupervisor(); the reads are synchronous, on the caller's turn, so a
+  // fake peer can take them mid-call (no fiber holds the guidance client between its statements then)
   binding(): BindingRecord;
-  bindSupervisor(): BindingRecord;
+  bindSupervisor(): StorePromise<BindingRecord>;
   supervisor(): Projection;
-  // saves Stop or Enable through the Settings excluded-chat editor (project-supervisor.ts:992-1003), fully synchronous
+  // saves Stop or Enable through the Settings excluded-chat editor (project-supervisor.ts:992-1003), fully synchronous: the
+  // admission section and its transactions run to completion on the caller's turn, so a fake peer can commit one mid-call
   stop(threadId?: string): void;
   enable(threadId?: string): void;
   stopped(threadId?: string): boolean;
@@ -270,7 +273,7 @@ export const startLinFixture = async (options: LinOptions = {}): Promise<LinFixt
   const closeAll = async () => {
     try {await endpoint?.close();}
     finally {
-      try {core?.close();}
+      try {await core?.close();}
       finally {
         try {await peer.close();}
         finally {await rm(directory, {recursive: true, force: true});}
@@ -280,12 +283,12 @@ export const startLinFixture = async (options: LinOptions = {}): Promise<LinFixt
   try {
     core = await openIntSupervision({directory, peerUrl: peer.baseUrl, definitions: loader,
       catalog: () => ({projects: [{project: {id: projectId, title: "Project P", workspaceRoot: "/work/p"}, available: true}], threads})});
-    const control = (scope: string | null) => core!.guidance.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+    const control = async /*s6d*/ (scope: string | null) => await core!.guidance.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
       .run(`supervisor_control:${JSON.stringify(scope)}`, JSON.stringify({generation: 1, enabled: true, manual: true}));
-    control(null);
-    control(projectId);
+    await control(null);
+    await control(projectId);
     // the activation boundary anchors the main's earliest run, so only later turns are new requests
-    core.store.baseline({snapshotSequence: 10, threads: [{id: mainThreadId, latestRunId: main.runs[0]?.id ?? null}]});
+    await core.store.baseline({snapshotSequence: 10, threads: [{id: mainThreadId, latestRunId: main.runs[0]?.id ?? null}]});
     // sets catalogClassificationsReady, without which workflowEditingEnabled denies every effect (project-supervisor.ts:130-136,165)
     await core.supervision.candidates("");
     endpoint = await startIntEndpoint(core);
@@ -294,27 +297,26 @@ export const startLinFixture = async (options: LinOptions = {}): Promise<LinFixt
     throw cause;
   }
   const opened = core;
-  const policyUpdate = (threadId: string, stopped: boolean) => {
-    const policy = opened.policy.get();
+  const policyUpdate = (threadId: string, stopped: boolean) => Effect.runSync(Effect.flatMap(policyService(opened.policy).get(), (policy) => {
     const excludedThreadIds = stopped ? [...policy.excludedThreadIds, threadId] : policy.excludedThreadIds.filter(id => id !== threadId);
-    Effect.runSync(opened.supervision.saveThreadPolicy({...policy, excludedThreadIds}));
-  };
+    return opened.supervision.saveThreadPolicy({...policy, excludedThreadIds});
+  }));
   const fixture: LinFixture = {
     directory, peer, core: opened, endpoint: endpoint!, definitions, main, threads,
-    binding: () => opened.store.binding(projectId, mainThreadId)!,
-    bindSupervisor: () => {
-      const reserved = opened.store.reserve(projectId, mainThreadId, "main", defaultSupervisorModel, 10, Date.now());
+    binding: () => Effect.runSync(serviceOf(opened.store).binding(projectId, mainThreadId))!,
+    bindSupervisor: async () => {
+      const reserved = await opened.store.reserve(projectId, mainThreadId, "main", defaultSupervisorModel, 10, Date.now());
       const ready = {...reserved, state: "ready" as const};
-      opened.store.setBinding(ready);
+      await opened.store.setBinding(ready);
       const supervisor = projectionOf({...thread(ready.threadId), title: "Project Supervisor", modelSelection: defaultSupervisorModel});
       peer.projections.set(ready.threadId, supervisor);
       threads.push(supervisor.thread);
       return ready;
     },
     supervisor: () => peer.projections.get(fixture.binding().threadId)!,
-    stop: (threadId = mainThreadId) => policyUpdate(threadId, true),
-    enable: (threadId = mainThreadId) => policyUpdate(threadId, false),
-    stopped: (threadId = mainThreadId) => opened.supervision.supervisionStopped(threadId),
+    stop: (threadId = mainThreadId) => {policyUpdate(threadId, true);},
+    enable: (threadId = mainThreadId) => {policyUpdate(threadId, false);},
+    stopped: (threadId = mainThreadId) => Effect.runSync(opened.supervision.gate.supervisionStopped(threadId)),
     close: closeAll,
   };
   return fixture;
@@ -341,7 +343,7 @@ export const within = async <A>(promise: Promise<A>, ms: number, label: string):
 };
 
 // an interpreted task with a source-bound proposal and its unsent introduction (values of test/support/int-workflow-fixture.ts:77-178)
-export const seedIntroduction = (f: LinFixture, source: {messageId: string; runId: string; ordinal: number; text: string}) => {
+export const seedIntroduction = async /*s6d*/ (f: LinFixture, source: {messageId: string; runId: string; ordinal: number; text: string}) => {
   const binding = f.binding();
   const snapshot: ProjectDefinitionSnapshot = {projectId, threadId: mainThreadId, workspaceRoot: "/work/p", globalOnly: false, globalRevision: null,
     revision: "definition-revision-1", editingAvailable: true, status: "ready", steps: [], workflows: [], config: effectiveIndex({steps: [], workflows: []}),
@@ -362,15 +364,15 @@ export const seedIntroduction = (f: LinFixture, source: {messageId: string; runI
     reason: "The latest user message describes an actionable task.", updatedAt: Date.now(), workflow, agreement: null, requestText: "",
     supervisorThreadId: binding.threadId, messageId: `supervisor-objective:${taskId}`, dispatchedAt: Date.now(), replayCount: 0,
     supervisorRunId: "interpretation-run", definitionContext, definitionSnapshot: snapshot};
-  f.core.store.saveTask(task);
+  await f.core.store.saveTask(task);
   const introduction: WorkflowIntroduction = {taskId, projectId, threadId: mainThreadId, supervisorThreadId: binding.threadId, state: "ready",
     text: "Proposed workflow: Baseline review.", messageId: `supervisor-notice:workflow:${taskId}`, targetRunId: null, error: null};
-  f.core.supervision.conversation.requests.saveIntroduction(introduction);
+  await f.core.supervision.conversation.requests.saveIntroduction(introduction);
   return {task, introduction};
 };
 
 // a ready helper of the bound root assigned the operational child "branch" (seeding of test/support/int-helper-fixture.ts:109-129)
-export const seedTeam = (f: LinFixture, options: {branchParent?: string} = {}) => {
+export const seedTeam = async /*s6d*/ (f: LinFixture, options: {branchParent?: string} = {}) => {
   const binding = f.binding();
   const team = f.core.supervision.team;
   const helper = projectionOf(thread("helper", binding.threadId, "subagent"));
@@ -391,18 +393,18 @@ export const seedTeam = (f: LinFixture, options: {branchParent?: string} = {}) =
   branch.providerTurns = [{runAttemptId: "branch-attempt", status: "running", nodeId: "branch-root"}];
   f.peer.projections.set("branch", branch);
   f.threads.push(branch.thread);
-  const registered = team.registerMember(binding, {threadId: helper.thread.id, taskId: "bootstrap", bootstrapRunId: "boot"});
-  const ready = team.markReady(binding, registered.threadId, registered.epoch);
+  const registered = await team.registerMember(binding, {threadId: helper.thread.id, taskId: "bootstrap", bootstrapRunId: "boot"});
+  const ready = await team.markReady(binding, registered.threadId, registered.epoch);
   const parents = new Map<string, string | null>([[mainThreadId, null], [branchParent, branchParent === mainThreadId ? null : mainThreadId], ["branch", branchParent],
     [ready.threadId, mainThreadId]]);
-  const assignment = team.assign(binding, "branch", ready.threadId, parents);
-  for (const notice of team.snapshot(binding).notifications.filter(value => value.assignmentEpoch === assignment.epoch)) {
-    team.updateNotificationDelivery(binding, binding.threadId, notice.id, "sending");
-    team.updateNotificationDelivery(binding, binding.threadId, notice.id, "delivered");
-    team.acknowledgeNotification(binding, notice.recipientThreadId, notice.id, notice.memberEpoch);
+  const assignment = await team.assign(binding, "branch", ready.threadId, parents);
+  for (const notice of (await team.snapshot(binding)).notifications.filter(value => value.assignmentEpoch === assignment.epoch)) {
+    await team.updateNotificationDelivery(binding, binding.threadId, notice.id, "sending");
+    await team.updateNotificationDelivery(binding, binding.threadId, notice.id, "delivered");
+    await team.acknowledgeNotification(binding, notice.recipientThreadId, notice.id, notice.memberEpoch);
   }
-  team.completeTransfer(binding, "branch", assignment.epoch);
-  const member = team.snapshot(binding).members.find(value => value.threadId === helper.thread.id)!;
+  await team.completeTransfer(binding, "branch", assignment.epoch);
+  const member = (await team.snapshot(binding)).members.find(value => value.threadId === helper.thread.id)!;
   return {helper, branch, member, assignment};
 };
 
@@ -436,9 +438,9 @@ export const helperBatch = (threadId: string): SupervisorMonitorBatch => {
   return {projectId, createdAt: detectedAt, trigger: "priority", finalizedActivityCount: 1, pendingItemCount: 1, truncated: false, threads: [batchThread]};
 };
 
-export const helperReceipt = (f: LinFixture): Record<string, unknown> | null => {
+export const helperReceipt = async /*s6d*/ (f: LinFixture): Promise<Record<string, unknown> | null> => {
   const binding = f.binding();
-  const row = f.core.guidance.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=?")
+  const row = await f.core.guidance.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=?")
     .get(binding.threadId, binding.generation);
   return row ? JSON.parse(String(row.document)) as Record<string, unknown> : null;
 };
@@ -446,10 +448,10 @@ export const helperReceipt = (f: LinFixture): Record<string, unknown> | null => 
 export type TeamEventRow = {rowid: number; id: string; createdAt: number; acknowledgedAt: unknown; document: Record<string, unknown>};
 
 // the stored team event rows of the bound Supervisor in insertion order
-export const teamEventRows = (f: LinFixture): TeamEventRow[] => {
+export const teamEventRows = async /*s6d*/ (f: LinFixture): Promise<TeamEventRow[]> => {
   const binding = f.binding();
-  return f.core.guidance.db.prepare("SELECT rowid,id,created_at,acknowledged_at,document FROM supervisor_team_events WHERE owner_thread_id=? AND owner_generation=? ORDER BY rowid")
-    .all(binding.threadId, binding.generation).map(row => ({rowid: Number(row.rowid), id: String(row.id), createdAt: Number(row.created_at),
+  return (await f.core.guidance.db.prepare("SELECT rowid,id,created_at,acknowledged_at,document FROM supervisor_team_events WHERE owner_thread_id=? AND owner_generation=? ORDER BY rowid")
+    .all(binding.threadId, binding.generation)).map(row => ({rowid: Number(row.rowid), id: String(row.id), createdAt: Number(row.created_at),
       acknowledgedAt: row.acknowledged_at, document: JSON.parse(String(row.document)) as Record<string, unknown>}));
 };
 

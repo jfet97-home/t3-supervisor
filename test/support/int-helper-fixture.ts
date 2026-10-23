@@ -11,6 +11,7 @@ import type { Projection, ThreadInfo } from "../../src/types.js";
 import { httpRequests, sendJson, startIntPeer, type IntNativePeer, type PeerHttpEntry } from "./int-native-peer.js";
 import { openIntSupervision, type IntSupervision } from "./int-production-wiring.js";
 import {Effect} from "effect";
+import { policyService, serviceOf } from "./store-units.js";
 
 // fixture ids, rpc semantics and team seeding copied from test/supervisor-helper-transport.test.ts (:16-71, :73-90, :95-129)
 
@@ -56,8 +57,9 @@ export type HelperFixture = {
   core: IntSupervision;
   binding: BindingRecord;
   runtime: SupervisorTeamRuntimeFacade;
-  batches: ReturnType<SupervisorTeamRuntimeFacade["partition"]>["helperBatches"];
-  // requests that reached a hook path with POST
+  batches: Awaited<ReturnType<SupervisorTeamRuntimeFacade["partition"]>>["helperBatches"];
+  // requests that reached a hook path with POST; the reads below are synchronous, on the caller's turn, so a peer seam can take
+  // them before it replies
   posts(): PeerHttpEntry[];
   request(): ConversationRequest;
   teamRequest(): TeamRequest;
@@ -120,52 +122,54 @@ export const startHelperFixture = async (): Promise<HelperFixture> => {
   const open = () => openIntSupervision({directory, peerUrl: peer.baseUrl, fetch,
     catalog: () => ({projects: [{project: {id: "p", title: "p", workspaceRoot: "/work/p"}, available: true}], threads: [main, operational]})});
   let core = await open();
-  core.guidance.db.prepare("INSERT INTO meta VALUES(?,?)").run('supervisor_control:"p"', JSON.stringify({enabled: true, manual: true, generation: 1}));
-  const binding = {...core.store.reserve("p", "main", "main", defaultSupervisorModel, 1, 1), state: "ready" as const};core.store.setBinding(binding);
+  await core.guidance.db.prepare("INSERT INTO meta VALUES(?,?)").run('supervisor_control:"p"', JSON.stringify({enabled: true, manual: true, generation: 1}));
+  const binding = {...await core.store.reserve("p", "main", "main", defaultSupervisorModel, 1, 1), state: "ready" as const};await core.store.setBinding(binding);
   const team = core.supervision.team;
-  const member = team.registerMember(binding, {threadId: "helper", taskId: "bootstrap", bootstrapRunId: "boot"});
+  const member = await team.registerMember(binding, {threadId: "helper", taskId: "bootstrap", bootstrapRunId: "boot"});
   helper = {thread: {id: "helper", projectId: "p", title: "helper", modelSelection: defaultSupervisorModel,
     runtimeMode: "full-access", interactionMode: "default", lineage: {parentThreadId: binding.threadId, relationshipToParent: "subagent"}},
   runs: [], messages: [], runtimeRequests: []};
-  const ready = team.markReady(binding, member.threadId, member.epoch);
+  const ready = await team.markReady(binding, member.threadId, member.epoch);
   const parents = new Map<string, string | null>([[main.id, null], [operational.id, main.id], [ready.threadId, main.id]]);
-  const assignment = team.assign(binding, operational.id, ready.threadId, parents);
-  for (const notice of team.snapshot(binding).notifications.filter(value => value.assignmentEpoch === assignment.epoch)) {
-    team.updateNotificationDelivery(binding, binding.threadId, notice.id, "sending");
-    team.updateNotificationDelivery(binding, binding.threadId, notice.id, "delivered");
-    team.acknowledgeNotification(binding, notice.recipientThreadId, notice.id, notice.memberEpoch);
+  const assignment = await team.assign(binding, operational.id, ready.threadId, parents);
+  for (const notice of (await team.snapshot(binding)).notifications.filter(value => value.assignmentEpoch === assignment.epoch)) {
+    await team.updateNotificationDelivery(binding, binding.threadId, notice.id, "sending");
+    await team.updateNotificationDelivery(binding, binding.threadId, notice.id, "delivered");
+    await team.acknowledgeNotification(binding, notice.recipientThreadId, notice.id, notice.memberEpoch);
   }
-  team.completeTransfer(binding, operational.id, assignment.epoch);
+  await team.completeTransfer(binding, operational.id, assignment.epoch);
   const threads = [helper.thread, operational, main];
   const helperProjection = helper;
   await core.supervision.candidates("");
   const runtime = core.supervision.conversation.teamRuntime!;
-  const partition = runtime.partition(binding, threads, helperBatch(operational.id));
-  const current = () => core.store.binding("p", "main")!;
+  const partition = await runtime.partition(binding, threads, helperBatch(operational.id));
+  // a synchronous read over the current process's stores (no fiber holds the guidance client between its statements)
+  const now = <A, E>(effect: Effect.Effect<A, E>): A => Effect.runSync(effect);
+  const current = () => now(serviceOf(core.store).binding("p", "main"))!;
+  const rowsOf = (statement: string) => now(core.guidance.sql.unsafe<{document: string}>(statement, [current().threadId, current().generation]));
   return {
     directory, peer, state, helper: helperProjection, threads, binding, batches: partition.helperBatches,
     get core() {return core;},
     get runtime() {return core.supervision.conversation.teamRuntime!;},
     posts: () => [...httpRequests(peer, hookPath), ...httpRequests(peer, redirectedHookPath)].filter(entry => entry.method === "POST"),
-    request: () => core.supervision.conversation.requests.requests("p", "helper").find(value => value.id.startsWith("team-review:"))!,
-    teamRequest: () => core.guidance.db.prepare("SELECT document FROM supervisor_team_requests WHERE owner_thread_id=? AND owner_generation=?")
-      .all(current().threadId, current().generation).map(row => JSON.parse(String(row.document)) as TeamRequest).find(value => value.requestId.startsWith("team-review:"))!,
+    request: () => now(serviceOf(core.supervision.conversation.requests).requests("p", "helper")).find(value => value.id.startsWith("team-review:"))!,
+    teamRequest: () => rowsOf("SELECT document FROM supervisor_team_requests WHERE owner_thread_id=? AND owner_generation=?")
+      .map(row => JSON.parse(String(row.document)) as TeamRequest).find(value => value.requestId.startsWith("team-review:"))!,
     receipt: () => {
-      const row = core.guidance.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=?")
-        .get(current().threadId, current().generation);
+      const [row] = rowsOf("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=?");
       return row ? JSON.parse(String(row.document)) as Record<string, unknown> : null;
     },
     restart: async () => {
-      core.close();
+      await core.close();
       core = await open();
       await core.supervision.candidates("");
     },
     stopMain: () => {
-      const policy = core.policy.get();
-      Effect.runSync(core.supervision.saveThreadPolicy({...policy, excludedThreadIds: [...policy.excludedThreadIds, "main"]}));
+      Effect.runSync(Effect.flatMap(policyService(core.policy).get(), (policy) =>
+        core.supervision.saveThreadPolicy({...policy, excludedThreadIds: [...policy.excludedThreadIds, "main"]})));
     },
     close: async () => {
-      try {core.close();}
+      try {await core.close();}
       finally {
         try {await peer.close();}
         finally {await rm(directory, {recursive: true, force: true});}

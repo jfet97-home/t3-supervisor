@@ -3,7 +3,11 @@ import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, FileSystem, Layer, Redacted } from "effect";
 import { FetchHttpClient, HttpBody, HttpClient } from "effect/http";
 import { GuidanceRuntime } from "../../src/guidance.js";
+import { guidanceDbLayer, policyDbLayer } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
+import { SupervisorIds } from "../../src/ids.js";
+import { SupervisorOwnership } from "../../src/project-supervisor-store.js";
+import { makeThreadPolicyStore, ThreadPolicyStore } from "../../src/thread-policy.js";
 import { GuidanceUi, type GuidanceUiOptions } from "../../src/guidance-ui.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import { ProjectDefinitions } from "../../src/project-definitions.js";
@@ -21,10 +25,14 @@ export const dashboard = (options: GuidanceUiOptions = {}) => Effect.gen(functio
   const fs = yield* FileSystem.FileSystem;
   const directory = yield* fs.makeTempDirectoryScoped({prefix: "c3b-ui-"});
   const config = uiConfig(directory);
-  const store = yield* Effect.acquireRelease(Effect.sync(() => new GuidanceStore(directory)), (store) => Effect.sync(() => store.close()));
-  const runtime = yield* GuidanceRuntime.make(config, store, {catalog: () => Effect.succeed({projects: [], threads: []})});
+  // the guidance store, and the process's policy store and ownership set, in the caller's scope
+  const stores = yield* Layer.build(Layer.mergeAll(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(directory)), Layer.provide(SupervisorIds.layer)),
+    Layer.effect(ThreadPolicyStore, makeThreadPolicyStore({excludedThreadIds: config.excludedThreadIds})).pipe(Layer.provide(policyDbLayer(directory))),
+    SupervisorOwnership.layer).pipe(Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer))));
+  const runtime = yield* GuidanceRuntime.make(config, {catalog: () => Effect.succeed({projects: [], threads: []})}).pipe(Effect.provide(stores));
   const context = yield* Layer.build(GuidanceUi.layer(config, options).pipe(
-    Layer.provide(Layer.mergeAll(ServiceAuth.layer(directory), Layer.succeed(GuidanceRuntime, runtime), workflowMcpLayer({} as WorkflowWriteController["Service"]))),
+    Layer.provide(Layer.mergeAll(ServiceAuth.layer(directory), Layer.succeed(GuidanceRuntime, runtime), workflowMcpLayer({} as WorkflowWriteController["Service"]),
+      Layer.succeedContext(stores))),
     Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer)),
   ));
   const {port} = Context.get(context, GuidanceUi);

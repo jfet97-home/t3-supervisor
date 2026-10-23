@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { it, type TestContext } from "vitest";
 import { after } from "./support/node-test.js";
+import { Effect } from "effect";
 import { helperDeliveryBody } from "../src/supervisor-helper-transport.js";
+import { serviceOf } from "./support/store-units.js";
 import { workflowRequestHash } from "../src/workflow-write-evidence.js";
 import { rpcRequests, sendJson } from "./support/int-native-peer.js";
 import { hookPath, publishedWrapper, redirectedHookPath, startHelperFixture, type HelperFixture } from "./support/int-helper-fixture.js";
@@ -15,8 +17,8 @@ const fixture = async (t: TestContext): Promise<HelperFixture> => {
   return f;
 };
 
-const runBatch = (f: HelperFixture, deadlineMs = 20_000) => {
-  const binding = f.core.store.binding("p", "main")!;
+const runBatch = async (f: HelperFixture, deadlineMs = 20_000) => {
+  const binding = (await f.core.store.binding("p", "main"))!;
   f.runtime.startCycle(binding);
   return f.runtime.runHelperBatch(binding, f.threads, f.batches, AbortSignal.timeout(deadlineMs));
 };
@@ -40,8 +42,8 @@ const assertCredentials = (f: HelperFixture): void => {
   assert.deepEqual(f.peer.unexpected, []);
 };
 
-const channelState = (f: HelperFixture): string | null => {
-  const row = f.core.guidance.db.prepare("SELECT document FROM supervisor_helper_channels").get();
+const channelState = async /*s6d*/ (f: HelperFixture): Promise<string | null> => {
+  const row = await f.core.guidance.db.prepare("SELECT document FROM supervisor_helper_channels").get();
   return row ? (JSON.parse(String(row.document)) as {state: string}).state : null;
 };
 
@@ -71,7 +73,7 @@ it("CT-INT-03: H1 an accepted POST whose reply is lost stays uncertain, is never
   assert.equal(f.teamRequest().state, "uncertain");
 
   await f.restart();
-  const binding = f.core.store.binding("p", "main")!;
+  const binding = (await f.core.store.binding("p", "main"))!;
   f.runtime.startCycle(binding);
   await f.runtime.reconcile(binding, f.threads, AbortSignal.timeout(20_000));
   assert.equal(f.posts().length, 1, "reconciliation after restart posts nothing");
@@ -132,23 +134,25 @@ it("CT-INT-03: H4a a Stop committed during the channel upsert fences the POST an
   await runBatch(f);
   assert.equal(f.posts().length, 0);
   assert.equal(f.receipt(), null);
-  assert.equal(channelState(f), "ready");
+  assert.equal(await channelState(f), "ready");
   const request = f.request();
   assert.equal(request.state, "prepared");
   assert.equal(request.sentAt, null);
-  assert.deepEqual(f.core.policy.get().excludedThreadIds, ["main"]);
+  assert.deepEqual((await f.core.policy.get()).excludedThreadIds, ["main"]);
   assertCredentials(f);
 });
 
 it("CT-INT-03: H4b a quarantine committed during the channel upsert revokes the send and settles its fence", {timeout: 60_000}, async (t) => {
   const f = await fixture(t);
-  f.state.beforeUpsert = once(() => {f.core.supervision.team.quarantineMember(f.core.store.binding("p", "main")!, "helper");});
+  // the quarantine committed synchronously, on the peer's turn
+  f.state.beforeUpsert = once(() => Effect.runSync(Effect.flatMap(serviceOf(f.core.store).binding("p", "main"),
+    (binding) => serviceOf(f.core.supervision.team).quarantineMember(binding!, "helper"))));
   await runBatch(f);
   assert.equal(f.posts().length, 0);
   assert.equal(f.receipt(), null);
   assert.equal(f.request().state, "failed");
   assert.equal(f.teamRequest().state, "settled");
-  const events = f.core.supervision.team.snapshot(f.core.store.binding("p", "main")!).events;
+  const events = (await f.core.supervision.team.snapshot((await f.core.store.binding("p", "main"))!)).events;
   assert.equal(events.some(event => event.kind === "service_attention" && event.id.startsWith("helper-checkin-failed:")), true);
   assertCredentials(f);
 });
@@ -223,7 +227,7 @@ it("CT-INT-03: H6 a 307 reply makes Node fetch re-POST the same body to the redi
 // sol-r19-01 on the real caller: the receipt of an accepted check-in replaced by bytes the transport did not write. The
 // team runtime's reconciliation reaches the send, which stays uncertain on the unreadable receipt; the request keeps
 // its identity, its fence stays unresolved, nothing is posted again and the row keeps its bytes, active or stopped
-const rawReceipt = (f: HelperFixture): string => String(f.core.guidance.db.prepare("SELECT document FROM supervisor_helper_deliveries").get()!.document);
+const rawReceipt = async /*s6d*/ (f: HelperFixture): Promise<string> => String((await f.core.guidance.db.prepare("SELECT document FROM supervisor_helper_deliveries").get())!.document);
 for (const [label, corrupt] of [
   ["an unparsable", (_valid: string) => "{\"threadId\":"],
   ["a wrong-shape", (valid: string) => JSON.stringify({...JSON.parse(valid) as object, state: "delivered"})],
@@ -235,17 +239,17 @@ for (const [label, corrupt] of [
     const request = f.request();
     const fence = f.teamRequest();
     assert.equal(request.state, "waiting");
-    f.core.guidance.db.prepare("UPDATE supervisor_helper_deliveries SET document=?").run(corrupt(rawReceipt(f)));
-    const invalid = rawReceipt(f);
+    await f.core.guidance.db.prepare("UPDATE supervisor_helper_deliveries SET document=?").run(corrupt(await rawReceipt(f)));
+    const invalid = await rawReceipt(f);
 
-    const binding = f.core.store.binding("p", "main")!;
+    const binding = (await f.core.store.binding("p", "main"))!;
     f.runtime.startCycle(binding);
     await f.runtime.reconcile(binding, f.threads, AbortSignal.timeout(20_000));
     const reconciled = f.request();
     assert.deepEqual([reconciled.id, reconciled.messageId, reconciled.text, reconciled.state], [request.id, request.messageId, request.text, "uncertain"]);
     assert.deepEqual([f.teamRequest().requestId, f.teamRequest().state], [fence.requestId, "uncertain"], "its fence stays unresolved");
     assert.equal(f.posts().length, 1, "nothing is posted again");
-    assert.equal(rawReceipt(f), invalid, "the receipt keeps its bytes");
+    assert.equal(await rawReceipt(f), invalid, "the receipt keeps its bytes");
 
     f.stopMain();
     f.runtime.startCycle(binding);
@@ -253,7 +257,7 @@ for (const [label, corrupt] of [
     assert.deepEqual([f.request().id, f.request().state], [request.id, "uncertain"], "the stopped reconciliation neither fails nor releases it");
     assert.deepEqual([f.teamRequest().requestId, f.teamRequest().state], [fence.requestId, "uncertain"]);
     assert.equal(f.posts().length, 1);
-    assert.equal(rawReceipt(f), invalid);
+    assert.equal(await rawReceipt(f), invalid);
     assertCredentials(f);
   });
 }

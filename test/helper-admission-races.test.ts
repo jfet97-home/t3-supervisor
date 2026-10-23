@@ -3,6 +3,7 @@ import { Effect } from "effect";
 import { it, type TestContext } from "vitest";
 import { after } from "./support/node-test.js";
 import { hookPath, startHelperFixture, type HelperFixture } from "./support/int-helper-fixture.js";
+import { policyService } from "./support/store-units.js";
 
 // the real policy writers against the real helper transport on the one admission gate (plan 3.9 T-07, 3.11): production
 // team runtime -> production helper transport -> platform fetch -> loopback socket, with the Settings and dashboard Stops of
@@ -16,23 +17,25 @@ const fixture = async (t: TestContext): Promise<HelperFixture> => {
   return f;
 };
 
-const runBatch = (f: HelperFixture) => {
-  const binding = f.core.store.binding("p", "main")!;
+const runBatch = async (f: HelperFixture) => {
+  const binding = (await f.core.store.binding("p", "main"))!;
   f.runtime.startCycle(binding);
   return f.runtime.runHelperBatch(binding, f.threads, f.batches, AbortSignal.timeout(20_000));
 };
 
-const stopped = (f: HelperFixture): boolean => f.core.policy.get().excludedThreadIds.includes("main");
+// the stored policy, read synchronously on the caller's turn (the policy client is never held across a turn)
+const policyNow = (f: HelperFixture) => Effect.runSync(policyService(f.core.policy).get());
+const stopped = (f: HelperFixture): boolean => policyNow(f).excludedThreadIds.includes("main");
 
 // the Settings excluded-chat editor's Stop: the admitted thread-policy save the HTTP handler yields (t-02)
 const settingsStop = (f: HelperFixture): Promise<unknown> => {
-  const policy = f.core.policy.get();
+  const policy = policyNow(f);
   return Effect.runPromise(f.core.supervision.saveThreadPolicy({...policy, excludedThreadIds: [...policy.excludedThreadIds, "main"]}));
 };
 
 // the dashboard's Stop supervision control: the admitted chat-policy write and its bookkeeping
 const dashboardStop = (f: HelperFixture): Promise<unknown> => f.core.supervision.setChatSupervision(
-  {projectId: "p", mainThreadId: "main", enabled: false, policyGeneration: f.core.policy.get().generation}, AbortSignal.timeout(20_000));
+  {projectId: "p", mainThreadId: "main", enabled: false, policyGeneration: policyNow(f).generation}, AbortSignal.timeout(20_000));
 
 for (const [route, stop] of [["Settings", settingsStop], ["dashboard", dashboardStop]] as const) {
   it(`a ${route} Stop requested while the webhook POST starts inside its admission section waits for that section, commits after it, and no later cycle starts another request`, {timeout: 60_000}, async (t) => {

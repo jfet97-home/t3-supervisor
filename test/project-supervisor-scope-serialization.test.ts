@@ -52,7 +52,7 @@ const holdSupervisorReads = (fixture: Fixture, threadIds: ReadonlySet<string>) =
 it("a cycle and a retry for one main supervise it one at a time under its scope key", {timeout: 10_000}, async t => {
   const fixture = await makeFixture([{threadId: "main", projectId: "project-a", turns: earlier}]);
   after(t, fixture.cleanup);
-  const binding = reserveReadyBinding(fixture, "main");
+  const binding = await reserveReadyBinding(fixture, "main");
   const key = supervisorScopeKey("project-a", "main");
   const events: string[] = [];
   let onWait: (lockKey: string) => void = () => undefined;
@@ -88,8 +88,8 @@ it("a cycle and a retry for one main supervise it one at a time under its scope 
 it("one cycle supervises two mains of a binding batch side by side under their own keys", {timeout: 10_000}, async t => {
   const fixture = await makeFixture([{threadId: "main-a", projectId: "project-a", turns: earlier}, {threadId: "main-b", projectId: "project-a", turns: earlier}]);
   after(t, fixture.cleanup);
-  const first = reserveReadyBinding(fixture, "main-a");
-  const second = reserveReadyBinding(fixture, "main-b");
+  const first = await reserveReadyBinding(fixture, "main-a");
+  const second = await reserveReadyBinding(fixture, "main-b");
   const events: string[] = [];
   const supervisor = fixture.makeSupervisor({locks: observedLocks(events, () => undefined)});
   const reads = holdSupervisorReads(fixture, new Set([first.threadId, second.threadId]));

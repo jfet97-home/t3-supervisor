@@ -12,6 +12,7 @@ import { T3TransportError, type T3ClientShape } from "../../src/t3.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../../src/types.js";
 import { effectiveIndex } from "../project-definitions-fixture.js";
+import { openGuidance, openSupervisors, storeUnitOf } from "./store-units.js";
 
 // copied from test/project-supervisor.test.ts, with interceptable native calls, an optional thread policy file and a file-keeping restart
 
@@ -153,14 +154,14 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
     projections.set(source.threadId, makeSourceProjection(source.threadId, source.projectId, source.turns));
     turnsByThread.set(source.threadId, [...source.turns]);
   }
-  let guidance = new GuidanceStore(directory);
+  let guidance = await openGuidance(directory);
   let ownedIds = new Set<string>();
-  let supervisorStore = new ProjectSupervisorStore(guidance, ownedIds);
-  for (const project of projects) guidance.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+  let supervisorStore = await openSupervisors(guidance, ownedIds);
+  for (const project of projects) await guidance.db.prepare("INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
     .run(`supervisor_control:${JSON.stringify(project.id)}`, JSON.stringify({generation: 1, enabled: true, manual: true}));
-  const threadPolicy = options.threadPolicy ? new ThreadPolicyStore(directory, {excludedThreadIds: []}) : undefined;
-  const config: SupervisorConfig = {supervisorOwnedThreadIds: ownedIds, dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "unused",
-    excludedThreadIds: [], healthPort: 0, ...(threadPolicy ? {threadPolicy} : {})};
+  // the run's policy store in the data directory, as the process opens it
+  const threadPolicy = options.threadPolicy ? storeUnitOf(supervisorStore).policy : undefined;
+  const config: SupervisorConfig = {dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0};
   const source = {
     catalog: () => Effect.succeed({
       projects: registeredProjects.map(project => ({project, available: true})),
@@ -233,12 +234,11 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
     projectSupervisorUnit(config, supervisorStore, source, t3, readRpc, operateRpc, overrides.activationSnapshot ?? activationSnapshot,
       overrides.definitions ?? defaultDefinitions, overrides.now, overrides.locks ? {locks: overrides.locks} : {});
   // a process restart: the old connection is closed and a new store opens the same guidance.sqlite3
-  const restart = (): void => {
-    guidance.close();
-    guidance = new GuidanceStore(directory);
+  const restart = async /*s6d*/ (): Promise<void> => {
+    await guidance.close();
+    guidance = await openGuidance(directory);
     ownedIds = new Set<string>();
-    supervisorStore = new ProjectSupervisorStore(guidance, ownedIds);
-    config.supervisorOwnedThreadIds = ownedIds;
+    supervisorStore = await openSupervisors(guidance, ownedIds);
   };
   const messageDispatches = () => operations.filter(call => call.tag === "orchestration.dispatchCommand" && call.payload.type === "message.dispatch");
   const launches = () => operations.filter(call => call.tag === "orchestration.launchThread");
@@ -253,20 +253,19 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
     setProjectionHook: (hook: ProjectionHook | null) => {projectionHook = hook;},
     setReadHook: (hook: ((tag: string) => void) | null) => {readHook = hook;},
     cleanup: async () => {
-      try {guidance.close();} catch { /* already closed by a simulated crash */ }
-      threadPolicy?.close();
+      try {await guidance.close();} catch { /* already closed by a simulated crash */ }
       await rm(directory, {recursive: true, force: true});
     },
   };
 };
 export type Fixture = Awaited<ReturnType<typeof makeFixture>>;
 
-export const reserveReadyBinding = (fixture: Fixture, mainThreadId = "source-thread", projectId = "project-a") => {
+export const reserveReadyBinding = async /*s6d*/ (fixture: Fixture, mainThreadId = "source-thread", projectId = "project-a") => {
   const main = fixture.projections.get(mainThreadId);
   assert.ok(main);
-  const binding = fixture.supervisorStore.reserve(projectId, mainThreadId, main.thread.title, defaultSupervisorModel, activationSequence, Date.now());
+  const binding = await fixture.supervisorStore.reserve(projectId, mainThreadId, main.thread.title, defaultSupervisorModel, activationSequence, Date.now());
   const ready = {...binding, state: "ready" as const};
-  fixture.supervisorStore.setBinding(ready);
+  await fixture.supervisorStore.setBinding(ready);
   fixture.projections.set(ready.threadId, emptySupervisorProjection(ready.threadId, ready.projectId, defaultSupervisorModel));
   return ready;
 };

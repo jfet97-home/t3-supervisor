@@ -6,6 +6,7 @@ import { after } from "./support/node-test.js";
 import { makeNoProjectFixture } from "./support/c2-ps-b-fixture.js";
 import { completeSupervisorRequest, deferred, makeFixture, missingDefinitions, reserveReadyBinding, retryInput, within, workflowResult, type Fixture } from "./support/c2-ps-fixture.js";
 import type { ProjectSupervisorUnit } from "./support/team-units.js";
+import { replaceMethod, serviceOf } from "./support/store-units.js";
 
 // target regressions (R26): a result, a root replacement or a Start preparation keeps its authority up to the step that commits
 // it. Ordering is controlled through the actual shared admission section (a held permit and an entry barrier); no predicate,
@@ -33,7 +34,7 @@ const heldDefinitions = () => {
 // a dispatched interpretation whose native run has completed with a workflow result
 const completedInterpretation = async (f: Fixture, supervisor: ProjectSupervisorUnit) => {
   await within(supervisor.runOnce(AbortSignal.timeout(5_000)), 5_000, "dispatching cycle");
-  const task = f.supervisorStore.task("main")!;
+  const task = (await f.supervisorStore.task("main"))!;
   assert.equal(task.status, "waiting");
   completeSupervisorRequest(f.projections.get(task.supervisorThreadId)!, task.messageId, workflowResult("task", "Review the release", "A finite task."));
   return task;
@@ -78,13 +79,13 @@ for (const caller of ["cycle", "retry"] as const) {
     const held = heldDefinitions();
     const supervisor = f.makeSupervisor({definitions: held.loader});
     const task = await completedInterpretation(f, supervisor);
-    const binding = f.supervisorStore.binding("project-a", "main")!;
+    const binding = (await f.supervisorStore.binding("project-a", "main"))!;
     const run = f.projections.get(task.supervisorThreadId)!.runs.find(item => item.userMessageId === task.messageId)!;
     await writeAheadOfResult(supervisor, held,
       () => caller === "cycle" ? supervisor.runOnce(AbortSignal.timeout(8_000)) : supervisor.retry(retryInput("project-a", 0, binding, "retry"), AbortSignal.timeout(8_000)),
-      () => Effect.runPromise(supervisor.supervisionControl.setChatPolicy("main", false, f.threadPolicy!.get().generation)));
-    assert.equal(supervisor.supervisionStopped("main"), true);
-    const closed = f.supervisorStore.task("main")!;
+      async () => Effect.runPromise(supervisor.supervisionControl.setChatPolicy("main", false, (await f.threadPolicy!.get()).generation)));
+    assert.equal(await supervisor.supervisionStopped("main"), true);
+    const closed = (await f.supervisorStore.task("main"))!;
     assert.equal(closed.id, task.id, "the original task identity is retained");
     assert.equal(closed.status, "unavailable", "a result admitted after the Stop is not applied");
     assert.equal(closed.reason, stoppedReason);
@@ -103,9 +104,9 @@ it("a project disable admitted ahead of a completed interpretation's application
   const task = await completedInterpretation(f, supervisor);
   let saved: unknown;
   await writeAheadOfResult(supervisor, held, () => supervisor.runOnce(AbortSignal.timeout(8_000)),
-    async () => {saved = await supervisor.saveControl({projectId: "project-a", expectedGeneration: f.supervisorStore.control("project-a").generation, enabled: false}, AbortSignal.timeout(5_000));});
+    async () => {saved = await supervisor.saveControl({projectId: "project-a", expectedGeneration: (await f.supervisorStore.control("project-a")).generation, enabled: false}, AbortSignal.timeout(5_000));});
   assert.equal((saved as {status: string}).status, "saved");
-  const retained = f.supervisorStore.task("main")!;
+  const retained = (await f.supervisorStore.task("main"))!;
   assert.equal(retained.id, task.id);
   assert.equal(retained.status, "waiting", "a result admitted after the disable is not applied");
   assert.equal(retained.objective, null);
@@ -117,14 +118,14 @@ for (const write of ["Stop", "disable"] as const) {
     const f = await makeFixture([{threadId: "main", projectId: "project-a", turns: earlier}], {threadPolicy: true});
     after(t, f.cleanup);
     const supervisor = f.makeSupervisor();
-    const ready = reserveReadyBinding(f, "main");
+    const ready = await reserveReadyBinding(f, "main");
     const missing = {...ready, state: "missing" as const};
-    f.supervisorStore.setBinding(missing);
+    await f.supervisorStore.setBinding(missing);
     f.projections.delete(missing.threadId);
-    f.supervisorStore.saveTask({id: "retained-task", threadId: "main", projectId: "project-a", sourceRunId: "run-old-turn", sourceMessageId: "old-turn", sourceOrdinal: 1,
+    await f.supervisorStore.saveTask({id: "retained-task", threadId: "main", projectId: "project-a", sourceRunId: "run-old-turn", sourceMessageId: "old-turn", sourceOrdinal: 1,
       sourceHash: "hash", status: "queued", objective: null, reason: "Waiting for the project Supervisor.", updatedAt: 1, requestText: "Retained request.",
       supervisorThreadId: missing.threadId, messageId: "supervisor-objective:retained-task", supervisorRunId: null, dispatchedAt: null, replayCount: 0});
-    const taskBefore = f.supervisorStore.task("main");
+    const taskBefore = await f.supervisorStore.task("main");
     const ownedBefore = [...f.supervisorStore.ownedIds];
     const gate = supervisor.admission.gate as BarrierGate;
     const admit = gate.admit;
@@ -141,15 +142,15 @@ for (const write of ["Stop", "disable"] as const) {
       };
       retry = supervisor.retry(retryInput("project-a", 0, missing, "replace"), AbortSignal.timeout(8_000));
       await within(reached.promise, 5_000, "the replacement section");
-      if (write === "Stop") assert.equal((await Effect.runPromise(supervisor.supervisionControl.setChatPolicy("main", false, f.threadPolicy!.get().generation))).status, "saved");
-      else assert.equal((await supervisor.saveControl({projectId: "project-a", expectedGeneration: f.supervisorStore.control("project-a").generation, enabled: false},
+      if (write === "Stop") assert.equal((await Effect.runPromise(supervisor.supervisionControl.setChatPolicy("main", false, (await f.threadPolicy!.get()).generation))).status, "saved");
+      else assert.equal((await supervisor.saveControl({projectId: "project-a", expectedGeneration: (await f.supervisorStore.control("project-a")).generation, enabled: false},
         AbortSignal.timeout(5_000))).status, "saved");
       release.resolve();
       const outcome = await within(retry, 5_000, "the refused replacement");
-      const retained = f.supervisorStore.binding("project-a", "main")!;
+      const retained = (await f.supervisorStore.binding("project-a", "main"))!;
       assert.deepEqual({threadId: retained.threadId, generation: retained.generation, state: retained.state},
         {threadId: missing.threadId, generation: missing.generation, state: "missing"}, "the retained root identity is unchanged");
-      assert.deepEqual(f.supervisorStore.task("main"), taskBefore, "the retained task is unchanged");
+      assert.deepEqual(await f.supervisorStore.task("main"), taskBefore, "the retained task is unchanged");
       assert.deepEqual([...f.supervisorStore.ownedIds], ownedBefore, "no replacement identity was reserved");
       assert.equal(f.launches().length, 0);
       // the answer is true: nothing was replaced
@@ -168,14 +169,14 @@ it("a missing-root replacement whose retained root changed before its section an
   const f = await makeFixture([{threadId: "main", projectId: "project-a", turns: earlier}], {threadPolicy: true});
   after(t, f.cleanup);
   const supervisor = f.makeSupervisor();
-  const ready = reserveReadyBinding(f, "main");
+  const ready = await reserveReadyBinding(f, "main");
   const missing = {...ready, state: "missing" as const};
-  f.supervisorStore.setBinding(missing);
+  await f.supervisorStore.setBinding(missing);
   f.projections.delete(missing.threadId);
-  f.supervisorStore.saveTask({id: "retained-task", threadId: "main", projectId: "project-a", sourceRunId: "run-old-turn", sourceMessageId: "old-turn", sourceOrdinal: 1,
+  await f.supervisorStore.saveTask({id: "retained-task", threadId: "main", projectId: "project-a", sourceRunId: "run-old-turn", sourceMessageId: "old-turn", sourceOrdinal: 1,
     sourceHash: "hash", status: "queued", objective: null, reason: "Waiting for the project Supervisor.", updatedAt: 1, requestText: "Retained request.",
     supervisorThreadId: missing.threadId, messageId: "supervisor-objective:retained-task", supervisorRunId: null, dispatchedAt: null, replayCount: 0});
-  const taskBefore = f.supervisorStore.task("main");
+  const taskBefore = await f.supervisorStore.task("main");
   const ownedBefore = [...f.supervisorStore.ownedIds];
   const gate = supervisor.admission.gate as BarrierGate;
   const admit = gate.admit;
@@ -193,15 +194,15 @@ it("a missing-root replacement whose retained root changed before its section an
     await within(reached.promise, 5_000, "the replacement section");
     // another writer advances the retained root while the replacement waits at its section
     const advanced = {...missing, generation: missing.generation + 1};
-    f.supervisorStore.setBinding(advanced);
+    await f.supervisorStore.setBinding(advanced);
     release.resolve();
     const outcome = await within(retry, 5_000, "the refused replacement");
     assert.deepEqual(outcome, {status: "conflict", message: "The conversation state changed. Refresh and choose the intended recovery action again.", snapshot: null},
       "the changed root is the declared conflict");
-    const retained = f.supervisorStore.binding("project-a", "main")!;
+    const retained = (await f.supervisorStore.binding("project-a", "main"))!;
     assert.deepEqual({threadId: retained.threadId, generation: retained.generation, state: retained.state},
       {threadId: advanced.threadId, generation: advanced.generation, state: "missing"}, "the other writer's root is unchanged");
-    assert.deepEqual(f.supervisorStore.task("main"), taskBefore, "the retained task is unchanged");
+    assert.deepEqual(await f.supervisorStore.task("main"), taskBefore, "the retained task is unchanged");
     assert.deepEqual([...f.supervisorStore.ownedIds], ownedBefore, "no replacement identity was reserved");
     assert.equal(f.launches().length, 0);
   } finally {
@@ -221,21 +222,21 @@ for (const route of ["dashboard", "agent"] as const) {
     const start = () => route === "dashboard" ? control.dashboardStart("main", operationId)
       : control.startSupervision({callerThreadId: "main", userMessageId: "old-turn", operationId}, {runId: "run-old-turn"});
     const store = f.supervisorStore;
-    const save = store.saveStartOperation.bind(store);
     const cancel = new AbortController();
     let cut = false;
     // the caller is interrupted exactly on the durable preparation write
-    store.saveStartOperation = (value) => {save(value);if (value.preparing && !cut) {cut = true;cancel.abort();}};
+    const restore = replaceMethod(serviceOf(store), "saveStartOperation", (save) => (value) =>
+      Effect.tap(save(value), () => Effect.sync(() => {if (value.preparing && !cut) {cut = true;cancel.abort();}})));
     const exit = await within(Effect.runPromiseExit(Effect.andThen(Effect.yieldNow, start()), {signal: cancel.signal}), 5_000, "the interrupted Start");
-    store.saveStartOperation = save;
+    restore();
     assert.equal(cut, true);
     assert.equal(Exit.isFailure(exit), true, "the interrupted caller ends without a result");
-    const receipt = store.startOperation("main", operationId);
+    const receipt = await store.startOperation("main", operationId);
     assert.notEqual(receipt?.preparing, true, "the preparation claim is finished by its owner");
     assert.deepEqual({status: receipt?.status, reason: receipt?.reason}, {status: "unavailable", reason: failedPreparation});
     assert.deepEqual(await Effect.runPromise(start()), {status: "unavailable", reason: failedPreparation}, "a same-operation repeat answers from the receipt");
-    assert.deepEqual(control.startStatus("main", operationId), {threadId: "main", operationId, status: "unavailable", reason: failedPreparation});
-    assert.equal(store.start("main"), null, "no Start permission was reserved");
+    assert.deepEqual(await Effect.runPromise(control.startStatus("main", operationId)), {threadId: "main", operationId, status: "unavailable", reason: failedPreparation});
+    assert.equal(await store.start("main"), null, "no Start permission was reserved");
     assert.equal(f.operations.length, 0, "no native call");
   });
 }
@@ -245,21 +246,21 @@ it("an interruption arriving inside the admitted Start activation keeps the deci
   after(t, f.cleanup);
   const control = f.supervisor.supervisionControl;
   const store = f.fixture.supervisorStore;
-  const saveStart = store.saveStart.bind(store);
   const cancel = new AbortController();
   let cut = false;
   // the caller is interrupted on the Start record written inside the admitted section; the section completes its activation
-  store.saveStart = (value) => {saveStart(value);if (!cut) {cut = true;cancel.abort();}};
+  const restore = replaceMethod(serviceOf(store), "saveStart", (saveStart) => (value) =>
+    Effect.tap(saveStart(value), () => Effect.sync(() => {if (!cut) {cut = true;cancel.abort();}})));
   const exit = await within(Effect.runPromiseExit(Effect.andThen(Effect.yieldNow, control.dashboardStart("manual", "cut-activation")), {signal: cancel.signal}),
     5_000, "the interrupted activation");
-  store.saveStart = saveStart;
+  restore();
   assert.equal(cut, true);
   assert.equal(Exit.isFailure(exit), true);
-  const activated = store.start("manual")!;
+  const activated = (await store.start("manual"))!;
   assert.equal(activated.status, "active", "the admitted activation stands");
-  const receipt = store.startOperation("manual", "cut-activation");
+  const receipt = await store.startOperation("manual", "cut-activation");
   assert.notEqual(receipt?.preparing, true);
   assert.deepEqual({status: receipt?.status, reason: receipt?.reason}, {status: "active", reason: activated.reason}, "the receipt records the decided outcome");
   assert.deepEqual(await Effect.runPromise(control.dashboardStart("manual", "cut-activation")), {status: "active", reason: activated.reason});
-  assert.equal(f.policy.get().excludedThreadIds.includes("manual"), false);
+  assert.equal((await f.policy.get()).excludedThreadIds.includes("manual"), false);
 });

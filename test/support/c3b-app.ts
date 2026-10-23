@@ -6,7 +6,11 @@ import { NodeFileSystem } from "@effect/platform-node";
 import { Clock, Context, Effect, Fiber, Layer } from "effect";
 import type { TestContext } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
+import { SupervisorConfig as Configuration } from "../../src/config.js";
+import { policyDbLayer } from "../../src/db.js";
 import { runGuidanceApplication } from "../../src/guidance-application.js";
+import { SupervisorOwnership } from "../../src/project-supervisor-store.js";
+import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import { NativeTransportLive } from "../../src/supervisor.js";
 import type { StoreShape } from "../../src/store.js";
 import { makeT3Client, T3Client, type T3ClientShape } from "../../src/t3.js";
@@ -127,7 +131,12 @@ export const runApp = (t: TestContext, config: SupervisorConfig, t3: T3ClientSha
       return clock.sleep(duration);
     }),
   };
-  const application = Effect.scoped(runGuidanceApplication(config, source, t3, () => ready.resolve())).pipe(Effect.provide(Layer.merge(NativeTransportLive, NodeFileSystem.layer)));
+  // the process's services the run reads, as the root provides them (src/supervisor.ts): the configuration, the thread-policy
+  // store on its own client and the ownership set
+  const process = Layer.mergeAll(Layer.succeed(Configuration, config), SupervisorOwnership.layer,
+    ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(config.dataDirectory)), Layer.provide(Layer.succeed(Configuration, config))));
+  const application = Effect.scoped(runGuidanceApplication(config, source, t3, () => ready.resolve())).pipe(
+    Effect.provide(Layer.mergeAll(NativeTransportLive, process).pipe(Layer.provideMerge(NodeFileSystem.layer))));
   const fiber = Effect.runFork(observed ? Effect.provideService(application, Clock.Clock, observed) : application);
   root.id = fiber.id;
   fiber.addObserver((exit) => { if (exit._tag === "Failure") ready.reject(new Error("the application stopped before it was ready")); });

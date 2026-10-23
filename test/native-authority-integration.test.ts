@@ -9,6 +9,7 @@ import { callTool, operateToken, rawMcpPost, readToken } from "./support/int-pro
 import { applyArgs, ensureArgs, installEvidence, localStep, sequencePlan, shellThread, startWorkflowFixture, thread,
   type IntWorkflowFixture } from "./support/int-workflow-fixture.js";
 import {Effect} from "effect";
+import { policyService, serviceOf } from "./support/store-units.js";
 
 // complete production boundary: HTTP gate -> stateless MCP -> production-wired controllers and native adapter -> loopback T3 peer, temp databases
 
@@ -20,8 +21,8 @@ const fixture = async (t: TestContext): Promise<IntWorkflowFixture> => {
   return f;
 };
 
-const count = (f: IntWorkflowFixture, table: string, where = "1=1", ...values: Array<string | number>): number =>
-  Number(f.core.guidance.db.prepare(`SELECT count(*) AS n FROM ${table} WHERE ${where}`).get(...values)?.n);
+const count = async /*s6d*/ (f: IntWorkflowFixture, table: string, where = "1=1", ...values: Array<string | number>): Promise<number> =>
+  Number((await f.core.guidance.db.prepare(`SELECT count(*) AS n FROM ${table} WHERE ${where}`).get(...values))?.n);
 
 const projectionPath = (f: IntWorkflowFixture) => `/api/orchestration/threads/${encodeURIComponent(f.supervisorThreadId)}`;
 
@@ -43,15 +44,16 @@ const assertReadCredentials = (peer: IntNativePeer): void => {
   assert.deepEqual(peer.unexpected, []);
 };
 
-const noWriteRows = (f: IntWorkflowFixture): void => {
-  assert.equal(count(f, "supervisor_workflow_write_receipts"), 0);
-  assert.equal(count(f, "supervisor_workflow_write_evidence"), 0);
-  assert.equal(f.core.supervision.workflowStates.get(f.projectId, f.mainThreadId), null);
+const noWriteRows = async /*s6d*/ (f: IntWorkflowFixture): Promise<void> => {
+  assert.equal(await count(f, "supervisor_workflow_write_receipts"), 0);
+  assert.equal(await count(f, "supervisor_workflow_write_evidence"), 0);
+  assert.equal(await f.core.supervision.workflowStates.get(f.projectId, f.mainThreadId), null);
 };
 
+// a Stop committed synchronously, on the native fake's turn
 const stopMain = (f: IntWorkflowFixture): void => {
-  const current = f.core.policy.get();
-  Effect.runSync(f.core.supervision.saveThreadPolicy({...current, excludedThreadIds: [...current.excludedThreadIds, f.mainThreadId]}));
+  Effect.runSync(Effect.flatMap(policyService(f.core.policy).get(), (current) =>
+    f.core.supervision.saveThreadPolicy({...current, excludedThreadIds: [...current.excludedThreadIds, f.mainThreadId]})));
 };
 
 const once = (work: () => void): (() => void) => {
@@ -88,7 +90,7 @@ it("CT-INT-01: 0 gate rejects a missing token, a foreign Host and a foreign Orig
 
   assert.deepEqual(f.peer.log, []);
   assert.deepEqual(f.peer.connections, []);
-  noWriteRows(f);
+  await noWriteRows(f);
 });
 
 it("CT-INT-01: i a valid exact own-main-run proof commits mutation, evidence and receipt over the real wire", {timeout: 60_000}, async (t) => {
@@ -105,18 +107,18 @@ it("CT-INT-01: i a valid exact own-main-run proof commits mutation, evidence and
   assert.equal(typeof value.stateHash, "string");
 
   const owner = {projectId: f.projectId, mainThreadId: f.mainThreadId, supervisorThreadId: f.supervisorThreadId, bindingGeneration: f.binding.generation};
-  const receipts = f.core.guidance.db.prepare("SELECT * FROM supervisor_workflow_write_receipts").all();
+  const receipts = await f.core.guidance.db.prepare("SELECT * FROM supervisor_workflow_write_receipts").all();
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0]!.operation_id, "int-ensure");
   assert.equal(receipts[0]!.operation_namespace, "edit");
   assert.equal(receipts[0]!.request_hash, workflowRequestHash({owner, arguments: args}));
   assert.deepEqual(JSON.parse(String(receipts[0]!.result)), value);
-  const evidence = f.core.guidance.db.prepare("SELECT * FROM supervisor_workflow_write_evidence").all();
+  const evidence = await f.core.guidance.db.prepare("SELECT * FROM supervisor_workflow_write_evidence").all();
   assert.equal(evidence.length, 1);
   assert.equal(evidence[0]!.item_id, itemId);
   assert.equal(evidence[0]!.successful, 1);
   assert.equal((JSON.parse(String(evidence[0]!.native_evidence)) as {nativeItemRef: {strength: string}}).nativeItemRef.strength, "strong");
-  assert.equal(f.core.supervision.workflowStates.get(f.projectId, f.mainThreadId)?.workflowId, value.workflowId);
+  assert.equal((await f.core.supervision.workflowStates.get(f.projectId, f.mainThreadId))?.workflowId, value.workflowId);
 
   assert.deepEqual(traffic(f), {projection: 1, shell: 1, archived: 1, turnItem: 1, total: 4});
   assert.deepEqual(rpcRequests(f.peer, "orchestration.getTurnItem")[0]!.payload, {threadId: f.supervisorThreadId, itemId});
@@ -133,7 +135,7 @@ it("CT-INT-01: ii weak proof is denied after one item read and no lineage read",
   assert.equal(reply.isError, true);
   assert.deepEqual(reply.value, {status: "denied", operationId: "int-weak", reason: "native_item_not_main_strong"});
   assert.deepEqual(traffic(f), {projection: 1, shell: 0, archived: 0, turnItem: 1, total: 2});
-  noWriteRows(f);
+  await noWriteRows(f);
   assertReadCredentials(f.peer);
 });
 
@@ -145,7 +147,7 @@ it("CT-INT-01: ii foreign proof from a child-run node is denied outside the main
   assert.equal(reply.isError, true);
   assert.deepEqual(reply.value, {status: "denied", operationId: "int-foreign", reason: "native_item_outside_main_run"});
   assert.deepEqual(traffic(f), {projection: 1, shell: 0, archived: 0, turnItem: 1, total: 2});
-  noWriteRows(f);
+  await noWriteRows(f);
   assertReadCredentials(f.peer);
 });
 
@@ -164,7 +166,7 @@ it("CT-INT-01: ii truncated native input stays pending after the evidence window
   assert.ok(observed.projection >= 2, `the projection is polled during the window (${observed.projection})`);
   assert.equal(observed.shell, 0);
   assert.equal(observed.archived, 0);
-  noWriteRows(f);
+  await noWriteRows(f);
   assertReadCredentials(f.peer);
 });
 
@@ -181,14 +183,14 @@ it("CT-INT-01: ii lagged evidence stays pending without reserving, then the publ
   assert.equal(before.turnItem, 0);
   assert.equal(before.shell, 0);
   assert.ok(before.projection >= 2, `the projection is polled during the window (${before.projection})`);
-  noWriteRows(f);
+  await noWriteRows(f);
 
   installEvidence(f, args);
   const created = await callTool(f.endpoint, "workflow_write", args);
   assert.equal(created.isError, false);
   assert.equal((created.value as {status: string}).status, "created");
-  assert.equal(count(f, "supervisor_workflow_write_receipts"), 1);
-  assert.equal(count(f, "supervisor_workflow_write_evidence"), 1);
+  assert.equal(await count(f, "supervisor_workflow_write_receipts"), 1);
+  assert.equal(await count(f, "supervisor_workflow_write_evidence"), 1);
   assertReadCredentials(f.peer);
 });
 
@@ -201,7 +203,7 @@ it("CT-INT-01: ii lagged lineage stays pending after three incoherent active/arc
   assert.equal(reply.isError, false);
   assert.deepEqual(reply.value, {status: "pending", operationId: "int-lineage", reason: "native_lineage_unavailable", retryable: true});
   assert.deepEqual(traffic(f), {projection: 1, shell: 3, archived: 3, turnItem: 1, total: 8});
-  noWriteRows(f);
+  await noWriteRows(f);
   assertReadCredentials(f.peer);
 });
 
@@ -222,8 +224,8 @@ it("CT-INT-01: iii an exact replay and an operation ID conflict are answered fro
   assert.deepEqual(reused.value, {status: "conflict", operationId: "int-ensure", reason: "operation_id_reused", currentRevision: null});
   assert.deepEqual(traffic(f), before, "a conflict issues no native request");
   assert.equal(f.peer.connections.length, connections);
-  assert.equal(count(f, "supervisor_workflow_write_receipts"), 1);
-  assert.equal(count(f, "supervisor_workflow_write_evidence"), 1);
+  assert.equal(await count(f, "supervisor_workflow_write_receipts"), 1);
+  assert.equal(await count(f, "supervisor_workflow_write_evidence"), 1);
 });
 
 it("CT-INT-01: iv a Stop committed between proof and commit denies at the commit recheck", {timeout: 60_000}, async (t) => {
@@ -235,9 +237,9 @@ it("CT-INT-01: iv a Stop committed between proof and commit denies at the commit
   const reply = await callTool(f.endpoint, "workflow_write", args);
   assert.equal(reply.isError, true);
   assert.deepEqual(reply.value, {status: "denied", operationId: "int-stop", reason: "owner_changed"});
-  noWriteRows(f);
-  assert.deepEqual(f.core.policy.get().excludedThreadIds, [f.mainThreadId]);
-  const binding = f.core.store.binding(f.projectId, f.mainThreadId);
+  await noWriteRows(f);
+  assert.deepEqual((await f.core.policy.get()).excludedThreadIds, [f.mainThreadId]);
+  const binding = await f.core.store.binding(f.projectId, f.mainThreadId);
   assert.equal(binding?.supervisionStop?.route, "ui");
   assert.equal(binding?.stopNotice?.state, "ready");
   assert.deepEqual(traffic(f), {projection: 1, shell: 1, archived: 1, turnItem: 1, total: 4});
@@ -245,13 +247,16 @@ it("CT-INT-01: iv a Stop committed between proof and commit denies at the commit
 
 it("CT-INT-01: iv a binding generation change between proof and commit denies at the commit recheck", {timeout: 60_000}, async (t) => {
   const f = await fixture(t);
-  f.native.beforeShell = once(() => f.core.store.setBinding({...f.core.store.binding(f.projectId, f.mainThreadId)!, generation: f.binding.generation + 1}));
+  // the binding change committed synchronously, on the native fake's turn
+  const supervisors = serviceOf(f.core.store);
+  f.native.beforeShell = once(() => Effect.runSync(Effect.flatMap(supervisors.binding(f.projectId, f.mainThreadId),
+    (binding) => supervisors.setBinding({...binding!, generation: f.binding.generation + 1}))));
   const args = ensureArgs(f, "int-generation", "Create the main workflow while the binding changes.");
   installEvidence(f, args);
   const reply = await callTool(f.endpoint, "workflow_write", args);
   assert.equal(reply.isError, true);
   assert.deepEqual(reply.value, {status: "denied", operationId: "int-generation", reason: "owner_changed"});
-  noWriteRows(f);
+  await noWriteRows(f);
 });
 
 it("CT-INT-01: iv a task source change during the definition read records one unsuccessful evidence row", {timeout: 60_000}, async (t) => {
@@ -265,19 +270,19 @@ it("CT-INT-01: iv a task source change during the definition read records one un
     plan: sequencePlan([localStep("Inspect source", "Use the task's pinned definitions.")]),
     note: "Apply the pinned plan while the task source changes.",
   };
-  const args = applyArgs(f, input);
+  const args = await applyArgs(f, input);
   installEvidence(f, args);
-  f.definitionReader.onLoad = once(() => {
-    const task = f.core.store.task(f.mainThreadId)!;
-    f.core.store.saveTask({...task, sourceHash: fingerprint("changed")});
-  });
+  // the source change committed synchronously, on the definitions read's turn
+  const supervisors = serviceOf(f.core.store);
+  f.definitionReader.onLoad = once(() => Effect.runSync(Effect.flatMap(supervisors.task(f.mainThreadId),
+    (task) => supervisors.saveTask({...task!, sourceHash: fingerprint("changed")}))));
   const reply = await callTool(f.endpoint, "workflow_write", args);
   assert.equal(reply.isError, true);
   assert.deepEqual(reply.value, {status: "invalid", operationId: "int-apply-source", reason: "current_task_proposal_changed"});
   assert.equal(f.definitionReader.calls, 1);
-  assert.equal(f.core.supervision.workflowStates.get(f.projectId, f.mainThreadId)?.revision, 1);
-  assert.equal(count(f, "supervisor_workflow_write_receipts", "operation_id=?", "int-apply-source"), 0);
-  const evidence = f.core.guidance.db.prepare("SELECT successful,result FROM supervisor_workflow_write_evidence WHERE operation_id=?").all("int-apply-source");
+  assert.equal((await f.core.supervision.workflowStates.get(f.projectId, f.mainThreadId))?.revision, 1);
+  assert.equal(await count(f, "supervisor_workflow_write_receipts", "operation_id=?", "int-apply-source"), 0);
+  const evidence = await f.core.guidance.db.prepare("SELECT successful,result FROM supervisor_workflow_write_evidence WHERE operation_id=?").all("int-apply-source");
   assert.equal(evidence.length, 1);
   assert.equal(evidence[0]!.successful, 0);
   assert.deepEqual(JSON.parse(String(evidence[0]!.result)), reply.value);
@@ -300,27 +305,27 @@ it("CT-INT-01: v excess and forbidden argument fields are rejected by the baseli
   assert.deepEqual(forbiddenReply.value, {status: "invalid", operationId: "int-forbidden", reason: "invalid_ensure_main"});
 
   assert.deepEqual(f.peer.log, []);
-  noWriteRows(f);
+  await noWriteRows(f);
 });
 
 const teamFixture = async (t: TestContext) => {
   const f = await fixture(t);
   const team = f.core.supervision.team;
-  const member = team.registerMember(f.binding, {threadId: "quarantine-helper", taskId: "quarantine-task", bootstrapRunId: "quarantine-bootstrap"});
-  const ready = team.markReady(f.binding, member.threadId, member.epoch);
+  const member = await team.registerMember(f.binding, {threadId: "quarantine-helper", taskId: "quarantine-task", bootstrapRunId: "quarantine-bootstrap"});
+  const ready = await team.markReady(f.binding, member.threadId, member.epoch);
   const helper = thread(member.threadId, f.projectId, f.supervisorThreadId, "subagent");
   f.catalogThreads.push(helper);
   f.native.shellThreads.push(shellThread(helper));
   const args = {supervisorThreadId: f.supervisorThreadId, bindingGeneration: f.binding.generation,
     action: "quarantine", operationId: "int-quarantine", memberThreadId: member.threadId};
-  const memberState = (threadId = member.threadId) => team.snapshot(f.binding).members.find(item => item.threadId === threadId);
+  const memberState = async /*s6d*/ (threadId = member.threadId) => (await team.snapshot(f.binding)).members.find(item => item.threadId === threadId);
   return {f, team, ready, args, memberState};
 };
 
 it("CT-INT-02: valid, replay and conflict quarantine through native proof and one atomic team receipt", {timeout: 60_000}, async (t) => {
   const {f, team, ready, args, memberState} = await teamFixture(t);
-  const second = team.registerMember(f.binding, {threadId: "second-helper", taskId: "second-task", bootstrapRunId: "second-bootstrap"});
-  const secondReady = team.markReady(f.binding, second.threadId, second.epoch);
+  const second = await team.registerMember(f.binding, {threadId: "second-helper", taskId: "second-task", bootstrapRunId: "second-bootstrap"});
+  const secondReady = await team.markReady(f.binding, second.threadId, second.epoch);
   const secondThread = thread(second.threadId, f.projectId, f.supervisorThreadId, "subagent");
   f.catalogThreads.push(secondThread);
   f.native.shellThreads.push(shellThread(secondThread));
@@ -334,27 +339,27 @@ it("CT-INT-02: valid, replay and conflict quarantine through native proof and on
   assert.equal(value.result.state, "quarantined");
   assert.equal(value.result.epoch, ready.epoch + 1);
   assert.equal(typeof value.team, "object");
-  const receipts = f.core.guidance.db.prepare("SELECT evidence_item_id,document FROM supervisor_team_tool_receipts").all();
+  const receipts = await f.core.guidance.db.prepare("SELECT evidence_item_id,document FROM supervisor_team_tool_receipts").all();
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0]!.evidence_item_id, itemId);
   assert.deepEqual(JSON.parse(String(receipts[0]!.document)), value);
-  assert.equal(team.snapshot(f.binding).events.some(event => event.kind === "member_quarantined" && event.memberThreadId === "quarantine-helper"), true);
+  assert.equal((await team.snapshot(f.binding)).events.some(event => event.kind === "member_quarantined" && event.memberThreadId === "quarantine-helper"), true);
   assert.deepEqual(traffic(f), {projection: 1, shell: 1, archived: 1, turnItem: 1, total: 4});
 
   const replay = await callTool(f.endpoint, "supervision_team", args);
   assert.equal(replay.isError, false);
   assert.deepEqual(replay.value, JSON.parse(String(receipts[0]!.document)));
   assert.deepEqual(traffic(f), {projection: 2, shell: 1, archived: 1, turnItem: 2, total: 6}, "a team replay reads fresh proof but no lineage");
-  assert.equal(memberState()?.epoch, ready.epoch + 1);
+  assert.equal((await memberState())?.epoch, ready.epoch + 1);
 
   const conflictArgs = {...args, memberThreadId: second.threadId};
   installEvidence(f, conflictArgs, {toolName: workflowToolNames.team.direct[0]});
   const conflict = await callTool(f.endpoint, "supervision_team", conflictArgs);
   assert.equal(conflict.isError, true);
   assert.deepEqual(conflict.value, {status: "denied", reason: "operation_id_conflict"});
-  assert.equal(memberState(second.threadId)?.state, "ready");
-  assert.equal(memberState(second.threadId)?.epoch, secondReady.epoch);
-  assert.equal(count(f, "supervisor_team_tool_receipts"), 1);
+  assert.equal((await memberState(second.threadId))?.state, "ready");
+  assert.equal((await memberState(second.threadId))?.epoch, secondReady.epoch);
+  assert.equal(await count(f, "supervisor_team_tool_receipts"), 1);
   assertReadCredentials(f.peer);
 });
 
@@ -365,9 +370,9 @@ it("CT-INT-02: weak proof denies the quarantine with no lineage read and no rece
   const reply = await callTool(f.endpoint, "supervision_team", args);
   assert.equal(reply.isError, true);
   assert.deepEqual(reply.value, {status: "denied", reason: "native_item_not_main_strong"});
-  assert.equal(count(f, "supervisor_team_tool_receipts"), 0);
-  assert.equal(memberState()?.state, "ready");
-  assert.equal(memberState()?.epoch, ready.epoch);
+  assert.equal(await count(f, "supervisor_team_tool_receipts"), 0);
+  assert.equal((await memberState())?.state, "ready");
+  assert.equal((await memberState())?.epoch, ready.epoch);
   assert.deepEqual(traffic(f), {projection: 1, shell: 0, archived: 0, turnItem: 1, total: 2});
 });
 
@@ -379,9 +384,9 @@ it("CT-INT-02: a Stop between proof and mutation is caught by the post-proof rec
   const proofStop = await callTool(first.f.endpoint, "supervision_team", first.args);
   assert.equal(proofStop.isError, true);
   assert.deepEqual(proofStop.value, {status: "denied", reason: "actor_changed"});
-  assert.equal(count(first.f, "supervisor_team_tool_receipts"), 0);
-  assert.equal(first.memberState()?.state, "ready");
-  assert.equal(first.memberState()?.epoch, first.ready.epoch);
+  assert.equal(await count(first.f, "supervisor_team_tool_receipts"), 0);
+  assert.equal((await first.memberState())?.state, "ready");
+  assert.equal((await first.memberState())?.epoch, first.ready.epoch);
   assert.deepEqual(traffic(first.f), {projection: 1, shell: 0, archived: 0, turnItem: 1, total: 2});
 
   const second = await teamFixture(t);
@@ -391,8 +396,8 @@ it("CT-INT-02: a Stop between proof and mutation is caught by the post-proof rec
   const lineageStop = await callTool(second.f.endpoint, "supervision_team", second.args);
   assert.equal(lineageStop.isError, true);
   assert.deepEqual(lineageStop.value, {status: "denied", reason: "actor_changed"});
-  assert.equal(count(second.f, "supervisor_team_tool_receipts"), 0);
-  assert.equal(second.memberState()?.state, "ready");
-  assert.equal(second.memberState()?.epoch, second.ready.epoch);
+  assert.equal(await count(second.f, "supervisor_team_tool_receipts"), 0);
+  assert.equal((await second.memberState())?.state, "ready");
+  assert.equal((await second.memberState())?.epoch, second.ready.epoch);
   assert.deepEqual(traffic(second.f), {projection: 1, shell: 1, archived: 1, turnItem: 1, total: 4});
 });

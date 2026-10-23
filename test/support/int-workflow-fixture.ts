@@ -86,14 +86,14 @@ export const startWorkflowFixture = async (mainThread = thread("main-workflows",
     catalog: () => ({projects: [{project: {id: projectId, title: "Project workflows", workspaceRoot: "/workspace/project-workflows"}, available: true}],
       threads: catalogThreads})});
   const {guidance, store: supervisors} = core;
-  const supervisorControl = (scope: string | null, enabled: boolean) => guidance.db.prepare(
+  const supervisorControl = async /*s6d*/ (scope: string | null, enabled: boolean) => await guidance.db.prepare(
     "INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
   ).run(`supervisor_control:${JSON.stringify(scope)}`, JSON.stringify({generation: 1, enabled, manual: true}));
-  supervisorControl(null, true);
-  supervisorControl(projectId, true);
-  const reserved = supervisors.reserve(projectId, mainThreadId, "Main thread", defaultSupervisorModel, 1, 1);
+  await supervisorControl(null, true);
+  await supervisorControl(projectId, true);
+  const reserved = await supervisors.reserve(projectId, mainThreadId, "Main thread", defaultSupervisorModel, 1, 1);
   const binding = {...reserved, state: "ready" as const};
-  supervisors.setBinding(binding);
+  await supervisors.setBinding(binding);
   const supervisorThreadId = binding.threadId;
   const definitionSnapshot: ProjectDefinitionSnapshot = {
     projectId,
@@ -157,7 +157,7 @@ export const startWorkflowFixture = async (mainThread = thread("main-workflows",
     definitionContext,
     definitionSnapshot,
   };
-  supervisors.saveTask(task);
+  await supervisors.saveTask(task);
   const sourceBinding: WorkflowSourceBindingInfo = {
     workspaceRoot: definitionSnapshot.workspaceRoot,
     revision: definitionSnapshot.revision,
@@ -181,7 +181,7 @@ export const startWorkflowFixture = async (mainThread = thread("main-workflows",
     close: async () => {
       try {await endpoint.close();}
       finally {
-        try {core.close();}
+        try {await core.close();}
         finally {
           try {await peer.close();}
           finally {await rm(directory, {recursive: true, force: true});}
@@ -258,8 +258,8 @@ export const installEvidence = (fixture: Pick<IntWorkflowFixture, "supervisorThr
   return itemId;
 };
 
-export const applyArgs = (fixture: IntWorkflowFixture, input: WorkflowApplyPatch) => {
-  const current = fixture.core.supervision.workflowStates.list(fixture.projectId, fixture.mainThreadId).find(document => document.workflowId === input.workflowId);
+export const applyArgs = async /*s6d*/ (fixture: IntWorkflowFixture, input: WorkflowApplyPatch) => {
+  const current = (await fixture.core.supervision.workflowStates.list(fixture.projectId, fixture.mainThreadId)).find(document => document.workflowId === input.workflowId);
   return {
   action: "apply",
   ...locator(fixture),

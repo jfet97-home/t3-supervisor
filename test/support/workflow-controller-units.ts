@@ -1,15 +1,14 @@
-import { Clock, Deferred, Effect, Scope } from "effect";
+import { Clock, Context, Deferred, Effect, Scope } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { supervisorTeamControllerFacade, workflowWriteControllerFacade, type RootRun } from "./root-facades.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import { ProjectDefinitions } from "../../src/project-definitions.js";
 import type { BindingRecord, ProjectSupervisorStore } from "../../src/project-supervisor-store.js";
+import type { ThreadPolicyStoreError } from "../../src/thread-policy.js";
 import { SupervisionControl } from "../../src/supervision-control.js";
 import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService, type SupervisionGateShape } from "../../src/supervision-gate.js";
-import { SupervisionStores } from "../../src/supervision-stores.js";
 import { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import { SupervisorConversationStore } from "../../src/supervisor-conversation-store.js";
-import { ProjectSupervisorMonitorStore } from "../../src/supervisor-monitor-store.js";
 import { HelperTransport } from "../../src/supervisor-helper-transport.js";
 import { NativeOperateRpc, SupervisorRpcError, type NativeRpcShape, type SupervisorRpc } from "../../src/supervisor-native.js";
 import { SupervisorTeamController } from "../../src/supervisor-team-controller.js";
@@ -17,12 +16,13 @@ import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { T3Client } from "../../src/t3.js";
 import type { Projection, SupervisorConfig, ThreadInfo } from "../../src/types.js";
 import type { WorkflowStateStore } from "../../src/workflow-state-store.js";
+import { serviceOf, storeContext, type Promised, type StoreServices } from "./store-units.js";
 import {
   WorkflowNativeAccess, WorkflowWriteController, type SupervisionStartInput, type SupervisionStartResult, type SupervisionStopInput,
   type SupervisionStopResult, type SupervisorContextViewInput, type SupervisorContextViewResult,
 } from "../../src/workflow-write-controller.js";
 import type { WorkflowEvidenceMatch } from "../../src/workflow-write-evidence.js";
-import { projectionClient } from "./team-units.js";
+import { predicate, projectionClient, scopeStores, type Answer } from "./team-units.js";
 
 // the baseline WorkflowWriteController and SupervisorTeamController constructors, rebuilt over the ported services and the
 // baseline promise facades (./root-facades.ts); each unit keeps its constructor options
@@ -35,17 +35,17 @@ export type WorkflowNativeFake = {
 };
 
 export type WorkflowWriteControllerUnitOptions = {
-  supervisors: ProjectSupervisorStore;
+  supervisors: Promised<ProjectSupervisorStore["Service"]>;
   helperProviderInstanceId?: string;
-  team?: SupervisorTeamStore;
-  workflows: WorkflowStateStore;
+  team?: Promised<SupervisorTeamStore["Service"]>;
+  workflows: Promised<WorkflowStateStore["Service"]>;
   native: WorkflowNativeFake;
   loadDefinitions?: (projectId: string, threadId: string, signal: AbortSignal) => Promise<ProjectDefinitionSnapshot>;
   contextViews?: {readContextView(binding: BindingRecord, input: SupervisorContextViewInput, signal: AbortSignal): Promise<SupervisorContextViewResult>};
   stops?: {stop(input: SupervisionStopInput, evidence: WorkflowEvidenceMatch, signal: AbortSignal): Promise<SupervisionStopResult>};
-  isEnabled?: (projectId: string, mainThreadId?: string, purpose?: "effect" | "status" | "read") => boolean;
+  isEnabled?: (projectId: string, mainThreadId?: string, purpose?: "effect" | "status" | "read") => Answer;
   starts?: {start(input: SupervisionStartInput, evidence: WorkflowEvidenceMatch, signal: AbortSignal): Promise<SupervisionStartResult>};
-  isChatStopped?: (mainThreadId: string) => boolean;
+  isChatStopped?: (mainThreadId: string) => Answer<ThreadPolicyStoreError>;
   maxEvidenceWaitMs?: number;
 };
 
@@ -56,8 +56,9 @@ export type SupervisorTeamControllerUnit = Omit<ReturnType<typeof supervisorTeam
   reconcile(binding: BindingRecord, signal: AbortSignal, now?: number): Promise<void>;
 };
 
+type UnitContext = Context.Context<StoreServices | WorkflowStateStore | SupervisionScopeService>;
 type Unit = {readonly service: WorkflowWriteController["Service"]; readonly gate: SupervisionGateShape; readonly native: WorkflowNativeAccess["Service"];
-  readonly stores: SupervisionStores["Service"]};
+  readonly context: UnitContext};
 const units = new WeakMap<object, Unit>();
 
 // the units live for the test process, as the baseline objects did; nothing is in flight once a test awaited its calls
@@ -131,13 +132,14 @@ const clockAt = (now: number): Clock.Clock => {
 // options when called
 class UnitScope extends SupervisionScope {
   constructor(private readonly options: WorkflowWriteControllerUnitOptions) {
-    super({dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0} satisfies SupervisorConfig, options.supervisors, true);
+    super({dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0} satisfies SupervisorConfig, scopeStores(options.supervisors), true);
   }
-  override scopeEnabled(): boolean {return true;}
-  override workflowEditingEnabled(projectId: string, mainThreadId?: string, purpose?: "effect" | "status" | "read"): boolean {
-    return this.options.isEnabled ? this.options.isEnabled(projectId, mainThreadId, purpose) : this.options.supervisors.enabled(projectId);
+  override scopeEnabled() {return Effect.succeed(true);}
+  override workflowEditingEnabled(projectId: string, mainThreadId?: string, purpose?: "effect" | "status" | "read") {
+    const isEnabled = this.options.isEnabled;
+    return isEnabled ? predicate(() => isEnabled(projectId, mainThreadId, purpose)) : serviceOf(this.options.supervisors).enabled(projectId);
   }
-  override supervisionStopped(threadId: string): boolean {return this.options.isChatStopped?.(threadId) ?? false;}
+  override supervisionStopped(threadId: string) {return predicate(() => this.options.isChatStopped?.(threadId) ?? false);}
 }
 
 // the baseline promise context views as the conversation's view read; nothing else of the conversation is used
@@ -160,23 +162,21 @@ const controlOf = (options: WorkflowWriteControllerUnitOptions): SupervisionCont
 // without a team option it runs without team authority, as the baseline controller did
 export const workflowWriteControllerUnit = (options: WorkflowWriteControllerUnitOptions): WorkflowWriteControllerUnit => {
   const scope = new UnitScope(options);
-  const gate = Effect.runSync(makeSupervisionGate(scope));
   const native = nativeAccess(options.native);
-  const stores = SupervisionStores.of({supervisors: options.supervisors, requests: new SupervisorConversationStore(options.supervisors.store),
-    monitor: new ProjectSupervisorMonitorStore(options.supervisors.store), team: options.team ?? new SupervisorTeamStore(options.supervisors),
-    workflows: options.workflows});
+  const context: UnitContext = storeContext(options.supervisors, options.workflows).pipe(
+    (stores) => options.team ? Context.add(stores, SupervisorTeamStore, serviceOf(options.team)) : stores, Context.add(SupervisionScopeService, scope));
+  const gate = Effect.runSync(makeSupervisionGate(scope).pipe(Effect.provide(context)));
   const service = Effect.runSync(WorkflowWriteController.make({...(options.team ? {} : {withoutTeam: true}),
     ...(options.maxEvidenceWaitMs !== undefined ? {maxEvidenceWaitMs: options.maxEvidenceWaitMs} : {})}).pipe(
     (effect) => options.starts || options.stops ? Effect.provideService(effect, SupervisionControl, controlOf(options)) : effect,
     Effect.provideService(SupervisionGate, gate),
     Effect.provideService(WorkflowNativeAccess, native),
-    Effect.provideService(SupervisionStores, stores),
-    Effect.provideService(SupervisionScopeService, scope),
     (effect) => options.loadDefinitions ? Effect.provideService(effect, ProjectDefinitions, definitionsOf(options.loadDefinitions)) : effect,
     (effect) => options.contextViews ? Effect.provideService(effect, SupervisorConversation, contextViewsOf(options.contextViews)) : effect,
+    Effect.provide(context),
   ));
   const unit = Object.assign(workflowWriteControllerFacade(run, service), {options});
-  units.set(unit, {service, gate, native, stores});
+  units.set(unit, {service, gate, native, context});
   return unit;
 };
 
@@ -189,19 +189,21 @@ export const workflowWriteControllerService = (workflows: WorkflowWriteControlle
 
 // the team controller over the write unit's gate and native reads, its helper receipts read through a receipt-only helper
 // transport on the same store, and the promise rpc (or none) as the operate client
-export const supervisorTeamControllerUnit = (workflows: WorkflowWriteControllerUnit, team: SupervisorTeamStore, rpc: SupervisorRpc | null,
-  requests?: SupervisorConversationStore): SupervisorTeamControllerUnit => {
+export const supervisorTeamControllerUnit = (workflows: WorkflowWriteControllerUnit, team: Promised<SupervisorTeamStore["Service"]>, rpc: SupervisorRpc | null,
+  requests?: Promised<SupervisorConversationStore["Service"]>): SupervisorTeamControllerUnit => {
   const unit = units.get(workflows);
   if (!unit) throw new Error("not a workflow write controller unit");
-  const store = workflows.options.supervisors;
-  const transport = build(HelperTransport.make({store, baseUrl: "http://unused.invalid"}).pipe(
+  const transport = build(HelperTransport.make({baseUrl: "http://unused.invalid"}).pipe(
     Effect.provideService(SupervisionGate, unit.gate),
     Effect.provideService(T3Client, projectionClient((threadId, signal) => workflows.options.native.projection(threadId, signal))),
     Effect.provide(FetchHttpClient.layer),
+    Effect.provide(unit.context),
   ));
+  const context = Context.add(unit.context, SupervisorTeamStore, serviceOf(team)).pipe(
+    (stores) => requests ? Context.add(stores, SupervisorConversationStore, serviceOf(requests)) : stores);
   const service = build(SupervisorTeamController.make(
     workflows.options.helperProviderInstanceId ? {helperProviderInstanceId: workflows.options.helperProviderInstanceId} : {}).pipe(
-    Effect.provideService(SupervisionStores, SupervisionStores.of({...unit.stores, team, ...(requests ? {requests} : {})})),
+    Effect.provide(context),
     Effect.provideService(WorkflowWriteController, unit.service),
     Effect.provideService(WorkflowNativeAccess, unit.native),
     Effect.provideService(SupervisionGate, unit.gate),
