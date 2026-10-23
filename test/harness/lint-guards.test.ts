@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 
 // the migration lint guards of eslint.config.js on virtual files: only src/db.ts may import the SQLite driver
 // (barrel or any subpath), only src/native-envelope.ts may import ws in src, src runs no Effect.run* outside the process
-// entries and the workflow MCP adapter, extension loading stays banned and the suites never import node:test
+// entries and the workflow MCP adapter, extension loading stays banned, the suites never import node:test, and src and
+// ui/src start no raw timer, import node:sqlite only in src/db.ts and run no Effect.run* in ui/src
 
 // every reported message of the file, one per line
 const lint = async (filePath: string, code: string): Promise<string> => {
@@ -59,6 +60,30 @@ describe("lint guards", () => {
     expect(await lint("src/lint-guard-probe.ts", fiberRuntime)).toContain(runOwner);
     expect(await lint("src/main.ts", fiberRuntime)).toContain(runOwner);
     expect(await lint("src/workflow-mcp.ts", fiberRuntime)).not.toContain(runOwner);
+  });
+
+  it("rejects raw timers in src and ui/src, also through globalThis, window and the timers modules, but not in tests", { timeout: 30_000 }, async () => {
+    const timerOwner = "src and ui/src start no raw timer; wait and repeat with Effect's Clock and Schedule (Effect.sleep, Schedule.spaced)";
+    for (const code of [
+      `export const later = (run: () => void) => setTimeout(run, 10);\n`,
+      `export const tick = (run: () => void) => setInterval(run, 10);\n`,
+      `export const soon = (run: () => void) => setImmediate(run);\n`,
+      `export const later = (run: () => void) => globalThis.setTimeout(run, 10);\n`,
+      `import { setTimeout as wait } from "node:timers/promises";\nexport const later = () => wait(10);\n`,
+    ]) {
+      for (const file of ["src/lint-guard-probe.ts", "ui/src/lint-guard-probe.ts", "src/db.ts", "src/native-envelope.ts"]) expect(await lint(file, code)).toContain(timerOwner);
+      expect(await lint("test/lint-guard-probe.test.ts", code)).not.toContain(timerOwner);
+    }
+    expect(await lint("ui/src/lint-guard-probe.tsx", `export const later = (run: () => void) => window.setTimeout(run, 10);\n`)).toContain(timerOwner);
+  });
+
+  it("rejects node:sqlite outside src/db.ts in src and ui/src, and Effect.run* in ui/src", { timeout: 30_000 }, async () => {
+    const nodeSqliteOwner = "node:sqlite stays in the SQL layer and private files adapter src/db.ts (plan 3.2)";
+    const code = `import { DatabaseSync } from "node:sqlite";\nexport const open = () => new DatabaseSync(":memory:");\n`;
+    for (const file of ["src/lint-guard-probe.ts", "ui/src/lint-guard-probe.ts"]) expect(await lint(file, code)).toContain(nodeSqliteOwner);
+    expect(await lint("src/db.ts", code)).not.toContain(nodeSqliteOwner);
+    expect(await lint("ui/src/lint-guard-probe.ts", `import { Effect } from "effect";\nexport const value = Effect.runSync(Effect.succeed(1));\n`))
+      .toContain("effects in src run in their caller's fiber; Effect.run* stays in the entries and the workflow MCP adapter (plan 3.9)");
   });
 
   it("rejects extension loading and node:test", { timeout: 30_000 }, async () => {

@@ -9427,7 +9427,7 @@
     "every UiError message and the unknown-start-outcome guidance text (`do not replay`) exactly as written (L58-L137)",
     "threadPolicy handler routes through supervision.saveThreadPolicy (human Stop/Enable semantics) when supervision exists (L129-L137)",
     "startup failure closes both listeners, disposes web handler, closes auth (L324-L335); close aborts active requests, closes MCP endpoint, listeners, handler, auth (L339-L350)",
-    "legacy <data>/ui-login-code removed at start (L54)"
+    "legacy <data>/ui-login-code removed at start (L54); removed in S8 (D-11), no startup deletes it"
    ],
    "existingTests": [
     {
@@ -23960,7 +23960,7 @@
    "source": "Coordinator (S0)",
    "requirement": "the unchanged CPU-bound deadline tests cannot run under Vitest's global async hook",
    "response": "plan 5.3 rule 3 exception: test/t3.test.ts and test/t3-projection-stream.test.ts run in a separate invocation (vitest.cpu-bound.config.ts) with the fatal native-resource gate test/support/handle-gate.ts; it does not cover pending promises or Effect fibers; since S4 the exercised code runs on fibers, so fiber and promise cleanup of watch, read, heartbeat and reader-cancel is proven in the main phase under the full detector (test/t3-client-port.test.ts T3-PORT-01..14, test/t3.characterization.test.ts, test/t3-projection-stream.characterization.test.ts, test/native-envelope.test.ts); deadlines and assertions unchanged",
-   "status": "resolved (S0), revised (S4)"
+   "status": "resolved (S0), revised (S4), retired (S8): both files run in the main phase under the full detector"
   },
   {
    "id": "UI-STORY-03-BASELINE",

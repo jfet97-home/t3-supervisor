@@ -271,9 +271,8 @@ describe("read interruption (CT-T3-06, effect form)", () => {
   }), { timeout: 10_000 });
 });
 
-// GATE-CPU revisit: test/t3.test.ts runs without the async leak detector for its cpu-bound deadlines, so its watch and
-// read failure paths are repeated here, where the detector fails the file for any fiber or promise left behind; each
-// case also observes that its socket or request was ended
+// the watch and read failure paths under the full detector, which fails the file for any fiber or promise left behind;
+// each case also observes that its socket or request was ended
 describe("watch and read cleanup under the full detector", () => {
   it.live("T3-PORT-09: a websocket handshake that never completes fails at its bound and ends the connection", () => Effect.gen(function*() {
     const peer = yield* hungPeer;

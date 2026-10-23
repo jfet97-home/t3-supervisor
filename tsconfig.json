@@ -11,5 +11,5 @@
     "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "vitest.config.ts", "vitest.harness.config.ts", "vitest.cpu-bound.config.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "vitest.config.ts", "vitest.harness.config.ts"]
 }
