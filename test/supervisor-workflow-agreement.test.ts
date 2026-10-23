@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { it } from "vitest";
-import { Schema } from "effect";
+import { it } from "@effect/vitest";
+import { Effect, Schema } from "effect";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { WorkflowProtocolDiagnosticSchema } from "../src/project-supervisor-contract.js";
 import { interpretationFromFields, prepareWorkflowRequest, validateWorkflowPlan, workflowInterpretationOutcome, workflowRecordDiagnostic, type ProposalContext, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
@@ -106,6 +106,9 @@ const visitPlanNodes = (group: unknown, visit: (node: MutableRecord) => void): v
     else if (node.kind === "workflow" && node.plan) visitPlanNodes(node.plan, visit);
   }
 };
+
+// the record parsers, validators and fingerprints are pure functions with plain tests; the diagnostic metadata decode is an Effect
+// test of the schema's decoder
 
 const fence = (kind: "workflow-proposal" | "workflow-acceptance", value: unknown): string =>
   `\`\`\`${kind}\n${JSON.stringify(value)}\n\`\`\``;
@@ -259,15 +262,17 @@ it("proposal diagnostics separate malformed envelopes, task/source mismatches, a
   assert.equal(diagnoseWorkflowProposalRecord(provisionalRecord, "task-a", context, true), "plan_not_formal");
 });
 
-it("workflow protocol diagnostic metadata has bounded strings and finite time", () => {
+const decodeDiagnostic = Schema.decodeUnknownEffect(WorkflowProtocolDiagnosticSchema);
+
+it.effect("workflow protocol diagnostic metadata has bounded strings and finite time", () => Effect.gen(function* () {
   assert.ok(workflowProtocolDiagnosticCodes.includes("record_json_invalid"));
   const diagnostic = {role: "operative", proposalId: "proposal-a", messageId: "message-a", code: "record_fields", observedAt: 1};
-  assert.deepEqual(Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)(diagnostic), diagnostic);
-  assert.throws(() => Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)({...diagnostic, proposalId: "x".repeat(201)}));
-  assert.throws(() => Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)({...diagnostic, messageId: "x".repeat(513)}));
-  assert.throws(() => Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)({...diagnostic, code: "x".repeat(81)}));
-  assert.throws(() => Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)({...diagnostic, observedAt: Number.POSITIVE_INFINITY}));
-});
+  assert.deepEqual(yield* decodeDiagnostic(diagnostic), diagnostic);
+  assert.ok(yield* Effect.flip(decodeDiagnostic({...diagnostic, proposalId: "x".repeat(201)})));
+  assert.ok(yield* Effect.flip(decodeDiagnostic({...diagnostic, messageId: "x".repeat(513)})));
+  assert.ok(yield* Effect.flip(decodeDiagnostic({...diagnostic, code: "x".repeat(81)})));
+  assert.ok(yield* Effect.flip(decodeDiagnostic({...diagnostic, observedAt: Number.POSITIVE_INFINITY})));
+}));
 
 it("plan fingerprints bind source revision, nested identity, and meaningful order", () => {
   const snapshot = definitions();
