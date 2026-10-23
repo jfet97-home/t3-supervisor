@@ -15,7 +15,7 @@ import { cutoverNativeThreads, cutoverReport, type CutoverNatives, type CutoverP
   interpretationCutoverReason, readCutoverRows, renderCutoverPlan } from "../src/interpretation-cutover.js";
 import { InterpretationEvidence, interpretationPlanDigest } from "../src/interpretation-evidence.js";
 import { interpretationSourcePin } from "../src/interpretation-submission.js";
-import type { WorkflowAgreementInfo, WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
+import { WorkflowAgreement, type WorkflowAgreementInfo, type WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import { SupervisorOwnership, type SupervisionStartRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { renderRolloutScan, rolloutScan } from "../src/rollout-scan.js";
 import { SupervisionStoresLive } from "../src/supervision-live.js";
@@ -66,10 +66,15 @@ const provisionalRaw = {requirements: [{kind: "step", id: "test-plan", applies: 
   plan: {kind: "sequence", nodes: [{kind: "step", definitionId: null, localId: "bounded-review", name: "Review available context",
     description: "State unknown obligations.", reason: "Continue with finite planning."}]}};
 
-// the pre-s6e agreement of a task record: its proposal evidence one flat message id
-const legacyAgreement = (proposalId: string, messageId: string, agentMessageId: string, workflow: WorkflowProposalInfo) =>
-  ({status: "agreed", message: "Agreed.", proposalId, agreedAt: baseTime + 500, supervisorMessageId: messageId, agentMessageId,
+// the pre-s6e agreement of a task record and of its main's workflow document: its proposal evidence one flat message id
+const legacyAgreement = (proposalId: string, messageId: string, agentMessageId: string, workflow: WorkflowProposalInfo, status: "agreed" | "stale" = "agreed") =>
+  ({status, message: "Agreed.", proposalId, agreedAt: baseTime + 500, supervisorMessageId: messageId, agentMessageId,
     workflow: {...workflow, status: "proposed"}}) as unknown as WorkflowAgreementInfo;
+// the same agreement as the current format stores it: the evidence naming that message in the flat id's place
+const convertedAgreement = (legacy: WorkflowAgreementInfo): WorkflowAgreementInfo => {
+  const {status, message, proposalId, agreedAt, supervisorMessageId, agentMessageId, workflow} = legacy as unknown as WorkflowAgreementInfo & {supervisorMessageId: string};
+  return {status, message, proposalId, agreedAt, evidence: {kind: "supervisor_message", messageId: supervisorMessageId}, agentMessageId, workflow};
+};
 
 const introduction = (base: TaskRecord, state: string, extra: Record<string, unknown> = {}) => ({taskId: base.id, projectId, threadId: base.threadId,
   supervisorThreadId: root, state, text: introductionBody, messageId: `supervisor-introduction:${base.id}`, targetRunId: null, error: null, ...extra});
@@ -83,6 +88,8 @@ type Scenario = {
   readonly starts: ReadonlyArray<SupervisionStartRecord>;
   readonly candidates: ReadonlyArray<Record<string, unknown>>;
   readonly introductions: ReadonlyArray<Record<string, unknown>>;
+  /** the tasks whose agreement their main's workflow document also retains */
+  readonly workflowAgreements: ReadonlyArray<TaskRecord>;
   readonly projection: Projection;
 };
 
@@ -128,8 +135,10 @@ const scenario = (inflightRun: "running" | "completed" | "absent"): Scenario => 
   });
   const stale = interpreted(task("provisional-stale"), provisionalSnapshot(), provisionalRaw);
   interpretationRun(projection, stale.task, 8, "completed", stale.answer.replace("Review available context", "Review something else"));
+  // an unsent request that keeps an earlier source revision's agreement as stale history
   const queued = task("queued", {status: "queued", objective: null, reason: "Waiting for the project Supervisor.", requestText: promptBody, dispatchedAt: null,
-    supervisorRunId: null, definitionContext: interpreted(task("queued")).task.definitionContext, definitionReadAttempts: 1});
+    supervisorRunId: null, definitionContext: interpreted(task("queued")).task.definitionContext, definitionReadAttempts: 1,
+    agreement: legacyAgreement("proposal-queued-earlier", "earlier-proposal-queued", "operative-acceptance-queued", formal.task.workflow!, "stale")});
   const settled = task("settled", {status: "not_supervised", reason: "Supervision is not needed.", supervisorRunId: "interpretation-run-settled"});
   return {
     tasks: [inflight, formalTask, changedTask, ...provisional.map((item) => item.task), stale.task, queued, settled],
@@ -146,6 +155,7 @@ const scenario = (inflightRun: "running" | "completed" | "absent"): Scenario => 
         {interpretation: true, agentMessageId: "operative-acceptance-changed", agentTextHash: "acceptance-hash"}),
     ],
     introductions: [...provisional.map((item) => item.introduction), introduction(stale.task, "ready"), introduction(formal.task, "sent", {commandId: "command-formal"})],
+    workflowAgreements: [formalTask],
     projection,
   };
 };
@@ -153,10 +163,30 @@ const scenario = (inflightRun: "running" | "completed" | "absent"): Scenario => 
 // ---- the data directory
 
 // the tables of a run that opened its stores (the production layers, closed again), then the pre-s6e rows through the raw driver
-const stores = (directory: string) => WorkflowStateStore.layer.pipe(
+const stores = (directory: string, workflows = WorkflowStateStore.layer) => workflows.pipe(
   Layer.provideMerge(SupervisionStoresLive), Layer.provideMerge(GuidanceStore.layer), Layer.provideMerge(guidanceDbLayer(directory)),
   Layer.provide(Layer.mergeAll(SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer)), SupervisorOwnership.layer, NodeFileSystem.layer)));
-const seeded = (prefix: string, value: Scenario) => Effect.gen(function* () {
+// each agreement imported by the production workflow store, then stored back in the pre-s6e format; returns the current store's documents
+const importedWorkflows = (directory: string, tasks: ReadonlyArray<TaskRecord>) => Effect.scoped(Effect.gen(function* () {
+  const context = yield* Layer.build(stores(directory, WorkflowStateStore.layerWith(() => Effect.succeed(true))));
+  const workflows = Context.get(context, WorkflowStateStore);
+  const db = Context.get(context, GuidanceDb);
+  const documents = new Map<string, string>();
+  for (const item of tasks) {
+    const imported = yield* db.withTransaction(workflows.importAcceptedAgreement({projectId, mainThreadId: item.threadId, supervisorThreadId: root, bindingGeneration: 1},
+      {taskId: item.id, sourceThreadId: item.threadId, sourceRunId: item.sourceRunId, sourceMessageId: item.sourceMessageId, sourceHash: item.sourceHash,
+        objective: item.objective!, agreement: convertedAgreement(item.agreement!)}, baseTime + 600));
+    assert.equal(imported.status, "applied");
+    const [row] = yield* db<{workflow_id: string; document: string}>`SELECT workflow_id,document FROM supervisor_workflow_state WHERE thread_id=${item.threadId}`;
+    const messageId = (item.agreement as unknown as {supervisorMessageId: string}).supervisorMessageId;
+    const legacy = row!.document.split(`"evidence":${JSON.stringify({kind: "supervisor_message", messageId})}`);
+    assert.equal(legacy.length, 2, "the document retains the agreement once");
+    yield* db`UPDATE supervisor_workflow_state SET document=${legacy.join(`"supervisorMessageId":${JSON.stringify(messageId)}`)} WHERE workflow_id=${row!.workflow_id}`;
+    documents.set(row!.workflow_id, row!.document);
+  }
+  return documents;
+}));
+const seededWith = (prefix: string, value: Scenario) => Effect.gen(function* () {
   const directory = yield* dataDirectory(prefix);
   yield* Effect.scoped(Layer.build(stores(directory)));
   const db = new DatabaseSync(join(directory, "guidance.sqlite3"));
@@ -183,8 +213,9 @@ const seeded = (prefix: string, value: Scenario) => Effect.gen(function* () {
     insert("INSERT INTO supervisor_workflow_operations VALUES(?,?,?,?,?,?,?,?,?,?)", projectId, "main-formal", root, 1, "workflow", "operation-unknown",
       "request-hash", JSON.stringify({status: "uncertain", workflowId: "workflow-formal"}), "workflow-formal", baseTime);
   } finally {db.close();}
-  return directory;
+  return {directory, workflows: yield* importedWorkflows(directory, value.workflowAgreements)};
 });
+const seeded = (prefix: string, value: Scenario) => Effect.map(seededWith(prefix, value), ({directory}) => directory);
 
 // every row of every table, by table, in rowid order
 const rows = (directory: string): Record<string, Array<Record<string, unknown>>> => {
@@ -251,6 +282,15 @@ const cutoverStep = (directory: string, t3: T3ClientShape, now: number) => Effec
   return {exit, events: events.filter((event) => String(event.event).startsWith("interpretation_cutover"))};
 });
 
+// the stored agreements the scenario converts, as the plan lists them
+const workflowIdOf = (directory: string, threadId: string): string => String(rows(directory).supervisor_workflow_state!.find((row) => row.thread_id === threadId)!.workflow_id);
+const expectedAgreements = (workflowId: string) => [
+  {row: "task", id: "main-changed", taskId: "task-changed", proposalId: "task-changed", status: "agreed", messageId: "answer-task-changed"},
+  {row: "task", id: "main-formal", taskId: "task-formal", proposalId: "task-formal", status: "agreed", messageId: "answer-task-formal"},
+  {row: "task", id: "main-queued", taskId: "task-queued", proposalId: "proposal-queued-earlier", status: "stale", messageId: "earlier-proposal-queued"},
+  {row: "workflow", id: workflowId, taskId: "task-formal", proposalId: "task-formal", status: "agreed", messageId: "answer-task-formal"},
+];
+
 const deepFreeze = <A>(value: A): A => {
   if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -287,8 +327,9 @@ it.live("the plan is pure: identical inputs give an identical plan, frozen input
       {taskId: "task-provisional-unknown", threadId: "main-provisional-unknown", workflowStatus: "provisional", introductionState: "uncertain", outcome: "record", reason: "answer_matches"},
     ],
     queued: [{taskId: "task-queued", threadId: "main-queued"}],
+    agreements: expectedAgreements(workflowIdOf(directory, "main-formal")),
     blockers: [],
-    writes: 11,
+    writes: 14,
   });
   const report = renderCutoverPlan(cutoverReport(plan)).join("\n");
   for (const secret of [promptBody, introductionBody, objective, "PRIVATE"]) assert.equal(report.includes(secret), false, "identities, counts and reasons only");
@@ -375,21 +416,25 @@ it.live("CT-ISUB-17: after its run ends the in-flight request closes unapplied w
     } else if (write.kind === "start") {
       planned.add(`start ${write.start.threadId}`);
       assert.equal(documentOf(after, "meta", "value", {key: `supervisor_start:${write.start.threadId}`}), JSON.stringify(write.start));
-    } else {
+    } else if (write.kind === "candidate") {
       planned.add(`candidate ${write.taskId} ${write.proposalId}`);
       assert.equal(documentOf(after, "supervisor_workflow_agreement_candidates", "document", {task_id: write.taskId, proposal_id: write.proposalId}), write.document);
+    } else {
+      planned.add(`workflow ${write.workflowId}`);
+      assert.equal(documentOf(after, "supervisor_workflow_state", "document", {workflow_id: write.workflowId}), write.document);
     }
   }
   const unplanned = (dump: ReturnType<typeof rows>) => Object.fromEntries(Object.entries(dump).map(([table, items]) => [table, items.filter((row) =>
     !(table === "supervisor_task_interpretations" && planned.has(`task ${String(row.thread_id)}`)) &&
     !(table === "meta" && (planned.has(`start ${String(row.key).replace("supervisor_start:", "")}`) || String(row.key).startsWith("supervisor_start_operation:[\"main-inflight\"")) ) &&
-    !(table === "supervisor_workflow_agreement_candidates" && planned.has(`candidate ${String(row.task_id)} ${String(row.proposal_id)}`)))]));
+    !(table === "supervisor_workflow_agreement_candidates" && planned.has(`candidate ${String(row.task_id)} ${String(row.proposal_id)}`)) &&
+    !(table === "supervisor_workflow_state" && planned.has(`workflow ${String(row.workflow_id)}`)))]));
   assert.deepEqual(unplanned(after), unplanned(original), "histories, bindings, introductions, requests, receipts and settled tasks are unchanged");
   for (const table of ["supervisor_workflow_introductions", "supervisor_conversation_requests", "supervisor_workflow_operations", "supervisor_main_bindings", "supervisor_owned_threads"])
     assert.deepEqual(after[table], original[table], `${table} kept byte for byte`);
   assert.equal(events.length, 1);
   assert.deepEqual(events[0], {...events[0], event: "interpretation_cutover_applied", closed: 1, startsRejected: 1, candidatesConverted: 2, candidatesStale: 1,
-    evidenceRecorded: 4, evidenceStale: 1, requestsPreparedAgain: 1, rows: 11});
+    evidenceRecorded: 4, evidenceStale: 1, requestsPreparedAgain: 1, agreementsConverted: 4, rows: 14});
 
   const taskOf = (threadId: string) => JSON.parse(documentOf(after, "supervisor_task_interpretations", "document", {thread_id: threadId})!) as TaskRecord;
   const before = (threadId: string) => running.tasks.find((item) => item.threadId === threadId)!;
@@ -414,8 +459,9 @@ it.live("CT-ISUB-17: after its run ends the in-flight request closes unapplied w
       runOrdinal: supervisorRunOrdinal, textHash: supervisorTextHash, ...(stale ? {stale: true} : {})}});
     assert.ok(Schema.is(InterpretationEvidence)(candidate(taskId, proposalId).evidence));
   }
-  assert.deepEqual(taskOf("main-formal").agreement, before("main-formal").agreement, "the accepted agreement is kept");
-  assert.deepEqual(taskOf("main-changed"), before("main-changed"), "a mismatching agreement is marked stale by the normal path, as the baseline did, never deleted here");
+  assert.deepEqual(taskOf("main-formal").agreement, convertedAgreement(before("main-formal").agreement!), "the accepted agreement is kept, naming the same message");
+  assert.deepEqual(taskOf("main-changed"), {...before("main-changed"), agreement: convertedAgreement(before("main-changed").agreement!)},
+    "a mismatching agreement is marked stale by the normal path, as the baseline did, never deleted here");
 
   // candidate-free provisional interpretations keep provisional status and gain current (or stale) evidence; their
   // introductions keep their exact ids, body and route
@@ -437,6 +483,7 @@ it.live("CT-ISUB-17: after its run ends the in-flight request closes unapplied w
   assert.equal(refreshed.requestText, "");
   assert.equal(refreshed.definitionContext, undefined);
   assert.equal(refreshed.messageId, before("main-queued").messageId);
+  assert.deepEqual(refreshed.agreement, convertedAgreement(before("main-queued").agreement!), "its stale agreement is converted in the same write");
 
   // a restart finds nothing to apply and changes nothing
   const second = yield* cutoverStep(directory, t3, at + 1_000);
@@ -444,13 +491,82 @@ it.live("CT-ISUB-17: after its run ends the in-flight request closes unapplied w
   assert.deepEqual(second.events, [], "nothing to apply starts the run silently");
   assert.deepEqual(rows(directory), after);
   const replanned = yield* planOf(directory, ended, at + 1_000);
-  assert.deepEqual({...cutoverReport(replanned)}, {inflight: [], starts: [], candidates: [], candidateFree: [], queued: [], blockers: [], writes: 0});
+  assert.deepEqual({...cutoverReport(replanned)}, {inflight: [], starts: [], candidates: [], candidateFree: [], queued: [], agreements: [], blockers: [], writes: 0});
+  nativeReadsOnly(peer);
+}), {timeout: 60_000});
+
+it.live("agreements: every stored agreement of a task record or a workflow document names the same message as supervisor_message evidence with every other key kept; the plan is applied exactly, a restart converts nothing and the scan lists them without changing a byte", () => Effect.gen(function* () {
+  const value = scenario("completed");
+  const {directory, workflows} = yield* seededWith("cutover-agreements-", value);
+  const original = rows(directory);
+  const workflowId = workflowIdOf(directory, "main-formal");
+  const peer = yield* nativePeer(value.projection);
+  const t3 = yield* client(peer);
+  const lookup = Effect.scoped(Effect.gen(function* () {
+    return yield* Context.get(yield* Layer.build(stores(directory)), WorkflowStateStore).getState(projectId, "main-formal");
+  }));
+
+  // the scan lists the conversions by identity and count, and changes no file byte
+  const unscanned = files(directory);
+  const scan = yield* rolloutScan(directory, t3);
+  assert.deepEqual(files(directory), unscanned, "no file was written, created or touched");
+  assert.deepEqual(scan.cutover?.agreements, expectedAgreements(workflowId));
+  const report = renderRolloutScan(directory, scan);
+  assert.ok(report.includes("  stored agreements converted to message evidence: 3 task, 1 workflow"), report);
+  assert.ok(report.includes("    task chat main-queued: task task-queued proposal proposal-queued-earlier (stale); message earlier-proposal-queued"), report);
+  assert.ok(report.includes(`    workflow workflow ${workflowId}: task task-formal proposal task-formal (agreed); message answer-task-formal`), report);
+  // the workflow store cannot read the pre-s6e document until it is converted
+  assert.equal((yield* lookup).status, "incompatible");
+
+  // plan == apply: a task with another conversion is written once, carrying both
+  const plan = yield* planOf(directory, value.projection, at);
+  assert.deepEqual(plan.agreements, expectedAgreements(workflowId));
+  assert.equal(plan.writes.filter((write) => write.kind === "task" && write.task.threadId === "main-queued").length, 1);
+  assert.deepEqual(plan.writes.filter((write) => write.kind === "workflow").map((write) => write.workflowId), [workflowId]);
+  const {exit, events} = yield* cutoverStep(directory, t3, at);
+  assert.ok(Exit.isSuccess(exit));
+  assert.equal(events[0]?.agreementsConverted, 4);
+  const after = rows(directory);
+  for (const write of plan.writes) {
+    if (write.kind === "task") assert.equal(documentOf(after, "supervisor_task_interpretations", "document", {thread_id: write.task.threadId}), JSON.stringify(write.task));
+    if (write.kind === "workflow") assert.equal(documentOf(after, "supervisor_workflow_state", "document", {workflow_id: write.workflowId}), write.document);
+  }
+
+  // preservation: the flat id becomes the evidence in its place, and every other key and value stays byte for byte
+  const before = (threadId: string) => value.tasks.find((item) => item.threadId === threadId)!;
+  const stored = (threadId: string) => JSON.parse(documentOf(after, "supervisor_task_interpretations", "document", {thread_id: threadId})!) as TaskRecord;
+  for (const threadId of ["main-formal", "main-changed"])
+    assert.equal(documentOf(after, "supervisor_task_interpretations", "document", {thread_id: threadId}),
+      JSON.stringify({...before(threadId), agreement: convertedAgreement(before(threadId).agreement!)}));
+  for (const threadId of ["main-formal", "main-changed", "main-queued"]) {
+    const agreement = stored(threadId).agreement!;
+    assert.deepEqual(agreement, convertedAgreement(before(threadId).agreement!));
+    assert.deepEqual(Object.keys(agreement), ["status", "message", "proposalId", "agreedAt", "evidence", "agentMessageId", "workflow"]);
+    assert.ok(Schema.is(WorkflowAgreement)(agreement));
+  }
+  // the workflow document is again exactly what the current store writes for this agreement, in the same row
+  assert.equal(documentOf(after, "supervisor_workflow_state", "document", {workflow_id: workflowId}), workflows.get(workflowId));
+  const row = (dump: ReturnType<typeof rows>) => ({...dump.supervisor_workflow_state!.find((item) => item.workflow_id === workflowId)!, document: null});
+  assert.deepEqual(row(after), row(original), "its revision and times stay");
+  const read = yield* lookup;
+  assert.equal(read.status, "found");
+  if (read.status === "found") assert.deepEqual(read.document.acceptedAgreements.map((item) => item.agreement), [convertedAgreement(before("main-formal").agreement!)]);
+
+  // idempotent restart: nothing is left to convert and no row changes
+  const second = yield* cutoverStep(directory, t3, at + 1_000);
+  assert.ok(Exit.isSuccess(second.exit));
+  assert.deepEqual(second.events, []);
+  assert.deepEqual(rows(directory), after);
+  const replanned = yield* planOf(directory, value.projection, at + 1_000);
+  assert.deepEqual(replanned.agreements, []);
+  assert.deepEqual(replanned.writes, []);
   nativeReadsOnly(peer);
 }), {timeout: 60_000});
 
 it.live("conflict: rows that change between the plan and the commit refuse with the fixed conflict reason and the transaction applies nothing", () => Effect.gen(function* () {
   const value = scenario("completed");
   const directory = yield* seeded("cutover-conflict-", value);
+  const before = rows(directory);
   const peer = yield* nativePeer(value.projection);
   // another writer changes a task while the step reads the native evidence
   peer.onRead(() => {
@@ -469,6 +585,7 @@ it.live("conflict: rows that change between the plan and the commit refuse with 
     JSON.stringify(item.threadId === "main-settled" ? {...item, reason: "Changed meanwhile."} : item), "only the other writer's change is stored");
   for (const item of value.candidates) assert.equal(documentOf(after, "supervisor_workflow_agreement_candidates", "document",
     {task_id: item.taskId as string, proposal_id: item.proposalId as string}), JSON.stringify(item));
+  assert.deepEqual(after.supervisor_workflow_state, before.supervisor_workflow_state, "the workflow documents stay in the pre-s6e format");
 }), {timeout: 60_000});
 
 it.live("scan: the cut-over section prints the startup plan by identities, counts and reasons, reads the root only when given the read client, and changes no file byte", () => Effect.gen(function* () {
@@ -482,7 +599,7 @@ it.live("scan: the cut-over section prints the startup plan by identities, count
   const plan = yield* planOf(directory, value.projection, at);
   assert.deepEqual(scan.cutover, {...cutoverReport(plan), nativeReads: true}, "the scan prints the plan the startup step applies");
   const report = renderRolloutScan(directory, scan);
-  assert.ok(report.includes("cut-over verdict: the s6e startup step would apply 11 row write(s) in one transaction"), report);
+  assert.ok(report.includes("cut-over verdict: the s6e startup step would apply 14 row write(s) in one transaction"), report);
   for (const secret of [promptBody, introductionBody, objective, readToken, "PRIVATE"]) assert.equal(report.includes(secret), false, "identities, counts and reasons only");
   assert.equal(JSON.stringify(scan).includes("PRIVATE"), false);
   nativeReadsOnly(peer);

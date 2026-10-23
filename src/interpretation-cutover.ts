@@ -8,7 +8,7 @@ import { fingerprint } from "./guidance-store.js";
 import { InterpretationEvidence, interpretationPlanDigest, SupervisorMessageEvidence } from "./interpretation-evidence.js";
 import { interpretationSourcePin } from "./interpretation-submission.js";
 import { logEvent } from "./logging.js";
-import { WorkflowProposal, type WorkflowProposalInfo } from "./project-supervisor-contract.js";
+import { AgreementEvidence, WorkflowAgreement, type WorkflowAgreementInfo, WorkflowProposal, type WorkflowProposalInfo } from "./project-supervisor-contract.js";
 import { ProjectSupervisorStore, type ProjectSupervisorStoreError, type SupervisionStartRecord, type TaskRecord } from "./project-supervisor-store.js";
 import { interpretationFromFields, interpretationLimits, seededNodeIds, workflowInterpretationOutcome } from "./supervisor-workflow.js";
 import type { T3ClientShape } from "./t3.js";
@@ -49,10 +49,32 @@ const isLegacyCandidate = Schema.is(LegacyCandidate);
 const isConvertedCandidate = (value: unknown): boolean => typeof value === "object" && value !== null && !Array.isArray(value) &&
   !("supervisorMessageId" in value) && Schema.is(Schema.Struct({taskId: Schema.String, proposalId: Schema.String, evidence: InterpretationEvidence}))(value);
 
+// the pre-s6e agreement of a task record or a workflow document: its proposal evidence is one flat supervisor message id
+const LegacyAgreement = Schema.Struct({
+  status: Schema.Literals(["agreed", "stale"]),
+  message: Schema.String,
+  proposalId: Schema.String,
+  agreedAt: Schema.Number,
+  supervisorMessageId: Schema.String,
+  agentMessageId: Schema.String,
+  workflow: WorkflowProposal,
+});
+type LegacyAgreement = typeof LegacyAgreement.Type;
+const isLegacyAgreement = Schema.is(LegacyAgreement);
+// an agreement the cut-over already converted: the evidence identity and no flat id
+const isConvertedAgreement = (value: unknown): boolean => typeof value === "object" && value !== null && !Array.isArray(value) &&
+  !("supervisorMessageId" in value) && Schema.is(Schema.Struct({evidence: AgreementEvidence}))(value);
+// a stored agreement is none, converted or in the pre-s6e format
+const agreementReadable = (value: unknown): boolean => value === undefined || value === null || isLegacyAgreement(value) || isConvertedAgreement(value);
+
 // the store's own row guards: a document is checked for the fields its readers rely on and kept whole
 const isStoredTask = Schema.is(Schema.Struct({threadId: Schema.String, projectId: Schema.String, status: Schema.String}));
 const isStoredStart = Schema.is(Schema.Struct({threadId: Schema.String, status: Schema.String}));
 const isStoredIntroduction = Schema.is(Schema.Struct({taskId: Schema.String, state: Schema.String}));
+// a workflow document's accepted agreements; a document without them holds no agreement and is classified by its own store
+const isStoredWorkflow = Schema.is(Schema.Struct({workflowId: Schema.String,
+  acceptedAgreements: Schema.Array(Schema.Struct({key: Schema.String, taskId: Schema.String, agreement: Schema.Unknown}))}));
+type StoredWorkflow = {readonly workflowId: string; readonly acceptedAgreements: ReadonlyArray<{readonly key: string; readonly taskId: string; readonly agreement: unknown}>};
 const decodeJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
 const parsedDocument = <A>(text: unknown, guard: (value: unknown) => boolean): A | null => {
   if (typeof text !== "string") return null;
@@ -101,6 +123,9 @@ export interface CutoverRows {
   /** null: already converted */
   readonly candidates: ReadonlyArray<{readonly taskId: string; readonly proposalId: string; readonly document: string; readonly legacy: LegacyCandidate | null}>;
   readonly introductions: ReadonlyArray<{readonly taskId: string; readonly state: string}>;
+  /** the workflow documents' accepted agreements; legacy null: already converted */
+  readonly workflows: ReadonlyArray<{readonly workflowId: string; readonly document: string; readonly accepted: ReadonlyArray<{readonly key: string;
+    readonly taskId: string; readonly legacy: LegacyAgreement | null}>}>;
   /** rows no reader can decode, by table and key */
   readonly unreadable: ReadonlyArray<{readonly table: string; readonly key: string}>;
 }
@@ -120,7 +145,7 @@ export const readCutoverRows: Effect.Effect<CutoverRows, SqlError.SqlError, Guid
     const tasks: Array<CutoverRows["tasks"][number]> = [];
     for (const row of yield* table("supervisor_task_interpretations", "SELECT thread_id,document FROM supervisor_task_interpretations ORDER BY thread_id")) {
       const task = parsedDocument<TaskRecord>(row.document, isStoredTask);
-      if (task) tasks.push({document: row.document as string, task});
+      if (task && agreementReadable(task.agreement)) tasks.push({document: row.document as string, task});
       else unreadable.push({table: "supervisor_task_interpretations", key: stringColumn(row, "thread_id")});
     }
     const starts: Array<CutoverRows["starts"][number]> = [];
@@ -143,7 +168,16 @@ export const readCutoverRows: Effect.Effect<CutoverRows, SqlError.SqlError, Guid
       if (introduction) introductions.push({taskId: introduction.taskId, state: introduction.state});
       else unreadable.push({table: "supervisor_workflow_introductions", key: stringColumn(row, "task_id")});
     }
-    return {tasks, starts, candidates, introductions, unreadable};
+    const workflows: Array<CutoverRows["workflows"][number]> = [];
+    for (const row of yield* table("supervisor_workflow_state", "SELECT workflow_id,document FROM supervisor_workflow_state ORDER BY workflow_id")) {
+      const workflow = parsedDocument<StoredWorkflow>(row.document, isStoredWorkflow);
+      if (!workflow) continue;
+      if (workflow.acceptedAgreements.every((item) => agreementReadable(item.agreement))) workflows.push({workflowId: stringColumn(row, "workflow_id"),
+        document: row.document as string, accepted: workflow.acceptedAgreements.map((item) => ({key: item.key, taskId: item.taskId,
+          legacy: isLegacyAgreement(item.agreement) ? item.agreement : null}))});
+      else unreadable.push({table: "supervisor_workflow_state", key: stringColumn(row, "workflow_id")});
+    }
+    return {tasks, starts, candidates, introductions, workflows, unreadable};
   }));
 });
 
@@ -217,7 +251,8 @@ export interface CutoverBlocker {
 export type CutoverWrite =
   | {readonly kind: "task"; readonly task: TaskRecord}
   | {readonly kind: "start"; readonly start: SupervisionStartRecord}
-  | {readonly kind: "candidate"; readonly taskId: string; readonly proposalId: string; readonly expected: string; readonly document: string};
+  | {readonly kind: "candidate"; readonly taskId: string; readonly proposalId: string; readonly expected: string; readonly document: string}
+  | {readonly kind: "workflow"; readonly workflowId: string; readonly expected: string; readonly document: string};
 
 /** What the cut-over reads and would do, by identities, outcomes and reason codes only. */
 export interface CutoverReport {
@@ -229,6 +264,9 @@ export interface CutoverReport {
   readonly candidateFree: ReadonlyArray<{readonly taskId: string; readonly threadId: string; readonly workflowStatus: string; readonly introductionState: string | null;
     readonly outcome: "record" | "stale" | "unknown"; readonly reason: string}>;
   readonly queued: ReadonlyArray<{readonly taskId: string; readonly threadId: string}>;
+  /** stored agreements converted to supervisor_message evidence: in a task record (by chat) or a workflow document (by workflow id) */
+  readonly agreements: ReadonlyArray<{readonly row: "task" | "workflow"; readonly id: string; readonly taskId: string; readonly proposalId: string;
+    readonly status: "agreed" | "stale"; readonly messageId: string}>;
   readonly blockers: ReadonlyArray<CutoverBlocker>;
 }
 export interface CutoverPlan extends CutoverReport {
@@ -247,6 +285,11 @@ const convertedCandidate = (document: string, evidence: SupervisorMessageEvidenc
   return JSON.stringify({...value, evidence});
 };
 
+// the flat message id becomes, in its place, the supervisor_message evidence naming it; every other key and value stays as stored
+const convertedAgreement = (legacy: LegacyAgreement): WorkflowAgreementInfo => Object.fromEntries(Object.entries(legacy).map(([key, value]) =>
+  key === "supervisorMessageId" ? ["evidence", {kind: "supervisor_message", messageId: legacy.supervisorMessageId}] : [key, value])) as WorkflowAgreementInfo;
+const isAgreement = Schema.is(WorkflowAgreement);
+
 /**
  * The cut-over of the stored rows against the given native reads at `now`, as data: what it closes, rejects, converts, marks
  * stale, records and refreshes, the exact writes, and whatever blocks applying now. Pure: it reads nothing and writes nothing.
@@ -255,13 +298,26 @@ export const interpretationCutoverPlan = (rows: CutoverRows, natives: CutoverNat
   const writes: Array<CutoverWrite> = [];
   const blockers: Array<CutoverBlocker> = rows.unreadable.map((row) => ({code: "row_unreadable", ids: {table: row.table, key: row.key}}));
   const candidateKeys = new Set(rows.candidates.map((row) => candidateKey(row.taskId, row.proposalId)));
-  const tasksById = new Map(rows.tasks.map(({task}) => [task.id, task]));
+
+  // a task's pre-s6e agreement is converted in every write of that task below; the task is written once
+  const agreements: Array<CutoverReport["agreements"][number]> = [];
+  const agreementTasks = new Set<string>();
+  const tasks = rows.tasks.map(({task}) => {
+    if (!isLegacyAgreement(task.agreement)) return task;
+    const legacy = task.agreement;
+    const agreement = convertedAgreement(legacy);
+    if (!isAgreement(agreement)) {blockers.push({code: "evidence_unrepresentable", ids: {taskId: task.id, threadId: task.threadId, proposalId: legacy.proposalId}});return task;}
+    agreements.push({row: "task", id: task.threadId, taskId: task.id, proposalId: legacy.proposalId, status: legacy.status, messageId: legacy.supervisorMessageId});
+    agreementTasks.add(task.threadId);
+    return {...task, agreement};
+  });
+  const tasksById = new Map(tasks.map((task) => [task.id, task]));
   const introductions = new Map(rows.introductions.map((row) => [row.taskId, row.state]));
 
   // in-flight old-prompt requests: observed read only; a terminal run closes the attempt unapplied, anything else blocks
   const inflight: Array<CutoverReport["inflight"][number]> = [];
   const closing = new Set<string>();
-  for (const {task} of rows.tasks) {
+  for (const task of tasks) {
     if (!oldInflight(task)) continue;
     const read = natives.get(task.supervisorThreadId);
     const unknown = nativeUnknown(read);
@@ -332,7 +388,7 @@ export const interpretationCutoverPlan = (rows: CutoverRows, natives: CutoverNat
 
   // candidate-free inferred or provisional interpretations: their legacy answer is validated once and recorded as evidence
   const candidateFreeEntries: Array<CutoverReport["candidateFree"][number]> = [];
-  for (const {task} of rows.tasks) {
+  for (const task of tasks) {
     if (!candidateFree(task, candidateKeys)) continue;
     const read = natives.get(task.supervisorThreadId);
     const unknown = nativeUnknown(read);
@@ -358,7 +414,7 @@ export const interpretationCutoverPlan = (rows: CutoverRows, natives: CutoverNat
 
   // an unsent request prepared under the old prompt is prepared again, so it is sent only under the typed protocol
   const queued: Array<CutoverReport["queued"][number]> = [];
-  for (const {task} of rows.tasks) {
+  for (const task of tasks) {
     if (!legacyTask(task) || task.status !== "queued" || task.dispatchedAt !== null || task.definitionContext == null) continue;
     queued.push({taskId: task.id, threadId: task.threadId});
     const refreshed: {-readonly [K in keyof TaskRecord]: TaskRecord[K]} = {...task, requestText: "", reason: queuedRefreshReason, updatedAt: now};
@@ -366,13 +422,27 @@ export const interpretationCutoverPlan = (rows: CutoverRows, natives: CutoverNat
     writes.push({kind: "task", task: refreshed});
   }
 
-  return {inflight, starts, candidates, candidateFree: candidateFreeEntries, queued, blockers, writes: blockers.length ? [] : writes};
+  // a task whose agreement is its only conversion, then each workflow document's pre-s6e accepted agreements
+  const written = new Set(writes.flatMap((write) => write.kind === "task" ? [write.task.threadId] : []));
+  for (const task of tasks) if (agreementTasks.has(task.threadId) && !written.has(task.threadId)) writes.push({kind: "task", task});
+  for (const row of rows.workflows) {
+    if (!row.accepted.some((item) => item.legacy)) continue;
+    const value = JSON.parse(row.document) as StoredWorkflow;
+    const converted = value.acceptedAgreements.map((item) => isLegacyAgreement(item.agreement) ? convertedAgreement(item.agreement) : null);
+    if (!converted.every((agreement) => agreement === null || isAgreement(agreement))) {blockers.push({code: "evidence_unrepresentable", ids: {workflowId: row.workflowId}});continue;}
+    for (const item of row.accepted) if (item.legacy) agreements.push({row: "workflow", id: row.workflowId, taskId: item.taskId, proposalId: item.legacy.proposalId,
+      status: item.legacy.status, messageId: item.legacy.supervisorMessageId});
+    const acceptedAgreements = value.acceptedAgreements.map((item, index) => converted[index] ? {...item, agreement: converted[index]} : item);
+    writes.push({kind: "workflow", workflowId: row.workflowId, expected: row.document, document: JSON.stringify({...value, acceptedAgreements})});
+  }
+
+  return {inflight, starts, candidates, candidateFree: candidateFreeEntries, queued, agreements, blockers, writes: blockers.length ? [] : writes};
 };
 
 /** The plan without its writes: identities, outcomes and codes only, as the scan prints it. */
 export const cutoverReport = (plan: CutoverPlan): CutoverReport & {readonly writes: number} => ({
-  inflight: plan.inflight, starts: plan.starts, candidates: plan.candidates, candidateFree: plan.candidateFree, queued: plan.queued, blockers: plan.blockers,
-  writes: plan.writes.length,
+  inflight: plan.inflight, starts: plan.starts, candidates: plan.candidates, candidateFree: plan.candidateFree, queued: plan.queued,
+  agreements: plan.agreements, blockers: plan.blockers, writes: plan.writes.length,
 });
 
 const blockerLine = (blocker: CutoverBlocker): string =>
@@ -399,6 +469,9 @@ export const renderCutoverPlan = (report: CutoverReport): Array<string> => {
     lines.push(`    ${item.outcome}: task ${item.taskId} chat ${item.threadId} workflow ${item.workflowStatus}, introduction ${item.introductionState ?? "none"}; ${item.reason}`);
   lines.push(`  unsent old-prompt requests prepared again: ${report.queued.length}`);
   for (const item of report.queued) lines.push(`    task ${item.taskId} chat ${item.threadId}`);
+  lines.push(`  stored agreements converted to message evidence: ${count(report.agreements, (item) => item.row)}`);
+  for (const item of report.agreements)
+    lines.push(`    ${item.row} ${item.row === "task" ? "chat" : "workflow"} ${item.id}: task ${item.taskId} proposal ${item.proposalId} (${item.status}); message ${item.messageId}`);
   if (report.blockers.length) {
     lines.push(`  blocks applying now (${report.blockers.length}):`);
     for (const blocker of report.blockers) lines.push(`    ${blockerLine(blocker)}`);
@@ -414,7 +487,7 @@ const refusalIdentities = (blockers: ReadonlyArray<CutoverBlocker>): string => {
   return blockers.length > shown.length ? `${shown.join("; ")}; and ${blockers.length - shown.length} more` : shown.join("; ");
 };
 const rowsIdentity = (rows: CutoverRows): string => JSON.stringify([rows.tasks.map((row) => row.document), rows.starts.map((row) => [row.key, row.document]),
-  rows.candidates.map((row) => [row.taskId, row.proposalId, row.document]), rows.unreadable]);
+  rows.candidates.map((row) => [row.taskId, row.proposalId, row.document]), rows.workflows.map((row) => [row.workflowId, row.document]), rows.unreadable]);
 
 /**
  * The one logged cut-over step at startup, before the run serves or cycles. It reads the rows and the roots' projections (no
@@ -439,9 +512,13 @@ export const interpretationCutover = (t3: Pick<T3ClientShape, "projection">): Ef
     for (const write of plan.writes) {
       if (write.kind === "task") yield* store.saveTask(write.task);
       else if (write.kind === "start") yield* store.saveStart(write.start);
-      // the candidate's own row, compared with the document the plan converted; its key, project and creation time stay
-      else if ((yield* changedRows(db`UPDATE supervisor_workflow_agreement_candidates SET document=${write.document} WHERE task_id=${write.taskId} AND proposal_id=${write.proposalId} AND document=${write.expected}`.raw)) !== 1)
-        return yield* new InterpretationCutoverRefused({reason: "interpretation_cutover_conflict"});
+      else {
+        // the candidate's or workflow document's own row, compared with the document the plan converted; its key, revision and times stay
+        const update = write.kind === "candidate"
+          ? db`UPDATE supervisor_workflow_agreement_candidates SET document=${write.document} WHERE task_id=${write.taskId} AND proposal_id=${write.proposalId} AND document=${write.expected}`
+          : db`UPDATE supervisor_workflow_state SET document=${write.document} WHERE workflow_id=${write.workflowId} AND document=${write.expected}`;
+        if ((yield* changedRows(update.raw)) !== 1) return yield* new InterpretationCutoverRefused({reason: "interpretation_cutover_conflict"});
+      }
     }
   })).pipe(Effect.catchTag("InterpretationCutoverRefused", (refused) => refuse(refused.reason, [])));
   yield* logEvent("interpretation_cutover_applied", {
@@ -450,6 +527,6 @@ export const interpretationCutover = (t3: Pick<T3ClientShape, "projection">): Ef
     candidatesStale: plan.candidates.filter((item) => item.outcome === "stale").length,
     evidenceRecorded: plan.candidateFree.filter((item) => item.outcome === "record").length,
     evidenceStale: plan.candidateFree.filter((item) => item.outcome === "stale").length,
-    requestsPreparedAgain: plan.queued.length, rows: plan.writes.length,
+    requestsPreparedAgain: plan.queued.length, agreementsConverted: plan.agreements.length, rows: plan.writes.length,
   });
 });
