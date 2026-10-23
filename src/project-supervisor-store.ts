@@ -1,7 +1,8 @@
 import { Clock, Context, Data, Effect, Layer, Ref, Schema } from "effect";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
-import { decodeRow, documentRow, documentRows, type GuidanceStoreError, mapSqlError, snapshotRead, storedDocument, tableColumns } from "./guidance-sql.js";
+import { decodeRow, documentRow, documentRows, type GuidanceStoreError, mapSqlError, rowFindings, rowKey, rowsOf, schemaChanges, snapshotRead, storedDocument,
+  type StoredRowFinding, type StoredRowScan, tableColumns } from "./guidance-sql.js";
 import { fingerprint } from "./guidance-store.js";
 import { SupervisorIds } from "./ids.js";
 import { SupervisorStateReset } from "./supervisor-state-reset.js";
@@ -692,3 +693,63 @@ export class ProjectSupervisorStore extends Context.Service<ProjectSupervisorSto
   static readonly layer: Layer.Layer<ProjectSupervisorStore, ProjectSupervisorStoreError | GuidanceStoreError, GuidanceDb | SupervisorIds | SupervisorOwnership | SupervisorStateReset> =
     Layer.effect(ProjectSupervisorStore, untracedSql(makeProjectSupervisorStore));
 }
+
+// the meta documents the project store reads, by key prefix (or exact key), with the guard its reader applies and when the run
+// reads them
+const metaDocumentKinds: ReadonlyArray<{readonly pattern: string; readonly kind: string; readonly guard: (value: unknown) => boolean; readonly read: StoredRowFinding["read"]}> = [
+  {pattern: "supervisor_start_operation:%", kind: "start operation", guard: isStoredObject, read: "open"},
+  {pattern: "supervisor_start:%", kind: "start", guard: isStoredStart, read: "cycle"},
+  {pattern: "supervisor_control:%", kind: "control", guard: isStoredObject, read: "cycle"},
+  {pattern: "supervisor_control_auto:%", kind: "auto control", guard: isStoredObject, read: "cycle"},
+  {pattern: "supervisor_no_project", kind: "no project control", guard: isStoredObject, read: "cycle"},
+  {pattern: "supervisor_global_definitions_control", kind: "global definitions control", guard: isStoredObject, read: "cycle"},
+  {pattern: "supervisor_global_definitions_event", kind: "global definitions event", guard: isStoredObject, read: "cycle"},
+  {pattern: "supervisor_activation_baseline", kind: "activation baseline", guard: isStoredObject, read: "cycle"},
+  {pattern: "supervisor_unbound_stop:%", kind: "unbound stop", guard: isStoredObject, read: "call"},
+];
+
+/**
+ * The rollout scan of the project supervision tables (read only): every stored row through the decoder its reader uses (the
+ * Start operations and owned ids are read when the run opens its stores), the open's table and column additions, and the
+ * Start operations the open rejects as interrupted, as the baseline open did.
+ */
+export const checkProjectSupervisorRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
+  const sql = yield* GuidanceDb;
+  const changes = [
+    ...(yield* Effect.forEach(["supervisor_owned_threads", "supervisor_project_settings", "supervisor_main_bindings", "supervisor_task_interpretations",
+      "supervisor_chat_enables"], (table) => schemaChanges(sql, table))).flat(),
+    ...yield* schemaChanges(sql, "supervisor_definition_user_saves", ["expected_revision"]),
+  ];
+  const findings: Array<StoredRowFinding> = [];
+  const metaValue = (guard: (value: unknown) => boolean) => (row: Record<string, unknown>) =>
+    Effect.flatMap(decodeKeyValueRow(row), ({value}) => storedDocument(value, guard, rowInvalid("meta")));
+  let preparing = 0;
+  for (const {pattern, kind, guard, read} of metaDocumentKinds) {
+    const rows = yield* rowsOf(sql, "meta", `SELECT key,value FROM meta WHERE key ${pattern.includes("%") ? "LIKE" : "="} '${pattern}'`);
+    findings.push(...yield* rowFindings(rows, {table: "meta", kind, problem: "undecodable", read}, (row) => rowKey(row, ["key"]), metaValue(guard)));
+    if (kind === "start operation") for (const row of rows) {
+      const operation = yield* Effect.option(metaValue(guard)(row));
+      if (operation._tag === "Some" && (operation.value as {preparing?: unknown}).preparing) preparing++;
+    }
+  }
+  const document = (guard: (value: unknown) => boolean, row: ProjectSupervisorRow) => (value: Record<string, unknown>) => documentRow(value, guard, rowInvalid(row));
+  findings.push(
+    ...yield* rowFindings(yield* rowsOf(sql, "supervisor_owned_threads", "SELECT id FROM supervisor_owned_threads"),
+      {table: "supervisor_owned_threads", kind: "owned thread", problem: "undecodable", read: "open"}, (row) => rowKey(row, ["id"]), decodeIdRow),
+    ...yield* rowFindings(yield* rowsOf(sql, "supervisor_main_bindings", "SELECT project_id,main_thread_id,document FROM supervisor_main_bindings"),
+      {table: "supervisor_main_bindings", kind: "binding", problem: "undecodable", read: "cycle"}, (row) => rowKey(row, ["project_id", "main_thread_id"]),
+      document(isStoredBinding, "binding")),
+    ...yield* rowFindings(yield* rowsOf(sql, "supervisor_task_interpretations", "SELECT thread_id,document FROM supervisor_task_interpretations"),
+      {table: "supervisor_task_interpretations", kind: "task", problem: "undecodable", read: "cycle"}, (row) => rowKey(row, ["thread_id"]), document(isStoredTask, "task")),
+    ...yield* rowFindings(yield* rowsOf(sql, "supervisor_project_settings", "SELECT project_id,document FROM supervisor_project_settings"),
+      {table: "supervisor_project_settings", kind: "project settings", problem: "undecodable", read: "cycle"}, (row) => rowKey(row, ["project_id"]),
+      document(isStoredSettings, "project_settings")),
+    ...yield* rowFindings(yield* rowsOf(sql, "supervisor_chat_enables", "SELECT thread_id,enabled_at FROM supervisor_chat_enables"),
+      {table: "supervisor_chat_enables", kind: "chat enable", problem: "undecodable", read: "call"}, (row) => rowKey(row, ["thread_id"]), decodeEnabledAtRow),
+    // a column the open adds reads as its default
+    ...yield* rowFindings(yield* rowsOf(sql, "supervisor_definition_user_saves", "SELECT * FROM supervisor_definition_user_saves"),
+      {table: "supervisor_definition_user_saves", kind: "definition save", problem: "undecodable", read: "call"}, (row) => rowKey(row, ["project_id", "workspace_root"]),
+      (row) => decodeDefinitionSaveRow({expected_revision: "", ...row})),
+  );
+  return {findings, changes: preparing ? [...changes, {table: "meta", change: "Start operations left preparing rejected as interrupted (as the baseline open did)", rows: preparing}] : changes};
+});

@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { Clock, Context, Effect, Layer, Schema } from "effect";
+import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
-import { decodeGuidanceRow, type GuidanceStoreError, guidanceSql, tableColumns } from "./guidance-sql.js";
+import { decodeGuidanceRow, type GuidanceStoreError, guidanceSql, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan, tableColumns } from "./guidance-sql.js";
 import { SupervisorIds } from "./ids.js";
 import {
   Activity,
@@ -255,3 +256,38 @@ export class GuidanceStore extends Context.Service<GuidanceStore, GuidanceStoreS
   static readonly layer: Layer.Layer<GuidanceStore, GuidanceStoreError, GuidanceDb | SupervisorIds> =
     Layer.effect(GuidanceStore, untracedSql(makeGuidanceStore));
 }
+
+/**
+ * The rollout scan of the guidance tables (read only): every stored row through the decoder its reader uses, the open's table
+ * and column additions, and the committed notices the open recovers as the baseline open did.
+ */
+export const checkGuidanceRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
+  const db = yield* GuidanceDb;
+  const changes = [
+    ...(yield* Effect.forEach(["meta", "rules", "mutes", "classifications", "observations", "activity", "budget"], (table) => schemaChanges(db, table))).flat(),
+    ...yield* schemaChanges(db, "episodes", ["object_id"]),
+    ...yield* schemaChanges(db, "notices", ["rule_generation", "settings_generation"]),
+  ];
+  const call = {problem: "undecodable", read: "call"} as const;
+  const notices = yield* rowsOf(db, "notices", "SELECT * FROM notices");
+  // a column the open adds reads as its default
+  const withNoticeDefaults = (row: Record<string, unknown>) => ({rule_generation: -1, settings_generation: -1, ...row});
+  const findings = [
+    ...yield* rowFindings(yield* rowsOf(db, "meta", "SELECT key,value FROM meta WHERE key='settings'"), {...call, table: "meta", kind: "settings"}, (row) => rowKey(row, ["key"]), decodeSettingsRow),
+    ...yield* rowFindings(yield* rowsOf(db, "rules", "SELECT id,document FROM rules"), {...call, table: "rules", kind: "rule"}, (row) => rowKey(row, ["id"]), decodeRuleRow),
+    ...yield* rowFindings(yield* rowsOf(db, "activity", "SELECT id,document FROM activity"), {...call, table: "activity", kind: "activity"}, (row) => rowKey(row, ["id"]),
+      (row) => Effect.flatMap(decodeActivityRow(row), (activity) => decodeActivityDocument(activity.document))),
+    ...yield* rowFindings(yield* rowsOf(db, "mutes", "SELECT rule_id,scope_id FROM mutes"), {...call, table: "mutes", kind: "mute"}, (row) => rowKey(row, ["rule_id", "scope_id"]), decodeMuteRow),
+    ...yield* rowFindings(yield* rowsOf(db, "classifications", "SELECT project_id,classification FROM classifications"), {...call, table: "classifications", kind: "classification"},
+      (row) => rowKey(row, ["project_id"]), decodeClassificationRow),
+    ...yield* rowFindings(yield* rowsOf(db, "budget", "SELECT day,tokens FROM budget"), {...call, table: "budget", kind: "budget"}, (row) => rowKey(row, ["day"]), decodeTokensRow),
+    ...yield* rowFindings(yield* rowsOf(db, "episodes", "SELECT * FROM episodes"), {...call, table: "episodes", kind: "episode"}, (row) => rowKey(row, ["thread_id", "rule_id"]),
+      (row) => decodeEpisodeRow({object_id: null, ...row})),
+    ...yield* rowFindings(notices, {problem: "undecodable", table: "notices", kind: "notice", read: "call"}, (row) => rowKey(row, ["id"]),
+      (row) => row.state === "committed" ? Effect.void : decodeNoticeRow(withNoticeDefaults(row))),
+    ...yield* rowFindings(notices.filter((row) => row.state === "committed"), {problem: "undecodable", table: "notices", kind: "committed notice", read: "open"},
+      (row) => rowKey(row, ["id"]), (row) => decodeNoticeRow(withNoticeDefaults(row))),
+  ];
+  const recovered = notices.filter((row) => row.state === "committed").length;
+  return {findings, changes: recovered ? [...changes, {table: "notices", change: "committed notices recovered as not delivered or uncertain (as the baseline open did)", rows: recovered}] : changes};
+});

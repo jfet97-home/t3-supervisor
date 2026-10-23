@@ -1,4 +1,6 @@
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { SqliteClient } from "@effect/sql-sqlite-node";
 import { Context, Data, Effect, FileSystem, Layer, type PlatformError as Platform, type Scope } from "effect";
 import { Reactivity } from "effect/reactivity";
@@ -128,3 +130,15 @@ export const accessDbLayer = (path: string): Layer.Layer<AccessDb, DatabaseOpenE
     for (const pragma of ["synchronous=FULL", "max_page_count=256"]) yield* client.unsafe(`PRAGMA ${pragma}`).pipe(Effect.mapError(failed));
     return client;
   }).pipe(untracedSql));
+
+/**
+ * A read-only client on an existing store file, for the rollout scan: no statement, pragma or file creation writes. With a
+ * write-ahead log beside the file the client reads through it (a live server keeps it); without one every committed row is
+ * in the file itself, which is then opened immutable, so the client creates no log or shared-memory file of its own.
+ */
+export const readOnlyDatabase = (directory: string, file: string): Effect.Effect<SqlClient.SqlClient, DatabaseOpenError, Scope.Scope> => {
+  const path = join(resolve(directory), file);
+  const filename = existsSync(`${path}-wal`) ? path : `${pathToFileURL(path).href}?immutable=1`;
+  return SqliteClient.make({ filename, readonly: true }).pipe(Effect.provide(Reactivity.layer),
+    Effect.mapError((cause) => new DatabaseOpenError({ file, cause })), untracedSql);
+};

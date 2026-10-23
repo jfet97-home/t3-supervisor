@@ -1,10 +1,11 @@
 import {Cause, Context, Data, Deferred, Effect, Exit, Fiber, FiberMap, Layer, Option, Schema, Scope} from "effect";
+import type {SqlError} from "effect/sql";
 import {HttpClient, HttpClientRequest, type HttpClientResponse} from "effect/http";
 import {workflowRequestHash} from "./workflow-write-evidence.js";
 import {NativeOperateRpc, record, type NativeRpcShape, type SupervisorRpcError} from "./supervisor-native.js";
 import {admitSend, SupervisionGate, type AdmittedInFlight, type GateGuard, type SendPreparation} from "./supervision-gate.js";
 import {GuidanceDb} from "./db.js";
-import {type GuidanceStoreError, guidanceSql, guidanceTransaction, type SupervisionStoreError} from "./guidance-sql.js";
+import {type GuidanceStoreError, guidanceSql, guidanceTransaction, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan, type SupervisionStoreError} from "./guidance-sql.js";
 import {ProjectSupervisorStore, type BindingRecord} from "./project-supervisor-store.js";
 import {T3Client, type T3TransportError} from "./t3.js";
 import type {MessageInfo, Projection} from "./types.js";
@@ -576,3 +577,23 @@ export class HelperTransport extends Context.Service<HelperTransport, HelperTran
   static readonly make = makeHelperTransport;
   static readonly layer = (options: HelperTransportOptions) => Layer.effect(HelperTransport, makeHelperTransport(options));
 }
+
+/**
+ * The rollout scan of the helper channel and delivery rows (read only): a row that is not a document this transport wrote is an
+ * invalid receipt, kept and never acted on (as at baseline), so it is reported incompatible; the open adds missing tables.
+ */
+export const checkHelperRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
+  const db = yield* GuidanceDb;
+  const changes = [...yield* schemaChanges(db, "supervisor_helper_channels"), ...yield* schemaChanges(db, "supervisor_helper_deliveries")];
+  const invalid = (guard: (value: unknown) => boolean) => (row: Record<string, unknown>) =>
+    storedRow(guard as (value: unknown) => value is unknown, row) === invalidReceipt ? Effect.fail("invalid_receipt") : Effect.void;
+  const findings = [
+    ...yield* rowFindings(yield* rowsOf(db, "supervisor_helper_channels", "SELECT owner_thread_id,owner_generation,helper_thread_id,document FROM supervisor_helper_channels"),
+      {table: "supervisor_helper_channels", kind: "channel", problem: "incompatible", read: "cycle"}, (row) => rowKey(row, ["owner_thread_id", "owner_generation", "helper_thread_id"]),
+      invalid(isChannel)),
+    ...yield* rowFindings(yield* rowsOf(db, "supervisor_helper_deliveries", "SELECT owner_thread_id,owner_generation,message_id,document FROM supervisor_helper_deliveries"),
+      {table: "supervisor_helper_deliveries", kind: "delivery receipt", problem: "incompatible", read: "cycle"}, (row) => rowKey(row, ["owner_thread_id", "owner_generation", "message_id"]),
+      invalid(isDelivery)),
+  ];
+  return {findings, changes};
+});

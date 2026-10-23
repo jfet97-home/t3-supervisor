@@ -1,7 +1,8 @@
 import { Clock, Context, Data, Effect, Layer, Schema } from "effect";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
-import { decodeRow, documentRow, documentRows, mapSqlError, snapshotRead, storedDocument } from "./guidance-sql.js";
+import { decodeRow, documentRow, documentRows, type GuidanceStoreError, mapSqlError, rowFindings, rowKey, rowsOf, schemaChanges, snapshotRead, storedDocument,
+  type StoredRowScan } from "./guidance-sql.js";
 import { SupervisorIds } from "./ids.js";
 import { isStoredBinding, ProjectSupervisorStore, type BindingRecord, type ProjectSupervisorStoreError } from "./project-supervisor-store.js";
 import type { SupervisorModelSelection } from "./project-supervisor-contract.js";
@@ -1002,3 +1003,22 @@ export class SupervisorTeamStore extends Context.Service<SupervisorTeamStore, Su
   static readonly layer: Layer.Layer<SupervisorTeamStore, TeamStoreError | ProjectSupervisorStoreError, GuidanceDb | SupervisorIds | ProjectSupervisorStore> =
     Layer.effect(SupervisorTeamStore, untracedSql(makeSupervisorTeamStore));
 }
+
+/**
+ * The rollout scan of the team tables (read only): every member, assignment, notification, event and request through the
+ * decoder its reader uses, and the open's table additions. The team runtime reads them in its supervision cycles.
+ */
+export const checkTeamRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
+  const sql = yield* GuidanceDb;
+  const tables = [
+    {table: "supervisor_team_members", kind: "member", key: ["owner_thread_id", "owner_generation", "member_thread_id"], guard: isStoredMember, row: "member"},
+    {table: "supervisor_team_assignments", kind: "assignment", key: ["owner_thread_id", "owner_generation", "subtree_root_thread_id"], guard: isStoredAssignment, row: "assignment"},
+    {table: "supervisor_team_notifications", kind: "notification", key: ["owner_thread_id", "owner_generation", "id"], guard: isStoredNotification, row: "notification"},
+    {table: "supervisor_team_events", kind: "event", key: ["owner_thread_id", "owner_generation", "id"], guard: isStoredEvent, row: "event"},
+    {table: "supervisor_team_requests", kind: "request", key: ["owner_thread_id", "owner_generation", "request_id"], guard: isStoredRequest, row: "request"},
+  ] as const;
+  const changes = (yield* Effect.forEach(tables, ({table}) => schemaChanges(sql, table))).flat();
+  const findings = (yield* Effect.forEach(tables, ({table, kind, key, guard, row}) => Effect.flatMap(rowsOf(sql, table, `SELECT ${key.join(",")},document FROM ${table}`),
+    (rows) => rowFindings(rows, {table, kind, problem: "undecodable", read: "cycle"}, (value) => rowKey(value, key), (value) => teamDocumentRow(value, guard, row))))).flat();
+  return {findings, changes};
+});

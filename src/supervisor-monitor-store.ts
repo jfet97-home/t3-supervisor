@@ -1,6 +1,7 @@
 import { Clock, Context, Data, Effect, Layer, Schema } from "effect";
+import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
-import { changedRows, decodeGuidanceRow, type GuidanceStoreError, guidanceSql, tableColumns } from "./guidance-sql.js";
+import { changedRows, decodeGuidanceRow, type GuidanceStoreError, guidanceSql, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan, tableColumns } from "./guidance-sql.js";
 import {
   collectSupervisorActivity,
   compareMonitorPriority,
@@ -571,3 +572,25 @@ export class ProjectSupervisorMonitorStore extends Context.Service<ProjectSuperv
   static readonly layer: Layer.Layer<ProjectSupervisorMonitorStore, GuidanceStoreError | InvalidMonitorCapacity, GuidanceDb> =
     Layer.effect(ProjectSupervisorMonitorStore, makeProjectSupervisorMonitorStore());
 }
+
+/**
+ * The rollout scan of the monitor tables (read only): every thread and item row through the decoder its reader uses, with the
+ * columns the open adds read as the open fills them, and the open's table and column additions.
+ */
+export const checkMonitorRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
+  const db = yield* GuidanceDb;
+  const changes = [
+    ...yield* schemaChanges(db, "supervisor_monitor_threads", ["activation_ordinal", "untracked_count"]),
+    ...yield* schemaChanges(db, "supervisor_monitor_items", ["read_item_id", "active"]),
+  ];
+  const cycle = { problem: "undecodable", read: "cycle" } as const;
+  const findings = [
+    ...yield* rowFindings(yield* rowsOf(db, "supervisor_monitor_threads", "SELECT * FROM supervisor_monitor_threads"),
+      { ...cycle, table: "supervisor_monitor_threads", kind: "monitor thread" }, (row) => rowKey(row, ["project_id", "thread_id"]),
+      (row) => decodeThreadRow({ untracked_count: 0, ...row, activation_ordinal: row.activation_ordinal ?? row.source_ordinal })),
+    ...yield* rowFindings(yield* rowsOf(db, "supervisor_monitor_items", "SELECT * FROM supervisor_monitor_items"),
+      { ...cycle, table: "supervisor_monitor_items", kind: "monitor item" }, (row) => rowKey(row, ["project_id", "thread_id", "item_id"]),
+      (row) => decodeItemRow({ read_item_id: null, active: 1, ...row })),
+  ];
+  return { findings, changes };
+});

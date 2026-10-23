@@ -1,4 +1,5 @@
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, FiberMap, HashMap, Layer, Option, Ref, Schema } from "effect";
+import type { SqlError } from "effect/sql";
 import {isRecord, workflowRequestHash, workflowToolInputSize, workflowToolInputMaxBytes} from "./workflow-write-evidence.js";
 import {WorkflowNativeAccess, WorkflowWriteController, type WorkflowCallCancel, type WorkflowLocator, type WorkflowReadCancelled} from "./workflow-write-controller.js";
 import {resolveSupervisorScope} from "./supervisor-scope.js";
@@ -6,7 +7,8 @@ import {modelSelection, NativeOperateRpc, SupervisorRpcError, type NativeRpcShap
 import {canSupervisorContact, hasPendingOwnerInput, resolveSteerableRun} from "./supervisor-conversation.js";
 import {childOrigin} from "./supervisor-observation.js";
 import {GuidanceDb} from "./db.js";
-import {decodeGuidanceRow, GuidanceStoreError, guidanceSql, guidanceTransaction, storedDocument, type SupervisionStoreError} from "./guidance-sql.js";
+import {decodeGuidanceRow, GuidanceStoreError, guidanceSql, guidanceTransaction, rowFindings, rowKey, rowsOf, schemaChanges, storedDocument, type StoredRowScan,
+  type SupervisionStoreError} from "./guidance-sql.js";
 import {ProjectSupervisorStore, type BindingRecord} from "./project-supervisor-store.js";
 import {SupervisorConversationStore} from "./supervisor-conversation-store.js";
 import {endedWithoutCompletion, maxHandoverReviewChain, parseHandoverReview, SupervisorTeamStore, type HandoverReviewInput} from "./supervisor-team-store.js";
@@ -816,3 +818,16 @@ export class SupervisorTeamController extends Context.Service<SupervisorTeamCont
     SupervisorConversationStore> =>
     Layer.effect(SupervisorTeamController, makeSupervisorTeamController(options));
 }
+
+/**
+ * The rollout scan of the team tool receipts (read only): a receipt whose columns or document do not decode fails the call that
+ * reads it; the open adds the table when it is missing.
+ */
+export const checkTeamToolReceipts: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
+  const sql = yield* GuidanceDb;
+  const rows = yield* rowsOf(sql, "supervisor_team_tool_receipts", "SELECT owner_thread_id,actor_thread_id,binding_generation,actor_epoch,operation_id,request_hash,document FROM supervisor_team_tool_receipts");
+  const findings = yield* rowFindings(rows, {table: "supervisor_team_tool_receipts", kind: "tool receipt", problem: "undecodable", read: "call"},
+    (row) => rowKey(row, ["owner_thread_id", "actor_thread_id", "binding_generation", "actor_epoch", "operation_id"]),
+    (row) => Effect.flatMap(decodeReceiptRow(row), (stored) => receiptDocument(stored.document)));
+  return {findings, changes: yield* schemaChanges(sql, "supervisor_team_tool_receipts")};
+});

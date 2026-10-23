@@ -93,3 +93,64 @@ export const tableColumns = Effect.fnUntraced(function* (db: SqlClient.SqlClient
   for (const row of rows) columns.push((yield* decodeGuidanceRow(ColumnName, "table_info")(row)).name);
   return columns;
 });
+
+// ---- the read-only rollout scan: each store checks its existing rows with its own decoders (scripts/rollout-scan.ts)
+
+/**
+ * A stored row a store would not read: it does not decode, or it decodes and the store treats it as incompatible. It names
+ * the table, the row kind and the row's key, never its content; `read` says when the run reads it: when it opens its stores (a
+ * finding there fails the run's start), in every supervision cycle (a finding there fails each cycle that reaches it), or only
+ * when a call reads that row.
+ */
+export interface StoredRowFinding {
+  readonly table: string;
+  readonly kind: string;
+  readonly key: string;
+  readonly problem: "undecodable" | "incompatible";
+  readonly read: "open" | "cycle" | "call";
+}
+/** What opening a store does to an existing file beside reading its rows: a table or column added, rows recovered or reset. */
+export interface OpenChange {
+  readonly table: string;
+  readonly change: string;
+  readonly rows: number;
+}
+export interface StoredRowScan {
+  readonly findings: ReadonlyArray<StoredRowFinding>;
+  readonly changes: ReadonlyArray<OpenChange>;
+}
+
+/** Whether the file has the table; the open creates a missing one. */
+export const tableExists = (db: SqlClient.SqlClient, table: string) =>
+  Effect.map(db`SELECT 1 FROM sqlite_master WHERE type='table' AND name=${table}`, (rows) => rows.length > 0);
+
+// the rows of a table whose columns are not the ones its reader selects (a prototype table the conditional create kept)
+type MismatchedRows = ReadonlyArray<Record<string, unknown>> & {readonly shapeMismatch?: true};
+
+/** The rows `select` reads from `table`, none when the file has no such table, or a mismatch when the select fails on it. */
+export const rowsOf = (db: SqlClient.SqlClient, table: string, select: string): Effect.Effect<MismatchedRows, SqlError.SqlError> =>
+  Effect.flatMap(tableExists(db, table), (exists) => exists
+    ? db.unsafe<Record<string, unknown>>(select).pipe(Effect.catchIf(SqlError.isSqlError, () => Effect.succeed(Object.assign([], {shapeMismatch: true as const}))))
+    : Effect.succeed([]));
+
+/** The key a finding names: the row's own key columns, never its content. */
+export const rowKey = (row: Record<string, unknown>, columns: ReadonlyArray<string>): string =>
+  columns.map((column) => String(row[column] ?? "")).join(" ");
+
+/**
+ * Runs each row through `decode`, the store's own decoding; a row it fails or rejects is a finding of its key. A table whose
+ * columns its reader cannot select is one incompatible finding naming the table.
+ */
+export const rowFindings = <R>(rows: ReadonlyArray<R>, finding: Omit<StoredRowFinding, "key">, key: (row: R) => string,
+  decode: (row: R) => Effect.Effect<unknown, unknown>): Effect.Effect<Array<StoredRowFinding>> =>
+  (rows as {readonly shapeMismatch?: true}).shapeMismatch
+    ? Effect.succeed([{...finding, kind: `${finding.kind} table`, key: finding.table, problem: "incompatible"}])
+    : Effect.map(Effect.forEach(rows, (row) => Effect.map(Effect.exit(Effect.suspend(() => decode(row))), (exit) => exit._tag === "Failure" ? [{...finding, key: key(row)}] : [])),
+      (found) => found.flat());
+
+/** The open's table creation and column additions for a table, as changes. */
+export const schemaChanges = Effect.fnUntraced(function* (db: SqlClient.SqlClient, table: string, columns: ReadonlyArray<string> = []) {
+  if (!(yield* tableExists(db, table))) return [{table, change: "table created", rows: 0}] satisfies Array<OpenChange>;
+  const present = yield* tableColumns(db, table);
+  return columns.filter((column) => !present.includes(column)).map((column): OpenChange => ({table, change: `column ${column} added with its default`, rows: 0}));
+});

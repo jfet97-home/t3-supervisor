@@ -1,7 +1,8 @@
 import { Context, Data, Effect, Layer, Schema } from "effect";
 import { SupervisorConfig as Configuration } from "./config.js";
 import { PolicyDb, untracedSql } from "./db.js";
-import { mapSqlError } from "./guidance-sql.js";
+import { type GuidanceStoreError, mapSqlError, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan } from "./guidance-sql.js";
+import type { SqlError } from "effect/sql";
 
 import { ThreadPolicy as ThreadPolicyDocument, type ThreadPolicySettings } from "./thread-policy-contract.js";
 const validId = (id: string) => id.length > 0 && id.length <= 512 && !/[\s\x00-\x1f\x7f]/u.test(id);
@@ -74,3 +75,15 @@ export class ThreadPolicyStore extends Context.Service<ThreadPolicyStore, Thread
   static readonly layer: Layer.Layer<ThreadPolicyStore, ThreadPolicyStoreError, PolicyDb | Configuration> = Layer.effect(ThreadPolicyStore,
     Effect.flatMap(Configuration, (config) => makeThreadPolicyStore({ excludedThreadIds: config.excludedThreadIds })));
 }
+
+/**
+ * The rollout scan of thread-settings.sqlite3 (read only): the stored policy row through the decoder of every read, which each
+ * supervision cycle and Stop check performs; a missing table or row is created at open with the configured seed.
+ */
+export const checkThreadPolicyRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, PolicyDb> = Effect.gen(function* () {
+  const db = yield* PolicyDb;
+  const rows = yield* rowsOf(db, "settings", "SELECT id,document FROM settings");
+  const findings = yield* rowFindings(rows, { table: "settings", kind: "thread policy", problem: "undecodable", read: "cycle" }, (row) => rowKey(row, ["id"]), decodePolicyRow);
+  const changes = yield* schemaChanges(db, "settings");
+  return { findings, changes: rows.length === 0 && changes.length === 0 ? [{ table: "settings", change: "policy row seeded from the configured excluded chats", rows: 0 }] : changes };
+});

@@ -2,7 +2,8 @@ import { Cause, Clock, Context, Data, Deferred, Effect, Exit, Layer, Option, Sch
 import {definitionReferenceLimits, definitionReferenceProblem, describeDefinitionReferenceProblem, validDefinitionReferences} from "./definition-references.js";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb } from "./db.js";
-import { documentRow, type GuidanceStoreError, guidanceSql, guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
+import { documentRow, type GuidanceStoreError, guidanceSql, guidanceTransaction, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan,
+  type SupervisionStoreError } from "./guidance-sql.js";
 import { ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "./project-supervisor-store.js";
 import { ProjectDefinitions } from "./project-definitions.js";
 import { SupervisionControl } from "./supervision-control.js";
@@ -1493,3 +1494,24 @@ export class WorkflowWriteController extends Context.Service<WorkflowWriteContro
     SupervisionGate | WorkflowNativeAccess | SupervisionScopeService | GuidanceDb | ProjectSupervisorStore | SupervisorTeamStore> =>
     Layer.effect(WorkflowWriteController, makeWorkflowWriteController(options));
 }
+
+/**
+ * The rollout scan of the workflow write receipts and evidence (read only): a receipt that does not decode is answered as an
+ * operation conflict (incompatible), never replayed; an evidence row that does not decode denies the write that meets it. The
+ * open adds missing tables.
+ */
+export const checkWorkflowWriteRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
+  const sql = yield* GuidanceDb;
+  const result = (decoded: Exit.Exit<{readonly result: string}, unknown>) =>
+    Exit.isSuccess(decoded) && Option.isSome(storedResult(decoded.value.result)) ? Effect.void : Effect.fail("unreadable");
+  const findings = [
+    ...yield* rowFindings(yield* rowsOf(sql, "supervisor_workflow_write_receipts", "SELECT * FROM supervisor_workflow_write_receipts"),
+      {table: "supervisor_workflow_write_receipts", kind: "write receipt", problem: "incompatible", read: "call"},
+      (row) => rowKey(row, ["project_id", "main_thread_id", "supervisor_thread_id", "binding_generation", "operation_namespace", "operation_id"]),
+      (row) => result(decodeProofRow(row))),
+    ...yield* rowFindings(yield* rowsOf(sql, "supervisor_workflow_write_evidence", "SELECT * FROM supervisor_workflow_write_evidence"),
+      {table: "supervisor_workflow_write_evidence", kind: "write evidence", problem: "undecodable", read: "call"},
+      (row) => rowKey(row, ["supervisor_thread_id", "item_id"]), (row) => result(decodeEvidenceRow(row))),
+  ];
+  return {findings, changes: [...yield* schemaChanges(sql, "supervisor_workflow_write_receipts"), ...yield* schemaChanges(sql, "supervisor_workflow_write_evidence")]};
+});

@@ -2,6 +2,7 @@ import { Cause, Context, Crypto, Data, Deferred, Effect, Exit, Layer, Schema, Se
 import { posix } from "node:path";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
+import { type GuidanceStoreError, rowFindings, rowKey, rowsOf, type StoredRowScan } from "./guidance-sql.js";
 import { NativeEnvelope, NativeFraming, nativeMaxPayload, NativeStep, type NativeEndpoint, type NativeEnvelopeError, type NativeExit } from "./native-envelope.js";
 import type { FreshGitInfo, GitOperationState } from "./project-files.js";
 
@@ -494,3 +495,14 @@ export class GitProbe extends Context.Service<GitProbe, {
 
 // the probe call shape the definitions take
 export type FreshGitProbe = GitProbe["Service"]["probe"];
+
+/**
+ * The rollout scan of the pending probe sessions (read only): an unreadable entry list makes the run's startup cleanup report
+ * itself unavailable (the run continues) and every later probe fail until it is cleared.
+ */
+export const checkGitProbeRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
+  const db = yield* GuidanceDb;
+  const rows = yield* rowsOf(db, "meta", `SELECT key,value FROM meta WHERE key='${PENDING_KEY}'`);
+  return {findings: yield* rowFindings(rows, {table: "meta", kind: "pending git probe sessions", problem: "undecodable", read: "call"}, (row) => rowKey(row, ["key"]),
+    (row) => Effect.flatMap(decodeMetaValue(row), ({value}) => parsePending(value))), changes: []};
+});

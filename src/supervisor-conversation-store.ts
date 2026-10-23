@@ -1,7 +1,7 @@
 import { Context, Data, Effect, Layer, Schema } from "effect";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
-import { decodeGuidanceRow, documentRow, GuidanceStoreError, guidanceSql, tableColumns } from "./guidance-sql.js";
+import { decodeGuidanceRow, documentRow, GuidanceStoreError, guidanceSql, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan, tableColumns } from "./guidance-sql.js";
 import { SupervisorIds } from "./ids.js";
 import type { SupervisorMonitorBatch } from "./supervisor-monitor.js";
 import { WorkflowProposal, type WorkflowProposalInfo } from "./project-supervisor-contract.js";
@@ -364,3 +364,31 @@ export class SupervisorConversationStore extends Context.Service<SupervisorConve
   static readonly layer: Layer.Layer<SupervisorConversationStore, GuidanceStoreError, GuidanceDb | SupervisorIds> =
     Layer.effect(SupervisorConversationStore, untracedSql(makeConversationStore));
 }
+
+/**
+ * The rollout scan of the conversation tables (read only): every stored request, introduction, agreement candidate and notice
+ * clock row through the decoder its reader uses, and the open's table and column additions. The conversation reads them in its
+ * supervision cycles.
+ */
+export const checkConversationRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
+  const db = yield* GuidanceDb;
+  const changes = [
+    ...(yield* Effect.forEach(["supervisor_conversation_requests", "supervisor_workflow_introductions", "supervisor_workflow_agreement_candidates"],
+      (table) => schemaChanges(db, table))).flat(),
+    ...yield* schemaChanges(db, "supervisor_monitor_binding_clock", ["review_misses"]),
+  ];
+  const cycle = { problem: "undecodable", read: "cycle" } as const;
+  const findings = [
+    ...yield* rowFindings(yield* rowsOf(db, "supervisor_conversation_requests", "SELECT id,document FROM supervisor_conversation_requests"),
+      { ...cycle, table: "supervisor_conversation_requests", kind: "request" }, (row) => rowKey(row, ["id"]), decodeRequestRow),
+    ...yield* rowFindings(yield* rowsOf(db, "supervisor_workflow_introductions", "SELECT task_id,document FROM supervisor_workflow_introductions"),
+      { ...cycle, table: "supervisor_workflow_introductions", kind: "introduction" }, (row) => rowKey(row, ["task_id"]), decodeIntroductionRow),
+    ...yield* rowFindings(yield* rowsOf(db, "supervisor_workflow_agreement_candidates", "SELECT task_id,proposal_id,document FROM supervisor_workflow_agreement_candidates"),
+      { ...cycle, table: "supervisor_workflow_agreement_candidates", kind: "agreement candidate" }, (row) => rowKey(row, ["task_id", "proposal_id"]), decodeCandidateRow),
+    // a column the open adds reads as its default
+    ...yield* rowFindings(yield* rowsOf(db, "supervisor_monitor_binding_clock", "SELECT * FROM supervisor_monitor_binding_clock"),
+      { ...cycle, table: "supervisor_monitor_binding_clock", kind: "notice clock" }, (row) => rowKey(row, ["supervisor_thread_id"]),
+      (row) => Effect.andThen(decodeNoticeClockRow(row), decodeReviewMissesRow({ review_misses: 0, ...row }))),
+  ];
+  return { findings, changes };
+});

@@ -3,7 +3,7 @@ import {Buffer} from "node:buffer";
 import {Clock, Context, Data, Effect, Exit, Layer, Schema} from "effect";
 import type {SqlError} from "effect/sql";
 import {GuidanceDb, untracedSql} from "./db.js";
-import {mapSqlError, snapshotRead, type SupervisionStoreError} from "./guidance-sql.js";
+import {type GuidanceStoreError, mapSqlError, rowFindings, rowKey, rowsOf, schemaChanges, snapshotRead, type StoredRowScan, type SupervisionStoreError} from "./guidance-sql.js";
 import {fingerprint} from "./guidance-store.js";
 import {SupervisorIds} from "./ids.js";
 import {ProjectSupervisorStore, type ProjectSupervisorStoreError} from "./project-supervisor-store.js";
@@ -1058,3 +1058,28 @@ export class WorkflowStateStore extends Context.Service<WorkflowStateStore, Work
   static readonly layerWith = (isEnabled: WorkflowEditingEnabled): Layer.Layer<WorkflowStateStore, WorkflowStateStoreError | ProjectSupervisorStoreError, GuidanceDb | SupervisorIds | ProjectSupervisorStore> =>
     Layer.effect(WorkflowStateStore, untracedSql(makeWorkflowStateStore(isEnabled)));
 }
+
+/**
+ * The rollout scan of the workflow state tables (read only): a state row whose columns do not decode, or an operation row, is a
+ * failure of the call that reads it; a state document or a stored receipt the store classifies incompatible is reported as
+ * such (its readers answer `incompatible` for it, as at baseline). The open adds the tables when they are missing.
+ */
+export const checkWorkflowStateRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
+  const sql = yield* GuidanceDb;
+  const changes = [...yield* schemaChanges(sql, "supervisor_workflow_state"), ...yield* schemaChanges(sql, "supervisor_workflow_operations")];
+  const states = yield* rowsOf(sql, "supervisor_workflow_state", `SELECT ${workflowColumns} FROM supervisor_workflow_state`);
+  const operations = yield* rowsOf(sql, "supervisor_workflow_operations", "SELECT project_id,main_thread_id,operation_namespace,operation_id,request_hash,result FROM supervisor_workflow_operations");
+  const stateKey = (row: Record<string, unknown>) => rowKey(row, ["workflow_id"]);
+  const operationKey = (row: Record<string, unknown>) => rowKey(row, ["project_id", "main_thread_id", "operation_namespace", "operation_id"]);
+  const findings = [
+    ...yield* rowFindings(states, {table: "supervisor_workflow_state", kind: "workflow state", problem: "undecodable", read: "call"}, stateKey, decodeWorkflowRow),
+    ...yield* rowFindings(states, {table: "supervisor_workflow_state", kind: "workflow state", problem: "incompatible", read: "call"}, stateKey,
+      (row) => Effect.flatMap(Effect.option(decodeWorkflowRow(row)), (decoded) =>
+        decoded._tag === "Some" && classifyWorkflowRow(decoded.value).status === "incompatible" ? Effect.fail("incompatible") : Effect.void)),
+    ...yield* rowFindings(operations, {table: "supervisor_workflow_operations", kind: "operation", problem: "undecodable", read: "call"}, operationKey, decodeOperationRow),
+    ...yield* rowFindings(operations, {table: "supervisor_workflow_operations", kind: "operation receipt", problem: "incompatible", read: "call"}, operationKey,
+      (row) => Effect.flatMap(Effect.option(decodeOperationRow(row)), (decoded) =>
+        decoded._tag === "Some" && classifyReceipt(String(row.operation_id), decoded.value.result).status === "incompatible" ? Effect.fail("incompatible") : Effect.void)),
+  ];
+  return {findings, changes};
+});
