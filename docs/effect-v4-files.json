@@ -24000,7 +24000,7 @@
   }
  ],
  "completion": {
-  "scannedCommit": "bafcba531e9303ca5211b2e664dd92aa6086e686",
+  "scannedCommit": "6119157a8430d606b99c74a645beb6ff1a0fe10b",
   "note": "the parent of the commit that writes this record; that commit changes only this file",
   "generator": "owner helper manifest-completion.py (scans comments-stripped text of every tracked file)",
   "statuses": {
@@ -24275,13 +24275,6 @@
     "facadeImports": []
    },
    "src/ids.ts": {
-    "kind": "source",
-    "baselineDisposition": null,
-    "status": "effect",
-    "reason": null,
-    "facadeImports": []
-   },
-   "src/interpretation-cutover.ts": {
     "kind": "source",
     "baselineDisposition": null,
     "status": "effect",
@@ -25105,13 +25098,6 @@
     "facadeImports": []
    },
    "test/ids.test.ts": {
-    "kind": "test",
-    "baselineDisposition": null,
-    "status": "effect-test",
-    "reason": null,
-    "facadeImports": []
-   },
-   "test/interpretation-cutover.test.ts": {
     "kind": "test",
     "baselineDisposition": null,
     "status": "effect-test",
@@ -26665,9 +26651,9 @@
    "doc": 22,
    "entry": 11,
    "pure": 24,
-   "effect": 116,
+   "effect": 115,
    "adapter": 16,
-   "effect-test": 138,
+   "effect-test": 137,
    "pure-test": 11,
    "harness": 36,
    "test-fixture": 3,
