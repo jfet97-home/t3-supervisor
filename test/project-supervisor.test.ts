@@ -482,7 +482,8 @@ it.effect("a provider-disabled initial creation is durably rejected without auto
 it.effect("a provider-disabled objective does not block another main in the same project", () => Effect.gen(function* () {
   const fixture = yield* makeFixture([{threadId: "first-thread", projectId: "project-a", turns: [{id: "first-task", sequence: 11, text: "Implement first"}]},
     {threadId: "second-thread", projectId: "project-a", turns: [{id: "second-task", sequence: 12, text: "Implement second"}]}]);
-  fixture.setProviderDisabledDispatches(1);
+  // the two mains dispatch concurrently: only the first main's interpretation request is rejected as provider-disabled
+  fixture.setProviderDisabledDispatchMatching((payload) => String(payload.text).includes("Implement first"));
   const supervisor = yield* fixture.makeSupervisor();
   yield* supervisor.runOnce;
   assert.equal((yield* fixture.store.task("first-thread"))?.status, "unavailable");

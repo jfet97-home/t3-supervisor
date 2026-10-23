@@ -304,8 +304,10 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
   const operations: Array<{ tag: string; payload: Record<string, unknown> }> = [];
   const projectionReads: string[] = [];
   let unknownDispatches = 0;
-  // one lost response for the first message dispatch this predicate selects, whatever order concurrent mains dispatch in
+  // one lost response, or one provider-disabled rejection, for the first message dispatch the predicate selects, whatever
+  // order concurrent mains dispatch in
   let unknownDispatchMatching: ((payload: Record<string, unknown>) => boolean) | null = null;
+  let providerDisabledDispatchMatching: ((payload: Record<string, unknown>) => boolean) | null = null;
   let acceptedDispatchesWithoutRun = 0;
   let unknownLaunchResponses = 0;
   let launchFailuresBeforeCreate = 0;
@@ -410,6 +412,10 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
     if (tag === "orchestration.dispatchCommand" && payload.type === "message.dispatch") {
       if (providerDisabledDispatches > 0) {
         providerDisabledDispatches -= 1;
+        throw new SupervisorRpcError("rejected", true, true);
+      }
+      if (providerDisabledDispatchMatching?.(payload)) {
+        providerDisabledDispatchMatching = null;
         throw new SupervisorRpcError("rejected", true, true);
       }
       if (unknownDispatches > 0) {
@@ -527,6 +533,7 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
     setSnapshotSequence: (value: number) => { snapshotSequence = value; },
     setUnknownDispatches: (count: number) => { unknownDispatches = count; },
     setUnknownDispatchMatching: (predicate: (payload: Record<string, unknown>) => boolean) => { unknownDispatchMatching = predicate; },
+    setProviderDisabledDispatchMatching: (predicate: (payload: Record<string, unknown>) => boolean) => { providerDisabledDispatchMatching = predicate; },
     setAcceptedDispatchesWithoutRun: (count: number) => { acceptedDispatchesWithoutRun = count; },
     setUnknownLaunchResponses: (count: number) => { unknownLaunchResponses = count; },
     setLaunchFailuresBeforeCreate: (count: number) => { launchFailuresBeforeCreate = count; },
