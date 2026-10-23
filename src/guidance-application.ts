@@ -1,5 +1,5 @@
-import {SupervisorTeamController} from "./supervisor-team-controller.js";
-import { Cause, Clock, Deferred, Effect, Exit, Fiber, Layer } from "effect";
+import {SupervisorTeamController, type SupervisorTeamControllerPromises} from "./supervisor-team-controller.js";
+import { Cause, Clock, Context, Deferred, Effect, Exit, Fiber, Layer } from "effect";
 import { GuidanceStore } from "./guidance-store.js";
 import { GuidanceRuntime } from "./guidance.js";
 import { GuidanceUi } from "./guidance-ui.js";
@@ -16,7 +16,7 @@ import { ProjectConfigEditorService, type ProjectConfigEditor } from "./project-
 import { existsSync } from "node:fs";
 import { ProjectSupervisorStore, loadSupervisorOwnership } from "./project-supervisor-store.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
-import { NativeOperateRpc, NativeRpc, NativeShell, record, type NativeRpcShape, type SupervisorRpc } from "./supervisor-native.js";
+import { NativeOperateRpc, NativeRpc, NativeShell, type NativeRpcShape, type SupervisorRpc } from "./supervisor-native.js";
 import { HelperTransport, type SupervisorHelperDeliveryTransport } from "./supervisor-helper-transport.js";
 import { SupervisorTeamRuntime, type SupervisorTeamRuntimeFacade } from "./supervisor-team-runtime.js";
 import { SupervisorTeamStore } from "./supervisor-team-store.js";
@@ -30,7 +30,10 @@ import { WorkflowStateStore } from "./workflow-state-store.js";
 import { SupervisorIds } from "./ids.js";
 import { T3Client } from "./t3.js";
 import { GitProbe } from "./git-probe.js";
-import { WorkflowWriteController } from "./workflow-write-controller.js";
+import {
+  WorkflowNativeAccess, WorkflowWriteController, type SupervisionStartInput, type SupervisionStartResult, type SupervisionStopInput, type SupervisionStopResult,
+  type WorkflowWriteControllerOptions, type WorkflowWriteControllerPromises,
+} from "./workflow-write-controller.js";
 import { WorkflowMcp } from "./workflow-mcp.js";
 import { ServiceAuth } from "./service-auth.js";
 
@@ -138,6 +141,53 @@ export const supervisorLifecycleFacade = (run: RootRun, lifecycle: SupervisorLif
   check: (input, threads, signal, now) => settleCall(run, signal, atWallClock(now)(lifecycle.check(input, threads))),
   parkInactive: (input, signal, stillInactive) => settleCall(run, signal, lifecycle.parkInactive(input, stillInactive)),
 });
+// b-03 (plan 3.9): the baseline promise shapes of the write controller for the workflow mcp endpoint, the progress page and the
+// dashboard; a call's signal is its cancel, as the baseline signal stood for its deadline, and without one the tool's own 10 s applies
+export const workflowWriteControllerFacade = (run: RootRun, controller: WorkflowWriteController["Service"]): WorkflowWriteController => {
+  const call = <A>(start: (cancel?: Deferred.Deferred<void>) => Effect.Effect<A>, signal: AbortSignal | undefined): Promise<A> =>
+    signal ? cancelled(run, signal, start) : run(start());
+  const facade: WorkflowWriteControllerPromises = {
+    read: (input, signal) => call((cancel) => controller.read(input, cancel), signal),
+    readTool: (input, signal) => call((cancel) => controller.readTool(input, cancel), signal),
+    write: (input, signal) => call((cancel) => controller.write(input, cancel), signal),
+    startSupervision: (input, signal) => call((cancel) => controller.startSupervision(input, cancel), signal),
+    stopSupervision: (input, signal) => call((cancel) => controller.stopSupervision(input, cancel), signal),
+  };
+  // the only value of the service's promise-shaped instance type, which the unported callers name
+  return facade as unknown as WorkflowWriteController;
+};
+// b-03 (plan 3.9): the baseline promise shapes of the team controller for the workflow mcp endpoint and ProjectSupervisor
+export const supervisorTeamControllerFacade = (run: RootRun, controller: SupervisorTeamController["Service"]): SupervisorTeamController => {
+  const facade: SupervisorTeamControllerPromises = {
+    call: (input, signal) => cancelled(run, signal, (cancel) => controller.call(input, cancel)),
+    // a refusal that escaped the guide rejects the call with its baseline message
+    guide: (input, signal) => run(Effect.scoped(Effect.flatMap(cancelOnAbort(signal), (cancel) => controller.guide(input, cancel)))),
+    reconcile: (binding, signal) => cancelled(run, signal, (cancel) => controller.reconcile(binding, false, cancel)),
+    reconcileStopped: (binding, signal) => cancelled(run, signal, (cancel) => controller.reconcileStopped(binding, cancel)),
+  };
+  // the only value of the service's promise-shaped instance type, which the unported callers name
+  return facade as unknown as SupervisorTeamController;
+};
+// the call's cancel as the abort signal of an unported promise delegate: it aborts once the cancel completes or the call is
+// interrupted, and a rejection is a defect, as the baseline rejection reached the tool caller
+const delegated = <A>(cancel: Deferred.Deferred<void>, call: (signal: AbortSignal) => Promise<A>): Effect.Effect<A> => Effect.scoped(Effect.gen(function* () {
+  const controller = new AbortController();
+  yield* Effect.forkScoped(Effect.andThen(Deferred.await(cancel), Effect.sync(() => controller.abort())));
+  return yield* Effect.promise((signal) => {
+    signal.addEventListener("abort", () => controller.abort(), {once: true});
+    return call(controller.signal);
+  });
+}));
+export type WorkflowStartStop = {
+  startSupervision(input: SupervisionStartInput, evidence: {runId: string}, signal: AbortSignal): Promise<SupervisionStartResult>;
+  stopSupervision(input: SupervisionStopInput, evidence: unknown, signal: AbortSignal): Promise<SupervisionStopResult>;
+};
+// b-03 toward an unported callee (plan 3.9): the Start and Stop paths of SupervisionControl, which the write controller
+// delegates to with its call's cancel until SupervisionControl is a service
+export const workflowWriteDelegates = (control: Partial<WorkflowStartStop>): Pick<WorkflowWriteControllerOptions, "starts" | "stops"> => ({
+  ...(control.startSupervision ? {starts: {start: (input, evidence, cancel) => delegated(cancel, (signal) => control.startSupervision!(input, evidence, signal))}} : {}),
+  ...(control.stopSupervision ? {stops: {stop: (input, evidence, cancel) => delegated(cancel, (signal) => control.stopSupervision!(input, evidence, signal))}} : {}),
+});
 // i-01/i-02 (plan 3.9): the helper transport, the team runtime, the conversation and the lifecycle, built once in the
 // supervision run from its context over one record of the interim stores and the supervisor's scope predicates, and handed to
 // ProjectSupervisor in the promise shapes of their unported callers, with the legacy admission over the same gate (t-07)
@@ -153,10 +203,27 @@ export const supervisorTeamServices = (run: RootRun, store: ProjectSupervisorSto
   const lifecycle = yield* SupervisorLifecycle.make.pipe(Effect.provideService(SupervisionStores, stores),
     Effect.provideService(SupervisorConversation, conversation), Effect.provideService(SupervisorTeamRuntime, runtime));
   const teamRuntime = teamRuntimeFacade(run, runtime);
-  return {helperTransport: helperTransportFacade(run, transport), teamRuntime, admission: legacyAdmission(yield* SupervisionGate, run),
+  const gate = yield* SupervisionGate;
+  // the services of this run the workflow write and team controllers are built over
+  const services = Context.make(SupervisionStores, stores).pipe(Context.add(SupervisionScopeService, scope), Context.add(SupervisionGate, gate),
+    Context.add(HelperTransport, transport), Context.add(SupervisorConversation, conversation));
+  return {helperTransport: helperTransportFacade(run, transport), teamRuntime, admission: legacyAdmission(gate, run),
     scope, workflowStates, conversation: supervisorConversationFacade(run, conversation, stores, teamRuntime),
-    lifecycle: supervisorLifecycleFacade(run, lifecycle)};
+    lifecycle: supervisorLifecycleFacade(run, lifecycle), services};
 });
+
+// the write and team controllers as services in the supervision run, built once over its stores, scope predicates, admission
+// gate, helper transport and conversation; the mcp endpoint, the progress page and ProjectSupervisor receive their b-03 facades
+export const supervisorWorkflowControllers = (supervision: ProjectSupervisor, helperProviderInstanceId: string | undefined) =>
+  Effect.gen(function* () {
+    // the team store ProjectSupervisor reads, which both controllers wrote through at baseline
+    const stores = SupervisionStores.of({...yield* SupervisionStores, team: supervision.team});
+    const writes = yield* WorkflowWriteController.make(workflowWriteDelegates(supervision.supervisionControl)).pipe(
+      Effect.provideService(SupervisionStores, stores));
+    const team = yield* SupervisorTeamController.make(helperProviderInstanceId ? {helperProviderInstanceId} : {}).pipe(
+      Effect.provideService(SupervisionStores, stores), Effect.provideService(WorkflowWriteController, writes));
+    return {writes, team};
+  });
 
 export const runGuidanceApplication = (
   config: SupervisorConfig,
@@ -238,28 +305,16 @@ export const runGuidanceApplication = (
     );
     const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, readRpc,
       nativeOperate ? rpcFacade(nativeOperate) : null, signal => run(nativeShell.baseline, {signal}), teamServices, definitions);
-    const workflowReader = new WorkflowWriteController({
-      supervisors: supervisionStore,
-      ...(config.helperProviderInstanceId ? {helperProviderInstanceId: config.helperProviderInstanceId} : {}),
-      team: supervision.team,
-      workflows: supervision.workflowStates,
-      isEnabled: (projectId, mainThreadId, purpose) => supervision.gate.workflowEditingEnabled(projectId, mainThreadId, purpose),
-      isChatStopped: threadId => supervision.gate.supervisionStopped(threadId),
-      loadDefinitions: (projectId, threadId, signal) => definitions.load(projectId, threadId, signal),
-      contextViews: supervision.conversation,
-      starts: {start: (input, evidence, signal) => supervision.supervisionControl.startSupervision(input, evidence, signal)},
-      stops: {stop: (input, evidence, signal) => supervision.supervisionControl.stopSupervision(input, evidence, signal)},
-      native: {
-        listThreads: signal => run(nativeShell.threads, {signal}),
-        projection: async (threadId, signal) => (await run(t3.projection(threadId), {signal})).projection,
-        getTurnItem: async (input, signal) => {
-          const result = await readRpc("orchestration.getTurnItem", input, signal);
-          if (!record(result) || !("item" in result)) throw new Error("workflow_native_item_unavailable");
-          return {item: result.item};
-        },
-      },
-    });
-    const teamController = new SupervisorTeamController(workflowReader, supervision.team, supervision.operateRpc, supervision.conversation.requests);
+    // the write and team controllers on the run's services and the native reads of the read credential
+    const controllers = yield* supervisorWorkflowControllers(supervision, config.helperProviderInstanceId).pipe(
+      Effect.provideServiceEffect(WorkflowNativeAccess, WorkflowNativeAccess.make.pipe(Effect.provideService(NativeShell, nativeShell),
+        Effect.provideService(T3Client, t3), Effect.provideService(NativeRpc, nativeRead))),
+      Effect.provideService(ProjectDefinitions, definitionsService),
+      (effect) => nativeOperate ? Effect.provideService(effect, NativeOperateRpc, nativeOperate) : effect,
+      Effect.provide(teamServices.services),
+    );
+    const workflowReader = workflowWriteControllerFacade(run, controllers.writes);
+    const teamController = supervisorTeamControllerFacade(run, controllers.team);
     supervision.teamEffects = teamController;
     // the dashboard's access client, runtime and workflow MCP endpoint, provided once in this scope; the listeners are
     // acquired after them and released before them

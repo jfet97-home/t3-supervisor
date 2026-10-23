@@ -4,7 +4,7 @@ import { FetchHttpClient } from "effect/http";
 import { request as httpRequest } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { supervisorTeamServices } from "../../src/guidance-application.js";
+import { supervisorTeamControllerFacade, supervisorTeamServices, supervisorWorkflowControllers, workflowWriteControllerFacade } from "../../src/guidance-application.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
 import { NativeEnvelope } from "../../src/native-envelope.js";
@@ -17,14 +17,14 @@ import type { StoreShape } from "../../src/store.js";
 import { makeSupervisionGate, SupervisionGate, SupervisionScope } from "../../src/supervision-gate.js";
 import { ProjectDefinitions } from "../../src/project-definitions.js";
 import { definitionsService } from "./team-units.js";
-import { NativeOperateRpc, NativeRpc, record, type SupervisorRpc } from "../../src/supervisor-native.js";
-import { makeSupervisorRpc, readSupervisorBaseline, readSupervisorThreads } from "./supervisor-native-client.js";
-import { SupervisorTeamController } from "../../src/supervisor-team-controller.js";
+import { NativeOperateRpc, NativeRpc, NativeShell, type NativeRpcShape, type SupervisorRpc } from "../../src/supervisor-native.js";
+import { makeSupervisorRpc, readSupervisorBaseline } from "./supervisor-native-client.js";
+import type { SupervisorTeamController } from "../../src/supervisor-team-controller.js";
 import { makeT3Client, T3Client, type T3ClientShape } from "../../src/t3.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { ProjectInfo, SupervisorConfig, ThreadInfo } from "../../src/types.js";
 import { WorkflowMcp } from "../../src/workflow-mcp.js";
-import { WorkflowWriteController } from "../../src/workflow-write-controller.js";
+import { WorkflowNativeAccess, type WorkflowWriteController } from "../../src/workflow-write-controller.js";
 
 // the production object graph of src/main.ts and src/guidance-application.ts, built over a loopback peer and temp files
 
@@ -45,6 +45,9 @@ export type IntSupervision = {
   readRpc: SupervisorRpc;
   operateRpc: SupervisorRpc;
   supervision: ProjectSupervisor;
+  // the operate client and the services of the supervision run, which the controllers share with it
+  operate: NativeRpcShape;
+  services: Effect.Success<ReturnType<typeof supervisorTeamServices>>["services"];
   // closes both database files, as a process exit would
   close(): void;
 };
@@ -75,8 +78,9 @@ export const openIntSupervision = async (input: {directory: string; peerUrl: str
   // supervisor's scope predicates
   const scope = Effect.runSync(Scope.make());
   const supervisorScope = new SupervisionScope(config, store, true);
+  const operate = Effect.runSync(NativeRpc.make({baseUrl: config.t3Url, token: operateToken}).pipe(Effect.provide(NativeEnvelope.layer)));
   const team = await Effect.runPromise(supervisorTeamServices((effect, options) => Effect.runPromise(effect, options), store, config.t3Url, supervisorScope).pipe(
-    Effect.provideServiceEffect(NativeOperateRpc, NativeRpc.make({baseUrl: config.t3Url, token: operateToken}).pipe(Effect.provide(NativeEnvelope.layer))),
+    Effect.provideService(NativeOperateRpc, operate),
     Effect.provideServiceEffect(SupervisionGate, makeSupervisionGate(supervisorScope)),
     (effect) => input.definitions ? Effect.provideService(effect, ProjectDefinitions, definitionsService(input.definitions)) : effect,
     Effect.provideService(T3Client, t3),
@@ -87,7 +91,7 @@ export const openIntSupervision = async (input: {directory: string; peerUrl: str
   ));
   const supervision = new ProjectSupervisor(config, store, source, t3, readRpc, operateRpc, readSupervisorBaseline(config.t3Url, readToken),
     team, input.definitions);
-  return {directory: input.directory, config, policy, guidance, store, source, t3, readRpc, operateRpc, supervision,
+  return {directory: input.directory, config, policy, guidance, store, source, t3, readRpc, operateRpc, supervision, operate, services: team.services,
     // a process exit also ends the supervision scope, which aborts any webhook POST still in flight
     close: () => {Effect.runFork(Scope.close(scope, Exit.void));guidance.close();policy.close();}};
 };
@@ -100,38 +104,32 @@ export type IntEndpoint = {
   close(): Promise<void>;
 };
 
-// wires the workflow controller, team controller, MCP endpoint and UI server exactly as guidance-application.ts:78-104
+// wires the workflow controller, team controller, MCP endpoint and UI server exactly as guidance-application.ts does: the controller
+// services over the supervision run's services and operate client and the read credential's native reads, handed to their callers
+// as the b-03 facades
 export const startIntEndpoint = async (core: IntSupervision, definitions: IntDefinitions): Promise<IntEndpoint> => {
-  const {config, supervision, t3, readRpc} = core;
-  const workflowReader = new WorkflowWriteController({
-    supervisors: core.store,
-    team: supervision.team,
-    workflows: supervision.workflowStates,
-    isEnabled: (projectId, mainThreadId, purpose) => supervision.workflowEditingEnabled(projectId, mainThreadId, purpose),
-    isChatStopped: threadId => supervision.supervisionStopped(threadId),
-    loadDefinitions: (projectId, threadId, signal) => definitions.load(projectId, threadId, signal),
-    contextViews: supervision.conversation,
-    starts: {start: (input, evidence, signal) => supervision.startSupervision(input, evidence, signal)},
-    stops: {stop: (input, evidence, signal) => supervision.stopSupervision(input, evidence, signal)},
-    // verbatim copy of the inline production adapter (guidance-application.ts:89-97), which is not exported
-    native: {
-      listThreads: readSupervisorThreads(config.t3Url, readToken.trim(), readRpc),
-      projection: async (threadId, signal) => (await Effect.runPromise(t3.projection(threadId), {signal})).projection,
-      getTurnItem: async (input, signal) => {
-        const result = await readRpc("orchestration.getTurnItem", input, signal);
-        if (!record(result) || !("item" in result)) throw new Error("workflow_native_item_unavailable");
-        return {item: result.item};
-      },
-    },
-  });
-  const teamController = new SupervisorTeamController(workflowReader, supervision.team, supervision.operateRpc, supervision.conversation.requests);
+  const {config, supervision, t3} = core;
+  const nativeRead = Effect.runSync(NativeRpc.make({baseUrl: config.t3Url, token: readToken.trim()}).pipe(Effect.provide(NativeEnvelope.layer)));
+  const nativeShell = Effect.runSync(NativeShell.make({baseUrl: config.t3Url, token: readToken.trim()}).pipe(
+    Effect.provideService(NativeRpc, nativeRead), Effect.provide(FetchHttpClient.layer)));
+  const scope = Effect.runSync(Scope.make());
+  const controllers = await Effect.runPromise(supervisorWorkflowControllers(supervision, config.helperProviderInstanceId).pipe(
+    Effect.provideServiceEffect(WorkflowNativeAccess, WorkflowNativeAccess.make.pipe(Effect.provideService(NativeShell, nativeShell),
+      Effect.provideService(T3Client, t3), Effect.provideService(NativeRpc, nativeRead))),
+    Effect.provideService(ProjectDefinitions, definitionsService(definitions)),
+    Effect.provideService(NativeOperateRpc, core.operate),
+    Effect.provide(core.services),
+    Scope.provide(scope),
+  ));
+  const workflowReader = workflowWriteControllerFacade((effect, options) => Effect.runPromise(effect, options), controllers.writes);
+  const teamController = supervisorTeamControllerFacade((effect, options) => Effect.runPromise(effect, options), controllers.team);
   supervision.teamEffects = teamController;
   const ui = await startGuidanceUi(config, Effect.runSync(GuidanceRuntime.make(config, core.guidance, core.source)),
     undefined, undefined, supervision, WorkflowMcp.layer(workflowReader, teamController), workflowReader);
   const address = ui.server.address();
   if (address === null || typeof address === "string") throw new Error("ui did not bind a TCP port");
   const token = await readFile(join(config.dataDirectory, "access", "workflow-mcp-token"), "utf8");
-  return {controller: workflowReader, teamController, port: address.port, token, close: () => ui.close()};
+  return {controller: workflowReader, teamController, port: address.port, token, close: () => ui.close().finally(() => Effect.runPromise(Scope.close(scope, Exit.void)))};
 };
 
 export type McpReply = {httpStatus: number; isError: boolean; value: unknown};

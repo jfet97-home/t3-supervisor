@@ -25,7 +25,8 @@ import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { compactProposalDigest, parseWorkflowAgreementRecord, workflowAgreementPlanHash } from "../src/supervisor-workflow-agreement.js";
 import { SupervisorTeamStore } from "../src/supervisor-team-store.js";
 import { ThreadPolicyStore } from "../src/thread-policy.js";
-import { WorkflowWriteController, type SupervisionStopInput } from "../src/workflow-write-controller.js";
+import type { SupervisionStopInput } from "../src/workflow-write-controller.js";
+import { workflowWriteControllerUnit, type WorkflowWriteControllerUnitOptions } from "./support/workflow-controller-units.js";
 import { effectiveIndex, indexSource, projectIndex, testSummary } from "./project-definitions-fixture.js";
 
 const projectId = "project-a";
@@ -1016,9 +1017,9 @@ const nativeStopController = (fixture: Awaited<ReturnType<typeof makeFixture>>, 
     toolName: "mcp__t3-supervisor-workflows__supervision_stop", input: args};
   turnItemsOf(caller).push(item);
   let verified = false;
-  const controller = new WorkflowWriteController({supervisors: fixture.projectStore, workflows: fixture.workflows,
+  const controller = workflowWriteControllerUnit({supervisors: fixture.projectStore, workflows: fixture.workflows,
     native: {listThreads: async () => fixture.threadList, projection: async () => caller, getTurnItem: async () => ({item})}, maxEvidenceWaitMs: 0,
-    stops: {stop: async (input: SupervisionStopInput, evidence: unknown, signal: AbortSignal) => {verified = true;return service.stopSupervision(input, evidence, signal);}}} as unknown as ConstructorParameters<typeof WorkflowWriteController>[0]);
+    stops: {stop: async (input: SupervisionStopInput, evidence: unknown, signal: AbortSignal) => {verified = true;return service.stopSupervision(input, evidence, signal);}}} as unknown as WorkflowWriteControllerUnitOptions);
   return {stop: (input: unknown) => controller.stopSupervision(input), verified: () => verified};
 };
 

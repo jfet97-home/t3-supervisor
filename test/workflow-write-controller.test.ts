@@ -1,5 +1,5 @@
 import {SupervisorTeamStore} from "../src/supervisor-team-store.js";
-import {SupervisorTeamController, supervisionTeamToolDefinition} from "../src/supervisor-team-controller.js";
+import {supervisionTeamToolDefinition} from "../src/supervisor-team-controller.js";
 import {SupervisorConversationStore} from "../src/supervisor-conversation-store.js";
 import {supervisorTeamView} from "../src/supervisor-team-view.js";
 import assert from "node:assert/strict";
@@ -13,7 +13,8 @@ import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, typ
 import type { Projection, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import type { WorkflowAgreementImport, WorkflowOwner } from "../src/workflow-state-contract.js";
-import { submittedApplyPointer, WorkflowWriteController, workflowReadToolDefinition, workflowWriteToolDefinition, type WorkflowApplyPatch, type WorkflowNativeAccess } from "../src/workflow-write-controller.js";
+import { submittedApplyPointer, workflowReadToolDefinition, workflowWriteToolDefinition, type WorkflowApplyPatch } from "../src/workflow-write-controller.js";
+import { supervisorTeamControllerUnit, workflowWriteControllerUnit, type WorkflowNativeFake as WorkflowNativeAccess, type WorkflowWriteControllerUnit as WorkflowWriteController } from "./support/workflow-controller-units.js";
 import { workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, workflowTurnItemDetailMaxBytes } from "../src/workflow-write-evidence.js";
 import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo } from "../src/project-supervisor-contract.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
@@ -200,7 +201,7 @@ const makeFixture = async (mainThread = thread("main-workflows", "project-workfl
       return {item: details.get(itemId) ?? null};
     },
   };
-  const controller = new WorkflowWriteController({supervisors, workflows, native,
+  const controller = workflowWriteControllerUnit({supervisors, workflows, native,
     loadDefinitions: async () => {definitionReader.calls++;if (definitionReader.fail) throw new Error("definitions_unavailable");return definitionReader.current;},
     isEnabled: id => supervisors.enabled(id), maxEvidenceWaitMs: 0});
   return {directory, guidance, supervisors, workflows, controller,
@@ -488,7 +489,7 @@ it("a delayed current record becomes verifiable after fresh projection polling",
       if (polls === 3) installEvidence(fixture, args, {itemId: "delayed-current-item", snapshotInput: "x".repeat(20 * 1024)});
       return originalProjection(threadId, signal);
     };
-    const controller = new WorkflowWriteController({supervisors: fixture.supervisors, workflows: fixture.workflows,
+    const controller = workflowWriteControllerUnit({supervisors: fixture.supervisors, workflows: fixture.workflows,
       native: fixture.native, isEnabled: id => fixture.supervisors.enabled(id), maxEvidenceWaitMs: 500});
     assert.equal((await controller.write(args)).status, "created");
     assert.ok(polls >= 3);
@@ -502,7 +503,7 @@ it("unchanged inspected detail is cached throughout the pending window", async (
     const requested = ensureArgs(fixture, "pending-current", "Wait for matching evidence.");
     const unrelated = ensureArgs(fixture, "pending-other", "This evidence has a different request.");
     const itemId = installEvidence(fixture, unrelated, {itemId: "unchanged-mismatch", snapshotInput: "x".repeat(20 * 1024)});
-    const controller = new WorkflowWriteController({supervisors: fixture.supervisors, workflows: fixture.workflows,
+    const controller = workflowWriteControllerUnit({supervisors: fixture.supervisors, workflows: fixture.workflows,
       native: fixture.native, isEnabled: id => fixture.supervisors.enabled(id)});
     assert.equal((await controller.write(requested)).status, "pending");
     assert.deepEqual(fixture.detailCalls, [itemId]);
@@ -595,7 +596,7 @@ it("an exact strong own-main record with an unrecognized tool name is explicitly
       toolName: observedToolName,
       snapshotInput: args,
     });
-    const controller = new WorkflowWriteController({
+    const controller = workflowWriteControllerUnit({
       supervisors: fixture.supervisors,
       workflows: fixture.workflows,
       native: fixture.native,
@@ -751,7 +752,7 @@ it("a human stop of the main fences workflow_write at the first and the final co
       if (stopOnDetail.active) stopped = fixture.mainThreadId;
       return fixture.native.getTurnItem(input, AbortSignal.timeout(1000));
     }};
-    const controller = new WorkflowWriteController({...fixture.controller.options, native, isChatStopped: threadId => threadId === stopped});
+    const controller = workflowWriteControllerUnit({...fixture.controller.options, native, isChatStopped: threadId => threadId === stopped});
     const args = ensureArgs(fixture, "stopped-op", "Create the main workflow.");
     installEvidence(fixture, args);
     const detailsBefore = fixture.detailCalls.length;
@@ -776,7 +777,7 @@ it("an incompatible main-scope version disables the default controller without r
   const fixture = await makeFixture();
   try {
     Object.defineProperty(fixture.supervisors, "scopeCompatible", {value: false});
-    const controller = new WorkflowWriteController({
+    const controller = workflowWriteControllerUnit({
       supervisors: fixture.supervisors,
       workflows: fixture.workflows,
       native: fixture.native,
@@ -1914,7 +1915,7 @@ it("a ready helper links and plans a completed unarchived assigned child using i
     own.thread = f.threads.find(item => item.id === member.threadId)!;
     f.projections.set(member.threadId, own);
     const actorFixture = {...f, supervisorThreadId: member.threadId, projection: own};
-    const controller = new WorkflowWriteController({...f.controller.options, team});
+    const controller = workflowWriteControllerUnit({...f.controller.options, team});
     const authority = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation,
       memberEpoch: ready.epoch, assignmentRootThreadId: child.id, assignmentEpoch: assignment.epoch};
     const args = {...authority, action: "link_child", operationId: "shared-operation", childThreadId: child.id, note: "Helper child plan."};
@@ -2041,7 +2042,7 @@ it("a ready helper links and plans a completed unarchived assigned child using i
     assert.equal((await controller.write(stale)).status, "denied");
     assert(transfer.epoch > assignment.epoch);
     assert.equal(f.workflows.get(f.projectId, f.mainThreadId, child.id)!.workflowId, doc.workflowId);
-    const quarantineController = new SupervisorTeamController(controller, team, null);
+    const quarantineController = supervisorTeamControllerUnit(controller, team, null);
     const quarantine = {...locator(f), action: "quarantine", operationId: "revoke-helper-after-child-write", memberThreadId: member.threadId};
     installEvidence(f, quarantine, {toolName: workflowToolNames.team.direct[0]});
     assert.equal((await quarantineController.call(quarantine, AbortSignal.timeout(1000)) as {status: string}).status, "ok");
@@ -2056,8 +2057,8 @@ it("team registration requires a completed app-owned bootstrap and readiness req
   const f = await makeFixture();
   try {
     const team = new SupervisorTeamStore(f.supervisors);
-    const reader = new WorkflowWriteController({...f.controller.options, team});
-    const controller = new SupervisorTeamController(reader, team, null);
+    const reader = workflowWriteControllerUnit({...f.controller.options, team});
+    const controller = supervisorTeamControllerUnit(reader, team, null);
     const args = {...locator(f), action: "register", operationId: "register-1", memberThreadId: "real-helper", taskId: "task-node", bootstrapRunId: "boot-run"};
     installEvidence(f, args, {toolName: workflowToolNames.team.direct[0]});
     const child = makeProjection("real-helper", f.projectId);
@@ -2090,8 +2091,8 @@ it("opt-in helper provider isolation accepts only a distinct configured instance
   const register = async (variant: "isolated" | "wrong-instance" | "same-instance" | "shared-session" | "missing-session" | "missing-owner") => {
     const f = await makeFixture();
     const team = new SupervisorTeamStore(f.supervisors);
-    const reader = new WorkflowWriteController({...f.controller.options, team, helperProviderInstanceId: configuredInstanceId});
-    const controller = new SupervisorTeamController(reader, team, null);
+    const reader = workflowWriteControllerUnit({...f.controller.options, team, helperProviderInstanceId: configuredInstanceId});
+    const controller = supervisorTeamControllerUnit(reader, team, null);
     const args = {...locator(f), action: "register", operationId: `register-${variant}`, memberThreadId: "isolated-helper",
       taskId: `task-${variant}`, bootstrapRunId: `boot-${variant}`};
     installEvidence(f, args, {toolName: workflowToolNames.team.direct[0]});
@@ -2178,9 +2179,9 @@ it("helper guidance resolves an omitted activeRunId and retains uncertain identi
     Object.assign(own.thread, {runtimeMode: "full-access", interactionMode: "default"});
     f.projections.set(member.threadId, own);
     const actorFixture = {...f, supervisorThreadId: member.threadId, projection: own};
-    const reader = new WorkflowWriteController({...f.controller.options, team});
+    const reader = workflowWriteControllerUnit({...f.controller.options, team});
     const sent: Record<string, unknown>[] = [];
-    const controller = new SupervisorTeamController(reader, team, async (_tag, command) => {sent.push(command);throw new Error("lost_send_reply");});
+    const controller = supervisorTeamControllerUnit(reader, team, async (_tag, command) => {sent.push(command);throw new Error("lost_send_reply");});
     const args = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: ready.epoch,
       assignmentRootThreadId: target.id, assignmentEpoch: assignment.epoch,
       operationId: "uncertain-guidance", targetThreadId: target.id, text: "Reconsider the observed failed test before completing this step."};
@@ -2284,9 +2285,9 @@ it("helper guidance defers on target owner input without routing to an eligible 
     Object.assign(own.thread, {runtimeMode: "full-access", interactionMode: "default"});
     f.projections.set(member.threadId, own);
     const actorFixture = {...f, supervisorThreadId: member.threadId, projection: own};
-    const reader = new WorkflowWriteController({...f.controller.options, team});
+    const reader = workflowWriteControllerUnit({...f.controller.options, team});
     const sent: Record<string, unknown>[] = [];
-    const controller = new SupervisorTeamController(reader, team, async (_tag, command) => {
+    const controller = supervisorTeamControllerUnit(reader, team, async (_tag, command) => {
       sent.push(command);
       return {sequence: sent.length};
     });
@@ -2352,9 +2353,9 @@ it("deferred owner guidance raises one stable attention after grace and routes o
     Object.assign(own.thread, {runtimeMode: "full-access", interactionMode: "default"});
     f.projections.set(member.threadId, own);
     const actorFixture = {...f, supervisorThreadId: member.threadId, projection: own};
-    const reader = new WorkflowWriteController({...f.controller.options, team});
+    const reader = workflowWriteControllerUnit({...f.controller.options, team});
     const sent: Record<string, unknown>[] = [];
-    const controller = new SupervisorTeamController(reader, team, async (_tag, command) => {
+    const controller = supervisorTeamControllerUnit(reader, team, async (_tag, command) => {
       sent.push(command);
       if (command.threadId === target.id) {
         const rootNodeId = `${target.activeRunId}-root`;
@@ -2466,8 +2467,8 @@ it("helper guidance records a pre-open transport refusal as not sent without anc
     f.projections.set(member.threadId, own);
 
     const actorFixture = {...f, supervisorThreadId: member.threadId, projection: own};
-    const reader = new WorkflowWriteController({...f.controller.options, team});
-    const controller = new SupervisorTeamController(reader, team,
+    const reader = workflowWriteControllerUnit({...f.controller.options, team});
+    const controller = supervisorTeamControllerUnit(reader, team,
       makeSupervisorRpc(`http://127.0.0.1:${address.port}`, "team-guide-preopen-token"));
     const args = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: ready.epoch,
       assignmentRootThreadId: parent.id, assignmentEpoch: assignment.epoch, operationId: "guide-preopen-refusal",
@@ -2559,8 +2560,8 @@ it("helper guidance replays a received dispatch failure with the exact command b
     f.projections.set(f.mainThreadId, mainProjection);
     f.projections.set(member.threadId, own);
     const actorFixture = {...f, supervisorThreadId: member.threadId, projection: own};
-    const reader = new WorkflowWriteController({...f.controller.options, team});
-    const controller = new SupervisorTeamController(reader, team,
+    const reader = workflowWriteControllerUnit({...f.controller.options, team});
+    const controller = supervisorTeamControllerUnit(reader, team,
       makeSupervisorRpc(`http://127.0.0.1:${address.port}`, "team-guide-test-token"));
     const args = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: ready.epoch,
       assignmentRootThreadId: parent.id, assignmentEpoch: assignment.epoch, operationId: "guide-replay",
@@ -2616,8 +2617,8 @@ it("root quarantine uses native team proof and preserves unresolved requests whi
     const args = {supervisorThreadId: f.supervisorThreadId, bindingGeneration: f.binding.generation,
       action: "quarantine", operationId: "quarantine-helper", memberThreadId: member.threadId};
     installEvidence(f, args, {toolName: workflowToolNames.team.direct[0]});
-    const reader = new WorkflowWriteController({...f.controller.options, team});
-    const controller = new SupervisorTeamController(reader, team, null);
+    const reader = workflowWriteControllerUnit({...f.controller.options, team});
+    const controller = supervisorTeamControllerUnit(reader, team, null);
     const result = await controller.call(args, AbortSignal.timeout(1000)) as {status: string; result: {state: string; epoch: number}};
 
     assert.equal(result.status, "ok");
@@ -2662,8 +2663,8 @@ it("root team retry restarts a definitely rejected note without changing an unkn
     const args = {supervisorThreadId: f.supervisorThreadId, bindingGeneration: f.binding.generation,
       action: "retry", operationId: "retry-failed-team-notices", memberThreadId: member.threadId};
     installEvidence(f, args, {toolName: workflowToolNames.team.direct[0]});
-    const reader = new WorkflowWriteController({...f.controller.options, team});
-    const controller = new SupervisorTeamController(reader, team, null);
+    const reader = workflowWriteControllerUnit({...f.controller.options, team});
+    const controller = supervisorTeamControllerUnit(reader, team, null);
     const result = await controller.call(args, AbortSignal.timeout(1000)) as {
       status: string; result: {retriedNotifications: number; pendingRequestsRemain: boolean};
     };
@@ -2833,7 +2834,7 @@ it("only the root assesses a main contribution, through verified native proof wi
     const own = makeProjection(member.threadId, f.projectId);
     own.thread = f.threads.find(item => item.id === member.threadId)!;
     f.projections.set(member.threadId, own);
-    const controller = new WorkflowWriteController({...f.controller.options, team});
+    const controller = workflowWriteControllerUnit({...f.controller.options, team});
     const helperArgs = {...assessArgs(f, workflowId), supervisorThreadId: member.threadId, memberEpoch: ready.epoch};
     installEvidence({...f, supervisorThreadId: member.threadId, projection: own}, helperArgs);
     assert.deepEqual(await controller.write(helperArgs), {status: "denied", operationId: "assess-external-review", reason: "contribution_assessment_root_only"});
@@ -2926,7 +2927,7 @@ it("workflow_read view definitions accepts nonempty definitionIds through the re
   const fixture = await makeFixture();
   try {
     const received: unknown[] = [];
-    const controller = new WorkflowWriteController({supervisors: fixture.supervisors, workflows: fixture.workflows, native: fixture.native,
+    const controller = workflowWriteControllerUnit({supervisors: fixture.supervisors, workflows: fixture.workflows, native: fixture.native,
       isEnabled: id => fixture.supervisors.enabled(id), maxEvidenceWaitMs: 0,
       contextViews: {readContextView: async (_binding: unknown, input: unknown) => {received.push(input);return {status: "ok", view: "definitions"};}} as never});
     // the exact native shape recovered from the live root: a manifest read and a read of two selected definitions

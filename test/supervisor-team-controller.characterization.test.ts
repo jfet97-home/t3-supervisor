@@ -9,9 +9,8 @@ import type {DatabaseSync} from "node:sqlite";
 import {GuidanceStore} from "../src/guidance-store.js";
 import {ProjectSupervisorStore, defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {SupervisorTeamStore} from "../src/supervisor-team-store.js";
-import {SupervisorTeamController} from "../src/supervisor-team-controller.js";
 import {SupervisorRpcError, type SupervisorRpc} from "../src/supervisor-native.js";
-import {WorkflowWriteController} from "../src/workflow-write-controller.js";
+import {supervisorTeamControllerUnit, workflowWriteControllerUnit, type SupervisorTeamControllerUnit as SupervisorTeamController} from "./support/workflow-controller-units.js";
 import {WorkflowStateStore} from "../src/workflow-state-store.js";
 import {workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames} from "../src/workflow-write-evidence.js";
 import type {Projection, ThreadInfo} from "../src/types.js";
@@ -73,9 +72,9 @@ const fixture = async (t: TestContext) => {
     return {sequence: calls.length};
   };
   const makeController = (store: ProjectSupervisorStore, teamStore: SupervisorTeamStore) => {
-    const workflows = new WorkflowWriteController({supervisors: store, team: teamStore, workflows: new WorkflowStateStore(store, () => true),
+    const workflows = workflowWriteControllerUnit({supervisors: store, team: teamStore, workflows: new WorkflowStateStore(store, () => true),
       native, isEnabled: () => true, isChatStopped: () => false, maxEvidenceWaitMs: 0});
-    return new SupervisorTeamController(workflows, teamStore, rpc);
+    return supervisorTeamControllerUnit(workflows, teamStore, rpc);
   };
   const controller = makeController(supervisors, team);
   after(t, async () => {

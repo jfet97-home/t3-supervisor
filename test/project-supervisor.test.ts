@@ -1,4 +1,4 @@
-import {WorkflowWriteController} from "../src/workflow-write-controller.js";
+import {workflowWriteControllerUnit} from "./support/workflow-controller-units.js";
 import { ThreadPolicyStore } from "../src/thread-policy.js";
 import assert from "node:assert/strict";
 import { it } from "vitest";
@@ -1655,7 +1655,7 @@ it("Start intake requires exact native own-run proof before reserving permission
         toolName: variant === "mcpx" ? "mcp__mcpx__mcpx_call_tool" : variant === "wrong_tool" ? "mcp__t3-supervisor-workflows__supervision_stop" : "mcp__t3-supervisor-workflows__supervision_start",
         input: variant === "mcpx" ? {name: "t3-supervisor-workflows__supervision_start", arguments: args} : variant === "forged" ? {...args, operationId: "other"} : args};
       caller.turnItems = [item];
-      const controller = new WorkflowWriteController({supervisors: f.fixture.supervisorStore, workflows: f.supervisor.workflowStates, maxEvidenceWaitMs: 0,
+      const controller = workflowWriteControllerUnit({supervisors: f.fixture.supervisorStore, workflows: f.supervisor.workflowStates, maxEvidenceWaitMs: 0,
         native: {listThreads: async () => [caller.thread], projection: async () => caller, getTurnItem: async () => ({item})},
         starts: {start: (input, evidence, signal) => f.supervisor.startSupervision(input, evidence, signal)}});
       const result = await controller.startSupervision(args);

@@ -7,11 +7,11 @@ import {join} from "node:path";
 import {GuidanceStore} from "../src/guidance-store.js";
 import {ProjectSupervisorStore, defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {SupervisorTeamStore} from "../src/supervisor-team-store.js";
-import {SupervisorTeamController, supervisionTeamToolDefinition} from "../src/supervisor-team-controller.js";
+import {supervisionTeamToolDefinition} from "../src/supervisor-team-controller.js";
 import {teamNotificationEvidence, teamNotificationText} from "../src/supervisor-team-runtime.js";
 import {attributesHelperDelivery} from "../src/supervisor-helper-transport.js";
 import {helperTransportUnit} from "./support/team-units.js";
-import {WorkflowWriteController} from "../src/workflow-write-controller.js";
+import {supervisorTeamControllerUnit, workflowWriteControllerUnit} from "./support/workflow-controller-units.js";
 import {WorkflowStateStore} from "../src/workflow-state-store.js";
 import {workflowToolNames} from "../src/workflow-write-evidence.js";
 import type {Projection, ThreadInfo} from "../src/types.js";
@@ -42,9 +42,9 @@ const fixture = async () => {
   let stoppedMain: string | null = null;
   const native = {listThreads: async () => threads, getTurnItem: async ({itemId}: {itemId: string}) => ({item: details.get(itemId)}),
     projection: async (id: string) => {reads.push(id);if (id === member.threadId) duringRead?.();return projections.get(id)!;}};
-  const workflows = new WorkflowWriteController({supervisors, team, workflows: new WorkflowStateStore(supervisors, () => true),
+  const workflows = workflowWriteControllerUnit({supervisors, team, workflows: new WorkflowStateStore(supervisors, () => true),
     native, isEnabled: () => true, isChatStopped: threadId => threadId === stoppedMain, maxEvidenceWaitMs: 0});
-  const controller = new SupervisorTeamController(workflows, team, null);
+  const controller = supervisorTeamControllerUnit(workflows, team, null);
   // create only the local durable receipt table. No native RPC/POST is used by this fixture.
   helperTransportUnit({store: supervisors, rpc: null, baseUrl: "http://unused.invalid", projection: native.projection});
   const assignment = team.assign(binding, "branch", member.threadId, new Map([["branch", "main"]]));
@@ -55,7 +55,7 @@ const fixture = async () => {
   const {text, marker} = teamNotificationText(binding, original);
   const logicalId = `supervisor-team-notice:${original.id}:attempt:0`;
   guidance.db.prepare("INSERT INTO supervisor_helper_deliveries VALUES(?,?,?,?)").run(binding.threadId, binding.generation, logicalId,
-    JSON.stringify({messageId: logicalId, threadId: member.threadId, taskId: "owned-task", text, state: "posted"}));
+    JSON.stringify({messageId: logicalId, commandId: logicalId, hash: "receipt-hash", threadId: member.threadId, taskId: "owned-task", text, state: "posted"}));
   const helper = projections.get(member.threadId)!;
   helper.runs.push({id: "interrupted-native-run", threadId: member.threadId, ordinal: 1, status: "interrupted", userMessageId: "native-message",
     requestedAt: "2026-10-19T00:00:00Z", startedAt: null, completedAt: null, rootNodeId: null});
@@ -153,7 +153,7 @@ it("review verification identifies an existing attempt by its stored sent bytes"
   const logicalId = `supervisor-team-notice:${f.original.id}:attempt:0`;
   const earlier = `${f.helper.messages[0]!.text}\nEarlier role wording.`;
   f.guidance.db.prepare("UPDATE supervisor_helper_deliveries SET document=? WHERE message_id=?").run(
-    JSON.stringify({messageId: logicalId, threadId: f.member.threadId, taskId: "owned-task", text: earlier, state: "posted"}), logicalId);
+    JSON.stringify({messageId: logicalId, commandId: logicalId, hash: "receipt-hash", threadId: f.member.threadId, taskId: "owned-task", text: earlier, state: "posted"}), logicalId);
   f.helper.messages[0]!.text = publishedFrame(earlier);
   f.proof(f.args);
   assert.equal((await f.call()).status, "ok", "a wording change after sending does not orphan the attempt");
@@ -211,7 +211,7 @@ it("review operation replay is durable and concurrent distinct operations admit 
   assert.equal(f.team.snapshot(f.binding).notifications.filter(value => value.kind === "handover_review").length, 1);
   // recreate the controller and remove native helper visibility: exact replay does
   // not mutate, redeliver, or need to reconsider the already-committed chain.
-  const restarted = new SupervisorTeamController(f.controller.workflows, new SupervisorTeamStore(f.supervisors), null);
+  const restarted = supervisorTeamControllerUnit(f.controller.workflows, new SupervisorTeamStore(f.supervisors), null);
   f.projections.delete(f.member.threadId);f.proof(winner);
   assert.deepEqual(await restarted.call(winner, AbortSignal.timeout(5000)), results[winnerIndex]);
   const changed = {...winner, note: "sentinel-different-note"};f.proof(changed);
@@ -236,7 +236,7 @@ it("native validation includes every earlier review in the expected chain", asyn
   const {text} = teamNotificationText(f.binding, review);
   const logicalId = `supervisor-team-notice:${review.id}:attempt:0`;
   f.guidance.db.prepare("INSERT INTO supervisor_helper_deliveries VALUES(?,?,?,?)").run(f.binding.threadId, f.binding.generation, logicalId,
-    JSON.stringify({messageId: logicalId, threadId: f.member.threadId, taskId: "owned-task", text, state: "posted"}));
+    JSON.stringify({messageId: logicalId, commandId: logicalId, hash: "receipt-hash", threadId: f.member.threadId, taskId: "owned-task", text, state: "posted"}));
   f.helper.messages.push({...f.helper.messages[0]!, id: "review-native-message", runId: "review-native-run", text: publishedFrame(text)});
   const run = {...f.helper.runs[0]!, id: "review-native-run", userMessageId: "review-native-message", status: "running"};
   f.helper.runs.push(run);

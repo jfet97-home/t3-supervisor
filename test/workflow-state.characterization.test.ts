@@ -9,7 +9,8 @@ import {defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type
 import {proposalContextFromDefinitions, validateWorkflowPlan} from "../src/supervisor-workflow.js";
 import {WorkflowStateStore} from "../src/workflow-state-store.js";
 import type {ExternalContributionImport, WorkflowAgreementImport, WorkflowApplyInput, WorkflowOwner, WorkflowStateDocument, WorkflowStatePlan, WorkflowStateSourceBinding} from "../src/workflow-state-contract.js";
-import {WorkflowWriteController, type WorkflowApplyPatch, type WorkflowNativeAccess} from "../src/workflow-write-controller.js";
+import type {WorkflowApplyPatch} from "../src/workflow-write-controller.js";
+import {workflowWriteControllerUnit, type WorkflowNativeFake as WorkflowNativeAccess, type WorkflowWriteControllerUnit as WorkflowWriteController} from "./support/workflow-controller-units.js";
 import {workflowToolNames} from "../src/workflow-write-evidence.js";
 import type {ProjectDefinitionSnapshot} from "../src/project-definitions-contract.js";
 import type {WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo} from "../src/project-supervisor-contract.js";
@@ -406,7 +407,7 @@ const makeControllerFixture = async (t: TestContext): Promise<ControllerFixture>
     },
     getTurnItem: async ({itemId}) => ({item: details.get(itemId) ?? null}),
   };
-  const controller = new WorkflowWriteController({supervisors, workflows, native, loadDefinitions: async () => definitions,
+  const controller = workflowWriteControllerUnit({supervisors, workflows, native, loadDefinitions: async () => definitions,
     isEnabled: id => supervisors.enabled(id), maxEvidenceWaitMs: 0});
   return {guidance, supervisors, workflows, controller, binding, projectId, mainThreadId, supervisorThreadId, projection, details, proposal,
     sourceBinding: {workspaceRoot: definitions.workspaceRoot, revision: definitions.revision, globalRevision: null, definitionsStatus: "ready",

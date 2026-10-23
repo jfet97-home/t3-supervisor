@@ -15,12 +15,11 @@ import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import {
   supervisionStartToolDefinition,
   supervisionStopToolDefinition,
-  WorkflowWriteController,
   workflowReadToolDefinition,
   workflowWriteToolDefinition,
   type WorkflowApplyPatch,
-  type WorkflowNativeAccess,
 } from "../src/workflow-write-controller.js";
+import { workflowWriteControllerUnit, type WorkflowNativeFake as WorkflowNativeAccess, type WorkflowWriteControllerUnit as WorkflowWriteController } from "./support/workflow-controller-units.js";
 import {
   verifyWorkflowToolEvidence,
   workflowToolInputMaxBytes,
@@ -122,7 +121,7 @@ const makeFixture = async (): Promise<Fixture> => {
     },
     getTurnItem: async ({itemId}) => {calls.detail.push(itemId); return {item: details.get(itemId) ?? null};},
   };
-  const controller = new WorkflowWriteController({supervisors, workflows, native, loadDefinitions: async () => definitionSnapshot,
+  const controller = workflowWriteControllerUnit({supervisors, workflows, native, loadDefinitions: async () => definitionSnapshot,
     isEnabled: id => supervisors.enabled(id), maxEvidenceWaitMs: 0});
   return {directory, guidance, supervisors, workflows, controller, binding, projectId, mainThreadId, supervisorThreadId, threads,
     projections, details, calls, native, proposal, sourceBinding};
@@ -210,7 +209,7 @@ it("CT-WWC-01: an abort during evidence polling or after listThreads returns the
       setImmediate(() => abort.abort());
       return projection;
     }};
-    const controller = new WorkflowWriteController({...fixture.controller.options, native, maxEvidenceWaitMs: 5_000});
+    const controller = workflowWriteControllerUnit({...fixture.controller.options, native, maxEvidenceWaitMs: 5_000});
     const args = ensureArgs(fixture, "interrupted-poll", "Create the main workflow after an interrupted poll.");
     assert.deepEqual(await controller.write(args, abort.signal),
       {status: "pending", operationId: "interrupted-poll", reason: "native_evidence_wait_interrupted", retryable: true});
@@ -229,7 +228,7 @@ it("CT-WWC-01: an abort during evidence polling or after listThreads returns the
       abort.abort();
       return fixture.native.getTurnItem(input, signal);
     }};
-    const controller = new WorkflowWriteController({...fixture.controller.options, native});
+    const controller = workflowWriteControllerUnit({...fixture.controller.options, native});
     const args = ensureArgs(fixture, "interrupted-detail", "Create the main workflow after an interrupted detail read.");
     installEvidence(fixture, args, "interrupted-detail-item");
     assert.deepEqual(await controller.write(args, abort.signal),
@@ -248,7 +247,7 @@ it("CT-WWC-01: an abort during evidence polling or after listThreads returns the
       abort.abort();
       return fixture.native.listThreads(signal);
     }};
-    const controller = new WorkflowWriteController({...fixture.controller.options, native});
+    const controller = workflowWriteControllerUnit({...fixture.controller.options, native});
     const args = ensureArgs(fixture, "interrupted-lineage", "Create the main workflow after an interrupted lineage read.");
     installEvidence(fixture, args, "interrupted-lineage-item");
     assert.deepEqual(await controller.write(args, abort.signal),
@@ -279,7 +278,7 @@ it("CT-WWC-02: concurrent identical writes proven by two distinct native items m
     await barrier;
     return view ?? fixture.native.projection(threadId, signal);
   }};
-  const controller = new WorkflowWriteController({...fixture.controller.options, native});
+  const controller = workflowWriteControllerUnit({...fixture.controller.options, native});
   const [left, right] = await Promise.all([controller.write(args), controller.write(args)]);
   assert.equal(left.status, "created", JSON.stringify(left));
   assert.deepEqual(right, left);
@@ -372,7 +371,7 @@ it("CT-WWC-05: successful receipts replay byte-identically through a new control
     projection: async id => {nativeCalls.push(`projection:${id}`); throw new Error("no_native_read_expected");},
     getTurnItem: async ({itemId}) => {nativeCalls.push(`detail:${itemId}`); throw new Error("no_native_read_expected");},
   };
-  const controller = new WorkflowWriteController({supervisors, workflows, native, isEnabled: id => supervisors.enabled(id), maxEvidenceWaitMs: 0,
+  const controller = workflowWriteControllerUnit({supervisors, workflows, native, isEnabled: id => supervisors.enabled(id), maxEvidenceWaitMs: 0,
     loadDefinitions: async () => {nativeCalls.push("loadDefinitions"); throw new Error("no_definition_read_expected");}});
   const createReplay = await controller.write(ensure);
   const applyReplay = await controller.write(args);
@@ -404,7 +403,7 @@ it("CT-WWC-08: a binding generation bump during an awaited native read after ver
     const native: WorkflowNativeAccess = read === "detail"
       ? {...fixture.native, getTurnItem: async (input, signal) => {bump(); return fixture.native.getTurnItem(input, signal);}}
       : {...fixture.native, listThreads: async signal => {bump(); return fixture.native.listThreads(signal);}};
-    const controller = new WorkflowWriteController({...fixture.controller.options, native});
+    const controller = workflowWriteControllerUnit({...fixture.controller.options, native});
     assert.deepEqual(await controller.write(args), {status: "denied", operationId, reason: "owner_changed"}, read);
     assert.deepEqual(fixture.calls.detail, [itemId], read);
     assert.equal(fixture.calls.listThreads, 1, read);
