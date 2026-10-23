@@ -23,7 +23,7 @@ import { SupervisorTeamRuntime, type SupervisorTeamRuntimeFacade } from "./super
 import { SupervisorTeamStore } from "./supervisor-team-store.js";
 import { SupervisorConversationStore } from "./supervisor-conversation-store.js";
 import { ProjectSupervisorMonitorStore } from "./supervisor-monitor-store.js";
-import { makeSupervisionGate, SupervisionGate, type SupervisionScope } from "./supervision-gate.js";
+import { legacyAdmission, makeSupervisionGate, SupervisionGate, type SupervisionScope } from "./supervision-gate.js";
 import { SupervisorIds } from "./ids.js";
 import { T3Client } from "./t3.js";
 import { GitProbe } from "./git-probe.js";
@@ -91,12 +91,14 @@ export const teamRuntimeFacade = (run: RootRun, runtime: SupervisorTeamRuntime["
   runHelperBatch: (binding, threads, batches, signal) => cancelled(run, signal, (cancel) => runtime.runHelperBatch(binding, threads, batches, cancel)),
 });
 // i-01/i-02 (plan 3.9): the helper transport and the team runtime, built once in the supervision run from its context and
-// handed to ProjectSupervisor in the promise shapes of their unported callers
+// handed to ProjectSupervisor in the promise shapes of their unported callers, with the legacy admission over the same gate
+// (t-07)
 export const supervisorTeamServices = (run: RootRun, store: ProjectSupervisorStore, baseUrl: string) => Effect.gen(function* () {
   const transport = yield* HelperTransport.make({store, baseUrl});
   const runtime = yield* SupervisorTeamRuntime.make({store, teamStore: new SupervisorTeamStore(store), requests: new SupervisorConversationStore(store.store),
     monitor: new ProjectSupervisorMonitorStore(store.store)}).pipe(Effect.provideService(HelperTransport, transport));
-  return {helperTransport: helperTransportFacade(run, transport), teamRuntime: teamRuntimeFacade(run, runtime)};
+  return {helperTransport: helperTransportFacade(run, transport), teamRuntime: teamRuntimeFacade(run, runtime),
+    admission: legacyAdmission(yield* SupervisionGate, run)};
 });
 
 export const runGuidanceApplication = (

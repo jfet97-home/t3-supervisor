@@ -5042,17 +5042,17 @@ it("the Settings excluded-chat editor records the same Enable and Stop as the da
   assert.equal((await controller.stop(args)).status, "stopped");
   clock.now += 1_000;
   const policy = fixture.threadPolicy.get();
-  service.saveThreadPolicy({...policy, excludedThreadIds: policy.excludedThreadIds.filter(id => id !== operativeThreadId)});
+  Effect.runSync(service.saveThreadPolicy({...policy, excludedThreadIds: policy.excludedThreadIds.filter(id => id !== operativeThreadId)}));
   assert.equal(service.supervisionStopped(operativeThreadId), false);
   assert.equal(fixture.projectStore.binding(projectId, operativeThreadId)?.supervisionStop, undefined, "the Enable clears the recorded stop");
   clock.now += 1_000;
   assert.deepEqual(await controller.stop(args), {status: "denied", reason: "superseded_by_later_enable"}, "the replayed call is older than the editor's Enable");
   clock.now += 1_000;
   const current = fixture.threadPolicy.get();
-  service.saveThreadPolicy({...current, excludedThreadIds: [...current.excludedThreadIds, operativeThreadId]});
+  Effect.runSync(service.saveThreadPolicy({...current, excludedThreadIds: [...current.excludedThreadIds, operativeThreadId]}));
   assert.deepEqual(fixture.projectStore.binding(projectId, operativeThreadId)?.supervisionStop,
     {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: clock.now}, "an editor exclusion is a fresh human stop");
-  assert.throws(() => service.saveThreadPolicy(current), /changed in another tab/u, "a stale editor save changes nothing");
+  assert.throws(() => Effect.runSync(service.saveThreadPolicy(current)), /changed in another tab/u, "a stale editor save changes nothing");
 });
 
 it("a settled pair stays asleep through agent-only main activity, also after Stop and Enable, until a human writes in the main", async t => {
@@ -5577,7 +5577,7 @@ it("Stop sends one concise operative notice and settles the idle root without a 
       const human = appendActualUserMessage(fixture.supervisor, `human-stop-${route}`, "Stop supervising this chat.", clock.now);
       const args = {callerThreadId: fixture.binding.threadId, targetThreadId: operativeThreadId, userMessageId: human.id, operationId: "stop-notice-direct"};
       assert.equal((await nativeStopController(fixture, fixture.supervisor, human, args, "stop-notice-native", service).stop(args)).status, "stopped");
-    } else if (route === "settings") service.saveThreadPolicy({...fixture.threadPolicy.get(), excludedThreadIds: [operativeThreadId]});
+    } else if (route === "settings") Effect.runSync(service.saveThreadPolicy({...fixture.threadPolicy.get(), excludedThreadIds: [operativeThreadId]}));
     else await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: fixture.threadPolicy.get().generation}, signal);
     const before = clock.now;
     await service.runOnce(signal);

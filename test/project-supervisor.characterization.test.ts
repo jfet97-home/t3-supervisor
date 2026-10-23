@@ -478,7 +478,7 @@ it("CT-PS-09: a Stop saved while the final models() read is awaited leaves the t
     const queued = fixture.supervisorStore.task(mainThreadId);
     if (queued?.status === "queued" && reasonAtStop === null) {
       reasonAtStop = queued.reason;
-      supervisor.saveThreadPolicy({...policy.get(), excludedThreadIds: [mainThreadId]});
+      Effect.runSync(supervisor.saveThreadPolicy({...policy.get(), excludedThreadIds: [mainThreadId]}));
     }
     return value;
   };

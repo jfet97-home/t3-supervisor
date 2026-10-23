@@ -129,15 +129,14 @@ export const startGuidanceUi = async (
         try: signal => editor ? editor.save(payload, signal) : Promise.resolve({status: "permission_required" as const, message: "Project editing needs a dedicated filesystem:read/filesystem:write credential through deployment setup.", definitions: null}),
         catch: () => new UiError({message: "The save outcome could not be confirmed. Refresh and inspect project.yaml before retrying."}),
       }),
-      threadPolicy: ({ payload }) => Effect.try({
-        try: () => {
-          const policy = runtime.config.threadPolicy;
-          if (!policy) throw new Error("Chat settings unavailable.");
-          // each chat this editor adds or removes is a human Stop or Enable for that chat's supervision
-          return supervision ? supervision.saveThreadPolicy(payload) : policy.save(payload);
-        },
-        catch: (cause) => new UiError({ message: cause instanceof Error ? cause.message : "Chat settings invalid. Reload first." }),
-      }),
+      threadPolicy: ({ payload }) => {
+        const invalid = (cause: unknown) => new UiError({ message: cause instanceof Error ? cause.message : "Chat settings invalid. Reload first." });
+        const policy = runtime.config.threadPolicy;
+        if (!policy) return Effect.fail(invalid(new Error("Chat settings unavailable.")));
+        // each chat this editor adds or removes is a human Stop or Enable for that chat's supervision, saved as one admission
+        // section (t-02)
+        return supervision ? Effect.mapError(supervision.saveThreadPolicy(payload), invalid) : Effect.try({ try: () => policy.save(payload), catch: invalid });
+      },
     }),
   );
   const routes = HttpApiBuilder.layer(SupervisorApi).pipe(

@@ -4,7 +4,7 @@ import { nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { fingerprint } from "./guidance-store.js";
 import { isSupervisorThread, prepareStopNotice, type BindingRecord, type ProjectSupervisorStore, type SupervisionStartRecord } from "./project-supervisor-store.js";
 import type { StoreShape } from "./store.js";
-import type { SupervisionScope } from "./supervision-gate.js";
+import type { LegacyAdmission, SupervisionScope } from "./supervision-gate.js";
 import type { SupervisorConversation } from "./supervisor-conversation.js";
 import { introductionOutcomeUnknown } from "./supervisor-conversation-store.js";
 import { mainConversation } from "./supervisor-scope.js";
@@ -24,7 +24,7 @@ export class SupervisionControl {
   private readonly queues = new Map<string, Promise<unknown>>();
   constructor(readonly config: SupervisorConfig, readonly store: ProjectSupervisorStore, readonly gate: SupervisionScope,
     readonly source: Pick<StoreShape, "catalog">, readonly t3: Pick<T3ClientShape, "projection">, readonly conversation: SupervisorConversation,
-    private readonly operateRpcAvailable: boolean, private readonly now: () => number) {}
+    private readonly operateRpcAvailable: boolean, private readonly now: () => number, private readonly admission: LegacyAdmission) {}
   private async serial<A>(key: string, work: () => Promise<A>): Promise<A> {
     const previous = this.queues.get(key) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(work);this.queues.set(key, next);
@@ -80,6 +80,9 @@ export class SupervisionControl {
       ? {status: previous.status, reason: previous.reason} : {status: "denied", reason: "operation_id_conflict"};
     if (previous?.status === "pending") return {status: "denied", reason: "An earlier Start is unresolved. Reconcile its operation ID before another request."};
     const projection = await this.projection(threadId, signal);
+    const projectId = thread.projectId;
+    // t-07: from the last await, the rechecks, the start record and a dashboard activation run as one admission section
+    return this.admission.run((): SupervisionStartResult => {
     if (projection.thread.projectId !== thread.projectId || !this.gate.mainShape(projection.thread)) return {status: "denied", reason: "scope_changed"};
     let message = userMessageId ? this.genuineUserMessage(projection, userMessageId) : null;
     const latestHuman = [...projection.messages].filter(item => this.genuineUserMessage(projection, item.id)).sort((a,b) => (timestampMs(b.createdAt) ?? 0) - (timestampMs(a.createdAt) ?? 0)).at(0);
@@ -97,7 +100,7 @@ export class SupervisionControl {
     if (mode.generation !== this.store.noProjectControl().generation || master.generation !== this.store.control(null).generation || !this.store.control(null).enabled)
       return {status: "denied", reason: "scope_mode_changed"};
     const run = message ? projection.runs.find(item => item.id === message!.runId)! : null;
-    const record: SupervisionStartRecord = {threadId, projectId: thread.projectId, operationId, requestHash, route, status: "pending",
+    const record: SupervisionStartRecord = {threadId, projectId, operationId, requestHash, route, status: "pending",
       reason: "Waiting for the Supervisor's first source-bound Start interpretation.", intentAt, modeGeneration: mode.generation, masterGeneration: master.generation,
       taskId: message ? randomUUID() : null, ...(message && run ? {source: {messageId: message.id, runId: run.id, ordinal: run.ordinal, hash: fingerprint(message.text)}} : {})};
     this.store.saveStart(record);
@@ -106,6 +109,7 @@ export class SupervisionControl {
       return {status: "active", reason: this.store.start(threadId)!.reason};
     }
     return {status: "pending", reason: record.reason};
+    });
   }
   /** The agent can request only its own chat; exact native wire evidence has already been verified. */
   startSupervision(input: SupervisionStartInput, evidence: {runId: string}, signal: AbortSignal): Promise<SupervisionStartResult> {
@@ -179,14 +183,15 @@ export class SupervisionControl {
     } else if (isSupervisorThread(this.config, caller.thread)) return {status: "denied", reason: "supervisor_thread_not_bound_to_target"};
     else if (input.callerThreadId === target.id) candidates = [{threadId: target.id, route: "relay"}];
     else candidates = [{threadId: input.callerThreadId, route: "chat"}];
-    let route: "direct" | "relay" | "chat" | null = null;
-    let instructedAt = this.now();
+    const startedAt = this.now();
     for (const candidate of candidates) {
       let projection: Projection;
       try {projection = candidate.threadId === input.callerThreadId ? caller : await this.projection(candidate.threadId, signal);}
       catch {return {status: "unavailable", reason: "evidence_projection_unavailable", retryable: true};}
+      // t-07: from the last await, the source checks, the policy write and its bookkeeping run as one admission section
+      const outcome = await this.admission.run((): SupervisionStopResult | null => {
       const message = this.genuineUserMessage(projection, input.userMessageId);
-      if (!message) continue;
+      if (!message) return null;
       // the calling assistant judges that the human asked to stop; the service only verifies provenance, target and ordering
       const words = message.text;
       // a human message that names another chat's ID authorizes only that chat, never the agent's choice of a different one, and
@@ -205,25 +210,28 @@ export class SupervisionControl {
       const verifiedRunId = typeof evidence === "object" && evidence !== null && typeof (evidence as {runId?: unknown}).runId === "string" ? (evidence as {runId: string}).runId : null;
       if (verifiedRunId !== null && candidate.threadId === input.callerThreadId && verifiedRunId !== message.runId)
         return {status: "denied", reason: "stop_call_not_in_human_turn"};
-      route = candidate.route;
-      if (Number.isFinite(Date.parse(message.createdAt))) instructedAt = Date.parse(message.createdAt);
-      break;
+      const route = candidate.route;
+      const instructedAt = Number.isFinite(Date.parse(message.createdAt)) ? Date.parse(message.createdAt) : startedAt;
+      const recorded = this.store.chatStop(target.id);
+      const written = this.writeChatPolicy(target.id, true);
+      if (written.status !== "saved") return {status: "unavailable", reason: `thread_policy_${written.status}`, retryable: written.status === "conflict"};
+      // the stop dates from the human's instruction; a replay or an older instruction keeps the recorded stop, so a keep-active
+      // the human chose after it still holds, while a newer human stop supersedes that choice
+      if (written.changed || !recorded || recorded.stoppedAt < instructedAt)
+        this.applyChatStop(target.id, {route, callerThreadId: input.callerThreadId, userMessageId: input.userMessageId, stoppedAt: instructedAt});
+      return {status: "stopped", targetThreadId: target.id, route, alreadyStopped: !written.changed};
+      });
+      if (outcome) return outcome;
     }
-    if (!route) return {status: "denied", reason: "user_message_not_genuine"};
-    const recorded = this.store.chatStop(target.id);
-    const written = this.writeChatPolicy(target.id, true);
-    if (written.status !== "saved") return {status: "unavailable", reason: `thread_policy_${written.status}`, retryable: written.status === "conflict"};
-    // the stop dates from the human's instruction; a replay or an older instruction keeps the recorded stop, so a keep-active
-    // the human chose after it still holds, while a newer human stop supersedes that choice
-    if (written.changed || !recorded || recorded.stoppedAt < instructedAt)
-      this.applyChatStop(target.id, {route, callerThreadId: input.callerThreadId, userMessageId: input.userMessageId, stoppedAt: instructedAt});
-    return {status: "stopped", targetThreadId: target.id, route, alreadyStopped: !written.changed};
+    return {status: "denied", reason: "user_message_not_genuine"};
   }
   /**
    * The Settings excluded-chat editor saves the same list as Stop supervision, so each chat it removes or adds gets the same
    * explicit Enable or Stop record as the dashboard control: a replayed stop never reverses that Enable.
    */
-  saveThreadPolicy(input: ThreadPolicySettings): ThreadPolicySettings {
+  saveThreadPolicy(input: ThreadPolicySettings): Effect.Effect<ThreadPolicySettings, unknown> {
+    // t-02/t-07: the save and its Stop/Enable bookkeeping as one admission section, yielded by the handler
+    return this.admission.effect(() => {
     const policy = this.config.threadPolicy;
     if (!policy) throw new Error("Chat settings unavailable.");
     const before = policy.get();
@@ -234,5 +242,6 @@ export class SupervisionControl {
     for (const id of saved.excludedThreadIds.filter(id => !before.excludedThreadIds.includes(id)))
       this.applyChatStop(id, {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: now});
     return saved;
+    });
   }
 }

@@ -8,6 +8,7 @@ import { httpRequests, rpcRequests, type IntNativePeer } from "./support/int-nat
 import { callTool, operateToken, rawMcpPost, readToken } from "./support/int-production-wiring.js";
 import { applyArgs, ensureArgs, installEvidence, localStep, sequencePlan, shellThread, startWorkflowFixture, thread,
   type IntWorkflowFixture } from "./support/int-workflow-fixture.js";
+import {Effect} from "effect";
 
 // complete production boundary: HTTP gate -> stateless MCP -> production-wired controllers and native adapter -> loopback T3 peer, temp databases
 
@@ -50,7 +51,7 @@ const noWriteRows = (f: IntWorkflowFixture): void => {
 
 const stopMain = (f: IntWorkflowFixture): void => {
   const current = f.core.policy.get();
-  f.core.supervision.saveThreadPolicy({...current, excludedThreadIds: [...current.excludedThreadIds, f.mainThreadId]});
+  Effect.runSync(f.core.supervision.saveThreadPolicy({...current, excludedThreadIds: [...current.excludedThreadIds, f.mainThreadId]}));
 };
 
 const once = (work: () => void): (() => void) => {

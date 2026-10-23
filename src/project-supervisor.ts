@@ -28,7 +28,7 @@ import { SupervisorConversation } from "./supervisor-conversation.js";
 import { introductionOutcomeUnknown } from "./supervisor-conversation-store.js";
 import type { NoProjectControlInput, GlobalDefinitionsControlInput, SupervisionControlInput, SupervisionSetupInput } from "./supervisor-control-contract.js";
 import { WorkflowStateStore } from "./workflow-state-store.js";
-import { SupervisionScope } from "./supervision-gate.js";
+import { SupervisionScope, type LegacyAdmission } from "./supervision-gate.js";
 import { SupervisionControl } from "./supervision-control.js";
 import { monitorActivityReference, observeScopeThread, SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS, SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
 
@@ -102,11 +102,12 @@ export class ProjectSupervisor {
   readonly lifecycle: SupervisorLifecycle;
   readonly workflowStates: WorkflowStateStore;
   readonly supervisionControl: SupervisionControl;
+  readonly admission: LegacyAdmission;
   constructor(readonly config: SupervisorConfig, readonly store: ProjectSupervisorStore, readonly source: Pick<StoreShape, "catalog">,
     readonly t3: Pick<T3ClientShape, "projection">, readonly readRpc: SupervisorRpc, readonly operateRpc: SupervisorRpc | null,
     readonly activationSnapshot: (signal: AbortSignal) => Promise<SupervisorBaseline>,
     // i-01/i-02 (plan 3.9): the helper transport and the team runtime, built once at the root
-    team: {helperTransport: SupervisorHelperDeliveryTransport; teamRuntime: SupervisorTeamRuntimeFacade},
+    team: {helperTransport: SupervisorHelperDeliveryTransport; teamRuntime: SupervisorTeamRuntimeFacade; admission: LegacyAdmission},
     readonly definitions?: ProjectSupervisorDefinitions, private readonly now: () => number = Date.now) {
       this.gate = new SupervisionScope(config, store, Boolean(operateRpc));
       this.team = new SupervisorTeamStore(store);
@@ -118,7 +119,8 @@ export class ProjectSupervisor {
         config.helperProviderInstanceId);
       this.conversation.supervisionStopped = threadId => this.gate.supervisionStopped(threadId);
       this.lifecycle = new SupervisorLifecycle(store, this.conversation, (id, signal) => this.projection(id, signal), operateRpc, this.workflowStates);
-      this.supervisionControl = new SupervisionControl(config, store, this.gate, source, t3, this.conversation, Boolean(operateRpc), now);
+      this.admission = team.admission;
+      this.supervisionControl = new SupervisionControl(config, store, this.gate, source, t3, this.conversation, Boolean(operateRpc), now, team.admission);
     }
   private async serial<A>(projectId: string, work: () => Promise<A>): Promise<A> {
     const previous = this.queues.get(projectId) ?? Promise.resolve();
@@ -134,7 +136,7 @@ export class ProjectSupervisor {
   startSupervision(input: SupervisionStartInput, evidence: {runId: string}, signal: AbortSignal): Promise<SupervisionStartResult> {return this.supervisionControl.startSupervision(input, evidence, signal);}
   dashboardStart(threadId: string, operationId: string, signal: AbortSignal): Promise<SupervisionStartResult> {return this.supervisionControl.dashboardStart(threadId, operationId, signal);}
   stopSupervision(input: SupervisionStopInput, evidence: unknown, signal: AbortSignal): Promise<SupervisionStopResult> {return this.supervisionControl.stopSupervision(input, evidence, signal);}
-  saveThreadPolicy(input: ThreadPolicySettings): ThreadPolicySettings {return this.supervisionControl.saveThreadPolicy(input);}
+  saveThreadPolicy(input: ThreadPolicySettings): Effect.Effect<ThreadPolicySettings, unknown> {return this.supervisionControl.saveThreadPolicy(input);}
   private async project(projectId: string) {
     const catalog = await Effect.runPromise(this.source.catalog());
     this.gate.rememberScratchProjects(catalog.projects.map(item => item.project));
@@ -666,7 +668,12 @@ export class ProjectSupervisor {
     for (const row of rows) {
       const start = JSON.parse(String(row.value)) as SupervisionStartRecord;
       if (start.route === "ui" && start.status === "pending") {
-        if (!this.store.store.transaction(() => this.supervisionControl.activateStart(start))) {this.supervisionControl.rejectStart(start, "Dashboard Start was superseded before activation.");continue;}
+        // t-07: the dashboard Start activation (or its rejection) as one admission section, never inside a transaction's caller
+        const activated = await this.admission.run(() => {
+          if (this.store.store.transaction(() => this.supervisionControl.activateStart(start))) return true;
+          this.supervisionControl.rejectStart(start, "Dashboard Start was superseded before activation.");return false;
+        });
+        if (!activated) continue;
         start.status = "active";
       }
       if (!start.source || !start.taskId || start.status === "rejected" || start.taskPrepared) continue;
@@ -781,13 +788,16 @@ export class ProjectSupervisor {
         return {status: result.status === "active" ? "saved" : "unavailable", message: result.reason, snapshot: await this.snapshot(input.projectId, signal, input.mainThreadId)};
       }
     }
-    const written = this.supervisionControl.writeChatPolicy(input.mainThreadId, !input.enabled, input.policyGeneration);
+    // t-07: the chat policy write and its Enable/Stop bookkeeping as one admission section
+    const written = await this.admission.run(() => {
+      const write = this.supervisionControl.writeChatPolicy(input.mainThreadId, !input.enabled, input.policyGeneration);
+      if (write.status !== "saved") return write;
+      if (input.enabled) this.store.recordChatEnable(input.mainThreadId, this.now());
+      this.supervisionControl.applyChatStop(input.mainThreadId, input.enabled ? null : {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: this.now()});
+      return write;
+    });
     if (written.status === "conflict") return {status: "conflict", message: "Chat settings changed in another tab or by the Supervisor. The saved state is shown.", snapshot: await this.snapshot(input.projectId, signal, input.mainThreadId).catch(() => null)};
     if (written.status !== "saved") return {status: "unavailable", message: written.status === "full" ? "The excluded chat list is full." : "Chat settings are unavailable.", snapshot: null};
-    if (input.enabled) {
-      this.store.recordChatEnable(input.mainThreadId, this.now());
-    }
-    this.supervisionControl.applyChatStop(input.mainThreadId, input.enabled ? null : {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: this.now()});
     return {status: "saved", message: input.enabled ? "Supervision is enabled for this chat; its next request is supervised by the same Supervisor."
       : "Supervision is stopped for this chat. Its operative is notified to stop replying to the Supervisor, which settles when idle. The operative task continues.", snapshot: await this.snapshot(input.projectId, signal, input.mainThreadId)};
   }
@@ -1227,14 +1237,18 @@ export class ProjectSupervisor {
         source = await this.projection(job.threadId, signal);
         if (!this.currentSource(job, source)) {this.complete(job, "unavailable", null, "The task source changed while the workflow was being revalidated.");return;}
       }
-      // rechecked after the final await: a result for a request before a boundary saved meanwhile closes unapplied
-      if (this.beforeBoundary(job, source)) {this.complete({...job, supervisorRunId: run.id}, "expired", null, enabledAgainReason);return;}
-      this.store.store.transaction(() => {
-        if (approveStart && (!pendingStart || !this.gate.validPendingStart(pendingStart) || !this.currentSource(job, source) || !this.supervisionControl.activateStart(pendingStart))) {
-          if (pendingStart) this.supervisionControl.rejectStart(pendingStart, "Start was superseded or could not be committed.");
-          this.complete(job, "expired", null, "Start was not activated.");return;
-        }
-        this.complete(job, result.objective === null ? "needs_context" : result.supervision === "not_needed" ? "not_supervised" : "inferred", result.objective, result.reason);
+      // t-07: from the last await, the boundary recheck, the Start activation and the result commit as one admission section
+      const settled = source;
+      await this.admission.run(() => {
+        // rechecked after the final await: a result for a request before a boundary saved meanwhile closes unapplied
+        if (this.beforeBoundary(job, settled)) {this.complete({...job, supervisorRunId: run.id}, "expired", null, enabledAgainReason);return;}
+        this.store.store.transaction(() => {
+          if (approveStart && (!pendingStart || !this.gate.validPendingStart(pendingStart) || !this.currentSource(job, settled) || !this.supervisionControl.activateStart(pendingStart))) {
+            if (pendingStart) this.supervisionControl.rejectStart(pendingStart, "Start was superseded or could not be committed.");
+            this.complete(job, "expired", null, "Start was not activated.");return;
+          }
+          this.complete(job, result.objective === null ? "needs_context" : result.supervision === "not_needed" ? "not_supervised" : "inferred", result.objective, result.reason);
+        });
       });
     }
     catch {

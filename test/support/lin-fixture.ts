@@ -14,6 +14,7 @@ import { proposalContextFromDefinitions, validateWorkflowPlan } from "../../src/
 import type { MessageInfo, Projection, RunInfo, ThreadInfo } from "../../src/types.js";
 import { effectiveIndex, projectIndex } from "../project-definitions-fixture.js";
 import { openIntSupervision, startIntEndpoint, type IntEndpoint, type IntSupervision } from "./int-production-wiring.js";
+import {Effect} from "effect";
 
 // a loopback T3 peer (shape of int-native-peer.ts) that can answer, fail or drop an arrived frame, wired as int-production-wiring.ts over temp files
 
@@ -296,7 +297,7 @@ export const startLinFixture = async (options: LinOptions = {}): Promise<LinFixt
   const policyUpdate = (threadId: string, stopped: boolean) => {
     const policy = opened.policy.get();
     const excludedThreadIds = stopped ? [...policy.excludedThreadIds, threadId] : policy.excludedThreadIds.filter(id => id !== threadId);
-    opened.supervision.saveThreadPolicy({...policy, excludedThreadIds});
+    Effect.runSync(opened.supervision.saveThreadPolicy({...policy, excludedThreadIds}));
   };
   const fixture: LinFixture = {
     directory, peer, core: opened, endpoint: endpoint!, definitions, main, threads,

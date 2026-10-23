@@ -10,6 +10,7 @@ import type { TeamRequest } from "../../src/supervisor-team-store.js";
 import type { Projection, ThreadInfo } from "../../src/types.js";
 import { httpRequests, sendJson, startIntPeer, type IntNativePeer, type PeerHttpEntry } from "./int-native-peer.js";
 import { openIntSupervision, type IntSupervision } from "./int-production-wiring.js";
+import {Effect} from "effect";
 
 // fixture ids, rpc semantics and team seeding copied from test/supervisor-helper-transport.test.ts (:16-71, :73-90, :95-129)
 
@@ -157,7 +158,7 @@ export const startHelperFixture = async (): Promise<HelperFixture> => {
     },
     stopMain: () => {
       const policy = core.policy.get();
-      core.supervision.saveThreadPolicy({...policy, excludedThreadIds: [...policy.excludedThreadIds, "main"]});
+      Effect.runSync(core.supervision.saveThreadPolicy({...policy, excludedThreadIds: [...policy.excludedThreadIds, "main"]}));
     },
     close: async () => {
       try {core.close();}
