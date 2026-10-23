@@ -88,7 +88,8 @@ it.live("closing the fake alone settles an active traffic wait: it fails as clos
 
 it.live("closing the G8 facade's fake with its scope settles the facade's readiness wait", () => Effect.gen(function* () {
   const recorder = yield* timersOf(bound);
-  const inner = yield* Scope.make();
+  // the facade's own scope, closed explicitly below and in any case with the test's scope
+  const inner = yield* Effect.acquireRelease(Scope.make(), (scope) => Scope.close(scope, Exit.void));
   const facade = yield* Scope.provide(inner)(fakeT3({token: "token"}));
   const waiting = yield* Effect.forkChild(facade.until(never, bound, label));
   while (recorder.armed.size === 0) yield* Effect.sleep("5 millis");
