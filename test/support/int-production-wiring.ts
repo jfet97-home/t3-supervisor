@@ -56,7 +56,7 @@ const buildT3Client = (baseUrl: string, token: string): Promise<T3ClientShape> =
 
 // opens the supervision services on existing files, as one process start (src/main.ts:12-17, guidance-application.ts:29-30,53-54,75-77)
 export const openIntSupervision = async (input: {directory: string; peerUrl: string; catalog: () => IntCatalog;
-  definitions?: IntDefinitions}): Promise<IntSupervision> => {
+  definitions?: IntDefinitions; fetch?: typeof globalThis.fetch}): Promise<IntSupervision> => {
   const config: SupervisorConfig = {dataDirectory: input.directory, t3Url: input.peerUrl, t3TokenFile: "unused", excludedThreadIds: [],
     healthPort: 0, uiPort: 0, uiHost: "127.0.0.1", uiAssetsDirectory: input.directory};
   config.supervisorOwnedThreadIds = loadSupervisorOwnership(config.dataDirectory);
@@ -82,6 +82,8 @@ export const openIntSupervision = async (input: {directory: string; peerUrl: str
     })),
     Effect.provideService(T3Client, t3),
     Effect.provide(Layer.mergeAll(FetchHttpClient.layer, SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer)))),
+    // a test may observe the synchronous start of each request; the request itself is the platform fetch's
+    (effect) => input.fetch ? Effect.provideService(effect, FetchHttpClient.Fetch, input.fetch) : effect,
     Scope.provide(scope),
   ));
   const supervision = new ProjectSupervisor(config, store, source, t3, readRpc, operateRpc, readSupervisorBaseline(config.t3Url, readToken),

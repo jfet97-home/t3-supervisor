@@ -39,6 +39,8 @@ export type HelperPeerState = {
   // synchronous seams that run before the peer replies
   beforeUpsert: (() => void) | null;
   beforeHelperProjection: ((read: number) => void) | null;
+  // runs synchronously when the transport starts a request (inside its admission section for a webhook POST)
+  onFetch: ((url: string) => void) | null;
   // the reply to a POST on the hook path; the default answers 202 with the logged delivery id
   reply: WebhookReply;
 };
@@ -69,7 +71,9 @@ export type HelperFixture = {
 const helperProjectionPath = "/api/orchestration/threads/helper";
 
 export const startHelperFixture = async (): Promise<HelperFixture> => {
-  const state: HelperPeerState = {tasks: [], deliveries: [], deliveryDetails: new Map(), beforeUpsert: null, beforeHelperProjection: null, reply: accepted};
+  const state: HelperPeerState = {tasks: [], deliveries: [], deliveryDetails: new Map(), beforeUpsert: null, beforeHelperProjection: null, onFetch: null,
+    reply: accepted};
+  const fetch: typeof globalThis.fetch = (url, init) => {state.onFetch?.(url instanceof Request ? url.url : String(url));return globalThis.fetch(url, init);};
   let helper: Projection | null = null;
   let helperReads = 0;
   const peer = await startIntPeer([{
@@ -113,7 +117,7 @@ export const startHelperFixture = async (): Promise<HelperFixture> => {
   const main: ThreadInfo = {id: "main", title: "main", projectId: "p", lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: "main"}};
   const operational: ThreadInfo = {id: "branch", title: "branch", projectId: "p",
     lineage: {parentThreadId: "main", relationshipToParent: "subagent", rootThreadId: "main"}};
-  const open = () => openIntSupervision({directory, peerUrl: peer.baseUrl,
+  const open = () => openIntSupervision({directory, peerUrl: peer.baseUrl, fetch,
     catalog: () => ({projects: [{project: {id: "p", title: "p", workspaceRoot: "/work/p"}, available: true}], threads: [main, operational]})});
   let core = await open();
   core.guidance.db.prepare("INSERT INTO meta VALUES(?,?)").run('supervisor_control:"p"', JSON.stringify({enabled: true, manual: true, generation: 1}));
