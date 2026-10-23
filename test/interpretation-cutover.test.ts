@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { it } from "@effect/vitest";
-import { Cause, Clock, Console, Context, Effect, Exit, Layer, Schema } from "effect";
+import { Cause, Clock, Console, Context, Effect, Exit, FileSystem, Layer, Schema, SubscriptionRef } from "effect";
 import { GuidanceDb, guidanceDbLayer } from "../src/db.js";
-import { InterpretationCutoverRefused } from "../src/errors.js";
+import { failureReason, InterpretationCutoverRefused } from "../src/errors.js";
 import { fingerprint, GuidanceStore } from "../src/guidance-store.js";
 import { SupervisorIds } from "../src/ids.js";
 import { cutoverNativeThreads, cutoverReport, type CutoverNatives, type CutoverPlan, interpretationCutover, interpretationCutoverPlan,
@@ -16,13 +16,15 @@ import { interpretationSourcePin } from "../src/interpretation-submission.js";
 import type { WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import { SupervisorOwnership, type SupervisionStartRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { SupervisionStoresLive } from "../src/supervision-live.js";
+import { createStatus, reportFailure, supervise } from "../src/supervisor.js";
 import { prepareWorkflowRequest, workflowInterpretationOutcome } from "../src/supervisor-workflow.js";
 import { makeT3Client, T3Client, type T3ClientShape } from "../src/t3.js";
-import type { Projection } from "../src/types.js";
+import type { Projection, SupervisorSettings } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { appendMessageToRun, appendRun, baseTime, definitions, requiredRawPlan, sourceText } from "./support/c1-conversation-fixture.js";
 import { dataDirectory } from "./support/g9-stores.js";
-import { eventConsole, pinnableClock } from "./support/g9-supervisor.js";
+import { eventConsole, pinnableClock, rootServices } from "./support/g9-supervisor.js";
+import { freePort } from "./support/g8-process.js";
 
 // the one-off interpretation cut-over (plan 3.12 item 11, CT-ISUB-17 and the readiness boundary's frozen-review cases): pre-s6e
 // rows written with the raw driver after the production store layers created their tables, the supervisor root served by a
@@ -311,6 +313,32 @@ it.live("blocker: an old-prompt attempt whose run is not terminal blocks; the st
   }
 }), {timeout: 60_000});
 
+it.live("refusal: the supervisor run logs the refusal once and ends with its fixed classified reason, with no partial apply and no restart of supervision", () => Effect.gen(function* () {
+  const value = scenario("running");
+  const directory = yield* seeded("cutover-refusal-", value);
+  const before = rows(directory);
+  const peer = yield* nativePeer(value.projection);
+  const tokenFile = join(directory, "read-token");
+  yield* FileSystem.FileSystem.use((fs) => fs.writeFileString(tokenFile, `${readToken}\n`)).pipe(Effect.provide(NodeFileSystem.layer));
+  const settings: SupervisorSettings = {dataDirectory: directory, t3Url: peer.url, t3TokenFile: tokenFile, excludedThreadIds: [], healthPort: 0,
+    uiPort: yield* freePort, uiHost: "127.0.0.1"};
+  const status = yield* SubscriptionRef.make(createStatus(settings, yield* Clock.currentTimeMillis));
+  const {console, events} = yield* eventConsole();
+  const started = yield* Clock.currentTimeMillis;
+  // the program as src/main.ts runs it: the run over its root services, its failure reported by one classified line
+  const exit = yield* Effect.exit(supervise(rootServices(settings, status, yield* client(peer))).pipe(Effect.tapCause(reportFailure),
+    Effect.provideService(Console.Console, console), Effect.timeout("20 seconds")));
+  const elapsed = (yield* Clock.currentTimeMillis) - started;
+  assert.ok(Exit.isFailure(exit));
+  assert.equal(failureReason(exit.cause), "interpretation_cutover_blocked");
+  assert.ok(elapsed < 10_000, `the run ended at once (${elapsed} ms), before the 10 s supervision restart`);
+  const names = events.map((event) => event.event);
+  assert.equal(names.filter((name) => name === "interpretation_cutover_refused").length, 1, "the refusal is logged once");
+  assert.equal(names.includes("supervision_unavailable"), false, "supervision is not restarted");
+  assert.deepEqual(events.filter((event) => event.event === "supervisor_failed").map((event) => event.reason), ["interpretation_cutover_blocked"]);
+  assert.deepEqual(rows(directory), before, "no partial apply");
+  assert.equal(peer.requests.some((request) => !request.startsWith("GET ") && !request.startsWith("UPGRADE ")), false, "nothing was sent");
+}), {timeout: 60_000});
 
 it.live("CT-ISUB-17: after its run ends the in-flight request closes unapplied without a re-send and its pending Start is rejected; the apply writes exactly the plan, preserves every other row, and a restart finds nothing to apply", () => Effect.gen(function* () {
   const running = scenario("running");

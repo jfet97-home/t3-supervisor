@@ -32,6 +32,7 @@ export class InterpretationCutoverRefused extends Data.TaggedError("Interpretati
 // the fixed reason a failed supervisor program is reported with; typed failures name their own, nothing else is rendered
 export const failureReason = (cause: Cause.Cause<unknown>): string => {
   const failure = Cause.squash(cause);
-  if (failure instanceof InvalidConfiguration || failure instanceof T3TokenUnavailable || failure instanceof ListenerUnavailable) return failure.reason;
+  if (failure instanceof InvalidConfiguration || failure instanceof T3TokenUnavailable || failure instanceof ListenerUnavailable ||
+    failure instanceof InterpretationCutoverRefused) return failure.reason;
   return Predicate.isTagged(failure, "ServeError") ? "health_listener_unavailable" : "supervisor_failed";
 };
