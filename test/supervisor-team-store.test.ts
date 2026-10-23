@@ -24,9 +24,12 @@ const fixture = <A, E, R>(use: (f: Fixture) => Effect.Effect<A, E, R>) => Effect
     return yield* use({ ...stores, directory, binding });
   })));
 
-// the failure of `effect`, validated as `assert.throws` validates a thrown error
+// the failure of `effect`, an error validated as `assert.throws` validates a thrown error
 const rejects = <A, E, R>(effect: Effect.Effect<A, E, R>, expected: RegExp | ((error: unknown) => boolean), message?: string) =>
-  Effect.map(Effect.flip(effect), (error) => assert.throws(() => { throw error; }, expected, message));
+  Effect.map(Effect.flip(effect), (error) => {
+    assert.ok(error instanceof Error, "the failure is an error");
+    assert.throws(() => { throw error; }, expected, message);
+  });
 
 const member = (team: SupervisorTeamStoreShape, binding: TeamBinding, threadId: string, now: number): Effect.Effect<TeamMember, unknown> => Effect.gen(function* () {
   const registered = yield* team.registerMember(binding, {threadId, taskId: `task-${threadId}`, bootstrapRunId: `run-${threadId}`, now});
