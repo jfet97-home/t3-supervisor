@@ -157,3 +157,7 @@ export const loopTurn: Effect.Effect<void> = Effect.callback<void>((resume) => {
   const immediate = setImmediate(() => resume(Effect.void));
   return Effect.sync(() => clearImmediate(immediate));
 });
+
+// an explicit live-clock deadline for an awaited loopback event
+export const within = <A, E, R>(effect: Effect.Effect<A, E, R>, milliseconds: number, label: string): Effect.Effect<A, E, R> =>
+  bounded(effect, milliseconds, () => `timed out waiting for ${label}`);
