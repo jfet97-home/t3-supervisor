@@ -1,26 +1,27 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
-import { it } from "vitest";
+import { NodeFileSystem } from "@effect/platform-node";
+import { it } from "@effect/vitest";
+import { Clock, Effect, Fiber, FileSystem, Layer } from "effect";
+import { FetchHttpClient, HttpBody, HttpClient } from "effect/http";
+import { TestClock } from "effect/testing";
 import type { GuidanceRuntime } from "../src/guidance.js";
-import { createServiceAuth, forgeDashboardToken, startGuidanceUi } from "./support/service-auth-harness.js";
+import { tsxLoader } from "./support/cli-process.js";
+import { forge, openServiceAuth, temporaryDirectory } from "./support/g8-auth.js";
+import { runProcess } from "./support/g8-process.js";
+import { guidanceUi } from "./support/service-auth-harness.js";
 import { childFailure, privately } from "./support/private-assert.js";
 import type { SupervisorConfig } from "../src/types.js";
 
-const withTemporaryDirectory = async <A>(run: (directory: string) => Promise<A>): Promise<A> => {
-  const directory = await mkdtemp(join(tmpdir(), "t3-service-auth-characterization-"));
-  try {
-    return await run(directory);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-};
+// the Effect service auth on real files: CT-AUTH-03 sets the service clock and runs under TestClock (it.effect); the
+// others run live (it.live) for the real auth files, the `auth forge` child processes and the dashboard's loopback HTTP
+// server. the auth database is observed and edited through node:sqlite, independent of the service's own client
+
+const temporary = temporaryDirectory("t3-service-auth-characterization-");
 
 const accessPath = (directory: string): string => join(directory, "access");
 const tokenPath = (directory: string): string => join(accessPath(directory), "workflow-mcp-token");
@@ -38,203 +39,191 @@ const rows = (directory: string, query: string): Array<Record<string, unknown>> 
   }
 };
 
-const execute = promisify(execFile);
 const command = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
-const loader = fileURLToPath(new URL("../node_modules/tsx/dist/loader.mjs", import.meta.url));
 
 // the real `auth forge` CLI in its own process; the token is only ever compared, never printed
-const forgeInChild = async (directory: string): Promise<string> => {
-  const { stdout, stderr } = await execute(process.execPath,
-    ["--disable-warning=ExperimentalWarning", "--import", loader, command, "auth", "forge"],
-    { env: { ...process.env, DATA_DIRECTORY: directory }, cwd: tmpdir(), timeout: 30_000, maxBuffer: 4096 })
-    .catch((error: unknown) => { throw childFailure("auth forge child", error); });
+const forgeInChild = (directory: string) => Effect.gen(function* () {
+  const result = yield* runProcess(process.execPath,
+    ["--disable-warning=ExperimentalWarning", "--import", tsxLoader, command, "auth", "forge"],
+    { env: { ...process.env, DATA_DIRECTORY: directory }, cwd: tmpdir(), timeoutMs: 30_000 });
+  if (result.code !== 0) return yield* Effect.die(childFailure("auth forge child", result));
+  const { stdout, stderr } = result;
   assert.equal(tokenLine.test(stdout), true, `auth forge printed one token line (${stdout.length} bytes)`);
   privately("auth forge stderr", [stdout.trim()], () => assert.equal(stderr, ""));
   return stdout.trim();
-};
+});
 
 // sqlite header bytes 18 and 19 are 1 for rollback-journal databases and 2 for wal
-const journalVersions = (bytes: Buffer): [number, number] => [bytes[18]!, bytes[19]!];
+const journalVersions = (bytes: Uint8Array): [number, number] => [bytes[18]!, bytes[19]!];
 
-it("CT-AUTH-01: opening a valid auth database leaves it byte-identical and creates no wal or journal", { timeout: 60_000 }, async () => {
-  await withTemporaryDirectory(async (directory) => {
-    (await createServiceAuth(directory)).close();
-    const grant = await forgeInChild(directory);
-    const listing = (await readdir(accessPath(directory))).sort();
-    const bytes = await readFile(databasePath(directory));
-    assert.deepEqual(listing, ["login.sqlite3", "workflow-mcp-token"]);
-    assert.deepEqual(journalVersions(bytes), [1, 1]);
+it.live("CT-AUTH-01: opening a valid auth database leaves it byte-identical and creates no wal or journal", () => Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const directory = yield* temporary;
+  yield* (yield* openServiceAuth(directory)).close;
+  const grant = yield* forgeInChild(directory);
+  const listing = (yield* fs.readDirectory(accessPath(directory))).sort();
+  const bytes = Buffer.from(yield* fs.readFile(databasePath(directory)));
+  assert.deepEqual(listing, ["login.sqlite3", "workflow-mcp-token"]);
+  assert.deepEqual(journalVersions(bytes), [1, 1]);
 
-    const auth = await createServiceAuth(directory);
-    try {
-      assert.ok((await readFile(databasePath(directory))).equals(bytes), "open does not write");
-      assert.deepEqual((await readdir(accessPath(directory))).sort(), listing);
-      // reads on the open connection do not write either
-      assert.equal(auth.authenticated(randomBytes(32).toString("base64url")), false);
-      assert.equal(auth.mcpAuthorized(`Bearer ${randomBytes(32).toString("base64url")}`), false);
-      assert.ok((await readFile(databasePath(directory))).equals(bytes), "reads do not write");
-      assert.deepEqual((await readdir(accessPath(directory))).sort(), listing);
-    } finally {
-      auth.close();
-    }
-    assert.ok((await readFile(databasePath(directory))).equals(bytes), "close does not write");
-    assert.deepEqual((await readdir(accessPath(directory))).sort(), listing);
-    assert.deepEqual(rows(directory, "PRAGMA journal_mode"), [{ journal_mode: "delete" }]);
+  const auth = yield* openServiceAuth(directory);
+  yield* Effect.gen(function* () {
+    assert.ok(Buffer.from(yield* fs.readFile(databasePath(directory))).equals(bytes), "open does not write");
+    assert.deepEqual((yield* fs.readDirectory(accessPath(directory))).sort(), listing);
+    // reads on the open connection do not write either
+    assert.equal(yield* auth.authenticated(randomBytes(32).toString("base64url")), false);
+    assert.equal(auth.mcpAuthorized(`Bearer ${randomBytes(32).toString("base64url")}`), false);
+    assert.ok(Buffer.from(yield* fs.readFile(databasePath(directory))).equals(bytes), "reads do not write");
+    assert.deepEqual((yield* fs.readDirectory(accessPath(directory))).sort(), listing);
+  }).pipe(Effect.ensuring(auth.close));
+  assert.ok(Buffer.from(yield* fs.readFile(databasePath(directory))).equals(bytes), "close does not write");
+  assert.deepEqual((yield* fs.readDirectory(accessPath(directory))).sort(), listing);
+  assert.deepEqual(rows(directory, "PRAGMA journal_mode"), [{ journal_mode: "delete" }]);
 
-    // the untouched file still serves the grant the child process forged
-    const reopened = await createServiceAuth(directory);
-    try {
-      assert.equal(typeof reopened.login(grant), "string");
-    } finally {
-      reopened.close();
-    }
+  // the untouched file still serves the grant the child process forged
+  const reopened = yield* openServiceAuth(directory);
+  assert.equal(typeof (yield* reopened.login(grant)), "string");
+}).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
+
+it.live("CT-AUTH-02: an access path that is a symlink to a directory fails closed for service open and forge", () => Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const root = yield* temporary;
+  const target = join(root, "target");
+  yield* (yield* openServiceAuth(target)).close;
+  yield* forge(target);
+  yield* fs.chmod(accessPath(target), 0o750);
+  const targetListing = (yield* fs.readDirectory(accessPath(target))).sort();
+  const targetBytes = Buffer.from(yield* fs.readFile(databasePath(target)));
+
+  const empty = join(root, "empty");
+  yield* fs.makeDirectory(empty, { mode: 0o755 });
+  for (const [name, destination] of [["linked", accessPath(target)], ["linked-empty", empty]] as const) {
+    const linked = join(root, name);
+    yield* fs.makeDirectory(linked);
+    yield* fs.symlink(destination, accessPath(linked));
+    const opened = yield* Effect.flip(openServiceAuth(linked));
+    assert.ok(opened instanceof Error && opened.message === "invalid service auth access directory");
+    const forged = yield* Effect.flip(forge(linked));
+    assert.ok(forged instanceof Error && forged.message === "invalid service auth access directory");
+    assert.equal((yield* fs.lstat(accessPath(linked))).type === "SymbolicLink", true);
+  }
+  // nothing was created, chmodded or written through either link
+  assert.deepEqual(yield* fs.readDirectory(empty), []);
+  assert.equal((yield* fs.lstat(empty)).mode & 0o777, 0o755);
+  assert.equal((yield* fs.lstat(accessPath(target))).mode & 0o777, 0o750);
+  assert.deepEqual((yield* fs.readDirectory(accessPath(target))).sort(), targetListing);
+  assert.ok(Buffer.from(yield* fs.readFile(databasePath(target))).equals(targetBytes));
+}).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 10_000 });
+
+it.effect("CT-AUTH-03: sessions tolerate a 60 s clock rollback and a grant is rejected exactly at its expiry", () => Effect.gen(function* () {
+  const directory = yield* temporary;
+  const issuedAt = 1_000_000;
+  yield* TestClock.setTime(issuedAt);
+  const auth = yield* openServiceAuth(directory);
+  const grant = yield* forge(directory);
+  const session = yield* auth.login(grant.token);
+  assert.ok(session);
+  for (const [offset, accepted] of [[0, true], [-60_000, true], [-60_001, false], [-59_999, true]] as const) {
+    yield* TestClock.setTime(issuedAt + offset);
+    assert.equal(yield* auth.authenticated(session), accepted, `session at issued_at${offset}`);
+  }
+
+  yield* TestClock.setTime(issuedAt);
+  const expiring = yield* forge(directory);
+  const lastMoment = yield* forge(directory);
+  assert.equal(expiring.expiresAt, issuedAt + 5 * 60 * 1_000);
+  yield* TestClock.setTime(expiring.expiresAt);
+  assert.equal(yield* auth.login(expiring.token), null);
+  // the rejected grant is not consumed; it stays until a later forge prunes it
+  assert.deepEqual(rows(directory, "SELECT token_hash FROM dashboard_login_grants ORDER BY token_hash"),
+    [sha256(expiring.token), sha256(lastMoment.token)].sort().map((token_hash) => ({ token_hash })));
+  yield* TestClock.setTime(lastMoment.expiresAt - 1);
+  assert.equal(typeof (yield* auth.login(lastMoment.token)), "string");
+}).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 10_000 });
+
+it.live("CT-AUTH-04: service open and forge failures never carry token, session or hash values", () => Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const root = yield* temporary;
+  const secrets: string[] = [];
+  const remember = (...values: string[]) => {for (const value of values) secrets.push(value, sha256(value), sha256(value).toUpperCase());};
+  const failures: Array<[string, unknown]> = [];
+  const failure = <R>(label: string, attempt: Effect.Effect<unknown, unknown, R>) => Effect.match(attempt, {
+    onFailure: (error) => {failures.push([label, error]);},
+    onSuccess: () => assert.fail(`${label} succeeded`),
   });
-});
-
-it("CT-AUTH-02: an access path that is a symlink to a directory fails closed for service open and forge", { timeout: 10_000 }, async () => {
-  await withTemporaryDirectory(async (root) => {
-    const target = join(root, "target");
-    (await createServiceAuth(target)).close();
-    await forgeDashboardToken(target);
-    await chmod(accessPath(target), 0o750);
-    const targetListing = (await readdir(accessPath(target))).sort();
-    const targetBytes = await readFile(databasePath(target));
-
-    const empty = join(root, "empty");
-    await mkdir(empty, { mode: 0o755 });
-    for (const [name, destination] of [["linked", accessPath(target)], ["linked-empty", empty]] as const) {
-      const linked = join(root, name);
-      await mkdir(linked);
-      await symlink(destination, accessPath(linked), "dir");
-      await assert.rejects(createServiceAuth(linked), (error: unknown) => error instanceof Error && error.message === "invalid service auth access directory");
-      await assert.rejects(forgeDashboardToken(linked), (error: unknown) => error instanceof Error && error.message === "invalid service auth access directory");
-      assert.equal((await lstat(accessPath(linked))).isSymbolicLink(), true);
-    }
-    // nothing was created, chmodded or written through either link
-    assert.deepEqual(await readdir(empty), []);
-    assert.equal((await lstat(empty)).mode & 0o777, 0o755);
-    assert.equal((await lstat(accessPath(target))).mode & 0o777, 0o750);
-    assert.deepEqual((await readdir(accessPath(target))).sort(), targetListing);
-    assert.ok((await readFile(databasePath(target))).equals(targetBytes));
+  // a valid installation whose secrets are then placed into each failing state
+  const seeded = (name: string) => Effect.gen(function* () {
+    const directory = join(root, name);
+    const auth = yield* openServiceAuth(directory);
+    const grant = yield* forge(directory);
+    const session = yield* auth.login(grant.token);
+    assert.ok(session);
+    yield* auth.close;
+    const pending = yield* forge(directory);
+    const workflowToken = yield* fs.readFileString(tokenPath(directory));
+    remember(workflowToken, grant.token, session, pending.token);
+    return { directory, workflowToken, session };
   });
-});
+  const edit = (directory: string, sql: string, ...values: Array<string | number>) => {
+    const database = new DatabaseSync(databasePath(directory));
+    try {database.prepare(sql).run(...values);} finally {database.close();}
+  };
 
-it("CT-AUTH-03: sessions tolerate a 60 s clock rollback and a grant is rejected exactly at its expiry", { timeout: 10_000 }, async () => {
-  await withTemporaryDirectory(async (directory) => {
-    const issuedAt = 1_000_000;
-    let currentTime = issuedAt;
-    const auth = await createServiceAuth(directory, { now: () => currentTime });
-    try {
-      const grant = await forgeDashboardToken(directory, { now: () => currentTime });
-      const session = auth.login(grant.token);
-      assert.ok(session);
-      for (const [offset, accepted] of [[0, true], [-60_000, true], [-60_001, false], [-59_999, true]] as const) {
-        currentTime = issuedAt + offset;
-        assert.equal(auth.authenticated(session), accepted, `session at issued_at${offset}`);
-      }
+  const oversized = yield* seeded("oversized-token");
+  yield* fs.writeFileString(tokenPath(oversized.directory), oversized.workflowToken + "A");
+  yield* failure("token file with the token and one more byte", openServiceAuth(oversized.directory));
 
-      currentTime = issuedAt;
-      const expiring = await forgeDashboardToken(directory, { now: () => currentTime });
-      const lastMoment = await forgeDashboardToken(directory, { now: () => currentTime });
-      assert.equal(expiring.expiresAt, issuedAt + 5 * 60 * 1_000);
-      currentTime = expiring.expiresAt;
-      assert.equal(auth.login(expiring.token), null);
-      // the rejected grant is not consumed; it stays until a later forge prunes it
-      assert.deepEqual(rows(directory, "SELECT token_hash FROM dashboard_login_grants ORDER BY token_hash"),
-        [sha256(expiring.token), sha256(lastMoment.token)].sort().map((token_hash) => ({ token_hash })));
-      currentTime = lastMoment.expiresAt - 1;
-      assert.equal(typeof auth.login(lastMoment.token), "string");
-    } finally {
-      auth.close();
-    }
-  });
-});
+  const altered = yield* seeded("altered-token");
+  yield* fs.writeFileString(tokenPath(altered.directory), "!" + altered.workflowToken.slice(1));
+  yield* failure("non-canonical token file", openServiceAuth(altered.directory));
 
-it("CT-AUTH-04: service open and forge failures never carry token, session or hash values", { timeout: 10_000 }, async () => {
-  await withTemporaryDirectory(async (root) => {
-    const secrets: string[] = [];
-    const remember = (...values: string[]) => {for (const value of values) secrets.push(value, sha256(value), sha256(value).toUpperCase());};
-    const failures: Array<[string, unknown]> = [];
-    const failure = async (label: string, attempt: () => Promise<unknown>) => {
-      try {
-        await attempt();
-      } catch (error) {
-        failures.push([label, error]);
-        return;
-      }
-      assert.fail(`${label} succeeded`);
-    };
-    // a valid installation whose secrets are then placed into each failing state
-    const seeded = async (name: string) => {
-      const directory = join(root, name);
-      const auth = await createServiceAuth(directory);
-      const grant = await forgeDashboardToken(directory);
-      const session = auth.login(grant.token);
-      assert.ok(session);
-      auth.close();
-      const pending = await forgeDashboardToken(directory);
-      const workflowToken = await readFile(tokenPath(directory), "utf8");
-      remember(workflowToken, grant.token, session, pending.token);
-      return { directory, workflowToken, session };
-    };
-    const edit = (directory: string, sql: string, ...values: Array<string | number>) => {
-      const database = new DatabaseSync(databasePath(directory));
-      try {database.prepare(sql).run(...values);} finally {database.close();}
-    };
+  const uppercase = yield* seeded("uppercase-hash");
+  edit(uppercase.directory, "UPDATE dashboard_login_sessions SET token_hash=?", sha256(uppercase.session).toUpperCase());
+  yield* failure("session row with an uppercase hash", openServiceAuth(uppercase.directory));
+  yield* failure("forge over a session row with an uppercase hash", forge(uppercase.directory));
 
-    const oversized = await seeded("oversized-token");
-    await writeFile(tokenPath(oversized.directory), oversized.workflowToken + "A");
-    await failure("token file with the token and one more byte", () => createServiceAuth(oversized.directory));
+  // one forged grant plus 31 fixture grants of known tokens fill the 32 pending slots
+  const crowded = yield* seeded("crowded");
+  const fixtureTokens = Array.from({ length: 31 }, () => randomBytes(32).toString("base64url"));
+  remember(...fixtureTokens);
+  const now = yield* Clock.currentTimeMillis;
+  const database = new DatabaseSync(databasePath(crowded.directory));
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    const insert = database.prepare("INSERT INTO dashboard_login_grants(token_hash,issued_at,expires_at) VALUES(?,?,?)");
+    for (const token of fixtureTokens) insert.run(sha256(token), now, now + 5 * 60 * 1_000);
+    database.exec("COMMIT");
+  } finally {database.close();}
+  yield* failure("forge at grant capacity", forge(crowded.directory));
 
-    const altered = await seeded("altered-token");
-    await writeFile(tokenPath(altered.directory), "!" + altered.workflowToken.slice(1));
-    await failure("non-canonical token file", () => createServiceAuth(altered.directory));
+  const wal = yield* seeded("wal");
+  edit(wal.directory, "PRAGMA journal_mode=WAL");
+  yield* failure("database in wal mode", openServiceAuth(wal.directory));
+  yield* failure("forge on a database in wal mode", forge(wal.directory));
 
-    const uppercase = await seeded("uppercase-hash");
-    edit(uppercase.directory, "UPDATE dashboard_login_sessions SET token_hash=?", sha256(uppercase.session).toUpperCase());
-    await failure("session row with an uppercase hash", () => createServiceAuth(uppercase.directory));
-    await failure("forge over a session row with an uppercase hash", () => forgeDashboardToken(uppercase.directory));
+  const clock = yield* seeded("clock");
+  // a wall clock that reads NaN, from a TestClock of this attempt only
+  yield* failure("forge with an invalid clock", TestClock.setTime(Number.NaN).pipe(Effect.andThen(forge(clock.directory)),
+    Effect.provide(TestClock.layer())));
+  yield* failure("forge without an access directory", forge(join(root, "missing")));
 
-    // one forged grant plus 31 fixture grants of known tokens fill the 32 pending slots
-    const crowded = await seeded("crowded");
-    const fixtureTokens = Array.from({ length: 31 }, () => randomBytes(32).toString("base64url"));
-    remember(...fixtureTokens);
-    const database = new DatabaseSync(databasePath(crowded.directory));
-    try {
-      database.exec("BEGIN IMMEDIATE");
-      const insert = database.prepare("INSERT INTO dashboard_login_grants(token_hash,issued_at,expires_at) VALUES(?,?,?)");
-      for (const token of fixtureTokens) insert.run(sha256(token), Date.now(), Date.now() + 5 * 60 * 1_000);
-      database.exec("COMMIT");
-    } finally {database.close();}
-    await failure("forge at grant capacity", () => forgeDashboardToken(crowded.directory));
-
-    const wal = await seeded("wal");
-    edit(wal.directory, "PRAGMA journal_mode=WAL");
-    await failure("database in wal mode", () => createServiceAuth(wal.directory));
-    await failure("forge on a database in wal mode", () => forgeDashboardToken(wal.directory));
-
-    const clock = await seeded("clock");
-    await failure("forge with an invalid clock", () => forgeDashboardToken(clock.directory, { now: () => Number.NaN }));
-    await failure("forge without an access directory", () => forgeDashboardToken(join(root, "missing")));
-
-    privately("failure messages", secrets, () => assert.deepEqual(failures.map(([label, error]) => [label, error instanceof Error ? error.message : String(error)]), [
-      ["token file with the token and one more byte", "invalid service auth workflow-mcp-token file"],
-      ["non-canonical token file", "invalid service auth workflow-mcp-token file"],
-      ["session row with an uppercase hash", "invalid service auth database"],
-      ["forge over a session row with an uppercase hash", "invalid service auth login grant state"],
-      ["forge at grant capacity", "dashboard login grant capacity reached"],
-      ["database in wal mode", "invalid service auth database"],
-      ["forge on a database in wal mode", "invalid service auth login grant state"],
-      ["forge with an invalid clock", "invalid service auth login grant state"],
-      ["forge without an access directory", "invalid service auth access directory"],
-    ]));
-    for (const [label, error] of failures) {
-      const rendered = error instanceof Error ? [error.message, String(error), error.stack ?? "", JSON.stringify(error)] : [String(error)];
-      const leaked = secrets.filter((secret) => rendered.some((text) => text.includes(secret)));
-      assert.equal(leaked.length, 0, `${label} carried ${leaked.length} secret value(s)`);
-    }
-  });
-});
+  privately("failure messages", secrets, () => assert.deepEqual(failures.map(([label, error]) => [label, error instanceof Error ? error.message : String(error)]), [
+    ["token file with the token and one more byte", "invalid service auth workflow-mcp-token file"],
+    ["non-canonical token file", "invalid service auth workflow-mcp-token file"],
+    ["session row with an uppercase hash", "invalid service auth database"],
+    ["forge over a session row with an uppercase hash", "invalid service auth login grant state"],
+    ["forge at grant capacity", "dashboard login grant capacity reached"],
+    ["database in wal mode", "invalid service auth database"],
+    ["forge on a database in wal mode", "invalid service auth login grant state"],
+    ["forge with an invalid clock", "invalid service auth login grant state"],
+    ["forge without an access directory", "invalid service auth access directory"],
+  ]));
+  for (const [label, error] of failures) {
+    const rendered = error instanceof Error ? [error.message, String(error), error.stack ?? "", JSON.stringify(error)] : [String(error)];
+    const leaked = secrets.filter((secret) => rendered.some((text) => text.includes(secret)));
+    assert.equal(leaked.length, 0, `${label} carried ${leaked.length} secret value(s)`);
+  }
+}).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 10_000 });
 
 const uiConfig = (directory: string): SupervisorConfig => ({
   dataDirectory: directory,
@@ -248,77 +237,70 @@ const uiConfig = (directory: string): SupervisorConfig => ({
   supervisorOwnedThreadIds: new Set(),
 });
 
-it("CT-AUTH-05: concurrent HTTP logins and child-process forges keep one session per grant and the delete-mode schema", { timeout: 60_000 }, async () => {
-  await withTemporaryDirectory(async (directory) => {
-    const ui = await startGuidanceUi(uiConfig(directory), {} as GuidanceRuntime["Service"]);
-    try {
-      const address = ui.server.address();
-      assert.ok(address && typeof address === "object");
-      const origin = `http://127.0.0.1:${address.port}`;
-      const login = async (token: string): Promise<{ status: number; session?: string }> => {
-        const response = await fetch(`${origin}/auth/login`, {
-          method: "POST",
-          headers: { Origin: origin, "Content-Type": "application/json" },
-          body: JSON.stringify({ token }),
-        });
-        const payload = await response.json() as { session?: unknown };
-        return typeof payload.session === "string" ? { status: response.status, session: payload.session } : { status: response.status };
-      };
-      const schema = () => rows(directory, "SELECT type, name, sql FROM sqlite_master ORDER BY type, name");
-      const schemaBefore = schema();
+it.live("CT-AUTH-05: concurrent HTTP logins and child-process forges keep one session per grant and the delete-mode schema", () => Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const directory = yield* temporary;
+  // the dashboard server closes with the test's scope
+  const ui = yield* guidanceUi(uiConfig(directory), {} as GuidanceRuntime["Service"]);
+  const origin = `http://127.0.0.1:${ui.port}`;
+  const client = yield* HttpClient.HttpClient;
+  const login = (token: string) => Effect.gen(function* () {
+    const response = yield* client.post(`${origin}/auth/login`, {
+      headers: { Origin: origin },
+      body: HttpBody.text(JSON.stringify({ token }), "application/json"),
+    });
+    const payload = (yield* response.json) as { session?: unknown };
+    return typeof payload.session === "string" ? { status: response.status, session: payload.session } : { status: response.status };
+  }).pipe(Effect.orDie);
+  const schema = () => rows(directory, "SELECT type, name, sql FROM sqlite_master ORDER BY type, name");
+  const schemaBefore = schema();
 
-      // eight concurrent logins on the server's shared connection race for one single-use grant
-      const grant = await forgeDashboardToken(directory);
-      const raced = await Promise.all(Array.from({ length: 8 }, () => login(grant.token)));
-      assert.deepEqual(raced.map((result) => result.status).sort(), [200, 401, 401, 401, 401, 401, 401, 401]);
-      const sessions = raced.flatMap((result) => result.session === undefined ? [] : [result.session]);
-      assert.equal(sessions.length, 1);
+  // eight concurrent logins on the server's shared connection race for one single-use grant
+  const grant = yield* forge(directory);
+  const raced = yield* Effect.all(Array.from({ length: 8 }, () => login(grant.token)), { concurrency: "unbounded" });
+  assert.deepEqual(raced.map((result) => result.status).sort(), [200, 401, 401, 401, 401, 401, 401, 401]);
+  const sessions = raced.flatMap((result) => result.session === undefined ? [] : [result.session]);
+  assert.equal(sessions.length, 1);
 
-      // four real CLI forges run while the server keeps taking the login write lock with unknown tokens
-      let forging = true;
-      const contention: number[] = [];
-      const contend = Promise.all(Array.from({ length: 3 }, async () => {
-        while (forging) contention.push((await login(randomBytes(32).toString("base64url"))).status);
-      }));
-      const perGrant: Array<Array<{ status: number; session?: string }>> = [];
-      const forges = Array.from({ length: 4 }, () => forgeInChild(directory).then(async (token) => {
-        // each forged grant is raced twice as soon as its process exits, while the other forges may still run
-        const pair = await Promise.all([login(token), login(token)]);
-        perGrant.push(pair);
-        return token;
-      }));
-      let tokens: string[];
-      try {
-        tokens = await Promise.all(forges);
-      } finally {
-        forging = false;
-        await contend;
-      }
-      assert.equal(new Set(tokens).size, 4);
-      assert.ok(contention.length > 0);
-      assert.deepEqual([...new Set(contention)], [401], "contending logins are rejected, never failed");
-      for (const pair of perGrant) {
-        assert.deepEqual(pair.map((result) => result.status).sort(), [200, 401]);
-        sessions.push(...pair.flatMap((result) => result.session === undefined ? [] : [result.session]));
-      }
-      assert.equal(new Set(sessions).size, 5);
+  // four real CLI forges run while the server keeps taking the login write lock with unknown tokens
+  let forging = true;
+  const contention: number[] = [];
+  const contendOnce: Effect.Effect<void> = Effect.suspend(() => forging
+    ? Effect.flatMap(login(randomBytes(32).toString("base64url")), (result) => {
+      contention.push(result.status);
+      return contendOnce;
+    })
+    : Effect.void);
+  const contend = yield* Effect.forkChild(Effect.all(Array.from({ length: 3 }, () => contendOnce), { concurrency: "unbounded" }));
+  const perGrant: Array<Array<{ status: number; session?: string }>> = [];
+  const forges = Array.from({ length: 4 }, () => forgeInChild(directory).pipe(Effect.tap((token) =>
+    // each forged grant is raced twice as soon as its process exits, while the other forges may still run
+    Effect.map(Effect.all([login(token), login(token)], { concurrency: "unbounded" }), (pair) => {perGrant.push(pair);}))));
+  const tokens = yield* Effect.all(forges, { concurrency: "unbounded" }).pipe(Effect.ensuring(Effect.suspend(() => {
+    forging = false;
+    return Fiber.join(contend);
+  })));
+  assert.equal(new Set(tokens).size, 4);
+  assert.ok(contention.length > 0);
+  assert.deepEqual([...new Set(contention)], [401], "contending logins are rejected, never failed");
+  for (const pair of perGrant) {
+    assert.deepEqual(pair.map((result) => result.status).sort(), [200, 401]);
+    sessions.push(...pair.flatMap((result) => result.session === undefined ? [] : [result.session]));
+  }
+  assert.equal(new Set(sessions).size, 5);
 
-      const stored = rows(directory, "SELECT token_hash FROM dashboard_login_sessions ORDER BY token_hash");
-      assert.deepEqual(stored, sessions.map(sha256).sort().map((token_hash) => ({ token_hash })));
-      assert.deepEqual(rows(directory, "SELECT COUNT(*) AS count FROM dashboard_login_grants"), [{ count: 0 }]);
-      assert.deepEqual(rows(directory, "PRAGMA journal_mode"), [{ journal_mode: "delete" }]);
-      assert.deepEqual(rows(directory, "PRAGMA integrity_check"), [{ integrity_check: "ok" }]);
-      assert.deepEqual(schema(), schemaBefore);
-      assert.deepEqual(schemaBefore.map((object) => [object.type, object.name]), [
-        ["index", "sqlite_autoindex_dashboard_login_grants_1"],
-        ["index", "sqlite_autoindex_dashboard_login_sessions_1"],
-        ["table", "dashboard_login_grants"],
-        ["table", "dashboard_login_sessions"],
-      ]);
-      assert.deepEqual(journalVersions(await readFile(databasePath(directory))), [1, 1]);
-      assert.deepEqual((await readdir(accessPath(directory))).sort(), ["login.sqlite3", "workflow-mcp-token"]);
-    } finally {
-      await ui.close();
-    }
-  });
-});
+  const stored = rows(directory, "SELECT token_hash FROM dashboard_login_sessions ORDER BY token_hash");
+  assert.deepEqual(stored, sessions.map(sha256).sort().map((token_hash) => ({ token_hash })));
+  assert.deepEqual(rows(directory, "SELECT COUNT(*) AS count FROM dashboard_login_grants"), [{ count: 0 }]);
+  assert.deepEqual(rows(directory, "PRAGMA journal_mode"), [{ journal_mode: "delete" }]);
+  assert.deepEqual(rows(directory, "PRAGMA integrity_check"), [{ integrity_check: "ok" }]);
+  assert.deepEqual(schema(), schemaBefore);
+  assert.deepEqual(schemaBefore.map((object) => [object.type, object.name]), [
+    ["index", "sqlite_autoindex_dashboard_login_grants_1"],
+    ["index", "sqlite_autoindex_dashboard_login_sessions_1"],
+    ["table", "dashboard_login_grants"],
+    ["table", "dashboard_login_sessions"],
+  ]);
+  assert.deepEqual(journalVersions(yield* fs.readFile(databasePath(directory))), [1, 1]);
+  assert.deepEqual((yield* fs.readDirectory(accessPath(directory))).sort(), ["login.sqlite3", "workflow-mcp-token"]);
+}).pipe(Effect.provide(Layer.mergeAll(NodeFileSystem.layer, FetchHttpClient.layer))), { timeout: 60_000 });
