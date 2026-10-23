@@ -5,10 +5,12 @@ import {resolveSupervisorScope} from "./supervisor-scope.js";
 import {modelSelection, NativeOperateRpc, SupervisorRpcError, type NativeRpcShape} from "./supervisor-native.js";
 import {canSupervisorContact, hasPendingOwnerInput, resolveSteerableRun} from "./supervisor-conversation.js";
 import {childOrigin} from "./supervisor-observation.js";
-import type {BindingRecord} from "./project-supervisor-store.js";
-import {endedWithoutCompletion, maxHandoverReviewChain, parseHandoverReview, type HandoverReviewInput} from "./supervisor-team-store.js";
+import {GuidanceDb} from "./db.js";
+import {decodeGuidanceRow, GuidanceStoreError, guidanceSql, guidanceTransaction, storedDocument, type SupervisionStoreError} from "./guidance-sql.js";
+import {ProjectSupervisorStore, type BindingRecord} from "./project-supervisor-store.js";
+import {SupervisorConversationStore} from "./supervisor-conversation-store.js";
+import {endedWithoutCompletion, maxHandoverReviewChain, parseHandoverReview, SupervisorTeamStore, type HandoverReviewInput} from "./supervisor-team-store.js";
 import {attributesHelperDelivery, HelperTransport, invalidReceipt} from "./supervisor-helper-transport.js";
-import {SupervisionStores} from "./supervision-stores.js";
 import {teamNotificationEvidence, teamNotificationText} from "./supervisor-team-runtime.js";
 import {admitSend, SupervisionGate, type AdmittedInFlight, type GateGuard, type SendPreparation} from "./supervision-gate.js";
 import type {T3TransportError} from "./t3.js";
@@ -103,6 +105,15 @@ const decodeGuideArguments = Schema.decodeUnknownExit(Schema.Struct({...locatorF
   targetThreadId: TeamId, text: Schema.String.check(Schema.makeFilter((value: string) => bounded(value, 12000)))}));
 const exactKeys = {onExcessProperty: "error"} as const;
 
+// the tool receipt rows: the columns are decoded with Schema; a stored document is parsed, checked to be a record and kept
+// whole; an unreadable receipt is a typed error naming the row, never an absent receipt
+const receiptRow = "supervisor_team_tool_receipt";
+const decodeReceiptRow = decodeGuidanceRow(Schema.Struct({request_hash: Schema.String, document: Schema.String}), receiptRow);
+const decodeGuideReceiptRow = decodeGuidanceRow(Schema.Struct({actor_thread_id: Schema.String, actor_epoch: Schema.Finite, operation_id: Schema.String,
+  evidence_item_id: Schema.String, document: Schema.String}), receiptRow);
+const receiptDocument = <A>(text: string): Effect.Effect<A, GuidanceStoreError> =>
+  storedDocument<A, GuidanceStoreError>(text, isRecord, () => new GuidanceStoreError({reason: "row_invalid", row: receiptRow, sqlReason: null}));
+
 // a fixed refusal code of a team or guidance step; only these codes, a store's own code and the review whitelist escape. A
 // guide's reservation refusal escapes the call itself, with the baseline error's message
 export class TeamDenied extends Data.TaggedError("TeamDenied")<{readonly reason: string}> {
@@ -117,6 +128,9 @@ const failureCode = (cause: Cause.Cause<unknown>): string | null => {
 // the baseline catch-all of a step: any failure or defect gives the fallback; an interruption stays an interruption
 const otherwise = <B>(fallback: (cause: Cause.Cause<unknown>) => B) => <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A | B, never, R> =>
   Effect.catchCauseIf(effect, (cause) => !Cause.hasInterruptsOnly(cause), (cause) => Effect.sync(() => fallback(cause))) as Effect.Effect<A | B, never, R>;
+// the same catch-all with a fallback that records: only the fallback's own failure escapes
+const otherwiseRecord = <B, E2, R2>(fallback: (cause: Cause.Cause<unknown>) => Effect.Effect<B, E2, R2>) => <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A | B, E2, R | R2> =>
+  Effect.catchCauseIf(effect, (cause) => !Cause.hasInterruptsOnly(cause), fallback) as Effect.Effect<A | B, E2, R | R2>;
 
 // a team call's cancel: the caller's own (the workflow mcp route's deadline); without one a call relies on interruption alone
 const withCancel = <A, E>(cancel: WorkflowCallCancel | undefined, body: (cancel: WorkflowCallCancel) => Effect.Effect<A, E>): Effect.Effect<A, E> =>
@@ -134,22 +148,29 @@ export type SupervisorTeamControllerOptions = {
   readonly helperProviderInstanceId?: string | undefined;
 };
 
+// a store failure outside a step's catch-all escapes the call (a store refusal inside one is its fixed code); reconcile must
+// not run inside a guidance transaction, because a fallback guide send it continues is admitted
 export interface SupervisorTeamControllerShape {
-  readonly call: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<unknown>;
-  readonly guide: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<unknown, TeamDenied>;
-  readonly reconcile: (binding: BindingRecord, stopped?: boolean, cancel?: WorkflowCallCancel) => Effect.Effect<void>;
+  readonly call: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<unknown, SupervisionStoreError>;
+  readonly guide: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<unknown, TeamDenied | SupervisionStoreError>;
+  readonly reconcile: (binding: BindingRecord, stopped?: boolean, cancel?: WorkflowCallCancel) => Effect.Effect<void, SupervisionStoreError>;
   /**
    * Guidance receipts of a stopped chat, observation only: a delivered steer settles, and a rejected attempt awaiting a fallback
    * or escalation is closed as not sent because a stop never sends another route. An unknown send keeps its identities.
    */
-  readonly reconcileStopped: (binding: BindingRecord, cancel?: WorkflowCallCancel) => Effect.Effect<void>;
+  readonly reconcileStopped: (binding: BindingRecord, cancel?: WorkflowCallCancel) => Effect.Effect<void, SupervisionStoreError>;
 }
 
 /** Mediates team changes and guidance using the existing private database and native proof. */
 const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions = {}) => Effect.gen(function* () {
   const workflows = yield* WorkflowWriteController;
-  // the interim synchronous stores (b-02): the binding store and its database, the team and the conversation requests
-  const {supervisors, team, requests} = yield* SupervisionStores;
+  // the binding store's ownership, the team and the conversation requests, and the run's guidance client for the tool receipts
+  const supervisors = yield* ProjectSupervisorStore;
+  const team = yield* SupervisorTeamStore;
+  const requests = yield* SupervisorConversationStore;
+  const sql = yield* GuidanceDb;
+  // a baseline synchronous block over the guidance file: one transaction, or a savepoint of the caller's
+  const transaction = guidanceTransaction(sql);
   const native = yield* WorkflowNativeAccess;
   const gate = yield* SupervisionGate;
   const transport = yield* HelperTransport;
@@ -161,40 +182,38 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
   // never joins another call's in-flight steer
   const sends = yield* Ref.make(0);
   const reconcileOffsets = yield* Ref.make(HashMap.empty<string, number>());
-  const db = supervisors.store.db;
-  db.exec(`CREATE TABLE IF NOT EXISTS supervisor_team_tool_receipts(
+  yield* guidanceSql(sql.unsafe(`CREATE TABLE IF NOT EXISTS supervisor_team_tool_receipts(
       owner_thread_id TEXT NOT NULL,actor_thread_id TEXT NOT NULL,binding_generation INTEGER NOT NULL,actor_epoch INTEGER NOT NULL,operation_id TEXT NOT NULL,
       request_hash TEXT NOT NULL,evidence_item_id TEXT NOT NULL,document TEXT NOT NULL,
-      PRIMARY KEY(owner_thread_id,actor_thread_id,binding_generation,actor_epoch,operation_id));`);
+      PRIMARY KEY(owner_thread_id,actor_thread_id,binding_generation,actor_epoch,operation_id))`));
 
   const parse = (input: unknown, decode: typeof decodeTeamArguments | typeof decodeGuideArguments): Payload | null => {
     if (Exit.isFailure(decode(input, exactKeys))) return null;
     try {if (workflowToolInputSize(input) > workflowToolInputMaxBytes) return null;} catch {return null;}
     return input as Payload;
   };
-  const receipt = (payload: Payload, binding: BindingRecord): {hash: string; value: Record<string, unknown>} | null => {
-    const row = db.prepare("SELECT request_hash,document FROM supervisor_team_tool_receipts WHERE owner_thread_id=? AND actor_thread_id=? AND binding_generation=? AND actor_epoch=? AND operation_id=?")
-      .get(binding.threadId, payload.supervisorThreadId, payload.bindingGeneration, payload.memberEpoch ?? 0, String(payload.operationId));
-    return row ? {hash: String(row.request_hash), value: JSON.parse(String(row.document)) as Record<string, unknown>} : null;
-  };
-  const save = (payload: Payload, binding: BindingRecord, evidenceItemId: string, result: unknown): void => {
-    db.prepare(`INSERT INTO supervisor_team_tool_receipts VALUES(?,?,?,?,?,?,?,?)
-      ON CONFLICT(owner_thread_id,actor_thread_id,binding_generation,actor_epoch,operation_id) DO UPDATE SET document=excluded.document`)
-      .run(binding.threadId, payload.supervisorThreadId, payload.bindingGeneration, payload.memberEpoch ?? 0, String(payload.operationId), workflowRequestHash(payload), evidenceItemId, JSON.stringify(result));
-  };
-  const atomic = <A>(work: () => A): A => db.isTransaction ? work() : supervisors.store.transaction(work);
+  const receipt = (payload: Payload, binding: BindingRecord): Effect.Effect<{hash: string; value: Record<string, unknown>} | null, GuidanceStoreError> =>
+    guidanceSql(Effect.gen(function* () {
+      const [row] = yield* sql`SELECT request_hash,document FROM supervisor_team_tool_receipts WHERE owner_thread_id=${binding.threadId} AND actor_thread_id=${payload.supervisorThreadId} AND binding_generation=${payload.bindingGeneration} AND actor_epoch=${payload.memberEpoch ?? 0} AND operation_id=${String(payload.operationId)}`;
+      if (row === undefined) return null;
+      const stored = yield* decodeReceiptRow(row);
+      return {hash: stored.request_hash, value: yield* receiptDocument<Record<string, unknown>>(stored.document)};
+    }));
+  const save = (payload: Payload, binding: BindingRecord, evidenceItemId: string, result: unknown): Effect.Effect<void, GuidanceStoreError> =>
+    guidanceSql(Effect.suspend(() => Effect.asVoid(sql`INSERT INTO supervisor_team_tool_receipts VALUES(${binding.threadId},${payload.supervisorThreadId},${payload.bindingGeneration},${payload.memberEpoch ?? 0},${String(payload.operationId)},${workflowRequestHash(payload)},${evidenceItemId},${JSON.stringify(result)})
+      ON CONFLICT(owner_thread_id,actor_thread_id,binding_generation,actor_epoch,operation_id) DO UPDATE SET document=excluded.document`)));
+  // a guide receipt's stored document, replaced in place by reconciliation
+  const replaceGuideReceipt = (binding: BindingRecord, row: {actor_thread_id: string; actor_epoch: number; operation_id: string}, document: GuideRecord) =>
+    guidanceSql(Effect.suspend(() => Effect.asVoid(sql`UPDATE supervisor_team_tool_receipts SET document=${JSON.stringify(document)} WHERE owner_thread_id=${binding.threadId} AND actor_thread_id=${row.actor_thread_id} AND binding_generation=${binding.generation} AND actor_epoch=${row.actor_epoch} AND operation_id=${row.operation_id}`)));
   // the actor's binding is still current; `guard` is the admission guard inside a section, the display predicates otherwise
-  const current = (payload: Payload, binding: BindingRecord, allowRegistering = false, guard?: GateGuard): boolean => {
-    const latest = workflows.resolveBinding(payload, allowRegistering, "effect", guard);
-    return latest?.threadId === binding.threadId && latest.generation === binding.generation;
-  };
-  const currentGuide = (payload: Payload, binding: BindingRecord): GuideRecord | null => {
-    const stored = receipt(payload, binding);
-    return stored ? stored.value as GuideRecord : null;
-  };
+  const current = (payload: Payload, binding: BindingRecord, allowRegistering = false, guard?: GateGuard): Effect.Effect<boolean, SupervisionStoreError> =>
+    Effect.map(workflows.resolveBinding(payload, allowRegistering, "effect", guard),
+      (latest) => latest?.threadId === binding.threadId && latest.generation === binding.generation);
+  const currentGuide = (payload: Payload, binding: BindingRecord): Effect.Effect<GuideRecord | null, GuidanceStoreError> =>
+    Effect.map(receipt(payload, binding), (stored) => stored ? stored.value as GuideRecord : null);
 
   const verifyHandoverReview = Effect.fnUntraced(function* (binding: BindingRecord, input: HandoverReviewInput, cancel: WorkflowCallCancel) {
-    const {original, chain} = team.handoverReviewContext(binding, input);
+    const {original, chain} = yield* team.handoverReviewContext(binding, input);
     const projection = yield* native.projection(original.recipientThreadId, cancel);
     if ((yield* Deferred.isDone(cancel)) || projection.thread.id !== original.recipientThreadId || projection.thread.projectId !== binding.projectId ||
       projection.thread.lineage.parentThreadId !== binding.threadId || projection.thread.lineage.relationshipToParent !== "subagent" ||
@@ -225,10 +244,11 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
     }
   });
 
-  // the provider isolation failure of a helper registration, after one stable service-attention event, or null when isolated
-  const helperProviderIsolationFailure = (binding: BindingRecord, payload: Payload, root: Projection, child: Projection): string | null => {
+  // the provider isolation failure of a helper registration, after one stable service-attention event, or null when isolated;
+  // the event is no input of any send guard, so it is recorded outside the admission section as at baseline
+  const helperProviderIsolationFailure = (binding: BindingRecord, payload: Payload, root: Projection, child: Projection): Effect.Effect<string | null, SupervisionStoreError> => {
     const configuredInstanceId = options.helperProviderInstanceId;
-    if (!configuredInstanceId) return null;
+    if (!configuredInstanceId) return Effect.succeed(null);
     const rootSelection = modelSelection(root.thread.modelSelection);
     const childSelection = modelSelection(child.thread.modelSelection);
     const ownProviderThreads = (projection: Projection, ownerThreadId: string) => Array.isArray(projection.providerThreads)
@@ -241,14 +261,13 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
     const rootSessions = new Set(rootProviderThreads.filter(hasSession).map(row => row.providerSessionId));
     const childSessionThreads = childProviderThreads.filter(hasSession);
     const childSessions = new Set(childSessionThreads.map(row => row.providerSessionId));
-    const failIsolation = (reason: string): string => {
+    const failIsolation = (reason: string): Effect.Effect<string, SupervisionStoreError> => {
       const memberThreadId = String(payload.memberThreadId);
       const eventIdentity = workflowRequestHash({supervisorThreadId: binding.threadId, bindingGeneration: binding.generation,
         memberThreadId, taskId: payload.taskId, bootstrapRunId: payload.bootstrapRunId});
-      team.serviceAttention(binding, {eventId: `helper-provider-isolation:${eventIdentity.slice(0, 32)}`,
+      return Effect.as(team.serviceAttention(binding, {eventId: `helper-provider-isolation:${eventIdentity.slice(0, 32)}`,
         memberThreadId: binding.threadId, targetThreadId: memberThreadId,
-        summary: `Helper ${memberThreadId} was not registered because its configured provider isolation could not be verified (${reason}). No helper membership or webhook was created, and no shared-session fallback occurred.`});
-      return reason;
+        summary: `Helper ${memberThreadId} was not registered because its configured provider isolation could not be verified (${reason}). No helper membership or webhook was created, and no shared-session fallback occurred.`}), reason);
     };
 
     if (!rootSelection || rootSelection.instanceId === configuredInstanceId) return failIsolation("helper_provider_instance_matches_root");
@@ -257,7 +276,7 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
       return failIsolation("helper_provider_instance_mismatch");
     if (!rootSessions.size || !childSessions.size) return failIsolation("helper_provider_session_unavailable");
     if ([...childSessions].some(sessionId => rootSessions.has(sessionId))) return failIsolation("helper_provider_session_shared");
-    return null;
+    return Effect.succeed(null);
   };
 
   const verifyMember = Effect.fnUntraced(function* (binding: BindingRecord, payload: Payload, cancel: WorkflowCallCancel) {
@@ -277,31 +296,31 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
       child.runs.filter(run => run.threadId === payload.memberThreadId).sort((a, b) => a.ordinal - b.ordinal)[0]?.id !== bootstrap.id ||
       !child.messages.some(message => message.id === bootstrap.userMessageId && message.runId === bootstrap.id && message.text === task.prompt))
       return yield* new TeamDenied({reason: "native_completed_bootstrap_not_verified"});
-    const isolation = helperProviderIsolationFailure(binding, payload, root, child);
+    const isolation = yield* helperProviderIsolationFailure(binding, payload, root, child);
     if (isolation) return yield* new TeamDenied({reason: isolation});
   });
 
-  const call = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<unknown> {
+  const call = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<unknown, SupervisionStoreError> {
     const payload = parse(input, decodeTeamArguments);
     if (!payload || typeof payload.action !== "string") return {status: "invalid", reason: "invalid_team_arguments"};
     if (payload.action !== "read" && !bounded(payload.operationId, 128)) return {status: "invalid", reason: "operation_id_required"};
     const reviewInput = payload.action === "review_handover" ? parseHandoverReview(payload) : null;
     if (payload.action === "review_handover" && !reviewInput) return fail("supervisor_team_invalid_handover_review");
     // reading the team stays possible after a human stop; every other action is an effect fenced by the stop
-    const binding = workflows.resolveBinding(payload, payload.action === "ready", payload.action === "read" ? "read" : "effect");
+    const binding = yield* workflows.resolveBinding(payload, payload.action === "ready", payload.action === "read" ? "read" : "effect");
     if (!binding && payload.action === "ready" && typeof payload.memberEpoch === "number") {
-      const replayed = workflows.resolveBinding({...payload, memberEpoch: payload.memberEpoch + 1});
-      const member = replayed && team.snapshot(replayed).members.find(item => item.threadId === payload.supervisorThreadId);
+      const replayed = yield* workflows.resolveBinding({...payload, memberEpoch: payload.memberEpoch + 1});
+      const member = replayed ? (yield* team.snapshot(replayed)).members.find(item => item.threadId === payload.supervisorThreadId) : undefined;
       if (replayed && member?.state === "ready" && member.epoch === payload.memberEpoch + 1) {
-        const stored = receipt(payload, replayed);
+        const stored = yield* receipt(payload, replayed);
         if (stored?.hash === workflowRequestHash(payload)) return stored.value;
       }
     }
     if (!binding) return fail("actor_not_current_ready_enabled");
-    if (payload.action === "read") return {status: "ok", team: team.snapshot(binding)};
+    if (payload.action === "read") return {status: "ok", team: yield* team.snapshot(binding)};
     const proof = yield* workflows.authorizeNative(payload, "team", payload.action === "ready", cancel);
     if (proof.status !== "verified") return payload.action === "review_handover" ? fail("native_root_proof_required") : proof;
-    const prior = receipt(payload, binding);
+    const prior = yield* receipt(payload, binding);
     if (prior) return prior.hash === workflowRequestHash(payload) ? prior.value : fail("operation_id_conflict");
     const root = payload.supervisorThreadId === binding.threadId;
     if (!root && !["ready", "report"].includes(payload.action)) return fail("root_authority_required");
@@ -316,56 +335,56 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
         return fail("target_not_live_operational_descendant");
       // the supervision_team mutation (plan 3.11): the actor and receipt rechecks, the team change and its receipt in one
       // transaction inside the admission section, so it is ordered against every Stop and send guard
-      return yield* gate.admit((guard) => Effect.sync(() => atomic((): unknown => {
-        if (!current(payload, binding, payload.action === "ready", guard)) return fail("actor_changed");
-        const concurrent = receipt(payload, binding);
+      return yield* gate.admit((guard) => transaction(Effect.gen(function* (): Effect.fn.Return<unknown, SupervisionStoreError> {
+        if (!(yield* current(payload, binding, payload.action === "ready", guard))) return fail("actor_changed");
+        const concurrent = yield* receipt(payload, binding);
         if (concurrent) return concurrent.hash === workflowRequestHash(payload) ? concurrent.value : fail("operation_id_conflict");
         let result: unknown;
         if (reviewInput) {
-          result = team.reviewHandover(binding, payload.supervisorThreadId, reviewInput);
+          result = yield* team.reviewHandover(binding, payload.supervisorThreadId, reviewInput);
         } else if (payload.action === "register") {
           if (!id(payload.memberThreadId) || !id(payload.taskId) || !id(payload.bootstrapRunId)) return fail("invalid_registration");
-          result = team.registerMember(binding, {threadId: payload.memberThreadId, taskId: payload.taskId, bootstrapRunId: payload.bootstrapRunId});
+          result = yield* team.registerMember(binding, {threadId: payload.memberThreadId, taskId: payload.taskId, bootstrapRunId: payload.bootstrapRunId});
         } else if (payload.action === "ready") {
           if (root || typeof payload.memberEpoch !== "number") return fail("registered_helper_required");
-          result = team.markReady(binding, payload.supervisorThreadId, payload.memberEpoch);
+          result = yield* team.markReady(binding, payload.supervisorThreadId, payload.memberEpoch);
         } else if (payload.action === "assign" || payload.action === "release") {
           if (payload.action === "assign" && !id(payload.memberThreadId)) return fail("member_required");
-          result = team.assign(binding, String(payload.targetThreadId), payload.action === "release" ? null : String(payload.memberThreadId), parentMap(threads));
+          result = yield* team.assign(binding, String(payload.targetThreadId), payload.action === "release" ? null : String(payload.memberThreadId), parentMap(threads));
         } else if (payload.action === "retire") {
           if (!id(payload.memberThreadId)) return fail("member_required");
-          result = team.retireMember(binding, payload.memberThreadId);
+          result = yield* team.retireMember(binding, payload.memberThreadId);
         } else if (payload.action === "quarantine") {
           if (!root || !id(payload.memberThreadId)) return fail("root_authority_required");
-          result = team.quarantineMember(binding, payload.memberThreadId);
+          result = yield* team.quarantineMember(binding, payload.memberThreadId);
         } else if (payload.action === "retry") {
           if (!id(payload.memberThreadId)) return fail("member_required");
           const memberThreadId = payload.memberThreadId;
-          const pendingRequestsRemain = team.unresolvedRequests(binding).some(item => item.memberThreadId === memberThreadId);
+          const pendingRequestsRemain = (yield* team.unresolvedRequests(binding)).some(item => item.memberThreadId === memberThreadId);
           const failed = pendingRequestsRemain ? [] :
-            requests.requests(binding.projectId, memberThreadId).filter(item => item.state === "failed" && !item.failureAcknowledged);
-          for (const request of failed) requests.saveRequest({...request, failureAcknowledged: true});
-          const retriedNotifications = team.retryFailedNotifications(binding, memberThreadId);
+            (yield* requests.requests(binding.projectId, memberThreadId)).filter(item => item.state === "failed" && !item.failureAcknowledged);
+          for (const request of failed) yield* requests.saveRequest({...request, failureAcknowledged: true});
+          const retriedNotifications = yield* team.retryFailedNotifications(binding, memberThreadId);
           result = {acknowledgedFailures: failed.length, retriedNotifications, pendingRequestsRemain};
         } else if (payload.action === "note") {
           if (!id(payload.memberThreadId) || !bounded(payload.summary, 4000)) return fail("member_and_summary_required");
           const memberThreadId = payload.memberThreadId;
-          const member = team.snapshot(binding).members.find(item => item.threadId === memberThreadId);
+          const member = (yield* team.snapshot(binding)).members.find(item => item.threadId === memberThreadId);
           if (!member) return fail("member_required");
-          result = team.note(binding, {eventId: `note:${payload.operationId}`, notificationId: `note:${payload.operationId}`,
+          result = yield* team.note(binding, {eventId: `note:${payload.operationId}`, notificationId: `note:${payload.operationId}`,
             memberThreadId, memberEpoch: member.epoch, message: payload.summary});
         } else if (payload.action === "report") {
           if (root || !bounded(payload.summary, 4000) || !["assessment", "escalation", "group_result"].includes(String(payload.reportKind)) ||
-            !team.authorizeWrite(binding, payload.supervisorThreadId, String(payload.targetThreadId), parentMap(threads), payload))
+            !(yield* team.authorizeWrite(binding, payload.supervisorThreadId, String(payload.targetThreadId), parentMap(threads), payload)))
             return fail("report_outside_current_assignment");
           const report = {eventId: `report:${payload.supervisorThreadId}:${payload.operationId}`, actorThreadId: payload.supervisorThreadId,
             memberEpoch: payload.memberEpoch!, targets: [{targetThreadId: String(payload.targetThreadId),
               assignmentRootThreadId: payload.assignmentRootThreadId!, assignmentEpoch: payload.assignmentEpoch!}],
             summary: payload.summary, parentById: parentMap(threads), ...(payload.reportKind === "group_result" ? {severity: "result" as const} : {})};
-          result = payload.reportKind === "escalation" ? team.escalate(binding, report) : team.assessment(binding, report);
+          result = payload.reportKind === "escalation" ? yield* team.escalate(binding, report) : yield* team.assessment(binding, report);
         } else return {status: "invalid", reason: "unknown_team_action"};
-        const response = {status: "ok", result, team: team.snapshot(binding)};
-        save(payload, binding, proof.evidence.itemId, response);
+        const response = {status: "ok", result, team: yield* team.snapshot(binding)};
+        yield* save(payload, binding, proof.evidence.itemId, response);
         return response;
       })));
     }).pipe(otherwise((cause) => {
@@ -387,16 +406,16 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
       requestId, targetRunId: "", text: String(payload.text), attempts: []};
   };
   const findGuideRoute = Effect.fnUntraced(function* (binding: BindingRecord, payload: Payload, includeTarget: boolean,
-    cancel: WorkflowCallCancel): Effect.fn.Return<GuideRouteSearch, SupervisorRpcError | T3TransportError | WorkflowReadCancelled> {
+    cancel: WorkflowCallCancel): Effect.fn.Return<GuideRouteSearch, SupervisorRpcError | T3TransportError | WorkflowReadCancelled | SupervisionStoreError> {
     const threads = yield* native.listThreads(cancel);
     const nativeScope = resolveSupervisorScope(threads, binding.projectId, binding.mainThreadId, supervisors.ownedIds);
     const parents = parentMap(threads);
     if (!nativeScope.complete || !nativeScope.main || !nativeScope.liveIds.has(String(payload.targetThreadId)))
       return {route: null, parents, reason: "native_scope_unavailable", freshScope: false};
-    if (!current(payload, binding) || !team.authorizeWrite(binding, payload.supervisorThreadId, String(payload.targetThreadId), parents, payload))
+    if (!(yield* current(payload, binding)) || !(yield* team.authorizeWrite(binding, payload.supervisorThreadId, String(payload.targetThreadId), parents, payload)))
       return {route: null, parents, reason: "guidance_assignment_changed", freshScope: true};
     const actor = yield* native.projection(payload.supervisorThreadId, cancel);
-    if (actor.thread.id !== payload.supervisorThreadId || actor.thread.archivedAt != null || actor.thread.deletedAt != null || !current(payload, binding))
+    if (actor.thread.id !== payload.supervisorThreadId || actor.thread.archivedAt != null || actor.thread.deletedAt != null || !(yield* current(payload, binding)))
       return {route: null, parents, reason: "helper_identity_changed", freshScope: true};
     const original = nativeScope.byId.get(String(payload.targetThreadId));
     if (!original) return {route: null, parents, reason: "target_lineage_unavailable", freshScope: true};
@@ -411,9 +430,9 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
         candidate = candidate.lineage.parentThreadId ? nativeScope.byId.get(candidate.lineage.parentThreadId) : undefined;
         continue;
       }
-      if (!current(payload, binding) || !team.authorizeWrite(binding, payload.supervisorThreadId, String(payload.targetThreadId), parents, payload))
+      if (!(yield* current(payload, binding)) || !(yield* team.authorizeWrite(binding, payload.supervisorThreadId, String(payload.targetThreadId), parents, payload)))
         return {route: null, parents, reason: "guidance_assignment_changed", freshScope: true};
-      if (!team.authorizeWrite(binding, payload.supervisorThreadId, candidate.id, parents, payload))
+      if (!(yield* team.authorizeWrite(binding, payload.supervisorThreadId, candidate.id, parents, payload)))
         return {route: null, parents, reason: "ancestor_outside_current_assignment", freshScope: true};
       const route = candidate.id === original.id ? target : yield* native.projection(candidate.id, cancel);
       if (route.thread.id !== candidate.id || route.thread.lineage.parentThreadId !== candidate.lineage.parentThreadId ||
@@ -424,9 +443,9 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
         const parent = parentThread ? yield* native.projection(parentThread.id, cancel) : undefined;
         const run = resolveSteerableRun(route);
         if (childOrigin(route.thread, parent) === "delegated_child" && run &&
-          canSupervisorContact(actor.thread, route.thread) && current(payload, binding) &&
-          team.authorizeWrite(binding, payload.supervisorThreadId, String(payload.targetThreadId), parents, payload) &&
-          team.authorizeWrite(binding, payload.supervisorThreadId, candidate.id, parents, payload)) return {route, parents, reason: null, freshScope: true};
+          canSupervisorContact(actor.thread, route.thread) && (yield* current(payload, binding)) &&
+          (yield* team.authorizeWrite(binding, payload.supervisorThreadId, String(payload.targetThreadId), parents, payload)) &&
+          (yield* team.authorizeWrite(binding, payload.supervisorThreadId, candidate.id, parents, payload))) return {route, parents, reason: null, freshScope: true};
       }
       candidate = candidate.lineage.parentThreadId ? nativeScope.byId.get(candidate.lineage.parentThreadId) : undefined;
     }
@@ -444,24 +463,23 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
     ({type: "message.dispatch", commandId: attempt.commandId, messageId: attempt.messageId,
       threadId: attempt.routedThreadId, text: textValue, attachments: [], createdBy: "system", creationSource: "server",
       dispatchMode: {type: "steer_active", targetRunId: attempt.targetRunId}});
+  // the root escalation after a definite rejection: the attention event, the request settlement and the escalated receipt in one
+  // transaction; it closes the guidance and enables no send, so it stays outside the admission section as at baseline
   const finishRootEscalation = (payload: Payload, binding: BindingRecord, evidenceItemId: string, record: GuideRecord,
-    requestRecorded: boolean): GuideRecord => {
+    requestRecorded: boolean): Effect.Effect<GuideRecord, GuidanceStoreError> => {
     const summary = record.escalationSummary ??
       `A definite steer rejection left ${record.targetThreadId} without a contactable ancestor in the helper's current assignment. Root intervention is required.`;
     const escalated: GuideRecord = {...record, status: "escalated", escalationSummary: summary, reason: "root_intervention_required"};
-    try {
-      atomic(() => {
-        team.serviceAttention(binding, {eventId: `guide-service-attention:${record.requestId}`, memberThreadId: record.supervisorThreadId,
-          targetThreadId: record.targetThreadId, summary});
-        if (requestRecorded) team.setRequestState(binding, binding.threadId, record.requestId, 0, "settled");
-        save(payload, binding, evidenceItemId, escalated);
-      });
+    return transaction(Effect.gen(function* () {
+      yield* team.serviceAttention(binding, {eventId: `guide-service-attention:${record.requestId}`, memberThreadId: record.supervisorThreadId,
+        targetThreadId: record.targetThreadId, summary});
+      if (requestRecorded) yield* team.setRequestState(binding, binding.threadId, record.requestId, 0, "settled");
+      yield* save(payload, binding, evidenceItemId, escalated);
       return escalated;
-    } catch {
+    })).pipe(otherwiseRecord(() => {
       const pending: GuideRecord = {...record, status: "needs_escalation", escalationSummary: summary, reason: "root_attention_recording_unavailable"};
-      save(payload, binding, evidenceItemId, pending);
-      return pending;
-    }
+      return Effect.as(save(payload, binding, evidenceItemId, pending), pending);
+    }));
   };
   // the steer, started by its admission section and awaited outside it
   const initiate = (operate: NativeRpcShape, command: Record<string, unknown>, cancel: WorkflowCallCancel): Effect.Effect<AdmittedInFlight<GuideDispatch>> =>
@@ -480,7 +498,7 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
   // after a definite rejection: a fresh route search and its records fall back to an escalation, as the baseline caught them;
   // the steer to a found route and the escalation itself fail the caller, as the baseline returned them unawaited
   const continueAfterDefiniteRejection = (payload: Payload, binding: BindingRecord, evidenceItemId: string, record: GuideRecord,
-    cancel: WorkflowCallCancel): Effect.Effect<GuideRecord, TeamDenied> => {
+    cancel: WorkflowCallCancel): Effect.Effect<GuideRecord, TeamDenied | SupervisionStoreError> => {
     const summary = record.escalationSummary ??
       `A definite steer rejection left ${record.targetThreadId} without a contactable ancestor in the helper's current assignment. Root intervention is required.`;
     return Effect.gen(function* () {
@@ -489,33 +507,32 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
         if (search.route && search.reason === null) return {_tag: "Send" as const, route: search.route, parents: search.parents};
         if (search.reason === "target_pending_owner_input") {
           const deferred: GuideRecord = {...record, status: "needs_fallback", reason: search.reason};
-          save(payload, binding, evidenceItemId, deferred);
+          yield* save(payload, binding, evidenceItemId, deferred);
           return {_tag: "Done" as const, record: deferred};
         }
         const needsEscalation: GuideRecord = {...record, status: "needs_escalation", escalationSummary: summary,
           reason: search.reason ?? "no_contactable_ancestor_in_assignment"};
-        save(payload, binding, evidenceItemId, needsEscalation);
+        yield* save(payload, binding, evidenceItemId, needsEscalation);
         return {_tag: "Escalate" as const, record: needsEscalation};
-      }).pipe(otherwise(() => {
+      }).pipe(otherwiseRecord(() => {
         const needsEscalation: GuideRecord = {...record, status: "needs_escalation", escalationSummary: summary, reason: "ancestor_route_read_unavailable"};
-        save(payload, binding, evidenceItemId, needsEscalation);
-        return {_tag: "Escalate" as const, record: needsEscalation};
+        return Effect.as(save(payload, binding, evidenceItemId, needsEscalation), {_tag: "Escalate" as const, record: needsEscalation});
       }));
       if (next._tag === "Send") return yield* sendGuideAttempt(payload, binding, evidenceItemId, record, next.route, next.parents, cancel);
       if (next._tag === "Done") return next.record;
-      return finishRootEscalation(payload, binding, evidenceItemId, next.record, record.attempts.length > 0);
+      return yield* finishRootEscalation(payload, binding, evidenceItemId, next.record, record.attempts.length > 0);
     });
   };
 
   const sendGuideAttempt = Effect.fnUntraced(function* (payload: Payload, binding: BindingRecord, evidenceItemId: string, record: GuideRecord,
-    route: Projection, parents: ReadonlyMap<string, string | null>, cancel: WorkflowCallCancel): Effect.fn.Return<GuideRecord, TeamDenied> {
+    route: Projection, parents: ReadonlyMap<string, string | null>, cancel: WorkflowCallCancel): Effect.fn.Return<GuideRecord, TeamDenied | SupervisionStoreError> {
     const targetRunId = resolveSteerableRun(route)?.id;
     if (typeof targetRunId !== "string" || targetRunId.length === 0) {
       const needsEscalation: GuideRecord = {...record, status: "needs_escalation", escalationSummary:
         `A definite steer rejection left ${record.targetThreadId} without a contactable ancestor in the helper's current assignment. Root intervention is required.`,
       reason: "route_run_unavailable"};
-      save(payload, binding, evidenceItemId, needsEscalation);
-      return finishRootEscalation(payload, binding, evidenceItemId, needsEscalation, record.attempts.length > 0);
+      yield* save(payload, binding, evidenceItemId, needsEscalation);
+      return yield* finishRootEscalation(payload, binding, evidenceItemId, needsEscalation, record.attempts.length > 0);
     }
     const reservation: {record: GuideRecord | null; attemptIndex: number} = {record: null, attemptIndex: -1};
     // a guide send (plan 3.11): the final assignment guard, the durable reservation (attempt and team request) and the steer's
@@ -523,16 +540,18 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
     const dispatch = yield* admitSend(gate, {
       identity: `${record.requestId}:command:${record.attempts.length}\u0000${yield* Ref.getAndUpdate(sends, (count) => count + 1)}`,
       inFlight,
-      prepare: (guard) => Effect.sync((): SendPreparation<GuideDispatch> => atomic(() => {
-        const existing = currentGuide(payload, binding);
+      // the receipt and guard reads, the reservation and the team request are one transaction; the initiation it returns runs
+      // after its commit, still inside the section
+      prepare: (guard) => transaction(Effect.gen(function* (): Effect.fn.Return<SendPreparation<GuideDispatch>, SupervisionStoreError> {
+        const existing = yield* currentGuide(payload, binding);
         const latest = existing ?? record;
         const attempts = latest.attempts ?? [];
         if (existing && (latest.status !== "needs_fallback" || attempts.length !== record.attempts.length)) {
           reservation.record = latest;
           return {_tag: "Answer", value: {_tag: "Stored", record: latest}};
         }
-        if (!current(payload, binding, false, guard) || !team.authorizeWrite(binding, payload.supervisorThreadId, record.targetThreadId, parents, payload) ||
-          !team.authorizeWrite(binding, payload.supervisorThreadId, route.thread.id, parents, payload)) return {_tag: "Answer", value: {_tag: "AssignmentChanged"}};
+        if (!(yield* current(payload, binding, false, guard)) || !(yield* team.authorizeWrite(binding, payload.supervisorThreadId, record.targetThreadId, parents, payload)) ||
+          !(yield* team.authorizeWrite(binding, payload.supervisorThreadId, route.thread.id, parents, payload))) return {_tag: "Answer", value: {_tag: "AssignmentChanged"}};
         reservation.attemptIndex = attempts.length;
         const attempt: GuideAttempt = {routedThreadId: route.thread.id, commandId: `${record.requestId}:command:${reservation.attemptIndex}`,
           messageId: `${record.requestId}:message:${reservation.attemptIndex}`, targetRunId, status: "prepared"};
@@ -542,16 +561,16 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
         delete reserved.escalationSummary;
         reservation.record = reserved;
         if (attempts.length === 0) {
-          const coverage = team.coverage(binding, record.targetThreadId, parents);
-          team.recordRequest(binding, {requestId: record.requestId, memberThreadId: payload.supervisorThreadId,
+          const coverage = yield* team.coverage(binding, record.targetThreadId, parents);
+          yield* team.recordRequest(binding, {requestId: record.requestId, memberThreadId: payload.supervisorThreadId,
             memberEpoch: coverage.memberEpoch ?? 0, targets: [{targetThreadId: record.targetThreadId,
               assignmentRootThreadId: coverage.assignmentRootThreadId ?? binding.mainThreadId, assignmentEpoch: coverage.assignmentEpoch ?? 0}], parentById: parents});
         }
-        save(payload, binding, evidenceItemId, reserved);
+        yield* save(payload, binding, evidenceItemId, reserved);
         return rpc ? {_tag: "Initiate", initiate: initiate(rpc, guideCommand(attempt, record.text), cancel)} : {_tag: "Answer", value: unavailableDispatch};
       })),
       // the original was interrupted after its initiation: its receipt keeps the reserved identities for reconciliation
-      reconcile: Effect.sync((): GuideDispatch => ({_tag: "Stored", record: currentGuide(payload, binding) ?? reservation.record ?? record})),
+      reconcile: Effect.map(currentGuide(payload, binding), (stored): GuideDispatch => ({_tag: "Stored", record: stored ?? reservation.record ?? record})),
     });
     if (dispatch._tag === "AssignmentChanged") return yield* new TeamDenied({reason: "guidance_assignment_changed"});
     if (dispatch._tag === "Stored") return dispatch.record;
@@ -559,25 +578,26 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
     const attemptIndex = reservation.attemptIndex;
     const attempt = prepared.attempts[attemptIndex]!;
     const command = guideCommand(attempt, record.text);
-    const acceptedResult = (latest: GuideRecord): GuideRecord => {
+    const acceptedResult = (latest: GuideRecord): Effect.Effect<GuideRecord, GuidanceStoreError> => {
       const result = {...changedAttempt(latest, attemptIndex, "accepted"), status: "accepted" as const,
         reason: "Native steer command accepted; late completion can still start a turn. Do not send another route."};
-      save(payload, binding, evidenceItemId, result);
-      return result;
+      return Effect.as(save(payload, binding, evidenceItemId, result), result);
     };
-    const rejectedResult = Effect.fnUntraced(function* (latest: GuideRecord, cause: unknown): Effect.fn.Return<GuideRecord, TeamDenied> {
+    // the reply's records stay separate statements, as at baseline: they close or settle the reserved attempt and a fallback
+    // send they continue is rechecked in its own admission section
+    const rejectedResult = Effect.fnUntraced(function* (latest: GuideRecord, cause: unknown): Effect.fn.Return<GuideRecord, TeamDenied | SupervisionStoreError> {
       if (cause instanceof SupervisorRpcError && cause.outcome === "rejected" && !cause.definiteRejection) {
         const notSent: GuideRecord = {...changedAttempt(latest, attemptIndex, "not_sent", "native_transport_not_sent"),
           status: "not_sent", reason: "native_transport_not_sent"};
-        save(payload, binding, evidenceItemId, notSent);
-        team.setRequestState(binding, binding.threadId, record.requestId, 0, "settled");
+        yield* save(payload, binding, evidenceItemId, notSent);
+        yield* team.setRequestState(binding, binding.threadId, record.requestId, 0, "settled");
         return notSent;
       }
       const definite = cause instanceof SupervisorRpcError && cause.definiteRejection;
       if (definite && attemptIndex === 0 && attempt.routedThreadId === record.targetThreadId) {
         const rejected = {...changedAttempt(latest, attemptIndex, "rejected", "native_steer_rejected"), status: "needs_fallback" as const,
           reason: "native_steer_rejected"};
-        save(payload, binding, evidenceItemId, rejected);
+        yield* save(payload, binding, evidenceItemId, rejected);
         return yield* continueAfterDefiniteRejection(payload, binding, evidenceItemId, rejected, cancel);
       }
       if (definite) {
@@ -585,20 +605,22 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
           status: "needs_escalation", escalationSummary:
             `A definite steer rejection left ${record.targetThreadId} without a contactable ancestor in the helper's current assignment. Root intervention is required.`,
           reason: "native_steer_rejected"};
-        save(payload, binding, evidenceItemId, needsEscalation);
-        return finishRootEscalation(payload, binding, evidenceItemId, needsEscalation, true);
+        yield* save(payload, binding, evidenceItemId, needsEscalation);
+        return yield* finishRootEscalation(payload, binding, evidenceItemId, needsEscalation, true);
       }
       const reason = cause instanceof SupervisorRpcError && cause.dispatchCommandFailure
         ? "dispatch_failure_replay_requires_reconciliation" : "original_send_requires_reconciliation";
       const uncertain: GuideRecord = {...changedAttempt(latest, attemptIndex, "uncertain", reason), status: "uncertain", reason};
-      save(payload, binding, evidenceItemId, uncertain);
-      team.setRequestState(binding, binding.threadId, record.requestId, 0, "uncertain");
+      yield* save(payload, binding, evidenceItemId, uncertain);
+      yield* team.setRequestState(binding, binding.threadId, record.requestId, 0, "uncertain");
       return uncertain;
     });
+    // an accepted reply whose record fails is classified with that failure, as the baseline caught it
+    const accepted = (latest: GuideRecord, otherwiseLatest: Effect.Effect<GuideRecord, GuidanceStoreError>) =>
+      acceptedResult(latest).pipe(Effect.catchCauseIf((cause) => !Cause.hasInterruptsOnly(cause),
+        (cause) => Effect.flatMap(otherwiseLatest, (current) => rejectedResult(current, Cause.squash(cause)))));
     const first = dispatchFailure(dispatch.exit);
-    if (first === null) {
-      try {return acceptedResult(prepared);} catch (cause) {return yield* rejectedResult(prepared, cause);}
-    }
+    if (first === null) return yield* accepted(prepared, Effect.succeed(prepared));
     if (!(first instanceof SupervisorRpcError) || !first.dispatchCommandFailure) return yield* rejectedResult(prepared, first);
     // a received dispatch-command failure: exactly one replay of the identical command, reserved durably before it is sent
     // again; like the baseline it rechecks no guard after the awaited reply (L-02)
@@ -606,9 +628,10 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
     const replay = yield* admitSend(gate, {
       identity: `${attempt.commandId}:replay\u0000${yield* Ref.getAndUpdate(sends, (count) => count + 1)}`,
       inFlight,
-      prepare: () => Effect.sync((): SendPreparation<GuideDispatch> => {
-        atomic(() => {
-          const latest = currentGuide(payload, binding) ?? prepared;
+      // the receipt read and the replay reservation are one transaction; the initiation runs after its commit
+      prepare: () => Effect.gen(function* (): Effect.fn.Return<SendPreparation<GuideDispatch>, GuidanceStoreError> {
+        yield* transaction(Effect.gen(function* () {
+          const latest = (yield* currentGuide(payload, binding)) ?? prepared;
           const latestAttempt = latest.attempts?.[attemptIndex];
           if (!latestAttempt || latestAttempt.dispatchFailureReplayAttempted || latestAttempt.status !== "prepared") {
             replayState.record = latest;
@@ -619,29 +642,28 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
             reason: "received_dispatch_command_failure"};
           replayState.record = {...latest, attempts, status: "replaying"};
           replayState.reserved = true;
-          save(payload, binding, evidenceItemId, replayState.record);
-        });
+          yield* save(payload, binding, evidenceItemId, replayState.record);
+        }));
         if (!replayState.reserved || !replayState.record) return {_tag: "Answer", value: {_tag: "Stored", record: replayState.record ?? prepared}};
         return rpc ? {_tag: "Initiate", initiate: initiate(rpc, command, cancel)} : {_tag: "Answer", value: unavailableDispatch};
       }),
-      reconcile: Effect.sync((): GuideDispatch => ({_tag: "Stored", record: currentGuide(payload, binding) ?? replayState.record ?? prepared})),
+      reconcile: Effect.map(currentGuide(payload, binding), (stored): GuideDispatch => ({_tag: "Stored", record: stored ?? replayState.record ?? prepared})),
     });
     if (replay._tag !== "Dispatched") return replay._tag === "Stored" ? replay.record : prepared;
     const replaying = replayState.record!;
+    const latestReplay = Effect.map(currentGuide(payload, binding), (stored) => stored ?? replaying);
     const second = dispatchFailure(replay.exit);
-    if (second === null) {
-      try {return acceptedResult(replaying);} catch (cause) {return yield* rejectedResult(currentGuide(payload, binding) ?? replaying, cause);}
-    }
-    return yield* rejectedResult(currentGuide(payload, binding) ?? replaying, second);
+    if (second === null) return yield* accepted(replaying, latestReplay);
+    return yield* rejectedResult(yield* latestReplay, second);
   });
 
-  const guide = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<unknown, TeamDenied> {
+  const guide = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<unknown, TeamDenied | SupervisionStoreError> {
     const payload = parse(input, decodeGuideArguments);
     if (!payload) return {status: "invalid", reason: "invalid_guidance_arguments"};
     const proof = yield* workflows.authorizeNative(payload, "guide", false, cancel);
     if (proof.status !== "verified") return proof;
     const binding = proof.binding;
-    const prior = receipt(payload, binding);
+    const prior = yield* receipt(payload, binding);
     if (prior && prior.hash !== workflowRequestHash(payload)) return fail("operation_id_conflict");
     if (!rpc) return fail("native_guidance_unavailable");
     if (payload.supervisorThreadId === binding.threadId) return fail("helper_guidance_only_use_main_dialogue");
@@ -653,8 +675,8 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
         if (!Array.isArray(original.attempts)) {
           const projection = yield* native.projection(original.routedThreadId, cancel);
           if (projection.messages.some(message => message.id === original.messageId && message.threadId === original.routedThreadId && message.text === payload.text)) {
-            const result = {...original, status: "delivered"};save(payload, binding, proof.evidence.itemId, result);
-            team.setRequestState(binding, binding.threadId, original.requestId, 0, "settled");return {_tag: "Done" as const, value: result as unknown};
+            const result = {...original, status: "delivered"};yield* save(payload, binding, proof.evidence.itemId, result);
+            yield* team.setRequestState(binding, binding.threadId, original.requestId, 0, "settled");return {_tag: "Done" as const, value: result as unknown};
           }
           return {_tag: "Done" as const, value: {...original, status: "uncertain", reason: "original_send_requires_reconciliation"} as unknown};
         }
@@ -666,19 +688,19 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
           const message = projection.messages.find(item => item.id === original.messageId && item.threadId === original.routedThreadId && item.text === payload.text &&
             item.createdBy === "user" && item.creationSource === "server");
           if (message) {
-            const result = {...original, status: "delivered"};save(payload, binding, proof.evidence.itemId, result);
-            team.setRequestState(binding, binding.threadId, original.requestId, 0, "settled");
-            if (message.runId && message.runId !== original.targetRunId) team.serviceAttention(binding, {
+            const result = {...original, status: "delivered"};yield* save(payload, binding, proof.evidence.itemId, result);
+            yield* team.setRequestState(binding, binding.threadId, original.requestId, 0, "settled");
+            if (message.runId && message.runId !== original.targetRunId) yield* team.serviceAttention(binding, {
               eventId: `late-guide:${original.requestId}`, memberThreadId: original.supervisorThreadId, targetThreadId: original.targetThreadId,
               summary: `The native steer reached a new run in ${original.routedThreadId} after the targeted run ended. Stop further direct guidance and assess whether its operational parent needs attention.`});
             return {_tag: "Done" as const, value: result as unknown};
           }
         }
         const uncertain: GuideRecord = {...original, status: "uncertain", reason: "original_send_requires_reconciliation"};
-        save(payload, binding, proof.evidence.itemId, uncertain);
+        yield* save(payload, binding, proof.evidence.itemId, uncertain);
         return {_tag: "Done" as const, value: uncertain as unknown};
       }
-      if (team.unresolvedRequests(binding).some(request => request.requestId.startsWith("guide:") &&
+      if ((yield* team.unresolvedRequests(binding)).some(request => request.requestId.startsWith("guide:") &&
         request.targets.some(target => target.targetThreadId === payload.targetThreadId)))
         return {_tag: "Done" as const, value: {status: "pending", reason: "prior_guidance_requires_reconciliation"} as unknown};
       const record = guideRecord(payload, binding);
@@ -689,34 +711,36 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
         // the escalation of a walk without a route (plan 3.11): the actor's binding, scope and per-chat stop rechecked with the
         // admission guard, as the reservation does, and the escalation event with the helper's last assessment in one section;
         // a scope stopped or disabled during the walk writes nothing and refuses as the walk's own recheck does
-        const escalated = yield* gate.admit((guard) => Effect.sync(() => {
-          if (!current(payload, binding, false, guard)) return false;
-          team.escalate(binding, {eventId: `guide-escalation:${workflowRequestHash(payload)}`, actorThreadId: payload.supervisorThreadId,
+        const escalated = yield* gate.admit((guard) => transaction(Effect.gen(function* () {
+          if (!(yield* current(payload, binding, false, guard))) return false;
+          yield* team.escalate(binding, {eventId: `guide-escalation:${workflowRequestHash(payload)}`, actorThreadId: payload.supervisorThreadId,
             memberEpoch: payload.memberEpoch!, targets: [{targetThreadId: String(payload.targetThreadId),
               assignmentRootThreadId: payload.assignmentRootThreadId!, assignmentEpoch: payload.assignmentEpoch!}], parentById: search.parents,
             summary: `Guidance needs root attention for ${String(payload.targetThreadId)}: ${String(payload.text).slice(0, 3000)}`});
           return true;
-        }));
+        })));
         return {_tag: "Done" as const, value: fail(escalated ? "no_contactable_ancestor_in_assignment_escalated" : "guidance_assignment_changed") as unknown};
       }
-      if (!current(payload, binding) || !team.authorizeWrite(binding, payload.supervisorThreadId, record.targetThreadId, search.parents, payload) ||
-        !team.authorizeWrite(binding, payload.supervisorThreadId, search.route.thread.id, search.parents, payload)) {
+      if (!(yield* current(payload, binding)) || !(yield* team.authorizeWrite(binding, payload.supervisorThreadId, record.targetThreadId, search.parents, payload)) ||
+        !(yield* team.authorizeWrite(binding, payload.supervisorThreadId, search.route.thread.id, search.parents, payload))) {
         return {_tag: "Done" as const, value: fail("assignment_changed") as unknown};
       }
       return {_tag: "Send" as const, record, route: search.route, parents: search.parents};
     }).pipe(otherwise(() => ({_tag: "Done" as const, value: fail("guidance_native_read_unavailable") as unknown})));
     if (next._tag === "Done") return next.value;
     if (next._tag === "Fallback") return yield* continueAfterDefiniteRejection(payload, binding, proof.evidence.itemId, next.record, cancel);
-    if (next._tag === "Escalate") return finishRootEscalation(payload, binding, proof.evidence.itemId, next.record, next.record.attempts.length > 0);
+    if (next._tag === "Escalate") return yield* finishRootEscalation(payload, binding, proof.evidence.itemId, next.record, next.record.attempts.length > 0);
     return yield* sendGuideAttempt(payload, binding, proof.evidence.itemId, next.record, next.route, next.parents, cancel);
   });
 
-  const reconcile = Effect.fnUntraced(function* (binding: BindingRecord, stopped: boolean, cancel: WorkflowCallCancel) {
+  const reconcile = Effect.fnUntraced(function* (binding: BindingRecord, stopped: boolean, cancel: WorkflowCallCancel): Effect.fn.Return<void, SupervisionStoreError> {
     const now = yield* Clock.currentTimeMillis;
-    const members = team.snapshot(binding).members;
+    const members = (yield* team.snapshot(binding)).members;
     const actors = new Set(members.map(member => member.threadId));
-    const rows = db.prepare("SELECT actor_thread_id,actor_epoch,operation_id,evidence_item_id,document FROM supervisor_team_tool_receipts WHERE owner_thread_id=? AND binding_generation=? AND json_extract(document,'$.requestId') LIKE 'guide:%' AND json_extract(document,'$.status') IN ('prepared','replaying','needs_fallback','needs_escalation','accepted','uncertain') ORDER BY rowid")
-      .all(binding.threadId, binding.generation).filter(row => actors.has(String(row.actor_thread_id)));
+    const stored = yield* guidanceSql(Effect.flatMap(
+      sql`SELECT actor_thread_id,actor_epoch,operation_id,evidence_item_id,document FROM supervisor_team_tool_receipts WHERE owner_thread_id=${binding.threadId} AND binding_generation=${binding.generation} AND json_extract(document,'$.requestId') LIKE 'guide:%' AND json_extract(document,'$.status') IN ('prepared','replaying','needs_fallback','needs_escalation','accepted','uncertain') ORDER BY rowid`,
+      (rows) => Effect.forEach(rows, decodeGuideReceiptRow)));
+    const rows = stored.filter(row => actors.has(row.actor_thread_id));
     // four receipts per cycle, from a rotating offset
     const offset = yield* Ref.modify(reconcileOffsets, (offsets): [number, HashMap.HashMap<string, number>] => {
       const next = rows.length ? Option.getOrElse(HashMap.get(offsets, binding.threadId), () => 0) % rows.length : 0;
@@ -724,30 +748,31 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
     });
     for (const row of [...rows.slice(offset), ...rows.slice(0, offset)].slice(0, 4)) {
       if (yield* Deferred.isDone(cancel)) return;
-      const value = JSON.parse(String(row.document)) as GuideRecord;
+      const value = yield* receiptDocument<GuideRecord>(row.document);
       // native uncertainty retains the original route and identities
       yield* Effect.gen(function* () {
         const payload = guidePayload(value);
         if (stopped && (value.status === "needs_fallback" || value.status === "needs_escalation")) {
-          atomic(() => {
-            db.prepare("UPDATE supervisor_team_tool_receipts SET document=? WHERE owner_thread_id=? AND actor_thread_id=? AND binding_generation=? AND actor_epoch=? AND operation_id=?")
-              .run(JSON.stringify({...value, status: "not_sent"}), binding.threadId, String(row.actor_thread_id), binding.generation, Number(row.actor_epoch), String(row.operation_id));
-            if (team.unresolvedRequests(binding).some(item => item.requestId === value.requestId)) team.setRequestState(binding, binding.threadId, value.requestId, 0, "settled");
-          });
+          // closes the guidance as not sent and settles its request in one transaction; it enables no send, so it stays outside
+          // the admission section as at baseline
+          yield* transaction(Effect.gen(function* () {
+            yield* replaceGuideReceipt(binding, row, {...value, status: "not_sent"});
+            if ((yield* team.unresolvedRequests(binding)).some(item => item.requestId === value.requestId)) yield* team.setRequestState(binding, binding.threadId, value.requestId, 0, "settled");
+          }));
           return;
         }
         if (value.status === "needs_fallback") {
-          const result = yield* continueAfterDefiniteRejection(payload, binding, String(row.evidence_item_id), value, cancel);
+          const result = yield* continueAfterDefiniteRejection(payload, binding, row.evidence_item_id, value, cancel);
           if (result.status === "needs_fallback" && result.reason === "target_pending_owner_input") {
-            const request = team.unresolvedRequests(binding).find(item => item.requestId === value.requestId);
-            if (!(yield* Deferred.isDone(cancel)) && request && now - request.updatedAt >= unresolvedGuideAttentionGraceMs) team.serviceAttention(binding, {
-              eventId: `guide-deferred:${value.requestId}`, memberThreadId: String(row.actor_thread_id), targetThreadId: value.targetThreadId,
+            const request = (yield* team.unresolvedRequests(binding)).find(item => item.requestId === value.requestId);
+            if (!(yield* Deferred.isDone(cancel)) && request && now - request.updatedAt >= unresolvedGuideAttentionGraceMs) yield* team.serviceAttention(binding, {
+              eventId: `guide-deferred:${value.requestId}`, memberThreadId: row.actor_thread_id, targetThreadId: value.targetThreadId,
               summary: `Guidance for ${value.targetThreadId} is deferred for a pending native owner decision. The question has not been answered and no ancestor route has been sent.`}, now);
           }
           return;
         }
         if (value.status === "needs_escalation") {
-          finishRootEscalation(payload, binding, String(row.evidence_item_id), value, value.attempts?.length > 0);
+          yield* finishRootEscalation(payload, binding, row.evidence_item_id, value, value.attempts?.length > 0);
           return;
         }
         if (!value.routedThreadId || !value.messageId) return;
@@ -755,20 +780,21 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
         const message = projection?.messages.find(item => item.id === value.messageId && item.threadId === value.routedThreadId && item.text === value.text &&
           item.createdBy === "user" && item.creationSource === "server");
         if (message) {
-          atomic(() => {
+          // the observed delivery: the delivered receipt, the request settlement and a late-run attention event in one transaction;
+          // it closes the guidance and enables no send, so it stays outside the admission section as at baseline
+          yield* transaction(Effect.gen(function* () {
             const result = {...value, status: "delivered" as const};
-            db.prepare("UPDATE supervisor_team_tool_receipts SET document=? WHERE owner_thread_id=? AND actor_thread_id=? AND binding_generation=? AND actor_epoch=? AND operation_id=?")
-              .run(JSON.stringify(result), binding.threadId, String(row.actor_thread_id), binding.generation, Number(row.actor_epoch), String(row.operation_id));
-            team.setRequestState(binding, binding.threadId, value.requestId, 0, "settled");
-            if (message.runId && message.runId !== value.targetRunId) team.serviceAttention(binding, {
-              eventId: `late-guide:${value.requestId}`, memberThreadId: String(row.actor_thread_id), targetThreadId: value.targetThreadId,
+            yield* replaceGuideReceipt(binding, row, result);
+            yield* team.setRequestState(binding, binding.threadId, value.requestId, 0, "settled");
+            if (message.runId && message.runId !== value.targetRunId) yield* team.serviceAttention(binding, {
+              eventId: `late-guide:${value.requestId}`, memberThreadId: row.actor_thread_id, targetThreadId: value.targetThreadId,
               summary: `The native steer reached a new run in ${value.routedThreadId} after the targeted run ended. Stop further direct guidance and assess whether its operational parent needs attention.`});
-          });
+          }));
           return;
         }
-        const request = team.unresolvedRequests(binding).find(item => item.requestId === value.requestId);
-        if (!(yield* Deferred.isDone(cancel)) && request && now - request.updatedAt >= unresolvedGuideAttentionGraceMs) team.serviceAttention(binding, {
-          eventId: `guide-unresolved:${value.requestId}`, memberThreadId: String(row.actor_thread_id), targetThreadId: value.targetThreadId,
+        const request = (yield* team.unresolvedRequests(binding)).find(item => item.requestId === value.requestId);
+        if (!(yield* Deferred.isDone(cancel)) && request && now - request.updatedAt >= unresolvedGuideAttentionGraceMs) yield* team.serviceAttention(binding, {
+          eventId: `guide-unresolved:${value.requestId}`, memberThreadId: row.actor_thread_id, targetThreadId: value.targetThreadId,
           summary: `A native guidance send to ${value.targetThreadId} remains unresolved after its reconciliation grace period. Its original target and command identities are retained; no alternate route is attempted.`});
       }).pipe(otherwise(() => undefined));
     }
@@ -785,7 +811,8 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
 // the team controller: team changes and helper guidance under verified native proof, receipts and the admission section
 export class SupervisorTeamController extends Context.Service<SupervisorTeamController, SupervisorTeamControllerShape>()("t3-supervisor/SupervisorTeamController") {
   static readonly make = makeSupervisorTeamController;
-  static readonly layer = (options: SupervisorTeamControllerOptions = {}): Layer.Layer<SupervisorTeamController, never,
-    WorkflowWriteController | WorkflowNativeAccess | SupervisionGate | HelperTransport | SupervisionStores> =>
+  static readonly layer = (options: SupervisorTeamControllerOptions = {}): Layer.Layer<SupervisorTeamController, GuidanceStoreError,
+    WorkflowWriteController | WorkflowNativeAccess | SupervisionGate | HelperTransport | GuidanceDb | ProjectSupervisorStore | SupervisorTeamStore |
+    SupervisorConversationStore> =>
     Layer.effect(SupervisorTeamController, makeSupervisorTeamController(options));
 }
