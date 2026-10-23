@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { describe, it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import { GuidanceDb } from "../src/db.js";
-import { GuidanceStoreError } from "../src/guidance-sql.js";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { SupervisorConversationStore } from "../src/supervisor-conversation-store.js";
 import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.js";
@@ -11,8 +10,8 @@ import { SupervisorStateReset, type SupervisorStateResetShape } from "../src/sup
 import { guidanceDb, rows, sequentialIds, temporaryDirectory } from "./support/guidance-store-services.js";
 
 // the SupervisorStateReset effect service on a temporary guidance.sqlite3 opened through the production layers, in the
-// synchronous constructors' order (guidance schema first): the scope-lifecycle reset cases at service level, CT-RESET-01
-// and the reset inside the caller's transaction
+// synchronous constructors' order (guidance schema first): the scope-lifecycle reset cases at service level (CT-RESET-01 lives
+// in the scope-lifecycle characterization) and the reset inside the caller's transaction
 
 const layer = (directory: string) => Layer.mergeAll(SupervisorStateReset.layer, SupervisorConversationStore.layer,
   ProjectSupervisorMonitorStore.layer).pipe(Layer.provideMerge(GuidanceStore.layer), Layer.provideMerge(guidanceDb(directory)), Layer.provide(sequentialIds()));
@@ -80,29 +79,6 @@ describe("SupervisorStateReset", () => {
       return { compatible: yield* reset.initializeMainSupervisionState(), unchanged: before === (yield* tableDigest(db)) };
     }));
     assert.deepEqual(observed, { compatible: false, unchanged: true });
-  }), { timeout: 10_000 });
-
-  it.live("CT-RESET-01: a reset that fails at its version insert leaves every table untouched and the version absent, also after reopen", () => Effect.gen(function* () {
-    const directory = yield* temporaryDirectory;
-    const { before, failure, after } = yield* withReset(directory, (reset, db) => Effect.gen(function* () {
-      yield* populate(db);
-      const before = yield* tableDigest(db);
-      yield* db.unsafe(`CREATE TEMP TRIGGER s6d_fail_version BEFORE INSERT ON meta WHEN NEW.key='supervisor_scope_version'
-        BEGIN SELECT RAISE(ABORT, 's6d injected version failure'); END`);
-      const failure = yield* Effect.flip(reset.initializeMainSupervisionState());
-      return { before, failure, after: yield* tableDigest(db) };
-    }));
-    assert.ok(failure instanceof GuidanceStoreError);
-    assert.deepEqual([failure.reason, failure.sqlReason], ["sql_failed", "ConstraintError"]);
-    assert.equal(after, before);
-    const reopened = yield* withReset(directory, (reset, db) => Effect.gen(function* () {
-      const digest = yield* tableDigest(db);
-      const version = yield* rows(db, "SELECT value FROM meta WHERE key='supervisor_scope_version'");
-      // without the failure the same initialization resets those tables
-      const compatible = yield* reset.initializeMainSupervisionState();
-      return { digest, version, compatible, changed: (yield* tableDigest(db)) !== before, bindings: yield* count(db, "supervisor_main_bindings") };
-    }));
-    assert.deepEqual(reopened, { digest: before, version: [], compatible: true, changed: true, bindings: 0 });
   }), { timeout: 10_000 });
 
   it.live("the reset joins the caller's transaction and rolls back with it", () => Effect.gen(function* () {

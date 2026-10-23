@@ -206,9 +206,10 @@ it.effect("CT-RESET-01: a reset that fails at its version insert leaves every ta
   assert.equal(yield* tableDigest(reopened), before);
   assert.equal((yield* query(reopened, "SELECT value FROM meta WHERE key='supervisor_scope_version'"))[0], undefined);
 
-  // without the failure the same construction resets those tables
+  // without the failure the same construction resets those tables and answers compatible
   yield* execute(f.sql, "DROP TRIGGER c1_fail_version");
-  yield* constructSupervisorStore(f.process);
+  const store = yield* constructSupervisorStore(f.process);
+  assert.equal(store.scopeCompatible, true, "the initialization after the failed attempt records the version and is compatible");
   assert.notEqual(yield* tableDigest(f.sql), before);
   assert.equal(Number((yield* query(f.sql, "SELECT count(*) AS n FROM supervisor_main_bindings"))[0]?.n), 0);
 }), {timeout: 10_000});
