@@ -27,9 +27,9 @@ export const temporaryDirectory = (prefix: string) => Effect.gen(function* () {
 /** The platform's v4 identities, as the root provides them. */
 export const ids = SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer));
 
-/** The guidance client of `directory` and the guidance store over it, as the supervision run builds them. */
-export const guidanceLayer = (directory: string) =>
-  Layer.fresh(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(directory)), Layer.provide(ids), Layer.provide(NodeFileSystem.layer)));
+/** The guidance client of `directory` and the guidance store over it, as the supervision run builds them (the platform's identities unless given). */
+export const guidanceLayer = (directory: string, identities: Layer.Layer<SupervisorIds> = ids) =>
+  Layer.fresh(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(directory)), Layer.provide(identities), Layer.provide(NodeFileSystem.layer)));
 
 /** The guidance client of `directory` alone: the file's pragmas and nothing of the store's schema. */
 export const guidanceClient = (directory: string) => Layer.fresh(guidanceDbLayer(directory)).pipe(Layer.provide(NodeFileSystem.layer));

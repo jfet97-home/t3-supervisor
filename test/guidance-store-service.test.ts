@@ -1,7 +1,4 @@
 import assert from "node:assert/strict";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "@effect/vitest";
 import { Effect, Layer, Scheduler } from "effect";
 import { TestClock } from "effect/testing";
@@ -12,9 +9,9 @@ import { GuidanceConflictError, GuidanceStore, type GuidanceStoreShape } from ".
 import { guidanceDb, rows, sequentialIds, temporaryDirectory } from "./support/guidance-store-services.js";
 
 // target regressions of the GuidanceStore effect service on a temporary guidance.sqlite3 through the production layers:
-// open-time schema, migrations and recovery (CT-GDB-01, CT-GDB-02), transactions that join the caller's (CT-GDB-06's
-// target), the CC-GDB-IMPLICIT sequences in one transaction, typed row and sql failures and the synchronous store's
-// method results
+// open-time schema (recovery and migration, CT-GDB-01 and CT-GDB-02, live in test/guidance.characterization.test.ts),
+// transactions that join the caller's (CT-GDB-06's target), the CC-GDB-IMPLICIT sequences in one transaction, typed row and
+// sql failures and the synchronous store's method results
 
 const layer = (directory: string) => GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDb(directory)), Layer.provide(sequentialIds()));
 
@@ -38,8 +35,6 @@ const conflictMessage = (error: unknown): string => {
   return error.message;
 };
 
-const guidanceFile = (directory: string) => join(directory, "guidance.sqlite3");
-
 describe("GuidanceStore", () => {
   it.effect("the layer creates the schema and the default settings once and keeps saved settings on reopen", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
@@ -53,82 +48,6 @@ describe("GuidanceStore", () => {
     assert.deepEqual(first.settings, defaults);
     assert.deepEqual(first.saved, { ...defaults, dailyTokenBudget: 5_000, generation: 2 });
     assert.deepEqual(yield* withGuidance(directory, (store) => store.settings()), first.saved);
-  }), { timeout: 10_000 });
-
-  it.effect("CT-GDB-01: reopening with committed notices recovers each once, lists the uncertain notice first and records nothing on a second reopen", () => Effect.gen(function* () {
-    const directory = yield* temporaryDirectory;
-    yield* withGuidance(directory, (_store, db) => Effect.gen(function* () {
-      const insert = (values: ReadonlyArray<unknown>) =>
-        db.unsafe("INSERT INTO notices(id,thread_id,rule_id,run_id,epoch,state,text,message_id,created_at,dispatch_started) VALUES(?,?,?,?,?,?,?,?,?,?)", values);
-      yield* insert(["not-started", "thread-a", "rule-a", "run-a", 3, "committed", "text a", null, 1_000, 0]);
-      yield* insert(["started", "thread-b", "rule-b", "run-b", 4, "committed", "text b", null, 2_000, 1]);
-      yield* insert(["visible", "thread-c", "rule-c", "run-c", 5, "visible", "text c", null, 3_000, 1]);
-    }).pipe(Effect.orDie));
-    const recoveryRows = (db: GuidanceDb["Service"]) => rows(db,
-      "SELECT json_extract(document,'$.noticeId') AS noticeId, json_extract(document,'$.state') AS state, json_extract(document,'$.episodeEpoch') AS epoch FROM activity WHERE json_extract(document,'$.reason')='process_recovery' ORDER BY noticeId");
-    yield* TestClock.setTime(50_000);
-    const first = yield* withGuidance(directory, (store, db) => Effect.gen(function* () {
-      return {
-        notices: yield* rows(db, "SELECT id,state FROM notices ORDER BY id"),
-        recovery: yield* recoveryRows(db),
-        stamps: yield* rows(db, "SELECT id,created_at FROM activity ORDER BY id"),
-        activities: yield* store.activities(),
-      };
-    }));
-    assert.deepEqual(first.notices, [{ id: "not-started", state: "not_delivered_restart" }, { id: "started", state: "uncertain" }, { id: "visible", state: "visible" }]);
-    assert.deepEqual(first.recovery, [{ noticeId: "not-started", state: "not_delivered_restart", epoch: 3 }, { noticeId: "started", state: "uncertain", epoch: 4 }]);
-    // identities come from SupervisorIds in recovery order and the time from Clock
-    assert.deepEqual(first.stamps, [
-      { id: "00000000-0000-4000-8000-000000000001", created_at: 50_000 },
-      { id: "00000000-0000-4000-8000-000000000002", created_at: 50_000 },
-    ]);
-    assert.deepEqual(first.activities[0], { id: "notice:started", noticeId: "started", episodeEpoch: 4, threadId: "thread-b", ruleId: "rule-b", runId: "run-b",
-      kind: "guidance", state: "uncertain", reason: "unreconciled_notice", detail: null, createdAt: 2_000 });
-    // the uncertain notice's own recovery row is folded into its unresolved entry
-    assert.deepEqual(first.activities.slice(1).map((item) => [item.noticeId, item.reason, item.state]), [["not-started", "process_recovery", "not_delivered_restart"]]);
-
-    const second = yield* withGuidance(directory, (store, db) => Effect.gen(function* () {
-      return { recovery: yield* recoveryRows(db), count: yield* rows(db, "SELECT COUNT(*) AS count FROM activity"), first: (yield* store.activities())[0]?.id };
-    }));
-    assert.deepEqual(second.recovery, first.recovery);
-    assert.deepEqual(second.count, [{ count: 2 }]);
-    assert.equal(second.first, "notice:started");
-  }), { timeout: 10_000 });
-
-  it.live("CT-GDB-02: opening a pre-migration database adds the episode and notice generation columns with defaults and keeps the rows", () => Effect.gen(function* () {
-    const directory = yield* temporaryDirectory;
-    mkdirSync(directory, { recursive: true });
-    const legacy = new DatabaseSync(guidanceFile(directory));
-    try {
-      legacy.exec(`CREATE TABLE episodes(thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,epoch INTEGER NOT NULL DEFAULT 0,
-        notified INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(thread_id,rule_id));
-        CREATE TABLE notices(id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,run_id TEXT NOT NULL,
-        epoch INTEGER NOT NULL,state TEXT NOT NULL,text TEXT NOT NULL,message_id TEXT,created_at INTEGER NOT NULL,
-        dispatch_started INTEGER NOT NULL DEFAULT 0);`);
-      legacy.prepare("INSERT INTO episodes VALUES(?,?,?,?)").run("thread-a", "rule-a", 7, 1);
-      legacy.prepare("INSERT INTO notices VALUES(?,?,?,?,?,?,?,?,?,?)").run("notice-a", "thread-a", "rule-a", "run-a", 7, "visible", "legacy text", "message-a", 5_000, 1);
-    } finally {
-      legacy.close();
-    }
-    const opened = yield* withGuidance(directory, (_store, db) => Effect.gen(function* () {
-      const columns = (table: string) => Effect.map(rows(db, `PRAGMA table_info(${table})`), (result) => result.map((row) => [row.name, row.dflt_value, row.notnull]));
-      return {
-        episodeColumns: yield* columns("episodes"),
-        noticeColumns: yield* columns("notices"),
-        episodes: yield* rows(db, "SELECT * FROM episodes"),
-        notices: yield* rows(db, "SELECT * FROM notices"),
-        recovery: yield* rows(db, "SELECT id FROM activity WHERE json_extract(document,'$.reason')='process_recovery'"),
-      };
-    }));
-    assert.deepEqual(opened.episodeColumns.at(-1), ["object_id", null, 0]);
-    assert.deepEqual(opened.noticeColumns.slice(-2), [["rule_generation", "-1", 1], ["settings_generation", "-1", 1]]);
-    assert.deepEqual(opened.episodes, [{ thread_id: "thread-a", rule_id: "rule-a", epoch: 7, notified: 1, object_id: null }]);
-    assert.deepEqual(opened.notices, [{ id: "notice-a", thread_id: "thread-a", rule_id: "rule-a", run_id: "run-a", epoch: 7,
-      state: "visible", text: "legacy text", message_id: "message-a", created_at: 5_000, dispatch_started: 1, rule_generation: -1, settings_generation: -1 }]);
-    assert.deepEqual(opened.recovery, []);
-    // a second open finds the columns present and alters nothing
-    const again = yield* withGuidance(directory, (_store, db) => Effect.all([rows(db, "PRAGMA table_info(notices)"), rows(db, "PRAGMA table_info(episodes)")]));
-    assert.deepEqual(again.map((columns) => columns.length), [12, 5]);
   }), { timeout: 10_000 });
 
   it.live("CT-GDB-06 target: a store transaction inside the caller's transaction joins it, committing and rolling back with the caller", () => Effect.gen(function* () {

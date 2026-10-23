@@ -14,6 +14,7 @@ import { GuidanceRuntime } from "../src/guidance.js";
 import { SupervisorApi } from "../src/guidance-contract.js";
 import { guidanceTransaction } from "../src/guidance-sql.js";
 import { GuidanceStore } from "../src/guidance-store.js";
+import type { SupervisorIds } from "../src/ids.js";
 import type { ProjectConfigEditorService } from "../src/project-config-editor.js";
 import type { ProjectInfo } from "../src/types.js";
 import { mockMethod } from "./support/node-test.js";
@@ -22,6 +23,7 @@ import { definitionsOf, grant, listeners, processStores, readCsrf, runtimeOver, 
 import { blockedPort, connectRefused, exchange, exchangeJson, freePort, jsonBody, openDescriptors, openRequest, portBindable, rawRequest, within,
   type ExchangeInit, type RawResponse } from "./support/g11-http.js";
 import { execute, guidanceClient, guidanceLayer, row, rows, temporaryDirectory } from "./support/g11-stores.js";
+import { sequentialIds } from "./support/guidance-store-services.js";
 
 // the c3b characterizations of the dashboard, its stores and the running guidance application on the production layers:
 // the stores and the runtime over temporary database files, the listeners on loopback ports and the application over a
@@ -43,9 +45,11 @@ const getJson = (url: string, headers: Record<string, string>) => Effect.map(fet
 
 const guidanceFile = (directory: string) => join(directory, "guidance.sqlite3");
 
-// `use` on the guidance store of `directory` and its client, opened as the run opens them and closed when `use` ends
-const withStore = <A, E>(directory: string, use: (store: GuidanceStore["Service"], sql: SqlClient.SqlClient) => Effect.Effect<A, E>) =>
-  Effect.scoped(Effect.flatMap(Layer.build(guidanceLayer(directory)), (context) => use(Context.get(context, GuidanceStore), Context.get(context, GuidanceDb)))).pipe(Effect.orDie);
+// `use` on the guidance store of `directory` and its client, opened as the run opens them (the platform's identities unless
+// given) and closed when `use` ends
+const withStore = <A, E>(directory: string, use: (store: GuidanceStore["Service"], sql: SqlClient.SqlClient) => Effect.Effect<A, E>,
+  identities?: Layer.Layer<SupervisorIds>) =>
+  Effect.scoped(Effect.flatMap(Layer.build(guidanceLayer(directory, identities)), (context) => use(Context.get(context, GuidanceStore), Context.get(context, GuidanceDb)))).pipe(Effect.orDie);
 
 // `use` on a client of the file with only its pragmas: a writer or an observer beside the store, as the baseline's direct
 // connection to the file was
@@ -237,16 +241,24 @@ const recoveryRows = (sql: SqlClient.SqlClient) => rows(sql,
 it.live("CT-GDB-01: reopening with committed notices recovers each once, lists the uncertain notice first and records nothing on a second reopen", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("c3b-gdb-recovery-");
   yield* seedNotices(directory);
+  // the reopen's clock reads 50 000 and its identities are numbered from 1 in draw order
+  const clock = yield* Effect.scoped(TestClock.make());
+  yield* clock.setTime(50_000);
   yield* withStore(directory, (first, sql) => Effect.gen(function* () {
     assert.deepEqual(yield* rows(sql, "SELECT id,state FROM notices ORDER BY id"),
       [{id: "not-started", state: "not_delivered_restart"}, {id: "started", state: "uncertain"}, {id: "visible", state: "visible"}]);
     assert.deepEqual(yield* recoveryRows(sql), [{noticeId: "not-started", state: "not_delivered_restart", epoch: 3}, {noticeId: "started", state: "uncertain", epoch: 4}]);
+    // identities come from SupervisorIds in recovery order and the time from Clock
+    assert.deepEqual(yield* rows(sql, "SELECT id,created_at FROM activity ORDER BY id"), [
+      {id: "00000000-0000-4000-8000-000000000001", created_at: 50_000},
+      {id: "00000000-0000-4000-8000-000000000002", created_at: 50_000},
+    ]);
     const activities = yield* first.activities();
     assert.deepEqual(activities[0], {id: "notice:started", noticeId: "started", episodeEpoch: 4, threadId: "thread-b", ruleId: "rule-b", runId: "run-b",
       kind: "guidance", state: "uncertain", reason: "unreconciled_notice", detail: null, createdAt: 2_000});
     // the uncertain notice's own recovery row is folded into its unresolved entry
     assert.deepEqual(activities.slice(1).map(item => [item.noticeId, item.reason, item.state]), [["not-started", "process_recovery", "not_delivered_restart"]]);
-  }));
+  }), sequentialIds()).pipe(Effect.provideService(Clock.Clock, clock));
 
   yield* withStore(directory, (second, sql) => Effect.gen(function* () {
     assert.deepEqual(yield* recoveryRows(sql), [{noticeId: "not-started", state: "not_delivered_restart", epoch: 3}, {noticeId: "started", state: "uncertain", epoch: 4}]);
