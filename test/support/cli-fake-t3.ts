@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { Clock, Duration, Effect } from "effect";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 
 // loopback stand-in for the T3 server: descriptor, shell snapshots and native rpc frames, recording every request
@@ -35,6 +36,9 @@ export interface FakeT3 {
   readonly baseUrl: string;
   readonly traffic: FakeT3Traffic;
   until(predicate: (traffic: FakeT3Traffic) => boolean, timeoutMs: number, label: string): Promise<void>;
+  // calls the listener after every recorded request; the returned function removes it
+  subscribe(listener: () => void): () => void;
+  // closing also ends every pending `until`: its timer is cleared and its promise rejects
   close(): Promise<void>;
 }
 
@@ -57,6 +61,7 @@ const text = (data: RawData): string => {
 export const startFakeT3 = async (options: FakeT3Options): Promise<FakeT3> => {
   const traffic = { http: [] as string[], requests: [] as string[], acks: [] as string[], frames: [] as string[], unauthorized: 0, upgrades: 0 };
   const events = new EventEmitter();
+  const pending = new Set<() => void>();
   const record = () => events.emit("traffic");
   const authorized = (request: IncomingMessage) => request.headers.authorization === `Bearer ${options.token}`;
   const activeThreads = Array.from({ length: options.activeThreads ?? 0 }, (_, index) => thread(`active-${index + 1}`));
@@ -148,20 +153,29 @@ export const startFakeT3 = async (options: FakeT3Options): Promise<FakeT3> => {
     baseUrl: `http://127.0.0.1:${address.port}`,
     traffic,
     until: (predicate, timeoutMs, label) => new Promise<void>((resolve, reject) => {
-      const check = () => {
-        if (!predicate(traffic)) return;
+      const end = (outcome: () => void) => {
         clearTimeout(timer);
         events.off("traffic", check);
-        resolve();
+        pending.delete(cancel);
+        outcome();
       };
-      const timer = setTimeout(() => {
-        events.off("traffic", check);
-        reject(new Error(`fake T3 did not observe ${label} within ${timeoutMs} ms`));
-      }, timeoutMs);
+      const check = () => {
+        if (predicate(traffic)) end(resolve);
+      };
+      const cancel = () => end(() => reject(new Error(`fake T3 closed before it observed ${label}`)));
+      const timer = setTimeout(() => end(() => reject(new Error(`fake T3 did not observe ${label} within ${timeoutMs} ms`))), timeoutMs);
+      pending.add(cancel);
       events.on("traffic", check);
       check();
     }),
+    subscribe: (listener) => {
+      events.on("traffic", listener);
+      return () => {
+        events.off("traffic", listener);
+      };
+    },
     close: async () => {
+      for (const cancel of [...pending]) cancel();
       for (const socket of webSockets.clients) socket.terminate();
       await new Promise<void>((resolve, reject) => webSockets.close((error) => error ? reject(error) : resolve()));
       http.closeAllConnections();
@@ -169,3 +183,21 @@ export const startFakeT3 = async (options: FakeT3Options): Promise<FakeT3> => {
     },
   };
 };
+
+// a wait for the fake's traffic as an effect: the predicate, an interruption or the bound ends it and removes its listener;
+// the bound runs on the live clock, also inside a TestClock suite, and its timer ends with the wait
+export const untilTraffic = (fake: FakeT3, predicate: (traffic: FakeT3Traffic) => boolean, timeoutMs: number, label: string): Effect.Effect<void> =>
+  Effect.callback<void>((resume) => {
+    const check = () => {
+      if (!predicate(fake.traffic)) return;
+      stop();
+      resume(Effect.void);
+    };
+    const stop = fake.subscribe(check);
+    check();
+    return Effect.sync(stop);
+  }).pipe(
+    Effect.timeoutOrElse({duration: Duration.millis(timeoutMs),
+      orElse: () => Effect.die(new Error(`fake T3 did not observe ${label} within ${timeoutMs} ms`))}),
+    Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
+  );

@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { Clock, Context, Effect, FileSystem, Layer, Option, type Scope } from "effect";
 import { shebang } from "./cli-bin.js";
-import { startFakeT3, type FakeT3 as NativeFakeT3, type FakeT3Options, type FakeT3Traffic } from "./cli-fake-t3.js";
+import { startFakeT3, untilTraffic, type FakeT3 as NativeFakeT3, type FakeT3Options, type FakeT3Traffic } from "./cli-fake-t3.js";
 import { nodePath, repositoryRoot, tsxLoader } from "./cli-process.js";
 import { bounded, freePort, portState, runProcess, startProcess, waitForHttp, type RunningProcess } from "./g8-process.js";
 
@@ -24,7 +24,7 @@ export const fakeT3 = (options: FakeT3Options): Effect.Effect<FakeT3, never, Sco
     (fake) => ({
       baseUrl: fake.baseUrl,
       traffic: fake.traffic,
-      until: (predicate, timeoutMs, label) => Effect.promise(() => fake.until(predicate, timeoutMs, label)),
+      until: (predicate, timeoutMs, label) => untilTraffic(fake, predicate, timeoutMs, label),
     }));
 
 const temporaryHome = (prefix: string) => Effect.gen(function* () {
