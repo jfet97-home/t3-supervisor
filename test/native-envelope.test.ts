@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { getEventListeners } from "node:events";
 import { describe, it } from "@effect/vitest";
 import { Deferred, Effect, Fiber } from "effect";
 import { TestClock } from "effect/testing";
 import {
-  cancelOnAbort, NativeEnvelope, NativeEnvelopeError, NativeFraming, nativeMaxPayload, NativeStep,
+  NativeEnvelope, NativeEnvelopeError, NativeFraming, nativeMaxPayload, NativeStep,
   type NativeCall, type NativeExit, type NativeOpenOptions, type NativeServerFrame,
 } from "../src/native-envelope.js";
 import { freePort } from "./support/c1-loopback.js";
@@ -383,24 +382,6 @@ describe("NativeEnvelope sent boundary and limits", () => {
     yield* hung.gone;
     assert.equal(hung.received(), "");
   }).pipe(provided), { timeout: 10_000 });
-
-  it.live("ENV-15: cancelOnAbort completes on abort, at once for an aborted signal, and removes its listener with its scope", () => Effect.gen(function*() {
-    const aborted = new AbortController();
-    aborted.abort();
-    assert.equal(yield* Effect.scoped(cancelOnAbort(aborted.signal).pipe(Effect.flatMap(Deferred.isDone))), true);
-
-    const controller = new AbortController();
-    yield* Effect.scoped(Effect.gen(function*() {
-      const cancel = yield* cancelOnAbort(controller.signal);
-      assert.equal(yield* Deferred.isDone(cancel), false);
-      assert.equal(getEventListeners(controller.signal, "abort").length, 1);
-      controller.abort();
-      yield* Deferred.await(cancel);
-    }));
-    const idle = new AbortController();
-    yield* Effect.scoped(cancelOnAbort(idle.signal));
-    assert.equal(getEventListeners(idle.signal, "abort").length, 0);
-  }), { timeout: 10_000 });
 });
 
 describe("NativeEnvelope connection", () => {

@@ -97,15 +97,15 @@ it.effect("TR-ORDER-01: queued saves of one checkout run in arrival order around
   for (const thread of ["a", ...queued]) revisions.set(thread, (yield* definitions.load("project", thread)).revision!);
   const first = yield* Effect.forkChild(editor.save(save("a", revisions.get("a")!)));
   yield* within(firstWrite, 5_000, "first write");
-  // each queued caller's cancel signal is the editor's soft cancellation: a cancelled save reports the expired save in its turn
-  const cancels = new Map(queued.map(thread => [thread, new AbortController()]));
+  // each queued caller's cancel trigger is the editor's soft cancellation: a cancelled save reports the expired save in its turn
+  const cancels = new Map(yield* Effect.forEach(queued, thread => Effect.map(Deferred.make<void>(), cancel => [thread, cancel] as const)));
   const pending: Array<Fiber.Fiber<{status: string; message: string}, unknown>> = [];
   for (const thread of queued) {
-    pending.push(yield* Effect.forkChild(editor.save(save(thread, revisions.get(thread)!), cancels.get(thread)!.signal)));
+    pending.push(yield* Effect.forkChild(editor.save(save(thread, revisions.get(thread)!), cancels.get(thread)!)));
     yield* within(recorded(`load:${thread}`), 5_000, `initial load ${thread}`);
     yield* Effect.yieldNow;
   }
-  cancels.get("c")!.abort();
+  yield* Deferred.succeed(cancels.get("c")!, undefined);
   yield* Effect.yieldNow;
   yield* release;
   const outcomes = yield* within(Fiber.joinAll([first, ...pending]), 5_000, "queued saves");
@@ -126,15 +126,15 @@ it.effect("TR-ORDER-02: queued setups of one checkout run in arrival order, a ca
   const definitions = yield* f.makeDefinitions({files, t3: recordingProjection(f, record)});
   const first = yield* Effect.forkChild(definitions.initialize("project", "a", setup));
   yield* within(entered, 5_000, "first setup body");
-  // each queued caller's cancel signal is the setup's soft cancellation, checked only once its body runs
-  const cancels = new Map(queued.map(thread => [thread, new AbortController()]));
+  // each queued caller's cancel trigger is the setup's soft cancellation, checked only once its body runs
+  const cancels = new Map(yield* Effect.forEach(queued, thread => Effect.map(Deferred.make<void>(), cancel => [thread, cancel] as const)));
   const pending: Array<Fiber.Fiber<unknown, unknown>> = [];
   for (const thread of queued) {
-    pending.push(yield* Effect.forkChild(definitions.initialize("project", thread, setup, cancels.get(thread)!.signal)));
+    pending.push(yield* Effect.forkChild(definitions.initialize("project", thread, setup, cancels.get(thread)!)));
     yield* within(recorded(`projection:${thread}`), 5_000, `checkout read ${thread}`);
     yield* Effect.yieldNow;
   }
-  cancels.get("c")!.abort();
+  yield* Deferred.succeed(cancels.get("c")!, undefined);
   yield* Effect.yieldNow;
   yield* release;
   const outcomes = yield* within(Fiber.joinAll([first, ...pending]), 5_000, "queued setups");

@@ -30,9 +30,6 @@ const rejectedByName = (value: unknown, name: string, depth = 0): boolean => {
   return Object.values(value).some(child => Array.isArray(child) ? child.some(item => rejectedByName(item, name, depth + 1)) : rejectedByName(child, name, depth + 1));
 };
 
-// the promise call shape the unported classes still receive; guidance-application.ts builds it over NativeRpc (B-03)
-export type SupervisorRpc = (tag: string, payload: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
-
 // a committed request (plan 3.11): sent turns true when the frame was handed to ws, from then on any failure is uncertain
 export interface NativeRpcInFlight {
   readonly sent: Effect.Effect<boolean>;

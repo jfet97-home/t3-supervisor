@@ -1,7 +1,7 @@
-import { Cause, Context, Effect, Layer, RcMap, Result, Scope, Semaphore } from "effect";
+import { Cause, Context, Deferred, Effect, Layer, RcMap, Result, Scope, Semaphore } from "effect";
 import { isMap, isSeq, parseDocument, stringify } from "yaml";
 import { posix } from "node:path";
-import {decodeDefinitionSource, definitionsCanceled, definitionsOperation, definitionsSignal, DefinitionSourceFailure, DefinitionSourceInvalid,
+import {decodeDefinitionSource, definitionsCanceled, definitionsOperation, definitionsCancel, DefinitionSourceFailure, DefinitionSourceInvalid,
   parseProjectConfiguration, ProjectConfigurationSource, ProjectDefinitions, withOperationCancel} from "./project-definitions.js";
 import { ProjectFileError, type ProjectWriter } from "./project-files.js";
 import { type DefinitionCatalogEntry, type ProjectConfigSave, type ProjectConfigSaveOutcome, type ProjectConfigurationInfo, type ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
@@ -60,8 +60,8 @@ const makeProjectConfigEditor = Effect.fnUntraced(function* ({definitions, write
   const saveLocks = yield* RcMap.make({lookup: (_root: string) => Semaphore.make(1)});
 
   const save = (input: ProjectConfigSave): Effect.Effect<ProjectConfigSaveOutcome, DefinitionSourceFailure> => Effect.gen(function* () {
-    // the save's own signal (its caller's cancel signal narrowed by its deadline) goes to every definitions call, as the baseline passed its signal
-    const operation = yield* definitionsSignal;
+    // the save's own cancel trigger (its caller's, narrowed by its deadline) goes to every definitions call
+    const operation = yield* definitionsCancel;
     const outcome = (status: ProjectConfigSaveOutcome["status"], message: string, snapshot: ProjectDefinitionSnapshot | null = null): ProjectConfigSaveOutcome =>
       ({status, message, definitions: snapshot ? {...snapshot, editingAvailable: true} : null});
     // the writer's methods are read for every save, as the baseline read them
@@ -133,14 +133,14 @@ const makeProjectConfigEditor = Effect.fnUntraced(function* ({definitions, write
     }))));
   });
 
-  return {save: (input: ProjectConfigSave, cancel?: AbortSignal) => save(input).pipe(definitionsOperation(cancel, "30 seconds"))};
+  return {save: (input: ProjectConfigSave, cancel?: Deferred.Deferred<void>) => save(input).pipe(definitionsOperation(cancel, "30 seconds"))};
 });
 
 /** Saves only the checkout-local project.yaml through the trusted native writer. */
 export class ProjectConfigEditorService extends Context.Service<ProjectConfigEditorService, {
   // saves of one checkout are serialized; a stale revision, a missing file or an unconfirmed write is never reported saved (30 s deadline)
   // a save cancelled or past its deadline before writing reports the expired save once its turn comes
-  readonly save: (input: ProjectConfigSave, cancel?: AbortSignal) => Effect.Effect<ProjectConfigSaveOutcome, DefinitionSourceFailure>;
+  readonly save: (input: ProjectConfigSave, cancel?: Deferred.Deferred<void>) => Effect.Effect<ProjectConfigSaveOutcome, DefinitionSourceFailure>;
 }>()("t3-supervisor/ProjectConfigEditor") {
   static readonly make: (options: EditorOptions) => Effect.Effect<ProjectConfigEditorService["Service"], never, Scope.Scope> = makeProjectConfigEditor;
   static readonly layer = (writer: ProjectConfigWriter, onSaved?: DefinitionSaveRecorder): Layer.Layer<ProjectConfigEditorService, never, ProjectDefinitions> =>

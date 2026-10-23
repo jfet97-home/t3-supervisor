@@ -138,26 +138,27 @@ it.effect("TR-PD-05: a cancel signal ends a load and a setup softly, so the serv
   seedCheck(f);
   const {files, entered} = hangingRead(f, ".t3-supervisor/steps/check.md");
   const hung = yield* f.makeDefinitions({files});
-  // the caller's cancel signal is the definitions' soft cancellation: a cancelled load or setup settles with its outcome
-  const cancelLoad = new AbortController();
-  const loading = yield* Effect.forkChild(hung.load("project", null, cancelLoad.signal));
+  // the caller's cancel trigger is the definitions' soft cancellation: a cancelled load or setup settles with its outcome
+  const cancelLoad = yield* Deferred.make<void>();
+  const loading = yield* Effect.forkChild(hung.load("project", null, cancelLoad));
   yield* entered;
-  cancelLoad.abort();
+  yield* Deferred.succeed(cancelLoad, undefined);
   const snapshot = yield* Fiber.join(loading);
   assert.deepEqual({status: snapshot.status, complete: snapshot.complete, revision: snapshot.revision, issues: snapshot.issues}, {status: "unavailable", complete: false, revision: null,
     issues: [{path: ".t3-supervisor/steps/check.md", code: "definition_source_unreadable", message: "T3 project file access is unavailable."}]});
 
   const g = makeDefinitionFixture({threadRoot: null});
-  const cancelSetup = new AbortController();
+  const cancelSetup = yield* Deferred.make<void>();
   const commits: unknown[] = [];
   const definitions = yield* g.makeDefinitions({options: {...g.definitionOptions,
     setupWriter: {
-      writeFile: (root, path, contents) => Effect.sync(() => {g.writes.push({root, path, contents});g.addFile(root, path, contents);cancelSetup.abort();}),
+      writeFile: (root, path, contents) => Effect.andThen(Effect.sync(() => {g.writes.push({root, path, contents});g.addFile(root, path, contents);}),
+        Deferred.succeed(cancelSetup, undefined)),
       commitFiles: (...args) => Effect.sync(() => {commits.push(args);return {status: "committed" as const, commitSha: "never"};}),
     },
     gitProbe: root => Effect.sync((): FreshGitInfo => ({workspaceRoot: root, branch: "main", isRepo: true, changedPaths: g.writes.map(write => write.path), operationState: {status: "safe"}})),
   }});
-  const outcome = yield* definitions.initialize("project", null, {origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/workspace", expectedBranch: "main"}, cancelSetup.signal);
+  const outcome = yield* definitions.initialize("project", null, {origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/workspace", expectedBranch: "main"}, cancelSetup);
   assert.deepEqual(outcome, {status: "stale", workspaceRoot: "/workspace", branch: "main", path: ".t3-supervisor", message: "Setup was canceled; files created so far were left uncommitted."});
   assert.deepEqual(g.writes.map(write => write.path), [".t3-supervisor/project.yaml"]);
   assert.deepEqual(commits, []);
@@ -181,10 +182,10 @@ it.effect("TR-EDITOR-02: a save whose cancel signal aborts while it is queued wa
   const revision = (yield* definitions.load("project")).revision!;
   const first = yield* Effect.forkChild(editor.save(input(revision, "First draft.")));
   yield* firstWrite;
-  const cancel = new AbortController();
-  const second = yield* Effect.forkChild(editor.save(input(revision, "Cancelled draft."), cancel.signal));
+  const cancel = yield* Deferred.make<void>();
+  const second = yield* Effect.forkChild(editor.save(input(revision, "Cancelled draft."), cancel));
   yield* Deferred.await(loaded);
-  cancel.abort();
+  yield* Deferred.succeed(cancel, undefined);
   yield* Effect.yieldNow;
   assert.equal(second.pollUnsafe(), undefined, "the cancelled save still waits for the save ahead of it");
   yield* release;

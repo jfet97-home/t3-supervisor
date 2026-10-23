@@ -365,14 +365,6 @@ const attempt = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<Attempt
 const notFound = (cause: unknown): boolean => cause instanceof T3TransportError && cause.httpStatus === 404;
 const uncertainCheckIn = "Supervisor request delivery is uncertain; its original identity is retained and only observed, never resent.";
 const uncertainIntroduction = "Proposal delivery is uncertain. Its exact message identity is retained.";
-// a caller's soft cancel as the abort signal of a read for the scope's lifetime: completing the deferred aborts it, and the read's
-// own outcome (a failure, or a late valid value) still decides, as the baseline signal-bound read did
-const cancelSignal = (cancel: Deferred.Deferred<void> | undefined): Effect.Effect<AbortSignal | undefined, never, Scope.Scope> =>
-  cancel === undefined ? Effect.succeed(undefined) : Effect.gen(function* () {
-    const controller = new AbortController();
-    yield* Effect.forkScoped(Effect.andThen(Deferred.await(cancel), Effect.sync(() => controller.abort())), {startImmediately: true});
-    return controller.signal;
-  });
 // whether a stored record is still exactly the one a caller read (none, for a creation); the store keeps each record's exact
 // JSON, so any write since (a send recorded, a refusal, a reservation) changes it
 const unchangedRecord = <A>(stored: A | null, held: A | null): boolean =>
@@ -540,7 +532,7 @@ const makeSupervisorConversation = Effect.gen(function* () {
     if (!context || !definitions) return {status: "unavailable", view, reason: "definitions_unavailable"};
     // the read observes the call's soft cancel and is awaited to its own end: a read failed by the abort is unavailable, a valid
     // value it still completes with is used
-    const read = yield* attempt(Effect.scoped(Effect.flatMap(cancelSignal(cancel), (signal) => definitions.load(task.projectId, task.threadId, signal))));
+    const read = yield* attempt(definitions.load(task.projectId, task.threadId, cancel));
     if (!read.ok) return {status: "unavailable", view, reason: "definitions_unavailable"};
     const fresh = read.value;
     if (!proposalContextMatches(context, fresh)) return {status: "stale", view, reason: "definitions_changed", revision: fresh.revision};

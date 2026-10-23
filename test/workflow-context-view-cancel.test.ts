@@ -6,7 +6,7 @@ import { SupervisionGate, SupervisionScope, SupervisionScopeService } from "../s
 import { SupervisorConversation } from "../src/supervisor-conversation.js";
 import type { SupervisorConfig } from "../src/types.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
-import { abortOf, wallClock, within } from "./support/g1b-conversation.js";
+import { wallClock, within } from "./support/g1b-conversation.js";
 import { baseTime, compactDraft, makeFixture, workflowRecord, type Fixture } from "./support/c1-conversation-fixture.js";
 
 // target regressions of the workflow_read view "check" (S6b): the call's soft cancel, the caller's own or the 10 s tool
@@ -49,14 +49,15 @@ const checkInput = (fixture: Fixture) => Effect.map(fixture.projectStore.task(fi
     record: compactDraft(task, workflowRecord(task, "checked-proposal"))};
 });
 
-// the definitions read held at the boundary until its abort signal fires: then it fails, or still completes with the valid
+// the definitions read held at the boundary until its cancel trigger completes: then it fails, or still completes with the valid
 // snapshot the fixture serves
 const holdDefinitions = (fixture: Fixture, onAbort: "fail" | "complete") => Effect.gen(function* () {
   const entered = yield* Deferred.make<void>();
   const aborted = yield* Deferred.make<void>();
-  fixture.fake.replaceDefinitions((projectId, threadId, signal) => Effect.gen(function* () {
+  fixture.fake.replaceDefinitions((projectId, threadId, cancel) => Effect.gen(function* () {
     yield* Deferred.succeed(entered, undefined);
-    yield* abortOf(signal);
+    // never completes without a trigger
+    yield* (cancel === undefined ? Effect.never : Deferred.await(cancel));
     yield* Deferred.succeed(aborted, undefined);
     return onAbort === "fail" ? yield* Effect.die(new Error("definitions read aborted")) : fixture.fake.definitionsSnapshot(projectId, threadId);
   }));

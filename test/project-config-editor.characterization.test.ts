@@ -89,13 +89,13 @@ it.effect("CT-EDITOR-02: a save cancelled while queued behind another save waits
   const revision = (yield* definitions.load("project")).revision!;
   const first = yield* Effect.forkChild(editor.save(input(revision, "First draft.")));
   yield* within(firstWrite, 5_000, "first write");
-  // the caller's cancel signal is the editor's soft cancellation: a cancelled save reports the expired save in its turn
-  const cancel = new AbortController();
+  // the caller's cancel trigger is the editor's soft cancellation: a cancelled save reports the expired save in its turn
+  const cancel = yield* Deferred.make<void>();
   let secondSettled = false;
-  const second = yield* Effect.forkChild(editor.save(input(revision, "Cancelled draft."), cancel.signal).pipe(Effect.ensuring(Effect.sync(() => {secondSettled = true;}))));
+  const second = yield* Effect.forkChild(editor.save(input(revision, "Cancelled draft."), cancel).pipe(Effect.ensuring(Effect.sync(() => {secondSettled = true;}))));
   yield* within(loads(3), 5_000, "second initial load");
   yield* Effect.yieldNow;
-  cancel.abort();
+  yield* Deferred.succeed(cancel, undefined);
   yield* Effect.yieldNow;
   assert.equal(secondSettled, false, "the cancelled save still waits for the save ahead of it");
   yield* release;

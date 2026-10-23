@@ -123,7 +123,7 @@ export interface FakeT3Options {
 }
 
 /** Loads one definitions snapshot; `cancel` is the production read's abort signal (the definitions service's native boundary). */
-export type DefinitionsLoad = (projectId: string, threadId: string | null, cancel: AbortSignal | undefined) => Effect.Effect<ProjectDefinitionSnapshot>;
+export type DefinitionsLoad = (projectId: string, threadId: string | null, cancel: Deferred.Deferred<void> | undefined) => Effect.Effect<ProjectDefinitionSnapshot>;
 
 export interface FakeT3 {
   readonly projections: Map<string, Projection>;
@@ -321,18 +321,6 @@ export const noNativeRead: NativeRpcShape = {
   call: () => Effect.fail(new SupervisorRpcError("uncertain")),
   initiate: () => Effect.succeed({ sent: Effect.succeed(true), result: Effect.fail(new SupervisorRpcError("uncertain")), release: Effect.void }),
 };
-
-/**
- * Completes once a production read's native abort signal fires, and never without one (the definitions service's native boundary:
- * its reads take the caller's AbortSignal); the listener is removed when the wait ends.
- */
-export const abortOf = (signal: AbortSignal | undefined): Effect.Effect<void> => Effect.callback<void>((resume) => {
-  if (signal === undefined) return;
-  if (signal.aborted) {resume(Effect.void);return;}
-  const onAbort = () => resume(Effect.void);
-  signal.addEventListener("abort", onAbort, { once: true });
-  return Effect.sync(() => signal.removeEventListener("abort", onAbort));
-});
 
 export interface ProjectSupervisorNatives {
   readonly settings: SupervisorSettings;

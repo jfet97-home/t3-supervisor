@@ -89,12 +89,12 @@ it.effect("CT-PD-02: a hung native read ends when the caller aborts, giving an i
   assert.equal((yield* (yield* f.makeDefinitions()).load("project")).complete, true);
   const {files, entered} = hangingRead(f, ".t3-supervisor/steps/check.md");
   const definitions = yield* definitionsWith(f, {files});
-  // the caller's cancel signal is the definitions' soft cancellation: a cancelled load settles with its snapshot
-  const cancel = new AbortController();
-  const pending = yield* Effect.forkChild(definitions.load("project", null, cancel.signal));
+  // the caller's cancel trigger is the definitions' soft cancellation: a cancelled load settles with its snapshot
+  const cancel = yield* Deferred.make<void>();
+  const pending = yield* Effect.forkChild(definitions.load("project", null, cancel));
   const trigger = yield* within(entered, 5_000, "hung read");
   assert.equal(yield* Deferred.isDone(trigger), false);
-  cancel.abort();
+  yield* Deferred.succeed(cancel, undefined);
   assert.deepEqual(summary(yield* within(Fiber.join(pending), 5_000, "aborted load")), unavailableSnapshot);
 }), {timeout: 10_000});
 
@@ -150,15 +150,15 @@ it.effect("CT-PD-03: a fixture tree yields the golden revision, global revision 
 
 it.effect("CT-PD-04: aborting create-and-commit setup between the first and second write leaves the first file uncommitted and never commits", () => Effect.gen(function* () {
   const f = makeDefinitionFixture({threadRoot: null});
-  // the caller's cancel signal is the definitions' soft cancellation: a cancelled setup settles with its stale outcome
-  const cancel = new AbortController();
+  // the caller's cancel trigger is the definitions' soft cancellation: a cancelled setup settles with its stale outcome
+  const cancel = yield* Deferred.make<void>();
   const commits: unknown[] = [];
   const probes: string[][] = [];
   const definitions = yield* definitionsWith(f, {
-    writeFile: (root, path, contents) => Effect.sync(() => {
+    writeFile: (root, path, contents) => Effect.gen(function* () {
       f.writes.push({root, path, contents});
       f.addFile(root, path, contents);
-      if (f.writes.length === 1) cancel.abort();
+      if (f.writes.length === 1) yield* Deferred.succeed(cancel, undefined);
     }),
     commitFiles: (...args) => Effect.sync(() => {commits.push(args);return {status: "committed" as const, commitSha: "never"};}),
     gitProbe: root => Effect.sync((): FreshGitInfo => {
@@ -167,7 +167,7 @@ it.effect("CT-PD-04: aborting create-and-commit setup between the first and seco
       return {workspaceRoot: root, branch: "main", isRepo: true, changedPaths, operationState: {status: "safe"}};
     }),
   });
-  const outcome = yield* within(definitions.initialize("project", null, {...setup, action: "create_and_commit"}, cancel.signal), 5_000, "setup");
+  const outcome = yield* within(definitions.initialize("project", null, {...setup, action: "create_and_commit"}, cancel), 5_000, "setup");
   assert.deepEqual(outcome, {status: "stale", workspaceRoot: "/workspace", branch: "main", path: ".t3-supervisor",
     message: "Setup was canceled; files created so far were left uncommitted."});
   assert.deepEqual(f.writes.map(write => write.path), [".t3-supervisor/project.yaml"]);

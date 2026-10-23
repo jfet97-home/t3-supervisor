@@ -6,7 +6,6 @@ import { definitionReferenceFields, definitionReferenceProblem, describeDefiniti
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import type { FreshGitProbe } from "./git-probe.js";
-import { cancelOnAbort } from "./native-envelope.js";
 import { ProjectFileError, type FileFailure, type ProjectCommitter, type ProjectFiles, type ProjectWriter, type ReadFileResult } from "./project-files.js";
 import {catalogEntryId, DefinitionNode, definitionIdPattern, normalizeProjectConfiguration, projectConfigurationError, ProjectConfigurationInfo, workflowDefinitionExpansionLimits,
   type DefinitionCatalogEntry, type DefinitionFileInfo, type DefinitionStepInfo, type DefinitionWorkflowInfo, type EffectiveConfigurationInfo,
@@ -71,37 +70,38 @@ const fileFailure = (failure: DefinitionSourceFailure | DefinitionReadLimit): Fi
 const failureMessage = (failure: DefinitionSourceFailure | DefinitionReadLimit, fallback: string): string =>
   failure._tag === "DefinitionReadLimit" ? failure.message : failure.error instanceof Error ? failure.error.message : fallback;
 
-// the running operation's signal: its caller's cancel signal narrowed by its deadline; set only by definitionsOperation
-const OperationSignal = Context.Reference<AbortSignal | undefined>("t3-supervisor/DefinitionsOperationSignal", {defaultValue: () => undefined});
-// soft cancellation is part of the service contract, as the baseline signal was: a cancelled call settles with its baseline outcome
-// (an unavailable snapshot, a stale setup, an expired save: ct-pd-02, ct-pd-04, ct-editor-02), which an interruption would discard
-// runs one operation under its caller's cancel signal and, when given, a deadline on the effect clock that aborts native calls in flight
-export const definitionsOperation = (cancel: AbortSignal | undefined, deadline?: Duration.Input) => <A, E>(self: Effect.Effect<A, E>): Effect.Effect<A, E> =>
-  deadline === undefined ? Effect.provideService(self, OperationSignal, cancel) : Effect.scoped(Effect.gen(function* () {
-    const expired = new AbortController();
-    yield* Effect.forkScoped(Effect.sleep(deadline).pipe(Effect.andThen(Effect.sync(() => expired.abort()))));
-    return yield* Effect.provideService(self, OperationSignal, cancel ? AbortSignal.any([expired.signal, cancel]) : expired.signal);
+// the running operation's cancel trigger: completed when its caller cancels or its deadline passes; set only by definitionsOperation
+const OperationCancel = Context.Reference<Deferred.Deferred<void> | undefined>("t3-supervisor/DefinitionsOperationCancel", {defaultValue: () => undefined});
+// soft cancellation is part of the service contract: a cancelled call settles with its baseline outcome (an unavailable snapshot, a
+// stale setup, an expired save: ct-pd-02, ct-pd-04, ct-editor-02), which an interruption would discard. The caller's cancel trigger
+// is the native clients' own (native-envelope.ts); with a deadline on the effect clock, the operation gets its own trigger that
+// completes at the deadline or when the caller's does
+export const definitionsOperation = (cancel: Deferred.Deferred<void> | undefined, deadline?: Duration.Input) => <A, E>(self: Effect.Effect<A, E>): Effect.Effect<A, E> =>
+  deadline === undefined ? Effect.provideService(self, OperationCancel, cancel) : Effect.scoped(Effect.gen(function* () {
+    const operation = yield* Deferred.make<void>();
+    // started at once, so a caller's trigger that already completed has completed the operation's before it runs
+    if (cancel !== undefined) yield* Effect.forkScoped(Effect.andThen(Deferred.await(cancel), Deferred.succeed(operation, undefined)), {startImmediately: true});
+    yield* Effect.forkScoped(Effect.andThen(Effect.sleep(deadline), Deferred.succeed(operation, undefined)));
+    return yield* Effect.provideService(self, OperationCancel, operation);
   }));
-// the running operation's signal, handed explicitly to a nested definitions call
-export const definitionsSignal: Effect.Effect<AbortSignal | undefined> = OperationSignal;
-// whether the running operation was cancelled or ran past its deadline, checked where the baseline checked signal.aborted
-export const definitionsCanceled: Effect.Effect<boolean> = Effect.map(OperationSignal, signal => signal?.aborted === true);
-// a native client call under the running operation: its signal becomes the call's cancel trigger, so an aborted signal ends the call
-// with the client's own outcome (unavailable, or an uncertain commit) and an already aborted one never connects; interruption ends it too
+// the running operation's cancel trigger, handed explicitly to a nested definitions call
+export const definitionsCancel: Effect.Effect<Deferred.Deferred<void> | undefined> = OperationCancel;
+// whether the running operation was cancelled or ran past its deadline
+export const definitionsCanceled: Effect.Effect<boolean> = Effect.flatMap(OperationCancel, cancel => cancel === undefined ? Effect.succeed(false) : Deferred.isDone(cancel));
+// a native client call under the running operation: the operation's trigger is the call's cancel trigger, so a completed trigger ends
+// the call with the client's own outcome (unavailable, or an uncertain commit) and an already completed one never connects;
+// interruption ends it too
 export const withOperationCancel = <A, E>(call: (cancel: Deferred.Deferred<void> | undefined) => Effect.Effect<A, E>): Effect.Effect<A, DefinitionSourceFailure> =>
-  Effect.flatMap(OperationSignal, signal => signal === undefined ? call(undefined) : Effect.scoped(Effect.flatMap(cancelOnAbort(signal), call))).pipe(
-    Effect.mapError(error => new DefinitionSourceFailure({error})));
-// a catalog or projection read ends when the operation's signal aborts, as the baseline's signal-bound read did
-const abortedBy = (signal: AbortSignal) => Effect.callback<never, DefinitionSourceFailure>(resume => {
-  const abort = () => resume(Effect.fail(new DefinitionSourceFailure({error: signal.reason})));
-  if (signal.aborted) {abort();return;}
-  signal.addEventListener("abort", abort, {once: true});
-  return Effect.sync(() => signal.removeEventListener("abort", abort));
-});
-const boundedRead = <A, E>(read: () => Effect.Effect<A, E>): Effect.Effect<A, DefinitionSourceFailure> => Effect.flatMap(OperationSignal, signal => {
+  Effect.flatMap(OperationCancel, call).pipe(Effect.mapError(error => new DefinitionSourceFailure({error})));
+// the operation's trigger completed while a catalog or projection read was pending
+class DefinitionsOperationEnded extends Data.TaggedError("DefinitionsOperationEnded")<{}> {
+  override get message() {return "The definitions read was canceled or ran past its deadline.";}
+}
+// a catalog or projection read ends when the operation's trigger completes
+const boundedRead = <A, E>(read: () => Effect.Effect<A, E>): Effect.Effect<A, DefinitionSourceFailure> => Effect.flatMap(OperationCancel, cancel => {
   const effect = Effect.suspend(read).pipe(Effect.mapError(error => new DefinitionSourceFailure({error})),
     Effect.catchDefect(error => Effect.fail(new DefinitionSourceFailure({error}))));
-  return signal ? Effect.raceFirst(effect, abortedBy(signal)) : effect;
+  return cancel ? Effect.raceFirst(effect, Effect.andThen(Deferred.await(cancel), Effect.fail(new DefinitionSourceFailure({error: new DefinitionsOperationEnded()})))) : effect;
 });
 // configured predicates are synchronous reads that may throw; a throw fails the operation as the baseline's rejection did
 const attempt = <A>(evaluate: () => A) => Effect.try({try: evaluate, catch: error => new DefinitionSourceFailure({error})});
@@ -1063,17 +1063,17 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
   return {
     globalHomePath,
     globalDefinitionsPath,
-    load: (projectId: string, threadId: string | null = null, cancel?: AbortSignal) => load(projectId, threadId).pipe(definitionsOperation(cancel, "30 seconds")),
-    presence: (projectId: string, cancel?: AbortSignal) => presenceForCheckout(projectId, null).pipe(definitionsOperation(cancel)),
-    presenceGlobal: (cancel?: AbortSignal) => presenceGlobal.pipe(definitionsOperation(cancel)),
-    presenceForCheckout: (projectId: string, threadId: string | null, cancel?: AbortSignal) => presenceForCheckout(projectId, threadId).pipe(definitionsOperation(cancel)),
-    checkoutTargets: (projectId: string, cancel?: AbortSignal) => checkoutTargets(projectId).pipe(definitionsOperation(cancel)),
-    currentWorkspace: (projectId: string, threadId: string | null, cancel?: AbortSignal) => currentWorkspace(projectId, threadId).pipe(definitionsOperation(cancel)),
-    globalFingerprint: (cancel?: AbortSignal) => globalFingerprint.pipe(definitionsOperation(cancel)),
-    initialize: (projectId: string, threadId: string | null, input: ProjectDefinitionSetupInput, cancel?: AbortSignal) =>
+    load: (projectId: string, threadId: string | null = null, cancel?: Deferred.Deferred<void>) => load(projectId, threadId).pipe(definitionsOperation(cancel, "30 seconds")),
+    presence: (projectId: string, cancel?: Deferred.Deferred<void>) => presenceForCheckout(projectId, null).pipe(definitionsOperation(cancel)),
+    presenceGlobal: (cancel?: Deferred.Deferred<void>) => presenceGlobal.pipe(definitionsOperation(cancel)),
+    presenceForCheckout: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => presenceForCheckout(projectId, threadId).pipe(definitionsOperation(cancel)),
+    checkoutTargets: (projectId: string, cancel?: Deferred.Deferred<void>) => checkoutTargets(projectId).pipe(definitionsOperation(cancel)),
+    currentWorkspace: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => currentWorkspace(projectId, threadId).pipe(definitionsOperation(cancel)),
+    globalFingerprint: (cancel?: Deferred.Deferred<void>) => globalFingerprint.pipe(definitionsOperation(cancel)),
+    initialize: (projectId: string, threadId: string | null, input: ProjectDefinitionSetupInput, cancel?: Deferred.Deferred<void>) =>
       initialize(projectId, threadId, input).pipe(definitionsOperation(cancel)),
-    initializeGlobal: (cancel?: AbortSignal) => initializeGlobal.pipe(definitionsOperation(cancel)),
-    readProjectConfig: (root: string, cancel?: AbortSignal) => read(root, projectConfigPath).pipe(definitionsOperation(cancel)),
+    initializeGlobal: (cancel?: Deferred.Deferred<void>) => initializeGlobal.pipe(definitionsOperation(cancel)),
+    readProjectConfig: (root: string, cancel?: Deferred.Deferred<void>) => read(root, projectConfigPath).pipe(definitionsOperation(cancel)),
   };
 });
 
@@ -1082,20 +1082,20 @@ export class ProjectDefinitions extends Context.Service<ProjectDefinitions, {
   readonly globalHomePath: string;
   readonly globalDefinitionsPath: string;
   // never fails: an unreadable scope makes the snapshot incomplete and revision-less (30 s deadline)
-  readonly load: (projectId: string, threadId?: string | null, cancel?: AbortSignal) => Effect.Effect<ProjectDefinitionSnapshot>;
-  readonly presence: (projectId: string, cancel?: AbortSignal) => Effect.Effect<DefinitionPresence>;
-  readonly presenceGlobal: (cancel?: AbortSignal) => Effect.Effect<GlobalDefinitionPresence>;
-  readonly presenceForCheckout: (projectId: string, threadId: string | null, cancel?: AbortSignal) => Effect.Effect<DefinitionPresence>;
-  readonly checkoutTargets: (projectId: string, cancel?: AbortSignal) => Effect.Effect<DefinitionCheckoutTarget[], DefinitionSourceFailure | DefinitionCheckoutUnavailable>;
+  readonly load: (projectId: string, threadId?: string | null, cancel?: Deferred.Deferred<void>) => Effect.Effect<ProjectDefinitionSnapshot>;
+  readonly presence: (projectId: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<DefinitionPresence>;
+  readonly presenceGlobal: (cancel?: Deferred.Deferred<void>) => Effect.Effect<GlobalDefinitionPresence>;
+  readonly presenceForCheckout: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => Effect.Effect<DefinitionPresence>;
+  readonly checkoutTargets: (projectId: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<DefinitionCheckoutTarget[], DefinitionSourceFailure | DefinitionCheckoutUnavailable>;
   // the operative checkout comes from the native projection; caller-supplied roots are never accepted
-  readonly currentWorkspace: (projectId: string, threadId: string | null, cancel?: AbortSignal) => Effect.Effect<string | null, DefinitionSourceFailure>;
-  readonly globalFingerprint: (cancel?: AbortSignal) => Effect.Effect<string | null>;
+  readonly currentWorkspace: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => Effect.Effect<string | null, DefinitionSourceFailure>;
+  readonly globalFingerprint: (cancel?: Deferred.Deferred<void>) => Effect.Effect<string | null>;
   // setup is serialized per root; a cancel signal stops it at the next check, leaving files written so far uncommitted
-  readonly initialize: (projectId: string, threadId: string | null, input: ProjectDefinitionSetupInput, cancel?: AbortSignal) =>
+  readonly initialize: (projectId: string, threadId: string | null, input: ProjectDefinitionSetupInput, cancel?: Deferred.Deferred<void>) =>
     Effect.Effect<ProjectDefinitionSetupOutcome, DefinitionSourceFailure>;
-  readonly initializeGlobal: (cancel?: AbortSignal) => Effect.Effect<ProjectDefinitionGlobalSetupOutcome, DefinitionSourceFailure>;
+  readonly initializeGlobal: (cancel?: Deferred.Deferred<void>) => Effect.Effect<ProjectDefinitionGlobalSetupOutcome, DefinitionSourceFailure>;
   // the native readback of a checkout's project.yaml
-  readonly readProjectConfig: (root: string, cancel?: AbortSignal) => Effect.Effect<DefinitionFileRead, DefinitionSourceFailure>;
+  readonly readProjectConfig: (root: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<DefinitionFileRead, DefinitionSourceFailure>;
 }>()("t3-supervisor/ProjectDefinitions") {
   static readonly make: (sources: ProjectDefinitionSources) => Effect.Effect<ProjectDefinitions["Service"], never, Scope.Scope> = makeProjectDefinitions;
   static readonly layer = (sources: ProjectDefinitionSources): Layer.Layer<ProjectDefinitions> => Layer.effect(ProjectDefinitions, makeProjectDefinitions(sources));

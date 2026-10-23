@@ -498,16 +498,6 @@ const open = (options: NativeOpenOptions): Effect.Effect<NativeConnection, Nativ
   };
 });
 
-// a cancel trigger completed when the signal aborts, for callers that still pass an AbortSignal; the listener lives in the scope
-export const cancelOnAbort = (signal: AbortSignal): Effect.Effect<Deferred.Deferred<void>, never, Scope.Scope> =>
-  Effect.acquireRelease(Effect.sync(() => {
-    const cancel = Deferred.makeUnsafe<void>();
-    const onAbort = () => {Deferred.doneUnsafe(cancel, Effect.void);};
-    if (signal.aborted) onAbort();
-    else signal.addEventListener("abort", onAbort, { once: true });
-    return { cancel, onAbort };
-  }), ({ onAbort }) => Effect.sync(() => signal.removeEventListener("abort", onAbort))).pipe(Effect.map(({ cancel }) => cancel));
-
 export class NativeEnvelope extends Context.Service<NativeEnvelope, {
   // commits the request synchronously: the socket exists with the frame bound to its open
   readonly initiate: <A, E = never, R = never>(call: NativeCall<A, E, R>) => Effect.Effect<NativeInFlight<A, E, R>>;
