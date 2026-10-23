@@ -209,7 +209,7 @@ it("D4 a failed definitions refresh keeps the latest successful read beside its 
   const shown = definitions.definitionsShown(failed, null);
   assert.deepEqual([shown.result?.definitions.revision, shown.error, shown.reading], ["a".repeat(64), true, false]);
   assert.deepEqual(sentTo("/api/guidance/project-configuration").map((request) => request.search.toString()), ["projectId=project", "projectId=project"]);
-  const saved = { definitions: loadedDefinitions("c".repeat(64)), loadedAt: 2 };
+  const saved = { definitions: loadedDefinitions("c".repeat(64)), loadedAt: 2, environmentId: "environment" };
   assert.deepEqual(definitions.definitionsShown(failed, saved), { result: saved, error: false, reading: false }, "a verified save is shown instead");
   stop();
   registry.dispose();
@@ -259,12 +259,12 @@ it("D6 the guard's confirmed discard of a project change resets the project's ke
   registry.set(settingsDraft, draft);
   registry.set(setupChoice, "checkout");
   registry.set(configuration, edited());
-  definitions.discardProjectDrafts(registry, "environment", "project", loaded, false);
+  definitions.discardProjectDrafts(registry, "environment", "project", { definitions: loaded, loadedAt: 1, environmentId: "environment" }, false);
   assert.deepEqual([registry.get(settingsDraft), registry.get(setupChoice), registry.get(configuration).editing], [draft, "checkout", false]);
 
   // a project change discards the Supervisor drafts as well, while the panels stay mounted
   registry.set(configuration, edited());
-  definitions.discardProjectDrafts(registry, "environment", "project", loaded, true);
+  definitions.discardProjectDrafts(registry, "environment", "project", { definitions: loaded, loadedAt: 1, environmentId: "environment" }, true);
   assert.deepEqual([registry.get(settingsDraft), registry.get(setupChoice), registry.get(configuration).editing], [null, "", false]);
   for (const stop of stops) stop();
   registry.dispose();

@@ -21,7 +21,7 @@ import {
   ApiClient,
   sessionHttpClient,
 } from "./api.js";
-import { admit, admittedMutation, authEpoch, authEpochAtom, draftFamily, scopeKey, snapshotAtom, uiRuntime, type MutationKey } from "./atoms.js";
+import { admit, admittedMutation, authEpoch, authEpochAtom, draftFamily, environmentAtom, scopeKey, snapshotAtom, uiRuntime, type MutationKey } from "./atoms.js";
 import "./style.css";
 import { directoryRoute, homeRoute, RouteLink, useNavigation, type Route } from "./navigation.js";
 import { Home, ReadTime, useOverview } from "./overview.js";
@@ -89,19 +89,20 @@ const accessAfter = (epoch: number) => Atom.toStream(accessAtom).pipe(
   Stream.runHead,
   Effect.map((result) => Option.match(Option.flatMap(result, AsyncResult.value), {onNone: (): AccessState => "unreachable", onSome: (access) => access.state})));
 
-// sign-in and sign-out requests go through the dashboard's session client outside the SupervisorApi groups
+// sign-in and sign-out requests go through the dashboard's session client outside the SupervisorApi groups; the request
+// and its response belong to the enclosing scope, so every return, failure or interruption aborts and releases them
 const authRequest = (path: string, body: object) => Effect.flatMap(HttpClient.HttpClient, (client) =>
-  client.execute(HttpClientRequest.post(new URL(path, globalThis.location.origin)).pipe(HttpClientRequest.bodyJsonUnsafe(body))));
+  HttpClient.withScope(client).execute(HttpClientRequest.post(new URL(path, globalThis.location.origin)).pipe(HttpClientRequest.bodyJsonUnsafe(body))));
 const LoginResult = Schema.Struct({session: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{43}$/u))});
 type LoginOutcome = "stored" | "rejected" | "refused" | "unreachable" | "storageBlocked";
 // one sign-in with a single-use token: the returned session is stored even when the form is gone
-const login = admittedMutation((token: string) => Effect.gen(function* () {
+const login = admittedMutation((token: string) => Effect.scoped(Effect.gen(function* () {
   const response = yield* authRequest("/auth/login", {token});
   if (response.status < 200 || response.status > 299) return (response.status === 401 ? "rejected" : "refused") as LoginOutcome;
   const {session} = yield* HttpClientResponse.schemaBodyJson(LoginResult)(response);
   yield* Effect.flatMap(SessionAccess, (access) => access.signIn(session));
   return "stored" as LoginOutcome;
-}).pipe(
+})).pipe(
   Effect.catchTag("StorageBlocked", () => Effect.succeed("storageBlocked" as LoginOutcome)),
   Effect.catch(() => Effect.succeed("unreachable" as LoginOutcome)),
   Effect.provide(sessionHttpClient)));
@@ -119,7 +120,9 @@ export interface SignInState {
 }
 export const signInState = Atom.keepAlive(Atom.make<SignInState>({busy: false, error: ""}));
 // the outcome of one sign-in: it waits for the admitted login and then for the access check of the stored session; once
-// the login's outcome is applied the operation is reset, so no atom keeps the consumed token as its argument
+// the login's outcome is applied the operation is reset, so no atom keeps the consumed token as its argument. the keep-alive
+// concurrent action outlives the form and the page's navigation; its waits stay interruptible, so disposing the page
+// runtime ends them, and an interrupted action writes nothing
 const signInOutcome = Atom.keepAlive(uiRuntime.fn((attempt: {readonly key: MutationKey; readonly epoch: number}, {registry}) => Effect.gen(function* () {
   const operation = login(attempt.key);
   const exit = yield* Effect.exit(AtomRegistry.getResult(registry, operation, {suspendOnWaiting: true}));
@@ -132,7 +135,7 @@ const signInOutcome = Atom.keepAlive(uiRuntime.fn((attempt: {readonly key: Mutat
   const access = yield* accessAfter(attempt.epoch);
   registry.set(signInState, {busy: false, error: access === "signedIn" ? "" : access === "unreachable" ? loginMessages.unreachable : "Sign-in could not be confirmed. Try again."});
   return true;
-}).pipe(Effect.uninterruptible), {concurrent: true}));
+}), {concurrent: true}));
 // signs in with a token and waits for the access check of the stored session; true once the session is stored. the
 // token goes only to the admitted login, which is reset once its outcome is applied; nothing else keeps it
 export const signInAction = Atom.keepAlive(Atom.writable((get) => get(signInOutcome), (context, token: string) => {
@@ -145,7 +148,7 @@ export const signInAction = Atom.keepAlive(Atom.writable((get) => get(signInOutc
 
 type LogoutOutcome = "signedOut" | "kept" | "failed";
 // one sign-out: the server session ends, and this tab forgets it unless another tab signed in meanwhile
-const logout = admittedMutation((_: void) => Effect.gen(function* () {
+const logout = admittedMutation((_: void) => Effect.scoped(Effect.gen(function* () {
   const access = yield* SessionAccess;
   const session = yield* access.session;
   const response = yield* authRequest("/auth/logout", {});
@@ -153,11 +156,12 @@ const logout = admittedMutation((_: void) => Effect.gen(function* () {
   if ((yield* access.session) !== session) return "kept" as LogoutOutcome;
   yield* access.clear(session);
   return "signedOut" as LogoutOutcome;
-}).pipe(Effect.catch(() => Effect.succeed("failed" as LogoutOutcome)), Effect.provide(sessionHttpClient)));
+})).pipe(Effect.catch(() => Effect.succeed("failed" as LogoutOutcome)), Effect.provide(sessionHttpClient)));
 // explicit sign-outs; the dashboard opened before one is closed
 const signOutCount = Atom.keepAlive(Atom.make(0));
 const signingOut = Atom.keepAlive(Atom.make(false));
-// signs out once however often it is asked while it runs; after a sign-out the dashboard closes once access shows it
+// signs out once however often it is asked while it runs; after a sign-out the dashboard closes once access shows it. the
+// request and every wait stay interruptible, so disposing the page runtime ends them
 export const signOutAction = Atom.keepAlive(uiRuntime.fn((_: void, {registry}) => Effect.gen(function* () {
   if (registry.get(signingOut)) return "kept" as LogoutOutcome;
   registry.set(signingOut, true);
@@ -171,7 +175,7 @@ export const signOutAction = Atom.keepAlive(uiRuntime.fn((_: void, {registry}) =
   }
   registry.set(signingOut, false);
   return outcome;
-}).pipe(Effect.uninterruptible), {concurrent: true}));
+}), {concurrent: true}));
 
 // whether the dashboard is open: from the first signed-in check until an explicit sign-out; it stays mounted (hidden)
 // while the session is missing, so open drafts survive expiry and re-sign-in
@@ -277,21 +281,32 @@ function History({
     </section>
   );
 }
-// the chat settings draft, null while the form follows the saved policy, and the outcome of the last save
-export const chatSettingsDraft = draftFamily<ThreadPolicySettings | null>(() => null)(scopeKey("chat-settings"));
-export const chatSettingsStatus = Atom.keepAlive(Atom.make({saving: false, message: ""}));
+// the chat settings of each T3 environment: the draft, null while the form follows the saved policy, and the outcome of
+// the last save; the shown ones are those of the current environment
+type ChatSettingsStatus = {readonly saving: boolean; readonly message: string};
+const chatSettingsKey = (environmentId: string | null) => scopeKey("chat-settings", environmentId);
+const chatSettingsDrafts = draftFamily<ThreadPolicySettings | null>(() => null);
+const chatSettingsStatuses = Atom.family((_key: string) => Atom.keepAlive(Atom.make<ChatSettingsStatus>({saving: false, message: ""})));
+export const chatSettingsDraft = Atom.keepAlive(Atom.writable((get) => get(chatSettingsDrafts(chatSettingsKey(get(environmentAtom)))),
+  (context, value: ThreadPolicySettings | null) => context.set(chatSettingsDrafts(chatSettingsKey(context.get(environmentAtom))), value)));
+export const chatSettingsStatus = Atom.keepAlive(Atom.writable((get) => get(chatSettingsStatuses(chatSettingsKey(get(environmentAtom)))),
+  (context, value: ChatSettingsStatus) => context.set(chatSettingsStatuses(chatSettingsKey(context.get(environmentAtom))), value)));
 const saveThreadPolicy = admittedMutation((payload: ThreadPolicySettings) => Effect.flatMap(ApiClient, (client) => client.guidance.threadPolicy({payload})));
-// saves the draft; a verified save clears it and refreshes the snapshot, a failed or unconfirmed save keeps it
+// saves the draft of the current environment; a verified save clears it and refreshes the snapshot, a failed or
+// unconfirmed save keeps it. the outcome goes to the environment the save started in, never to the one shown when it
+// settles; the request and every wait stay interruptible, so disposing the page runtime ends them
 export const saveChatSettings = Atom.keepAlive(uiRuntime.fn((payload: ThreadPolicySettings, {registry}) => Effect.gen(function* () {
-  if (registry.get(chatSettingsStatus).saving) return;
-  registry.set(chatSettingsStatus, {...registry.get(chatSettingsStatus), saving: true});
-  const exit = yield* Effect.exit(admit(registry, saveThreadPolicy({scope: scopeKey("chat-settings"), operationId: yield* newOperationId}), payload));
+  const key = chatSettingsKey(registry.get(environmentAtom));
+  const status = chatSettingsStatuses(key);
+  if (registry.get(status).saving) return;
+  registry.set(status, {...registry.get(status), saving: true});
+  const exit = yield* Effect.exit(admit(registry, saveThreadPolicy({scope: key, operationId: yield* newOperationId}), payload));
   if (Exit.isSuccess(exit)) {
-    registry.set(chatSettingsDraft, null);
-    registry.set(chatSettingsStatus, {saving: false, message: "Chat settings saved and applied."});
+    registry.set(chatSettingsDrafts(key), null);
+    registry.set(status, {saving: false, message: "Chat settings saved and applied."});
     registry.refresh(snapshotAtom);
-  } else registry.set(chatSettingsStatus, {saving: false, message: "Chat settings invalid or changed in another tab. Reload first."});
-}).pipe(Effect.uninterruptible), {concurrent: true}));
+  } else registry.set(status, {saving: false, message: "Chat settings invalid or changed in another tab. Reload first."});
+}), {concurrent: true}));
 function ChatSettings({ data, onDirtyChange }: { data: GuidanceSnapshot; onDirtyChange: (dirty: boolean) => void }) {
   const draft = useAtomValue(chatSettingsDraft);
   const setDraft = useAtomSet(chatSettingsDraft);

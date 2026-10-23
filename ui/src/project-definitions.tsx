@@ -198,19 +198,29 @@ export const confirmDiscard = (pending: {saving: boolean; configurationDirty: bo
     ask(includeSupervisor ? "Discard unsaved project configuration and Supervisor settings?" : "Discard unsaved project-configuration changes and reload definitions?"));
 
 // the confirmed discard of the pending project work, applied to the keep-alive drafts rather than by remounting: the
-// configuration draft of the shown checkout and, when the project changes, the project's Supervisor drafts
+// configuration draft of the shown checkout in the environment it was read for and, when the project changes, the
+// project's Supervisor drafts of the current environment
 export const discardProjectDrafts = (registry: AtomRegistry.AtomRegistry, environmentId: string | null, projectId: string,
-  definitions: ProjectDefinitionSnapshot | null, includeSupervisor: boolean) => {
+  loaded: LoadedDefinitions | null, includeSupervisor: boolean) => {
   if (includeSupervisor) discardSupervisorDrafts(registry, environmentId, projectId);
-  if (definitions) registry.set(configurationDrafts(configurationScope(environmentId, definitions)), freshDraft());
+  if (loaded) registry.set(configurationDrafts(configurationScope(loaded.environmentId, loaded.definitions)), freshDraft());
 };
 
-// the view a definitions read belongs to (the baseline view key) and its read key, null while nothing may be read
-export type DefinitionsView = {readonly key: string; readonly read: string | null};
+// the view a definitions read belongs to (the baseline view key with its T3 environment), its read key, null while
+// nothing may be read, and the environment it reads
+export type DefinitionsView = {readonly key: string; readonly read: string | null; readonly environmentId: string | null};
 
 // the view the panel shows: it follows the live view, except that no reload starts while the configuration editor holds
-// a draft or a save
-export const heldView = (held: DefinitionsView, live: DefinitionsView, holding: boolean): DefinitionsView => holding ? held : live;
+// a draft or a save; a draft never holds another environment's view, so a new environment reads its own definitions and
+// the draft stays with the environment it was made in
+export const heldView = (held: DefinitionsView, live: DefinitionsView, holding: boolean): DefinitionsView =>
+  holding && held.environmentId === live.environmentId ? held : live;
+
+// what the configuration editor last reported, for the environment its definitions were read for; a report counts only
+// while that environment is current
+export type ConfigurationReport = {readonly environmentId: string | null; readonly dirty: boolean; readonly saving: boolean};
+export const reportedFor = (report: ConfigurationReport, environmentId: string | null) =>
+  report.environmentId === environmentId ? report : {environmentId, dirty: false, saving: false};
 
 // what the definitions view shows for its read: a verified save, else the latest successful read, which a failed refresh
 // keeps beside its failure; the failure is shown once no read is running
@@ -234,14 +244,15 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   const selection: DefinitionsSelection = inWorkspace ? {projectId: route.projectId, threadId: route.main ?? "", contextSelected: route.main !== null} : retained.current;
   retained.current = selection;
   const [revision, setRevision] = useState(0);
-  const [configurationDirty, setConfigurationDirty] = useState(false);
-  const [configurationSaving, setConfigurationSaving] = useState(false);
+  const environmentId = useAtomValue(environmentAtom);
+  const [configurationReport, setConfigurationReport] = useState<ConfigurationReport>({environmentId: null, dirty: false, saving: false});
+  const {dirty: configurationDirty, saving: configurationSaving} = reportedFor(configurationReport, environmentId);
   const [supervisorDirty, setSupervisorDirty] = useState(false);
   const [supervisorSaving, setSupervisorSaving] = useState(false);
   const dirty = configurationDirty || supervisorDirty;
   const saving = configurationSaving || supervisorSaving;
-  const [savedMessage, setSavedMessage] = useState("");
-  const reportDirty = useCallback((value: boolean) => setConfigurationDirty(value), []);
+  // the message of a verified save, shown only in the environment it was saved in
+  const [savedMessage, setSavedMessage] = useState<{environmentId: string | null; text: string} | null>(null);
   useEffect(() => {onDirtyChange?.(dirty || saving);}, [dirty, saving, onDirtyChange]);
   useEffect(() => {onDraftTargetChange?.(draftTarget(selection, {dirty, saving, configurationDirty}));}, [dirty, saving, selection.projectId, selection.threadId, selection.contextSelected, configurationDirty, onDraftTargetChange]);
   const projects = data.projects.filter(project => project.available);
@@ -250,10 +261,9 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   const threadUnavailable = Boolean(projectId && selection.threadId && !threads.some(thread => thread.id === selection.threadId));
   const threadId = selection.threadId;
   const canLoad = Boolean(projectId && selection.contextSelected && !threadUnavailable && data.connected);
-  const key = JSON.stringify([projectId, threadId, revision, canLoad]);
+  const key = JSON.stringify([environmentId, projectId, threadId, revision, canLoad]);
   const epoch = useAtomValue(authEpochAtom, epochOf);
-  const environmentId = useAtomValue(environmentAtom);
-  const live = {key, read: canLoad ? definitionsReadKey(environmentId, projectId, threadId || null, epoch) : null};
+  const live = {key, read: canLoad ? definitionsReadKey(environmentId, projectId, threadId || null, epoch) : null, environmentId};
   const held = useRef(live);
   held.current = heldView(held.current, live, configurationDirty || configurationSaving);
   const view = held.current;
@@ -263,15 +273,22 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   const savedView = saved !== null && saved.read === view.read ? saved.loaded : null;
   useEffect(() => {if (saved !== null && saved.read !== view.read) setSaved(null);}, [saved, view.read]);
   const shown = definitionsShown(read, savedView);
-  const loaded = shown.result;
+  // definitions read for another environment are never shown or edited here
+  const loaded = shown.result?.environmentId === environmentId ? shown.result : null;
   const current = view.key === key ? {result: loaded, error: shown.error, loadedAt: loaded?.loadedAt ?? null} : null;
   const busy = Boolean(canLoad && (shown.reading || !current?.result && !current?.error));
   const registry = useContext(RegistryContext);
+  // the editor's reports belong to the environment of the definitions it edits
+  const editorEnvironment = loaded?.environmentId ?? environmentId;
+  const reportDirty = useCallback((value: boolean) =>
+    setConfigurationReport(report => ({...reportedFor(report, editorEnvironment), dirty: value})), [editorEnvironment]);
+  const reportSaving = useCallback((value: boolean) =>
+    setConfigurationReport(report => ({...reportedFor(report, editorEnvironment), saving: value})), [editorEnvironment]);
   const discard = (includeSupervisor = false) => {
     if (!confirmDiscard({saving, configurationDirty, supervisorDirty}, includeSupervisor, question => confirm(question))) return false;
     if (includeSupervisor) setSupervisorDirty(false);
-    discardProjectDrafts(registry, environmentId, selection.projectId, loaded?.definitions ?? null, includeSupervisor);
-    reportDirty(false);setSavedMessage("");setSaved(null);return true;
+    discardProjectDrafts(registry, environmentId, selection.projectId, loaded, includeSupervisor);
+    reportDirty(false);setSavedMessage(null);setSaved(null);return true;
   };
   // a refresh reads the shown checkout again; its latest successful read stays visible until the new one settles
   const refresh = () => {
@@ -352,11 +369,11 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
     <div hidden={!showDefinitions} className="stack">
       {busy && <p className="panel" role="status">Reading project definitions…</p>}
       {canLoad && current?.error && <p className="panel" role="alert">Could not load definitions. Refresh to try again or check the Supervisor connection.</p>}
-      {savedMessage && <p role="status">{savedMessage}</p>}
+      {savedMessage?.environmentId === environmentId && <p role="status">{savedMessage.text}</p>}
       {canLoad && current?.result && <div className="stack"><p className="muted small" role="status">Loaded {new Date(current.loadedAt!).toLocaleTimeString()}. Refresh after repository changes.</p><DefinitionsContent key={key} definitions={current.result.definitions}/></div>}
       {loaded && <div hidden={!canLoad || view.key !== key} inert={supervisorSaving || configurationSaving}>
-        <ProjectConfigurationEditor key={JSON.stringify([loaded.definitions.projectId, loaded.definitions.threadId, loaded.definitions.revision, revision])} definitions={loaded.definitions} onDirtyChange={reportDirty} onSavingChange={setConfigurationSaving}
-          onSaved={result => {setSaved({read: view.read, loaded: {definitions: result, loadedAt: Date.now()}});setSavedMessage("Saved project configuration to .t3-supervisor/project.yaml.");}}/>
+        <ProjectConfigurationEditor key={JSON.stringify([loaded.environmentId, loaded.definitions.projectId, loaded.definitions.threadId, loaded.definitions.revision, revision])} definitions={loaded.definitions} onDirtyChange={reportDirty} onSavingChange={reportSaving}
+          onSaved={result => {setSaved({read: view.read, loaded: {definitions: result, loadedAt: Date.now(), environmentId: loaded.environmentId}});setSavedMessage({environmentId: loaded.environmentId, text: "Saved project configuration to .t3-supervisor/project.yaml."});}}/>
       </div>}
     </div>
   </section>;

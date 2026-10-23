@@ -26,6 +26,8 @@ export const loadProjectDefinitions = (projectId: string, threadId: string | nul
 export interface LoadedDefinitions {
   readonly definitions: ProjectDefinitionSnapshot;
   readonly loadedAt: number;
+  // the T3 environment the definitions were read for; drafts, saves and their outcomes stay with it
+  readonly environmentId: string | null;
 }
 
 // the family key of one definitions read: the T3 environment, the checkout selection and the auth epoch; a refresh reads
@@ -33,11 +35,12 @@ export interface LoadedDefinitions {
 export const definitionsReadKey = (environmentId: string | null, projectId: string, threadId: string | null, authEpoch: number): string =>
   scopeKey(environmentId, projectId, threadId, authEpoch);
 
-// the definitions read of one key (definitionsReadKey); a new key disposes and interrupts the previous read
+// the definitions read of one key (definitionsReadKey), recording the environment it was read for; a new key disposes and
+// interrupts the previous read
 export const projectDefinitionsAtom = Atom.family((key: string) => {
-  const [, projectId, threadId] = JSON.parse(key) as [string | null, string, string | null];
+  const [environmentId, projectId, threadId] = JSON.parse(key) as [string | null, string, string | null];
   return uiRuntime.atom(Effect.zipWith(loadProjectDefinitions(projectId, threadId), Clock.currentTimeMillis,
-    (definitions, loadedAt): LoadedDefinitions => ({definitions, loadedAt})));
+    (definitions, loadedAt): LoadedDefinitions => ({definitions, loadedAt, environmentId})));
 });
 
 const requestSave = (input: ProjectConfigSave) =>

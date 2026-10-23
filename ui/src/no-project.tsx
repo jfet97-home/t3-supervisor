@@ -36,6 +36,9 @@ const actionState = (registry: AtomRegistry.AtomRegistry) => {
   return {environmentId, state: noProjectStates(scopeKey(environmentId))};
 };
 
+// these actions are keep-alive and concurrent, so navigation and auth changes never end them; their requests and waits
+// stay interruptible, so disposing the page runtime aborts them, and an interrupted action writes nothing
+
 // reads the saved mode: a read replaces the draft, a failed read keeps it and holds the panel uncertain until a read works
 export const reloadNoProject = Atom.keepAlive(uiRuntime.fn((_: void, {registry}) => Effect.gen(function* () {
   const {state: stateAtom} = actionState(registry);
@@ -47,7 +50,7 @@ export const reloadNoProject = Atom.keepAlive(uiRuntime.fn((_: void, {registry})
     onSuccess: (control) => ({...state, control, mode: control.mode, busy: false, uncertain: false, message: ""}),
     onFailure: () => ({...state, busy: false, uncertain: true, message: "Mode unavailable. Reload before changing it."}),
   }));
-}).pipe(Effect.uninterruptible), {concurrent: true}));
+}), {concurrent: true}));
 
 const saveNoProjectMode = admittedMutation((payload: NoProjectControlInput) =>
   Effect.flatMap(ApiClient, (client) => client.guidance.saveNoProjectControl({payload})));
@@ -65,7 +68,7 @@ export const saveNoProject = Atom.keepAlive(uiRuntime.fn((_: void, {registry}) =
     onSuccess: (result) => ({...latest, control: result.control, mode: result.control.mode, busy: false, uncertain: result.status !== "saved", message: result.message}),
     onFailure: () => ({...latest, busy: false, uncertain: true, message: "The mode change is unconfirmed. Reload its saved status before trying again."}),
   }));
-}).pipe(Effect.uninterruptible), {concurrent: true}));
+}), {concurrent: true}));
 
 // the session a hidden panel follows: none
 const hiddenEpoch = Atom.keepAlive(Atom.make(AsyncResult.initial<number>()));
@@ -106,15 +109,19 @@ export type ChatCandidates = typeof SupervisionCandidates.Type;
 type CandidatePurpose = "start" | "exclude";
 // the reload counter of each candidate search
 export const candidatesRevision = Atom.family((_purpose: CandidatePurpose) => Atom.keepAlive(Atom.make(0)));
-// one candidate search, requested 200 ms after a typed query and at once for the recent list; a new query, purpose or
-// reload is a new search, and the search it replaces is interrupted with its pending delay or request; a new session
-// searches again
-export const chatCandidates = Atom.family((purpose: CandidatePurpose) => Atom.family((query: string) => Atom.family((_revision: number) =>
-  uiRuntime.atom((get) => {
+// one candidate search of one T3 environment, requested 200 ms after a typed query and at once for the recent list; a new
+// query, purpose or reload is a new search, and the search it replaces is interrupted with its pending delay or request; a
+// new session searches again
+const environmentSearches = Atom.family((_environmentKey: string) => Atom.family((purpose: CandidatePurpose) => Atom.family((query: string) =>
+  Atom.family((_revision: number) => uiRuntime.atom((get) => {
     authEpoch(get);
     return (query ? Effect.sleep("200 millis") : Effect.void).pipe(
       Effect.andThen(request((client) => client.guidance.supervisionCandidates({query: {query, purpose}}))));
-  }))));
+  })))));
+// the candidate search of the current T3 environment: another environment's rows are never shown, so while the new
+// environment's search is unread or failed there is no row to act on
+export const chatCandidates = Atom.family((purpose: CandidatePurpose) => Atom.family((query: string) => Atom.family((revision: number) =>
+  Atom.make((get) => get(environmentSearches(scopeKey(get(environmentAtom)))(purpose)(query)(revision))))));
 // the search of an inactive panel: nothing is requested
 const noCandidates = Atom.keepAlive(Atom.make(AsyncResult.initial<ChatCandidates>()));
 
@@ -148,8 +155,9 @@ export const startState = Atom.keepAlive(Atom.writable(
 const startMutation = admittedMutation((payload: StartIntent) => Effect.flatMap(ApiClient, (client) => client.guidance.startSupervision({payload})));
 
 // applies a status to the intent it answers: a status for another intent is a failure, a terminal status clears the fence
-// once, and a "denied" read is never terminal because the original request may still be running; true when cleared
-const applyStartStatus = (registry: AtomRegistry.AtomRegistry, exit: Exit.Exit<typeof SupervisionStartStatus.Type, unknown>, intent: StartIntent, fromRead: boolean, failure: string) => Effect.gen(function* () {
+// once, and a "denied" read is never terminal because the original request may still be running; true when cleared. the
+// fence removal and the state that records it form one uninterruptible step without any wait
+const applyStartStatus = (registry: AtomRegistry.AtomRegistry, exit: Exit.Exit<typeof SupervisionStartStatus.Type, unknown>, intent: StartIntent, fromRead: boolean, failure: string) => Effect.uninterruptible(Effect.gen(function* () {
   const state = registry.get(startState);
   if (Exit.isFailure(exit) || exit.value.threadId !== intent.threadId || exit.value.operationId !== intent.operationId) {
     registry.set(startState, {...state, busy: false, message: failure});
@@ -168,20 +176,22 @@ const applyStartStatus = (registry: AtomRegistry.AtomRegistry, exit: Exit.Exit<t
   registry.set(startState, {intent: null, busy: false, message: status.reason});
   registry.set(candidatesRevision("start"), registry.get(candidatesRevision("start")) + 1);
   return true;
-});
+}));
 
 // starts supervision of one chat: the fence is persisted before the request, and no Start is sent without it; an unknown
-// outcome keeps the fence, and nothing sends another Start until a terminal status clears it; true when cleared
+// outcome keeps the fence, and nothing sends another Start until a terminal status clears it; true when cleared. the
+// persistence and the state that records it form one uninterruptible step; an action interrupted while it waits leaves
+// the persisted fence with its original operation id for the next page, which never sends the Start again
 export const startSupervision = Atom.keepAlive(uiRuntime.fn((threadId: string, {registry}) => Effect.gen(function* () {
   const state = registry.get(startState);
   if (state.busy || state.intent) return false;
   const intent = {threadId, operationId: yield* newOperationId};
-  const persisted = yield* Effect.exit(startFence((fence) => fence.set(startIntentKey, intent)));
+  const persisted = yield* Effect.uninterruptible(Effect.exit(startFence((fence) => fence.set(startIntentKey, intent))).pipe(
+    Effect.tap((stored) => Exit.isSuccess(stored) ? Effect.sync(() => registry.set(startState, {intent, busy: true, message: "Saving Start…"})) : Effect.void)));
   if (Exit.isFailure(persisted)) return false;
-  registry.set(startState, {intent, busy: true, message: "Saving Start…"});
   const exit = yield* Effect.exit(admit(registry, startMutation({scope: scopeKey("start-supervision"), operationId: intent.operationId}), intent));
   return yield* applyStartStatus(registry, exit, intent, false, "Start outcome is unknown. Check the original operation status; no new Start will be sent.");
-}).pipe(Effect.uninterruptible), {concurrent: true}));
+}), {concurrent: true}));
 
 // reads the status of the exact retained operation; true when it cleared the fence
 export const checkStartStatus = Atom.keepAlive(uiRuntime.fn((_: void, {registry}) => Effect.gen(function* () {
@@ -191,7 +201,7 @@ export const checkStartStatus = Atom.keepAlive(uiRuntime.fn((_: void, {registry}
   registry.set(startState, {...state, busy: true});
   const exit = yield* Effect.exit(request((client) => client.guidance.supervisionStartStatus({query: intent})));
   return yield* applyStartStatus(registry, exit, intent, true, "Start status unavailable. The original operation remains held.");
-}).pipe(Effect.uninterruptible), {concurrent: true}));
+}), {concurrent: true}));
 
 export function StartSupervisionPanel({active, onStateChange, onChanged}: {active: boolean; onStateChange: (value: boolean) => void; onChanged: () => void}) {
   const [query, setQuery] = useState("");const candidates = useChatCandidates(query, "start", active);

@@ -107,10 +107,10 @@ it("no definitions reload starts while the configuration is dirty or saving, and
 
   // the panel's render: the held view follows the live view unless the editor holds a draft or a save; the mounted
   // read is the held view's
-  let view: DefinitionsView = {key: "", read: null};
+  let view: DefinitionsView = {key: "", read: null, environmentId: null};
   let mounted: {read: string; stop: () => void} | null = null;
   const render = (reload: number, epoch: number, holding: boolean, threadId: string | null = null) => {
-    view = heldView(view, {key: JSON.stringify(["project", threadId ?? "", reload, true]), read: definitionsReadKey(null, "project", threadId, epoch)}, holding);
+    view = heldView(view, {key: JSON.stringify(["project", threadId ?? "", reload, true]), read: definitionsReadKey(null, "project", threadId, epoch), environmentId: null}, holding);
     if (mounted?.read === view.read) return projectDefinitionsAtom(mounted.read);
     mounted?.stop();
     const read = view.read!;
