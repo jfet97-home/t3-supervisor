@@ -298,10 +298,19 @@ const cancelSignal = (cancel: Deferred.Deferred<void> | undefined): Effect.Effec
     yield* Effect.forkScoped(Effect.andThen(Deferred.await(cancel), Effect.sync(() => controller.abort())), {startImmediately: true});
     return controller.signal;
   });
-// whether the durable introduction is still exactly the prepared unsent attempt a caller holds (the store keeps its exact JSON):
-// any send recorded since (sending, accepted, uncertain, sent, blocked, a fallback or retry reservation) changes it
+// whether a stored record is still exactly the one a caller read (none, for a creation); the store keeps each record's exact
+// JSON, so any write since (a send recorded, a refusal, a reservation) changes it
+const unchangedRecord = <A>(stored: A | null, held: A | null): boolean =>
+  held === null ? stored === null : stored !== null && JSON.stringify(stored) === JSON.stringify(held);
+// whether the durable introduction is still exactly the prepared unsent attempt a caller holds: any send recorded since (sending,
+// accepted, uncertain, sent, blocked, a fallback or retry reservation) changes it
 const unchangedUnsentIntroduction = (stored: WorkflowIntroduction | null, held: WorkflowIntroduction): boolean =>
-  stored !== null && stored.state === "ready" && JSON.stringify(stored) === JSON.stringify(held);
+  stored !== null && stored.state === "ready" && unchangedRecord(stored, held);
+// whether an introduction carries a recorded send: its dispatch reservation (a fallback or retry one included), an accepted or
+// unknown outcome or its delivery; such a record keeps its identities, body and route and is only reconciled
+const sendRecorded = (introduction: WorkflowIntroduction): boolean =>
+  ["sending", "accepted", "uncertain", "sent"].includes(introduction.state) || Boolean(introduction.dispatchMode) ||
+  introduction.acceptedAt !== undefined || introduction.definiteRejection === false || Boolean(introduction.rejectedAttempts?.length);
 
 export interface SupervisorConversationShape {
   // one supervision pass of a bound main: introductions, the in-flight check-in and the next due check-in
@@ -859,6 +868,8 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
   const runProtocolRepair = (binding: BindingRecord, tasks: readonly TaskRecord[]): Effect.Effect<boolean> => Effect.gen(function* () {
     const teamPolicy = yield* teamPolicyOf(binding);
     return yield* dispatchWith(binding.threadId, true, (_guard, now) => {
+      // a check-in is created only while none is pending, as this cycle found; a pending one is only reconciled
+      if (requests.pending(binding.projectId, binding.threadId) !== null) return {value: false, request: null};
       if (now - (requests.lastNotice(binding.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return {value: false, request: null};
       for (const task of tasks) {
         const diagnostic = task.workflowProtocolDiagnostic;
@@ -930,6 +941,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         const error = `${reason} Monitoring for this main is blocked; correct the context before Retry native access.`;
         return yield* admitted((guard) => {
           if (!guard.scopeEnabled(binding.projectId, binding.mainThreadId)) return false;
+          if (requests.pending(binding.projectId, binding.threadId) !== null) return true;
           store.store.transaction(() => {
             store.saveTask({...task, ...(task.definitionReview ? {definitionReview: {...task.definitionReview, message: error}} : {})});
             const failed = requests.prepare({projectId: task.projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: task.id,
@@ -940,6 +952,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       }
       return yield* dispatchWith(binding.threadId, true, (guard) => {
         if (!guard.scopeEnabled(binding.projectId, binding.mainThreadId)) return {value: false, request: null};
+        if (requests.pending(binding.projectId, binding.threadId) !== null) return {value: true, request: null};
         const request = requests.prepare({projectId: task.projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: task.id,
           text: completePrompt, batch: null, completionMarker, ...(role.roleVersion ? {roleVersion: role.roleVersion} : {})}, now);
         store.saveTask({...task, definitionNoticeKey: key});
@@ -1628,7 +1641,8 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if ((!previous || previous.state === "ready") && (settled || (yield* isResting))) continue;
       if (previous?.state === "ready" || previous?.state === "sending" || previous?.state === "accepted" || previous?.state === "uncertain") {
         const sent = yield* attempt(sendIntroduction(task, previous, threads));
-        if (!sent.ok) requests.saveIntroduction({...previous, state: notFound(sent.cause) ? "blocked" : previous.state,
+        // a record another caller advanced meanwhile is left to the next observation
+        if (!sent.ok && holdsIntroduction(task.id, previous)) requests.saveIntroduction({...previous, state: notFound(sent.cause) ? "blocked" : previous.state,
           error: notFound(sent.cause) ? "The operative conversation was deleted; other conversations remain supervised." : "This introduction could not be checked; other conversations remain supervised."});
         continue;
       }
@@ -1643,7 +1657,9 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         if (!guard.scopeEnabled(binding.projectId, binding.mainThreadId)) return "stop" as const;
         if (!eligible(agent.thread, threads) || agent.thread.projectId !== binding.projectId || !sourceUnchanged(task, agent)) return "skip" as const;
         if (!canSupervisorContact(supervisor.thread, agent.thread)) {
-          requests.saveIntroduction({...introduction, state: "blocked", error: "The Supervisor's native modes cannot contact this operative chat. Adjust runtime/interaction modes in T3; existing conversations are never auto-upgraded."});
+          // a creation refuses only while no introduction exists: a send another caller recorded meanwhile is never refused
+          if (holdsIntroduction(task.id, null))
+            requests.saveIntroduction({...introduction, state: "blocked", error: "The Supervisor's native modes cannot contact this operative chat. Adjust runtime/interaction modes in T3; existing conversations are never auto-upgraded."});
           return "skip" as const;
         }
         return "continue" as const;
@@ -1652,13 +1668,16 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if (contactable === "skip") continue;
       const dialogue = yield* dialogueDefinitions(task);
       const decisionNow = yield* Clock.currentTimeMillis;
+      // the unavailable-definitions refusal this caller wrote, which its later context write may replace only while unchanged
+      let reviewHeld: WorkflowIntroduction | null = null;
       const prepared = yield* admitted((guard) => {
         if (!guard.scopeEnabled(binding.projectId, binding.mainThreadId)) return "stop" as const;
-        // the durable receipt decides: a send another caller recorded for this task since this caller found none is never
-        // replaced by a fresh reservation
-        if (!introductionUnsent(task.id)) return "skip" as const;
+        // the durable receipt decides: this caller found no introduction, so it creates, refuses or reserves one only while there is
+        // still none; a record another caller wrote meanwhile is never replaced
+        if (!holdsIntroduction(task.id, null)) return "skip" as const;
         if (!dialogue) {
-          requests.saveIntroduction({...introduction, state: "blocked", error: "Project definitions changed or are unavailable; the draft was not sent."});
+          reviewHeld = {...introduction, state: "blocked", error: "Project definitions changed or are unavailable; the draft was not sent."};
+          requests.saveIntroduction(reviewHeld);
           return "review" as const;
         }
         const cachedRead = dialogue === cachedProvisionalDefinitions(task);
@@ -1696,7 +1715,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
           const observed = definitions ? yield* definitions.load(task.projectId, task.threadId) : undefined;
           const proceed = yield* admitted((guard) => {
             if (!guard.scopeEnabled(binding.projectId, binding.mainThreadId)) return false;
-            if (observed && observed.status !== "unavailable" && observed.status !== "permission_required")
+            if (observed && observed.status !== "unavailable" && observed.status !== "permission_required" && holdsIntroduction(task.id, reviewHeld))
               requests.saveIntroduction({...introduction, state: "context", error: null});
             return true;
           });
@@ -1716,7 +1735,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         continue;
       }
       const sent = yield* attempt(sendIntroduction(store.task(task.threadId) ?? task, prepared, threads));
-      if (!sent.ok) requests.saveIntroduction({...prepared, state: notFound(sent.cause) ? "blocked" : "ready",
+      if (!sent.ok && holdsIntroduction(task.id, prepared)) requests.saveIntroduction({...prepared, state: notFound(sent.cause) ? "blocked" : "ready",
         error: notFound(sent.cause) ? "The operative conversation was deleted; other conversations remain supervised." : "This introduction could not be checked; other conversations remain supervised."});
     }
     if (inflight) {yield* reconcile(inflight, supervisor, threads);return;}
@@ -1831,7 +1850,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     if (prompt.length > maxConversationTextLength) {
       const error = `Complete monitoring context exceeds its limit (${prompt.length}/${maxConversationTextLength} characters); no check-in was sent and pending activity is retained. Monitoring for this main is blocked; reduce the context before Retry native access.`;
       yield* admitted((guard) => {
-        if (!guard.scopeEnabled(binding.projectId, binding.mainThreadId)) return;
+        if (!guard.scopeEnabled(binding.projectId, binding.mainThreadId) || requests.pending(binding.projectId, binding.threadId) !== null) return;
         store.store.transaction(() => {
           const failed = requests.prepare({projectId: binding.projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: null,
             text: error, batch: selected, completionMarker, ...(rootEvents.length ? {teamEventIds: rootEvents.map(event => event.id)} : {})}, checkInNow);
@@ -1840,7 +1859,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       });return;
     }
     yield* dispatchWith(binding.threadId, undefined, (guard) => {
-      if (!guard.scopeEnabled(binding.projectId, binding.mainThreadId)) return {value: undefined, request: null};
+      if (!guard.scopeEnabled(binding.projectId, binding.mainThreadId) || requests.pending(binding.projectId, binding.threadId) !== null) return {value: undefined, request: null};
       const request = requests.prepare({projectId: binding.projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: null, text: prompt, batch: selected, completionMarker,
         ...(role.roleVersion ? {roleVersion: role.roleVersion} : {}), ...(rootEvents.length ? {teamEventIds: rootEvents.map(event => event.id)} : {})}, checkInNow);
       for (const item of included) {
@@ -2000,7 +2019,9 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
             if (reply.ok) {requests.saveRequest({...sending, state: "waiting"});return prepared.value;}
             const definite = reply.cause instanceof SupervisorRpcError && reply.cause.definiteRejection;
             requests.saveRequest({...sending, state: definite ? "failed" : "uncertain", error: definite ? "T3 rejected the supervising request; pending activity is retained." : uncertainCheckIn});
-            if (definite && request.taskId) blockIntroduction(request.taskId, "T3 rejected the dialogue initialization; no proposal was sent.");
+            // the refused dialogue initialization blocks its introduction only while no send of it is recorded
+            const initialized = definite && request.taskId ? requests.introduction(request.taskId) : null;
+            if (request.taskId && initialized && !sendRecorded(initialized)) blockIntroduction(request.taskId, "T3 rejected the dialogue initialization; no proposal was sent.");
             return prepared.value;
           }).pipe(Effect.onInterrupt(() => Effect.sync(() => requests.saveRequest({...sending, state: "uncertain", error: uncertainCheckIn})))),
           release: flight.release,
@@ -2014,6 +2035,10 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     const introduction = requests.introduction(taskId);
     if (introduction) requests.saveIntroduction({...introduction, state: "blocked", error});
   };
+  // a caller writes an introduction or a root check-in only while the stored record is still exactly the one it read
+  const holdsIntroduction = (taskId: string, held: WorkflowIntroduction | null): boolean => unchangedRecord(requests.introduction(taskId), held);
+  const holdsRequest = (held: ConversationRequest): boolean =>
+    unchangedRecord(requests.requests(held.projectId, held.supervisorThreadId).find(item => item.id === held.id) ?? null, held);
   // whether the Supervisor's own interpretation answer yields exactly this plan; only node IDs are service-assigned on each read
   const interpretationMatches = (task: TaskRecord, text: string, expected: WorkflowPlanValue): boolean => {
     if (!task.definitionContext) return false;
@@ -2103,7 +2128,8 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
   const reconcile = (input: ConversationRequest, supervisor: Projection, threads: readonly ThreadInfo[], stopped = false): Effect.Effect<void> => Effect.gen(function* () {
     let request = input;
     if (request.supervisorThreadId !== supervisor.thread.id) {
-      requests.saveRequest({...request, state: "failed", error: "The bound Supervisor changed; the old request identity was retained."});return;
+      if (holdsRequest(request)) requests.saveRequest({...request, state: "failed", error: "The bound Supervisor changed; the old request identity was retained."});
+      return;
     }
     const message = supervisor.messages.find(item => item.id === request.messageId && item.threadId === request.supervisorThreadId);
     const run = supervisor.runs.find(item => item.threadId === request.supervisorThreadId && (item.id === message?.runId || item.id === request.runId || item.userMessageId === request.messageId));
@@ -2111,10 +2137,14 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if (request.state === "prepared" && request.sentAt === null) {
         const unsent = request;
         if (!stopped) yield* dispatchWith(request.supervisorThreadId, undefined, () => ({value: undefined, request: unsent}));
-      } else if (request.state !== "uncertain") requests.saveRequest({...request, state: "uncertain", error: "The native request has no confirmed matching run yet. Its identity and pending activity are retained."});
+      } else if (request.state !== "uncertain" && holdsRequest(request)) requests.saveRequest({...request, state: "uncertain", error: "The native request has no confirmed matching run yet. Its identity and pending activity are retained."});
       return;
     }
-    if (request.runId !== run.id) {request = {...request, runId: run.id};requests.saveRequest(request);}
+    // a request another caller advanced meanwhile is left to the next observation
+    if (request.runId !== run.id) {
+      if (!holdsRequest(request)) return;
+      request = {...request, runId: run.id};requests.saveRequest(request);
+    }
     if (!["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(run.status)) return;
     const contaminated = supervisor.messages.some(item => item.runId === run.id && item.role === "user" && item.id !== request.messageId && typeof item.senderThreadId !== "string");
     const answers = completedAssistantMessages(supervisor, request.supervisorThreadId).filter(item => item.runId === run.id);
@@ -2130,6 +2160,8 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         ? ownerBinding && teamRuntime ? yield* teamRuntime.rootOwnedBatch(ownerBinding, completed.batch, threads) : completed.batch
         : null;
       store.store.transaction(() => {
+        // the outcome commits once, from the request as this caller read it
+        if (!holdsRequest(completed)) return;
         const misses = !confirmedCompletion && run.status === "completed" && completed.kind === "review" ? requests.missedReview(completed.supervisorThreadId) : 0;
         const retryableMiss = completed.kind === "review" && run.status === "completed" && misses < 3;
         const error = confirmedCompletion ? null : retryableMiss ? "The check-in output was not confirmed; pending activity will be checked again after the cooldown." : completed.kind === "context" && validCompletion ? "The initial workflow-proposal record could not be confirmed; no operative proposal was sent." : "The check-in could not be confirmed. Pending activity is retained; Retry native access to recover.";
@@ -2149,7 +2181,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
           for (const eventId of completed.teamEventIds) stores.team.acknowledgeEvent(ownerBinding, ownerBinding.threadId, eventId);
         if (completed.taskId && completed.kind === "context") {
           const introduction = requests.introduction(completed.taskId);
-          if (introduction) requests.saveIntroduction({...introduction, state: confirmedCompletion ? "ready" : "blocked", error: confirmedCompletion ? null : error ?? "The dialogue initialization did not complete; no proposal was sent."});
+          if (introduction && !sendRecorded(introduction)) requests.saveIntroduction({...introduction, state: confirmedCompletion ? "ready" : "blocked", error: confirmedCompletion ? null : error ?? "The dialogue initialization did not complete; no proposal was sent."});
         }
       });
     }));
@@ -2160,6 +2192,8 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     const observedNow = yield* Clock.currentTimeMillis;
     const proceed = yield* admitted((guard) => {
       if (!guard.scopeEnabled(task.projectId, task.threadId)) return false;
+      // a record another caller advanced since this caller read it is left to the next observation
+      if (!holdsIntroduction(task.id, introduction)) return false;
       if (agent.thread.id !== task.threadId) return false;
       const visible = agent.messages.find(message => message.id === introduction.messageId && message.threadId === task.threadId && message.text === introduction.text);
       if (visible) {requests.saveIntroduction({...introduction, state: "sent", error: null});return false;}
@@ -2184,7 +2218,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     if (!proceed) return;
     const dialogue = yield* dialogueDefinitions(task);
     const defined = yield* admitted((guard) => {
-      if (!guard.scopeEnabled(task.projectId, task.threadId)) return null;
+      if (!guard.scopeEnabled(task.projectId, task.threadId) || !holdsIntroduction(task.id, introduction)) return null;
       if (!dialogue) {blockIntroduction(task.id, "Task eligibility or project definitions changed; the draft was not sent.");return null;}
       return dialogue;
     });
@@ -2271,7 +2305,8 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     // crossed by a resend
     for (const failed of requests.requests(projectId, supervisorThreadId).filter(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged)) requests.saveRequest({...failed, failureAcknowledged: true});
     for (const introduction of requests.introductions(projectId).filter(intro => intro.supervisorThreadId === supervisorThreadId)) {
-      if (introduction.state === "blocked" && !introduction.dispatchMode) store.store.db.prepare("DELETE FROM supervisor_workflow_introductions WHERE task_id=?").run(introduction.taskId);
+      // only a known-unsent refusal is deleted; a record that carries a recorded send keeps its identities and is only reconciled
+      if (introduction.state === "blocked" && !sendRecorded(introduction)) store.store.db.prepare("DELETE FROM supervisor_workflow_introductions WHERE task_id=?").run(introduction.taskId);
       if (introduction.state === "blocked" && introduction.definiteRejection) {
         const rejectedAttempts = [...(introduction.rejectedAttempts ?? []), {messageId: introduction.messageId, commandId: introduction.commandId ?? `supervisor-workflow:${introduction.taskId}`, dispatchMode: introduction.dispatchMode}];
         const suffix = `retry:${rejectedAttempts.length}`;
