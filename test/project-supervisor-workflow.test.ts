@@ -875,7 +875,7 @@ it("the interpretation request carries the concise standing role once, permits r
   assert.equal(occurrences("Never restate a human request"), 1);
   assert.equal(occurrences(`Standing instructions version ${task.roleVersion}.`), 1);
   assert.match(text, /Only local t3-code t3_thread_read\/t3_thread_send/u);
-  assert.match(text, /MCPX wrappers may invoke them/u);
+  assert.match(text, /MCPX mcpx_call_tool may invoke them/u);
   assert.match(text, /Decide relevance before definitions/u);
   assert.match(text, /freshly read your own local thread and cite the latest exact human message/u);
   assert.match(text, /Never reuse an earlier Stop ID/u);

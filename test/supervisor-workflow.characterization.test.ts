@@ -53,16 +53,18 @@ it("CT-SW-01: canonical plan JSON, seeded node IDs and prompt digests are golden
   assert.equal(sha256(JSON.stringify(prepared.context)), "4b22e3c45e9060410b2a752eea3eb602c960836021edd7c79e75d9d8d3e45f4f");
   assert.equal(sha256(JSON.stringify(prepared.workflow)), "a263f8572ef36eca2578bb7f9a3f3e0860a0690bca1f4869eba7ebf4b61d0db4");
 
+  // target change (native proof 2026-10-23): the reader and submission routes permit a code-mode gateway and count only the
+  // executed tool call (reader 1658 -> 1622, typed 2986 -> 3023 characters)
   const reader = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
     {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}, earlierMessages: [{messageId: "message-0", text: "Earlier request."}]});
-  assert.equal(reader.requestText.length, 1658);
-  assert.equal(sha256(reader.requestText), "085d6c578e304e9f28d34f3e005c864124c0407d103b5b3ef211b7129d643a19");
+  assert.equal(reader.requestText.length, 1622);
+  assert.equal(sha256(reader.requestText), "a398b9776b1edcdc193c0d5cef06a48a2ca08bd85b62dbfa49909a9795c531b5");
   const typed = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
     {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}, earlierMessages: [{messageId: "message-0", text: "Earlier request."}],
       submission: {supervisorThreadId: "supervisor-a", bindingGeneration: 3, taskId: "task-a", attemptId: "interpretation-attempt:00000000-0000-4000-8000-000000000001",
         sourcePin: {messageId: "message-a", runId: "run-a", ordinal: 1, hash: "0".repeat(64)}, startVerdict: true}});
-  assert.equal(typed.requestText.length, 2986);
-  assert.equal(sha256(typed.requestText), "b46f778077d979aab17b93272a1fdf8b4d1e90525c0453bff745fdab16d6238b");
+  assert.equal(typed.requestText.length, 3023);
+  assert.equal(sha256(typed.requestText), "dc96c51621f97b4c278072b242dfafe59c0cc6d94b16125cbc49b67f791e8bdb");
 
   const canonical = canonicalizeProposalDraft(goldenDraft, prepared.context, goldenSeed);
   assert.deepEqual(canonical, {ok: true, workflow: canonicalWorkflow});
