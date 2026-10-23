@@ -5,8 +5,6 @@ import {
   decodeInterpretationSubmission, interpretationAttemptId, interpretationAttemptKey, interpretationSourcePin, type InterpretationPayload,
 } from "../../src/interpretation-submission.js";
 import type { TaskRecord } from "../../src/project-supervisor-store.js";
-import type { SupervisorRpc } from "../../src/supervisor-native.js";
-import { SupervisorRpcError } from "../../src/supervisor-native.js";
 import type { Projection, RunInfo } from "../../src/types.js";
 import { workflowToolNames } from "../../src/workflow-write-evidence.js";
 
@@ -42,7 +40,7 @@ export const recordInterpretationSubmission = (input: {
   // the MCPX call wrapper instead of the direct tool name
   readonly mcpx?: boolean;
   readonly now?: number;
-}): RecordedSubmission => {
+}): Effect.Effect<RecordedSubmission> => Effect.gen(function* () {
   const {supervisor, run, task} = input;
   const requestText = String(supervisor.messages.find(message => message.id === task.messageId)?.text ?? "");
   const attempt = {attemptId: interpretationAttemptId(attemptUuid(`${task.id}\0${task.messageId}\0${task.sourceHash}`)),
@@ -51,7 +49,8 @@ export const recordInterpretationSubmission = (input: {
     attemptId: attempt.attemptId, sourcePin: interpretationSourcePin(task), objective: input.objective === undefined ? task.objective : input.objective,
     reason: task.reason, sourceMessageIds: [task.sourceMessageId],
     ...(task.definitionContext ? {supervision: input.supervision ?? "needed", workflow: input.workflow} : {})};
-  const submission = Effect.runSync(decodeInterpretationSubmission(args, {definitionContext: task.definitionContext ?? null, pendingStart: false}));
+  // a fixture whose arguments do not decode is a defect of the test, not an outcome
+  const submission = yield* Effect.orDie(decodeInterpretationSubmission(args, {definitionContext: task.definitionContext ?? null, pendingStart: false}));
   const payload = submission.payload;
   const workflow = payload.kind === "interpretation" ? payload.workflow : undefined;
   const itemId = input.itemId ?? `${run.id}-interpretation-submit-${(supervisor.turnItems ?? []).filter(item => item.runId === run.id).length + 1}`;
@@ -70,15 +69,4 @@ export const recordInterpretationSubmission = (input: {
   const evidence: InterpretationSubmissionEvidence = {kind: "interpretation_submission", taskId: task.id, attemptId: attempt.attemptId, itemId,
     runId: run.id, argumentsHash: submission.argumentsHash, sourcePin: interpretationSourcePin(task), planDigest: interpretationPlanDigest(workflow)};
   return {task: {...task, attempt, interpretationEvidence: evidence, ...(workflow ? {workflow} : {})}, payload, evidence, item, arguments: args};
-};
-
-// the read credential's native item detail of a thread's turn item, served from the projection it appears in; an item the projection
-// no longer shows is unavailable
-export const turnItemReader = (projection: (threadId: string) => Projection | null | undefined, reads?: Array<string>): SupervisorRpc =>
-  async (tag, payload) => {
-    if (tag !== "orchestration.getTurnItem") throw new Error(`unexpected fake read command ${tag}`);
-    reads?.push(String(payload.itemId));
-    const item = (projection(String(payload.threadId))?.turnItems ?? []).find(candidate => candidate.id === payload.itemId);
-    if (!item) throw new SupervisorRpcError("rejected", true);
-    return {item: structuredClone(item)};
-  };
+});

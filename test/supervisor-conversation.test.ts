@@ -459,7 +459,7 @@ const makeFixture = Effect.fnUntraced(function* (clock: FixtureClock, options: F
       },
     }),
   };
-  const task = options.workflow === false ? draftTask : setInterpretationSubmission(supervisor, draftTask, requiredRawPlan());
+  const task = options.workflow === false ? draftTask : yield* setInterpretationSubmission(supervisor, draftTask, requiredRawPlan());
   yield* projectStore.saveTask(task);
   yield* projectStore.baseline({snapshotSequence: 1, threads: []});
 
@@ -693,18 +693,18 @@ type Fixture = Effect.Success<ReturnType<typeof makeFixture>>;
 
 // the Supervisor's own completed interpretation run (the root's first turn) and its recorded typed submission: the task as
 // finalization leaves it holds the attempt, the evidence pinning the executed tool item and the submitted plan
-const setInterpretationSubmission = (supervisor: Projection, task: TaskRecord, raw: unknown, objective = task.objective): TaskRecord => {
+const setInterpretationSubmission = (supervisor: Projection, task: TaskRecord, raw: unknown, objective = task.objective) => Effect.gen(function* () {
   const runId = task.supervisorRunId ?? "supervisor-objective-run";
   const run = supervisor.runs.find(item => item.id === runId) ??
     appendRun({projection: supervisor, id: runId, ordinal: 0, status: "completed", messageId: task.messageId, text: "Interpret the task.", now: baseTime - 60_000});
-  return recordInterpretationSubmission({supervisor, run, task, bindingGeneration: 1, workflow: raw, objective}).task;
-};
+  return (yield* recordInterpretationSubmission({supervisor, run, task, bindingGeneration: 1, workflow: raw, objective})).task;
+});
 
 // stores a task whose workflow is the decoded plan of the Supervisor's recorded submission, as finalization applies it
 const interpretTask = Effect.fnUntraced(function* (fixture: Fixture, raw: unknown, context: NonNullable<TaskRecord["definitionContext"]>,
   snapshot: ProjectDefinitionSnapshot, extra: Partial<TaskRecord> = {}) {
   const current = (yield* fixture.projectStore.task(fixture.task.threadId))!;
-  const task = setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: context, definitionSnapshot: snapshot,
+  const task = yield* setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: context, definitionSnapshot: snapshot,
     workflowProposalId: current.workflowProposalId ?? current.id}, raw);
   const stored: TaskRecord = {...task, ...extra};
   yield* fixture.projectStore.saveTask(stored);
@@ -717,7 +717,7 @@ const installTaskDefinitions = Effect.fnUntraced(function* (fixture: Fixture, sn
   const prepared = prepareWorkflowRequest(current.threadId, current.sourceMessageId, current.objective ?? sourceText, snapshot);
   assert.ok(prepared.context);
   const plan = planWithFixedWorkflows(prepared.context, workflowIds);
-  const task = setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: prepared.context, definitionSnapshot: snapshot,
+  const task = yield* setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: prepared.context, definitionSnapshot: snapshot,
     workflowProposalId: current.workflowProposalId ?? current.id}, fixedWorkflowsRawPlan(workflowIds));
   assert.equal(interpretationPlanDigest(task.workflow), interpretationPlanDigest(plan), "the submission decodes to the validated plan");
   yield* fixture.projectStore.saveTask(task);
@@ -736,7 +736,7 @@ const installNestedCatalog = Effect.fnUntraced(function* (fixture: Fixture) {
     {kind: "workflow", definitionId: "change", reason: "Complete the requested change."}]}};
   const plan = validateWorkflowPlan(raw, prepared.context);
   assert.ok(plan);
-  const task = setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: prepared.context, definitionSnapshot: snapshot}, raw);
+  const task = yield* setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: prepared.context, definitionSnapshot: snapshot}, raw);
   assert.equal(interpretationPlanDigest(task.workflow), interpretationPlanDigest(plan), "the submission decodes to the validated plan");
   yield* fixture.projectStore.saveTask(task);
   fixture.setDefinitions(snapshot);
@@ -5218,7 +5218,7 @@ it.effect("CT-ISUB-16: the proposal goes out only on the Supervisor's current re
     const clock = {now: baseTime};
     const fixture = yield* makeFixture(clock);
     const stored = (yield* fixture.projectStore.task(fixture.task.threadId))!;
-    const wrapped = recordInterpretationSubmission({supervisor: fixture.supervisor, run: recordedSubmission(fixture).run, task: stored, bindingGeneration: 1,
+    const wrapped = yield* recordInterpretationSubmission({supervisor: fixture.supervisor, run: recordedSubmission(fixture).run, task: stored, bindingGeneration: 1,
       workflow: requiredRawPlan(), mcpx: true});
     yield* fixture.projectStore.saveTask(wrapped.task);
     yield* fixture.run();
@@ -5278,7 +5278,7 @@ it.effect("CT-ISUB-16: not-needed and unclear results never enter proposal check
     const clock = {now: baseTime};
     const fixture = yield* makeFixture(clock);
     const stored = (yield* fixture.projectStore.task(fixture.task.threadId))!;
-    const recorded = recordInterpretationSubmission({supervisor: fixture.supervisor, run: recordedSubmission(fixture).run, task: stored, bindingGeneration: 1,
+    const recorded = yield* recordInterpretationSubmission({supervisor: fixture.supervisor, run: recordedSubmission(fixture).run, task: stored, bindingGeneration: 1,
       workflow: null, ...(variant === "not_needed" ? {supervision: "not_needed" as const} : {objective: null})});
     assert.notEqual(recorded.task.workflow?.status, "proposed", variant);
     yield* fixture.projectStore.saveTask(recorded.task);

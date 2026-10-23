@@ -418,7 +418,7 @@ export const makeFixture = (clock: FixtureClock, options: FixtureOptions = {}) =
       },
     }),
   };
-  const task = options.task === false || options.workflow === false ? draftTask : setInterpretationSubmission(supervisor, draftTask, requiredRawPlan());
+  const task = options.task === false || options.workflow === false ? draftTask : yield* setInterpretationSubmission(supervisor, draftTask, requiredRawPlan());
   if (options.task !== false) yield* projectStore.saveTask(task);
   yield* projectStore.baseline({snapshotSequence: 1, threads: []});
 
@@ -447,7 +447,7 @@ export const makeFixture = (clock: FixtureClock, options: FixtureOptions = {}) =
       sourceOrdinal: source.ordinal, definitionContext: context, definitionSnapshot: {...definitionSnapshot, threadId},
       messageId: `supervisor-objective:${taskId}`, supervisorThreadId: reserved.threadId,
       workflow: {status: "proposed", message: "A draft is ready.", workspaceRoot, revision, globalRevision: null, ...requiredPlanForContext(context)}};
-    const boundTask = setInterpretationSubmission(ownSupervisor, draftBound, requiredRawPlan());
+    const boundTask = yield* setInterpretationSubmission(ownSupervisor, draftBound, requiredRawPlan());
     yield* projectStore.saveTask(boundTask);
     const boundBinding = (yield* projectStore.binding(projectId, threadId)) as BindingRecord;
     return {binding: boundBinding, supervisor: ownSupervisor, projection, task: boundTask, run: runOf(process, threadId, ownSupervisor, threadList)};
@@ -492,12 +492,12 @@ export type Fixture = Effect.Success<ReturnType<typeof makeFixture>>;
 
 // the Supervisor's own completed interpretation run (the root's first turn) and its recorded typed submission: the task as
 // finalization leaves it holds the attempt, the evidence pinning the executed tool item and the submitted plan
-export const setInterpretationSubmission = (supervisor: Projection, task: TaskRecord, raw: unknown, objective = task.objective): TaskRecord => {
+export const setInterpretationSubmission = (supervisor: Projection, task: TaskRecord, raw: unknown, objective = task.objective) => Effect.gen(function* () {
   const runId = task.supervisorRunId ?? "supervisor-objective-run";
   const run = supervisor.runs.find(item => item.id === runId) ??
     appendRun({projection: supervisor, id: runId, ordinal: 0, status: "completed", messageId: task.messageId, text: "Interpret the task.", now: baseTime - 60_000});
-  return recordInterpretationSubmission({supervisor, run, task, bindingGeneration: 1, workflow: raw, objective}).task;
-};
+  return (yield* recordInterpretationSubmission({supervisor, run, task, bindingGeneration: 1, workflow: raw, objective})).task;
+});
 
 export const appendNoticeForTask = (fixture: Fixture, task: TaskRecord, projection: Projection) => Effect.gen(function* () {
   const introduction: WorkflowIntroduction = {

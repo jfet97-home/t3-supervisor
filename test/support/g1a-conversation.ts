@@ -178,9 +178,8 @@ export const nativeClient = (handle: NativeHandler): NativeRpcShape => {
 };
 
 /**
- * The read credential's native item detail of a thread's turn item, served from the projection it appears in, as the evidence
- * fixture's turnItemReader serves it: each read records its item ID, and an item the projection no longer shows is a definite
- * rejection.
+ * The read credential's native item detail of a thread's turn item, served from the projection it appears in: each read
+ * records its item ID, and an item the projection no longer shows is a definite rejection.
  */
 export const turnItemDetails = (projection: (threadId: string) => Projection | null | undefined, reads: Array<string>): NativeHandler => (tag, payload) => {
   if (tag !== "orchestration.getTurnItem") throw new Error(`unexpected fake read command ${tag}`);
