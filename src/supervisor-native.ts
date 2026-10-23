@@ -153,8 +153,10 @@ const makeNativeShell = (endpoint: NativeEndpoint): Effect.Effect<NativeShellSha
   const client = yield* HttpClient.HttpClient;
   const request = HttpClientRequest.get(new URL("/api/orchestration/shell", endpoint.baseUrl)).pipe(
     HttpClientRequest.setHeaders({ Authorization: `Bearer ${endpoint.token}`, "x-t3-orchestration-protocol": "2" }));
-  // the bounded active shell, without relying on limited event replay; no client span and no trace headers to T3
-  const active = client.execute(request).pipe(
+  // the bounded active shell, without relying on limited event replay; no client span and no trace headers to T3. the request
+  // belongs to this read's scope from its headers on, so a failure or interruption before or while its body is read (the
+  // archived read failing beside it) aborts it
+  const active = HttpClient.withScope(client).execute(request).pipe(
     Effect.mapError(rejected),
     Effect.flatMap((response) => response.status >= 200 && response.status < 300 ? boundedBody(response) : refusedBody(response)),
     Effect.flatMap((body) => Effect.mapError(decodeJson(body), rejected)),
@@ -165,6 +167,7 @@ const makeNativeShell = (endpoint: NativeEndpoint): Effect.Effect<NativeShellSha
       return Effect.succeed({ snapshotSequence: value.snapshotSequence, threads: value.threads });
     }),
     Effect.timeoutOrElse({ duration: "10 seconds", orElse: () => Effect.fail(rejected()) }),
+    Effect.scoped,
     Effect.provideService(HttpClient.TracerDisabledWhen, () => true),
   );
   const pair = Effect.all([active, rpc.call("orchestration.getArchivedShellSnapshot", {})], { concurrency: 2 });

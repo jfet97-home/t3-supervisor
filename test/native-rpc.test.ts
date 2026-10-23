@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from "node:http";
 import { describe, it } from "@effect/vitest";
-import { Deferred, Effect, Fiber, Layer } from "effect";
-import { FetchHttpClient } from "effect/http";
+import { Deferred, Effect, Exit, Fiber, Layer, Option, Stream } from "effect";
+import { FetchHttpClient, HttpClient, type HttpClientResponse } from "effect/http";
 import { TestClock } from "effect/testing";
 import { NativeEnvelope } from "../src/native-envelope.js";
 import { NativeOperateRpc, NativeRpc, NativeShell, SupervisorRpcError } from "../src/supervisor-native.js";
@@ -166,4 +166,33 @@ describe("NativeShell", () => {
     yield* TestClock.adjust("1 millis");
     assert.deepEqual(classification(yield* Fiber.join(fiber)), ["rejected", false, false, false]);
   }), { timeout: 10_000 });
+
+  it.live("NRPC-08: an archived read failing while the active response sits between its headers and its body read ends the active request", () => Effect.gen(function* () {
+    // the reviewers' fault: the active response is taken and held at the handoff to the body read while the archived read fails
+    const ended = yield* Deferred.make<void>();
+    const { baseUrl } = yield* serve((_request, response) => {
+      response.once("close", () => {Deferred.doneUnsafe(ended, Effect.void);});
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write("{");
+    });
+    const headers = yield* Deferred.make<void>();
+    let held: HttpClientResponse.HttpClientResponse | undefined;
+    const raw = yield* HttpClient.HttpClient;
+    const atHandoff = HttpClient.transformResponse(raw, (effect) => effect.pipe(Effect.tap((response) => {
+      held = response;
+      return Deferred.succeed(headers, undefined).pipe(Effect.andThen(Effect.never));
+    })));
+    const archive = NativeRpc.of({
+      call: () => Deferred.await(headers).pipe(Effect.andThen(Effect.fail(new SupervisorRpcError("rejected")))),
+      initiate: () => Effect.die("the shell reads only call"),
+    });
+    const shell = yield* NativeShell.make({ baseUrl, token }).pipe(Effect.provideService(NativeRpc, archive), Effect.provideService(HttpClient.HttpClient, atHandoff));
+    const exit = yield* Effect.exit(shell.baseline);
+    assert.ok(held !== undefined, "the active response was taken");
+    assert.ok(Exit.isFailure(exit));
+    // bounded only so that a request left open fails here by name; it is then released for cleanup
+    const closed = yield* Deferred.await(ended).pipe(Effect.timeoutOption("2 seconds"));
+    if (Option.isNone(closed) && held !== undefined) yield* Stream.runHead(held.stream).pipe(Effect.ignore);
+    assert.ok(Option.isSome(closed), "the active request ended with the failed read");
+  }).pipe(Effect.provide(FetchHttpClient.layer)), { timeout: 10_000 });
 });
