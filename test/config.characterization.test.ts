@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { it } from "@effect/vitest";
 import { ConfigProvider, Effect } from "effect";
-import { it } from "vitest";
 import { environment, loadDataDirectory, SupervisorConfig } from "../src/config.js";
 
 // the configuration as the process parses it: the SupervisorConfig layer over the current process environment
-const loadConfig = () => Effect.runSync(SupervisorConfig.useSync((config) => config).pipe(
+const loadConfig = Effect.suspend(() => SupervisorConfig.useSync((config) => config).pipe(
   Effect.provide(SupervisorConfig.layer), Effect.provide(ConfigProvider.layer(environment()))));
 
 // every variable loadConfig reads, plus the two that locate the default data directory
@@ -17,26 +17,26 @@ const variables = [
 ] as const;
 type Variable = typeof variables[number];
 
-// runs with exactly the given variables set and restores the previous process environment afterwards
-const withEnvironment = <A>(values: Partial<Record<Variable, string>>, run: () => A): A => {
-  const saved = new Map(variables.map(name => [name, process.env[name]] as const));
-  try {
+// runs with exactly the given variables set and restores the previous process environment when it ends, however it ends
+const withEnvironment = <A, E>(values: Partial<Record<Variable, string>>, run: Effect.Effect<A, E>): Effect.Effect<A, E> =>
+  Effect.scoped(Effect.andThen(Effect.acquireRelease(Effect.sync(() => {
+    const saved = new Map(variables.map(name => [name, process.env[name]] as const));
     for (const name of variables) delete process.env[name];
     for (const [name, value] of Object.entries(values)) process.env[name] = value;
-    return run();
-  } finally {
+    return saved;
+  }), (saved) => Effect.sync(() => {
     for (const [name, value] of saved) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
-  }
-};
+  })), run));
 
 // the default assets directory is resolved next to src/, which is the repository root as seen from test/
 const defaultAssets = fileURLToPath(new URL("../ui-dist", import.meta.url));
 
-it("CT-CONFIG-01: every default and list parsing equals the loadConfig golden", { timeout: 10_000 }, () => {
-  const defaults = withEnvironment({ HOME: "/home/characterization" }, () => ({ config: loadConfig(), directory: loadDataDirectory() }));
+it.effect("CT-CONFIG-01: every default and list parsing equals the loadConfig golden", () => Effect.gen(function* () {
+  const defaults = yield* withEnvironment({ HOME: "/home/characterization" },
+    Effect.map(loadConfig, config => ({ config, directory: loadDataDirectory() })));
   assert.deepEqual(defaults.config, {
     dataDirectory: "/home/characterization/.local/state/t3-supervisor",
     t3Url: "http://127.0.0.1:3773",
@@ -54,12 +54,12 @@ it("CT-CONFIG-01: every default and list parsing equals the loadConfig golden", 
   });
   assert.equal(defaults.directory, defaults.config.dataDirectory);
 
-  assert.equal(withEnvironment({ HOME: "/home/characterization", XDG_STATE_HOME: "/state/home" }, () => loadConfig().dataDirectory),
+  assert.equal((yield* withEnvironment({ HOME: "/home/characterization", XDG_STATE_HOME: "/state/home" }, loadConfig)).dataDirectory,
     "/state/home/t3-supervisor");
-  assert.equal(withEnvironment({ HOME: "/home/characterization", XDG_STATE_HOME: "/state/home", DATA_DIRECTORY: "/explicit/data" },
-    () => loadConfig().dataDirectory), "/explicit/data");
+  assert.equal((yield* withEnvironment({ HOME: "/home/characterization", XDG_STATE_HOME: "/state/home", DATA_DIRECTORY: "/explicit/data" },
+    loadConfig)).dataDirectory, "/explicit/data");
 
-  const configured = withEnvironment({
+  const configured = yield* withEnvironment({
     HOME: "/home/characterization",
     DATA_DIRECTORY: "/data",
     T3_URL: "http://t3.internal:4000",
@@ -78,7 +78,7 @@ it("CT-CONFIG-01: every default and list parsing equals the loadConfig golden", 
     T3_PROJECT_COMMIT_TOKEN_FILE: "/secrets/commit",
     T3_GIT_PROBE_TOKEN_FILE: "/secrets/probe",
     T3_MANAGED_SCRATCH_ROOT: "/scratch",
-  }, () => loadConfig());
+  }, loadConfig);
   assert.deepEqual(configured, {
     dataDirectory: "/data",
     t3Url: "http://t3.internal:4000",
@@ -100,28 +100,28 @@ it("CT-CONFIG-01: every default and list parsing equals the loadConfig golden", 
   });
 
   // thread ids are trimmed and filtered but keep their case; only MCP hosts are lowercased
-  assert.deepEqual(withEnvironment({ EXCLUDED_THREAD_IDS: "Thread-A,thread-a" }, () => loadConfig().excludedThreadIds),
+  assert.deepEqual((yield* withEnvironment({ EXCLUDED_THREAD_IDS: "Thread-A,thread-a" }, loadConfig)).excludedThreadIds,
     ["Thread-A", "thread-a"]);
-});
+}), { timeout: 10_000 });
 
-it("CT-CONFIG-02: whitespace inside the helper id fails while a blank helper id is unset", { timeout: 10_000 }, () => {
+it.effect("CT-CONFIG-02: whitespace inside the helper id fails while a blank helper id is unset", () => Effect.gen(function* () {
   for (const invalid of ["a b", "a\tb", " a\nb "]) {
-    assert.throws(() => withEnvironment({ SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: invalid }, () => loadConfig()),
-      (error: unknown) => error instanceof Error && error.message === "invalid_helper_provider_instance_id");
+    const failure: unknown = yield* Effect.flip(withEnvironment({ SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: invalid }, loadConfig));
+    assert.ok(failure instanceof Error && failure.message === "invalid_helper_provider_instance_id");
   }
   for (const blank of ["   ", "\t\n "]) {
-    const config = withEnvironment({ SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: blank }, () => loadConfig());
+    const config = yield* withEnvironment({ SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: blank }, loadConfig);
     assert.equal(config.helperProviderInstanceId, undefined);
     assert.equal(Object.hasOwn(config, "helperProviderInstanceId"), false);
   }
-  assert.equal(withEnvironment({ SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: "x".repeat(256) }, () => loadConfig().helperProviderInstanceId),
+  assert.equal((yield* withEnvironment({ SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: "x".repeat(256) }, loadConfig)).helperProviderInstanceId,
     "x".repeat(256));
-});
+}), { timeout: 10_000 });
 
-it("CT-CONFIG-03: empty-string and non-numeric values keep their baseline results", { timeout: 10_000 }, () => {
+it.effect("CT-CONFIG-03: empty-string and non-numeric values keep their baseline results", () => Effect.gen(function* () {
   // nullish defaults keep an empty string, Number('') is 0, and truthiness-gated optional fields stay absent
-  const empty = withEnvironment(Object.fromEntries(variables.filter(name => name !== "XDG_STATE_HOME" && name !== "HOME")
-    .map(name => [name, ""])), () => loadConfig());
+  const empty = yield* withEnvironment(Object.fromEntries(variables.filter(name => name !== "XDG_STATE_HOME" && name !== "HOME")
+    .map(name => [name, ""])), loadConfig);
   assert.deepEqual(empty, {
     dataDirectory: "",
     t3Url: "",
@@ -137,11 +137,11 @@ it("CT-CONFIG-03: empty-string and non-numeric values keep their baseline result
     projectCommitTokenFile: "",
     gitProbeTokenFile: "",
   });
-  assert.equal(withEnvironment({ DATA_DIRECTORY: "" }, () => loadDataDirectory()), "");
+  assert.equal(yield* withEnvironment({ DATA_DIRECTORY: "" }, Effect.sync(loadDataDirectory)), "");
 
-  const nonNumeric = withEnvironment({ HEALTH_PORT: "abc", UI_PORT: "abc", WORKFLOW_MCP_PORT: "abc" }, () => loadConfig());
+  const nonNumeric = yield* withEnvironment({ HEALTH_PORT: "abc", UI_PORT: "abc", WORKFLOW_MCP_PORT: "abc" }, loadConfig);
   assert.ok(Number.isNaN(nonNumeric.healthPort));
   assert.ok(Number.isNaN(nonNumeric.uiPort));
   assert.equal(Object.hasOwn(nonNumeric, "workflowMcpPort"), true);
   assert.ok(Number.isNaN(nonNumeric.workflowMcpPort));
-});
+}), { timeout: 10_000 });

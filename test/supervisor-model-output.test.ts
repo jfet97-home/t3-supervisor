@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { it } from "vitest";
+import { it } from "@effect/vitest";
 import { Effect, Exit } from "effect";
 import { decodeInterpretationSubmission, type InterpretationArgumentsInvalid } from "../src/interpretation-submission.js";
 import { record } from "../src/supervisor-native.js";
@@ -49,10 +49,10 @@ const submissions: Array<[string, Record<string, unknown>]> = [
   ["credential", {...valid, objective: "Use token=github_pat_12345678901234567890 to ship"}],
 ];
 
-it("interpretation submissions decode their fields with the oracle's exact acceptance and values, without any reply syntax", {timeout: 10_000}, () => {
+it.effect("interpretation submissions decode their fields with the oracle's exact acceptance and values, without any reply syntax", () => Effect.gen(function* () {
   for (const [label, value] of submissions) {
     const expected = oracle(value);
-    const decoded = Effect.runSyncExit(decodeInterpretationSubmission({...envelope, ...value}, {definitionContext: null, pendingStart: false}));
+    const decoded = yield* Effect.exit(decodeInterpretationSubmission({...envelope, ...value}, {definitionContext: null, pendingStart: false}));
     if (expected === "rejected") {
       assert.ok(Exit.isFailure(decoded), label);
       continue;
@@ -62,36 +62,35 @@ it("interpretation submissions decode their fields with the oracle's exact accep
   }
   assert.deepEqual(submissions.filter(([, value]) => oracle(value) !== "rejected").map(([label]) => label),
     ["valid", "null objective without source", "null objective with source", "objective at bound", "reason at bound", "empty reason", "credential"]);
-});
+}), {timeout: 10_000});
 
-it("workflow submissions report schema paths for their own keys and semantic codes for the interpretation fields", {timeout: 10_000}, () => {
+it.effect("workflow submissions report schema paths for their own keys and semantic codes for the interpretation fields", () => Effect.gen(function* () {
   const context = prepareWorkflowRequest("thread-a", sourceId, "Ship the export.", goldenSnapshot).context;
   assert.ok(context);
   const workflow = {requirements: [{kind: "step", id: "verify", applies: true, reason: "The task changes behavior."}],
     plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "verify", reason: "Check the changed behavior."}]}};
   const base = {...envelope, objective: "Ship the export.", reason: "A repository change.", sourceMessageIds: [sourceId], supervision: "needed", workflow};
-  const decode = (value: Record<string, unknown>) => Effect.runSyncExit(decodeInterpretationSubmission(value, {definitionContext: context, pendingStart: false}));
-  const failure = (value: Record<string, unknown>): [string, string] => {
-    const exit = decode(value);
+  const decode = (value: Record<string, unknown>) => Effect.exit(decodeInterpretationSubmission(value, {definitionContext: context, pendingStart: false}));
+  const failure = (value: Record<string, unknown>) => Effect.map(decode(value), (exit): [string, string] => {
     if (Exit.isSuccess(exit)) return ["accepted", ""];
     const error = exit.cause.reasons.find(reason => reason._tag === "Fail")?.error as InterpretationArgumentsInvalid;
     return [error.code, error.issues[0]?.path ?? ""];
-  };
-  assert.deepEqual(failure(base), ["accepted", ""]);
+  });
+  assert.deepEqual(yield* failure(base), ["accepted", ""]);
   const withoutSupervision: Record<string, unknown> = {...base};
   delete withoutSupervision.supervision;
   for (const [value, path] of [[{...base, supervision: "required"}, "/supervision"], [{...base, extra: true}, "/*"], [withoutSupervision, "/supervision"],
     [{...base, objective: 3}, "/objective"], [{...base, reason: "r".repeat(1001)}, "/reason"]] as const)
-    assert.deepEqual(failure(value), ["arguments_schema", path], path);
-  assert.deepEqual(failure({...base, sourceMessageIds: ["message-b"]}), ["source_message_ids_mismatch", "/sourceMessageIds"]);
-  assert.deepEqual(failure({...base, supervision: "not_needed"}), ["not_needed_workflow_present", "/workflow"]);
-  const proposed = decode(base);
+    assert.deepEqual(yield* failure(value), ["arguments_schema", path], path);
+  assert.deepEqual(yield* failure({...base, sourceMessageIds: ["message-b"]}), ["source_message_ids_mismatch", "/sourceMessageIds"]);
+  assert.deepEqual(yield* failure({...base, supervision: "not_needed"}), ["not_needed_workflow_present", "/workflow"]);
+  const proposed = yield* decode(base);
   assert.ok(Exit.isSuccess(proposed) && proposed.value.payload.kind === "interpretation" && proposed.value.payload.workflow?.status === "proposed");
-  const notNeeded = decode({...base, supervision: "not_needed", workflow: null});
+  const notNeeded = yield* decode({...base, supervision: "not_needed", workflow: null});
   assert.ok(Exit.isSuccess(notNeeded) && notNeeded.value.payload.kind === "interpretation");
   assert.equal(notNeeded.value.payload.kind === "interpretation" ? notNeeded.value.payload.supervision : null, "not_needed");
   assert.equal(notNeeded.value.payload.kind === "interpretation" ? notNeeded.value.payload.workflow?.plan : undefined, null);
-});
+}), {timeout: 10_000});
 
 it("fenced protocol records decode JSON bodies and keep malformed ones inert", {timeout: 10_000}, () => {
   const text = ["```workflow-acceptance", "{\"taskId\":\"task-a\",\"proposalId\":\"proposal-a\",\"digest\":\"d\"}", "```",
