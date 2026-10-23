@@ -11,13 +11,12 @@ import { SupervisorConversationStore } from "../src/supervisor-conversation-stor
 import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { SupervisorTeamStore, type TeamBinding, type TeamMember, type TeamNotification } from "../src/supervisor-team-store.js";
 import { teamNotificationText } from "../src/supervisor-team-runtime.js";
-import { supervisorTeamView } from "../src/supervisor-team-view.js";
 import { supervisionGuideToolDefinition, supervisionTeamToolDefinition } from "../src/supervisor-team-controller.js";
 import { workflowReadToolDefinition, workflowWriteToolDefinition } from "../src/workflow-write-controller.js";
 import { directParentChildLifecycle } from "../src/supervisor-observation.js";
 import { T3TransportError } from "../src/t3.js";
 import type { SupervisorHelperDeliveryTransport } from "../src/supervisor-helper-transport.js";
-import { helperTransportUnit, supervisorConversationUnit, teamRuntimeUnit } from "./support/team-units.js";
+import { helperTransportUnit, supervisorConversationUnit, supervisorTeamView, teamRuntimeUnit } from "./support/team-units.js";
 import { workflowRequestHash } from "../src/workflow-write-evidence.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
 

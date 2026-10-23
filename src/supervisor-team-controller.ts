@@ -145,7 +145,8 @@ export interface SupervisorTeamControllerShape {
   readonly reconcileStopped: (binding: BindingRecord, cancel?: WorkflowCallCancel) => Effect.Effect<void>;
 }
 
-// the baseline promise call shapes the unported workflow mcp endpoint and ProjectSupervisor use (b-03)
+// the baseline promise call shapes of the root facade (b-03): the unported workflow mcp endpoint calls and guides; the
+// reconcile shapes serve the unit seams of the controller suites
 export interface SupervisorTeamControllerPromises {
   call(input: unknown, signal: AbortSignal): Promise<unknown>;
   guide(input: unknown, signal: AbortSignal): Promise<unknown>;
@@ -796,10 +797,8 @@ export class SupervisorTeamController extends Context.Service<SupervisorTeamCont
   static readonly layer = (options: SupervisorTeamControllerOptions = {}): Layer.Layer<SupervisorTeamController, never,
     WorkflowWriteController | WorkflowNativeAccess | SupervisionGate | HelperTransport | SupervisionStores> =>
     Layer.effect(SupervisorTeamController, makeSupervisorTeamController(options));
-  // b-03 (plan 3.9): the promise call shapes the unported workflow mcp endpoint and ProjectSupervisor type this name with; the
-  // root facade (guidance-application.ts) is their only value, and they go when those callers consume the service
+  // b-03 (plan 3.9): the promise call shapes the unported workflow mcp endpoint types this name with; the root facade
+  // (guidance-application.ts) is their only value, and they go when that caller consumes the service
   declare readonly call: SupervisorTeamControllerPromises["call"];
   declare readonly guide: SupervisorTeamControllerPromises["guide"];
-  declare readonly reconcile: SupervisorTeamControllerPromises["reconcile"];
-  declare readonly reconcileStopped: SupervisorTeamControllerPromises["reconcileStopped"];
 }

@@ -2,6 +2,7 @@ import { Cause, Clock, Context, Data, Deferred, Effect, Exit, Layer, Option, Sch
 import {definitionReferenceLimits, definitionReferenceProblem, describeDefinitionReferenceProblem, validDefinitionReferences} from "./definition-references.js";
 import type { BindingRecord, TaskRecord } from "./project-supervisor-store.js";
 import { ProjectDefinitions } from "./project-definitions.js";
+import { SupervisionControl } from "./supervision-control.js";
 import { SupervisionGate, SupervisionScopeService, type GateGuard } from "./supervision-gate.js";
 import { SupervisionStores } from "./supervision-stores.js";
 import { SupervisorConversation } from "./supervisor-conversation.js";
@@ -82,9 +83,6 @@ export class WorkflowNativeAccess extends Context.Service<WorkflowNativeAccess, 
 export type WorkflowScopeReads = Pick<GateGuard, "workflowEditingEnabled" | "supervisionStopped">;
 
 export type WorkflowWriteControllerOptions = {
-  // the Start and Stop paths of SupervisionControl, adapted at the root with the call's cancel until it is a service
-  readonly stops?: SupervisionStops | undefined;
-  readonly starts?: SupervisionStarts | undefined;
   readonly maxEvidenceWaitMs?: number | undefined;
   // a unit exercised without the team store, as the baseline optional constructor argument allowed: no team authority in the
   // commit, no team actors in the binding check and no coverage in reads; the composition root always reads the stores' team
@@ -120,14 +118,6 @@ export type SupervisionStopInput = {callerThreadId: string; targetThreadId: stri
 export type SupervisionStopResult =
   | {status: "stopped"; targetThreadId: string; route: "direct" | "relay" | "chat"; alreadyStopped: boolean}
   | {status: "denied" | "invalid" | "unavailable" | "pending"; reason: string; retryable?: boolean};
-/** A native Start on verified own-thread evidence (SupervisionControl). */
-export type SupervisionStarts = {
-  readonly start: (input: SupervisionStartInput, evidence: WorkflowEvidenceMatch, cancel: WorkflowCallCancel) => Effect.Effect<SupervisionStartResult>;
-};
-/** Durable per-chat stop on genuine human evidence; the same thread policy backs the dashboard control. */
-export type SupervisionStops = {
-  readonly stop: (input: SupervisionStopInput, evidence: WorkflowEvidenceMatch, cancel: WorkflowCallCancel) => Effect.Effect<SupervisionStopResult>;
-};
 export type WorkflowReadPayload = WorkflowLocator & {
   view?: SupervisorContextViewName;
   definitionIds?: string[];
@@ -731,7 +721,8 @@ export interface WorkflowWriteControllerShape {
     reads?: WorkflowScopeReads) => BindingRecord | null;
 }
 
-// the baseline promise call shapes the unported workflow mcp endpoint, progress page and dashboard use (b-03)
+// the baseline promise call shapes of the root facade (b-03): the unported workflow mcp endpoint calls the tools; the read
+// shape serves the unit seams of the controller suites
 export interface WorkflowWriteControllerPromises {
   read(input: unknown, signal?: AbortSignal): Promise<WorkflowReadResult>;
   readTool(input: unknown, signal?: AbortSignal): Promise<WorkflowReadResult | SupervisorContextViewResult>;
@@ -749,6 +740,9 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
   const definitions = Option.getOrNull(yield* Effect.serviceOption(ProjectDefinitions));
   // bounded on-demand Supervisor context for the verified current binding: task, definitions, instructions and dry-run checks
   const conversation = Option.getOrNull(yield* Effect.serviceOption(SupervisorConversation));
+  // the Start and Stop of verified native calls (a native Start on own-thread evidence; a durable per-chat stop on genuine human
+  // evidence, backed by the same thread policy as the dashboard control)
+  const control = Option.getOrNull(yield* Effect.serviceOption(SupervisionControl));
   const {supervisors} = stores;
   const team = options.withoutTeam ? undefined : stores.team;
   if (!stores.workflows) return yield* Effect.die(new Error("the workflow write controller needs the workflow state store"));
@@ -1291,7 +1285,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     catch {return {status: "invalid", reason: "arguments_not_json"};}
     const decoded = decodeStartArguments(input, exactKeys);
     if (Exit.isFailure(decoded)) return {status: "invalid", reason: "invalid_start_arguments"};
-    if (!options.starts) return {status: "unavailable", reason: "supervision_start_unavailable"};
+    if (!control) return {status: "unavailable", reason: "supervision_start_unavailable"};
     const args = {callerThreadId: decoded.value.callerThreadId, userMessageId: decoded.value.userMessageId, operationId: decoded.value.operationId};
     const read = yield* settled(native.projection(args.callerThreadId, cancel));
     if (Option.isNone(read)) return {status: "unavailable", reason: "caller_projection_unavailable", retryable: true};
@@ -1300,7 +1294,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       return {status: "denied", reason: "caller_not_current"};
     const verified = yield* findToolEvidence(args.callerThreadId, caller.thread.projectId, args, "start", cancel);
     if (verified.status !== "verified") return {status: verified.status, reason: verified.reason, retryable: verified.status === "pending"};
-    return yield* options.starts.start(args, verified.evidence, cancel);
+    return yield* control.startSupervision(args, verified.evidence, cancel);
   });
 
   const stopSupervision = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<SupervisionStopResult> {
@@ -1309,7 +1303,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     if (inputBytes > workflowToolInputMaxBytes) return {status: "invalid", reason: "arguments_too_large"};
     const decoded = decodeStopArguments(input, exactKeys);
     if (Exit.isFailure(decoded)) return {status: "invalid", reason: "invalid_stop_arguments"};
-    if (!options.stops) return {status: "unavailable", reason: "supervision_stop_unavailable"};
+    if (!control) return {status: "unavailable", reason: "supervision_stop_unavailable"};
     const args = {callerThreadId: decoded.value.callerThreadId, targetThreadId: decoded.value.targetThreadId, userMessageId: decoded.value.userMessageId,
       operationId: decoded.value.operationId};
     const read = yield* settled(native.projection(args.callerThreadId, cancel));
@@ -1320,7 +1314,8 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     const verified = yield* findToolEvidence(args.callerThreadId, caller.thread.projectId, args, "stop", cancel);
     if (verified.status === "pending") return {status: "pending", reason: verified.reason, retryable: true};
     if (verified.status === "denied") return {status: "denied", reason: verified.reason};
-    return yield* options.stops.stop(args, verified.evidence, cancel);
+    // a failed catalog read ends the call as the baseline rejection did
+    return yield* Effect.orDie(control.stopSupervision(args, verified.evidence, cancel));
   });
 
   const read = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<WorkflowReadResult> {
@@ -1502,9 +1497,8 @@ export class WorkflowWriteController extends Context.Service<WorkflowWriteContro
   static readonly layer = (options: WorkflowWriteControllerOptions = {}): Layer.Layer<WorkflowWriteController, never,
     SupervisionGate | WorkflowNativeAccess | SupervisionStores | SupervisionScopeService> =>
     Layer.effect(WorkflowWriteController, makeWorkflowWriteController(options));
-  // b-03 (plan 3.9): the promise call shapes the unported workflow mcp endpoint, progress page and dashboard type this name with;
-  // the root facade (guidance-application.ts) is their only value, and they go when those callers consume the service
-  declare readonly read: WorkflowWriteControllerPromises["read"];
+  // b-03 (plan 3.9): the promise call shapes the unported workflow mcp endpoint types this name with; the root facade
+  // (guidance-application.ts) is their only value, and they go when that caller consumes the service
   declare readonly readTool: WorkflowWriteControllerPromises["readTool"];
   declare readonly write: WorkflowWriteControllerPromises["write"];
   declare readonly startSupervision: WorkflowWriteControllerPromises["startSupervision"];

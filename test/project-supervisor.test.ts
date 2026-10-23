@@ -9,8 +9,8 @@ import { join } from "node:path";
 import { Context, Effect, Layer, Schema } from "effect";
 import { createServer } from "node:http";
 import { GuidanceStore } from "../src/guidance-store.js";
-import { parseInterpretation, ProjectSupervisor } from "../src/project-supervisor.js";
-import { projectSupervisorUnit } from "./support/team-units.js";
+import { parseInterpretation } from "../src/project-supervisor.js";
+import { projectSupervisorUnit, type ProjectSupervisorUnit, type ProjectSupervisorUnitDefinitions } from "./support/team-units.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../src/project-supervisor-contract.js";
 import { ProjectSupervisorSnapshot } from "../src/project-supervisor-contract.js";
@@ -376,7 +376,7 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
     const workspaceRoot = registeredProjects.find(project => project.id === projectId)?.workspaceRoot ?? "";
     return missingDefinitions(projectId, threadId, workspaceRoot);
   }};
-  const makeSupervisor = (definitions: ConstructorParameters<typeof ProjectSupervisor>[8] | null = defaultDefinitions) =>
+  const makeSupervisor = (definitions: ProjectSupervisorUnitDefinitions | null = defaultDefinitions) =>
     projectSupervisorUnit(config, supervisorStore, source, t3, readRpc, operateRpc, activationSnapshot, definitions ?? undefined);
   const restart = (): void => {
     guidance.close();
@@ -431,7 +431,7 @@ const reserveReadyBinding = (fixture: Awaited<ReturnType<typeof makeFixture>>, m
   return ready;
 };
 
-const registerReadyHelper = (fixture: Awaited<ReturnType<typeof makeFixture>>, supervisor: ProjectSupervisor,
+const registerReadyHelper = (fixture: Awaited<ReturnType<typeof makeFixture>>, supervisor: ProjectSupervisorUnit,
   binding: ReturnType<typeof reserveReadyBinding>, threadId: string) => {
   const helperProjection = makeSourceProjection(threadId, binding.projectId, []);
   helperProjection.thread.lineage = {parentThreadId: binding.threadId, relationshipToParent: "subagent", rootThreadId: binding.threadId};
@@ -446,7 +446,7 @@ const markRootMissing = (fixture: Awaited<ReturnType<typeof makeFixture>>, bindi
   return {...binding, state: "missing" as const};
 };
 
-const addPendingHelperCheckin = (supervisor: ProjectSupervisor, binding: ReturnType<typeof reserveReadyBinding>, memberThreadId: string,
+const addPendingHelperCheckin = (supervisor: ProjectSupervisorUnit, binding: ReturnType<typeof reserveReadyBinding>, memberThreadId: string,
   requestId: string, now: number, state: "waiting" | "uncertain" = "waiting") => {
   const prepared = supervisor.conversation.requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: memberThreadId,
     kind: "review", taskId: null, text: "Bounded helper check-in", batch: null, completionMarker: `complete:${requestId}`}, now);

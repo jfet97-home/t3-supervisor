@@ -288,7 +288,7 @@ export const startLinFixture = async (options: LinOptions = {}): Promise<LinFixt
     core.store.baseline({snapshotSequence: 10, threads: [{id: mainThreadId, latestRunId: main.runs[0]?.id ?? null}]});
     // sets catalogClassificationsReady, without which workflowEditingEnabled denies every effect (project-supervisor.ts:130-136,165)
     await core.supervision.candidates("");
-    endpoint = await startIntEndpoint(core, loader);
+    endpoint = await startIntEndpoint(core);
   } catch (cause) {
     await closeAll();
     throw cause;

@@ -241,6 +241,8 @@ const makeFixture = async (initialDefinitions: ProjectDefinitionSnapshot = defin
   let definitionReadOutcomes: Array<ProjectDefinitionSnapshot | Error> = [];
   let currentDefinitions = initialDefinitions;
   let dispatchFailure: "unknown" | "rejected" | null = null;
+  // runs when the models read has its answer, before the caller receives it
+  let modelsRead: (() => void) | null = null;
   const guidance = new GuidanceStore(directory);
   const ownedIds = new Set<string>();
   const store = new ProjectSupervisorStore(guidance, ownedIds);
@@ -266,7 +268,7 @@ const makeFixture = async (initialDefinitions: ProjectDefinitionSnapshot = defin
     },
   };
   const readRpc = async (tag: string): Promise<unknown> => {
-    if (tag === "server.getConfig") return modelConfig;
+    if (tag === "server.getConfig") {modelsRead?.();return modelConfig;}
     throw new Error(`unexpected fake read RPC: ${tag}`);
   };
   const operateRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
@@ -323,6 +325,7 @@ const makeFixture = async (initialDefinitions: ProjectDefinitionSnapshot = defin
     setDefinitions: (next: ProjectDefinitionSnapshot) => { currentDefinitions = next; },
     setDefinitionReadOutcomes: (outcomes: Array<ProjectDefinitionSnapshot | Error>) => { definitionReadOutcomes = [...outcomes]; },
     setDispatchFailure: (failure: "unknown" | "rejected") => { dispatchFailure = failure; },
+    onModelsRead: (hook: (() => void) | null) => { modelsRead = hook; },
     task: () => store.task(sourceThreadId),
     store,
   };
@@ -879,15 +882,12 @@ it("an Enable or re-enable saved during the final awaits leaves the request undi
     const fixture = await makeFixture();
     after(t, fixture.cleanup);
     const supervisor = fixture.makeSupervisor();
-    const internal = supervisor as unknown as {models(signal: AbortSignal): Promise<unknown>; store: {recordChatEnable(id: string, at: number): void}};
-    const models = internal.models.bind(supervisor);
+    const internal = supervisor as unknown as {store: {recordChatEnable(id: string, at: number): void}};
     // the Enable lands while the last read before dispatch is awaited, after the queued gate and definition preparation
-    internal.models = async signal => {
-      const value = await models(signal);
+    fixture.onModelsRead(() => {
       const queued = fixture.task();
       if (queued?.status === "queued" && queued.definitionContext) internal.store.recordChatEnable(sourceThreadId, Date.now());
-      return value;
-    };
+    });
     await supervisor.runOnce();
     assert.equal(fixture.dispatches().length, 0, "a request written before the Enable is never dispatched");
     assert.equal(fixture.task()!.status, "expired");

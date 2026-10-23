@@ -1,3 +1,5 @@
+import { Effect } from "effect";
+import type { GuidanceSupervision } from "../../src/guidance-ui.js";
 import type { ProjectSupervisor } from "../../src/project-supervisor.js";
 import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, ProjectSupervisorRetryInput, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome } from "../../src/project-supervisor-contract.js";
 
@@ -76,13 +78,13 @@ export const retryOutcome: ProjectSupervisorSaveOutcome = {status: "uncertain", 
 export type SupervisionCalls = {saves: unknown[]; retries: unknown[]; chats: unknown[]};
 
 // the four ProjectSupervisor methods the HttpApi handlers call for these endpoints, recording each decoded payload
-export const fakeSupervision = (): {supervision: ProjectSupervisor; calls: SupervisionCalls} => {
+export const fakeSupervision = (): {supervision: GuidanceSupervision; calls: SupervisionCalls} => {
   const calls: SupervisionCalls = {saves: [], retries: [], chats: []};
-  const supervision = {
-    snapshot: async (projectId: string, _signal: AbortSignal, mainThreadId: string | null) => ({...supervisorSnapshot, projectId, mainThreadId}),
-    save: async (payload: ProjectSupervisorSaveInput) => {calls.saves.push(payload);return saveOutcome;},
-    retry: async (payload: ProjectSupervisorRetryInput) => {calls.retries.push(payload);return retryOutcome;},
-    setChatSupervision: async (payload: ProjectSupervisorChatSupervisionInput) => {calls.chats.push(payload);return retryOutcome;},
-  } as unknown as ProjectSupervisor;
-  return {supervision, calls};
+  const supervisor = {
+    snapshot: (projectId: string, mainThreadId: string | null) => Effect.succeed({...supervisorSnapshot, projectId, mainThreadId}),
+    save: (payload: ProjectSupervisorSaveInput) => Effect.sync(() => {calls.saves.push(payload);return saveOutcome;}),
+    retry: (payload: ProjectSupervisorRetryInput) => Effect.sync(() => {calls.retries.push(payload);return retryOutcome;}),
+    setChatSupervision: (payload: ProjectSupervisorChatSupervisionInput) => Effect.sync(() => {calls.chats.push(payload);return retryOutcome;}),
+  } as unknown as ProjectSupervisor["Service"];
+  return {supervision: {supervisor, control: {} as GuidanceSupervision["control"]}, calls};
 };

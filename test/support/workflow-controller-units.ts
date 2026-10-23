@@ -1,9 +1,10 @@
 import { Clock, Deferred, Effect, Scope } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { supervisorTeamControllerFacade, workflowWriteControllerFacade, workflowWriteDelegates, type RootRun } from "../../src/guidance-application.js";
+import { supervisorTeamControllerFacade, workflowWriteControllerFacade, type RootRun } from "../../src/guidance-application.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import { ProjectDefinitions } from "../../src/project-definitions.js";
 import type { BindingRecord, ProjectSupervisorStore } from "../../src/project-supervisor-store.js";
+import { SupervisionControl } from "../../src/supervision-control.js";
 import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService, type SupervisionGateShape } from "../../src/supervision-gate.js";
 import { SupervisionStores } from "../../src/supervision-stores.js";
 import { SupervisorConversation } from "../../src/supervisor-conversation.js";
@@ -48,8 +49,8 @@ export type WorkflowWriteControllerUnitOptions = {
   maxEvidenceWaitMs?: number;
 };
 
-export type WorkflowWriteControllerUnit = WorkflowWriteController & {readonly options: WorkflowWriteControllerUnitOptions};
-export type SupervisorTeamControllerUnit = Omit<SupervisorTeamController, "reconcile"> & {
+export type WorkflowWriteControllerUnit = ReturnType<typeof workflowWriteControllerFacade> & {readonly options: WorkflowWriteControllerUnitOptions};
+export type SupervisorTeamControllerUnit = Omit<ReturnType<typeof supervisorTeamControllerFacade>, "reconcile"> & {
   readonly workflows: WorkflowWriteControllerUnit;
   // the baseline reconcile took an explicit `now` (its default the wall clock)
   reconcile(binding: BindingRecord, signal: AbortSignal, now?: number): Promise<void>;
@@ -144,6 +145,17 @@ const contextViewsOf = (views: NonNullable<WorkflowWriteControllerUnitOptions["c
   ({readContextView: (binding: BindingRecord, input: SupervisorContextViewInput) => Effect.promise((signal) => views.readContextView(binding, input, signal))}) as
     unknown as SupervisorConversation["Service"];
 
+// the baseline Start and Stop delegates as the Start/Stop control the controller calls, each receiving the call's cancel as its
+// signal; a missing delegate answers as the baseline controller without it did
+const controlOf = (options: WorkflowWriteControllerUnitOptions): SupervisionControl["Service"] => ({
+  startSupervision: (input: SupervisionStartInput, evidence: {runId: string}, cancel?: Deferred.Deferred<void>) => options.starts
+    ? signalled(cancel, (signal) => options.starts!.start(input, evidence as WorkflowEvidenceMatch, signal))
+    : Effect.succeed<SupervisionStartResult>({status: "unavailable", reason: "supervision_start_unavailable"}),
+  stopSupervision: (input: SupervisionStopInput, evidence: unknown, cancel?: Deferred.Deferred<void>) => options.stops
+    ? signalled(cancel, (signal) => options.stops!.stop(input, evidence as WorkflowEvidenceMatch, signal))
+    : Effect.succeed<SupervisionStopResult>({status: "unavailable", reason: "supervision_stop_unavailable"}),
+}) as unknown as SupervisionControl["Service"];
+
 // the write controller over its own admission gate, whose guard is the unit's scope predicates, and the stores of its options;
 // without a team option it runs without team authority, as the baseline controller did
 export const workflowWriteControllerUnit = (options: WorkflowWriteControllerUnitOptions): WorkflowWriteControllerUnit => {
@@ -153,14 +165,9 @@ export const workflowWriteControllerUnit = (options: WorkflowWriteControllerUnit
   const stores = SupervisionStores.of({supervisors: options.supervisors, requests: new SupervisorConversationStore(options.supervisors.store),
     monitor: new ProjectSupervisorMonitorStore(options.supervisors.store), team: options.team ?? new SupervisorTeamStore(options.supervisors),
     workflows: options.workflows});
-  const delegates = workflowWriteDelegates({
-    ...(options.starts ? {startSupervision: (input: SupervisionStartInput, evidence: {runId: string}, signal: AbortSignal) =>
-      options.starts!.start(input, evidence as WorkflowEvidenceMatch, signal)} : {}),
-    ...(options.stops ? {stopSupervision: (input: SupervisionStopInput, evidence: unknown, signal: AbortSignal) =>
-      options.stops!.stop(input, evidence as WorkflowEvidenceMatch, signal)} : {}),
-  });
-  const service = Effect.runSync(WorkflowWriteController.make({...delegates, ...(options.team ? {} : {withoutTeam: true}),
+  const service = Effect.runSync(WorkflowWriteController.make({...(options.team ? {} : {withoutTeam: true}),
     ...(options.maxEvidenceWaitMs !== undefined ? {maxEvidenceWaitMs: options.maxEvidenceWaitMs} : {})}).pipe(
+    (effect) => options.starts || options.stops ? Effect.provideService(effect, SupervisionControl, controlOf(options)) : effect,
     Effect.provideService(SupervisionGate, gate),
     Effect.provideService(WorkflowNativeAccess, native),
     Effect.provideService(SupervisionStores, stores),

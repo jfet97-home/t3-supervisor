@@ -6,8 +6,7 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { Effect } from "effect";
 import { GuidanceStore } from "../../src/guidance-store.js";
-import { ProjectSupervisor } from "../../src/project-supervisor.js";
-import { projectSupervisorUnit } from "./team-units.js";
+import { projectSupervisorUnit, type ProjectSupervisorUnitDefinitions } from "./team-units.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../../src/project-supervisor-contract.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
@@ -74,7 +73,7 @@ const addSupervisorRequest = (projection: Projection, payload: Record<string, un
   nodes.push({id: rootId, threadId, runId, parentNodeId: null, rootNodeId: rootId, kind: "root_turn", status: "running", providerThreadId: "supervisor-provider"});
 };
 
-export type Definitions = ConstructorParameters<typeof ProjectSupervisor>[8];
+export type Definitions = ProjectSupervisorUnitDefinitions;
 
 // a real temp-file guidance database with counting native fakes; `now` is the constructor clock seam
 export const makeFixture = async (initial: Array<{threadId: string; projectId: string; turns: Turn[]}>) => {

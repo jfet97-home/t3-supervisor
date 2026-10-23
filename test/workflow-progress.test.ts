@@ -6,7 +6,8 @@ import type { ProjectSupervisor } from "../src/project-supervisor.js";
 import type { ProjectSupervisorScopeSnapshot } from "../src/supervisor-observation.js";
 import type { WorkflowStateDocument, WorkflowStateEvidence } from "../src/workflow-state-contract.js";
 import type { WorkflowReadResult, WorkflowWriteController } from "../src/workflow-write-controller.js";
-import { parseWorkflowProgressPageQuery, readWorkflowProgressPage, WorkflowProgressSnapshotSchema } from "../src/workflow-progress.js";
+import { parseWorkflowProgressPageQuery, WorkflowProgressSnapshotSchema } from "../src/workflow-progress.js";
+import { readWorkflowProgressPage } from "./support/progress-page.js";
 
 const scopeSnapshot = (): ProjectSupervisorScopeSnapshot => ({
   projectId: "project",

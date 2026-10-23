@@ -333,7 +333,8 @@ it("CT-PS-05: concurrent control() shares one presence and boundary read; when t
     assert.equal(left.detectionStatus, "present");
     assert.equal(f.supervisorStore.autoControlInitialized("project-new"), true);
   }
-  // the shared read runs on the first caller's signal: its abort fails the joined caller, which records unavailable in memory only
+  // the shared read runs in the first caller: its interruption ends that call without a result and fails the joined caller,
+  // which records unavailable in memory only
   {
     const f = await makeControlFixture([{threadId: "new-main", projectId: "project-new", turns: []}]);
     after(t, f.cleanup);
@@ -355,7 +356,7 @@ it("CT-PS-05: concurrent control() shares one presence and boundary read; when t
     await secondJoined.promise;
     firstCaller.abort();
     const [left, right] = await Promise.allSettled([first, second]);
-    assert.equal(left.status, "fulfilled", "the aborted first caller still resolves its control read");
+    assert.equal(left.status, "rejected", "the interrupted first caller ends without a control read");
     assert.equal(right.status, "fulfilled");
     assert.equal(right.value.detectionStatus, "unavailable");
     assert.equal(right.value.detectionError, "The project .t3-supervisor folder could not be checked.");
@@ -469,19 +470,15 @@ it("CT-PS-09: a Stop saved while the final models() read is awaited leaves the t
   const policy = fixture.threadPolicy;
   assert.ok(policy);
   const supervisor = fixture.makeSupervisor();
-  const internal = supervisor as unknown as {models(signal: AbortSignal): Promise<unknown>};
-  const models = internal.models.bind(supervisor);
   let reasonAtStop: string | null = null;
   // the Stop lands while the last read before dispatch is awaited: discovery has no task yet, the final read sees it queued
-  internal.models = async signal => {
-    const value = await models(signal);
+  fixture.setReadHook(() => {
     const queued = fixture.supervisorStore.task(mainThreadId);
     if (queued?.status === "queued" && reasonAtStop === null) {
       reasonAtStop = queued.reason;
       Effect.runSync(supervisor.saveThreadPolicy({...policy.get(), excludedThreadIds: [mainThreadId]}));
     }
-    return value;
-  };
+  });
   await within(supervisor.runOnce(AbortSignal.timeout(5_000)), 5_000, "runOnce");
   assert.equal(reasonAtStop, "Waiting for the project Supervisor.", "the Stop was saved during the final models() read");
   assert.equal(supervisor.supervisionStopped(mainThreadId), true);
@@ -526,19 +523,19 @@ it("CT-PS-10: control re-checks presence after 30 s, or 60 s once unavailable, o
   assert.equal(presenceCalls, 2);
 });
 
-it("CT-PS-10: a running interpretation becomes unavailable only after more than 300 s of Date.now, which also stamps dispatchedAt and updatedAt", {timeout: 10_000}, async t => {
+it("CT-PS-10: a running interpretation becomes unavailable only after more than 300 s of the supervisor clock, which also stamps dispatchedAt and updatedAt", {timeout: 10_000}, async t => {
   const f = await makeControlFixture([{threadId: "source-thread", projectId: "project-a", turns: [{id: "first-task", sequence: 11, text: "Review the release"}]}]);
   after(t, f.cleanup);
   let wall = Date.now();
-  mockMethod(t, Date, "now", () => wall);
-  const constructorClock = wall - 3_600_000;
-  const supervisor = f.makeSupervisor({now: () => constructorClock});
+  // the wall clock stands an hour ahead of the supervisor clock, which alone stamps and times the interpretation
+  mockMethod(t, Date, "now", () => wall + 3_600_000);
+  const supervisor = f.makeSupervisor({now: () => wall});
   await supervisor.runOnce(AbortSignal.timeout(5_000));
   const task = f.supervisorStore.task("source-thread");
   assert.ok(task);
   assert.equal(task.status, "waiting");
-  assert.equal(task.dispatchedAt, wall, "dispatchedAt is Date.now");
-  assert.equal(task.updatedAt, wall, "updatedAt is Date.now");
+  assert.equal(task.dispatchedAt, wall, "dispatchedAt is the supervisor clock");
+  assert.equal(task.updatedAt, wall, "updatedAt is the supervisor clock");
   const binding = f.supervisorStore.binding("project-a", "source-thread");
   assert.ok(binding);
   const run = f.projections.get(binding.threadId)?.runs.find(candidate => candidate.userMessageId === task.messageId);

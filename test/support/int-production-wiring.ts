@@ -1,4 +1,3 @@
-import { NodeCrypto } from "@effect/platform-node";
 import { Context, Effect, Exit, Layer, Scope } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { request as httpRequest } from "node:http";
@@ -6,25 +5,25 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { supervisorTeamControllerFacade, supervisorTeamServices, supervisorWorkflowControllers, workflowWriteControllerFacade } from "../../src/guidance-application.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
-import { SupervisorIds } from "../../src/ids.js";
 import { NativeEnvelope } from "../../src/native-envelope.js";
 import { GuidanceRuntime } from "../../src/guidance.js";
 import { startGuidanceUi } from "./service-auth-harness.js";
 import { ProjectSupervisorStore, loadSupervisorOwnership } from "../../src/project-supervisor-store.js";
-import { ProjectSupervisor } from "../../src/project-supervisor.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import type { StoreShape } from "../../src/store.js";
 import { makeSupervisionGate, SupervisionGate, SupervisionScope } from "../../src/supervision-gate.js";
 import { ProjectDefinitions } from "../../src/project-definitions.js";
-import { definitionsService } from "./team-units.js";
+import { buildProjectSupervisor, definitionsService, projectSupervisorFacade, type ProjectSupervisorUnit } from "./team-units.js";
 import { NativeOperateRpc, NativeRpc, NativeShell, type NativeRpcShape, type SupervisorRpc } from "../../src/supervisor-native.js";
-import { makeSupervisorRpc, readSupervisorBaseline } from "./supervisor-native-client.js";
-import type { SupervisorTeamController } from "../../src/supervisor-team-controller.js";
+import { makeSupervisorRpc } from "./supervisor-native-client.js";
+import { SupervisorTeamController } from "../../src/supervisor-team-controller.js";
 import { makeT3Client, T3Client, type T3ClientShape } from "../../src/t3.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { ProjectInfo, SupervisorConfig, ThreadInfo } from "../../src/types.js";
 import { WorkflowMcp } from "../../src/workflow-mcp.js";
-import { WorkflowNativeAccess, type WorkflowWriteController } from "../../src/workflow-write-controller.js";
+import { WorkflowNativeAccess, WorkflowWriteController } from "../../src/workflow-write-controller.js";
+import { SupervisorIds } from "../../src/ids.js";
+import { NodeCrypto } from "@effect/platform-node";
 
 // the production object graph of src/main.ts and src/guidance-application.ts, built over a loopback peer and temp files
 
@@ -44,10 +43,13 @@ export type IntSupervision = {
   t3: T3ClientShape;
   readRpc: SupervisorRpc;
   operateRpc: SupervisorRpc;
-  supervision: ProjectSupervisor;
+  supervision: ProjectSupervisorUnit;
   // the operate client and the services of the supervision run, which the controllers share with it
   operate: NativeRpcShape;
-  services: Effect.Success<ReturnType<typeof supervisorTeamServices>>["services"];
+  services: ProjectSupervisorUnit["services"];
+  // the workflow write and team controllers of the run
+  writes: WorkflowWriteController["Service"];
+  team: SupervisorTeamController["Service"];
   // closes both database files, as a process exit would
   close(): void;
 };
@@ -58,7 +60,8 @@ const buildT3Client = (baseUrl: string, token: string): Promise<T3ClientShape> =
     return Context.get(context, T3Client);
   })));
 
-// opens the supervision services on existing files, as one process start (src/main.ts:12-17, guidance-application.ts:29-30,53-54,75-77)
+// opens the supervision services on existing files, as one process start (src/main.ts, src/guidance-application.ts): the team
+// services, the Start/Stop control, the workflow write and team controllers and the project supervisor of one supervision run
 export const openIntSupervision = async (input: {directory: string; peerUrl: string; catalog: () => IntCatalog;
   definitions?: IntDefinitions; fetch?: typeof globalThis.fetch}): Promise<IntSupervision> => {
   const config: SupervisorConfig = {dataDirectory: input.directory, t3Url: input.peerUrl, t3TokenFile: "unused", excludedThreadIds: [],
@@ -79,57 +82,52 @@ export const openIntSupervision = async (input: {directory: string; peerUrl: str
   const scope = Effect.runSync(Scope.make());
   const supervisorScope = new SupervisionScope(config, store, true);
   const operate = Effect.runSync(NativeRpc.make({baseUrl: config.t3Url, token: operateToken}).pipe(Effect.provide(NativeEnvelope.layer)));
-  const team = await Effect.runPromise(supervisorTeamServices((effect, options) => Effect.runPromise(effect, options), store, config.t3Url, supervisorScope).pipe(
+  const withDefinitions = <A, E, R>(effect: Effect.Effect<A, E, R>) => input.definitions ? Effect.provideService(effect, ProjectDefinitions, definitionsService(input.definitions)) : effect;
+  const services = await Effect.runPromise(supervisorTeamServices(store, config.t3Url, supervisorScope).pipe(
     Effect.provideService(NativeOperateRpc, operate),
     Effect.provideServiceEffect(SupervisionGate, makeSupervisionGate(supervisorScope)),
-    (effect) => input.definitions ? Effect.provideService(effect, ProjectDefinitions, definitionsService(input.definitions)) : effect,
+    withDefinitions,
     Effect.provideService(T3Client, t3),
     Effect.provide(Layer.mergeAll(FetchHttpClient.layer, SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer)))),
     // a test may observe the synchronous start of each request; the request itself is the platform fetch's
     (effect) => input.fetch ? Effect.provideService(effect, FetchHttpClient.Fetch, input.fetch) : effect,
     Scope.provide(scope),
   ));
-  const supervision = new ProjectSupervisor(config, store, source, t3, readRpc, operateRpc, readSupervisorBaseline(config.t3Url, readToken),
-    team, input.definitions);
-  return {directory: input.directory, config, policy, guidance, store, source, t3, readRpc, operateRpc, supervision, operate, services: team.services,
+  // the read credential's native reads, the shell boundary and the workflow controllers' proof and scope
+  const nativeRead = Effect.runSync(NativeRpc.make({baseUrl: config.t3Url, token: readToken}).pipe(Effect.provide(NativeEnvelope.layer)));
+  const nativeShell = Effect.runSync(NativeShell.make({baseUrl: config.t3Url, token: readToken}).pipe(
+    Effect.provideService(NativeRpc, nativeRead), Effect.provide(FetchHttpClient.layer)));
+  const built = buildProjectSupervisor({services, source, t3, read: nativeRead, shell: nativeShell, operate, definitions: input.definitions,
+    controllers: (context) => supervisorWorkflowControllers(config.helperProviderInstanceId).pipe(
+      Effect.provideServiceEffect(WorkflowNativeAccess, WorkflowNativeAccess.make), withDefinitions, Effect.provide(context)), scope});
+  const supervision = projectSupervisorFacade({config, store, t3, definitions: input.definitions, scope: supervisorScope, services, ...built});
+  const controllers = built.controllers as Context.Context<WorkflowWriteController | SupervisorTeamController>;
+  return {directory: input.directory, config, policy, guidance, store, source, t3, readRpc, operateRpc, supervision, operate, services,
+    writes: Context.get(controllers, WorkflowWriteController), team: Context.get(controllers, SupervisorTeamController),
     // a process exit also ends the supervision scope, which aborts any webhook POST still in flight
     close: () => {Effect.runFork(Scope.close(scope, Exit.void));guidance.close();policy.close();}};
 };
 
 export type IntEndpoint = {
-  controller: WorkflowWriteController;
-  teamController: SupervisorTeamController;
+  controller: ReturnType<typeof workflowWriteControllerFacade>;
+  teamController: ReturnType<typeof supervisorTeamControllerFacade>;
   port: number;
   token: string;
   close(): Promise<void>;
 };
 
-// wires the workflow controller, team controller, MCP endpoint and UI server exactly as guidance-application.ts does: the controller
-// services over the supervision run's services and operate client and the read credential's native reads, handed to their callers
-// as the b-03 facades
-export const startIntEndpoint = async (core: IntSupervision, definitions: IntDefinitions): Promise<IntEndpoint> => {
-  const {config, supervision, t3} = core;
-  const nativeRead = Effect.runSync(NativeRpc.make({baseUrl: config.t3Url, token: readToken.trim()}).pipe(Effect.provide(NativeEnvelope.layer)));
-  const nativeShell = Effect.runSync(NativeShell.make({baseUrl: config.t3Url, token: readToken.trim()}).pipe(
-    Effect.provideService(NativeRpc, nativeRead), Effect.provide(FetchHttpClient.layer)));
-  const scope = Effect.runSync(Scope.make());
-  const controllers = await Effect.runPromise(supervisorWorkflowControllers(supervision, config.helperProviderInstanceId).pipe(
-    Effect.provideServiceEffect(WorkflowNativeAccess, WorkflowNativeAccess.make.pipe(Effect.provideService(NativeShell, nativeShell),
-      Effect.provideService(T3Client, t3), Effect.provideService(NativeRpc, nativeRead))),
-    Effect.provideService(ProjectDefinitions, definitionsService(definitions)),
-    Effect.provideService(NativeOperateRpc, core.operate),
-    Effect.provide(core.services),
-    Scope.provide(scope),
-  ));
-  const workflowReader = workflowWriteControllerFacade((effect, options) => Effect.runPromise(effect, options), controllers.writes);
-  const teamController = supervisorTeamControllerFacade((effect, options) => Effect.runPromise(effect, options), controllers.team);
-  supervision.teamEffects = teamController;
+// wires the MCP endpoint and UI server exactly as guidance-application.ts does: the api handlers yield the supervision services,
+// the MCP endpoint calls the controllers' b-03 facades
+export const startIntEndpoint = async (core: IntSupervision): Promise<IntEndpoint> => {
+  const {config} = core;
+  const workflowReader = workflowWriteControllerFacade((effect, options) => Effect.runPromise(effect, options), core.writes);
+  const teamController = supervisorTeamControllerFacade((effect, options) => Effect.runPromise(effect, options), core.team);
   const ui = await startGuidanceUi(config, Effect.runSync(GuidanceRuntime.make(config, core.guidance, core.source)),
-    undefined, undefined, supervision, WorkflowMcp.layer(workflowReader, teamController), workflowReader);
+    undefined, undefined, {supervisor: core.supervision.service, control: core.supervision.supervisionControl}, WorkflowMcp.layer(workflowReader, teamController), core.writes);
   const address = ui.server.address();
   if (address === null || typeof address === "string") throw new Error("ui did not bind a TCP port");
   const token = await readFile(join(config.dataDirectory, "access", "workflow-mcp-token"), "utf8");
-  return {controller: workflowReader, teamController, port: address.port, token, close: () => ui.close().finally(() => Effect.runPromise(Scope.close(scope, Exit.void)))};
+  return {controller: workflowReader, teamController, port: address.port, token, close: () => ui.close()};
 };
 
 export type McpReply = {httpStatus: number; isError: boolean; value: unknown};

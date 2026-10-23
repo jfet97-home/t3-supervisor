@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { GuidanceStore } from "../../src/guidance-store.js";
-import { ProjectSupervisor } from "../../src/project-supervisor.js";
-import { projectSupervisorUnit } from "./team-units.js";
+import { projectSupervisorUnit, type ProjectSupervisorUnitDefinitions } from "./team-units.js";
+import type { ScopeLocksShape } from "../../src/scope-locks.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../../src/project-supervisor-contract.js";
 import { T3TransportError, type T3ClientShape } from "../../src/t3.js";
@@ -146,6 +146,8 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
   let acceptedDispatchesWithoutRun = 0;
   let operateHook: OperateHook | null = null;
   let projectionHook: ProjectionHook | null = null;
+  // runs when a read rpc has its answer, before the caller receives it
+  let readHook: ((tag: string) => void) | null = null;
   let baselineReads = 0;
   for (const source of initial) {
     projections.set(source.threadId, makeSourceProjection(source.threadId, source.projectId, source.turns));
@@ -176,7 +178,7 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
     },
   };
   const readRpc: Rpc = async tag => {
-    if (tag === "server.getConfig") return modelConfig;
+    if (tag === "server.getConfig") {readHook?.(tag);return modelConfig;}
     throw new Error("unexpected fake read RPC");
   };
   const operateRpc: Rpc = async (tag, payload, signal) => {
@@ -226,10 +228,10 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
     const workspaceRoot = registeredProjects.find(project => project.id === projectId)?.workspaceRoot ?? "";
     return missingDefinitions(projectId, threadId, workspaceRoot);
   }};
-  const makeSupervisor = (overrides: {activationSnapshot?: typeof activationSnapshot; definitions?: ConstructorParameters<typeof ProjectSupervisor>[8];
-    now?: () => number} = {}) =>
+  const makeSupervisor = (overrides: {activationSnapshot?: typeof activationSnapshot; definitions?: ProjectSupervisorUnitDefinitions;
+    now?: () => number; locks?: (locks: ScopeLocksShape) => ScopeLocksShape} = {}) =>
     projectSupervisorUnit(config, supervisorStore, source, t3, readRpc, operateRpc, overrides.activationSnapshot ?? activationSnapshot,
-      overrides.definitions ?? defaultDefinitions, overrides.now);
+      overrides.definitions ?? defaultDefinitions, overrides.now, overrides.locks ? {locks: overrides.locks} : {});
   // a process restart: the old connection is closed and a new store opens the same guidance.sqlite3
   const restart = (): void => {
     guidance.close();
@@ -249,6 +251,7 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
     setAcceptedDispatchesWithoutRun: (count: number) => {acceptedDispatchesWithoutRun = count;},
     setOperateHook: (hook: OperateHook | null) => {operateHook = hook;},
     setProjectionHook: (hook: ProjectionHook | null) => {projectionHook = hook;},
+    setReadHook: (hook: ((tag: string) => void) | null) => {readHook = hook;},
     cleanup: async () => {
       try {guidance.close();} catch { /* already closed by a simulated crash */ }
       threadPolicy?.close();

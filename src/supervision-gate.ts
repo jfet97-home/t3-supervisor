@@ -94,21 +94,6 @@ export class SupervisionGate extends Context.Service<SupervisionGate, Supervisio
   static readonly layer = (guard: GateGuard): Layer.Layer<SupervisionGate> => Layer.effect(SupervisionGate, makeSupervisionGate(guard));
 }
 
-// t-07 (plan 3.9): an unported synchronous policy block (Stop, Enable, Start activation, chat supervision, thread policy)
-// run whole as one admission section of the same gate the ported sends use, so no send's guard check and initiation can
-// interleave with it; `run` serves the promise callers, `effect` the handlers that are already effects (t-02). a block's
-// own exception is its failure, unchanged. removed when S6b ports these writers onto the gate directly
-export interface LegacyAdmission {
-  readonly gate: SupervisionGateShape;
-  readonly run: <A>(block: () => A) => Promise<A>;
-  readonly effect: <A>(block: () => A) => Effect.Effect<A, unknown>;
-}
-
-export const legacyAdmission = (gate: SupervisionGateShape, run: <A, E>(effect: Effect.Effect<A, E>) => Promise<A>): LegacyAdmission => {
-  const effect = <A>(block: () => A) => gate.admit(() => Effect.try({ try: block, catch: (cause) => cause }));
-  return { gate, effect, run: (block) => run(effect(block)) };
-};
-
 // a send handed to its native transport: `result` resolves to the path's baseline outcome for every reply and error (it
 // never fails) and classifies its own interruption on the durable receipt (uncertain once the request left); `release` is
 // the adapter's local cleanup and runs exactly once

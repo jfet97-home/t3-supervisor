@@ -11,19 +11,27 @@ import { GuidanceRuntime } from "./guidance.js";
 import type { SupervisorConfig } from "./types.js";
 import type { ProjectDefinitionLoader } from "./project-definitions.js";
 import type { ProjectConfigEditor } from "./project-config-editor.js";
-import type { ProjectSupervisor } from "./project-supervisor.js";
-import type { WorkflowWriteController } from "./workflow-write-controller.js";
-import { parseWorkflowProgressPageQuery, readWorkflowProgressPage } from "./workflow-progress.js";
+import { ProjectSupervisor } from "./project-supervisor.js";
+import type { SupervisionControl } from "./supervision-control.js";
+import { WorkflowWriteController } from "./workflow-write-controller.js";
+import { parseWorkflowProgressPageQuery } from "./workflow-progress.js";
+import { readWorkflowProgressPage } from "./workflow-progress-reader.js";
 import { ServiceAuth } from "./service-auth.js";
 import { WorkflowMcp, WorkflowMcpRoute } from "./workflow-mcp.js";
 import { overviewPage } from "./dashboard-overview.js";
 
-// the unported supervision objects the api handlers call through their promise shapes (b-03)
+// the supervision services the api handlers yield
+export interface GuidanceSupervision {
+  readonly supervisor: ProjectSupervisor["Service"];
+  readonly control: SupervisionControl["Service"];
+}
+
+// the definitions and the config editor are unported objects the api handlers call through their promise shapes (b-03)
 export interface GuidanceUiOptions {
   readonly definitions?: ProjectDefinitionLoader | undefined;
   readonly editor?: ProjectConfigEditor | undefined;
-  readonly supervision?: ProjectSupervisor | undefined;
-  readonly workflowReader?: WorkflowWriteController | undefined;
+  readonly supervision?: GuidanceSupervision | undefined;
+  readonly workflowReader?: WorkflowWriteController["Service"] | undefined;
 }
 
 export class InvalidWorkflowMcpHosts extends Data.TaggedError("InvalidWorkflowMcpHosts") {
@@ -102,69 +110,40 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
   const mcp = yield* WorkflowMcp;
   yield* fs.remove(join(config.dataDirectory, "ui-login-code"), { force: true });
   const { definitions, editor, supervision, workflowReader } = options;
+  // a supervision call answers its fixed UiError for any failure or defect, and for absent supervision; an interruption stays one
+  const supervised = <A, E, R>(message: string, call: (services: GuidanceSupervision) => Effect.Effect<A, E, R>): Effect.Effect<A, UiError, R> =>
+    !supervision ? Effect.fail(new UiError({message})) : Effect.catchCause(Effect.suspend(() => call(supervision)),
+      (cause) => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause as Cause.Cause<never>) : Effect.fail(new UiError({message})));
   const handlers = HttpApiBuilder.group(SupervisorApi, "guidance", (h) =>
     h.handleAll({
       snapshot: () => Effect.orDie(runtime.snapshot),
-      dashboardOverview: ({query}) => Effect.tryPromise({
-        try: () => {if (!supervision) throw new Error("supervision_unavailable");return supervision.overview(overviewPage(query));},
-        catch: () => new UiError({message: "The work overview is unavailable. Refresh to try again."}),
+      dashboardOverview: ({query}) => supervised("The work overview is unavailable. Refresh to try again.",
+        ({supervisor}) => Effect.suspend(() => supervisor.overview(overviewPage(query)))),
+      noProjectControl: () => Effect.try({try: () => {if (!supervision) throw new Error("unavailable");return supervision.supervisor.noProjectControl();}, catch: () => new UiError({message: "No Project mode unavailable."})}),
+      saveNoProjectControl: ({payload}) => supervised("Reload the No Project mode before retrying.", ({supervisor}) => supervisor.saveNoProjectControl(payload)),
+      supervisionCandidates: ({query}) => supervised("Chat search unavailable.", ({supervisor}) => supervisor.candidates(query.query, query.purpose)),
+      startSupervision: ({payload}) => supervised("Start outcome is unknown. Check its original operation ID; do not replay.", ({control}) =>
+        Effect.map(control.dashboardStart(payload.threadId, payload.operationId), (result) => ({...payload, status: result.status === "invalid" ? "denied" as const : result.status, reason: result.reason}))),
+      supervisionStartStatus: ({query}) => Effect.try({try: () => {if (!supervision) throw new Error("unavailable");return supervision.control.startStatus(query.threadId, query.operationId);}, catch: () => new UiError({message: "Start status unavailable."})}),
+      supervisionControl: ({query}) => supervised("Supervision control is unavailable.", ({supervisor}) => supervisor.control(query.projectId ?? null)),
+      saveSupervisionControl: ({payload}) => supervised("The enable/disable outcome could not be confirmed. Reload before trying again.", ({supervisor}) => supervisor.saveControl(payload)),
+      supervisionSetupOptions: ({query}) => supervised("Registered checkout options could not be loaded.", ({supervisor}) => supervisor.setupOptions(query.projectId)),
+      setupSupervision: ({payload}) => supervised("The setup outcome could not be confirmed. Inspect the selected checkout before retrying.", ({supervisor}) => supervisor.setup(payload)),
+      globalDefinitionsControl: () => supervised("Global rules control is unavailable.", ({supervisor}) => supervisor.globalDefinitionsControl),
+      saveGlobalDefinitionsControl: ({payload}) => supervised("The global rules setup outcome could not be confirmed. Inspect ~/.t3-supervisor before retrying.",
+        ({supervisor}) => supervisor.saveGlobalDefinitionsControl(payload)),
+      projectSupervisor: ({query}) => supervised("Project supervision is unavailable. Check the T3 connection and registered project.",
+        ({supervisor}) => supervisor.snapshot(query.projectId, query.mainThreadId ?? null)),
+      workflowProgress: ({query}) => supervised("Live workflow progress is unavailable. Refresh and check the T3 connection.", ({supervisor}) => {
+        const parsed = parseWorkflowProgressPageQuery(query);
+        if (!workflowReader || !parsed) return Effect.fail(new UiError({message: "Live workflow progress is unavailable. Refresh and check the T3 connection."}));
+        return readWorkflowProgressPage(parsed).pipe(Effect.provideService(ProjectSupervisor, supervisor), Effect.provideService(WorkflowWriteController, workflowReader));
       }),
-      noProjectControl: () => Effect.try({try: () => {if (!supervision) throw new Error("unavailable");return supervision.noProjectControl();}, catch: () => new UiError({message: "No Project mode unavailable."})}),
-      saveNoProjectControl: ({payload}) => Effect.tryPromise({try: signal => {if (!supervision) throw new Error("unavailable");return supervision.saveNoProjectControl(payload, signal);}, catch: () => new UiError({message: "Reload the No Project mode before retrying."})}),
-      supervisionCandidates: ({query}) => Effect.tryPromise({try: () => {if (!supervision) throw new Error("unavailable");return supervision.candidates(query.query, query.purpose);}, catch: () => new UiError({message: "Chat search unavailable."})}),
-      startSupervision: ({payload}) => Effect.tryPromise({try: async signal => {if (!supervision) throw new Error("unavailable");const result = await supervision.dashboardStart(payload.threadId, payload.operationId, signal);return {...payload, status: result.status === "invalid" ? "denied" as const : result.status, reason: result.reason};}, catch: () => new UiError({message: "Start outcome is unknown. Check its original operation ID; do not replay."})}),
-      supervisionStartStatus: ({query}) => Effect.try({try: () => {if (!supervision) throw new Error("unavailable");return supervision.startStatus(query.threadId, query.operationId);}, catch: () => new UiError({message: "Start status unavailable."})}),
-      supervisionControl: ({query}) => Effect.tryPromise({
-        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.control(query.projectId ?? null, signal);},
-        catch: () => new UiError({message: "Supervision control is unavailable."}),
-      }),
-      saveSupervisionControl: ({payload}) => Effect.tryPromise({
-        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.saveControl(payload, signal);},
-        catch: () => new UiError({message: "The enable/disable outcome could not be confirmed. Reload before trying again."}),
-      }),
-      supervisionSetupOptions: ({query}) => Effect.tryPromise({
-        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.setupOptions(query.projectId, signal);},
-        catch: () => new UiError({message: "Registered checkout options could not be loaded."}),
-      }),
-      setupSupervision: ({payload}) => Effect.tryPromise({
-        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.setup(payload, signal);},
-        catch: () => new UiError({message: "The setup outcome could not be confirmed. Inspect the selected checkout before retrying."}),
-      }),
-      globalDefinitionsControl: () => Effect.tryPromise({
-        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.globalDefinitionsControl(signal);},
-        catch: () => new UiError({message: "Global rules control is unavailable."}),
-      }),
-      saveGlobalDefinitionsControl: ({payload}) => Effect.tryPromise({
-        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.saveGlobalDefinitionsControl(payload, signal);},
-        catch: () => new UiError({message: "The global rules setup outcome could not be confirmed. Inspect ~/.t3-supervisor before retrying."}),
-      }),
-      projectSupervisor: ({query}) => Effect.tryPromise({
-        try: signal => {
-          if (!supervision) throw new Error("supervision_unavailable");return supervision.snapshot(query.projectId, signal, query.mainThreadId ?? null);
-        }, catch: () => new UiError({message: "Project supervision is unavailable. Check the T3 connection and registered project."}),
-      }),
-      workflowProgress: ({query}) => Effect.tryPromise({
-        try: signal => {
-          if (!supervision || !workflowReader) throw new Error("workflow_progress_unavailable");
-          const parsed = parseWorkflowProgressPageQuery(query);
-          if (!parsed) throw new Error("workflow_progress_invalid_query");
-          return readWorkflowProgressPage(supervision, workflowReader, parsed, signal);
-        },
-        catch: () => new UiError({message: "Live workflow progress is unavailable. Refresh and check the T3 connection."}),
-      }),
-      saveProjectSupervisor: ({payload}) => Effect.tryPromise({
-        try: signal => {
-          if (!supervision) throw new Error("supervision_unavailable");return supervision.save(payload, signal);
-        }, catch: () => new UiError({message: "Supervisor settings could not be confirmed. Refresh and inspect the current selection before saving again."}),
-      }),
-      retryProjectSupervisor: ({payload}) => Effect.tryPromise({
-        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.retry(payload, signal);},
-        catch: () => new UiError({message: "Native access retry could not be confirmed. Refresh to inspect the retained state."}),
-      }),
-      chatSupervision: ({payload}) => Effect.tryPromise({
-        try: signal => {if (!supervision) throw new Error("supervision_unavailable");return supervision.setChatSupervision(payload, signal);},
-        catch: () => new UiError({message: "The chat supervision change could not be confirmed. Refresh to inspect the saved state."}),
-      }),
+      saveProjectSupervisor: ({payload}) => supervised("Supervisor settings could not be confirmed. Refresh and inspect the current selection before saving again.",
+        ({supervisor}) => supervisor.save(payload)),
+      retryProjectSupervisor: ({payload}) => supervised("Native access retry could not be confirmed. Refresh to inspect the retained state.", ({supervisor}) => supervisor.retry(payload)),
+      chatSupervision: ({payload}) => supervised("The chat supervision change could not be confirmed. Refresh to inspect the saved state.",
+        ({supervisor}) => supervisor.setChatSupervision(payload)),
       projectConfiguration: ({query}) => Effect.tryPromise({
         try: (signal) => {
           if (!definitions) throw new Error("Project definition access is not configured.");
@@ -181,8 +160,8 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
         const policy = config.threadPolicy;
         if (!policy) return Effect.fail(invalid(new Error("Chat settings unavailable.")));
         // each chat this editor adds or removes is a human Stop or Enable for that chat's supervision, saved as one admission
-        // section (t-02)
-        return supervision ? Effect.mapError(supervision.saveThreadPolicy(payload), invalid) : Effect.try({ try: () => policy.save(payload), catch: invalid });
+        // section
+        return supervision ? Effect.mapError(supervision.control.saveThreadPolicy(payload), invalid) : Effect.try({ try: () => policy.save(payload), catch: invalid });
       },
     }),
   );

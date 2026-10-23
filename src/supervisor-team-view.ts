@@ -1,31 +1,55 @@
+import { Effect } from "effect";
 import type {ProjectSupervisorTeamInfo} from "./project-supervisor-contract.js";
 import type {BindingRecord} from "./project-supervisor-store.js";
-import {notificationClosed, type SupervisorTeamStore, type TeamNotification} from "./supervisor-team-store.js";
+import {SupervisionStores} from "./supervision-stores.js";
+import {notificationClosed, type SupervisorTeamSnapshot, type TeamNotification, type TeamRequest} from "./supervisor-team-store.js";
 import type {ThreadInfo} from "./types.js";
-import type {SupervisorConversationStore} from "./supervisor-conversation-store.js";
+import type {ConversationRequest} from "./supervisor-conversation-store.js";
+
+// the retained team records the view presents, read in one synchronous step from the interim stores; nothing is read natively
+export interface TeamViewData {
+  readonly snapshot: SupervisorTeamSnapshot;
+  // the unresolved guidance requests of the team
+  readonly guideRequests: ReadonlyArray<TeamRequest>;
+  // members whose guidance waits for an owner decision on its original target
+  readonly deferredGuidanceMembers: ReadonlySet<string>;
+  readonly rootPending: boolean;
+  // the pending and latest check-in of each presented member
+  readonly members: ReadonlyMap<string, {readonly pending: ConversationRequest | null; readonly latest: ConversationRequest | undefined}>;
+}
+
+/** Reads the team records of one binding without waking or polling any helper conversation. */
+export const readTeamViewData = (binding: BindingRecord): Effect.Effect<TeamViewData, never, SupervisionStores> => Effect.gen(function* () {
+  const {team, requests} = yield* SupervisionStores;
+  return yield* Effect.sync((): TeamViewData => {
+    const snapshot = team.snapshot(binding);
+    const guideRequests = team.unresolvedRequests(binding).filter(request => request.requestId.startsWith("guide:"));
+    const guideRequestIds = new Set(guideRequests.map(request => request.requestId));
+    const deferredGuidanceMembers = new Set<string>();
+    if (guideRequestIds.size > 0) {
+      const rows = team.supervisors.store.db.prepare(`SELECT actor_thread_id,json_extract(document,'$.requestId') AS request_id
+        FROM supervisor_team_tool_receipts WHERE owner_thread_id=? AND binding_generation=?
+        AND json_extract(document,'$.status')='needs_fallback' AND json_extract(document,'$.reason')='target_pending_owner_input'`)
+        .all(binding.threadId, binding.generation);
+      for (const row of rows) {
+        if (typeof row.request_id === "string" && guideRequestIds.has(row.request_id)) deferredGuidanceMembers.add(String(row.actor_thread_id));
+      }
+    }
+    const members = new Map(snapshot.members.slice(0, 100).map(member => [member.threadId, {pending: requests.pending(binding.projectId, member.threadId),
+      latest: requests.requests(binding.projectId, member.threadId).at(-1)}]));
+    return {snapshot, guideRequests, deferredGuidanceMembers, rootPending: Boolean(requests.pending(binding.projectId, binding.threadId)), members};
+  });
+});
 
 /** Presents existing team records without waking or polling every helper conversation. */
-export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRecord, threads: readonly ThreadInfo[],
-  requests: SupervisorConversationStore, now = Date.now()): ProjectSupervisorTeamInfo => {
-  const snapshot = team.snapshot(binding);
+export const supervisorTeamView = (data: TeamViewData, binding: BindingRecord, threads: readonly ThreadInfo[], observedAt: number): ProjectSupervisorTeamInfo => {
+  const {snapshot, guideRequests, deferredGuidanceMembers} = data;
   const byId = new Map(threads.map(thread => [thread.id, thread]));
   const guideCountsByMember = new Map<string, number>();
   const uncertainGuidanceMembers = new Set<string>();
-  const guideRequests = team.unresolvedRequests(binding).filter(request => request.requestId.startsWith("guide:"));
-  const guideRequestIds = new Set(guideRequests.map(request => request.requestId));
   for (const request of guideRequests) {
     guideCountsByMember.set(request.memberThreadId, (guideCountsByMember.get(request.memberThreadId) ?? 0) + 1);
     if (request.state === "uncertain") uncertainGuidanceMembers.add(request.memberThreadId);
-  }
-  const deferredGuidanceMembers = new Set<string>();
-  if (guideRequestIds.size > 0) {
-    const rows = team.supervisors.store.db.prepare(`SELECT actor_thread_id,json_extract(document,'$.requestId') AS request_id
-      FROM supervisor_team_tool_receipts WHERE owner_thread_id=? AND binding_generation=?
-      AND json_extract(document,'$.status')='needs_fallback' AND json_extract(document,'$.reason')='target_pending_owner_input'`)
-      .all(binding.threadId, binding.generation);
-    for (const row of rows) {
-      if (typeof row.request_id === "string" && guideRequestIds.has(row.request_id)) deferredGuidanceMembers.add(String(row.actor_thread_id));
-    }
   }
   const unresolvedNotices = snapshot.notifications.filter(value => value.assignmentRootThreadId !== null && ["pending", "sending", "uncertain", "delivered"].includes(value.state) &&
     !notificationClosed(value));
@@ -40,14 +64,14 @@ export const supervisorTeamView = (team: SupervisorTeamStore, binding: BindingRe
       ? "in_progress" : value.kind === "handover_review" ? "requested" : undefined;
   const issues = snapshot.events.filter(event => event.acknowledgedAt === null && event.severity === "attention").slice(-100)
     .map(event => ({id: event.id, severity: "warning" as const, summary: event.summary, observedAt: event.createdAt}));
-  return {status: "ok", message: "Assignments are monitoring responsibility; operational child workflows remain connected to their parent.", observedAt: now,
+  return {status: "ok", message: "Assignments are monitoring responsibility; operational child workflows remain connected to their parent.", observedAt,
     root: {threadId: binding.threadId, title: binding.title, model: snapshot.root.modelSelection.model,
       readiness: binding.state === "ready" ? "ready" : "pending",
-      lifecycle: requests.pending(binding.projectId, binding.threadId) ? "active" : "idle", currentState: "Coordinates the main workflow, policy and unassigned work.", lastAssessment: null},
+      lifecycle: data.rootPending ? "active" : "idle", currentState: "Coordinates the main workflow, policy and unassigned work.", lastAssessment: null},
     members: snapshot.members.slice(0, 100).map(member => {
       const thread = byId.get(member.threadId);
-      const pending = requests.pending(binding.projectId, member.threadId);
-      const latest = requests.requests(binding.projectId, member.threadId).at(-1);
+      const pending = data.members.get(member.threadId)?.pending ?? null;
+      const latest = data.members.get(member.threadId)?.latest;
       const assessment = snapshot.events.filter(event => event.memberThreadId === member.threadId && event.kind === "assessment").at(-1);
       return {threadId: member.threadId, title: member.title ?? thread?.title ?? null,
         model: member.modelSelection?.model ?? (thread?.modelSelection as {model?: string} | undefined)?.model ?? snapshot.root.modelSelection.model,

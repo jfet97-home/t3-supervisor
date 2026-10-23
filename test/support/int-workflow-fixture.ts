@@ -175,7 +175,7 @@ export const startWorkflowFixture = async (mainThread = thread("main-workflows",
   native.projections.set(supervisorThreadId, projection);
   // sets catalogClassificationsReady, without which workflowEditingEnabled denies every write (project-supervisor.ts:130-136,165)
   await core.supervision.candidates("");
-  const endpoint = await startIntEndpoint(core, definitions);
+  const endpoint = await startIntEndpoint(core);
   return {directory, peer, native, core, endpoint, binding, projectId, mainThreadId, supervisorThreadId, catalogThreads, projection,
     details: native.details, definitionReader, proposal, sourceBinding,
     close: async () => {

@@ -4,7 +4,7 @@ import type { ProjectSupervisor } from "../src/project-supervisor.js";
 import type { ProjectSupervisorScopeSnapshot } from "../src/supervisor-observation.js";
 import type { WorkflowStateDocument } from "../src/workflow-state-contract.js";
 import type { WorkflowReadResult, WorkflowWriteController } from "../src/workflow-write-controller.js";
-import { readWorkflowProgressPage } from "../src/workflow-progress.js";
+import { readWorkflowProgressPage } from "./support/progress-page.js";
 import { mockMethod } from "./support/node-test.js";
 
 const query = {projectId: "project", mainThreadId: "main-thread", workflowOffset: 0, lineageOffset: 0, limit: 20};

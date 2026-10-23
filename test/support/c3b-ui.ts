@@ -9,7 +9,7 @@ import { GuidanceStore } from "../../src/guidance-store.js";
 import { startGuidanceUi } from "./service-auth-harness.js";
 import type { ProjectConfigEditor } from "../../src/project-config-editor.js";
 import type { ProjectDefinitionLoader } from "../../src/project-definitions.js";
-import type { ProjectSupervisor } from "../../src/project-supervisor.js";
+import type { GuidanceUiOptions } from "../../src/guidance-ui.js";
 import type { SupervisorConfig } from "../../src/types.js";
 import type { WorkflowMcp } from "../../src/workflow-mcp.js";
 import { defer } from "./c3b-http.js";
@@ -50,7 +50,7 @@ export const startUi = async (t: TestContext, options: {
   config?: Partial<SupervisorConfig>;
   definitions?: ProjectDefinitionLoader;
   editor?: ProjectConfigEditor;
-  supervision?: ProjectSupervisor;
+  supervision?: GuidanceUiOptions["supervision"];
   workflows?: Layer.Layer<WorkflowMcp>;
 } = {}): Promise<StartedUi> => {
   const directory = options.directory ?? await tempDirectory(t, "c3b-ui-");

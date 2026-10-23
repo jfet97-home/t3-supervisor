@@ -11,8 +11,7 @@ import { GuidanceStore, fingerprint } from "../src/guidance-store.js";
 import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { ProjectSupervisorStore, defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
-import { ProjectSupervisor } from "../src/project-supervisor.js";
-import { projectSupervisorUnit, supervisorConversationUnit } from "./support/team-units.js";
+import { projectSupervisorUnit, supervisorConversationUnit, type ProjectSupervisorUnit } from "./support/team-units.js";
 import { supervisionStopToolDefinition } from "../src/workflow-write-controller.js";
 import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
@@ -1006,7 +1005,7 @@ const steerHumanMessage = (projection: Projection, activeRun: RunInfo, id: strin
 
 // a WorkflowWriteController whose supervision_stop is backed by the caller's own completed native tool call in its human run
 const nativeStopController = (fixture: Awaited<ReturnType<typeof makeFixture>>, caller: Projection, human: MessageInfo,
-  args: {callerThreadId: string; targetThreadId: string; userMessageId: string; operationId: string}, callId: string, service: ProjectSupervisor,
+  args: {callerThreadId: string; targetThreadId: string; userMessageId: string; operationId: string}, callId: string, service: ProjectSupervisorUnit,
   callRunId = human.runId) => {
   const run = caller.runs.find(item => item.id === callRunId)!;
   const nodeId = `${callId}-node`;

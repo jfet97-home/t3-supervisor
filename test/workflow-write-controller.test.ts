@@ -1,7 +1,7 @@
 import {SupervisorTeamStore} from "../src/supervisor-team-store.js";
 import {supervisionTeamToolDefinition} from "../src/supervisor-team-controller.js";
 import {SupervisorConversationStore} from "../src/supervisor-conversation-store.js";
-import {supervisorTeamView} from "../src/supervisor-team-view.js";
+import {supervisorTeamView} from "./support/team-units.js";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
