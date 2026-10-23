@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
-import { Context, Effect, FileSystem, Layer, Redacted } from "effect";
+import { Context, Effect, Exit, FileSystem, Layer, Redacted, Scope } from "effect";
 import { SupervisorConfig as Configuration } from "../../src/config.js";
 import { GuidanceRuntime } from "../../src/guidance.js";
 import { GuidanceUi, type GuidanceUiOptions } from "../../src/guidance-ui.js";
@@ -15,7 +15,7 @@ import type { SupervisorConfig } from "../../src/types.js";
 import { WorkflowMcp } from "../../src/workflow-mcp.js";
 import type { WorkflowCallCancel, WorkflowWriteController } from "../../src/workflow-write-controller.js";
 import { exchange } from "./g11-http.js";
-import { guidanceLayer, policyLayer } from "./g11-stores.js";
+import { guidanceLayer, policyLayer, temporaryDirectory } from "./g11-stores.js";
 
 // the dashboard and workflow MCP listeners of src/guidance-ui.ts over their production layers, in the caller's scope: the
 // run's guidance client and store, the process's thread-policy store and ownership set, the guidance runtime over a catalog,
@@ -106,19 +106,43 @@ export interface Dashboard {
   readonly policy: ThreadPolicyStore["Service"];
 }
 
+/** Starts the listeners over the given runtime and thread-policy store in the caller's scope. */
+export const listeners = (config: SupervisorConfig, services: Context.Context<GuidanceRuntime | ThreadPolicyStore>, options: ListenerOptions = {}) =>
+  Effect.map(Layer.build(listenersLayer(config, options).pipe(Layer.provide(Layer.succeedContext(services)))), (context) => {
+    const ui = Context.get(context, GuidanceUi);
+    return {port: ui.port, mcpPort: ui.mcpPort, origin: `http://127.0.0.1:${ui.port}`};
+  });
+
 /** Starts the listeners over `runtime` (a runtime over the empty catalog by default) in the caller's scope. */
 export const dashboard = (config: SupervisorConfig, options: ListenerOptions & {
   readonly runtime?: Layer.Layer<GuidanceRuntime | ThreadPolicyStore, unknown> | undefined;
 } = {}) => Effect.gen(function* () {
   const services = yield* Layer.build(options.runtime ?? runtimeOver(config));
-  const ui = Context.get(yield* Layer.build(listenersLayer(config, options).pipe(Layer.provide(Layer.succeedContext(services)))), GuidanceUi);
+  const ui = yield* listeners(config, services, options);
   const fs = yield* FileSystem.FileSystem;
   const token = (yield* fs.readFileString(join(config.dataDirectory, "access", "workflow-mcp-token"))).trim();
   return {
-    port: ui.port, mcpPort: ui.mcpPort, origin: `http://127.0.0.1:${ui.port}`, token,
-    runtime: Context.get(services, GuidanceRuntime), policy: Context.get(services, ThreadPolicyStore),
+    ...ui, token, runtime: Context.get(services, GuidanceRuntime), policy: Context.get(services, ThreadPolicyStore),
   } satisfies Dashboard;
 }).pipe(Effect.provide(NodeFileSystem.layer));
+
+export interface StartedUi extends Dashboard {
+  readonly config: SupervisorConfig;
+  readonly directory: string;
+  // closes the listeners and then the stores; the test scope closes them too
+  readonly close: Effect.Effect<void>;
+}
+
+/** The dashboard of a data directory (a fresh one by default) in its own scope, closed with the test scope or by `close`. */
+export const startUi = (options: ListenerOptions & {readonly directory?: string | undefined; readonly config?: Partial<SupervisorConfig> | undefined} = {}) =>
+  Effect.gen(function* () {
+    const directory = options.directory ?? (yield* temporaryDirectory("c3b-ui-"));
+    const config = uiConfig(directory, options.config);
+    const scope = yield* Scope.make();
+    yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+    const ui = yield* dashboard(config, options).pipe(Scope.provide(scope));
+    return {...ui, config, directory, close: Scope.close(scope, Exit.void)} satisfies StartedUi;
+  });
 
 /** A single-use dashboard grant of the data directory, as the CLI forges it. */
 export const grant = (directory: string) =>
