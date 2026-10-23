@@ -21,6 +21,9 @@ export const hasCurrentAgreement = (task: TaskInterpretationInfo | undefined) =>
 
 export const alignmentLabel = (task: TaskInterpretationInfo | undefined) => hasCurrentAgreement(task) ? "Agreed" : task?.agreement ? "Needs review" : task?.workflow?.status === "proposed" ? "Awaiting acceptance" : "Not agreed";
 
+const hasActiveNode = (node: WorkflowPlanNodeInfo): boolean => "nodes" in node ? node.nodes.some(hasActiveNode) :
+  node.status === "underway" || node.status === "needs_attention" || node.kind === "workflow" && node.plan !== null && hasActiveNode(node.plan);
+
 /** Preserves sequence, parallel and nested workflow boundaries without deriving parent completion from children. */
 export function PlanJourney({node, live = false, context = "proposed"}: {node: WorkflowPlanNodeInfo; live?: boolean; context?: "proposed" | "agreed" | "historical"}) {
   if ("nodes" in node) {
@@ -33,7 +36,7 @@ export function PlanJourney({node, live = false, context = "proposed"}: {node: W
   const state = live ? node.status : context === "proposed" ? "proposed" : "planned";
   const label = live ? states[node.status] : context === "agreed" ? "In agreed plan" : context === "historical" ? "In earlier plan" : "Proposed";
   return <div className={`journey-stop state-${state}`}>
-    <details className="journey-step" open={live && (node.status === "underway" || node.status === "needs_attention") || undefined}>
+    <details className="journey-step" open={live && hasActiveNode(node) || undefined}>
       <summary aria-current={live && node.status === "underway" ? "step" : undefined}>
         <StepMark state={state}/><span className="step-name">{node.name}{node.kind === "workflow" && <small>Workflow</small>}</span><span className="step-state">{label}</span><svg className="step-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m7 5 5 5-5 5" fill="none" stroke="currentColor" strokeWidth="1.7"/></svg>
       </summary>

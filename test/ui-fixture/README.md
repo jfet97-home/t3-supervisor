@@ -346,3 +346,5 @@ again after switching back to `a`:
   static handling follow the baseline. HTTP 409 does not occur at baseline.
 - The UI's behaviour in each story is to be observed and recorded. This fixture does not
   assert it.
+
+`journey-nested-attention` retains a planned parent while revealing its attention-needing child, without changing the parent assessment.

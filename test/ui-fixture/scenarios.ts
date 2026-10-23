@@ -544,7 +544,7 @@ export class FixtureModel {
 }
 
 export const scenarioNames = [
-  "journey-request", "journey-proposal", "journey-agreed", "journey-working", "journey-completed", "journey-attention", "journey-stale", "journey-nested", "journey-retained",
+  "journey-request", "journey-proposal", "journey-agreed", "journey-working", "journey-completed", "journey-attention", "journey-stale", "journey-nested", "journey-nested-attention", "journey-retained",
   "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
   "save-401", "save-403", "save-409", "save-413", "editor-conflict", "editor-uncertain", "slow-reads", "setup-race", "reload",
 ] as const;
@@ -575,6 +575,7 @@ export const scenarioCatalog: Record<ScenarioName, {description: string; plan: (
   "journey-completed": {description: "synthetic duplicate-email task: completed", plan: () => plan([])},
   "journey-attention": {description: "synthetic duplicate-email task: attention", plan: () => plan([])},
   "journey-stale": {description: "synthetic duplicate-email task: stale", plan: () => plan([])},
+  "journey-nested-attention": {description: "synthetic planned workflow with an attention-needing child", plan: () => plan([])},
   "journey-retained": {description: "a current plan beside an unlinked earlier completed workflow", plan: () => plan([])},
   "journey-nested": {description: "synthetic duplicate-email task: nested", plan: () => plan([])},
   "baseline": {description: "normal synthetic behaviour", plan: () => plan([])},
