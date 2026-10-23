@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
 import { request as httpRequest, type ClientRequest } from "node:http";
 import { connect, createServer as createNetServer } from "node:net";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { Deferred, Effect, Layer } from "effect";
+import { Deferred, type Duration, Effect, Layer, type Scope } from "effect";
 import { FetchHttpClient, HttpBody, HttpClient, HttpClientRequest } from "effect/http";
 
 // the loopback client side of the g11 dashboard and supervisor suites: small adapters over node's http and net clients
@@ -135,3 +135,14 @@ export const exchangeJson = (url: string, init: ExchangeInit = {}): Effect.Effec
 
 // the platform fetch, which the client runs over
 const fetchClient = FetchHttpClient.layer.pipe(Layer.provide(Layer.sync(FetchHttpClient.Fetch, () => globalThis.fetch)));
+
+/** An awaited event with an explicit deadline on the live clock: past it the case fails by the event's name. */
+export const within = <A, E, R>(effect: Effect.Effect<A, E, R>, duration: Duration.Input, label: string): Effect.Effect<A, E, R> =>
+  Effect.timeoutOrElse(effect, { duration, orElse: () => Effect.die(new Error(`timed out waiting for ${label}`)) });
+
+/** A call's cancel that completes at its deadline on the live clock, as the baseline AbortSignal.timeout aborted. */
+export const cancelAfter = (duration: Duration.Input): Effect.Effect<Deferred.Deferred<void>, never, Scope.Scope> => Effect.gen(function* () {
+  const cancel = yield* Deferred.make<void>();
+  yield* Effect.forkScoped(Effect.andThen(Effect.sleep(duration), Deferred.succeed(cancel, undefined)));
+  return cancel;
+});
