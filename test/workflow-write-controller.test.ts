@@ -17,7 +17,7 @@ import { workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, wo
 import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo } from "../src/project-supervisor-contract.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { effectiveIndex, projectIndex, testSummary } from "./project-definitions-fixture.js";
-import { parseWorkflowInterpretation, proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
+import { interpretationFromFields, proposalContextFromDefinitions, validateWorkflowPlan, workflowInterpretationOutcome } from "../src/supervisor-workflow.js";
 import { WebSocketServer } from "ws";
 import { NodeHttpServer } from "@effect/platform-node";
 import { Effect, Exit, Layer, Scope } from "effect";
@@ -1000,9 +1000,13 @@ it("apply denies a null-plan provisional current task before reading or changing
     if (created.status !== "created") return;
 
     const context = proposalContextFromDefinitions(fixture.definitionReader.current);
-    const provisional = parseWorkflowInterpretation(JSON.stringify({objective: "Complete the current project task.",
-      reason: "The latest message describes an actionable task.", sourceMessageIds: ["source-message-current"], workflow: null}),
-    "source-message-current", context).workflow;
+    // the semantic outcome of a submission whose workflow is null: a provisional record without a plan
+    const fields = interpretationFromFields({objective: "Complete the current project task.", reason: "The latest message describes an actionable task.",
+      sourceMessageIds: ["source-message-current"]}, "source-message-current");
+    assert.ok(fields.ok);
+    const outcome = workflowInterpretationOutcome(fields.value, undefined, null, context);
+    assert.ok(outcome.ok);
+    const provisional = outcome.value.workflow;
     assert.equal(provisional.status, "provisional");
     assert.equal(provisional.plan, null);
     await replaceCurrentProposal(fixture, "proposal-null-plan-provisional", fixture.definitionReader.current, provisional);

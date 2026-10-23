@@ -1,94 +1,96 @@
 import assert from "node:assert/strict";
 import { it } from "vitest";
+import { Effect, Exit } from "effect";
+import { decodeInterpretationSubmission, type InterpretationArgumentsInvalid } from "../src/interpretation-submission.js";
 import { record } from "../src/supervisor-native.js";
 import { exactFenceRecords, extractWorkflowAgreementRecords } from "../src/supervisor-workflow-agreement.js";
 import { extractProjectDefinitionDecisionRecords } from "../src/supervisor-definition-review.js";
-import { parseInterpretation, parseWorkflowInterpretation, prepareWorkflowRequest, redact, seededNodeIds } from "../src/supervisor-workflow.js";
+import { prepareWorkflowRequest, redact } from "../src/supervisor-workflow.js";
 import { goldenSnapshot } from "./support/c1-workflow-fixture.js";
+import * as fx from "./support/s6e-prep-interpretation.js";
 
-const sourceId = "message-a";
-// the hand validation that preceded the schema decode, kept as the acceptance oracle
-const oracle = (text: string): {objective: string | null; reason: string} | "rejected" => {
-  try {
-    if (text.length > 16_000) return "rejected";
-    const fenced = /^```(?:json)?\s*\n([\s\S]*)\n```$/u.exec(text.trim());
-    const value: unknown = JSON.parse(fenced ? fenced[1]! : text);
-    if (!record(value) || Object.keys(value).sort().join(",") !== "objective,reason,sourceMessageIds" ||
-      !(value.objective === null || typeof value.objective === "string" && value.objective.trim().length > 0 && value.objective.length <= 2000) ||
-      typeof value.reason !== "string" || value.reason.length > 1000 || !Array.isArray(value.sourceMessageIds) || value.sourceMessageIds.length > 1 ||
-      value.sourceMessageIds.some(id => id !== sourceId) || value.objective !== null && value.sourceMessageIds.length !== 1) return "rejected";
-    return {objective: typeof value.objective === "string" ? redact(value.objective.trim()) : null, reason: redact(value.reason)};
-  } catch {return "rejected";}
+// the interpretation is a typed tool submission (plan 3.12): its fields arrive as decoded argument objects, never as final-chat text,
+// so no fence, JSON text or reply syntax exists any more; the field acceptance of the old reply decode is kept as the oracle
+const sourceId = fx.task.sourceMessageId;
+// the hand validation that preceded the schema decode, kept as the acceptance oracle of the interpretation fields
+const oracle = (value: Record<string, unknown>): {objective: string | null; reason: string} | "rejected" => {
+  if (!record(value) || Object.keys(value).sort().join(",") !== "objective,reason,sourceMessageIds" ||
+    !(value.objective === null || typeof value.objective === "string" && value.objective.trim().length > 0 && value.objective.length <= 2000) ||
+    typeof value.reason !== "string" || value.reason.length > 1000 || !Array.isArray(value.sourceMessageIds) || value.sourceMessageIds.length > 1 ||
+    value.sourceMessageIds.some(id => id !== sourceId) || value.objective !== null && value.sourceMessageIds.length !== 1) return "rejected";
+  return {objective: typeof value.objective === "string" ? redact(value.objective.trim()) : null, reason: redact(value.reason)};
 };
-const reply = (value: Record<string, unknown>) => JSON.stringify(value);
+// the attempt's envelope the fields are submitted with
+const envelope = (() => {
+  const {supervisorThreadId, bindingGeneration, taskId, attemptId, sourcePin} = fx.plainArguments();
+  return {supervisorThreadId, bindingGeneration, taskId, attemptId, sourcePin};
+})();
 const valid = {objective: " Ship the export ", reason: "A repository change.", sourceMessageIds: [sourceId]};
-const replies: Array<[string, string]> = [
-  ["valid", reply(valid)],
-  ["fenced", "```json\n" + reply(valid) + "\n```"],
-  ["bare fence", "```\n" + reply(valid) + "\n```"],
-  ["null objective without source", reply({objective: null, reason: "Only a greeting.", sourceMessageIds: []})],
-  ["null objective with source", reply({objective: null, reason: "Unclear.", sourceMessageIds: [sourceId]})],
-  ["objective at bound", reply({...valid, objective: "o".repeat(2000)})],
-  ["objective over bound", reply({...valid, objective: "o".repeat(2001)})],
-  ["blank objective", reply({...valid, objective: "   "})],
-  ["numeric objective", reply({...valid, objective: 3})],
-  ["reason at bound", reply({...valid, reason: "r".repeat(1000)})],
-  ["reason over bound", reply({...valid, reason: "r".repeat(1001)})],
-  ["empty reason", reply({...valid, reason: ""})],
-  ["missing reason", reply({objective: valid.objective, sourceMessageIds: [sourceId]})],
-  ["excess key", reply({...valid, workflow: null})],
-  ["prototype key", reply(valid).replace("{", "{\"__proto__\":1,")],
-  ["other source", reply({...valid, sourceMessageIds: ["message-b"]})],
-  ["two sources", reply({...valid, sourceMessageIds: [sourceId, sourceId]})],
-  ["no source", reply({...valid, sourceMessageIds: []})],
-  ["numeric source", reply({...valid, sourceMessageIds: [7]})],
-  ["source string", reply({...valid, sourceMessageIds: sourceId})],
-  ["array", "[]"],
-  ["null", "null"],
-  ["malformed", "{\"objective\": \"Ship"],
-  ["prose", "I will ship the export."],
-  ["oversized", reply({...valid, reason: "r".repeat(16_000)})],
-  ["credential", reply({...valid, objective: "Use token=github_pat_12345678901234567890 to ship"})],
+const submissions: Array<[string, Record<string, unknown>]> = [
+  ["valid", valid],
+  ["null objective without source", {objective: null, reason: "Only a greeting.", sourceMessageIds: []}],
+  ["null objective with source", {objective: null, reason: "Unclear.", sourceMessageIds: [sourceId]}],
+  ["objective at bound", {...valid, objective: "o".repeat(2000)}],
+  ["objective over bound", {...valid, objective: "o".repeat(2001)}],
+  ["blank objective", {...valid, objective: "   "}],
+  ["numeric objective", {...valid, objective: 3}],
+  ["reason at bound", {...valid, reason: "r".repeat(1000)}],
+  ["reason over bound", {...valid, reason: "r".repeat(1001)}],
+  ["empty reason", {...valid, reason: ""}],
+  ["missing reason", {objective: valid.objective, sourceMessageIds: [sourceId]}],
+  ["excess key", {...valid, workflow: null}],
+  ["prototype key", JSON.parse(JSON.stringify(valid).replace("{", "{\"__proto__\":1,")) as Record<string, unknown>],
+  ["other source", {...valid, sourceMessageIds: ["message-b"]}],
+  ["two sources", {...valid, sourceMessageIds: [sourceId, sourceId]}],
+  ["no source", {...valid, sourceMessageIds: []}],
+  ["numeric source", {...valid, sourceMessageIds: [7]}],
+  ["source string", {...valid, sourceMessageIds: sourceId}],
+  ["oversized", {...valid, reason: "r".repeat(16_000)}],
+  ["credential", {...valid, objective: "Use token=github_pat_12345678901234567890 to ship"}],
 ];
 
-it("interpretation replies decode with the oracle's exact acceptance, values and fixed failure", {timeout: 10_000}, () => {
-  for (const [label, text] of replies) {
-    const expected = oracle(text);
+it("interpretation submissions decode their fields with the oracle's exact acceptance and values, without any reply syntax", {timeout: 10_000}, () => {
+  for (const [label, value] of submissions) {
+    const expected = oracle(value);
+    const decoded = Effect.runSyncExit(decodeInterpretationSubmission({...envelope, ...value}, {definitionContext: null, pendingStart: false}));
     if (expected === "rejected") {
-      assert.throws(() => parseInterpretation(text, sourceId), (error: unknown) => error instanceof Error && error.message === "invalid_interpretation", label);
+      assert.ok(Exit.isFailure(decoded), label);
       continue;
     }
-    assert.deepEqual(parseInterpretation(text, sourceId), expected, label);
+    assert.ok(Exit.isSuccess(decoded), label);
+    assert.deepEqual(decoded.value.payload, {kind: "interpretation", ...expected, startRequested: false}, label);
   }
-  assert.deepEqual(replies.filter(([, text]) => oracle(text) !== "rejected").map(([label]) => label),
-    ["valid", "fenced", "bare fence", "null objective without source", "null objective with source", "objective at bound", "reason at bound", "empty reason", "credential"]);
+  assert.deepEqual(submissions.filter(([, value]) => oracle(value) !== "rejected").map(([label]) => label),
+    ["valid", "null objective without source", "null objective with source", "objective at bound", "reason at bound", "empty reason", "credential"]);
 });
 
-it("workflow replies keep the envelope error for their own keys and the interpretation error for its fields", {timeout: 10_000}, () => {
+it("workflow submissions report schema paths for their own keys and semantic codes for the interpretation fields", {timeout: 10_000}, () => {
   const context = prepareWorkflowRequest("thread-a", sourceId, "Ship the export.", goldenSnapshot).context;
   assert.ok(context);
   const workflow = {requirements: [{kind: "step", id: "verify", applies: true, reason: "The task changes behavior."}],
     plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "verify", reason: "Check the changed behavior."}]}};
-  const base = {objective: "Ship the export.", reason: "A repository change.", sourceMessageIds: [sourceId], workflow};
-  const failure = (text: string): string => {
-    try {
-      parseWorkflowInterpretation(text, sourceId, context, seededNodeIds("reply"));
-      return "accepted";
-    } catch (error) {return error instanceof Error ? error.message : "unknown";}
+  const base = {...envelope, objective: "Ship the export.", reason: "A repository change.", sourceMessageIds: [sourceId], supervision: "needed", workflow};
+  const decode = (value: Record<string, unknown>) => Effect.runSyncExit(decodeInterpretationSubmission(value, {definitionContext: context, pendingStart: false}));
+  const failure = (value: Record<string, unknown>): [string, string] => {
+    const exit = decode(value);
+    if (Exit.isSuccess(exit)) return ["accepted", ""];
+    const error = exit.cause.reasons.find(reason => reason._tag === "Fail")?.error as InterpretationArgumentsInvalid;
+    return [error.code, error.issues[0]?.path ?? ""];
   };
-  assert.equal(failure(reply(base)), "accepted");
-  assert.equal(failure(reply({...base, supervision: "needed"})), "accepted");
-  assert.equal(failure("```json\n" + reply({...base, supervision: "needed"}) + "\n```"), "accepted");
-  for (const text of ["{\"objective\": \"Ship", reply({...base, supervision: "required"}), reply({...base, extra: true}),
-    reply({objective: base.objective, reason: base.reason, sourceMessageIds: base.sourceMessageIds}), "[]",
-    reply({...base, reason: "r".repeat(128_001)})])
-    assert.equal(failure(text), "invalid_workflow_response", text.slice(0, 60));
-  for (const text of [reply({...base, objective: 3}), reply({...base, sourceMessageIds: ["message-b"]}), reply({...base, reason: "r".repeat(1001)})])
-    assert.equal(failure(text), "invalid_interpretation", text.slice(0, 60));
-  assert.equal(parseWorkflowInterpretation(reply({...base, supervision: "needed"}), sourceId, context, seededNodeIds("reply")).workflow.status, "proposed");
-  const notNeeded = parseWorkflowInterpretation(reply({...base, supervision: "not_needed", workflow: null}), sourceId, context, seededNodeIds("reply"));
-  assert.equal(notNeeded.supervision, "not_needed");
-  assert.equal(notNeeded.workflow.plan, null);
+  assert.deepEqual(failure(base), ["accepted", ""]);
+  const withoutSupervision: Record<string, unknown> = {...base};
+  delete withoutSupervision.supervision;
+  for (const [value, path] of [[{...base, supervision: "required"}, "/supervision"], [{...base, extra: true}, "/*"], [withoutSupervision, "/supervision"],
+    [{...base, objective: 3}, "/objective"], [{...base, reason: "r".repeat(1001)}, "/reason"]] as const)
+    assert.deepEqual(failure(value), ["arguments_schema", path], path);
+  assert.deepEqual(failure({...base, sourceMessageIds: ["message-b"]}), ["source_message_ids_mismatch", "/sourceMessageIds"]);
+  assert.deepEqual(failure({...base, supervision: "not_needed"}), ["not_needed_workflow_present", "/workflow"]);
+  const proposed = decode(base);
+  assert.ok(Exit.isSuccess(proposed) && proposed.value.payload.kind === "interpretation" && proposed.value.payload.workflow?.status === "proposed");
+  const notNeeded = decode({...base, supervision: "not_needed", workflow: null});
+  assert.ok(Exit.isSuccess(notNeeded) && notNeeded.value.payload.kind === "interpretation");
+  assert.equal(notNeeded.value.payload.kind === "interpretation" ? notNeeded.value.payload.supervision : null, "not_needed");
+  assert.equal(notNeeded.value.payload.kind === "interpretation" ? notNeeded.value.payload.workflow?.plan : undefined, null);
 });
 
 it("fenced protocol records decode JSON bodies and keep malformed ones inert", {timeout: 10_000}, () => {

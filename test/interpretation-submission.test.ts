@@ -28,7 +28,7 @@ import {
   type InterpretationSubmission,
   type InterpretationSubmitResult,
 } from "../src/interpretation-submission.js";
-import { interpretationLimits, parseInterpretation, parseWorkflowInterpretation, prepareWorkflowRequest, seededNodeIds } from "../src/supervisor-workflow.js";
+import { interpretationLimits, prepareWorkflowRequest } from "../src/supervisor-workflow.js";
 import { verifyWorkflowToolEvidence, workflowRequestHash, workflowToolNames } from "../src/workflow-write-evidence.js";
 import { makeDefinitionFixture, stepSource, workflowSource } from "./project-definitions-fixture.js";
 import * as fx from "./support/s6e-prep-interpretation.js";
@@ -334,14 +334,20 @@ it.effect("CT-ISUB-05: invalid inputs fail with typed diagnostics, and a correct
 
 it.effect("CT-ISUB-05: the decode keeps today's semantic outcomes: formal, provisional, unavailable, not needed and the Start verdicts", () => Effect.gen(function* () {
   const context = yield* definitionContext;
-  const attemptId = fx.attempt().attemptId;
-  const seed = `t3-supervisor:interpretation:${attemptId}`;
-  // the factored semantic step decides the same outcome as the old final-chat parser over the same fields and node ids
-  const sameAsParser = (raw: Record<string, unknown>, submission: InterpretationSubmission) => {
-    const reply = JSON.stringify({objective: raw.objective, reason: raw.reason, sourceMessageIds: raw.sourceMessageIds, supervision: raw.supervision, workflow: raw.workflow});
-    const parsed = parseWorkflowInterpretation(reply, fx.task.sourceMessageId, context, seededNodeIds(seed));
-    assert.deepEqual(submission.payload, {kind: "interpretation", ...parsed, startRequested: false});
-    return parsed;
+  // the factored semantic step decides the outcome the deleted final-chat parser decided over the same fields and node ids: the
+  // canonical digests below are that parser's results, recorded once before it was removed
+  const parserDigests = [
+    "d7cc22a1a5ad951f3eb360c75badd0ce9b6e182e9a68883cdd22705902e016b5",
+    "49d98f75f41d4755708c48a19c3074832f42d4bdc68aed5a3159ff14ee58f7f1",
+    "fdbf688be4d571f132581a004feb93ed1ecd4515083c632b9ce219bd16cd5b3a",
+    "12f6f928c3d5ff401b00eb34a44571bb91d2af88e1f6d3b144358196ee4c1f49",
+    "a199d38e9c2ecc68375b8dcb1dd4bd37e45a16b3406fd7a978cf0cbf50340a38",
+  ];
+  let compared = 0;
+  const sameAsParser = (_raw: Record<string, unknown>, submission: InterpretationSubmission) => {
+    assert.equal(createHash("sha256").update(canonicalJson(submission.payload)).digest("hex"), parserDigests[compared++]);
+    assert.ok(submission.payload.kind === "interpretation" && submission.payload.workflow);
+    return {...submission.payload, workflow: submission.payload.workflow};
   };
   const withDefinitions = {definitionContext: context, pendingStart: false};
   const formalRaw = workflowArguments();
@@ -362,9 +368,9 @@ it.effect("CT-ISUB-05: the decode keeps today's semantic outcomes: formal, provi
   assert.deepEqual((yield* decode(formalRaw, withDefinitions)).payload, (yield* decode(structuredClone(formalRaw), withDefinitions)).payload);
   // without definitions the payload is the old interpretation; a pending Start adds the verdict, and a negative one grants nothing else
   const plainRaw = fx.plainArguments();
-  assert.deepEqual((yield* decode(plainRaw)).payload, {kind: "interpretation",
-    ...parseInterpretation(JSON.stringify({objective: plainRaw.objective, reason: plainRaw.reason, sourceMessageIds: plainRaw.sourceMessageIds}), fx.task.sourceMessageId),
-    startRequested: false});
+  assert.equal(compared, parserDigests.length);
+  assert.deepEqual((yield* decode(plainRaw)).payload, {kind: "interpretation", objective: "Ship export support",
+    reason: "The latest message asks for a concrete change.", startRequested: false});
   assert.deepEqual((yield* decode(fx.plainArguments({startRequested: true}), startContext)).payload,
     {kind: "interpretation", objective: "Ship export support", reason: "The latest message asks for a concrete change.", startRequested: true});
   assert.deepEqual((yield* decode(fx.plainArguments({objective: null, startRequested: true}), startContext)).payload,

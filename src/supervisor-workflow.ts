@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { Exit, Schema } from "effect";
 import { definitionReferenceFields, definitionReferenceProblem, describeDefinitionReferenceProblem, sameDefinitionReferences, type DefinitionReferenceProblemCode } from "./definition-references.js";
 import {redact} from "./credential-redaction.js";
 export {redact} from "./credential-redaction.js";
@@ -39,7 +38,7 @@ const maxDefinitionIdLength = 200;
 const maxRequirementAssessments = 100;
 const maxInterpretationReplyLength = 16_000;
 const maxWorkflowInterpretationReplyLength = 128_000;
-// the interpretation bounds the final-chat parsers and the typed interpretation submission share
+// the interpretation bounds of the typed interpretation submission's arguments
 export const interpretationLimits = {
   maxObjectiveLength: maxTextLength,
   maxReasonLength,
@@ -80,16 +79,6 @@ export type WorkflowApplyDiagnostic = {
 type WorkflowApplyDiagnosticState = {value: WorkflowApplyDiagnostic | null};
 const workflowApplyDiagnosticPathMaxLength = 512;
 
-// model replies are decoded with exact keys; a JSON, shape or bound failure maps to the fixed parser error and never carries the input
-const exactKeys = {onExcessProperty: "error"} as const;
-const unfenced = (text: string): string => /^```(?:json)?\s*\n([\s\S]*)\n```$/u.exec(text.trim())?.[1] ?? text;
-const InterpretationReply = Schema.Struct({
-  objective: Schema.NullOr(Schema.String.check(Schema.isMaxLength(maxTextLength))),
-  reason: Schema.String.check(Schema.isMaxLength(maxReasonLength)),
-  sourceMessageIds: Schema.Array(Schema.String).check(Schema.isMaxLength(interpretationLimits.maxSourceMessageIds)),
-});
-const decodeInterpretationReply = Schema.decodeUnknownExit(Schema.fromJsonString(InterpretationReply));
-
 // the decoded interpretation fields the semantic rules read
 export type InterpretationFields = {readonly objective: string | null; readonly reason: string; readonly sourceMessageIds: ReadonlyArray<string>};
 export type InterpretationValue = {objective: string | null; reason: string};
@@ -109,15 +98,6 @@ export const interpretationFromFields = (fields: InterpretationFields, sourceId:
   if (sourceMessageIds.some(id => id !== sourceId) || objective !== null && sourceMessageIds.length !== 1)
     return {ok: false, code: "source_message_ids_mismatch", path: "/sourceMessageIds"};
   return {ok: true, value: {objective: objective === null ? null : redact(objective.trim()), reason: redact(reason)}};
-};
-
-export const parseInterpretation = (text: string, sourceId: string): {objective: string | null; reason: string} => {
-  if (text.length > maxInterpretationReplyLength) throw new Error("invalid_interpretation");
-  const decoded = decodeInterpretationReply(unfenced(text), exactKeys);
-  if (Exit.isFailure(decoded)) throw new Error("invalid_interpretation");
-  const interpretation = interpretationFromFields(decoded.value, sourceId);
-  if (!interpretation.ok) throw new Error("invalid_interpretation");
-  return interpretation.value;
 };
 
 const sourceOf = (value: {origin?: "global" | "project" | undefined; path?: string | undefined; sourceId?: string | undefined}): WorkflowSourceInfo => ({
@@ -1532,16 +1512,6 @@ const provisionalRecord = (context: ProposalContext, message: string, extraIssue
 
 const provisionalPlan = (context: ProposalContext, message: string): WorkflowPlanValue => provisionalRecord(context, redact(message));
 
-// the interpretation fields keep their own decode and error inside parseInterpretation
-const WorkflowInterpretationReply = Schema.Struct({
-  objective: Schema.Unknown,
-  reason: Schema.Unknown,
-  sourceMessageIds: Schema.Unknown,
-  supervision: Schema.optionalKey(Schema.Literals(["needed", "not_needed"])),
-  workflow: Schema.Unknown,
-});
-const decodeWorkflowInterpretationReply = Schema.decodeUnknownExit(Schema.fromJsonString(WorkflowInterpretationReply));
-
 // the semantic outcome of a source-checked interpretation in a definition context: not needed, needs context, a finite
 // provisional plan or a formal proposal; a provisional plan is never promoted
 export const workflowInterpretationOutcome = (interpretation: InterpretationValue, supervision: "needed" | "not_needed" | undefined,
@@ -1569,20 +1539,6 @@ export const workflowInterpretationOutcome = (interpretation: InterpretationValu
     ? "A complete source-bound semantic plan was proposed. It remains a draft until exact operative acceptance; it is not execution evidence."
     : "A finite provisional plan was proposed. Broken definitions, missing requirements, and unknown applicability remain visible and unresolved.";
   return {ok: true, value: {...interpretation, workflow: {...baseWorkflow(context, status, message), ...plan}}};
-};
-
-/** Converts a native Supervisor reply into a bounded, source-bound proposal. */
-export const parseWorkflowInterpretation = (text: string, sourceId: string, context: ProposalContext, nodeIds: NodeIds = randomNodeIds): {
-  objective: string | null; reason: string; workflow: WorkflowProposalInfo; supervision?: "needed" | "not_needed";
-} => {
-  if (text.length > maxWorkflowInterpretationReplyLength) throw new Error("invalid_workflow_response");
-  const decoded = decodeWorkflowInterpretationReply(unfenced(text), exactKeys);
-  if (Exit.isFailure(decoded)) throw new Error("invalid_workflow_response");
-  const value = decoded.value;
-  const interpretation = parseInterpretation(JSON.stringify({objective: value.objective, reason: value.reason, sourceMessageIds: value.sourceMessageIds}), sourceId);
-  const outcome = workflowInterpretationOutcome(interpretation, value.supervision, value.workflow, context, nodeIds);
-  if (!outcome.ok) throw new Error("invalid_workflow_response");
-  return outcome.value;
 };
 
 /** Revalidates the cached context against the full freshly loaded source snapshot. */

@@ -5,12 +5,13 @@ import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo 
 import {
   canonicalAuthoringMaterial,
   canonicalizeProposalDraft,
-  parseWorkflowInterpretation,
+  interpretationFromFields,
   prepareWorkflowRequest,
   seededNodeIds,
   validateWorkflowApplyAgainstPinnedContext,
   validateWorkflowPlan,
   validateWorkflowRecord,
+  workflowInterpretationOutcome,
 } from "../src/supervisor-workflow.js";
 import { goldenSnapshot } from "./support/c1-workflow-fixture.js";
 
@@ -63,9 +64,12 @@ it("plan builders allocate every new occurrence from the injected generator in t
   assert.deepEqual(validateWorkflowPlan(draft, context, seededNodeIds("injected")), plan);
   assert.deepEqual(validateWorkflowRecord(plan, context), plan);
 
-  const reply = JSON.stringify({objective: "Ship the export.", reason: "A repository change.", sourceMessageIds: ["message-a"], supervision: "needed", workflow: draft});
-  const interpreted = parseWorkflowInterpretation(reply, "message-a", context, seededNodeIds("injected"));
-  assert.deepEqual(nodeIdsOf(interpreted.workflow.plan), ids);
+  // the interpretation outcome a submission decodes to draws its occurrence ids from the same injected generator
+  const fields = interpretationFromFields({objective: "Ship the export.", reason: "A repository change.", sourceMessageIds: ["message-a"]}, "message-a");
+  assert.ok(fields.ok);
+  const interpreted = workflowInterpretationOutcome(fields.value, "needed", draft, context, seededNodeIds("injected"));
+  assert.ok(interpreted.ok);
+  assert.deepEqual(nodeIdsOf(interpreted.value.workflow.plan), ids);
 
   const material = canonicalAuthoringMaterial(context, 24_000, seededNodeIds("authoring"));
   assert.ok(material.workflow?.plan);

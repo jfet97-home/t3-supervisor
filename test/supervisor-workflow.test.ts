@@ -3,9 +3,14 @@ import { it } from "vitest";
 import type { DefinitionReference, ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { requiredReferences, workflowDefinitionExpansionLimits } from "../src/project-definitions-contract.js";
 import type { WorkflowPlanNodeInfo, WorkflowPlanStepInfo, WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
+import { Effect, Exit } from "effect";
+import { decodeInterpretationSubmission } from "../src/interpretation-submission.js";
+import * as fx from "./support/s6e-prep-interpretation.js";
 import {
-  parseWorkflowInterpretation,
+  interpretationFromFields,
   prepareWorkflowRequest,
+  workflowInterpretationOutcome,
+  type ProposalContext,
   canonicalAuthoringMaterial,
   proposalContextFromDefinitions,
   proposalContextMatches,
@@ -39,17 +44,28 @@ const load = async (files: Files, options: {globalEnabled?: boolean; globalFiles
   return {fixture, snapshot: await fixture.loader.load("project", threadId)};
 };
 
-const reply = (workflow: unknown, objective = "Ship export support") => JSON.stringify({
+// the decoded interpretation fields of a task with a plan draft
+type Fields = {objective: string | null; reason: string; sourceMessageIds: string[]; supervision?: "needed" | "not_needed"; workflow: unknown};
+const reply = (workflow: unknown, objective = "Ship export support"): Fields => ({
   objective,
   reason: "The latest message describes a concrete task.",
   sourceMessageIds: objective ? [sourceMessageId] : [],
   workflow: objective ? workflow : null,
 });
 
+// the semantic interpretation outcome of decoded fields: the value-level step the typed submission's decode runs
+const outcome = (fields: Fields, context: ProposalContext) => {
+  const interpretation = interpretationFromFields(fields, sourceMessageId);
+  assert.ok(interpretation.ok, "source-linked fields");
+  const result = workflowInterpretationOutcome(interpretation.value, fields.supervision, fields.workflow, context);
+  if (!result.ok) throw new Error(result.code);
+  return result.value;
+};
+
 const interpret = (snapshot: ProjectDefinitionSnapshot, workflow: unknown, task = "Ship export support") => {
   const prepared = prepareWorkflowRequest(threadId, sourceMessageId, task, snapshot);
   assert.ok(prepared.context, "the task retains a provisional workflow context");
-  const result = parseWorkflowInterpretation(reply(workflow), sourceMessageId, prepared.context);
+  const result = outcome(reply(workflow), prepared.context);
   return {prepared, result};
 };
 
@@ -492,7 +508,7 @@ it("a provisional marker survives bounded context diagnostics and its record sti
     message: `Definition source ${index} could not be read.`,
   }));
   const context = proposalContextFromDefinitions({...snapshot, issues});
-  const result = parseWorkflowInterpretation(reply(null), sourceMessageId, context);
+  const result = outcome(reply(null), context);
   assert.equal(result.workflow.plan, null);
 
   const canonical = proposalRecord(result.workflow);
@@ -722,8 +738,8 @@ it("a long task excerpt does not erase known references or make the unchanged so
   assert.equal(prepared.context.promptComplete, false);
   assert.equal(proposalContextMatches(prepared.context, snapshot), true);
 
-  const provisional = parseWorkflowInterpretation(reply({requirements: [{kind: "step", id: "e2e", applies: true, reason: "Test the flow."}],
-    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "e2e", reason: "Include flow coverage."}]}}), sourceMessageId, prepared.context);
+  const provisional = outcome(reply({requirements: [{kind: "step", id: "e2e", applies: true, reason: "Test the flow."}],
+    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "e2e", reason: "Include flow coverage."}]}}), prepared.context);
   assert.equal(provisional.workflow.requirements[0]?.state, "unknown");
   assert.equal(provisional.workflow.status, "provisional");
 });
@@ -1082,17 +1098,18 @@ it("a semantic not-needed decision returns no workflow and is distinct from an u
     "workflows/check.yaml": workflowSource("Check", "  - step: inspect\n")});
   assert.equal(snapshot.status, "ready");
   const context = prepareWorkflowRequest(threadId, sourceMessageId, "Thank the colleague for the documents.", snapshot).context!;
-  const result = parseWorkflowInterpretation(JSON.stringify({objective: "Thank the colleague for the documents", reason: "A short self-contained message.",
-    sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null}), sourceMessageId, context);
+  const result = outcome({objective: "Thank the colleague for the documents", reason: "A short self-contained message.",
+    sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null}, context);
   assert.equal(result.supervision, "not_needed");
   assert.equal(result.workflow.plan, null);
-  assert.throws(() => parseWorkflowInterpretation(JSON.stringify({objective: "Thank the colleague", reason: "Short.", sourceMessageIds: [sourceMessageId],
-    supervision: "not_needed", workflow: {requirements: [], plan: {kind: "sequence", nodes: []}}}), sourceMessageId, context), /invalid_workflow_response/u,
+  assert.throws(() => outcome({objective: "Thank the colleague", reason: "Short.", sourceMessageIds: [sourceMessageId],
+    supervision: "not_needed", workflow: {requirements: [], plan: {kind: "sequence", nodes: []}}}, context), /not_needed_workflow_present/u,
     "a not-needed decision cannot also smuggle a plan");
-  assert.throws(() => parseWorkflowInterpretation(JSON.stringify({objective: "Thank", reason: "Short.", sourceMessageIds: [sourceMessageId],
-    supervision: "maybe", workflow: null}), sourceMessageId, context), /invalid_workflow_response/u);
-  const needed = parseWorkflowInterpretation(JSON.stringify({objective: "Ship the export", reason: "A repository change.", sourceMessageIds: [sourceMessageId],
+  // an unknown supervision value is no decision: the typed submission's exact arguments reject it
+  const maybe = Effect.runSyncExit(decodeInterpretationSubmission(fx.plainArguments({supervision: "maybe", workflow: null}), {definitionContext: context, pendingStart: false}));
+  assert.ok(Exit.isFailure(maybe));
+  const needed = outcome({objective: "Ship the export", reason: "A repository change.", sourceMessageIds: [sourceMessageId],
     supervision: "needed", workflow: {requirements: [{kind: "step", id: "inspect", applies: true, reason: "Check it."}],
-      plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "inspect", reason: "Check the export."}]}}}), sourceMessageId, context);
+      plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "inspect", reason: "Check the export."}]}}}, context);
   assert.equal(needed.workflow.status, "proposed");
 });
