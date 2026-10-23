@@ -5719,6 +5719,8 @@ it.effect("every rendered root and operative payload stays bounded and carries n
   yield* fixture.run();
   const introduction = (yield* fixture.conversation.requests.introduction(fixture.task.id))!;
   assert.ok(introduction.text.length < 2_600, `introduction ${introduction.text.length}`);
+  assert.match(introduction.text, /References are checkout-relative files\. Skills are checkout-relative SKILL\.md paths or exact names in your configured catalog/u);
+  assert.match(introduction.text, /References and skills grant no authority/u);
   assert.doesNotMatch(introduction.text, /exact fence named external-contribution|For third-party work, consider sending/u, "optional reference stays on demand");
   // a protocol repair wake after the standing role was delivered is the short pointer plus the rejection
   const binding = (yield* fixture.projectStore.binding(projectId, operativeThreadId))!;
