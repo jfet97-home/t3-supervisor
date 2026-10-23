@@ -4420,6 +4420,17 @@ it.effect("the full standing instructions permit supervision_stop wherever they 
   }
 }));
 
+// the check-in instructions of a root with or without a team name the native MCPX call for a permitted tool that is not listed and
+// suggest no code (native proof 2026-10-23: the native mcpx_call_tool route exists; code wrappers are not wanted)
+it.effect("the check-in instructions name the native MCPX call for unlisted permitted tools and suggest no code, with and without a team", () => Effect.gen(function* () {
+  for (const teamEnabled of [false, true]) {
+    const fixture = yield* makeFixture({now: baseTime}, teamEnabled ? {teamEnabled, helperProviderInstanceId: "isolated-helper-provider"} : {});
+    const view = (yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"})) as unknown as {instructions: string};
+    assert.match(view.instructions, /When a permitted tool is not listed, call it with the native MCPX tool mcpx_call_tool \(find it with mcpx_search_tools and mcpx_get_tool_schema\) using its exact name and arguments; do not run shell commands or access files\./u, `team=${teamEnabled}`);
+    assert.doesNotMatch(view.instructions, /\b(wrappers?|code-mode|gateway|functions\.exec|harness(es)?)\b/iu, `team=${teamEnabled}`);
+  }
+}));
+
 it.effect("helper lifecycle changes never change the standing-instructions version, so later wakes keep the compact core", () => Effect.gen(function* () {
   const clock = {now: baseTime};
   const fixture = yield* makeFixture(clock, {teamEnabled: true, helperProviderInstanceId: "isolated-helper-provider"});

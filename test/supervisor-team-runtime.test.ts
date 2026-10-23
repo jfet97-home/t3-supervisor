@@ -590,6 +590,9 @@ it.effect("registration readiness uses a finite native check-in and exact member
   // the readiness check, which precedes every assignment, is the one helper message carrying the full helper role
   assert.equal(request.text.split("Use link_child only when the assigned target has no workflow document").length - 1, 1);
   assert.ok(request.text.length < 9_500, `readiness ${request.text.length}`);
+  // the helper reaches its tools as native MCP/MCPX tool calls; nothing suggests code (native proof 2026-10-23)
+  assert.match(request.text, /Discover and invoke actual MCP tools as native tool calls, directly or through mcpx_search_tools, mcpx_get_tool_schema and mcpx_call_tool/u);
+  assert.doesNotMatch(request.text, /\b(wrappers?|code-mode|gateway|functions\.exec|harness(es)?)\b/iu);
   assert.ok(request.text.includes("t3-supervisor-workflows__supervision_team"));
   assert.ok(request.text.includes(`bindingGeneration=${f.binding.generation}`));
   assert.ok(request.text.includes(`memberEpoch=${member.epoch}`));
