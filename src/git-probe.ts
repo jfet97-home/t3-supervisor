@@ -1,4 +1,4 @@
-import { Context, Crypto, Data, Deferred, Effect, Exit, Layer, Schema, Semaphore } from "effect";
+import { Cause, Context, Crypto, Data, Deferred, Effect, Exit, Layer, Schema, Semaphore } from "effect";
 import { posix } from "node:path";
 import type { GuidanceStore } from "./guidance-store.js";
 import { NativeEnvelope, NativeFraming, nativeMaxPayload, NativeStep, type NativeEndpoint, type NativeEnvelopeError, type NativeExit } from "./native-envelope.js";
@@ -376,7 +376,14 @@ const makeGitProbe = Effect.fnUntraced(function* (endpoint: NativeEndpoint, stor
         else if (error.reason === "invalid_frame") fail(new GitProbeError("T3 returned an invalid terminal frame."));
         else if (error.reason !== "socket_closed" || !packet || !exit) abort();
       })));
-    yield* Effect.forkScoped(stream);
+    // a consumer or adapter defect ends the attach fiber without a typed failure: the probe waiting on these signals receives
+    // that cause at once, so it ends, closes its terminal and releases the probe lock instead of outliving its deadline
+    yield* Effect.forkScoped(stream.pipe(Effect.onExit((exit) => Effect.sync(() => {
+      if (Exit.isSuccess(exit) || !Cause.hasDies(exit.cause)) return;
+      Deferred.doneUnsafe(ready, Effect.failCause(exit.cause));
+      Deferred.doneUnsafe(helperReady, Effect.failCause(exit.cause));
+      Deferred.doneUnsafe(result, Effect.failCause(exit.cause));
+    }))));
     const capture = Effect.sync(() => {
       if (capturing) return;
       capturing = true;

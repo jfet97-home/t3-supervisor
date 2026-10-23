@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NodeCrypto } from "@effect/platform-node";
 import { it } from "@effect/vitest";
-import { Deferred, Effect, Exit, Fiber, Layer } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect";
 import { TestClock } from "effect/testing";
 import { WebSocketServer, type WebSocket } from "ws";
 import { GitProbe, GitProbeError } from "../src/git-probe.js";
@@ -184,3 +184,22 @@ it.live("TR-PROBE-04: a non-record attach event fails the probe with its own mes
   assert.deepEqual(t3.requests.map(request => request.tag), ["terminal.open", "terminal.attach", "terminal.close"]);
   assert.deepEqual(pendingSessions(store), []);
 }), {timeout: 10_000});
+
+it.live("TR-PROBE-05: a defect in the attach consumer ends the probe with that cause at once, closes the terminal, drops the pending entry and releases the probe lock", () => Effect.gen(function* () {
+  // the reviewers' fault: the envelope's attach consumer dies on its first chunk, below every typed failure path
+  const t3 = yield* Effect.acquireRelease(Effect.promise(() => startFakeTerminalT3(status, () => true)), fake => Effect.promise(() => fake.close()));
+  const {store} = yield* guidanceStore;
+  const original = yield* NativeEnvelope;
+  const defect = new Error("attach-consumer-defect");
+  const faulty = NativeEnvelope.of({...original, call: spec => original.call(spec.request.tag === "terminal.attach" ? {...spec, onChunk: () => Effect.die(defect)} : spec)});
+  const probe = yield* GitProbe.make({baseUrl: t3.url, token: "terminal-operate-test-token"}, store).pipe(Effect.provideService(NativeEnvelope, faulty));
+  // well inside the 15 s probe deadline: the probe settles on the defect itself, not on its deadline
+  const exit = yield* Effect.exit(probe.probe(root)).pipe(Effect.timeout("5 seconds"));
+  assert.ok(Exit.isFailure(exit) && Cause.hasDies(exit.cause) && Cause.squash(exit.cause) === defect, "the probe ends with the consumer's defect");
+  assert.deepEqual(t3.requests.map(request => request.tag), ["terminal.open", "terminal.attach", "terminal.close"]);
+  assert.deepEqual(pendingSessions(store), []);
+  // the probe lock was released: the next probe opens a terminal of its own
+  yield* Effect.exit(probe.probe(root)).pipe(Effect.timeout("5 seconds"));
+  assert.equal(t3.requests.filter(request => request.tag === "terminal.open").length, 2);
+  assert.deepEqual(pendingSessions(store), []);
+}).pipe(Effect.provide(probeClients)), {timeout: 20_000});
