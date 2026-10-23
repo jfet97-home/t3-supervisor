@@ -34,9 +34,9 @@ import { idleControlActivity, SupervisionControlPanel, GlobalDefinitionsControlP
 const newOperationId = Effect.sync(() => crypto.randomUUID());
 
 export const snapshotRefreshMillis = 5_000;
-// the snapshot refreshes on every interval while it is mounted, also while the page is hidden, as the baseline interval
-// did; a failed refresh keeps the last successful snapshot
-export const snapshotPoll = Atom.family((millis: number) => snapshotAtom.pipe(Atom.makeRefreshOnSignal(Atom.make(
+// the snapshot refreshes on every interval of the page runtime's clock while it is mounted, also while the page is
+// hidden, as the baseline interval did; a failed refresh keeps the last successful snapshot
+export const snapshotPoll = Atom.family((millis: number) => snapshotAtom.pipe(Atom.makeRefreshOnSignal(uiRuntime.atom(
   Stream.fromSchedule(Schedule.spaced(millis)).pipe(Stream.scan(() => 0, (tick: number) => tick + 1), Stream.drop(1)), {initialValue: 0}))));
 export const dashboardSnapshot = snapshotPoll(snapshotRefreshMillis);
 

@@ -6,17 +6,18 @@ import { NodeFileSystem } from "@effect/platform-node";
 import { beforeAll, it } from "@effect/vitest";
 import { Effect, Exit, FileSystem } from "effect";
 import { AsyncResult, type Atom, AtomRegistry } from "effect/reactivity";
+import { TestClock } from "effect/testing";
 import { vi } from "vitest";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { scopedRegistry } from "./support/g7-page.js";
-import { json, makeBrowser, until, type SentRequest } from "./support/g7-browser.js";
+import { clockedRegistry, scopedRegistry } from "./support/g7-page.js";
+import { json, liveSleep, makeBrowser, nextTurn, until, type SentRequest } from "./support/g7-browser.js";
 
 // target regressions of the dashboard integration (WP-S7-INT) over a stubbed browser and the real page runtime: the
 // shared admit helper, the per-registry claim, the auth epoch as session generation, stale reads, the transitional
 // removals, the guarded discard of Supervisor drafts, the consumed sign-in token and the T3 environment in scope keys. the
 // waits for a request or an atom value are bounded on the live clock. the tests that observe the absence of a request
-// over real event-loop time, and the poll test that counts reads of the snapshot refresh (a plain atom on the default
-// clock) against the page runtime's poll signal, are it.live
+// over real event-loop time are it.live; the poll test steps the snapshot refresh and the poll signal, both on the page
+// runtime, with TestClock on the runtime's clock, and observes its absence of a second read over live event-loop time
 
 // importing the shell mounts its root; only the React root renderer is replaced, nothing it renders is under test here
 vi.mock("react-dom/client", () => ({ createRoot: () => ({ render: () => undefined }) }));
@@ -203,12 +204,12 @@ it.effect("D2 an admitted operation is claimed per registry: repeated writes in 
   second.dispose();
 }), { timeout: 10_000 });
 
-it.live("D3 signed-out 401s leave the auth epoch as it was, so the epoch-keyed reads repeat only on their polls, and a sign-in reads each of them once", () => Effect.gen(function* () {
+it.effect("D3 signed-out 401s leave the auth epoch as it was, so the epoch-keyed reads repeat only on their polls, and a sign-in reads each of them once", () => Effect.gen(function* () {
   // a signed-in page that knows its T3 environment signs out
   browser.local.set("supervisor-session", "session-0");
   browser.sent.length = 0;
   browser.state.reply = (request) => request.path === "/api/guidance/snapshot" ? json(snapshot()) : json({ csrf: "csrf-0" });
-  const registry = yield* scopedRegistry();
+  const registry = yield* clockedRegistry(atoms.uiRuntime);
   const stopEpoch = registry.mount(atoms.authEpochAtom);
   const stopSnapshot = registry.mount(atoms.snapshotAtom);
   yield* until(registry, atoms.environmentAtom, (value) => value === "environment", "the environment");
@@ -232,6 +233,14 @@ it.live("D3 signed-out 401s leave the auth epoch as it was, so the epoch-keyed r
   const ticks = atoms.pollSignal(40);
   const polling = [ticks, shell.snapshotPoll(40), shell.accessRefresh, model.polled].map((atom) => registry.mount(atom as Atom.Atom<unknown>));
   const stopSearch = registry.mount(search);
+  // four poll intervals pass on the page runtime's clock, each one's polled reads answered before the next, as the real
+  // intervals allowed
+  for (let interval = 1; interval <= 4; interval++) {
+    yield* TestClock.adjust("40 millis");
+    yield* nextTurn;
+    yield* Effect.all([shell.snapshotPoll(40), model.polled].map((atom) =>
+      settled(registry, atom as Atom.Atom<AsyncResult.AsyncResult<unknown, unknown>>, `the reads of interval ${interval}`)), { concurrency: "unbounded" });
+  }
   const polls = yield* until(registry, ticks, (value) => AsyncResult.isSuccess(value) && value.value >= 4, "four polls");
   const count = AsyncResult.isSuccess(polls) ? polls.value : 0;
   assert.equal(epochOf(registry), signedOut, "no 401 while signed out advances the epoch");
@@ -254,8 +263,10 @@ it.live("D3 signed-out 401s leave the auth epoch as it was, so the epoch-keyed r
   assert.equal(epochOf(registry), signedOut + 1, "the sign-in stored a new session");
   const paths = ["/api/guidance/snapshot", "/api/guidance/dashboard-overview", "/api/guidance/supervision-candidates"];
   for (const path of paths) yield* browser.request((request) => request.path === path && request.session === session, `${path} after the sign-in`);
-  // absence of a second read can only be observed over time
-  yield* Effect.sleep("150 millis");
+  // absence of a second read can only be observed over time: the stopped polls' intervals pass on the page runtime's
+  // clock, and live event-loop time passes for any read that an answer would start
+  yield* TestClock.adjust("150 millis");
+  yield* liveSleep("150 millis");
   for (const path of paths) assert.deepEqual(sentTo(path).map((request) => request.session), [session], `${path} is read once for the new session`);
   assert.equal(epochOf(registry), signedOut + 1);
   for (const stop of [stopOverview, stopSearch, stopSnapshot, stopEpoch]) stop();

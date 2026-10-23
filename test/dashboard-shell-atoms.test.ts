@@ -6,14 +6,16 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, it } from "@effect/vitest";
 import { Effect } from "effect";
 import { AsyncResult, type Atom, type AtomRegistry } from "effect/reactivity";
+import { TestClock } from "effect/testing";
 import { vi } from "vitest";
-import { scopedRegistry } from "./support/g7-page.js";
-import { json, makeBrowser, until } from "./support/g7-browser.js";
+import { clockedRegistry, scopedRegistry } from "./support/g7-page.js";
+import { json, makeBrowser, nextTurn, until } from "./support/g7-browser.js";
+import { countedRegistry, elapse } from "./support/s8ui-clock.js";
 
 // target regressions of the dashboard shell over atoms (CT-UI-SHELL-01): the 5 s snapshot refresh, the retained last
 // snapshot and its alert, the access refreshes, sign-in and sign-out, and drafts surviving expiry and re-sign-in. the
-// waits for a request or an atom value are bounded on the live clock. the snapshot refresh runs on a plain atom, whose
-// schedule uses the default clock, so the refresh test lets real time pass and is it.live
+// waits for a request or an atom value are bounded on the live clock. the snapshot refresh runs on the page runtime, so
+// the refresh tests step its intervals with TestClock on the runtime's clock
 
 // importing the shell mounts its root; only the React root renderer is replaced, nothing it renders is under test here
 vi.mock("react-dom/client", () => ({ createRoot: () => ({ render: () => undefined }) }));
@@ -53,25 +55,30 @@ const settled = (registry: AtomRegistry.AtomRegistry, atom: Atom.Atom<AsyncResul
   until(registry, atom, (result) => AsyncResult.isNotInitial(result) && !result.waiting, "the action settled");
 const session = "A".repeat(43);
 
-it.live("the snapshot refreshes every 5 s while mounted, also while the page is hidden, and stops when unmounted", () => Effect.gen(function* () {
+it.effect("the snapshot refreshes every 5 s while mounted, also while the page is hidden, and stops when unmounted", () => Effect.gen(function* () {
   assert.equal(shell.snapshotRefreshMillis, 5_000);
   assert.equal(shell.dashboardSnapshot, shell.snapshotPoll(5_000));
   browser.local.set("supervisor-session", "session-1");
   browser.sent.length = 0;
   browser.state.reply = () => json(snapshot(true));
-  const registry = yield* scopedRegistry();
-  const stop = registry.subscribe(shell.snapshotPoll(20), () => undefined, { immediate: true });
+  const registry = yield* clockedRegistry(atoms.uiRuntime);
+  // the dashboard's own 5 s interval: it passes only on the page runtime's clock, never within the live bounds
+  const stop = registry.subscribe(shell.dashboardSnapshot, () => undefined, { immediate: true });
+  // two intervals pass on the page runtime's clock
+  yield* TestClock.adjust("10 seconds");
   yield* browser.request(() => snapshots().length >= 3, "two refreshes after the first read");
   browser.state.visibility = "hidden";
   const hidden = snapshots().length;
+  // two more intervals pass while hidden
+  yield* TestClock.adjust("10 seconds");
   yield* browser.request(() => snapshots().length >= hidden + 2, "refreshes while hidden");
   browser.state.visibility = "visible";
   stop();
-  yield* until(registry, shell.snapshotPoll(20), (result) => !result.waiting, "the last refresh");
+  yield* until(registry, shell.dashboardSnapshot, (result) => !result.waiting, "the last refresh");
   registry.dispose();
   const after = snapshots().length;
-  // absence of a refresh can only be observed over time: six intervals pass after unmounting
-  yield* Effect.sleep("120 millis");
+  // six intervals pass on the page runtime's clock after unmounting
+  yield* elapse("30 seconds");
   assert.equal(snapshots().length, after, "no refresh after unmount");
 }), { timeout: 10_000 });
 
@@ -240,4 +247,26 @@ it.effect("sign-out sends one request however often it is asked, forgets only it
   assert.equal(yield* storedSession(registry), "");
   for (const stop of stops) stop();
   registry.dispose();
+}), { timeout: 10_000 });
+
+it.effect("unmounting the dashboard snapshot stops its 5 s refresh timer on the page runtime's clock", () => Effect.gen(function* () {
+  browser.local.set("supervisor-session", "session-1");
+  browser.sent.length = 0;
+  browser.state.reply = () => json(snapshot(true));
+  const {registry, sleeps} = yield* countedRegistry(atoms.uiRuntime);
+  const stop = registry.subscribe(shell.dashboardSnapshot, () => undefined, { immediate: true });
+  yield* until(registry, shell.dashboardSnapshot, (result) => AsyncResult.isSuccess(result) && !result.waiting, "the first snapshot");
+  assert.equal(sleeps(), 1, "the refresh interval is the one timer on the page runtime's clock");
+  // one 5 s interval passes on the page runtime's clock
+  yield* TestClock.adjust("5 seconds");
+  yield* browser.request(() => snapshots().length >= 2, "the refresh");
+  assert.equal(snapshots().length, 2, "one refresh for the interval");
+  assert.equal(sleeps(), 1, "the next interval is pending");
+  stop();
+  // the registry removes the unmounted snapshot on its next task, and the refresh signal only it used on the task after
+  yield* nextTurn;
+  yield* nextTurn;
+  assert.equal(sleeps(), 0, "no timer after unmounting");
+  yield* elapse("30 seconds");
+  assert.equal(snapshots().length, 2, "no refresh after unmounting");
 }), { timeout: 10_000 });
