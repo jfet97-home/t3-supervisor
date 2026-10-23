@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "vitest";
-import { canonicalizeProposalDraft, interpretationPrompt, prepareWorkflowRequest, seededNodeIds } from "../src/supervisor-workflow.js";
+import { canonicalizeProposalDraft, prepareWorkflowRequest, seededNodeIds } from "../src/supervisor-workflow.js";
 import { goldenDraft, goldenSeed, goldenSnapshot, sha256 } from "./support/c1-workflow-fixture.js";
 
 const verifySource = {origin: "project", path: ".t3-supervisor/steps/verify.md", sourceId: "project:verify"};
@@ -45,17 +45,24 @@ it("CT-SW-01: canonical plan JSON, seeded node IDs and prompt digests are golden
   const taskText = "Check this task. token=github_pat_12345678901234567890";
   const prepared = prepareWorkflowRequest("thread-a", "message-a", taskText, goldenSnapshot);
   assert.ok(prepared.context);
-  assert.equal(prepared.requestText.length, 5429);
-  assert.equal(sha256(prepared.requestText), "65a267fb5ff9c01cd330c1761fd353dc173620266859478229984d38418b7c83");
+  // the request texts are the typed-submission prompt of plan 3.12 item 12 (the final-chat JSON prompts and the objective-only
+  // interpretationPrompt are deleted); the context and workflow digests are unchanged
+  assert.equal(prepared.requestText.length, 5539);
+  assert.equal(sha256(prepared.requestText), "512e78d7d2f43037d1d8bc18e89bb25fd279d79b6cc65876ae25fc01343b675a");
   assert.equal(prepared.requestText.includes("github_pat_12345678901234567890"), false);
   assert.equal(sha256(JSON.stringify(prepared.context)), "4b22e3c45e9060410b2a752eea3eb602c960836021edd7c79e75d9d8d3e45f4f");
   assert.equal(sha256(JSON.stringify(prepared.workflow)), "a263f8572ef36eca2578bb7f9a3f3e0860a0690bca1f4869eba7ebf4b61d0db4");
 
   const reader = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
     {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}, earlierMessages: [{messageId: "message-0", text: "Earlier request."}]});
-  assert.equal(reader.requestText.length, 1555);
-  assert.equal(sha256(reader.requestText), "d90954428ad788a1de595746a62fe4583a388f74e29e5e107cf8881e905e2fb5");
-  assert.equal(sha256(interpretationPrompt("thread-a", "message-a", "Check this task.")), "ce8ab4b6b0c44fd5a932cfa2ea7b91abb4f2a915c1ff4f6680a33cdc4a2cfeb5");
+  assert.equal(reader.requestText.length, 1658);
+  assert.equal(sha256(reader.requestText), "085d6c578e304e9f28d34f3e005c864124c0407d103b5b3ef211b7129d643a19");
+  const typed = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
+    {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}, earlierMessages: [{messageId: "message-0", text: "Earlier request."}],
+      submission: {supervisorThreadId: "supervisor-a", bindingGeneration: 3, taskId: "task-a", attemptId: "interpretation-attempt:00000000-0000-4000-8000-000000000001",
+        sourcePin: {messageId: "message-a", runId: "run-a", ordinal: 1, hash: "0".repeat(64)}, startVerdict: true}});
+  assert.equal(typed.requestText.length, 2986);
+  assert.equal(sha256(typed.requestText), "b46f778077d979aab17b93272a1fdf8b4d1e90525c0453bff745fdab16d6238b");
 
   const canonical = canonicalizeProposalDraft(goldenDraft, prepared.context, goldenSeed);
   assert.deepEqual(canonical, {ok: true, workflow: canonicalWorkflow});

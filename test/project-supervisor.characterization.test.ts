@@ -10,7 +10,7 @@ import { SupervisorIds } from "../src/ids.js";
 import { SupervisorRpcError, type SupervisorRpc } from "../src/supervisor-native.js";
 import type { SupervisorConfig } from "../src/types.js";
 import { makeFixture as makeControlFixture, makeNoProjectFixture, supervisionStateDigest } from "./support/c2-ps-b-fixture.js";
-import { addSupervisorRequest, completeSupervisorRequest, deferred, makeFixture, reserveReadyBinding, retryInput, within, workflowResult, type Fixture } from "./support/c2-ps-fixture.js";
+import { addSupervisorRequest, completeSupervisorRequest, deferred, makeFixture, reserveReadyBinding, retryInput, submitInterpretation, within, workflowFields, type Fixture } from "./support/c2-ps-fixture.js";
 import { metaRows, pssFixture, tableRows } from "./support/c2-pss-fixture.js";
 import { after, mockMethod } from "./support/node-test.js";
 import { openGuidance, openSupervisors, serviceOf, storeUnitOf, type DbFacade } from "./support/store-units.js";
@@ -187,8 +187,11 @@ it("CT-PS-02: a task persisted as dispatching before a crash keeps its identity:
     const root = fixture.projections.get(binding.threadId);
     assert.ok(root);
     addSupervisorRequest(root, {messageId: dispatching.messageId, text: dispatching.requestText});
-    completeSupervisorRequest(root, dispatching.messageId, workflowResult(dispatching.sourceMessageId, "Create a migration plan", "The source asks for a plan."));
     const supervisor = fixture.makeSupervisor();
+    // the present native result is the root's typed submission in the request run; its final chat text is not read
+    assert.equal((await submitInterpretation(fixture, supervisor, dispatching, workflowFields(dispatching.sourceMessageId, "Create a migration plan",
+      "The source asks for a plan."))).status, "submitted");
+    completeSupervisorRequest(root, dispatching.messageId, "Submitted the interpretation.");
     await within(supervisor.runOnce(AbortSignal.timeout(5_000)), 5_000, "runOnce after restart");
     const applied = await fixture.supervisorStore.task(mainThreadId);
     assert.ok(applied);

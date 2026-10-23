@@ -7,7 +7,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Context, Effect, Layer, Schema } from "effect";
 import { createServer } from "node:http";
-import { parseInterpretation } from "../src/project-supervisor.js";
 import { projectSupervisorUnit, type ProjectSupervisorUnit, type ProjectSupervisorUnitDefinitions } from "./support/team-units.js";
 import { defaultSupervisorModel, type SupervisorBaseline } from "../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../src/project-supervisor-contract.js";
@@ -18,6 +17,8 @@ import { makeT3Client, T3Client, T3TransportError, type T3ClientShape } from "..
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
 import { effectiveIndex, makeDefinitionFixture, projectIndex, stepSource } from "./project-definitions-fixture.js";
 import { openGuidance, openSupervisors, storeUnitOf } from "./support/store-units.js";
+import { interpretationSubmitter, submissionArguments, taskFields, turnItemAnswer, type SubmissionItemOptions } from "./support/interpretation-submit.js";
+import type { TaskRecord } from "../src/project-supervisor-store.js";
 
 const activationSequence = 10;
 const day = 24 * 60 * 60 * 1000;
@@ -208,6 +209,13 @@ const workflowResult = (messageId: string, objective: string, reason: string): s
     reason: "The current task needs a bounded plan."}]}},
 });
 
+// the bound root's typed submission of a task's interpretation: its executed tool item in the request run, through the write controller
+const submitTask = async (fixture: {supervisorStore: Parameters<typeof interpretationSubmitter>[0]["supervisors"]; projections: Map<string, Projection>},
+  supervisor: {workflowStates: Parameters<typeof interpretationSubmitter>[0]["workflows"]}, task: TaskRecord, fields: Record<string, unknown>,
+  options: SubmissionItemOptions = {}) =>
+  await interpretationSubmitter({supervisors: fixture.supervisorStore, workflows: supervisor.workflowStates, projections: fixture.projections})
+    .submit(task, submissionArguments(task, fields), options);
+
 const retryInput = (
   projectId: string,
   expectedGeneration: number,
@@ -275,8 +283,10 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
       return Effect.fail(new T3TransportError("missing projection", 404));
     },
   };
-  const readRpc = async (tag: string): Promise<unknown> => {
+  const readRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
     if (tag === "server.getConfig") return modelConfig;
+    const item = turnItemAnswer(projections, tag, payload);
+    if (item) return item;
     throw new Error("unexpected fake read RPC");
   };
   const operateRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
@@ -550,16 +560,16 @@ it("activation baseline excludes existing runs and gives independent mains separ
   assert.ok(firstTask);
   const supervisorProjection = fixture.projections.get(binding.threadId);
   assert.ok(supervisorProjection);
-  const linkedResult = workflowResult(firstTask.sourceMessageId, "Build the invoice export", "The source request asks for an export to be built.");
-  completeSupervisorRequest(supervisorProjection, firstTask.messageId, linkedResult);
+  // a submission citing another input is refused with its typed diagnostic and records nothing; the source-linked one is recorded
+  assert.deepEqual(await submitTask(fixture, supervisor, firstTask, taskFields(firstTask, "A different task", "The response points to another input.",
+    {sourceMessageIds: ["unrelated-message"]})), {status: "invalid", code: "source_message_ids_mismatch",
+    issues: [{code: "source_message_ids_mismatch", path: "/sourceMessageIds"}], retry: "corrected"});
+  assert.deepEqual(await submitTask(fixture, supervisor, firstTask, taskFields(firstTask, "Build the invoice export", "The source request asks for an export to be built.")),
+    {status: "submitted", attemptId: firstTask.attempt!.attemptId, retry: "none"});
+  completeSupervisorRequest(supervisorProjection, firstTask.messageId, "Submitted the interpretation.");
   await supervisor.runOnce();
   assert.equal((await fixture.supervisorStore.task("current-thread"))?.status, "inferred");
   assert.equal((await fixture.supervisorStore.task("current-thread"))?.objective, "Build the invoice export");
-  assert.throws(() => parseInterpretation(JSON.stringify({
-    objective: "A different task",
-    reason: "The response points to another input.",
-    sourceMessageIds: ["unrelated-message"],
-  }), firstTask.sourceMessageId));
 
   await supervisor.runOnce();
   const dispatches = fixture.operations.filter((call) => call.payload.type === "message.dispatch");
@@ -1273,8 +1283,8 @@ it("a changed source invalidates a completed Supervisor result without an operat
   assert.ok(task && binding);
   const supervisorProjection = fixture.projections.get(binding.threadId);
   assert.ok(supervisorProjection);
-  completeSupervisorRequest(supervisorProjection, task.messageId,
-    workflowResult(task.sourceMessageId, "Deploy the release", "The source request asks for a deployment."));
+  assert.equal((await submitTask(fixture, supervisor, task, taskFields(task, "Deploy the release", "The source request asks for a deployment."))).status, "submitted");
+  completeSupervisorRequest(supervisorProjection, task.messageId, "Submitted the interpretation.");
 
   const sourceProjection = fixture.projections.get("source-thread");
   assert.ok(sourceProjection);
@@ -1299,9 +1309,11 @@ it("a completed interpretation with unrelated source IDs is rejected", async (t)
   assert.ok(task && binding);
   const supervisorProjection = fixture.projections.get(binding.threadId);
   assert.ok(supervisorProjection);
-  const unrelated = JSON.parse(workflowResult(task.sourceMessageId, "Publish a release", "This response cites another message.")) as Record<string, unknown>;
-  unrelated.sourceMessageIds = ["unrelated-message"];
-  completeSupervisorRequest(supervisorProjection, task.messageId, JSON.stringify(unrelated));
+  const unrelated = await submitTask(fixture, supervisor, task, taskFields(task, "Publish a release", "This response cites another message.",
+    {sourceMessageIds: ["unrelated-message"]}));
+  assert.equal(unrelated.status, "invalid");
+  // the run's final answer, even well-formed final-chat JSON, is never read
+  completeSupervisorRequest(supervisorProjection, task.messageId, workflowResult(task.sourceMessageId, "Publish a release", "This response cites the source."));
 
   await supervisor.runOnce();
   const rejected = await fixture.supervisorStore.task("source-thread");
@@ -1547,8 +1559,9 @@ it("a main conversation over the buffered cap is discovered and interpreted from
   assert.ok(binding);
   const supervisorProjection = fixture.projections.get(binding.threadId);
   assert.ok(supervisorProjection);
-  completeSupervisorRequest(supervisorProjection, task.messageId, workflowResult("old-task", "Build the invoice export",
-    "The source request asks for an export to be built."));
+  assert.equal((await submitTask(fixture, supervisor, task, taskFields(task, "Build the invoice export",
+    "The source request asks for an export to be built."))).status, "submitted");
+  completeSupervisorRequest(supervisorProjection, task.messageId, "Submitted the interpretation.");
   await supervisor.runOnce();
   assert.equal((await fixture.supervisorStore.task("huge-main"))?.status, "inferred");
   assert.equal((await fixture.supervisorStore.task("huge-main"))?.objective, "Build the invoice export");
@@ -1593,7 +1606,10 @@ it("native Start runs one intent interpretation, grants only that chat and survi
     assert.match(task.requestText, /startRequested/);
     assert.equal(f.fixture.operations.filter(op => op.payload.type === "message.dispatch").length, 1);
     const root = f.fixture.projections.get(task.supervisorThreadId)!;
-    completeSupervisorRequest(root, task.messageId, JSON.stringify({objective: null, reason: "User requested supervision; awaiting a substantive task.", sourceMessageIds: [args.userMessageId], startRequested: true, workflow: null}));
+    assert.equal((await submitTask(f.fixture, f.supervisor, task, {objective: null, reason: "User requested supervision; awaiting a substantive task.", sourceMessageIds: [args.userMessageId],
+      supervision: "needed", startRequested: true, workflow: null})).status, "submitted");
+    assert.equal((await f.fixture.supervisorStore.start("manual"))?.status, "pending", "recording never activates a Start");
+    completeSupervisorRequest(root, task.messageId, "Submitted the Start verdict.");
     await f.supervisor.runOnce();
     assert.equal((await f.fixture.supervisorStore.start("manual"))?.status, "active", JSON.stringify({start:await f.fixture.supervisorStore.start("manual"),task:await f.fixture.supervisorStore.task("manual")}));
     assert.equal(await f.supervisor.scopeEnabled("project-a", "manual"), true);
@@ -1617,7 +1633,9 @@ it("negative Start intent and later Stop fence interpretation without operative 
       if (outcome === "stop") await f.supervisor.setChatSupervision({projectId: "project-a", mainThreadId: "manual", policyGeneration: (await f.policy.get()).generation, enabled: false}, AbortSignal.timeout(1000));
       if (outcome === "mode") await f.supervisor.saveNoProjectControl({expectedGeneration: 0, mode: "off"}, AbortSignal.timeout(1000));
       if (outcome === "edited") f.fixture.projections.get("manual")!.messages[0]!.text = "Changed request";
-      completeSupervisorRequest(f.fixture.projections.get(task.supervisorThreadId)!, task.messageId, JSON.stringify({objective: null, reason: "No task", sourceMessageIds: [args.userMessageId], startRequested: outcome !== "negative", workflow: null}));
+      await submitTask(f.fixture, f.supervisor, task, {objective: null, reason: "No task", sourceMessageIds: [args.userMessageId], supervision: "needed",
+        startRequested: outcome !== "negative", workflow: null});
+      completeSupervisorRequest(f.fixture.projections.get(task.supervisorThreadId)!, task.messageId, "Submitted the Start verdict.");
       await f.supervisor.runOnce();
       assert.equal(await f.supervisor.scopeEnabled("project-a", "manual"), false, outcome);
       assert.equal(f.fixture.operations.filter(op => op.payload.threadId === "manual").length, 0, outcome);
@@ -1712,7 +1730,9 @@ it("an inactive rejected Start parks its root without a human Stop or losing sou
   try {
     await f.supervisor.startSupervision({callerThreadId: "manual", userMessageId: "request-start", operationId: "reject-and-park"}, {runId: "run-request-start"}, AbortSignal.timeout(1000));
     await f.supervisor.runOnce();const task = (await f.fixture.supervisorStore.task("manual"))!;
-    completeSupervisorRequest(f.fixture.projections.get(task.supervisorThreadId)!, task.messageId, JSON.stringify({objective: null, reason: "No Start intent", sourceMessageIds: [task.sourceMessageId], startRequested: false, workflow: null}));
+    assert.equal((await submitTask(f.fixture, f.supervisor, task, {objective: null, reason: "No Start intent", sourceMessageIds: [task.sourceMessageId], supervision: "needed",
+      startRequested: false, workflow: null})).status, "submitted");
+    completeSupervisorRequest(f.fixture.projections.get(task.supervisorThreadId)!, task.messageId, "Submitted the Start verdict.");
     await f.supervisor.runOnce();await f.supervisor.runOnce();
     const binding = (await f.fixture.supervisorStore.binding("project-a", "manual"))!;
     assert.equal(binding.settlement?.state, "settled");assert.equal(binding.supervisionStop, undefined);assert.equal(binding.stopObservedAt, undefined);
@@ -1743,7 +1763,9 @@ it("a later human task survives repeated discovery and restart without recreatin
   try {
     await f.supervisor.startSupervision({callerThreadId: "manual", userMessageId: "request-start", operationId: "start-handoff"}, {runId: "run-request-start"}, AbortSignal.timeout(1000));await f.supervisor.runOnce();
     const initial = (await f.fixture.supervisorStore.task("manual"))!;
-    completeSupervisorRequest(f.fixture.projections.get(initial.supervisorThreadId)!, initial.messageId, JSON.stringify({startRequested: true, objective: null, reason: "User requested supervision", sourceMessageIds: [initial.sourceMessageId], workflow: null}));
+    assert.equal((await submitTask(f.fixture, f.supervisor, initial, {startRequested: true, objective: null, reason: "User requested supervision", sourceMessageIds: [initial.sourceMessageId],
+      supervision: "needed", workflow: null})).status, "submitted");
+    completeSupervisorRequest(f.fixture.projections.get(initial.supervisorThreadId)!, initial.messageId, "Submitted the Start verdict.");
     await f.supervisor.runOnce();
     await f.fixture.restart();const resumed = f.fixture.makeSupervisor();
     f.fixture.addTurn("manual", "project-a", {id: "later-greeting", sequence: 21, text: "Reply with a greeting."});
@@ -1751,7 +1773,9 @@ it("a later human task survives repeated discovery and restart without recreatin
     await resumed.runOnce();const next = (await f.fixture.supervisorStore.task("manual"))!;
     assert.notEqual(next.id, initial.id);assert.equal(next.sourceMessageId, "later-greeting");
     await resumed.runOnce();assert.equal((await f.fixture.supervisorStore.task("manual"))?.id, next.id);
-    completeSupervisorRequest(f.fixture.projections.get(next.supervisorThreadId)!, next.messageId, JSON.stringify({objective: "Reply with a greeting", reason: "Self-contained greeting", sourceMessageIds: [next.sourceMessageId], supervision: "not_needed", workflow: null}));
+    assert.equal((await submitTask(f.fixture, resumed, next, {objective: "Reply with a greeting", reason: "Self-contained greeting", sourceMessageIds: [next.sourceMessageId],
+      supervision: "not_needed", workflow: null})).status, "submitted");
+    completeSupervisorRequest(f.fixture.projections.get(next.supervisorThreadId)!, next.messageId, "Submitted the interpretation.");
     await resumed.runOnce();await resumed.runOnce();
     assert.equal((await f.fixture.supervisorStore.task("manual"))?.id, next.id);assert.equal((await f.fixture.supervisorStore.task("manual"))?.status, "not_supervised");
     assert.equal(f.fixture.operations.filter(op => op.payload.type === "message.dispatch" && op.payload.threadId === initial.supervisorThreadId).length, 2);

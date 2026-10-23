@@ -4,7 +4,7 @@ import { it } from "vitest";
 import type { GateGuard, SupervisionGateShape } from "../src/supervision-gate.js";
 import { after } from "./support/node-test.js";
 import { makeNoProjectFixture } from "./support/c2-ps-b-fixture.js";
-import { completeSupervisorRequest, deferred, makeFixture, missingDefinitions, reserveReadyBinding, retryInput, within, workflowResult, type Fixture } from "./support/c2-ps-fixture.js";
+import { completeSupervisorRequest, deferred, makeFixture, missingDefinitions, reserveReadyBinding, retryInput, submitInterpretation, within, workflowFields, type Fixture } from "./support/c2-ps-fixture.js";
 import type { ProjectSupervisorUnit } from "./support/team-units.js";
 import { replaceMethod, serviceOf } from "./support/store-units.js";
 
@@ -36,7 +36,8 @@ const completedInterpretation = async (f: Fixture, supervisor: ProjectSupervisor
   await within(supervisor.runOnce(AbortSignal.timeout(5_000)), 5_000, "dispatching cycle");
   const task = (await f.supervisorStore.task("main"))!;
   assert.equal(task.status, "waiting");
-  completeSupervisorRequest(f.projections.get(task.supervisorThreadId)!, task.messageId, workflowResult("task", "Review the release", "A finite task."));
+  assert.equal((await submitInterpretation(f, supervisor, task, workflowFields("task", "Review the release", "A finite task."))).status, "submitted");
+  completeSupervisorRequest(f.projections.get(task.supervisorThreadId)!, task.messageId, "Submitted the interpretation.");
   return task;
 };
 

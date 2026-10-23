@@ -11,6 +11,9 @@ import { T3TransportError, type T3ClientShape } from "../../src/t3.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../../src/types.js";
 import { effectiveIndex } from "../project-definitions-fixture.js";
 import { openGuidance, openSupervisors, storeUnitOf } from "./store-units.js";
+import { interpretationSubmitter, submissionArguments, turnItemAnswer } from "./interpretation-submit.js";
+import type { TaskRecord } from "../../src/project-supervisor-store.js";
+import type { ProjectSupervisorUnit } from "./team-units.js";
 
 // copied from test/project-supervisor.test.ts, with interceptable native calls, an optional thread policy file and a file-keeping restart
 
@@ -101,8 +104,9 @@ export const completeSupervisorRequest = (projection: Projection, messageId: str
     streaming: false, createdAt: now, updatedAt: now});
 };
 
-export const workflowResult = (messageId: string, objective: string, reason: string): string => JSON.stringify({
-  objective, reason, sourceMessageIds: [messageId],
+// the interpretation fields of a finite one-step plan citing the source message
+export const workflowFields = (messageId: string, objective: string, reason: string): Record<string, unknown> => ({
+  objective, reason, sourceMessageIds: [messageId], supervision: "needed",
   workflow: {requirements: [], plan: {kind: "sequence", nodes: [{kind: "step", definitionId: null, localId: "bounded-task-step",
     name: "Review the available context", description: "State what remains unknown and keep the plan finite.",
     reason: "The current task needs a bounded plan."}]}},
@@ -176,8 +180,10 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
       return Effect.fail(new T3TransportError("missing projection", 404));
     },
   };
-  const readRpc: Rpc = async tag => {
+  const readRpc: Rpc = async (tag, payload) => {
     if (tag === "server.getConfig") {readHook?.(tag);return modelConfig;}
+    const item = turnItemAnswer(projections, tag, payload);
+    if (item) return item;
     throw new Error("unexpected fake read RPC");
   };
   const operateRpc: Rpc = async (tag, payload, signal) => {
@@ -257,6 +263,11 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
   };
 };
 export type Fixture = Awaited<ReturnType<typeof makeFixture>>;
+
+// the bound root's typed submission of the task's interpretation, its executed tool item in the request run, through the write controller
+export const submitInterpretation = async (fixture: Fixture, supervisor: Pick<ProjectSupervisorUnit, "workflowStates">, task: TaskRecord,
+  fields: Record<string, unknown>) => await interpretationSubmitter({supervisors: fixture.supervisorStore, workflows: supervisor.workflowStates,
+  projections: fixture.projections}).submit(task, submissionArguments(task, fields));
 
 export const reserveReadyBinding = async (fixture: Fixture, mainThreadId = "source-thread", projectId = "project-a") => {
   const main = fixture.projections.get(mainThreadId);

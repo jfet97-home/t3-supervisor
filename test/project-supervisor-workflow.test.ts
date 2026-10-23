@@ -15,6 +15,8 @@ import { T3TransportError } from "../src/t3.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
 import { effectiveIndex, indexSource, projectIndex, stepSource, testSummary } from "./project-definitions-fixture.js";
 import { openGuidance, openSupervisors, serviceOf } from "./support/store-units.js";
+import { interpretationSubmitter, submissionArguments, turnItemAnswer } from "./support/interpretation-submit.js";
+import type { TaskRecord } from "../src/project-supervisor-store.js";
 
 const projectId = "project-a";
 const sourceThreadId = "source-thread";
@@ -204,10 +206,12 @@ const completeSupervisorRequest = (projection: Projection, messageId: string, re
   });
 };
 
-const workflowResponse = (messageId: string): string => JSON.stringify({
+// the interpretation fields a root submits for the export task
+const workflowFields = (messageId: string): Record<string, unknown> => ({
   objective: "Implement the export workflow",
   reason: "The source conversation requests an export implementation.",
   sourceMessageIds: [messageId],
+  supervision: "needed",
   workflow: {
     requirements: [{kind: "step", id: "test-plan", applies: true, reason: "The change needs a focused behavior check."}],
     plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "test-plan", reason: "Verify the export behavior with a regression test."}]},
@@ -220,10 +224,11 @@ const objectiveResponse = (messageId: string): string => JSON.stringify({
   sourceMessageIds: [messageId],
 });
 
-const provisionalWorkflowResponse = (messageId: string): string => JSON.stringify({
+const provisionalWorkflowFields = (messageId: string): Record<string, unknown> => ({
   objective: "Implement the export workflow",
   reason: "The source conversation requests an export implementation.",
   sourceMessageIds: [messageId],
+  supervision: "needed",
   workflow: {
     requirements: [],
     plan: {kind: "sequence", nodes: [{kind: "step", definitionId: null, localId: "bounded-review", name: "Review available context",
@@ -265,8 +270,10 @@ const makeFixture = async (initialDefinitions: ProjectDefinitionSnapshot = defin
       return projection ? Effect.succeed({ projection, snapshotSequence: 20 }) : Effect.fail(new T3TransportError("missing projection", 404));
     },
   };
-  const readRpc = async (tag: string): Promise<unknown> => {
+  const readRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
     if (tag === "server.getConfig") {modelsRead?.();return modelConfig;}
+    const item = turnItemAnswer(projections, tag, payload);
+    if (item) return item;
     throw new Error(`unexpected fake read RPC: ${tag}`);
   };
   const operateRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
@@ -329,6 +336,19 @@ const makeFixture = async (initialDefinitions: ProjectDefinitionSnapshot = defin
   };
 };
 
+type WorkflowFixture = Awaited<ReturnType<typeof makeFixture>>;
+// the root's typed submission (its executed tool item in the request run, through the write controller) and the run's completion;
+// the run's final chat text repeats the fields only as the conversation's final-answer proposal evidence, which moves to the
+// recorded submission with the conversation's evidence switch; the interpretation itself never reads it
+const submitAndComplete = async (fixture: WorkflowFixture, supervisor: {workflowStates: Parameters<typeof interpretationSubmitter>[0]["workflows"]} | null,
+  task: TaskRecord, fields: Record<string, unknown>) => {
+  const workflows = (supervisor ?? fixture.makeSupervisor()).workflowStates;
+  const submitted = await interpretationSubmitter({supervisors: fixture.store, workflows, projections: fixture.projections})
+    .submit(task, submissionArguments(task, fields));
+  assert.equal(submitted.status, "submitted", JSON.stringify(submitted));
+  completeSupervisorRequest(fixture.projections.get(task.supervisorThreadId)!, task.messageId, JSON.stringify(fields));
+};
+
 it("dispatch uses complete definitions from the operative source worktree", async (t) => {
   const fixture = await makeFixture();
   after(t, fixture.cleanup);
@@ -364,7 +384,7 @@ it("a correlated native result appears in the project DTO without repeating or s
   assert.ok(task && binding);
   const native = fixture.projections.get(binding.threadId);
   assert.ok(native);
-  completeSupervisorRequest(native, task.messageId, workflowResponse(task.sourceMessageId));
+  await submitAndComplete(fixture, supervisor, task, workflowFields(task.sourceMessageId));
 
   await supervisor.runOnce();
   const inferred = await fixture.task();
@@ -409,7 +429,7 @@ it("changed or non-ready definitions stale the workflow while preserving the inf
     const native = fixture.projections.get(binding.threadId);
     assert.ok(native, variant.name);
     fixture.setDefinitions(variant.snapshot);
-    completeSupervisorRequest(native, task.messageId, workflowResponse(task.sourceMessageId));
+    await submitAndComplete(fixture, supervisor, task, workflowFields(task.sourceMessageId));
 
     await supervisor.runOnce();
     const completed = await fixture.task();
@@ -481,7 +501,7 @@ it("bounded unavailable preparation reads still dispatch a provisional workflow 
   const native = fixture.projections.get(binding.threadId);
   assert.ok(native);
   assert.equal((await fixture.store.tasks(projectId)).filter((task) => task.status === "queued").length, 0);
-  completeSupervisorRequest(native, dispatched!.messageId, provisionalWorkflowResponse(dispatched!.sourceMessageId));
+  await submitAndComplete(fixture, null, dispatched!, provisionalWorkflowFields(dispatched!.sourceMessageId));
   await fixture.makeSupervisor().runOnce();
   assert.equal((await fixture.task())?.status, "inferred");
   assert.equal((await fixture.task())?.workflow?.status, "stale");
@@ -499,7 +519,7 @@ it("a known unavailable completion read stales the proposal without redispatch",
   assert.ok(task && binding);
   const native = fixture.projections.get(binding.threadId);
   assert.ok(native);
-  completeSupervisorRequest(native, task.messageId, workflowResponse(task.sourceMessageId));
+  await submitAndComplete(fixture, null, task, workflowFields(task.sourceMessageId));
   fixture.setDefinitionReadOutcomes([unavailableDefinitionSnapshot()]);
 
   await fixture.makeSupervisor().runOnce();
@@ -523,7 +543,7 @@ it("three transient completion read failures stale only the proposal and preserv
   assert.ok(task && binding);
   const native = fixture.projections.get(binding.threadId);
   assert.ok(native);
-  completeSupervisorRequest(native, task.messageId, workflowResponse(task.sourceMessageId));
+  await submitAndComplete(fixture, null, task, workflowFields(task.sourceMessageId));
   fixture.setDefinitionReadOutcomes([
     new Error("first revalidation failure"),
     new Error("second revalidation failure"),
@@ -637,12 +657,15 @@ it("persisted objective-only records are not backfilled or replayed", async (t) 
   const definitionsEnabledSupervisor = fixture.makeSupervisor();
   await definitionsEnabledSupervisor.runOnce();
   assert.equal(fixture.definitionReads.length, 0, "the persisted in-flight request is not prepared again");
+  // an in-flight record without a typed attempt has no recorded submission: its final chat answer is never applied (typed
+  // protocol; the old final-chat parser applied it as inferred)
   completeSupervisorRequest(native, legacyTask.messageId, objectiveResponse(legacyTask.sourceMessageId));
   await definitionsEnabledSupervisor.runOnce();
 
   const completed = await fixture.task();
-  assert.equal(completed?.status, "inferred");
-  assert.equal(completed?.objective, "Implement the export workflow");
+  assert.equal(completed?.status, "unavailable");
+  assert.equal(completed?.reason, "The Supervisor did not submit a valid, source-linked interpretation.");
+  assert.equal(completed?.objective, null);
   assert.equal(completed?.workflow, null);
   await definitionsEnabledSupervisor.runOnce();
   assert.equal(fixture.definitionReads.length, 0, "a completed objective-only record remains unchanged");
@@ -670,8 +693,8 @@ it("a link-only request stays context for the next genuine request instead of be
   await supervisor.runOnce();
   const first = (await fixture.task())!;
   const native = fixture.projections.get((await fixture.binding())!.threadId)!;
-  completeSupervisorRequest(native, first.messageId, JSON.stringify({objective: null, reason: "Only an issue link was supplied.", sourceMessageIds: [],
-    supervision: "needed", workflow: null}));
+  await submitAndComplete(fixture, supervisor, first, {objective: null, reason: "Only an issue link was supplied.", sourceMessageIds: [],
+    supervision: "needed", workflow: null});
   await supervisor.runOnce();
   assert.equal((await fixture.task())?.status, "needs_context");
 
@@ -695,8 +718,8 @@ it("a semantic not-needed decision is persisted without negotiation and the next
   await supervisor.runOnce();
   const first = (await fixture.task())!;
   const native = fixture.projections.get((await fixture.binding())!.threadId)!;
-  completeSupervisorRequest(native, first.messageId, JSON.stringify({objective: "Thank the colleague and ask for the missing document",
-    reason: "A short self-contained message with no workflow obligations.", sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null}));
+  await submitAndComplete(fixture, supervisor, first, {objective: "Thank the colleague and ask for the missing document",
+    reason: "A short self-contained message with no workflow obligations.", sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null});
   await supervisor.runOnce();
   const decided = (await fixture.task())!;
   assert.equal(decided.status, "not_supervised");
@@ -723,8 +746,8 @@ it("after an explicit Enable only a request written after it is interpreted", as
   await supervisor.runOnce();
   const first = (await fixture.task())!;
   const native = fixture.projections.get((await fixture.binding())!.threadId)!;
-  completeSupervisorRequest(native, first.messageId, JSON.stringify({objective: "Thank the colleague and ask for the missing document",
-    reason: "A short self-contained message with no workflow obligations.", sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null}));
+  await submitAndComplete(fixture, supervisor, first, {objective: "Thank the colleague and ask for the missing document",
+    reason: "A short self-contained message with no workflow obligations.", sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null});
   await supervisor.runOnce();
   assert.equal((await fixture.task())!.status, "not_supervised");
   // a request the human wrote while supervision was stopped, then an explicit Enable
@@ -865,9 +888,13 @@ it("the interpretation request carries the concise standing role once, permits r
   const instructions = await supervisor.conversation.readContextView((await fixture.binding())!, {view: "interpretation"}, AbortSignal.timeout(5000));
   assert.match(String(instructions.instructions), /configured required references alone never make a task needed/u);
   assert.match(String(instructions.instructions), /If you cannot invoke workflow_read, that says nothing about the project's definitions/u);
-  assert.ok(text.length < 5000, `interpretation request ${text.length} characters`);
+  // the typed protocol adds one bounded submission block with the quoted attempt; the rest of the request stays as concise as before
+  const submission = text.slice(text.indexOf("SUBMISSION: "), text.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE\n"));
+  assert.match(submission, /supervision_interpretation_submit/u);
+  assert.ok(submission.length < 1000, `submission block ${submission.length} characters`);
+  assert.ok(text.length - submission.length < 5000, `interpretation request ${text.length - submission.length} characters without the submission block`);
   const native = fixture.projections.get((await fixture.binding())!.threadId)!;
-  completeSupervisorRequest(native, task.messageId, workflowResponse(sourceMessageId));
+  await submitAndComplete(fixture, supervisor, task, workflowFields(sourceMessageId));
   await supervisor.runOnce();
   assert.equal((await fixture.binding())!.deliveredRoleVersion, task.roleVersion, "the completed interpretation delivered the standing role");
   assert.equal(await supervisor.conversation.interpretationRole((await fixture.binding())!), null, "later root messages carry no second copy");
@@ -896,7 +923,7 @@ it("an Enable or re-enable saved during the final awaits leaves the request undi
     await supervisor.runOnce();
     const first = (await fixture.task())!;
     const native = fixture.projections.get((await fixture.binding())!.threadId)!;
-    completeSupervisorRequest(native, first.messageId, workflowResponse(sourceMessageId));
+    await submitAndComplete(fixture, supervisor, first, workflowFields(sourceMessageId));
     const internal = supervisor as unknown as {definitions: {load: (...args: unknown[]) => Promise<unknown>}};
     const stores = serviceOf(supervisor.store);
     const load = internal.definitions.load.bind(internal.definitions);
@@ -927,8 +954,8 @@ it("an earlier unresolved request carries forward only from the current supervis
   await supervisor.runOnce();
   const first = (await fixture.task())!;
   const native = fixture.projections.get((await fixture.binding())!.threadId)!;
-  completeSupervisorRequest(native, first.messageId, JSON.stringify({objective: null, reason: "Only an issue link was supplied.", sourceMessageIds: [],
-    supervision: "needed", workflow: null}));
+  await submitAndComplete(fixture, supervisor, first, {objective: null, reason: "Only an issue link was supplied.", sourceMessageIds: [],
+    supervision: "needed", workflow: null});
   await supervisor.runOnce();
   assert.equal((await fixture.task())?.status, "needs_context");
   // the human stopped and enabled supervision again after the link; the next request starts a new epoch
@@ -951,7 +978,7 @@ it("after an Enable the chat's next request is interpreted afresh by the same Su
   await supervisor.runOnce();
   const first = (await fixture.task())!;
   const rootId = (await fixture.binding())!.threadId;
-  completeSupervisorRequest(fixture.projections.get(rootId)!, first.messageId, workflowResponse(sourceMessageId));
+  await submitAndComplete(fixture, supervisor, first, workflowFields(sourceMessageId));
   await supervisor.runOnce();
   assert.equal((await fixture.task())!.status, "inferred");
   const interpretations = () => fixture.dispatches().filter(call => call.payload.threadId === rootId).length;
@@ -989,7 +1016,7 @@ it("across an Enable only an attempted introduction with an unknown outcome keep
     const supervisor = fixture.makeSupervisor();
     await supervisor.runOnce();
     const first = (await fixture.task())!;
-    completeSupervisorRequest(fixture.projections.get((await fixture.binding())!.threadId)!, first.messageId, workflowResponse(sourceMessageId));
+    await submitAndComplete(fixture, supervisor, first, workflowFields(sourceMessageId));
     await supervisor.runOnce();
     const fallbackId = `supervisor-notice:workflow:${first.id}:queue`;
     await supervisor.conversation.requests.saveIntroduction({taskId: first.id, projectId, threadId: sourceThreadId, supervisorThreadId: first.supervisorThreadId,
@@ -1028,7 +1055,7 @@ it("the proposal is introduced in the same cycle its interpretation completes", 
     Object.assign(projection.thread, {runtimeMode: "full-access", interactionMode: "default"});
   // and the operative has no pending owner question or approval
   (fixture.projections.get(sourceThreadId)! as {runtimeRequests?: unknown[]}).runtimeRequests = [];
-  completeSupervisorRequest(fixture.projections.get((await fixture.binding())!.threadId)!, task.messageId, workflowResponse(sourceMessageId));
+  await submitAndComplete(fixture, supervisor, task, workflowFields(sourceMessageId));
   await supervisor.runOnce();
   assert.equal((await fixture.task())!.status, "inferred");
   const introduction = fixture.dispatches().find(call => call.payload.threadId === sourceThreadId);
