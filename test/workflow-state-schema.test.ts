@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { it } from "@effect/vitest";
 import { Effect, Exit, Schema } from "effect";
-import { fingerprint, GuidanceStore } from "../src/guidance-store.js";
+import { guidanceTransaction } from "../src/guidance-sql.js";
+import { fingerprint } from "../src/guidance-store.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import type { WorkflowPlanGroupInfo, WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
-import { defaultSupervisorModel, ProjectSupervisorStore } from "../src/project-supervisor-store.js";
+import { defaultSupervisorModel } from "../src/project-supervisor-store.js";
 import { proposalContextFromDefinitions, seededNodeIds, validateWorkflowPlan } from "../src/supervisor-workflow.js";
 import {
   ExternalContributionRecordSchema,
@@ -17,8 +15,11 @@ import {
   type WorkflowOwner,
   type WorkflowStateDocument,
 } from "../src/workflow-state-contract.js";
-import { parseExternalContributionRecord, WorkflowStateStore } from "../src/workflow-state-store.js";
+import { parseExternalContributionRecord } from "../src/workflow-state-store.js";
 import { effectiveIndex, projectIndex } from "./project-definitions-fixture.js";
+import { execute, openWorkflowStores, query, temporaryDirectory } from "./support/g12-stores.js";
+
+// live Effect tests: the stores write a real guidance.sqlite3 in a temporary directory; nothing here waits on time
 
 const decodeDocument = Schema.decodeUnknownExit(Schema.fromJsonString(WorkflowStateDocumentSchema));
 const decodeReceipt = Schema.decodeUnknownExit(Schema.fromJsonString(WorkflowMutationReceiptSchema));
@@ -35,42 +36,39 @@ const localPlan = (ids: readonly string[], nodeIds = seededNodeIds("schema")): W
 
 // a temp-file guidance database with ready bindings for main-a and main-b, closed and removed with the test scope
 const storeFixture = Effect.gen(function* () {
-  const directory = yield* Effect.acquireRelease(Effect.promise(() => mkdtemp(join(tmpdir(), "workflow-state-schema-"))),
-    path => Effect.promise(() => rm(path, {recursive: true, force: true})));
-  const guidance = yield* Effect.acquireRelease(Effect.sync(() => new GuidanceStore(directory)), store => Effect.sync(() => store.close()));
-  const supervisors = new ProjectSupervisorStore(guidance, new Set());
-  guidance.db.prepare("INSERT INTO meta VALUES(?,?)").run(`supervisor_control:${JSON.stringify("project-a")}`, JSON.stringify({generation: 1, enabled: true, manual: true}));
-  const owner = (mainThreadId: string): WorkflowOwner => {
-    const binding = {...supervisors.reserve("project-a", mainThreadId, "Main conversation", defaultSupervisorModel, 1, 1), state: "ready" as const};
-    supervisors.setBinding(binding);
-    return {projectId: "project-a", mainThreadId, supervisorThreadId: binding.threadId, bindingGeneration: binding.generation};
-  };
-  return {guidance, workflows: new WorkflowStateStore(supervisors), ownerA: owner("main-a"), ownerB: owner("main-b")};
+  const {sql, supervisors, workflows} = yield* openWorkflowStores(yield* temporaryDirectory("workflow-state-schema-"));
+  yield* execute(sql, "INSERT INTO meta VALUES(?,?)", `supervisor_control:${JSON.stringify("project-a")}`, JSON.stringify({generation: 1, enabled: true, manual: true}));
+  const owner = (mainThreadId: string) => Effect.gen(function* () {
+    const binding = {...(yield* supervisors.reserve("project-a", mainThreadId, "Main conversation", defaultSupervisorModel, 1, 1)), state: "ready" as const};
+    yield* supervisors.setBinding(binding);
+    return {projectId: "project-a", mainThreadId, supervisorThreadId: binding.threadId, bindingGeneration: binding.generation} satisfies WorkflowOwner;
+  });
+  return {sql, transaction: guidanceTransaction(sql), workflows, ownerA: yield* owner("main-a"), ownerB: yield* owner("main-b")};
 });
 
 it.live("documents and receipts written by the store decode with the stored-shape schemas", () => Effect.gen(function* () {
-  const {guidance, workflows, ownerA, ownerB} = yield* storeFixture;
+  const {sql, transaction, workflows, ownerA, ownerB} = yield* storeFixture;
   const plan = validateWorkflowPlan({requirements: [], plan: localPlan(["local-a", "local-b"])}, proposalContextFromDefinitions(definitions), seededNodeIds("plan"));
   assert.ok(plan);
   const proposal = {status: "proposed", message: "A source-bound draft plan.", workspaceRoot: definitions.workspaceRoot, revision: definitions.revision,
     globalRevision: null, ...plan} as WorkflowProposalInfo;
-  const imported = guidance.transaction(() => workflows.importAcceptedAgreementInTransaction(ownerA, {taskId: "task-a", sourceThreadId: "main-a",
+  const imported = yield* transaction(workflows.importAcceptedAgreement(ownerA, {taskId: "task-a", sourceThreadId: "main-a",
     sourceRunId: "run-a", sourceMessageId: "message-a", sourceHash, objective: "Prepare the export workflow.", agreement: {status: "agreed",
       message: "The complete workflow was echoed by the operative assistant.", proposalId: "proposal-a", agreedAt: 123,
       supervisorMessageId: "supervisor-message-a", agentMessageId: "agent-message-a", workflow: proposal}}, 100));
   assert.equal(imported.status, "applied");
-  const main = workflows.get("project-a", "main-a")!;
+  const main = (yield* workflows.get("project-a", "main-a"))!;
   const nodeId = (main.plan!.nodes[0] as {nodeId: string}).nodeId;
-  assert.equal(guidance.transaction(() => workflows.recordContributionInTransaction(ownerA, {contributionId: "review:external-1", nodeId, revision: 1,
+  assert.equal((yield* transaction(workflows.recordContribution(ownerA, {contributionId: "review:external-1", nodeId, revision: 1,
     state: "result", summary: "An external reviewer checked the export.", references: [{kind: "url", value: "https://reviews.example/42"}],
-    externalRef: "review-42", sourceThreadId: "main-a", sourceRunId: "run-main", sourceMessageId: "message-1"}, 200)).status, "applied");
-  const recorded = workflows.get("project-a", "main-a")!;
-  assert.equal(guidance.transaction(() => workflows.assessContributionInTransaction(ownerA, {operationId: "assess-1", workflowId: recorded.workflowId,
+    externalRef: "review-42", sourceThreadId: "main-a", sourceRunId: "run-main", sourceMessageId: "message-1"}, 200))).status, "applied");
+  const recorded = (yield* workflows.get("project-a", "main-a"))!;
+  assert.equal((yield* transaction(workflows.assessContribution(ownerA, {operationId: "assess-1", workflowId: recorded.workflowId,
     expectedRevision: recorded.revision, contributionId: "review:external-1", resultRevision: 1, decision: "accepted", note: "The review covers the export."},
-  300)).status, "applied");
-  assert.equal(workflows.ensureMainInTransaction(ownerB, "draft-b", "Start a draft.", 400).status, "created");
+  300))).status, "applied");
+  assert.equal((yield* workflows.ensureMain(ownerB, "draft-b", "Start a draft.", 400)).status, "created");
 
-  const rows = guidance.db.prepare("SELECT document FROM supervisor_workflow_state ORDER BY created_at").all().map(row => String(row.document));
+  const rows = (yield* query(sql, "SELECT document FROM supervisor_workflow_state ORDER BY created_at")).map(row => String(row.document));
   assert.equal(rows.length, 2);
   for (const raw of rows) {
     const decoded = decodeDocument(raw);
@@ -82,7 +80,7 @@ it.live("documents and receipts written by the store decode with the stored-shap
   assert.ok(stored.evidence.some(item => item.contribution !== undefined));
   assert.ok(stored.acceptedAgreements.length === 1);
 
-  const receipts = guidance.db.prepare("SELECT result FROM supervisor_workflow_operations").all().map(row => String(row.result));
+  const receipts = (yield* query(sql, "SELECT result FROM supervisor_workflow_operations")).map(row => String(row.result));
   assert.ok(receipts.length >= 2);
   for (const raw of receipts) {
     const decoded = decodeReceipt(raw);
@@ -92,9 +90,9 @@ it.live("documents and receipts written by the store decode with the stored-shap
 }), {timeout: 10_000});
 
 it.live("the document schema covers the structural incompatibilities and leaves identity and plan rules to the store", () => Effect.gen(function* () {
-  const {guidance, workflows, ownerA} = yield* storeFixture;
-  assert.equal(workflows.ensureMainInTransaction(ownerA, "draft-a", "Start a draft.", 100).status, "created");
-  const base = JSON.parse(String(guidance.db.prepare("SELECT document FROM supervisor_workflow_state").get()?.document)) as Record<string, unknown>;
+  const {sql, workflows, ownerA} = yield* storeFixture;
+  assert.equal((yield* workflows.ensureMain(ownerA, "draft-a", "Start a draft.", 100)).status, "created");
+  const base = JSON.parse(String((yield* query(sql, "SELECT document FROM supervisor_workflow_state"))[0]?.document)) as Record<string, unknown>;
   const variant = (change: (document: Record<string, unknown>) => void): string => {
     const document = structuredClone(base);
     change(document);
