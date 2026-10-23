@@ -29,10 +29,11 @@ require rebuilding or restarting the application.
   Pass the exact revision, delta, evidence and unresolved objections. A delegated
   task's backing child thread is not a resumable ordinary reviewer conversation.
   Replace reviewers only for a material scope/context change, explaining why.
-- Review a frozen candidate. Assign one primary reviewer to each risky scope; give
-  additional reviewers distinct concerns unless the user requests broader coverage.
-  Recheck a fix with the reviewer responsible for the finding and affected shared
-  boundaries, using the exact delta, relevant callers and real message output.
+- When review is requested, review a frozen candidate and assign one primary reviewer
+  per risky scope. Give additional reviewers distinct concerns unless the user requests
+  broader coverage. Recheck a fix with the reviewer who raised the finding; involve
+  another reviewer only when the delta changes a boundary they reviewed. Include the
+  exact delta and relevant callers, plus real message output where messages changed.
   Unrelated fixes do not require every reviewer to approve again. Do not restart
   broad reviews or full campaigns for every small delta. Track every requested
   review to a terminal result. Approval is an assessment, not proof that a
