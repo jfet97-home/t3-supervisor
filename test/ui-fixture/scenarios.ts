@@ -33,7 +33,18 @@ export const fixtureIds = {
   threadB1: "fixture-thread-b1",
   threadN1: "fixture-thread-n1",
   threadN2: "fixture-thread-n2",
+  // the No Project chats of environment b
+  threadBN1: "fixture-thread-bn1",
+  threadBN2: "fixture-thread-bn2",
 } as const;
+
+// two synthetic T3 environments with their own No Project chats, chat exclusions and project definitions; the fixture-only
+// control POST /__fixture/environment/<name> switches the one the fixture answers for, as if Supervisor now served another
+// T3 server. each environment keeps its own in-memory state; the project ids are the same in both
+export const fixtureEnvironmentNames = ["a", "b"] as const;
+export type FixtureEnvironmentName = typeof fixtureEnvironmentNames[number];
+export const fixtureEnvironments: Record<FixtureEnvironmentName, string> = {a: "fixture-environment", b: "fixture-environment-b"};
+export const isFixtureEnvironmentName = (value: string): value is FixtureEnvironmentName => (fixtureEnvironmentNames as readonly string[]).includes(value);
 
 export class FixtureFailure extends Error {}
 
@@ -107,7 +118,7 @@ const task = (projectId: string, threadId: string, objective: string): TaskInter
 const projectSettings = (): ProjectSupervisorInfo["settings"] =>
   ({generation: 1, modelSelection: steadyModel, pending: false, monitoring: {intervalMinutes: 5, activityThreshold: 10}, teamSettings: {maxHelpersPerRoot: 5}});
 
-export const initialFixtureData = (): FixtureData => ({
+const environmentA = (): FixtureData => ({
   global: {generation: 1, enabled: true, manual: false},
   globalDefinitions: {generation: 1, enabled: false, manual: false},
   noProject: {generation: 1, mode: "on_request"},
@@ -151,6 +162,26 @@ export const initialFixtureData = (): FixtureData => ({
   ],
 });
 
+// environment b: other No Project chats, another explicit exclusion and another project.yaml for the same project ids
+const environmentB = (): FixtureData => {
+  const data = environmentA();
+  const projectA = data.projects.find(project => project.id === fixtureIds.projectA)!;
+  return {
+    ...data,
+    threadPolicy: {generation: 1, excludedThreadIds: [fixtureIds.threadA1]},
+    stops: {[fixtureIds.threadA1]: {stoppedBy: "ui", stoppedAt: fixtureEpoch + 5 * minute}},
+    projects: data.projects.map(project => project !== projectA ? project : {...project, workspaceRoot: "/fixture-b/project-a",
+      checkouts: [{origin: "project", threadId: null, workspaceRoot: "/fixture-b/project-a", branch: "main", isGitRepository: true, folderStatus: "present"}],
+      projectConfig: {workflows: [], steps: [{path: "steps/fixture-tests.md", summary: "Fixture B step: run the environment b tests.", required: false}]}}),
+    threads: data.threads.filter(thread => thread.id !== fixtureIds.threadN1 && thread.id !== fixtureIds.threadN2).concat([
+      {id: fixtureIds.threadBN1, title: "Fixture B No Project chat 1", projectId: fixtureIds.noProject, binding: null, selectedModel: null, task: null},
+      {id: fixtureIds.threadBN2, title: "Fixture B No Project chat 2", projectId: fixtureIds.noProject, binding: null, selectedModel: null, task: null},
+    ]),
+  };
+};
+
+export const initialFixtureData = (environment: FixtureEnvironmentName = "a"): FixtureData => environment === "a" ? environmentA() : environmentB();
+
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 const withForced = <R>(forced: ForcedOutcome | null, run: () => R, conflict: () => R, uncertain: () => R): R => {
   if (forced?.outcome === "conflict") return conflict();
@@ -162,10 +193,19 @@ const withForced = <R>(forced: ForcedOutcome | null, run: () => R, conflict: () 
 };
 
 export class FixtureModel {
-  private data = initialFixtureData();
+  private datasets = {a: initialFixtureData("a"), b: initialFixtureData("b")};
+  private current: FixtureEnvironmentName = "a";
   constructor(private readonly now: () => number = Date.now) {}
 
-  reset() {this.data = initialFixtureData();}
+  // the data of the environment the fixture answers for
+  private get data(): FixtureData {return this.datasets[this.current];}
+  get environment() {return {name: this.current, environmentId: fixtureEnvironments[this.current]};}
+  switchEnvironment(name: FixtureEnvironmentName) {this.current = name;}
+
+  reset() {
+    this.datasets = {a: initialFixtureData("a"), b: initialFixtureData("b")};
+    this.current = "a";
+  }
 
   private project(projectId: string): FixtureProject {
     const project = this.data.projects.find(item => item.id === projectId);
@@ -183,7 +223,7 @@ export class FixtureModel {
 
   guidanceSnapshot(now: number): GuidanceSnapshot {
     return {
-      environmentId: "fixture-environment", serverVersion: "fixture-baseline", connected: true, lastCycleAt: now,
+      environmentId: fixtureEnvironments[this.current], serverVersion: "fixture-baseline", connected: true, lastCycleAt: now,
       sendingReady: true, sendingReason: "Fixture: synthetic data; nothing is sent.",
       settings: {generation: 1, guidancePaused: false, monitoringPaused: false, allowFollowupRace: false, verifiedServerVersion: null,
         model: "fixture-model-steady", reasoning: "low", dailyTokenBudget: 0, evidenceHours: 24, maxAnchorAgeSeconds: 600},

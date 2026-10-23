@@ -65,6 +65,20 @@ baseline single-use behaviour. The session is a random 43-character value kept i
 Global supervision is on and global definitions are off. Workflow progress is an empty
 `ok` page. Synthetic text starts with "Fixture" or "Fixture:".
 
+### Environments
+
+The fixture answers for one of two synthetic T3 environments. Each keeps its own in-memory
+state, and the project ids are the same in both. The snapshot's `environmentId` names the
+current one.
+
+| Name | `environmentId` | Start candidates (No Project chats) | Explicit exclusion | `fixture-project-a` definitions |
+| --- | --- | --- | --- | --- |
+| `a` (default) | `fixture-environment` | `fixture-thread-n1`, `fixture-thread-n2` | `fixture-thread-a3` | `/fixture/project-a`: 1 workflow, 2 steps (as above) |
+| `b` | `fixture-environment-b` | `fixture-thread-bn1` "Fixture B No Project chat 1", `fixture-thread-bn2` | `fixture-thread-a1` | `/fixture-b/project-a`: no workflow, 1 step "Fixture B step: run the environment b tests." (another revision) |
+
+Switching changes only which data set answers. It calls nothing native and changes no
+session.
+
 ## Controls (`/__fixture/`)
 
 Controls go through the same Host/Origin check. Call them with curl, or from the page with
@@ -78,6 +92,7 @@ Controls go through the same Host/Origin check. Call them with curl, or from the
 | `GET /__fixture/log[?since=<seq>]` | request log (below) |
 | `POST /__fixture/held/answer[?seq=]`, `POST /__fixture/held/drop[?seq=]` | answer (run the handler now, or send the stored result with `apply=1`) or destroy held connections |
 | `POST /__fixture/grant` | single-use sign-in token |
+| `POST /__fixture/environment/<a\|b>` | answers for that synthetic T3 environment from the next request on; each keeps its data; reset returns to `a` |
 
 ## Scenarios
 
@@ -112,7 +127,7 @@ once, except `slow-reads`.
 `GET /__fixture/log` returns `entries` in receipt order, up to 2000 (older ones are
 counted in `evicted`). Each entry has `seq`, `at` and `completedAt` (monotonic ms since
 start), `method`, `path` (with query), `kind` (`api|auth|fixture|static`), `mutation`,
-`scenario`, `bodySha256`, `bodyBytes`, `effect` (for example `held`, `dropped`,
+`scenario`, `environment` (the `environmentId` that answered), `bodySha256`, `bodyBytes`, `effect` (for example `held`, `dropped`,
 `status-401`, `outcome-conflict`, `session-expired`, `delayed-2000ms`), `result`
 (`answered|held|dropped|interrupted|pending`) and `status`. Raw bodies, tokens, sessions
 and CSRF values are never logged. GETs of `/__fixture/log` and `/__fixture/state` are not
@@ -149,6 +164,13 @@ await fetch("/__fixture/log").then(r => r.json()).then(l => ({mutations: l.mutat
   window.clearInterval = function (id) {live.delete(id); c.intervals = live.size; return clear.call(this, id);}; return "installed";})()
 // focus and reflow
 (() => {const e = document.activeElement, s = getComputedStyle(e); return {tag: e.tagName, label: (e.getAttribute("aria-label") || e.textContent || "").trim().slice(0, 60), outline: `${s.outlineStyle} ${s.outlineWidth} ${s.outlineColor}`, shadow: s.boxShadow, reflowOk: document.documentElement.scrollWidth <= innerWidth};})()
+```
+
+```js
+// switch the synthetic T3 environment (a or b); the page sees it at its next snapshot read (within 5 s)
+await fetch("/__fixture/environment/b", {method: "POST"}).then(r => r.json())
+// which environment the fixture answers for
+await fetch("/__fixture/state").then(r => r.json()).then(s => s.environment)
 ```
 
 `confirm()` dialogs (Save, Discard, Refresh) need the preview dialog tool. Record the
@@ -289,6 +311,28 @@ Settings and the sign-in form, tab through all controls with the keyboard. Recor
 order, the focus snippet (visible outline or shadow) and the skip link ("Skip to content").
 Repeat at 200 % and 400 % zoom (browser zoom; if unavailable, 640 px and 320 px viewports
 at 1280 px equivalence) and at a 320 px wide viewport. Record `reflowOk` and screenshots.
+
+**Environment switch (A-R18-03, mounted).** Start each check with `POST /__fixture/reset`,
+reload and sign in; the fixture answers for `a`. Switch with `POST /__fixture/environment/b`
+and wait for the next 5 s snapshot (read back `environmentId` from the log or the state
+control). For each panel record what is shown and enabled before and after the switch, and
+again after switching back to `a`:
+1. Home, "Start supervision for a No Project chat": a shows the two "Fixture No Project chat"
+   rows; after the switch no a row may stay actionable while b's search is unread or failed
+   (combine with `scenario/slow-reads` to see the unread state); b shows the "Fixture B" rows.
+2. Settings, "Chat settings": in a, remove the exclusion of "Fixture chat A3" without saving
+   (a draft). After the switch the form shows b's saved exclusion ("Fixture chat A1") and no
+   a draft; back in a, the a draft is present. Variant: start the a save with
+   `scenario/mutation-never-answered?path=/api/guidance/thread-policy`, switch to b,
+   `held/answer`, and record that b shows no a outcome while a does.
+3. Projects, "Fixture project A", "Definitions", "Inspect project root checkout", "Edit
+   project configuration": change step 1's summary (a dirty a draft), then switch. Record
+   that b shows its own definitions (`/fixture-b/project-a`, one step) and no a draft, that
+   no Save of a can reach b, and that back in a the a draft is present. Variant: start the a
+   save with `scenario/mutation-never-answered?path=/api/guidance/project-configuration`,
+   switch, `held/answer`, and record where its outcome message appears.
+4. Log proof: entries carry `environment`; no mutation entry of a's draft is answered by
+   `fixture-environment-b`.
 
 ## Known gaps and differences from the baseline server
 

@@ -9,7 +9,7 @@ import { extname, join, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import { SupervisorApi, UiError } from "../../src/guidance-contract.js";
 import {
-  FixtureFailure, FixtureModel, fixtureToken, isScenarioName, parseScenarioParams, scenarioCatalog, scenarioNames,
+  FixtureFailure, FixtureModel, fixtureEnvironmentNames, fixtureToken, isFixtureEnvironmentName, isScenarioName, parseScenarioParams, scenarioCatalog, scenarioNames,
   type Arm, type ForcedOutcome, type ScenarioName, type ScenarioParams,
 } from "./scenarios.js";
 
@@ -22,6 +22,8 @@ export type LogEntry = {
   kind: "api" | "auth" | "fixture" | "static";
   mutation: boolean;
   scenario: ScenarioName;
+  // the T3 environment the fixture answered for when the request arrived
+  environment: string;
   bodySha256: string | null;
   bodyBytes: number | null;
   effect: string | null;
@@ -89,7 +91,7 @@ class RequestLog {
   private evicted = 0;
   constructor(private readonly started: number, private readonly limit = 2000) {}
   private clock() {return Math.round((performance.now() - this.started) * 10) / 10;}
-  begin(input: Pick<LogEntry, "method" | "path" | "kind" | "mutation" | "scenario">): LogEntry {
+  begin(input: Pick<LogEntry, "method" | "path" | "kind" | "mutation" | "scenario" | "environment">): LogEntry {
     const entry: LogEntry = {...input, seq: ++this.sequence, at: this.clock(), bodySha256: null, bodyBytes: null, effect: null, result: "pending", status: null, completedAt: null};
     this.entries.push(entry);
     if (this.entries.length > this.limit) {this.entries.shift();this.evicted++;}
@@ -192,7 +194,8 @@ export class FixtureController {
     return {
       scenario: this.scenario, armed: this.arms, sessions: this.sessions.length,
       held: [...this.held.values()].map(item => ({seq: item.seq, path: item.path})),
-      ...(catalog ? {scenarios: scenarioNames.map(name => ({name, description: scenarioCatalog[name].description}))} : {}),
+      ...(catalog ? {environment: this.model.environment, environments: fixtureEnvironmentNames,
+        scenarios: scenarioNames.map(name => ({name, description: scenarioCatalog[name].description}))} : {}),
     };
   }
   close() {
@@ -300,6 +303,12 @@ const fixtureRoutes = (controller: FixtureController) => {
       controller.apply(name, params);
       return json(200, controller.state());
     })),
+    HttpRouter.add("POST", "/__fixture/environment/:name", Effect.gen(function*() {
+      const name = (yield* HttpRouter.params).name ?? "";
+      if (!isFixtureEnvironmentName(name)) return json(404, {message: "Unknown fixture environment.", environments: fixtureEnvironmentNames});
+      controller.model.switchEnvironment(name);
+      return json(200, {environment: controller.model.environment, ...controller.state()});
+    })),
     HttpRouter.add("GET", "/__fixture/state", Effect.sync(() => json(200, controller.state(true)))),
     HttpRouter.add("GET", "/__fixture/log", request => Effect.sync(() => {
       const since = new URL(request.url, controller.origin).searchParams.get("since");
@@ -350,7 +359,7 @@ const gate = <E, R>(controller: FixtureController, app: Effect.Effect<HttpServer
   const scenario = controller.scenario;
   const kind = path.startsWith("/api/") ? "api" as const : path.startsWith("/auth/") ? "auth" as const : path.startsWith("/__fixture/") ? "fixture" as const : "static" as const;
   const quiet = request.method === "GET" && (path === "/__fixture/log" || path === "/__fixture/state");
-  const entry = quiet ? null : controller.log.begin({method: request.method, path: path + url.search, kind, scenario,
+  const entry = quiet ? null : controller.log.begin({method: request.method, path: path + url.search, kind, scenario, environment: controller.model.environment.environmentId,
     mutation: request.method !== "GET" && request.method !== "HEAD" && (kind === "api" || kind === "auth")});
   return yield* screen(controller, app, {request, path, kind, scenario, entry}).pipe(Effect.onInterrupt(() => Effect.sync(() => controller.log.settle(entry, "interrupted"))));
 }).pipe(Effect.interruptible);
