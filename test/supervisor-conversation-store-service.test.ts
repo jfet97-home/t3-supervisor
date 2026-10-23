@@ -35,7 +35,7 @@ const reviewInput = (supervisorThreadId: string) => ({projectId, supervisorThrea
 const candidate = (taskId: string, proposalId: string, at: number): WorkflowAgreementCandidate => ({taskId, projectId, proposalId, planHash: `hash-${proposalId}`,
   workflow: {status: "proposed", message: "Draft.", workspaceRoot: "/work", revision: "r1", globalRevision: null, definitionsStatus: "ready",
     definitionsComplete: true, requirementsKnown: true, requirements: [], issues: [], plan: null},
-  supervisorMessageId: `message-${proposalId}`, supervisorRunId: "run", supervisorRunOrdinal: 1, supervisorTextHash: "text", proposedAt: at});
+  evidence: {kind: "supervisor_message", messageId: `message-${proposalId}`, runId: "run", runOrdinal: 1, textHash: "text"}, proposedAt: at});
 
 // a yield every eight operations interleaves concurrent fibers between any two statements that are not one transaction
 const forcedYields = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideService(effect, Scheduler.MaxOpsBeforeYield, 8);
@@ -198,6 +198,28 @@ describe("SupervisorConversationStore", () => {
     }));
     assert.deepEqual(observed.read, observed.stored);
     assert.equal(observed.document, JSON.stringify({...observed.stored, agentMessageId: "agent", agentTextHash: "agent-hash"}));
+  }), { timeout: 10_000 });
+
+  it.live("a candidate decodes either evidence as the typed submission and the cut-over write it, while a pre-conversion row is invalid", () => Effect.gen(function* () {
+    const directory = yield* temporaryDirectory;
+    const observed = yield* withStore(directory, (store, db) => Effect.gen(function* () {
+      // a retained initial candidate the cut-over converted in place: the old provenance fields replaced by the message evidence
+      const converted = {...candidate("task-a", "p-a", 1), interpretation: true, retainedKey: "kept",
+        evidence: {kind: "supervisor_message", messageId: "answer", runId: "run", runOrdinal: 0, textHash: "hash", stale: true}};
+      const submitted = {...candidate("task-a", "p-b", 2), interpretation: true, evidence: {kind: "interpretation_submission", taskId: "task-a",
+        attemptId: "interpretation-attempt:1b4e28ba-2fa1-41d2-883f-0016d3cca427", itemId: "item", runId: "run", argumentsHash: "a".repeat(64),
+        sourcePin: {messageId: "source", runId: "source-run", ordinal: 1, hash: "b".repeat(64)}, planDigest: null}};
+      const {taskId, proposalId, planHash, workflow, proposedAt} = candidate("task-a", "p-c", 3);
+      const legacy = {taskId, projectId, proposalId, planHash, workflow, proposedAt, interpretation: true,
+        supervisorMessageId: "answer", supervisorRunId: "run", supervisorRunOrdinal: 0, supervisorTextHash: "hash"};
+      for (const [index, document] of [converted, submitted, legacy].entries())
+        yield* db`INSERT INTO supervisor_workflow_agreement_candidates VALUES('task-a',${document.proposalId},${projectId},${JSON.stringify(document)},${index})`;
+      return {converted, submitted, read: [yield* store.agreementCandidate("task-a", "p-a"), yield* store.agreementCandidate("task-a", "p-b")],
+        legacy: yield* Effect.flip(store.agreementCandidate("task-a", "p-c"))};
+    }));
+    assert.deepEqual(observed.read, [observed.converted, observed.submitted]);
+    assert.ok(observed.legacy instanceof GuidanceStoreError);
+    assert.equal(observed.legacy.reason, "row_invalid");
   }), { timeout: 10_000 });
 
   it.live("introductions: an attempted one is retained, a never-dispatched draft is removed, and rejected attempts without a dispatch mode decode", () => Effect.gen(function* () {

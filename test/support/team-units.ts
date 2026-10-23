@@ -242,12 +242,14 @@ export type SupervisorConversationUnit = SupervisorConversationFacade & Conversa
 // projection, a team store builds the team runtime, which reads this conversation's stop and scope predicates as the baseline
 // runtime did. Descendant contactability comes from the scope configuration
 export const supervisorConversationUnit = (...[store, rpc, projection, definitions, eligible, enabled, workflows, descendantContactable, teamStore,
-  helperTransport, helperProviderInstanceId]: [
+  helperTransport, helperProviderInstanceId, read]: [
   store: Promised<ProjectSupervisorStore["Service"]>, rpc: SupervisorRpc | null, projection: (threadId: string, signal: AbortSignal) => Promise<Projection>,
   definitions: DefinitionsLoader | undefined, eligible: ConversationCallbacks["eligible"],
   enabled?: ConversationCallbacks["enabled"], workflows?: Promised<WorkflowStateStore["Service"]>,
   descendantContactable?: (thread: ThreadInfo, threads: readonly ThreadInfo[]) => boolean, teamStore?: Promised<SupervisorTeamStore["Service"]>,
   helperTransport?: SupervisorHelperDeliveryTransport, helperProviderInstanceId?: string,
+  // the read credential's native reads (an interpretation submission's item detail)
+  read?: SupervisorRpc,
 ]): SupervisorConversationUnit => {
   if (descendantContactable) throw new Error("a conversation unit derives descendant contactability from its scope");
   const callbacks: ConversationCallbacks = { projection, eligible, enabled: enabled ?? (() => true), supervisionStopped: () => false };
@@ -277,6 +279,7 @@ export const supervisorConversationUnit = (...[store, rpc, projection, definitio
     Effect.provideService(SupervisionGate, gate),
     Effect.provideService(T3Client, projectionClient((threadId, signal) => unit.projection(threadId, signal))),
     withOperate(rpc),
+    (effect) => read ? Effect.provideService(effect, NativeRpc, operateClient(read)) : effect,
     (effect) => definitions ? Effect.provideService(effect, ProjectDefinitions, definitionsService(definitions)) : effect,
     (effect) => runtime ? Effect.provideService(effect, SupervisorTeamRuntime, runtime) : effect,
     Effect.provide(storeServices),

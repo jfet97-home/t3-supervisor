@@ -5,6 +5,7 @@ import { decodeGuidanceRow, documentRow, GuidanceStoreError, guidanceSql, rowFin
 import { SupervisorIds } from "./ids.js";
 import type { SupervisorMonitorBatch } from "./supervisor-monitor.js";
 import { WorkflowProposal, type WorkflowProposalInfo } from "./project-supervisor-contract.js";
+import { InterpretationEvidence } from "./interpretation-evidence.js";
 
 export type ConversationRequest = {
   id: string;
@@ -51,16 +52,17 @@ export type WorkflowAgreementCandidate = {
   proposalId: string;
   planHash: string;
   workflow: WorkflowProposalInfo;
-  supervisorMessageId: string;
-  supervisorRunId: string;
-  supervisorRunOrdinal: number;
-  supervisorTextHash: string;
+  /** What the proposal rests on: the interpretation attempt's recorded tool submission, or the Supervisor message publishing it. */
+  evidence: InterpretationEvidence;
   proposedAt: number;
   agentMessageId?: string;
   agentTextHash?: string;
   /** True when the Supervisor published the compact protocol; planHash is then the compact digest over the task revision. */
   compact?: boolean;
-  /** The proposal evidence is the Supervisor's own interpretation answer, re-derived to this digest. */
+  /**
+   * The service-prepared interpretation proposal: its evidence is the attempt's tool submission or, converted once by the cut-over,
+   * the final answer message it was derived from, which stays current by its unchanged hash alone.
+   */
   interpretation?: boolean;
   /** Objective the Supervisor restated from the cited genuine user messages when it published this proposal. */
   objective?: {text: string; sourceMessageIds: string[]} | null;
@@ -159,10 +161,7 @@ const WorkflowAgreementCandidateDocument = Schema.Struct({
   proposalId: Schema.String,
   planHash: Schema.String,
   workflow: WorkflowProposal,
-  supervisorMessageId: Schema.String,
-  supervisorRunId: Schema.String,
-  supervisorRunOrdinal: Schema.Number,
-  supervisorTextHash: Schema.String,
+  evidence: InterpretationEvidence,
   proposedAt: Schema.Number,
   agentMessageId: Schema.optionalKey(Schema.String),
   agentTextHash: Schema.optionalKey(Schema.String),

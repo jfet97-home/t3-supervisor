@@ -574,7 +574,7 @@ it("CT-CSTORE-03: a request saved 'sending' survives reopen unchanged and only t
 const candidate = (taskId: string, proposalId: string, at: number): WorkflowAgreementCandidate => ({taskId, projectId, proposalId, planHash: `hash-${proposalId}`,
   workflow: {status: "proposed", message: "Draft.", workspaceRoot: "/work", revision: "r1", globalRevision: null, definitionsStatus: "ready",
     definitionsComplete: true, requirementsKnown: true, requirements: [], issues: [], plan: null},
-  supervisorMessageId: `message-${proposalId}`, supervisorRunId: "run", supervisorRunOrdinal: 1, supervisorTextHash: "text", proposedAt: at});
+  evidence: {kind: "supervisor_message", messageId: `message-${proposalId}`, runId: "run", runOrdinal: 1, textHash: "text"}, proposedAt: at});
 
 it("CT-CSTORE-04: agreement evidence is write-once and candidates are full at 50 per task and 5000 per project", {timeout: 10_000}, async t => {
   const {open} = await conversationStore(t);

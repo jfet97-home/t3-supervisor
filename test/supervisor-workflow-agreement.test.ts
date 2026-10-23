@@ -3,7 +3,7 @@ import { it } from "vitest";
 import { Schema } from "effect";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { WorkflowProtocolDiagnosticSchema } from "../src/project-supervisor-contract.js";
-import { parseWorkflowInterpretation, prepareWorkflowRequest, validateWorkflowPlan, workflowRecordDiagnostic, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
+import { interpretationFromFields, prepareWorkflowRequest, validateWorkflowPlan, workflowInterpretationOutcome, workflowRecordDiagnostic, type ProposalContext, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import { diagnoseWorkflowProposalRecord, extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, parseWorkflowProposalRecord, workflowAgreementPlanHash, workflowProtocolDiagnosticCodes } from "../src/supervisor-workflow-agreement.js";
 import { effectiveIndex, projectIndex, testSummary } from "./project-definitions-fixture.js";
 
@@ -161,15 +161,20 @@ it("invalid and revision-null definitions can be shown provisionally but cannot 
   }
 });
 
+// the provisional plan of an interpretation without a workflow, through the value-level outcome the typed submission decodes with
+const provisionalPlan = (context: ProposalContext) => {
+  const interpretation = interpretationFromFields({objective: "Check this task.", reason: "The latest message describes a concrete task.",
+    sourceMessageIds: ["message-a"]}, "message-a");
+  assert.ok(interpretation.ok);
+  const outcome = workflowInterpretationOutcome(interpretation.value, undefined, null, context);
+  assert.ok(outcome.ok);
+  return outcome.value.workflow;
+};
+
 it("an exact null-plan provisional echo is a proposal but never a formal agreement", () => {
   const snapshot = definitions();
   const context = contextFor(snapshot);
-  const provisional = parseWorkflowInterpretation(JSON.stringify({
-    objective: "Check this task.",
-    reason: "The latest message describes a concrete task.",
-    sourceMessageIds: ["message-a"],
-    workflow: null,
-  }), "message-a", context).workflow;
+  const provisional = provisionalPlan(context);
   assert.equal(provisional.plan, null);
   assert.equal(provisional.issues.filter(item => item.code === "provisional_plan_required").length, 1);
   const echoed = proposal(snapshot, {
@@ -240,12 +245,7 @@ it("proposal diagnostics separate malformed envelopes, task/source mismatches, a
   const invalidSnapshot = definitions({status: "invalid", revision: "observed-invalid-revision", projectConfig: null,
     issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "Repair local configuration."}]});
   const context = contextFor(invalidSnapshot);
-  const provisional = parseWorkflowInterpretation(JSON.stringify({
-    objective: "Check this task.",
-    reason: "The latest message describes a concrete task.",
-    sourceMessageIds: ["message-a"],
-    workflow: null,
-  }), "message-a", context).workflow;
+  const provisional = provisionalPlan(context);
   const provisionalValue: WorkflowPlanValue = {
     definitionsStatus: provisional.definitionsStatus,
     definitionsComplete: provisional.definitionsComplete,

@@ -2,8 +2,8 @@ import { Cause, Clock, Console, Context, Deferred, Effect, FiberMap, HashMap, La
 import { mainRunNodeReader, nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { isCurrentMainGraphRun, SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch, type SupervisorNativeChildLifecycleEvidence } from "./supervisor-monitor.js";
 import { SupervisorConversationStore, type ConversationRequest, type RequestInflight, type WorkflowAgreementCandidate, type WorkflowIntroduction } from "./supervisor-conversation-store.js";
-import { NativeOperateRpc, record, SupervisorRpcError, type NativeRpcInFlight } from "./supervisor-native.js";
-import { fixedOccurrencesPreserved, readerWorkflowInstruction, manifestMembers, parseWorkflowInterpretation, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, workflowTemplatesFor, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
+import { NativeOperateRpc, NativeRpc, record, SupervisorRpcError, type NativeRpcInFlight } from "./supervisor-native.js";
+import { fixedOccurrencesPreserved, readerWorkflowInstruction, manifestMembers, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, workflowTemplatesFor, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
 import { compactProposalDigest, exactFenceRecords, extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, resolveCompactAcceptance, resolveCompactProposal, workflowAgreementPlanHash, workflowProtocolDiagnosticCodes, type CompactProposalPins, type StoredProposalDigest, type WorkflowAgreementRecordKind } from "./supervisor-workflow-agreement.js";
 import { extractApprovedProjectDefinitions, extractProjectDefinitionDecisionRecords, parseProjectDefinitionDecisionRecord, buildProjectDefinitionReviewRequest } from "./supervisor-definition-review.js";
 import { isSupervisorThread, prepareStopNotice, ProjectSupervisorStore, type BindingRecord, type ProtocolAnchor, type TaskRecord } from "./project-supervisor-store.js";
@@ -25,6 +25,9 @@ import { GuidanceDb } from "./db.js";
 import { guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
 import { ProjectSupervisorMonitorStore, type InvalidMonitorObservation } from "./supervisor-monitor-store.js";
 import { SupervisorTeamStore } from "./supervisor-team-store.js";
+import { interpretationPlanDigest, type InterpretationEvidence, type InterpretationSubmissionEvidence, type SupervisorMessageEvidence } from "./interpretation-evidence.js";
+import { interpretationSourcePin, type InterpretationSourcePin } from "./interpretation-submission.js";
+import { verifyWorkflowToolEvidence, workflowRequestHash, workflowToolNames, workflowTurnItemDetailMaxBytes } from "./workflow-write-evidence.js";
 
 const busy = (projection: Projection) => projection.runs.some(run => ["preparing", "queued", "starting", "running", "waiting"].includes(run.status));
 const failedRunStates = new Set(["failed", "interrupted", "cancelled", "rolled_back"]);
@@ -198,6 +201,84 @@ const workflowValue = (workflow: WorkflowProposalInfo): WorkflowPlanValue => ({
   plan: workflow.plan,
 });
 
+// whether evidence still holds: current, changed (it no longer describes the proposal) or unknown (its native detail could not be
+// read this time; nothing is decided on it)
+type EvidenceState = "current" | "changed" | "unknown";
+
+const samePin = (left: InterpretationSourcePin, right: InterpretationSourcePin): boolean =>
+  left.messageId === right.messageId && left.runId === right.runId && left.ordinal === right.ordinal && left.hash === right.hash;
+
+// the complete arguments of a native interpretation tool item: its direct input, or the arguments of an MCPX call naming the tool;
+// the verifier checks the exact wrapper
+const submittedArguments = (detail: Record<string, unknown>): Record<string, unknown> | null => {
+  const input = detail.input;
+  if (!record(input) || typeof detail.toolName !== "string") return null;
+  if ((workflowToolNames.interpretation.direct as ReadonlyArray<string>).includes(detail.toolName)) return input;
+  return (workflowToolNames.mcpxCall as ReadonlyArray<string>).includes(detail.toolName) && input.name === workflowToolNames.interpretation.mcpxTarget &&
+    record(input.arguments) ? input.arguments : null;
+};
+
+// a recorded tool submission against the bound root's projection and the native detail of its item: current while the item is still
+// an executed, completed main-run item of the same completed run, nothing of it rolled back, whose complete arguments hash to the
+// recorded hash; a detail that was not read or does not decode decides nothing
+const submissionEvidenceState = (evidence: InterpretationSubmissionEvidence, supervisor: Projection, detail: unknown): EvidenceState => {
+  if (!(supervisor.turnItems ?? []).some(item => item.id === evidence.itemId && item.threadId === supervisor.thread.id)) return "changed";
+  if (!record(detail)) return "unknown";
+  const args = submittedArguments(detail);
+  if (!args) return detail.toolName === undefined || detail.input === undefined ? "unknown" : "changed";
+  const check = verifyWorkflowToolEvidence({projection: supervisor, supervisorThreadId: supervisor.thread.id, itemId: evidence.itemId, detail,
+    tool: "interpretation", arguments: args});
+  if (check.status === "pending") return "unknown";
+  if (check.status === "denied") return "changed";
+  const run = supervisor.runs.find(item => item.id === evidence.runId && item.threadId === supervisor.thread.id);
+  return check.evidence.runId === evidence.runId && check.evidence.status === "completed" && run?.status === "completed" &&
+    check.evidence.inputHash === evidence.argumentsHash ? "current" : "changed";
+};
+
+// the Supervisor message evidence names, while it is still a completed assistant message of its run with the recorded text hash;
+// never re-read for its content
+const evidenceMessage = (evidence: SupervisorMessageEvidence, messages: readonly CompletedMessage[]): CompletedMessage | null => {
+  if (evidence.stale === true) return null;
+  const message = messages.find(item => item.messageId === evidence.messageId && item.runId === evidence.runId);
+  return message && fingerprint(message.text) === evidence.textHash ? message : null;
+};
+
+// the Supervisor message evidence of a published proposal record
+const messageEvidence = (message: CompletedMessage): SupervisorMessageEvidence =>
+  ({kind: "supervisor_message", messageId: message.messageId, runId: message.runId, runOrdinal: message.ordinal, textHash: fingerprint(message.text)});
+
+// the root run order of a candidate's evidence; a tool submission is its attempt's interpretation, which every negotiated proposal of
+// the same task revision follows
+const evidenceRunOrdinal = (evidence: InterpretationEvidence): number => evidence.kind === "supervisor_message" ? evidence.runOrdinal : -1;
+
+// whether a candidate is the service-prepared interpretation proposal
+const interpretationProposal = (candidate: WorkflowAgreementCandidate): boolean =>
+  candidate.interpretation === true || candidate.evidence.kind === "interpretation_submission";
+
+// what evidence is judged against: the bound root's projection, its completed assistant messages and the native details read for its
+// recorded tool submissions
+type EvidenceView = {readonly supervisor: Projection; readonly messages: readonly CompletedMessage[]; readonly details: ReadonlyMap<string, unknown>};
+
+// the task's own interpretation evidence, which stands for a candidate-free interpretation: the current attempt's recorded tool
+// submission, or the answer message the cut-over validated once, for the task's current source revision and exactly its plan
+const taskEvidenceState = (task: TaskRecord, view: EvidenceView): EvidenceState => {
+  const evidence = task.interpretationEvidence;
+  if (!evidence || view.supervisor.thread.id !== task.supervisorThreadId || !evidence.sourcePin || !samePin(evidence.sourcePin, interpretationSourcePin(task)) ||
+    evidence.planDigest === undefined || evidence.planDigest !== interpretationPlanDigest(task.workflow)) return "changed";
+  if (evidence.kind === "supervisor_message") return evidenceMessage(evidence, view.messages) ? "current" : "changed";
+  return evidence.taskId === task.id && evidence.attemptId === task.attempt?.attemptId
+    ? submissionEvidenceState(evidence, view.supervisor, view.details.get(evidence.itemId)) : "changed";
+};
+
+// the Supervisor conversation message an agreement cites for its proposal: the message publishing it or, for a tool submission, the
+// interpretation request message whose run made it; a tool item is never cited as a message
+const proposalMessageId = (candidate: WorkflowAgreementCandidate, supervisor: Projection): string | null => {
+  const evidence = candidate.evidence;
+  if (evidence.kind === "supervisor_message") return evidence.messageId;
+  const run = supervisor.runs.find(item => item.id === evidence.runId && item.threadId === supervisor.thread.id);
+  return typeof run?.userMessageId === "string" && run.userMessageId.length > 0 ? run.userMessageId : null;
+};
+
 const sourcePinMatchesContext = (value: Pick<WorkflowProposalInfo,
   "workspaceRoot" | "revision" | "globalRevision" | "definitionsStatus" | "definitionsComplete" | "requirementsKnown">,
 context: ProposalContext): boolean => context.status === "ready" && context.complete && context.requirementsKnown && context.promptComplete && context.revision !== null &&
@@ -350,6 +431,8 @@ const makeSupervisorConversation = Effect.gen(function* () {
   const clock = yield* Clock.Clock;
   // the operate credential, the definitions, the helper team and workflow state are absent where a scope has none of them
   const rpc = Option.getOrNull(yield* Effect.serviceOption(NativeOperateRpc));
+  // the read credential, for the native detail of a recorded interpretation submission
+  const readRpc = Option.getOrNull(yield* Effect.serviceOption(NativeRpc));
   const definitions = Option.getOrNull(yield* Effect.serviceOption(ProjectDefinitions));
   const teamRuntime = Option.getOrNull(yield* Effect.serviceOption(SupervisorTeamRuntime));
   const workflows = Option.getOrNull(yield* Effect.serviceOption(WorkflowStateStore));
@@ -359,6 +442,8 @@ const makeSupervisorConversation = Effect.gen(function* () {
   const descendantObservedAt = yield* Ref.make(HashMap.empty<string, number>());
   const descendantOffsets = yield* Ref.make(HashMap.empty<string, number>());
   const observeOffset = yield* Ref.make(0);
+  // the last native detail read of each recorded interpretation submission, kept while the root's snapshot of its item is unchanged
+  const submissionDetailMemo = yield* Ref.make(HashMap.empty<string, {signature: string; detail: unknown}>());
   // the in-flight native sends of this service (plan 3.11): closing its scope interrupts each one and keeps its receipt
   const checkIns = yield* FiberMap.make<string, unknown>();
   const introductionSends = yield* FiberMap.make<string, void>();
@@ -711,7 +796,8 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     const current = yield* store.task(task.threadId);
     if (!current || current.id !== task.id || current.status !== "inferred" || !(yield* introductionUnsent(task.id)) ||
       current.definitionReview?.status !== "authorized" && current.definitionReview?.status !== "restored") return;
-    const renewed: TaskRecord = {...current, status: "queued", requestText: "", messageId: `supervisor-task-renewal:${renewalId}`,
+    // the renewed request is a new attempt; the evidence of the old one never stands for it
+    const renewed: TaskRecord = {...current, interpretationEvidence: undefined, status: "queued", requestText: "", messageId: `supervisor-task-renewal:${renewalId}`,
       workflowProposalId: `${task.id}:renew:${proposalId}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0,
       reason: "Approved project definitions are ready; refresh the unsent proposal in the existing Supervisor conversation.", updatedAt: now};
     delete renewed.definitionContext;delete renewed.definitionReadAttempts;delete renewed.revalidationAttempts;delete renewed.definitionNoticeKey;
@@ -999,7 +1085,8 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     const current = yield* store.task(task.threadId);
     if (!current || current.id !== task.id || current.sourceHash !== task.sourceHash) return false;
     const refreshed: TaskRecord = {...current, ...(current.agreement && !current.agreementSourceHash ? {agreementSourceHash: current.sourceHash} : {}),
-      status: "queued", sourceHash, objective: null,
+      // the earlier revision's interpretation evidence never stands for the edited source
+      status: "queued", sourceHash, objective: null, interpretationEvidence: undefined,
       reason: "The user edited the original task request; the same Supervisor will reinterpret it and negotiate a fresh plan.",
       requestText: "", messageId: `supervisor-task-revision:${revisionId}`, replayCount: 0, dispatchedAt: null, supervisorRunId: null,
       workflowProposalId: `${task.id}:source:${sourceHash.slice(0, 12)}`, updatedAt: now};
@@ -1284,11 +1371,18 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         revision: item.revision, decision: item.assessment?.decision ?? null, sourceMessageId: item.sourceMessageId}));
     return open.length ? [{mainThreadId: binding.mainThreadId, workflowId: document.workflowId, open}] : [];
   });
-  const proposalEvidenceCurrent = (task: TaskRecord, candidate: WorkflowAgreementCandidate, messages: readonly CompletedMessage[],
-    context: ProposalContext): boolean => {
-    const message = messages.find(item => item.messageId === candidate.supervisorMessageId && item.runId === candidate.supervisorRunId);
-    if (!message || fingerprint(message.text) !== candidate.supervisorTextHash) return false;
-    if (candidate.interpretation) return interpretationMatches(task, message.text, workflowValue(candidate.workflow));
+  // a candidate's proposal evidence: a tool submission while its native item is unchanged and still pins this plan; a Supervisor message
+  // while it is unchanged, and for a negotiated proposal while it still publishes this exact record
+  const proposalEvidenceState = (task: TaskRecord, candidate: WorkflowAgreementCandidate, view: EvidenceView, context: ProposalContext): EvidenceState => {
+    const evidence = candidate.evidence;
+    if (view.supervisor.thread.id !== task.supervisorThreadId) return "changed";
+    if (evidence.kind === "interpretation_submission")
+      return evidence.taskId === candidate.taskId && evidence.planDigest === interpretationPlanDigest(candidate.workflow)
+        ? submissionEvidenceState(evidence, view.supervisor, view.details.get(evidence.itemId)) : "changed";
+    const message = evidenceMessage(evidence, view.messages);
+    if (!message) return "changed";
+    // the interpretation proposal converted from its answer message stays current by that message's unchanged hash alone
+    if (candidate.interpretation) return "current";
     return extractWorkflowAgreementRecords(message.text, "workflow-proposal").some(value => {
       if (!candidate.compact) {
         // retained full canonical records from before the compact protocol remain valid evidence for their own agreements
@@ -1297,7 +1391,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       }
       const resolved = resolveCompactProposal(value, proposalPins(task, candidate), context, storedProposal(task, (proposalId) => proposalId === candidate.proposalId ? candidate : null, true));
       return resolved.ok && resolved.proposal.proposalId === candidate.proposalId && resolved.proposal.digest === candidate.planHash;
-    });
+    }) ? "current" : "changed";
   };
   const acceptanceEvidenceCurrent = (task: TaskRecord, introduction: WorkflowIntroduction, candidate: WorkflowAgreementCandidate,
     messages: readonly CompletedMessage[], context: ProposalContext, agent: Projection): boolean => {
@@ -1332,18 +1426,18 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     const value = {workspaceRoot: workflow.workspaceRoot, revision: workflow.revision, workflow: workflowValue(workflow)};
     return {proposalId, digest: compactProposalDigest(proposalPins(task), value), ...value};
   };
-  const agreementEvidenceCurrent = (task: TaskRecord, introduction: WorkflowIntroduction, agent: Projection, supervisorMessages: readonly CompletedMessage[],
-    agentMessages: readonly CompletedMessage[], context: ProposalContext) => Effect.gen(function* () {
+  const agreementEvidenceState = (task: TaskRecord, introduction: WorkflowIntroduction, agent: Projection, view: EvidenceView,
+    agentMessages: readonly CompletedMessage[], context: ProposalContext) => Effect.gen(function* (): Effect.fn.Return<EvidenceState, SupervisionStoreError> {
     const agreement = task.agreement;
-    if (agreement?.status !== "agreed") return true;
+    if (agreement?.status !== "agreed") return "current";
     const candidate = yield* requests.agreementCandidate(task.id, agreement.proposalId);
     const agreedValue = agreement.workflow.workspaceRoot && agreement.workflow.revision ? {workspaceRoot: agreement.workflow.workspaceRoot,
       revision: agreement.workflow.revision, workflow: workflowValue(agreement.workflow)} : null;
     const agreementHash = !agreedValue ? null : candidate?.compact
       ? compactProposalDigest({taskId: task.id, taskRevision: task.agreementSourceHash ?? task.sourceHash}, agreedValue) : workflowAgreementPlanHash(agreedValue);
-    return Boolean(candidate && agreementHash === candidate.planHash && agreement.supervisorMessageId === candidate.supervisorMessageId &&
-      agreement.agentMessageId === candidate.agentMessageId && proposalEvidenceCurrent(task, candidate, supervisorMessages, context) &&
-      acceptanceEvidenceCurrent(task, introduction, candidate, agentMessages, context, agent));
+    if (!candidate || agreementHash !== candidate.planHash || agreement.supervisorMessageId !== proposalMessageId(candidate, view.supervisor) ||
+      agreement.agentMessageId !== candidate.agentMessageId || !acceptanceEvidenceCurrent(task, introduction, candidate, agentMessages, context, agent)) return "changed";
+    return proposalEvidenceState(task, candidate, view, context);
   });
   const introductionVisible = (agent: Projection, introduction: WorkflowIntroduction): boolean => {
     const message = agent.messages.find(item => item.id === introduction.messageId && item.threadId === introduction.threadId &&
@@ -1405,6 +1499,11 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     if (!(yield* enabled(task.projectId, task.threadId))) return;
     if (!loaded || loaded.status === "unavailable" || loaded.status === "permission_required") return;
     if (!(yield* reviewDefinitions(task, loaded, agent, supervisor, now))) return;
+    // the native details of the active and the agreed proposal's evidence, read before the section that judges them
+    const observed = (yield* store.task(task.threadId)) ?? task;
+    const judged = yield* Effect.forEach([...new Set([observed.workflowProposalId ?? observed.id, observed.agreement?.proposalId ?? observed.id])],
+      (proposalId) => requests.agreementCandidate(task.id, proposalId));
+    const evidenceDetails = yield* submissionDetails(supervisor, judged.map(candidate => candidate?.evidence));
     const accepted = yield* admitted((guard) => Effect.gen(function* () {
       if (!(yield* guard.scopeEnabled(task.projectId, task.threadId))) return null;
       task = (yield* store.task(task.threadId)) ?? task;
@@ -1432,9 +1531,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
           const workflow: WorkflowProposalInfo = {status: "proposed", message: "A complete proposal is waiting for an exact operative acceptance record.",
             workspaceRoot: proposal.workspaceRoot, revision: proposal.revision, globalRevision: context.globalRevision ?? null, ...proposal.workflow};
           const candidate: WorkflowAgreementCandidate = {taskId: task.id, projectId: task.projectId, proposalId: proposal.proposalId, compact: true,
-            planHash: proposal.digest, workflow, supervisorMessageId: message.messageId, supervisorRunId: message.runId,
-            supervisorTextHash: fingerprint(message.text), objective: proposal.objective,
-            supervisorRunOrdinal: message.ordinal, proposedAt: message.createdAt ?? now};
+            planHash: proposal.digest, workflow, evidence: messageEvidence(message), objective: proposal.objective, proposedAt: message.createdAt ?? now};
           const saved = yield* persistCandidate(task, candidate, context, now);
           if (saved === "saved" || saved === "same")
             yield* clearWorkflowProtocolDiagnostic(task, "supervisor", message, supervisorMessages, agentMessages, now);
@@ -1442,13 +1539,14 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         }
       }
       const currentTask = (yield* store.task(task.threadId)) ?? task;
-      if (currentTask.agreement?.status === "agreed" && !(yield* agreementEvidenceCurrent(currentTask, introduction, agent, supervisorMessages, agentMessages, context))) {
+      const view: EvidenceView = {supervisor, messages: supervisorMessages, details: evidenceDetails};
+      if (currentTask.agreement?.status === "agreed" && (yield* agreementEvidenceState(currentTask, introduction, agent, view, agentMessages, context)) === "changed") {
         yield* markWorkflowStale(currentTask, "The saved Supervisor proposal or operative acceptance message changed or left the completed main conversation graph; agreement evidence is stale.", now);
       }
       const activeProposalId = currentTask.workflowProposalId ?? currentProposalId;
       if (!activeProposalId) return null;
       const candidate = yield* requests.agreementCandidate(task.id, activeProposalId);
-      if (!candidate || !proposalEvidenceCurrent(currentTask, candidate, supervisorMessages, context)) return null;
+      if (!candidate || proposalEvidenceState(currentTask, candidate, view, context) !== "current") return null;
       for (const message of agentMessages) {
         if (!afterIntroduction(agent, introduction, message.messageId)) continue;
         for (const value of extractWorkflowAgreementRecords(message.text, "workflow-acceptance")) {
@@ -1494,8 +1592,8 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if (result === "saved" || result === "same" && !current.workflowProposalId) {
         const prior = current.workflowProposalId ? yield* requests.agreementCandidate(task.id, current.workflowProposalId) : null;
         const firstId = !current.workflowProposalId || current.workflowProposalId === task.id && !prior;
-        const later = prior && (candidate.supervisorRunOrdinal > prior.supervisorRunOrdinal ||
-          candidate.supervisorRunOrdinal === prior.supervisorRunOrdinal && candidate.proposedAt > prior.proposedAt);
+        const later = prior && (evidenceRunOrdinal(candidate.evidence) > evidenceRunOrdinal(prior.evidence) ||
+          evidenceRunOrdinal(candidate.evidence) === evidenceRunOrdinal(prior.evidence) && candidate.proposedAt > prior.proposedAt);
         if (result === "same" || firstId || later || current.workflowProposalId === candidate.proposalId) {
           const updated = {...current, workflow: candidate.workflow, workflowProposalId: candidate.proposalId,
             ...(candidate.objective ? {objective: redact(candidate.objective.text)} : {}), updatedAt: now};
@@ -1547,11 +1645,14 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     const supervisorRead = yield* attempt(projection(task.supervisorThreadId));
     if (!supervisorRead.ok) return;
     const freshSupervisor = supervisorRead.value;
+    const evidenceDetails = yield* submissionDetails(freshSupervisor, [candidate.evidence]);
     const importStatus = yield* admitted((guard) => Effect.gen(function* () {
       if (!(yield* guard.scopeEnabled(task.projectId, task.threadId))) return null;
       if (freshSupervisor.thread.id !== binding.threadId || freshSupervisor.thread.projectId !== task.projectId || freshSupervisor.thread.deletedAt || freshSupervisor.thread.archivedAt) return null;
       const supervisorMessages = completedAssistantMessages(freshSupervisor, task.supervisorThreadId);
-      if (!proposalEvidenceCurrent(currentTask, candidate, supervisorMessages, context)) return null;
+      if (proposalEvidenceState(currentTask, candidate, {supervisor: freshSupervisor, messages: supervisorMessages, details: evidenceDetails}, context) !== "current") return null;
+      const proposalMessage = proposalMessageId(candidate, freshSupervisor);
+      if (proposalMessage === null) return null;
       const operativeMessages = completedAssistantMessages(agent, task.threadId);
       const acceptanceMessage = operativeMessages.find(message => message.messageId === agentMessageId);
       if (!acceptanceMessage) return null;
@@ -1563,7 +1664,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       const agreedWorkflow: WorkflowProposalInfo = {...candidate.workflow, message: "The operative chat accepted this exact proposal; this remains semantic guidance, not execution evidence."};
       const agreement: WorkflowAgreementInfo = {status: "agreed", message: "The operative assistant accepted the Supervisor's exact proposal by its digest; this is semantic agreement, not execution evidence.",
         proposalId: candidate.proposalId, agreedAt: acceptanceMessage.createdAt ?? now,
-        supervisorMessageId: candidate.supervisorMessageId, agentMessageId, workflow: agreedWorkflow};
+        supervisorMessageId: proposalMessage, agentMessageId, workflow: agreedWorkflow};
       const current = yield* store.task(task.threadId);
       const liveBinding = yield* store.bindingForSupervisor(task.supervisorThreadId);
       const liveIntroduction = yield* requests.introduction(task.id);
@@ -1700,6 +1801,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if (contactable === "stop") return;
       if (contactable === "skip") continue;
       const dialogue = yield* dialogueDefinitions(task);
+      const evidenceDetails = yield* submissionDetails(supervisor, [task.interpretationEvidence]);
       const decisionNow = yield* Clock.currentTimeMillis;
       // the unavailable-definitions refusal this caller wrote, which its later context write may replace only while unchanged
       let reviewHeld: WorkflowIntroduction | null = null;
@@ -1721,10 +1823,12 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         const proposalId = task.workflowProposalId ?? task.id;
         const proposal = preparedProposal(task, proposalId);
         if (!proposal) {yield* requests.saveIntroduction({...introduction, state: "blocked", error: "The interpreted proposal is not source-bound; the draft was not sent."});return "skip" as const;}
-        // the Supervisor's own interpretation answer is the source-bound proposal evidence, so the proposal goes out right away with
-        // no separate confirmation turn, once that answer re-derives the exact prepared digest
-        if ((yield* interpretationCandidate(task, supervisor, dialogue, proposal, decisionNow)) === null) {
-          yield* requests.saveIntroduction({...introduction, state: "blocked", error: "The interpreted proposal could not be re-derived from the Supervisor's interpretation; the draft was not sent."});return "skip" as const;
+        // the Supervisor's recorded interpretation is the source-bound proposal evidence, so the proposal goes out right away with no
+        // separate confirmation turn, while that evidence is current and pins exactly the prepared plan
+        const initial = yield* interpretationCandidate(task, supervisor, dialogue, proposal, evidenceDetails, decisionNow);
+        if (initial === "unknown") return "skip" as const;
+        if (initial === null) {
+          yield* requests.saveIntroduction({...introduction, state: "blocked", error: "The interpreted proposal could not be confirmed from the Supervisor's recorded interpretation; the draft was not sent."});return "skip" as const;
         }
         if (text.length > maxConversationTextLength) {yield* requests.saveIntroduction({...introduction, state: "blocked", error: `The introduction exceeds its limit (${text.length}/${maxConversationTextLength} characters); no definition sources were truncated.`});return "skip" as const;}
         if (!(yield* guard.scopeEnabled(binding.projectId, binding.mainThreadId))) return "stop" as const;
@@ -2080,48 +2184,74 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
   const holdsIntroduction = (taskId: string, held: WorkflowIntroduction | null) => Effect.map(requests.introduction(taskId), (stored) => unchangedRecord(stored, held));
   const holdsRequest = (held: ConversationRequest) => Effect.map(requests.requests(held.projectId, held.supervisorThreadId),
     (stored) => unchangedRecord(stored.find(item => item.id === held.id) ?? null, held));
-  // whether the Supervisor's own interpretation answer yields exactly this plan; only node IDs are service-assigned on each read
-  const interpretationMatches = (task: TaskRecord, text: string, expected: WorkflowPlanValue): boolean => {
-    if (!task.definitionContext) return false;
+  // the root's snapshot signature of a recorded submission's item, as the evidence search keys its detail reads; null once the root no
+  // longer shows the item
+  const submissionItemSignature = (supervisor: Projection, itemId: string): string | null => {
+    const item = (supervisor.turnItems ?? []).find(candidate => candidate.id === itemId && candidate.threadId === supervisor.thread.id);
+    if (!item) return null;
     try {
-      const result = parseWorkflowInterpretation(text, task.sourceMessageId, task.definitionContext);
-      const shape = (value: WorkflowPlanValue) => JSON.stringify(value, (key, item: unknown) => key === "nodeId" ? undefined : item);
-      return result.supervision !== "not_needed" && result.objective !== null && shape(workflowValue(result.workflow)) === shape(expected);
-    } catch {return false;}
+      return workflowRequestHash({id: item.id, runId: item.runId ?? null, providerThreadId: item.providerThreadId ?? null, updatedAt: item.updatedAt ?? null,
+        status: item.status ?? null, toolName: item.toolName ?? null, input: item.input ?? null});
+    } catch {return null;}
   };
-  /** Whether a proposal sent on the interpretation answer still has that unchanged answer (and, when formal, its candidate). */
-  const interpretationEvidenceCurrent = (task: TaskRecord, supervisor: Projection, snapshot: ProjectDefinitionSnapshot) => Effect.gen(function* () {
-    if (currentProtocolAnchor(task)?.promptMessageId !== task.messageId || !task.workflow) return true;
-    const messages = completedAssistantMessages(supervisor, task.supervisorThreadId);
-    const candidate = yield* requests.agreementCandidate(task.id, task.workflowProposalId ?? task.id);
-    if (candidate?.interpretation) {
-      const context = proposalContext(task, snapshot);
-      return Boolean(context && proposalEvidenceCurrent(task, candidate, messages, context));
+  // the native details of the recorded tool submissions among these evidences, read on the read credential before any section; a
+  // detail is reused while the root's snapshot of its item is unchanged, so a settled submission costs one read
+  const submissionDetails = (supervisor: Projection, evidences: ReadonlyArray<InterpretationEvidence | null | undefined>) => Effect.gen(function* () {
+    const details = new Map<string, unknown>();
+    for (const evidence of evidences) {
+      if (evidence?.kind !== "interpretation_submission" || details.has(evidence.itemId)) continue;
+      const signature = submissionItemSignature(supervisor, evidence.itemId);
+      if (signature === null) continue;
+      const memo = HashMap.get(yield* Ref.get(submissionDetailMemo), evidence.itemId);
+      if (Option.isSome(memo) && memo.value.signature === signature) {details.set(evidence.itemId, memo.value.detail);continue;}
+      if (!readRpc) continue;
+      const read = yield* attempt(readRpc.call("orchestration.getTurnItem", {threadId: supervisor.thread.id, itemId: evidence.itemId}));
+      if (!read.ok || !record(read.value) || !record(read.value.item)) continue;
+      const detail = read.value.item;
+      let bytes = Number.POSITIVE_INFINITY;
+      try {bytes = Buffer.byteLength(JSON.stringify(detail), "utf8");} catch { /* an undecodable detail stays unread */ }
+      if (bytes > workflowTurnItemDetailMaxBytes) continue;
+      details.set(evidence.itemId, detail);
+      yield* Ref.update(submissionDetailMemo, (memo) =>
+        HashMap.set(HashMap.size(memo) >= 32 && !HashMap.has(memo, evidence.itemId) ? HashMap.empty() : memo, evidence.itemId, {signature, detail}));
     }
-    const expected = workflowValue(task.workflow);
-    return messages.some(message => message.runId === task.supervisorRunId && interpretationMatches(task, message.text, expected));
+    return details as ReadonlyMap<string, unknown>;
   });
-  /** The initial candidate from the Supervisor's own interpretation run; "provisional" when the plan is not formally ready. */
+  /** Whether a proposal sent on the interpretation still has its unchanged evidence: its interpretation candidate's, else the task's own. */
+  const interpretationEvidenceState = (task: TaskRecord, view: EvidenceView, snapshot: ProjectDefinitionSnapshot) =>
+    Effect.gen(function* (): Effect.fn.Return<EvidenceState, SupervisionStoreError> {
+      if (currentProtocolAnchor(task)?.promptMessageId !== task.messageId || !task.workflow) return "current";
+      const candidate = yield* requests.agreementCandidate(task.id, task.workflowProposalId ?? task.id);
+      if (candidate && interpretationProposal(candidate)) {
+        const context = proposalContext(task, snapshot);
+        return context ? proposalEvidenceState(task, candidate, view, context) : "changed";
+      }
+      return taskEvidenceState(task, view);
+    });
+  /**
+   * The initial candidate on the task's own interpretation evidence; "provisional" when the plan is not formally ready, "unknown" while
+   * the native detail of that evidence is unread.
+   */
   const interpretationCandidate = (task: TaskRecord, supervisor: Projection, snapshot: ProjectDefinitionSnapshot, prepared: StoredProposalDigest,
-    now: number) => Effect.gen(function* (): Effect.fn.Return<WorkflowAgreementCandidate | "provisional" | null, SupervisionStoreError> {
-    const context = proposalContext(task, snapshot);
-    if (!context || !task.workflow || !task.supervisorRunId || supervisor.thread.id !== task.supervisorThreadId) return null;
-    const expectedWorkflow = workflowValue(task.workflow);
-    const initialPlan = validateWorkflowRecord(expectedWorkflow, context);
-    if (!initialPlan || JSON.stringify(initialPlan) !== JSON.stringify(expectedWorkflow) || prepared.workspaceRoot !== context.workspaceRoot || prepared.revision !== context.revision) return null;
-    const message = completedAssistantMessages(supervisor, task.supervisorThreadId).filter(item => item.runId === task.supervisorRunId)
-      .find(item => interpretationMatches(task, item.text, expectedWorkflow));
-    if (!message) return null;
-    if (!formalPlanReady(task.workflow) || context.status !== "ready" || !context.complete || !context.revision) return "provisional";
-    const workflow: WorkflowProposalInfo = {status: "proposed", message: "A complete proposal is waiting for an exact operative acceptance record.",
-      workspaceRoot: prepared.workspaceRoot, revision: prepared.revision, globalRevision: context.globalRevision ?? null, ...prepared.workflow};
-    const candidate: WorkflowAgreementCandidate = {taskId: task.id, projectId: task.projectId, proposalId: prepared.proposalId, compact: true, interpretation: true,
-      planHash: prepared.digest, workflow, supervisorMessageId: message.messageId, supervisorRunId: message.runId,
-      supervisorRunOrdinal: message.ordinal, supervisorTextHash: fingerprint(message.text), proposedAt: message.createdAt ?? now};
-    const saved = yield* persistCandidate(task, candidate, context, now);
-    return (saved === "saved" || saved === "same") && (yield* store.task(task.threadId))?.workflowProposalId === prepared.proposalId
-      ? yield* requests.agreementCandidate(task.id, prepared.proposalId) : null;
-  });
+    details: ReadonlyMap<string, unknown>, now: number) =>
+    Effect.gen(function* (): Effect.fn.Return<WorkflowAgreementCandidate | "provisional" | "unknown" | null, SupervisionStoreError> {
+      const context = proposalContext(task, snapshot);
+      const evidence = task.interpretationEvidence;
+      if (!context || !task.workflow || !evidence || supervisor.thread.id !== task.supervisorThreadId) return null;
+      const expectedWorkflow = workflowValue(task.workflow);
+      const initialPlan = validateWorkflowRecord(expectedWorkflow, context);
+      if (!initialPlan || JSON.stringify(initialPlan) !== JSON.stringify(expectedWorkflow) || prepared.workspaceRoot !== context.workspaceRoot || prepared.revision !== context.revision) return null;
+      const state = taskEvidenceState(task, {supervisor, messages: completedAssistantMessages(supervisor, task.supervisorThreadId), details});
+      if (state !== "current") return state === "unknown" ? "unknown" : null;
+      if (!formalPlanReady(task.workflow) || context.status !== "ready" || !context.complete || !context.revision) return "provisional";
+      const workflow: WorkflowProposalInfo = {status: "proposed", message: "A complete proposal is waiting for an exact operative acceptance record.",
+        workspaceRoot: prepared.workspaceRoot, revision: prepared.revision, globalRevision: context.globalRevision ?? null, ...prepared.workflow};
+      const candidate: WorkflowAgreementCandidate = {taskId: task.id, projectId: task.projectId, proposalId: prepared.proposalId, compact: true, interpretation: true,
+        planHash: prepared.digest, workflow, evidence, proposedAt: now};
+      const saved = yield* persistCandidate(task, candidate, context, now);
+      return (saved === "saved" || saved === "same") && (yield* store.task(task.threadId))?.workflowProposalId === prepared.proposalId
+        ? yield* requests.agreementCandidate(task.id, prepared.proposalId) : null;
+    });
   const initialWorkflowCandidate = (request: ConversationRequest, runId: string, supervisor: Projection,
     threads: readonly ThreadInfo[], now: number): Effect.Effect<WorkflowAgreementCandidate | "provisional" | null, SupervisionStoreError> => Effect.gen(function* () {
     if (!request.taskId || request.kind !== "context") return null;
@@ -2162,8 +2292,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
           const workflow: WorkflowProposalInfo = {status: "proposed", message: "A complete proposal is waiting for an exact operative acceptance record.",
             workspaceRoot: prepared.workspaceRoot, revision: prepared.revision, globalRevision: context.globalRevision ?? null, ...prepared.workflow};
           const candidate: WorkflowAgreementCandidate = {taskId: task.id, projectId: task.projectId, proposalId, compact: true,
-            planHash: prepared.digest, workflow, supervisorMessageId: message.messageId, supervisorRunId: runId,
-            supervisorRunOrdinal: message.ordinal, supervisorTextHash: fingerprint(message.text), proposedAt: message.createdAt ?? now};
+            planHash: prepared.digest, workflow, evidence: messageEvidence(message), proposedAt: message.createdAt ?? now};
           const saved = yield* persistCandidate(task, candidate, context, now);
           if ((saved === "saved" || saved === "same") && (yield* store.task(task.threadId))?.workflowProposalId === proposalId) return yield* requests.agreementCandidate(task.id, proposalId);
         }
@@ -2282,6 +2411,8 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     }));
     if (!defined) return;
     const supervisor = yield* projection(task.supervisorThreadId);
+    const sentProposal = yield* requests.agreementCandidate(task.id, task.workflowProposalId ?? task.id);
+    const evidenceDetails = yield* submissionDetails(supervisor, [task.interpretationEvidence, sentProposal?.evidence]);
     if (!rpc) return yield* Effect.die(new Error("supervisor_operate_rpc_unavailable"));
     const operate = rpc;
     // the admission section (plan 3.11): every POST reaching here is fresh (unknown identities returned above), including a
@@ -2295,7 +2426,10 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         // receipt is only reconciled by later observation and nothing is initiated from the stale copy
         if (!unchangedUnsentIntroduction(yield* requests.introduction(task.id), introduction)) return {_tag: "Answer", value: undefined};
         if (!(yield* guard.scopeEnabled(task.projectId, task.threadId))) return {_tag: "Answer", value: undefined};
-        if (!(yield* interpretationEvidenceCurrent(task, supervisor, defined))) {
+        const evidence = yield* interpretationEvidenceState(task, {supervisor, messages: completedAssistantMessages(supervisor, task.supervisorThreadId), details: evidenceDetails}, defined);
+        // an unread native detail decides nothing; a later observation reads it again
+        if (evidence === "unknown") return {_tag: "Answer", value: undefined};
+        if (evidence === "changed") {
           yield* blockIntroduction(task.id, "The Supervisor's interpretation answer changed or is no longer complete; the draft was not sent.");return {_tag: "Answer", value: undefined};
         }
         if (!canSupervisorContact(supervisor.thread, agent.thread)) {yield* blockIntroduction(task.id, "The Supervisor's native modes cannot contact this operative chat. Adjust its T3 modes and Retry native access.");return {_tag: "Answer", value: undefined};}

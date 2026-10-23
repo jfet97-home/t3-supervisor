@@ -15,7 +15,7 @@ import { projectSupervisorUnit, supervisorConversationUnit, type ProjectSupervis
 import { supervisionStopToolDefinition } from "../src/workflow-write-controller.js";
 import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
-import { parseWorkflowInterpretation, prepareWorkflowRequest, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
+import { prepareWorkflowRequest, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, workflowInterpretationOutcome, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import type { ConversationRequest, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
 import { SupervisorRpcError, type SupervisorRpc } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
@@ -25,6 +25,9 @@ import { SupervisorTeamStore } from "../src/supervisor-team-store.js";
 import type { SupervisionStopInput } from "../src/workflow-write-controller.js";
 import { workflowWriteControllerUnit, type WorkflowWriteControllerUnitOptions } from "./support/workflow-controller-units.js";
 import { effectiveIndex, indexSource, projectIndex, testSummary } from "./project-definitions-fixture.js";
+import { interpretationPlanDigest, type SupervisorMessageEvidence } from "../src/interpretation-evidence.js";
+import { interpretationAttemptId, interpretationSourcePin } from "../src/interpretation-submission.js";
+import { recordInterpretationSubmission, turnItemReader } from "./support/interpretation-evidence-fixture.js";
 import { openGuidance, openPolicy, openSupervisors, openWorkflows, serviceOf, teamOf, type Promised, type StorePromise } from "./support/store-units.js";
 
 const projectId = "project-a";
@@ -419,7 +422,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
   const prepared = prepareWorkflowRequest(operativeThreadId, sourceMessageId, sourceText, definitionSnapshot);
   assert.ok(prepared.context);
   const initialPlan = requiredPlanForContext(prepared.context);
-  const task: TaskRecord = {
+  const draftTask: TaskRecord = {
     id: "proposal-1",
     threadId: operativeThreadId,
     projectId,
@@ -450,9 +453,9 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
       },
     }),
   };
+  const task = options.workflow === false ? draftTask : setInterpretationSubmission(supervisor, draftTask, requiredRawPlan());
   await projectStore.saveTask(task);
   await projectStore.baseline({snapshotSequence: 1, threads: []});
-  if (options.workflow !== false) setInterpretationAnswer(supervisor, task, requiredRawPlan());
 
   let queuePeerDuringNextSupervisorDispatch = options.queuePeerDuringNextSupervisorDispatch ?? false;
   let failNextIntroduction = false;
@@ -551,6 +554,14 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     },
   };
   const threadList = [supervisor.thread, operative.thread];
+  // the read credential serves a recorded submission's native item detail from the projection that shows it
+  const itemReads: string[] = [];
+  const itemReader = turnItemReader(threadId => projections.get(threadId), itemReads);
+  let itemReadFailure = false;
+  const readItems: SupervisorRpc = async (tag, payload, signal) => {
+    if (itemReadFailure) throw new SupervisorRpcError("uncertain");
+    return itemReader(tag, payload, signal);
+  };
   const workflows = await openWorkflows(projectStore, () => true);
   const conversation = supervisorConversationUnit(
     projectStore,
@@ -570,6 +581,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     options.teamEnabled ? teamOf(projectStore) : undefined,
     undefined,
     options.helperProviderInstanceId,
+    readItems,
   );
   conversation.supervisionStopped = threadId => threadPolicy.get().then((policy) => policy.excludedThreadIds.includes(threadId));
   const apiConfig = {
@@ -646,6 +658,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
   return {
     binding: await projectStore.binding(projectId, operativeThreadId) as BindingRecord,
     calls,
+    itemReads,
     cleanup: async () => { await threadPolicy.close(); await guidance.close(); await rm(directory, { recursive: true, force: true }); },
     threadPolicy,
     threadPolicyDirectory,
@@ -661,7 +674,8 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
         const projection = projections.get(threadId);
         if (!projection) throw new Error(`missing restarted test projection ${threadId}`);
         return projection;
-      }, definitionLoader, thread => thread.id.startsWith("operative-") && thread.projectId === projectId, () => true, workflows);
+      }, definitionLoader, thread => thread.id.startsWith("operative-") && thread.projectId === projectId, () => true, workflows,
+      undefined, undefined, undefined, undefined, readItems);
       // a restarted service reads the same persisted per-chat stop
       const reopened = await openPolicy(threadPolicyDirectory, {excludedThreadIds: []});
       restarted.supervisionStopped = threadId => reopened.get().then((policy) => policy.excludedThreadIds.includes(threadId));
@@ -670,6 +684,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     returnInvalidNextIntroductionReceipt: () => { returnInvalidNextIntroductionReceipt = true; },
     setDefinitions: (snapshot: ProjectDefinitionSnapshot) => { definitionSnapshot = snapshot; },
     setDefinitionReadFailure: (failure: Error | null) => { definitionReadFailure = failure; },
+    setItemReadFailure: (failing: boolean) => { itemReadFailure = failing; },
     setProjectionFailure: (threadId: string, failure: Error | null) => { if (failure) projectionFailures.set(threadId, failure); else projectionFailures.delete(threadId); },
     projection: (threadId: string) => projections.get(threadId) ?? null,
     addChildProjection: (projection: Projection) => {projections.set(projection.thread.id, projection);threadList.push(projection.thread);},
@@ -683,27 +698,25 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
   };
 };
 
-// the Supervisor's own completed interpretation run (the root's first turn); its answer is the evidence the introduction is sent on
-const setInterpretationAnswer = (supervisor: Projection, task: TaskRecord, raw: unknown, objective = task.objective) => {
+// the Supervisor's own completed interpretation run (the root's first turn) and its recorded typed submission: the task as
+// finalization leaves it holds the attempt, the evidence pinning the executed tool item and the submitted plan
+const setInterpretationSubmission = (supervisor: Projection, task: TaskRecord, raw: unknown, objective = task.objective): TaskRecord => {
   const runId = task.supervisorRunId ?? "supervisor-objective-run";
-  const text = JSON.stringify({objective, reason: task.reason, sourceMessageIds: [task.sourceMessageId], supervision: "needed", workflow: raw});
-  const existing = supervisor.messages.find(message => message.id === `${runId}-answer`);
-  if (existing) {existing.text = text;return;}
-  const run = appendRun({projection: supervisor, id: runId, ordinal: 0, status: "completed", messageId: task.messageId, text: "Interpret the task.", now: baseTime - 60_000});
-  appendMessageToRun(supervisor, run, {id: `${runId}-answer`, role: "assistant", text, now: baseTime - 59_000});
+  const run = supervisor.runs.find(item => item.id === runId) ??
+    appendRun({projection: supervisor, id: runId, ordinal: 0, status: "completed", messageId: task.messageId, text: "Interpret the task.", now: baseTime - 60_000});
+  return recordInterpretationSubmission({supervisor, run, task, bindingGeneration: 1, workflow: raw, objective}).task;
 };
 
-// stores a task whose workflow is the service's parse of the Supervisor's own answer, as interpretation stores it
+// stores a task whose workflow is the decoded plan of the Supervisor's recorded submission, as finalization applies it
 const interpretTask = async (fixture: Awaited<ReturnType<typeof makeFixture>>, raw: unknown, context: NonNullable<TaskRecord["definitionContext"]>,
   snapshot: ProjectDefinitionSnapshot, extra: Partial<TaskRecord> = {}): Promise<TaskRecord> => {
   const current = (await fixture.projectStore.task(fixture.task.threadId))!;
-  const answer = JSON.stringify({objective: current.objective, reason: current.reason, sourceMessageIds: [current.sourceMessageId], supervision: "needed", workflow: raw});
-  const task: TaskRecord = {...current, definitionContext: context, definitionSnapshot: snapshot, workflowProposalId: current.workflowProposalId ?? current.id,
-    workflow: parseWorkflowInterpretation(answer, current.sourceMessageId, context).workflow, ...extra};
-  await fixture.projectStore.saveTask(task);
+  const task = setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: context, definitionSnapshot: snapshot,
+    workflowProposalId: current.workflowProposalId ?? current.id}, raw);
+  const stored: TaskRecord = {...task, ...extra};
+  await fixture.projectStore.saveTask(stored);
   fixture.setDefinitions(snapshot);
-  setInterpretationAnswer(fixture.supervisor, task, raw);
-  return task;
+  return stored;
 };
 
 const installTaskDefinitions = async (fixture: Awaited<ReturnType<typeof makeFixture>>, snapshot: ProjectDefinitionSnapshot, workflowIds: readonly string[]): Promise<TaskRecord> => {
@@ -711,13 +724,11 @@ const installTaskDefinitions = async (fixture: Awaited<ReturnType<typeof makeFix
   const prepared = prepareWorkflowRequest(current.threadId, current.sourceMessageId, current.objective ?? sourceText, snapshot);
   assert.ok(prepared.context);
   const plan = planWithFixedWorkflows(prepared.context, workflowIds);
-  const task: TaskRecord = {...current, definitionContext: prepared.context, definitionSnapshot: snapshot,
-    workflow: {status: "proposed", message: "A complete proposal is ready for review.", workspaceRoot: prepared.context.workspaceRoot,
-      revision: prepared.context.revision, globalRevision: prepared.context.globalRevision ?? null, ...plan},
-    workflowProposalId: current.workflowProposalId ?? current.id};
+  const task = setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: prepared.context, definitionSnapshot: snapshot,
+    workflowProposalId: current.workflowProposalId ?? current.id}, fixedWorkflowsRawPlan(workflowIds));
+  assert.equal(interpretationPlanDigest(task.workflow), interpretationPlanDigest(plan), "the submission decodes to the validated plan");
   await fixture.projectStore.saveTask(task);
   fixture.setDefinitions(snapshot);
-  setInterpretationAnswer(fixture.supervisor, task, fixedWorkflowsRawPlan(workflowIds));
   return task;
 };
 
@@ -732,11 +743,10 @@ const installNestedCatalog = async (fixture: Awaited<ReturnType<typeof makeFixtu
     {kind: "workflow", definitionId: "change", reason: "Complete the requested change."}]}};
   const plan = validateWorkflowPlan(raw, prepared.context);
   assert.ok(plan);
-  const task: TaskRecord = {...current, definitionContext: prepared.context, definitionSnapshot: snapshot,
-    workflow: {status: "proposed", message: "A complete draft is ready.", workspaceRoot, revision, globalRevision: null, ...plan}};
+  const task = setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: prepared.context, definitionSnapshot: snapshot}, raw);
+  assert.equal(interpretationPlanDigest(task.workflow), interpretationPlanDigest(plan), "the submission decodes to the validated plan");
   await fixture.projectStore.saveTask(task);
   fixture.setDefinitions(snapshot);
-  setInterpretationAnswer(fixture.supervisor, task, raw);
   return task;
 };
 
@@ -759,7 +769,9 @@ it("a realistic nested catalog completes startup, introduction and exact accepta
   assert.ok(acceptance, "a complete source-bound interpretation has an exact acceptance record");
   const candidate = await fixture.conversation.requests.agreementCandidate(task.id, task.id);
   assert.equal(candidate?.interpretation, true);
-  assert.equal(candidate?.supervisorMessageId, "supervisor-objective-run-answer", "the candidate cites the Supervisor's interpretation answer");
+  assert.deepEqual(candidate?.evidence, (await fixture.projectStore.task(task.threadId))?.interpretationEvidence,
+    "the candidate rests on the Supervisor's recorded interpretation submission");
+  assert.equal(candidate?.evidence.kind, "interpretation_submission");
   assert.equal(candidate?.planHash, acceptance.digest);
   await fixture.run();
   const introduction = (await fixture.conversation.requests.introduction(task.id))!;
@@ -788,7 +800,8 @@ it("invalid oversized definitions keep provisional initialization compact while 
   const oversized = {...task.definitionSnapshot!, status: "invalid" as const, complete: false, sources: [...task.definitionSnapshot!.sources,
     {path: ".t3-supervisor/extra.md", content: material, origin: "project" as const}],
     issues: [{path: ".t3-supervisor/extra.md", code: "unexpected_definition_entry", message: "Only project.yaml, steps/ and workflows/ belong here."}]};
-  const raw = JSON.parse(fixture.supervisor.messages.find(message => message.id === "supervisor-objective-run-answer")!.text).workflow;
+  const submitted = task.interpretationEvidence?.kind === "interpretation_submission" ? task.interpretationEvidence.itemId : null;
+  const raw = (fixture.supervisor.turnItems!.find(item => item.id === submitted)!.input as Record<string, unknown>).workflow;
   await interpretTask(fixture, raw, proposalContextFromDefinitions(oversized), oversized);
   await fixture.run();
   assert.equal(await fixture.conversation.requests.pending(projectId, fixture.binding.threadId), null, "no initialization turn");
@@ -2642,7 +2655,8 @@ it("a restarted source run still gets its introduction in two startup cycles", a
   const agreed = (await fixture.projectStore.task(fixture.task.threadId))?.agreement;
   assert.equal(agreed?.status, "agreed");
   assert.equal(agreed?.proposalId, fixture.task.id);
-  assert.equal(agreed?.supervisorMessageId, (await fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id))?.supervisorMessageId);
+  assert.equal((await fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id))?.evidence.kind, "interpretation_submission");
+  assert.equal(agreed?.supervisorMessageId, fixture.task.messageId, "a submission-based agreement cites the interpretation request its run answered");
   assert.ok(agreed?.agentMessageId);
   const workflowState = await fixture.workflows.get(projectId, operativeThreadId);
   assert.ok(workflowState);
@@ -2831,9 +2845,10 @@ it("R114-D diagnoses an invalid fresh proposal in a current task root turn", asy
   assert.equal((await fixture.projectStore.task(fixture.task.threadId))?.workflowProtocolDiagnostic, undefined,
     "a current root turn cannot attribute a record carrying another task ID");
 
-  const provisional = parseWorkflowInterpretation(JSON.stringify({objective: fixture.task.objective,
-    reason: fixture.task.reason, sourceMessageIds: [fixture.task.sourceMessageId], workflow: null}),
-  fixture.task.sourceMessageId, fixture.task.definitionContext!).workflow;
+  const provisionalOutcome = workflowInterpretationOutcome({objective: fixture.task.objective, reason: fixture.task.reason}, undefined, null,
+    fixture.task.definitionContext!);
+  assert.ok(provisionalOutcome.ok);
+  const provisional = provisionalOutcome.value.workflow;
   const provisionalValue: WorkflowPlanValue = {definitionsStatus: provisional.definitionsStatus,
     definitionsComplete: provisional.definitionsComplete, requirementsKnown: provisional.requirementsKnown,
     requirements: provisional.requirements, issues: provisional.issues, plan: provisional.plan};
@@ -4900,7 +4915,7 @@ it("a new full-format proposal record gets a compact-protocol diagnostic instead
   // a retained full-format candidate that was never accepted cannot be accepted any more, so republishing it is diagnosed too
   const retained = appendAssistantTurn(fixture.supervisor, "legacy-retained-record", workflowFence("workflow-proposal", workflowRecord(task, "legacy-retained")), clock.now + 2);
   await fixture.conversation.requests.saveAgreementCandidate({taskId: task.id, projectId, proposalId: "legacy-retained", planHash: "legacy-plan-hash", workflow: task.workflow!,
-    supervisorMessageId: retained.message.id, supervisorRunId: retained.message.runId!, supervisorRunOrdinal: 1, supervisorTextHash: "legacy-text", proposedAt: clock.now});
+    evidence: {kind: "supervisor_message", messageId: retained.message.id, runId: retained.message.runId!, runOrdinal: 1, textHash: "legacy-text"}, proposedAt: clock.now});
   await observeAgreement(fixture, clock.now + 61_000);
   const retainedDiagnostic = (await fixture.projectStore.task(task.threadId))?.workflowProtocolDiagnostic;
   assert.equal(retainedDiagnostic?.code, "legacy_record_format", "an unaccepted retained candidate gets the compact-protocol diagnostic");
@@ -5271,7 +5286,7 @@ it("a full-format record is exempt from the compact-protocol diagnostic only as 
     supervisorMessageId: "original-evidence", agentMessageId: "original-acceptance", workflow: fixture.task.workflow!}};
   const exact = workflowRecord(task, "retained-agreed");
   await fixture.conversation.requests.saveAgreementCandidate({taskId: task.id, projectId, proposalId: "retained-agreed", planHash: workflowAgreementPlanHash(parseWorkflowAgreementRecord(exact, task.id, task.definitionContext!)!),
-    workflow: task.workflow!, supervisorMessageId: "original-evidence", supervisorRunId: "old-run", supervisorRunOrdinal: 1, supervisorTextHash: "original-text-hash", proposedAt: clock.now - 1});
+    workflow: task.workflow!, evidence: {kind: "supervisor_message", messageId: "original-evidence", runId: "old-run", runOrdinal: 1, textHash: "original-text-hash"}, proposedAt: clock.now - 1});
   const changed = workflowRecord(task, "retained-agreed", withLocalStep(task, "Additional work", "Different content from the retained agreement"));
   const problem = async (value: unknown, recordedAt: number) => await (fixture.conversation as unknown as {compactRecordProblem(task: TaskRecord, role: string, value: unknown, context: unknown,
     agent: Projection, recordedAt: number): StorePromise<{code: string} | null>}).compactRecordProblem(task, "supervisor", value, task.definitionContext!, fixture.operative, recordedAt);
@@ -5324,22 +5339,76 @@ it("a project re-enabled with a new boundary never revives a settled pair for a 
   assert.match(wake!.text, new RegExp(request.id, "u"));
 });
 
-it("the proposal goes out only on the Supervisor's own completed interpretation answer: absent, mismatched or streaming answers and pending owner input send nothing", { timeout: 60_000 }, async t => {
-  for (const variant of ["absent", "mismatched", "streaming"] as const) {
+// the recorded interpretation submission's native tool item, its node and the run that made it, in the root's projection
+const recordedSubmission = (fixture: Awaited<ReturnType<typeof makeFixture>>, task: TaskRecord = fixture.task) => {
+  const evidence = task.interpretationEvidence;
+  assert.ok(evidence?.kind === "interpretation_submission");
+  const item = turnItemsOf(fixture.supervisor).find(candidate => candidate.id === evidence.itemId);
+  const node = nodesOf(fixture.supervisor).find(candidate => candidate.id === item?.nodeId);
+  const run = fixture.supervisor.runs.find(candidate => candidate.id === evidence.runId);
+  assert.ok(item && node && run);
+  return {evidence, item, node, run};
+};
+
+it("CT-ISUB-16: the proposal goes out only on the Supervisor's current recorded submission; a missing, rolled-back, changed, other-run or superseded one, another plan or a final-chat answer alone send nothing", { timeout: 60_000 }, async t => {
+  const variants = ["absent", "final_chat_only", "item_removed", "item_rolled_back", "node_rolled_back", "arguments_changed", "other_run", "run_failed",
+    "earlier_attempt", "other_plan"] as const;
+  for (const variant of variants) {
     const clock = {now: baseTime};
     const fixture = await makeFixture(clock);
     after(t, fixture.cleanup);
-    const answer = fixture.supervisor.messages.find(message => message.id === "supervisor-objective-run-answer")!;
-    if (variant === "absent") fixture.supervisor.messages.splice(fixture.supervisor.messages.indexOf(answer), 1);
-    if (variant === "mismatched") answer.text = JSON.stringify({...JSON.parse(answer.text), workflow: requiredRawPlan("A plan the service never stored.")});
-    if (variant === "streaming") answer.streaming = true;
+    const {evidence, item, node, run} = recordedSubmission(fixture);
+    const stored = (await fixture.projectStore.task(fixture.task.threadId))!;
+    if (variant === "absent" || variant === "final_chat_only") await fixture.projectStore.saveTask({...stored, interpretationEvidence: undefined});
+    // the old protocol's well-formed final JSON answer in the request run is no evidence and is never parsed
+    if (variant === "final_chat_only") appendMessageToRun(fixture.supervisor, run, {id: "final-chat-answer", role: "assistant", now: baseTime - 59_000,
+      text: JSON.stringify({objective: stored.objective, reason: stored.reason, sourceMessageIds: [stored.sourceMessageId], supervision: "needed", workflow: requiredRawPlan()})});
+    if (variant === "item_removed") turnItemsOf(fixture.supervisor).splice(turnItemsOf(fixture.supervisor).indexOf(item), 1);
+    if (variant === "item_rolled_back") item.status = "rolled_back";
+    if (variant === "node_rolled_back") node.status = "rolled_back";
+    if (variant === "arguments_changed") item.input = {...item.input as Record<string, unknown>, reason: "Edited after the submission."};
+    if (variant === "other_run") {
+      const later = appendAssistantTurn(fixture.supervisor, "later-root-turn", "Done.", baseTime - 30_000).run;
+      await fixture.projectStore.saveTask({...stored, interpretationEvidence: {...evidence, runId: later.id}});
+    }
+    if (variant === "run_failed") run.status = "failed";
+    if (variant === "earlier_attempt") await fixture.projectStore.saveTask({...stored, attempt: {...stored.attempt!, attemptId: interpretationAttemptId(randomUUID())}});
+    if (variant === "other_plan") await fixture.projectStore.saveTask({...stored, interpretationEvidence: {...evidence,
+      planDigest: interpretationPlanDigest(requiredPlanForContext(stored.definitionContext!, "A plan the service never stored."))}});
     await fixture.run();
     assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0, `${variant}: nothing reaches the operative`);
     assert.equal(fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId).length, 0, `${variant}: no confirmation turn is sent instead`);
     assert.equal(await fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id), null, variant);
     const introduction = await fixture.conversation.requests.introduction(fixture.task.id);
     assert.equal(introduction?.state, "blocked", variant);
-    assert.match(introduction?.error ?? "", /could not be re-derived from the Supervisor's interpretation/u, variant);
+    assert.match(introduction?.error ?? "", /could not be confirmed from the Supervisor's recorded interpretation/u, variant);
+  }
+  // an unread native detail decides nothing: no introduction is written until the read succeeds
+  {
+    const clock = {now: baseTime};
+    const fixture = await makeFixture(clock);
+    after(t, fixture.cleanup);
+    fixture.setItemReadFailure(true);
+    await fixture.run();
+    assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
+    assert.equal(await fixture.conversation.requests.introduction(fixture.task.id), null, "an unread detail leaves the proposal unprepared, not blocked");
+    fixture.setItemReadFailure(false);
+    await fixture.run();
+    assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 1);
+    assert.deepEqual(fixture.itemReads, [recordedSubmission(fixture).evidence.itemId], "one detail read serves preparation and send of an unchanged item");
+  }
+  // the MCPX wrapper of the same tool is the same evidence
+  {
+    const clock = {now: baseTime};
+    const fixture = await makeFixture(clock);
+    after(t, fixture.cleanup);
+    const stored = (await fixture.projectStore.task(fixture.task.threadId))!;
+    const wrapped = recordInterpretationSubmission({supervisor: fixture.supervisor, run: recordedSubmission(fixture).run, task: stored, bindingGeneration: 1,
+      workflow: requiredRawPlan(), mcpx: true});
+    await fixture.projectStore.saveTask(wrapped.task);
+    await fixture.run();
+    assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 1);
+    assert.equal((await fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id))?.evidence.kind, "interpretation_submission");
   }
   const clock = {now: baseTime};
   const fixture = await makeFixture(clock);
@@ -5355,7 +5424,120 @@ it("the proposal goes out only on the Supervisor's own completed interpretation 
   assert.equal((await fixture.conversation.requests.introduction(fixture.task.id))?.state, "accepted");
 });
 
-it("agreement evidence from an interpretation answer goes stale when that answer changes", async t => {
+it("CT-ISUB-16: agreement on a recorded submission goes stale when its native tool item, node or run rolls back or its arguments change, never on an unread detail", async t => {
+  for (const variant of ["item_rolled_back", "node_rolled_back", "run_rolled_back", "arguments_changed"] as const) {
+    const clock = {now: baseTime};
+    mockMethod(t, Date, "now", () => clock.now);
+    const fixture = await makeFixture(clock);
+    after(t, fixture.cleanup);
+    await fixture.run();
+    await fixture.run();
+    const introduction = (await fixture.conversation.requests.introduction(fixture.task.id))!;
+    assert.equal(introduction.state, "sent", variant);
+    const acceptance = preparedAcceptanceRecord((await fixture.projectStore.task(fixture.task.threadId))!)!;
+    const notice = fixture.operative.messages.find(message => message.id === introduction.messageId)!;
+    const run = fixture.operative.runs.find(item => item.id === notice.runId)!;
+    appendMessageToRun(fixture.operative, run, {id: "interpretation-evidence-acceptance", role: "assistant", text: workflowFence("workflow-acceptance", acceptance), now: ++clock.now});
+    completeRun(fixture.operative, run, "Accepted.", clock.now);
+    await observeAgreement(fixture, clock.now + 30_000);
+    const agreed = (await fixture.projectStore.task(fixture.task.threadId))?.agreement;
+    assert.equal(agreed?.status, "agreed", variant);
+    assert.equal(agreed?.supervisorMessageId, fixture.task.messageId, "the agreement cites the interpretation request the submission answered");
+    const submission = recordedSubmission(fixture);
+    // a changed snapshot whose detail cannot be read is no evidence either way
+    submission.item.updatedAt = iso(clock.now + 1);
+    fixture.setItemReadFailure(true);
+    await observeAgreement(fixture, clock.now + 60_000);
+    assert.equal((await fixture.projectStore.task(fixture.task.threadId))?.agreement?.status, "agreed", `${variant}: an unread detail keeps the agreement`);
+    fixture.setItemReadFailure(false);
+    if (variant === "item_rolled_back") submission.item.status = "rolled_back";
+    if (variant === "node_rolled_back") submission.node.status = "rolled_back";
+    if (variant === "run_rolled_back") submission.run.status = "rolled_back";
+    if (variant === "arguments_changed") submission.item.input = {...submission.item.input as Record<string, unknown>, reason: "Edited after the agreement."};
+    await observeAgreement(fixture, clock.now + 90_000);
+    assert.equal((await fixture.projectStore.task(fixture.task.threadId))?.agreement?.status, "stale", `${variant}: the submission is no longer evidence`);
+  }
+});
+
+it("CT-ISUB-16: not-needed and unclear results never enter proposal checks or native evidence reads", async t => {
+  for (const variant of ["not_needed", "unclear"] as const) {
+    const clock = {now: baseTime};
+    const fixture = await makeFixture(clock);
+    after(t, fixture.cleanup);
+    const stored = (await fixture.projectStore.task(fixture.task.threadId))!;
+    const recorded = recordInterpretationSubmission({supervisor: fixture.supervisor, run: recordedSubmission(fixture).run, task: stored, bindingGeneration: 1,
+      workflow: null, ...(variant === "not_needed" ? {supervision: "not_needed" as const} : {objective: null})});
+    assert.notEqual(recorded.task.workflow?.status, "proposed", variant);
+    await fixture.projectStore.saveTask(recorded.task);
+    await fixture.run();
+    await fixture.conversation.observe(fixture.threadList, AbortSignal.timeout(5_000), clock.now + 30_000);
+    assert.equal(fixture.calls.length, 0, `${variant}: nothing is sent`);
+    assert.equal(await fixture.conversation.requests.introduction(fixture.task.id), null, variant);
+    assert.deepEqual(await fixture.conversation.requests.agreementCandidates(fixture.task.id), [], variant);
+    assert.deepEqual(fixture.itemReads, [], `${variant}: no native evidence read`);
+  }
+});
+
+it("cut-over evidence: a converted answer message stays current by its unchanged hash alone and is never re-read; stale, changed, removed or other-source evidence is never current", { timeout: 60_000 }, async t => {
+  for (const variant of ["current", "prose", "stale", "changed", "removed", "other_source"] as const) {
+    const clock = {now: baseTime};
+    const fixture = await makeFixture(clock);
+    after(t, fixture.cleanup);
+    const stored = (await fixture.projectStore.task(fixture.task.threadId))!;
+    const {run} = recordedSubmission(fixture);
+    // the request run's final answer the cut-over validated once; it is never parsed again, so prose is as current as the JSON
+    const text = variant === "prose" ? "A legacy interpretation answer in prose." : JSON.stringify({objective: stored.objective, reason: stored.reason,
+      sourceMessageIds: [stored.sourceMessageId], supervision: "needed", workflow: requiredRawPlan()});
+    const answer = appendMessageToRun(fixture.supervisor, run, {id: "legacy-interpretation-answer", role: "assistant", text, now: baseTime - 59_000});
+    const evidence: SupervisorMessageEvidence = {kind: "supervisor_message", messageId: answer.id, runId: run.id, runOrdinal: run.ordinal, textHash: fingerprint(text),
+      planDigest: interpretationPlanDigest(stored.workflow),
+      sourcePin: variant === "other_source" ? {...interpretationSourcePin(stored), hash: "0".repeat(64)} : interpretationSourcePin(stored),
+      ...(variant === "stale" ? {stale: true} : {})};
+    await fixture.projectStore.saveTask({...stored, interpretationEvidence: evidence});
+    if (variant === "changed") answer.text = `${text}\nEdited.`;
+    if (variant === "removed") fixture.supervisor.messages.splice(fixture.supervisor.messages.indexOf(answer), 1);
+    await fixture.run();
+    const current = variant === "current" || variant === "prose";
+    assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, current ? 1 : 0, variant);
+    const candidate = await fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id);
+    if (current) {
+      assert.deepEqual(candidate?.evidence, evidence, `${variant}: the candidate keeps the converted evidence`);
+      assert.equal(candidate?.interpretation, true);
+    } else {
+      assert.equal(candidate, null, variant);
+      assert.equal((await fixture.conversation.requests.introduction(fixture.task.id))?.state, "blocked", variant);
+    }
+    assert.deepEqual(fixture.itemReads, [], `${variant}: message evidence needs no native item read`);
+  }
+  // a converted candidate's deferred send and its agreement follow the message's hash
+  const clock = {now: baseTime};
+  mockMethod(t, Date, "now", () => clock.now);
+  const fixture = await makeFixture(clock);
+  after(t, fixture.cleanup);
+  const stored = (await fixture.projectStore.task(fixture.task.threadId))!;
+  const {run} = recordedSubmission(fixture);
+  const answer = appendMessageToRun(fixture.supervisor, run, {id: "legacy-interpretation-answer", role: "assistant", text: "A legacy answer.", now: baseTime - 59_000});
+  await fixture.projectStore.saveTask({...stored, interpretationEvidence: {kind: "supervisor_message", messageId: answer.id, runId: run.id, runOrdinal: run.ordinal,
+    textHash: fingerprint(answer.text), planDigest: interpretationPlanDigest(stored.workflow), sourcePin: interpretationSourcePin(stored)}});
+  await fixture.run();
+  await fixture.run();
+  const introduction = (await fixture.conversation.requests.introduction(fixture.task.id))!;
+  assert.equal(introduction.state, "sent");
+  const acceptance = preparedAcceptanceRecord((await fixture.projectStore.task(fixture.task.threadId))!)!;
+  const notice = fixture.operative.messages.find(message => message.id === introduction.messageId)!;
+  const operativeRun = fixture.operative.runs.find(item => item.id === notice.runId)!;
+  appendMessageToRun(fixture.operative, operativeRun, {id: "converted-evidence-acceptance", role: "assistant", text: workflowFence("workflow-acceptance", acceptance), now: ++clock.now});
+  completeRun(fixture.operative, operativeRun, "Accepted.", clock.now);
+  await observeAgreement(fixture, clock.now + 30_000);
+  const agreed = (await fixture.projectStore.task(fixture.task.threadId))?.agreement;
+  assert.equal(agreed?.status, "agreed");
+  assert.equal(agreed?.supervisorMessageId, answer.id, "a message-based agreement cites its proposal message");
+  answer.text = "A legacy answer, edited.";
+  await observeAgreement(fixture, clock.now + 60_000);
+  assert.equal((await fixture.projectStore.task(fixture.task.threadId))?.agreement?.status, "stale", "a changed converted answer is no longer evidence");
+});
+
+it("CT-ISUB-13: a recorded submission, the root's own or a child's acceptance record, a plain yes, completed coding or a changed digest never create agreement", async t => {
   const clock = {now: baseTime};
   mockMethod(t, Date, "now", () => clock.now);
   const fixture = await makeFixture(clock);
@@ -5364,18 +5546,26 @@ it("agreement evidence from an interpretation answer goes stale when that answer
   await fixture.run();
   const introduction = (await fixture.conversation.requests.introduction(fixture.task.id))!;
   assert.equal(introduction.state, "sent");
-  const acceptance = preparedAcceptanceRecord((await fixture.projectStore.task(fixture.task.threadId))!)!;
+  const task = (await fixture.projectStore.task(fixture.task.threadId))!;
+  const acceptance = preparedAcceptanceRecord(task)!;
+  assert.equal((await fixture.conversation.requests.agreementCandidate(task.id, task.id))?.evidence.kind, "interpretation_submission");
+  await observeAgreement(fixture, clock.now + 30_000);
+  assert.equal((await fixture.projectStore.task(task.threadId))?.agreement, undefined, "the submission and its candidate alone are no agreement");
+  appendAssistantTurn(fixture.supervisor, "root-own-acceptance", workflowFence("workflow-acceptance", acceptance), clock.now + 1);
   const notice = fixture.operative.messages.find(message => message.id === introduction.messageId)!;
   const run = fixture.operative.runs.find(item => item.id === notice.runId)!;
-  appendMessageToRun(fixture.operative, run, {id: "interpretation-evidence-acceptance", role: "assistant", text: workflowFence("workflow-acceptance", acceptance), now: ++clock.now});
-  completeRun(fixture.operative, run, "Accepted.", clock.now);
-  await observeAgreement(fixture, clock.now + 30_000);
-  assert.equal((await fixture.projectStore.task(fixture.task.threadId))?.agreement?.status, "agreed");
-  assert.equal((await fixture.projectStore.task(fixture.task.threadId))?.agreement?.supervisorMessageId, "supervisor-objective-run-answer");
-  const answer = fixture.supervisor.messages.find(message => message.id === "supervisor-objective-run-answer")!;
-  answer.text = JSON.stringify({...JSON.parse(answer.text), reason: "Edited after the agreement."});
+  await appendOperativeAcceptance(fixture, acceptance, clock.now + 2, {text: "yes", run});
+  await appendOperativeAcceptance(fixture, acceptance, clock.now + 3, {nodeKind: "subagent", run});
+  await appendOperativeAcceptance(fixture, {...acceptance, digest: "0".repeat(64)}, clock.now + 4, {run});
+  addCommandActivity(fixture.operative, "implemented-change", "npm run build", clock.now + 5);
+  await appendOperativeAcceptance(fixture, acceptance, clock.now + 6, {text: "Implemented and tested the export workflow.", run});
   await observeAgreement(fixture, clock.now + 60_000);
-  assert.equal((await fixture.projectStore.task(fixture.task.threadId))?.agreement?.status, "stale", "a changed interpretation answer is no longer evidence");
+  assert.equal((await fixture.projectStore.task(task.threadId))?.agreement, undefined);
+  const exact = await appendOperativeAcceptance(fixture, acceptance, clock.now + 7, {run});
+  await observeAgreement(fixture, clock.now + 90_000);
+  const agreed = (await fixture.projectStore.task(task.threadId))?.agreement;
+  assert.equal(agreed?.status, "agreed", "only the operative main's own exact acceptance after the introduction agrees");
+  assert.equal(agreed?.agentMessageId, exact.id);
 });
 
 it("Retry native access only re-observes unknown root check-ins and introductions, across Stop, Enable and activation boundaries", async t => {
@@ -5488,8 +5678,8 @@ it("a ready introduction is never sent after a later Enable or activation bounda
   }
 });
 
-it("a deferred proposal or a known-unsent queued fallback is sent only while the Supervisor's interpretation answer is unchanged", { timeout: 60_000 }, async t => {
-  for (const variant of ["removed", "changed", "streaming", "fallback"] as const) {
+it("a deferred proposal or a known-unsent queued fallback is sent only while the Supervisor's recorded submission is unchanged", { timeout: 60_000 }, async t => {
+  for (const variant of ["removed", "changed", "rolled_back", "fallback"] as const) {
     const clock = {now: baseTime};
     const fixture = await makeFixture(clock);
     after(t, fixture.cleanup);
@@ -5501,14 +5691,16 @@ it("a deferred proposal or a known-unsent queued fallback is sent only while the
       assert.equal((fixture.calls.find(call => call.payload.threadId === operativeThreadId)?.payload.dispatchMode as {type?: string})?.type, "steer_active");
       assert.equal((await fixture.conversation.requests.introduction(fixture.task.id))?.dispatchMode?.type, "queue_after_active", "the definitely rejected steer left a queued fallback");
     }
-    const answer = fixture.supervisor.messages.find(message => message.id === "supervisor-objective-run-answer")!;
-    if (variant === "removed") fixture.supervisor.messages.splice(fixture.supervisor.messages.indexOf(answer), 1);
-    if (variant === "changed" || variant === "fallback") answer.text = JSON.stringify({...JSON.parse(answer.text), workflow: requiredRawPlan("A plan the service never stored.")});
-    if (variant === "streaming") answer.streaming = true;
+    const {item} = recordedSubmission(fixture);
+    if (variant === "removed") turnItemsOf(fixture.supervisor).splice(turnItemsOf(fixture.supervisor).indexOf(item), 1);
+    if (variant === "changed" || variant === "fallback") item.input = {...item.input as Record<string, unknown>, reason: "A reason the service never recorded."};
+    if (variant === "rolled_back") item.status = "rolled_back";
     fixture.operative.runtimeRequests = [];
     await fixture.run();
     assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, variant === "fallback" ? 1 : 0, `${variant}: nothing further is sent`);
-    assert.equal((await fixture.conversation.requests.introduction(fixture.task.id))?.state, "blocked", variant);
+    const introduction = await fixture.conversation.requests.introduction(fixture.task.id);
+    assert.equal(introduction?.state, "blocked", variant);
+    assert.match(introduction?.error ?? "", /interpretation answer changed or is no longer complete/u, variant);
   }
 });
 

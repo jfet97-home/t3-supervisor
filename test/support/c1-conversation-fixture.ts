@@ -17,6 +17,7 @@ import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } f
 import { compactProposalDigest } from "../../src/supervisor-workflow-agreement.js";
 import { openGuidance, openPolicy, openSupervisors, openWorkflows, policyService, type GuidanceHandle, type PolicyHandle, type Promised } from "./store-units.js";
 import { effectiveIndex, indexSource, projectIndex, testSummary } from "../project-definitions-fixture.js";
+import { recordInterpretationSubmission, turnItemReader } from "./interpretation-evidence-fixture.js";
 
 // copied from test/supervisor-conversation.test.ts (frozen baseline suite) and extended with an rpc interceptor,
 // a reopened controller on the same files and a second bound main
@@ -374,7 +375,7 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
   const prepared = prepareWorkflowRequest(operativeThreadId, sourceMessageId, sourceText, definitionSnapshot);
   assert.ok(prepared.context);
   const initialPlan = requiredPlanForContext(prepared.context);
-  const task: TaskRecord = {
+  const draftTask: TaskRecord = {
     id: "proposal-1",
     threadId: operativeThreadId,
     projectId,
@@ -405,10 +406,8 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
       },
     }),
   };
-  if (options.task !== false) {
-    await projectStore.saveTask(task);
-    if (options.workflow !== false) setInterpretationAnswer(supervisor, task, requiredRawPlan());
-  }
+  const task = options.task === false || options.workflow === false ? draftTask : setInterpretationSubmission(supervisor, draftTask, requiredRawPlan());
+  if (options.task !== false) await projectStore.saveTask(task);
   await projectStore.baseline({snapshotSequence: 1, threads: []});
 
   let nextSupervisorRun = 0;
@@ -490,6 +489,8 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
     return projection;
   };
   const eligible = (thread: ThreadInfo) => thread.id.startsWith("operative-") && thread.projectId === projectId;
+  // the read credential serves a recorded submission's native item detail from the projection that shows it
+  const readItems = turnItemReader(threadId => projections.get(threadId));
   const threadList = [supervisor.thread, operative.thread];
   const closables: Array<{close(): Promise<void>}> = [threadPolicy, guidance];
   // the handles close once each; the handle itself ignores a second close
@@ -497,7 +498,8 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
   // one controller over one database connection, as one supervisor process owns it; the chat stop is the policy store's read
   const makeController = async (store: Promised<ProjectSupervisorStore["Service"]>, policy: PolicyHandle) => {
     const workflows = await openWorkflows(store, () => true);
-    const conversation = supervisorConversationUnit(store, rpc, readProjection, definitionLoader, eligible, () => true, workflows);
+    const conversation = supervisorConversationUnit(store, rpc, readProjection, definitionLoader, eligible, () => true, workflows,
+      undefined, undefined, undefined, undefined, readItems);
     conversation.supervisionStopped = threadId => Effect.map(policyService(policy).get(), (current) => current.excludedThreadIds.includes(threadId));
     return {conversation, workflows};
   };
@@ -553,12 +555,12 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
     threadList.push(projection.thread, ownSupervisor.thread);
     const context = prepareWorkflowRequest(threadId, messageId, messageText, {...definitionSnapshot, threadId}).context;
     assert.ok(context);
-    const boundTask: TaskRecord = {...task, id: taskId, threadId, sourceRunId: source.id, sourceMessageId: messageId, sourceHash: fingerprint(messageText),
+    const draftBound: TaskRecord = {...draftTask, id: taskId, threadId, sourceRunId: source.id, sourceMessageId: messageId, sourceHash: fingerprint(messageText),
       sourceOrdinal: source.ordinal, definitionContext: context, definitionSnapshot: {...definitionSnapshot, threadId},
       messageId: `supervisor-objective:${taskId}`, supervisorThreadId: reserved.threadId,
       workflow: {status: "proposed", message: "A draft is ready.", workspaceRoot, revision, globalRevision: null, ...requiredPlanForContext(context)}};
+    const boundTask = setInterpretationSubmission(ownSupervisor, draftBound, requiredRawPlan());
     await projectStore.saveTask(boundTask);
-    setInterpretationAnswer(ownSupervisor, boundTask, requiredRawPlan());
     const boundBinding = await projectStore.binding(projectId, threadId) as BindingRecord;
     return {binding: boundBinding, supervisor: ownSupervisor, projection, task: boundTask,
       run: async (runSignal: AbortSignal = signal) => conversation.run(await projectStore.binding(projectId, threadId) as BindingRecord, ownSupervisor, threadList, runSignal)};
@@ -592,16 +594,15 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
 };
 export type Fixture = Awaited<ReturnType<typeof makeFixture>>;
 
-export const setInterpretationAnswer = (supervisor: Projection, task: TaskRecord, raw: unknown, objective = task.objective) => {
+// the Supervisor's own completed interpretation run (the root's first turn) and its recorded typed submission: the task as
+// finalization leaves it holds the attempt, the evidence pinning the executed tool item and the submitted plan
+export const setInterpretationSubmission = (supervisor: Projection, task: TaskRecord, raw: unknown, objective = task.objective): TaskRecord => {
   const runId = task.supervisorRunId ?? "supervisor-objective-run";
-  const text = JSON.stringify({objective, reason: task.reason, sourceMessageIds: [task.sourceMessageId], supervision: "needed", workflow: raw});
-  const existing = supervisor.messages.find(message => message.id === `${runId}-answer`);
-  if (existing) {existing.text = text;return;}
-  const run = appendRun({projection: supervisor, id: runId, ordinal: 0, status: "completed", messageId: task.messageId, text: "Interpret the task.", now: baseTime - 60_000});
-  appendMessageToRun(supervisor, run, {id: `${runId}-answer`, role: "assistant", text, now: baseTime - 59_000});
+  const run = supervisor.runs.find(item => item.id === runId) ??
+    appendRun({projection: supervisor, id: runId, ordinal: 0, status: "completed", messageId: task.messageId, text: "Interpret the task.", now: baseTime - 60_000});
+  return recordInterpretationSubmission({supervisor, run, task, bindingGeneration: 1, workflow: raw, objective}).task;
 };
 
-// stores a task whose workflow is the service's parse of the Supervisor's own answer, as interpretation stores it
 
 export const appendNoticeForTask = async (
   fixture: Fixture,
