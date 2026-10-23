@@ -94,6 +94,24 @@ export const catalogDbLayer = (dataDirectory: string): Layer.Layer<CatalogDb, Da
     pragmas: ["synchronous=FULL", "foreign_keys=ON", "wal_autocheckpoint=256", "secure_delete=ON", `max_page_count=${maxCatalogPages}`],
   }));
 
+/** guidance.sqlite3 with the baseline pragmas of `guidance-store.ts`; the store owns its schema and recovery (S6d). */
+export const guidanceDbLayer = (dataDirectory: string): Layer.Layer<GuidanceDb, DatabaseOpenError, FileSystem.FileSystem> =>
+  Layer.effect(GuidanceDb, openDatabase({
+    directory: dataDirectory,
+    file: "guidance.sqlite3",
+    journal: "wal",
+    pragmas: ["synchronous=FULL", "secure_delete=ON", "max_page_count=16384"],
+  }));
+
+/** thread-settings.sqlite3 with the baseline pragmas of `thread-policy.ts`; the store owns its schema (S6d). */
+export const policyDbLayer = (dataDirectory: string): Layer.Layer<PolicyDb, DatabaseOpenError, FileSystem.FileSystem> =>
+  Layer.effect(PolicyDb, openDatabase({
+    directory: dataDirectory,
+    file: "thread-settings.sqlite3",
+    journal: "wal",
+    pragmas: ["synchronous=FULL"],
+  }));
+
 /**
  * The access database (access/login.sqlite3) on a file the caller already validated: DELETE journal, synchronous=FULL,
  * busy_timeout 5000 and max_page_count=256 (plan 3.2). It neither creates, secures nor bootstraps the file: only the

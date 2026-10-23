@@ -4,6 +4,7 @@ import { NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, FileSystem } from "effect";
 import { AccessDb, accessDbLayer, CatalogDb, catalogDbLayer } from "../src/db.js";
+import { withDbFile } from "./support/sql-db-files.js";
 
 const pragmaValue = (rows: ReadonlyArray<unknown>): unknown => Object.values(rows[0] as object)[0];
 
@@ -43,6 +44,29 @@ describe("CatalogDb", () => {
       assert.equal(observed.modes["/"], "700");
       for (const [path, mode] of Object.entries(observed.modes)) if (path !== "/") assert.equal(mode, "600", path);
     }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 10_000 });
+
+  for (const [label, kind, file, expected] of [
+    ["GuidanceDb", "guidance", "guidance.sqlite3", { journal_mode: "wal", synchronous: 2, busy_timeout: 5000, secure_delete: 1, max_page_count: 16384 }],
+    ["PolicyDb", "policy", "thread-settings.sqlite3", { journal_mode: "wal", synchronous: 2, busy_timeout: 5000 }],
+  ] as const) {
+    it.live(`${label} opens ${file} private with the baseline pragmas`, () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = join(yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-db-" }), "data");
+        const observed = yield* withDbFile(kind, directory, (db) => Effect.gen(function* () {
+          const pragmas: Record<string, unknown> = {};
+          for (const name of Object.keys(expected)) pragmas[name] = pragmaValue(yield* db.unsafe(`PRAGMA ${name}`));
+          yield* db.withTransaction(db.unsafe("CREATE TABLE t (id INTEGER PRIMARY KEY)"));
+          const modes: Record<string, string> = { "/": ((yield* fs.stat(directory)).mode & 0o777).toString(8) };
+          for (const entry of yield* fs.readDirectory(directory)) modes[entry] = ((yield* fs.stat(join(directory, entry))).mode & 0o777).toString(8);
+          return { pragmas, modes };
+        }));
+        assert.deepEqual(observed.pragmas, expected);
+        assert.ok(file in observed.modes, "the client opened its own file");
+        assert.equal(observed.modes["/"], "700");
+        for (const [path, mode] of Object.entries(observed.modes)) if (path !== "/") assert.equal(mode, "600", path);
+      }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 10_000 });
+  }
 
   it.live("opens an existing access database with the delete journal and the access pragmas, creating no sidecar", () =>
     Effect.gen(function* () {
