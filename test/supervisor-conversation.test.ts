@@ -5530,11 +5530,11 @@ it.effect("the interpretation request's standing role carries no final-chat inte
   assert.match(role.text, /Standing instructions version [0-9a-f]{16}\. They govern your later check-ins and dialogue, not the request below\.$/u);
 }));
 
-// native proof 2026-10-23 (VM, two models): both roots read definitions with mcpx.mcpx_call_tool through their code-mode tool
-// gateway, then refused to submit because the request forbade "a script or code-mode wrapper", the only route their harness
-// offers. The rendered request (role and request as the project supervisor composes them) and the tool description permit that
-// gateway for the MCPX call and the submission, and say only the executed tool call counts; the proof stays the recorded native item
-it.effect("the submission route permits mcpx_call_tool directly or through a code-mode gateway and counts only the executed tool call, in the rendered request and the tool description", () => Effect.gen(function* () {
+// native proof 2026-10-23 (VM, two models): both roots read definitions with the native MCPX tool mcpx.mcpx_call_tool (Codex's own
+// history: native mcpx tool calls only, no exec), then refused to submit, reading "never through a script or code-mode wrapper" as
+// forbidding that same call. The rendered request (role and request as the project supervisor composes them), the interpretation
+// instructions and the tool description name that native call with its exact {name, arguments} object and suggest no code
+it.effect("the submission route names the native MCPX call used for workflow_read and suggests no code, in the rendered request and the tool description", () => Effect.gen(function* () {
   const fixture = yield* makeFixture({now: baseTime});
   const role = yield* fixture.conversation.interpretationRole(fixture.binding);
   assert.ok(role);
@@ -5544,20 +5544,19 @@ it.effect("the submission route permits mcpx_call_tool directly or through a cod
     submission: {supervisorThreadId: fixture.binding.threadId, bindingGeneration: fixture.binding.generation, taskId: task.id,
       attemptId: interpretationAttemptId("7d0c1a52-4f8e-4c4b-9a8b-0d6c2f1e3a4b"), sourcePin: interpretationSourcePin(task), startVerdict: true}});
   const requestText = `${role.text}\n${request.requestText}`;
-  const description = supervisionInterpretationSubmitToolDefinition.description;
-  for (const [label, text] of [["request", requestText], ["tool description", description]] as const) {
-    assert.match(text, /mcpx_call_tool with name t3-supervisor-workflows__supervision_interpretation_submit/u, label);
-    assert.match(text, /directly or via a code-mode gateway such as functions\.exec/u, label);
-    assert.match(text, /Only (that|the) executed tool call (T3 records )?counts/u, label);
-    // nothing forbids the gateway or calls MCPX a wrapper any more
-    assert.doesNotMatch(text, /wrapper/iu, label);
-  }
-  assert.match(requestText, /Only that executed tool call counts, never shell or HTTP\./u);
-  // the interpretation instructions the root reads with workflow_read view interpretation carry the same route
   const instructions = String((yield* fixture.conversation.readContextView(fixture.binding, {view: "interpretation"})).instructions);
-  assert.match(instructions, /you may reach both through MCPX discovery\/schema\/call tools, directly or via a code-mode gateway such as functions\.exec/u);
-  assert.doesNotMatch(instructions, /wrapper/iu);
-  assert.match(role.text, /MCPX mcpx_call_tool may invoke them\. .*a code-mode gateway may make these calls\./u);
+  const description = supervisionInterpretationSubmitToolDefinition.description;
+  for (const [label, text] of [["request", requestText], ["instructions", instructions], ["tool description", description]] as const) {
+    assert.match(text, /native MCPX tool mcpx_call_tool/u, label);
+    // nothing suggests or forbids code, a wrapper or a gateway any more
+    assert.doesNotMatch(text, /\b(wrappers?|code-mode|gateway|functions\.exec|scripts?)\b/iu, label);
+  }
+  for (const [label, text] of [["request", requestText], ["tool description", description]] as const) {
+    assert.match(text, /name: ?"t3-supervisor-workflows__supervision_interpretation_submit", ?arguments:/u, label);
+    assert.match(text, /Only (that|the) executed tool call (T3 records )?counts/u, label);
+  }
+  assert.match(requestText, /If it is not listed, call the native MCPX tool mcpx_call_tool, as for workflow_read, with \{name:/u);
+  assert.match(role.text, /MCPX mcpx_call_tool may invoke them\. .*mcpx_call_tool, each a native tool call\./u);
 }));
 
 it.effect("a direct stop cites the freshly read latest human message with its own operationId, in the standing role and the tool description", () => Effect.gen(function* () {
