@@ -5,7 +5,7 @@ import { fingerprint } from "./guidance-store.js";
 import { isSupervisorThread, prepareStopNotice, type BindingRecord, type ProjectSupervisorStore, type SupervisionStartRecord } from "./project-supervisor-store.js";
 import type { StoreShape } from "./store.js";
 import type { LegacyAdmission, SupervisionScope } from "./supervision-gate.js";
-import type { SupervisorConversation } from "./supervisor-conversation.js";
+import type { SupervisorConversationFacade } from "./supervisor-conversation.js";
 import { introductionOutcomeUnknown } from "./supervisor-conversation-store.js";
 import { mainConversation } from "./supervisor-scope.js";
 import type { T3ClientShape } from "./t3.js";
@@ -23,7 +23,7 @@ const namesThread = (text: string, threadId: string): boolean =>
 export class SupervisionControl {
   private readonly queues = new Map<string, Promise<unknown>>();
   constructor(readonly config: SupervisorConfig, readonly store: ProjectSupervisorStore, readonly gate: SupervisionScope,
-    readonly source: Pick<StoreShape, "catalog">, readonly t3: Pick<T3ClientShape, "projection">, readonly conversation: SupervisorConversation,
+    readonly source: Pick<StoreShape, "catalog">, readonly t3: Pick<T3ClientShape, "projection">, readonly conversation: SupervisorConversationFacade,
     private readonly operateRpcAvailable: boolean, private readonly now: () => number, private readonly admission: LegacyAdmission) {}
   private async serial<A>(key: string, work: () => Promise<A>): Promise<A> {
     const previous = this.queues.get(key) ?? Promise.resolve();

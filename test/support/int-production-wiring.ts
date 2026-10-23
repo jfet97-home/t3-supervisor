@@ -14,7 +14,9 @@ import { ProjectSupervisorStore, loadSupervisorOwnership } from "../../src/proje
 import { ProjectSupervisor } from "../../src/project-supervisor.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import type { StoreShape } from "../../src/store.js";
-import { makeSupervisionGate, SupervisionGate, type SupervisionScope } from "../../src/supervision-gate.js";
+import { makeSupervisionGate, SupervisionGate, SupervisionScope } from "../../src/supervision-gate.js";
+import { ProjectDefinitions } from "../../src/project-definitions.js";
+import { definitionsService } from "./team-units.js";
 import { NativeOperateRpc, NativeRpc, record, type SupervisorRpc } from "../../src/supervisor-native.js";
 import { makeSupervisorRpc, readSupervisorBaseline, readSupervisorThreads } from "./supervisor-native-client.js";
 import { SupervisorTeamController } from "../../src/supervisor-team-controller.js";
@@ -68,17 +70,15 @@ export const openIntSupervision = async (input: {directory: string; peerUrl: str
   const t3 = await buildT3Client(config.t3Url, readToken);
   const readRpc = makeSupervisorRpc(config.t3Url, readToken);
   const operateRpc = makeSupervisorRpc(config.t3Url, operateToken);
-  // the helper transport and team runtime as guidance-application.ts builds them: the operate client, the T3 client and
-  // global fetch in the supervision scope, with the admission gate guarding through the supervisor's scope predicates
+  // the helper transport, team runtime, conversation and lifecycle as guidance-application.ts builds them: the operate client,
+  // the T3 client, the definitions and global fetch in the supervision scope, with the admission gate guarding through the
+  // supervisor's scope predicates
   const scope = Effect.runSync(Scope.make());
-  let supervisorScope: SupervisionScope | null = null;
-  const team = await Effect.runPromise(supervisorTeamServices((effect) => Effect.runPromise(effect), store, config.t3Url).pipe(
+  const supervisorScope = new SupervisionScope(config, store, true);
+  const team = await Effect.runPromise(supervisorTeamServices((effect, options) => Effect.runPromise(effect, options), store, config.t3Url, supervisorScope).pipe(
     Effect.provideServiceEffect(NativeOperateRpc, NativeRpc.make({baseUrl: config.t3Url, token: operateToken}).pipe(Effect.provide(NativeEnvelope.layer))),
-    Effect.provideServiceEffect(SupervisionGate, makeSupervisionGate({
-      scopeEnabled: (projectId, mainThreadId, purpose) => supervisorScope?.scopeEnabled(projectId, mainThreadId, purpose) ?? false,
-      supervisionStopped: (threadId) => supervisorScope?.supervisionStopped(threadId) ?? true,
-      workflowEditingEnabled: (projectId, mainThreadId, purpose) => supervisorScope?.workflowEditingEnabled(projectId, mainThreadId, purpose) ?? false,
-    })),
+    Effect.provideServiceEffect(SupervisionGate, makeSupervisionGate(supervisorScope)),
+    (effect) => input.definitions ? Effect.provideService(effect, ProjectDefinitions, definitionsService(input.definitions)) : effect,
     Effect.provideService(T3Client, t3),
     Effect.provide(Layer.mergeAll(FetchHttpClient.layer, SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer)))),
     // a test may observe the synchronous start of each request; the request itself is the platform fetch's
@@ -87,7 +87,6 @@ export const openIntSupervision = async (input: {directory: string; peerUrl: str
   ));
   const supervision = new ProjectSupervisor(config, store, source, t3, readRpc, operateRpc, readSupervisorBaseline(config.t3Url, readToken),
     team, input.definitions);
-  supervisorScope = supervision.gate;
   return {directory: input.directory, config, policy, guidance, store, source, t3, readRpc, operateRpc, supervision,
     // a process exit also ends the supervision scope, which aborts any webhook POST still in flight
     close: () => {Effect.runFork(Scope.close(scope, Exit.void));guidance.close();policy.close();}};

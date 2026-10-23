@@ -4,7 +4,7 @@ import { assessmentForTask, workflowAssessment } from "./workflow-assessment.js"
 import { buildDashboardOverview } from "./dashboard-overview.js";
 import {supervisorTeamView} from "./supervisor-team-view.js";
 import {SupervisorTeamStore} from "./supervisor-team-store.js";
-import { SupervisorLifecycle } from "./supervisor-lifecycle.js";
+import type { SupervisorLifecycleFacade } from "./supervisor-lifecycle.js";
 import { mainConversation, resolveSupervisorScope, supervisorScopeKey } from "./supervisor-scope.js";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
@@ -24,7 +24,7 @@ import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.j
 import type { StoreShape } from "./store.js";
 import { T3TransportError, type T3ClientShape } from "./t3.js";
 import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "./types.js";
-import { SupervisorConversation } from "./supervisor-conversation.js";
+import type { SupervisorConversationFacade } from "./supervisor-conversation.js";
 import { introductionOutcomeUnknown } from "./supervisor-conversation-store.js";
 import type { NoProjectControlInput, GlobalDefinitionsControlInput, SupervisionControlInput, SupervisionSetupInput } from "./supervisor-control-contract.js";
 import { WorkflowStateStore } from "./workflow-state-store.js";
@@ -98,27 +98,25 @@ export class ProjectSupervisor {
   readonly gate: SupervisionScope;
   readonly team: SupervisorTeamStore;
   readonly helperTransport: SupervisorHelperDeliveryTransport;
-  readonly conversation: SupervisorConversation;
-  readonly lifecycle: SupervisorLifecycle;
+  readonly conversation: SupervisorConversationFacade;
+  readonly lifecycle: SupervisorLifecycleFacade;
   readonly workflowStates: WorkflowStateStore;
   readonly supervisionControl: SupervisionControl;
   readonly admission: LegacyAdmission;
   constructor(readonly config: SupervisorConfig, readonly store: ProjectSupervisorStore, readonly source: Pick<StoreShape, "catalog">,
     readonly t3: Pick<T3ClientShape, "projection">, readonly readRpc: SupervisorRpc, readonly operateRpc: SupervisorRpc | null,
     readonly activationSnapshot: (signal: AbortSignal) => Promise<SupervisorBaseline>,
-    // i-01/i-02 (plan 3.9): the helper transport and the team runtime, built once at the root
-    team: {helperTransport: SupervisorHelperDeliveryTransport; teamRuntime: SupervisorTeamRuntimeFacade; admission: LegacyAdmission},
+    // i-01/i-02 (plan 3.9): the scope predicates, the workflow state, the helper transport, the team runtime, the conversation
+    // and the lifecycle, built once at the root
+    team: {helperTransport: SupervisorHelperDeliveryTransport; teamRuntime: SupervisorTeamRuntimeFacade; admission: LegacyAdmission; scope: SupervisionScope;
+      workflowStates: WorkflowStateStore; conversation: SupervisorConversationFacade; lifecycle: SupervisorLifecycleFacade},
     readonly definitions?: ProjectSupervisorDefinitions, private readonly now: () => number = Date.now) {
-      this.gate = new SupervisionScope(config, store, Boolean(operateRpc));
+      this.gate = team.scope;
       this.team = new SupervisorTeamStore(store);
       this.helperTransport = team.helperTransport;
-      this.workflowStates = new WorkflowStateStore(store, (projectId, mainThreadId) => this.gate.workflowEditingEnabled(projectId, mainThreadId));
-      this.conversation = new SupervisorConversation(store, operateRpc, (threadId, signal) => this.projection(threadId, signal), definitions,
-        (thread, threads) => this.gate.eligible(thread, threads), (projectId, mainThreadId, purpose) => this.gate.scopeEnabled(projectId, mainThreadId, purpose), this.workflowStates,
-        thread => !isSupervisorThread(config, thread) && !thread.archivedAt && !thread.deletedAt, team.teamRuntime,
-        config.helperProviderInstanceId);
-      this.conversation.supervisionStopped = threadId => this.gate.supervisionStopped(threadId);
-      this.lifecycle = new SupervisorLifecycle(store, this.conversation, (id, signal) => this.projection(id, signal), operateRpc, this.workflowStates);
+      this.workflowStates = team.workflowStates;
+      this.conversation = team.conversation;
+      this.lifecycle = team.lifecycle;
       this.admission = team.admission;
       this.supervisionControl = new SupervisionControl(config, store, this.gate, source, t3, this.conversation, Boolean(operateRpc), now, team.admission);
     }

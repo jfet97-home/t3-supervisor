@@ -6,8 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { ProjectSupervisorStore, defaultSupervisorModel } from "../src/project-supervisor-store.js";
-import { resolveSteerableRun, SupervisorConversation } from "../src/supervisor-conversation.js";
-import { SupervisorLifecycle, SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
+import { resolveSteerableRun } from "../src/supervisor-conversation.js";
+import { SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
+import { supervisorConversationUnit, supervisorLifecycleUnit } from "./support/team-units.js";
 import { mainConversation, resolveSupervisorScope } from "../src/supervisor-scope.js";
 import { childOrigin, delegatedLifecycle, directParentChildLifecycle, normalizeLifecycle, observeScopeThread } from "../src/supervisor-observation.js";
 import { T3TransportError } from "../src/t3.js";
@@ -122,10 +123,10 @@ const fixture = async () => {
   let uncertain = false;
   const project = async (id: string) => {projectionReads++;const failure = failures.get(id);if (failure) throw failure;const p = projections.get(id);if (!p) throw new Error("unreadable");return p;};
   const rpc = async (_tag: string, payload: Record<string, unknown>) => {calls.push(payload);if (uncertain) throw new Error("lost receipt");supervisor.thread.settledAt = "2026-10-14T10:02:00Z";supervisor.thread.settledOverride = "settled";return {sequence: 11};};
-  const conversation = new SupervisorConversation(store, rpc, project, undefined, () => true, () => true, workflows);
+  const conversation = supervisorConversationUnit(store, rpc, project, undefined, () => true, () => true, workflows);
   store.saveTask({id: "task", projectId: "p", threadId: "main", sourceRunId: "run", sourceMessageId: "source", sourceHash: "hash", sourceOrdinal: 1, supervisorThreadId: binding.threadId,
     messageId: "interpretation", status: "inferred", objective: "Implement", reason: "Requested", updatedAt: 1, requestText: "", dispatchedAt: null, supervisorRunId: null, replayCount: 0});
-  const lifecycle = new SupervisorLifecycle(store, conversation, project, rpc, workflows);
+  const lifecycle = supervisorLifecycleUnit(store, conversation, project, rpc, workflows);
   return {guidance, store, binding, conversation, lifecycle, workflows, main, supervisor, projections, threads, calls, projectionReads: () => projectionReads,
     setUncertain: () => {uncertain = true;}, setFailure: (id: string, error: unknown | null) => {if (error) failures.set(id, error);else failures.delete(id);},
     check: (now: number) => lifecycle.check(store.binding("p", "main")!, threads, AbortSignal.timeout(1000), now),
@@ -525,7 +526,7 @@ it("a fresh main read that observes reopening cancels closed-source settlement",
   const reopened: Projection = {...f.main, thread: {...f.main.thread, archivedAt: null, updatedAt: "2026-10-14T10:03:00Z"}};
   let mainReads = 0;
   const projection = async (id: string) => id === "main" ? (++mainReads <= 2 ? archived : reopened) : f.projections.get(id)!;
-  const lifecycle = new SupervisorLifecycle(f.store, f.conversation, projection, async (_tag, payload) => {f.calls.push(payload);return {sequence: 20};});
+  const lifecycle = supervisorLifecycleUnit(f.store, f.conversation, projection, async (_tag, payload) => {f.calls.push(payload);return {sequence: 20};});
   await lifecycle.check(f.binding, f.threads, AbortSignal.timeout(1000), 10);
   await lifecycle.check(f.binding, f.threads, AbortSignal.timeout(1000), 10 + SUPERVISOR_SETTLE_QUIET_MS);
   assert.equal(mainReads, 3);assert.equal(f.calls.length, 0);assert.equal(f.store.binding("p", "main")?.quietSince, null);
@@ -591,7 +592,7 @@ it("new activity supersedes an unresolved parking epoch without replacing the Su
 
 it("an accepted settlement without a visible native settlement retains its uncertain identity", async t => {
   const f = await fixture();after(t, f.cleanup);
-  const lifecycle = new SupervisorLifecycle(f.store, f.conversation, async id => f.projections.get(id)!, async () => ({sequence: 20}));
+  const lifecycle = supervisorLifecycleUnit(f.store, f.conversation, async id => f.projections.get(id)!, async () => ({sequence: 20}));
   await lifecycle.check(f.binding, f.threads, AbortSignal.timeout(1000), 1);
   await lifecycle.check(f.binding, f.threads, AbortSignal.timeout(1000), 100_000);
   assert.equal(f.store.binding("p", "main")?.settlement?.state, "uncertain");

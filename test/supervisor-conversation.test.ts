@@ -14,7 +14,7 @@ import { ProjectSupervisorStore, defaultSupervisorModel, type BindingRecord, typ
 import { ProjectSupervisor } from "../src/project-supervisor.js";
 import { projectSupervisorUnit, supervisorConversationUnit } from "./support/team-units.js";
 import { supervisionStopToolDefinition } from "../src/workflow-write-controller.js";
-import { SupervisorConversation, externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText } from "../src/supervisor-conversation.js";
+import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
 import { parseWorkflowInterpretation, prepareWorkflowRequest, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import type { ConversationRequest, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
@@ -657,7 +657,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
     rejectNextIntroduction: (count = 1) => { introductionsToReject += count; },
     makeProjectSupervisor: () => projectSupervisor,
     makeRestartedConversation: () => {
-      const restarted = new SupervisorConversation(projectStore, null, async threadId => {
+      const restarted = supervisorConversationUnit(projectStore, null, async threadId => {
         const failure = projectionFailures.get(threadId);
         if (failure) throw failure;
         const projection = projections.get(threadId);
@@ -1079,16 +1079,17 @@ const observeAgreement = (fixture: Awaited<ReturnType<typeof makeFixture>>, now:
 
 it("helper provider isolation is opt-in in root roles and uses the current native selection", { timeout: 60_000 }, async t => {
   const clock = {now: baseTime};
-  const standard = await makeFixture(clock);
+  // the Supervisor's own conversation as ProjectSupervisor builds it: with its helper team and the configured helper instance
+  const standard = await makeFixture(clock, {teamEnabled: true});
   after(t, standard.cleanup);
   const roleFor = (conversation: unknown, binding: BindingRecord): string =>
     (conversation as {roleFor(binding: BindingRecord): string}).roleFor(binding);
-  const standardRole = roleFor(standard.makeProjectSupervisor().conversation, standard.binding);
+  const standardRole = roleFor(standard.conversation, standard.binding);
   assert.doesNotMatch(standardRole, /t3_thread_configuration|target\.providerInstanceId/u);
 
-  const isolated = await makeFixture(clock, {helperProviderInstanceId: "supervisor-helpers-20348"});
+  const isolated = await makeFixture(clock, {helperProviderInstanceId: "supervisor-helpers-20348", teamEnabled: true});
   after(t, isolated.cleanup);
-  const isolatedRole = roleFor(isolated.makeProjectSupervisor().conversation, isolated.binding);
+  const isolatedRole = roleFor(isolated.conversation, isolated.binding);
   assert.match(isolatedRole, /t3_thread_configuration/u);
   assert.match(isolatedRole, /target\.providerInstanceId to "supervisor-helpers-20348"/u);
   assert.match(isolatedRole, /use native delegate_task for a short bootstrap as your direct child/u);
@@ -1102,7 +1103,7 @@ it("helper provider isolation is opt-in in root roles and uses the current nativ
 it("workflow editing guidance tells authors to start live steps planned and read rejection diagnostics", async t => {
   const fixture = await makeFixture({now: baseTime});
   after(t, fixture.cleanup);
-  const role = (fixture.makeProjectSupervisor().conversation as unknown as {roleFor(binding: BindingRecord): string}).roleFor(fixture.binding);
+  const role = fixture.conversation.roleFor(fixture.binding);
   assert.match(role, /New live steps start "planned"; mark them underway or completed in a separate later apply with status_changed evidence\./u);
   assert.match(role, /On rejection, read the reason, code, and path\./u);
 });
@@ -2658,7 +2659,7 @@ it("a restarted source run still gets its introduction in two startup cycles", a
   assert.equal(fixture.operative.runs.find(run => run.id === sourceRun.id)?.status, "running");
 
   const beforeRestart = structuredClone(agreed);
-  const restarted = new SupervisorConversation(fixture.projectStore, null, async threadId => {
+  const restarted = supervisorConversationUnit(fixture.projectStore, null, async threadId => {
     const projection = fixture.projection(threadId);
     if (!projection) throw new Error(`missing test projection ${threadId}`);
     return projection;
@@ -4197,7 +4198,7 @@ it("the operative introduction points to the contribution record and the Supervi
   const text = workflowIntroductionText(fixture.task);
   assert.match(text, /ask your Supervisor for the external-contribution record format/u);
   assert.doesNotMatch(text, /exact fence named external-contribution/u);
-  const role = (fixture.makeProjectSupervisor().conversation as unknown as {roleFor(binding: BindingRecord): string}).roleFor(fixture.binding);
+  const role = fixture.conversation.roleFor(fixture.binding);
   assert.match(role, /exact fence named external-contribution/u);
   assert.match(role, /Reporting a result never completes a step, and no progress reports are needed/u);
   assert.match(role, /a result that is already available may be posted directly as revision 1/u);
@@ -4471,15 +4472,15 @@ it("a stop saved while interpretation or introduction delivery is preparing send
   assert.equal(fixture.projectStore.task(fixture.task.threadId)?.status, "queued", "the task identity is kept unsent");
   assert.equal((await service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: true, policyGeneration: fixture.threadPolicy.get().generation}, signal)).status, "saved");
 
-  const conversation = fixture.conversation as unknown as {dialogueDefinitions(...args: unknown[]): Promise<unknown>;
-    sendIntroduction(task: TaskRecord, introduction: WorkflowIntroduction, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void>};
-  const original = conversation.dialogueDefinitions.bind(fixture.conversation);
-  mockMethod(t, conversation, "dialogueDefinitions", async (...args: unknown[]) => {const result = await original(...args);await stop();return result;});
+  // the introduction's definition read is the loader read inside its dialogue definitions
+  const definitions = fixture.conversation.definitions!;
+  const original = definitions.load.bind(definitions);
+  mockMethod(t, definitions, "load", async (...args: Parameters<typeof original>) => {const result = await original(...args);await stop();return result;});
   const introduction: WorkflowIntroduction = {taskId: fixture.task.id, projectId, threadId: operativeThreadId, supervisorThreadId: fixture.binding.threadId,
     state: "ready", text: workflowIntroductionText(fixture.task), messageId: "late-introduction", targetRunId: null, error: null};
   fixture.conversation.requests.saveIntroduction(introduction);
   const beforeIntroduction = fixture.calls.length;
-  await conversation.sendIntroduction(fixture.task, introduction, fixture.threadList, signal);
+  await fixture.conversation.sendIntroduction(fixture.task, introduction, fixture.threadList, signal);
   assert.equal(fixture.calls.length, beforeIntroduction, "a stop saved during the definition read keeps the introduction unsent");
   assert.equal(fixture.conversation.requests.introduction(fixture.task.id)?.state, "ready");
 });

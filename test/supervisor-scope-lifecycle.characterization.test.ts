@@ -8,8 +8,8 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { ProjectSupervisorStore, defaultSupervisorModel, prepareStopNotice } from "../src/project-supervisor-store.js";
-import { SupervisorConversation } from "../src/supervisor-conversation.js";
-import { SupervisorLifecycle, SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
+import { SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
+import { supervisorConversationUnit, supervisorLifecycleUnit } from "./support/team-units.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
@@ -46,9 +46,9 @@ const fixture = async (t: TestContext) => {
   const opened = [guidance];
   const controllers = (projectStore: ProjectSupervisorStore) => {
     const workflows = new WorkflowStateStore(projectStore, () => true);
-    const conversation = new SupervisorConversation(projectStore, rpc, project, undefined, () => true, () => true, workflows);
+    const conversation = supervisorConversationUnit(projectStore, rpc, project, undefined, () => true, () => true, workflows);
     conversation.supervisionStopped = threadId => stopped && threadId === "main";
-    return {conversation, lifecycle: new SupervisorLifecycle(projectStore, conversation, project, rpc, workflows)};
+    return {conversation, lifecycle: supervisorLifecycleUnit(projectStore, conversation, project, rpc, workflows)};
   };
   store.saveTask({id: "task", projectId: "p", threadId: "main", sourceRunId: "run", sourceMessageId: "source", sourceHash: "hash", sourceOrdinal: 1, supervisorThreadId: binding.threadId,
     messageId: "interpretation", status: "inferred", objective: "Implement", reason: "Requested", updatedAt: 1, requestText: "", dispatchedAt: null, supervisorRunId: null, replayCount: 0});
@@ -158,7 +158,7 @@ it("CT-LIFE-02: a stop committed while check() awaits its main read survives the
 it("CT-LIFE-03: settlement starts exactly at quietSince+60000 and an uncertain one retries exactly at observedAt+60000, never a fourth time", {timeout: 10_000}, async t => {
   const f = await fixture(t);
   // T3 accepts every settle without the Supervisor ever showing as settled
-  const lifecycle = new SupervisorLifecycle(f.store, f.conversation, async id => id === "main" ? f.main : f.supervisor,
+  const lifecycle = supervisorLifecycleUnit(f.store, f.conversation, async id => id === "main" ? f.main : f.supervisor,
     async (_tag, payload, signal) => {f.calls.push({payload, signal});return {sequence: 20};});
   const check = (now: number) => lifecycle.check(f.store.binding("p", "main")!, f.threads, AbortSignal.timeout(3_000), now);
   const quietSince = 10;

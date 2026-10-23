@@ -8,8 +8,8 @@ import { GuidanceStore, fingerprint } from "../../src/guidance-store.js";
 import type { ProjectDefinitionLoader } from "../../src/project-definitions.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import { ProjectSupervisorStore, defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../../src/project-supervisor-store.js";
-import { projectSupervisorUnit } from "./team-units.js";
-import { SupervisorConversation, workflowIntroductionText } from "../../src/supervisor-conversation.js";
+import { projectSupervisorUnit, supervisorConversationUnit } from "./team-units.js";
+import { workflowIntroductionText } from "../../src/supervisor-conversation.js";
 import { prepareWorkflowRequest, validateWorkflowPlan, type WorkflowPlanValue } from "../../src/supervisor-workflow.js";
 import type { ConversationRequest, WorkflowIntroduction } from "../../src/supervisor-conversation-store.js";
 import { SupervisorRpcError, type SupervisorRpc } from "../../src/supervisor-native.js";
@@ -502,7 +502,7 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
   // one controller over one database connection, as one supervisor process owns it
   const makeController = (store: ProjectSupervisorStore, policy: ThreadPolicyStore) => {
     const workflows = new WorkflowStateStore(store, () => true);
-    const conversation = new SupervisorConversation(store, rpc, readProjection, definitionLoader, eligible, () => true, workflows);
+    const conversation = supervisorConversationUnit(store, rpc, readProjection, definitionLoader, eligible, () => true, workflows);
     conversation.supervisionStopped = threadId => policy.get().excludedThreadIds.includes(threadId);
     return {conversation, workflows};
   };
