@@ -74,6 +74,9 @@ export class SupervisionScope implements GateGuard {
   }
 }
 
+// the scope predicates as a service (S6b): the one SupervisionScope the composition root builds over the interim stores
+export class SupervisionScopeService extends Context.Service<SupervisionScopeService, SupervisionScope>()("t3-supervisor/SupervisionScopeService") {}
+
 export interface SupervisionGateShape {
   // one admission section: waiting for the permit stays interruptible (nothing is admitted before it), the body is
   // uninterruptible and contains only synchronous store work (short withTransaction blocks after S6d) and at most one
