@@ -1455,9 +1455,13 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
           if (!validModelSelection(settings.modelSelection, yield* models)) return {status: "invalid", message: "Choose an available model before replacing a deleted conversation.", snapshot: null};
           if (!projectEnabled(input.projectId, input.mainThreadId)) return unavailableNow(disabledBeforeReplacement);
           const teamRecovery = yield* prepareMissingRootTeam(read);
-          // after the team recovery, its checks, the current permission and retained identity, then the replacement with its task
-          // closures and the creation reset run as one admission section; every check precedes the first write
+          // after the team recovery, the retained identity (first: the team reads below fail on a binding that changed), the team
+          // checks and the current permission, then the replacement with its task closures and the creation reset run as one
+          // admission section; every check precedes the first write
           const replaced = yield* gate.admit((guard) => Effect.sync((): ProjectSupervisorSaveOutcome | null => {
+            const retained = store.binding(input.projectId, input.mainThreadId);
+            if (retained?.threadId !== read.threadId || retained.generation !== read.generation || retained.state !== "missing")
+              return {status: "conflict", message: "The conversation state changed. Refresh and choose the intended recovery action again.", snapshot: null};
             if (teamRecovery === "disabled") return unavailableNow(disabledBeforeReplacement);
             if (teamRecovery === "present_helper") return unavailableNow("A registered helper is still present in T3. The missing root was not replaced; archive or delete the helper, or quarantine and retire it while the root is available, then retry. No helper was treated as missing.");
             if (teamRecovery !== "ready") return unavailableNow("T3 could not verify every registered helper or retire its verified webhook job. The missing root was not replaced; restore native access and retry.");
@@ -1465,9 +1469,6 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
             if (teamSnapshot.assignments.some(assignment => assignment.state === "transferring") || team.unresolvedRequests(read).length)
               return unavailableNow("The Supervisor team still has unresolved handover state or native effects. Their original identities and history remain retained; reconcile them before replacing the root.");
             if (!guard.scopeEnabled(input.projectId, input.mainThreadId, "interpretation")) return unavailableNow(disabledBeforeReplacement);
-            const retained = store.binding(input.projectId, input.mainThreadId);
-            if (retained?.threadId !== read.threadId || retained.generation !== read.generation || retained.state !== "missing")
-              return {status: "conflict", message: "The conversation state changed. Refresh and choose the intended recovery action again.", snapshot: null};
             const replacement = store.replaceMissingBinding(retained, settings.modelSelection);
             for (const job of store.tasksFor(retained)) if (["queued", "dispatching", "waiting", "uncertain"].includes(job.status)) complete(job, "unavailable", null, "The bound Supervisor conversation was deleted; its request identity remains retained.");
             store.setBinding({...replacement, creationAttempts: 0});

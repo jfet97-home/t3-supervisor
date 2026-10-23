@@ -162,6 +162,55 @@ for (const write of ["Stop", "disable"] as const) {
   });
 }
 
+// r29: a root changed by another writer before the replacement's section is answered as the declared conflict, before any
+// team read of the stale binding, and nothing of the retained root or its tasks changes
+it("a missing-root replacement whose retained root changed before its section answers conflict and changes nothing", {timeout: 10_000}, async t => {
+  const f = await makeFixture([{threadId: "main", projectId: "project-a", turns: earlier}], {threadPolicy: true});
+  after(t, f.cleanup);
+  const supervisor = f.makeSupervisor();
+  const ready = reserveReadyBinding(f, "main");
+  const missing = {...ready, state: "missing" as const};
+  f.supervisorStore.setBinding(missing);
+  f.projections.delete(missing.threadId);
+  f.supervisorStore.saveTask({id: "retained-task", threadId: "main", projectId: "project-a", sourceRunId: "run-old-turn", sourceMessageId: "old-turn", sourceOrdinal: 1,
+    sourceHash: "hash", status: "queued", objective: null, reason: "Waiting for the project Supervisor.", updatedAt: 1, requestText: "Retained request.",
+    supervisorThreadId: missing.threadId, messageId: "supervisor-objective:retained-task", supervisorRunId: null, dispatchedAt: null, replayCount: 0});
+  const taskBefore = f.supervisorStore.task("main");
+  const ownedBefore = [...f.supervisorStore.ownedIds];
+  const gate = supervisor.admission.gate as BarrierGate;
+  const admit = gate.admit;
+  const reached = deferred();
+  const release = deferred();
+  let entries = 0;
+  let retry: Promise<unknown> | undefined;
+  try {
+    gate.admit = <A, E, R>(body: (guard: GateGuard) => Effect.Effect<A, E, R>) => {
+      entries += 1;
+      if (entries !== 2) return admit(body);
+      return Effect.andThen(Effect.promise(() => {reached.resolve();return release.promise;}), admit(body));
+    };
+    retry = supervisor.retry(retryInput("project-a", 0, missing, "replace"), AbortSignal.timeout(8_000));
+    await within(reached.promise, 5_000, "the replacement section");
+    // another writer advances the retained root while the replacement waits at its section
+    const advanced = {...missing, generation: missing.generation + 1};
+    f.supervisorStore.setBinding(advanced);
+    release.resolve();
+    const outcome = await within(retry, 5_000, "the refused replacement");
+    assert.deepEqual(outcome, {status: "conflict", message: "The conversation state changed. Refresh and choose the intended recovery action again.", snapshot: null},
+      "the changed root is the declared conflict");
+    const retained = f.supervisorStore.binding("project-a", "main")!;
+    assert.deepEqual({threadId: retained.threadId, generation: retained.generation, state: retained.state},
+      {threadId: advanced.threadId, generation: advanced.generation, state: "missing"}, "the other writer's root is unchanged");
+    assert.deepEqual(f.supervisorStore.task("main"), taskBefore, "the retained task is unchanged");
+    assert.deepEqual([...f.supervisorStore.ownedIds], ownedBefore, "no replacement identity was reserved");
+    assert.equal(f.launches().length, 0);
+  } finally {
+    release.resolve();
+    gate.admit = admit;
+    if (retry) await Promise.allSettled([retry]);
+  }
+});
+
 for (const route of ["dashboard", "agent"] as const) {
   it(`an interruption arriving with the durable ${route} Start preparation finishes its receipt and a repeat answers from it`, {timeout: 10_000}, async t => {
     const f = await makeFixture([{threadId: "main", projectId: "project-a", turns: earlier}], {threadPolicy: true});
