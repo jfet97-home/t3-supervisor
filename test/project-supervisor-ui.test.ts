@@ -776,7 +776,9 @@ it("a retry 403 refreshes the latest CSRF token without automatically repeating 
 
     const {loadAccess} = await import("./support/ui-run.js");
     assert.equal(await loadAccess(), true);
-    await assert.rejects(runUi(retryProjectSupervisor(retryInput)), (error: unknown) => error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved);
+    // target change (story03): a 403 for a token the process no longer issues may answer a browser resend after the first
+    // attempt applied in the process before a restart, so the outcome is unknown; nothing is repeated automatically
+    await assert.rejects(runUi(retryProjectSupervisor(retryInput)), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
     assert.equal(retryWrites, 1);
     assert.equal(csrfReads, 2);
     assert.equal((await runUi(retryProjectSupervisor(retryInput))).status, "saved");
@@ -804,8 +806,9 @@ it("a 403 refreshes CSRF without retrying the POST and the next explicit save us
 
     const {loadAccess} = await import("./support/ui-run.js");
     assert.equal(await loadAccess(), true);
+    // target change (story03): the rotated token's 403 does not exclude a first attempt that applied before the restart
     await assert.rejects(runUi(saveProjectSupervisor(input)), (error: unknown) =>
-      error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved && /Session refreshed/.test(error.message));
+      error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved && /could not be confirmed/.test(error.message));
     assert.equal(writes, 1);
     assert.equal(csrfReads, 2);
 

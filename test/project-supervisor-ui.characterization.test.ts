@@ -9,7 +9,7 @@ import { loadProjectSupervisor, ProjectSupervisorRequestError, retryProjectSuper
 import { defer, readCsrf, signIn } from "./support/c3b-http.js";
 import { fakeSupervision, supervisorSnapshot } from "./support/c3b-project-supervisor.js";
 import { startUi } from "./support/c3b-ui.js";
-import { getCsrfToken, installPageLocation, runUi } from "./support/ui-run.js";
+import { clearAccess, getCsrfToken, installPageLocation, loadAccess, runUi } from "./support/ui-run.js";
 
 type Golden = {snapshot: unknown; saveResult: unknown; retryResult: unknown};
 const golden = JSON.parse(readFileSync(new URL("./support/c3b-project-supervisor.golden.json", import.meta.url), "utf8")) as Golden;
@@ -88,8 +88,15 @@ it("CT-UI-API-01: every exported mutation helper maps 401, 403, 413, 415, 500 an
   const browser = installBrowser(t);
   let expired = 0;
   browser.window.addEventListener("supervisor-auth-required", () => {expired++;});
-  const run = async (helper: () => Promise<unknown>, reply: Reply, csrf: Reply) => {
+  // sent: the session the request carries (null: none) and the CSRF token cached before it is sent ("" when none)
+  const run = async (helper: () => Promise<unknown>, reply: Reply, csrf: Reply, sent: {session: string | null; token: string}) => {
     browser.values.set("supervisor-session", "session-1");
+    clearAccess("session-1");
+    if (sent.session !== null) browser.values.set("supervisor-session", sent.session);
+    if (sent.token !== "") {
+      browser.setFetch(async () => new Response(JSON.stringify({csrf: sent.token}), {status: 200}));
+      assert.equal(await loadAccess(), true);
+    }
     const requests: string[] = [];
     browser.setFetch(async (url, init) => {
       const path = new URL(String(url), "http://supervisor.test").pathname;
@@ -133,29 +140,44 @@ it("CT-UI-API-01: every exported mutation helper maps 401, 403, 413, 415, 500 an
     const text = name === "saveProjectConfiguration" ? configText : supervisorText;
     const post = `POST ${helper.path}`;
     const withRefresh = [post, "GET /api/csrf"];
-    const matrix: Array<[string, Reply, Reply, unknown]> = [
-      ["401 refreshed", json({message: "Sign in to Supervisor."}, 401), refreshed,
-        {outcome: [text.refreshed, true], requests: withRefresh, session: "session-1", expired: 0}],
-      ["401 refresh failed", json({message: "Sign in to Supervisor."}, 401), refreshFailed,
+    const signedIn = {session: "session-1", token: ""};
+    const unauthorized = json({message: "Sign in to Supervisor."}, 401);
+    const forbidden = json({message: "Refresh the local dashboard before changing settings."}, 403);
+    // fetch shows only the last attempt; a browser resend repeats the original headers after the session or the server
+    // process (whose CSRF token is per process) may have ended. A refusal is a definite not-performed only when its check
+    // refuses those headers on every attempt. target change (approved, story03): the baseline reported every 401 and 403
+    // as not performed; a 401 for a sent session and a 403 for a token the process no longer issues are now unknown
+    const matrix: Array<[string, Reply, Reply, {session: string | null; token: string}, unknown]> = [
+      ["401 for a session, refreshed (target change)", unauthorized, refreshed, signedIn,
+        {outcome: [text.unknown, false], requests: withRefresh, session: "session-1", expired: 0}],
+      ["401 for a session, refresh failed (target change)", unauthorized, refreshFailed, signedIn,
+        {outcome: [text.unknown, false], requests: withRefresh, session: null, expired: 1}],
+      ["401 without a session", unauthorized, refreshFailed, {session: null, token: ""},
         {outcome: [text.refreshFailed, true], requests: withRefresh, session: null, expired: 1}],
-      ["403 refreshed", json({message: "Refresh the local dashboard before changing settings."}, 403), refreshed,
+      ["403 without a token, refreshed", forbidden, refreshed, signedIn,
         {outcome: [text.refreshed, true], requests: withRefresh, session: "session-1", expired: 0}],
-      ["403 refresh failed", json({message: "Refresh the local dashboard before changing settings."}, 403), refreshFailed,
+      ["403 without a token, refresh failed", forbidden, refreshFailed, signedIn,
         {outcome: [text.refreshFailed, true], requests: withRefresh, session: null, expired: 1}],
-      ["413", json({message: "The request payload is too large. Reduce its size before retrying."}, 413), refreshed,
+      ["403 with the token the process still issues", forbidden, refreshed, {session: "session-1", token: "refreshed-csrf"},
+        {outcome: [text.refreshed, true], requests: withRefresh, session: "session-1", expired: 0}],
+      ["403 with a token the process no longer issues (target change)", forbidden, refreshed, {session: "session-1", token: "earlier-csrf"},
+        {outcome: [text.unknown, false], requests: withRefresh, session: "session-1", expired: 0}],
+      ["403 with a token, refresh failed (target change)", forbidden, refreshFailed, {session: "session-1", token: "earlier-csrf"},
+        {outcome: [text.unknown, false], requests: withRefresh, session: null, expired: 1}],
+      ["413", json({message: "The request payload is too large. Reduce its size before retrying."}, 413), refreshed, signedIn,
         {outcome: [text.tooLarge, true], requests: [post], session: "session-1", expired: 0}],
-      ["415", json({message: "Use JSON for supervisor mutations."}, 415), refreshed,
+      ["415", json({message: "Use JSON for supervisor mutations."}, 415), refreshed, signedIn,
         {outcome: [text.format, true], requests: [post], session: "session-1", expired: 0}],
-      ["500", json({message: "Supervisor operation unavailable."}, 500), refreshed,
+      ["500", json({message: "Supervisor operation unavailable."}, 500), refreshed, signedIn,
         {outcome: [text.unknown, false], requests: [post], session: "session-1", expired: 0}],
-      ["400 UiError", json({_tag: "UiError", message: "Reload first."}, 400), refreshed,
+      ["400 UiError", json({_tag: "UiError", message: "Reload first."}, 400), refreshed, signedIn,
         {outcome: [text.unknown, false], requests: [post], session: "session-1", expired: 0}],
-      ["malformed JSON", {status: 200, body: "{\"status\":"}, refreshed,
+      ["malformed JSON", {status: 200, body: "{\"status\":"}, refreshed, signedIn,
         {outcome: [text.unknown, false], requests: [post], session: "session-1", expired: 0}],
-      ["undecodable JSON", json({status: "saved", message: 1}), refreshed,
+      ["undecodable JSON", json({status: "saved", message: 1}), refreshed, signedIn,
         {outcome: [text.unknown, false], requests: [post], session: "session-1", expired: 0}],
     ];
-    for (const [label, reply, csrf, expected] of matrix) assert.deepEqual(await run(helper.call, reply, csrf), expected, `${name} ${label}`);
+    for (const [label, reply, csrf, sent, expected] of matrix) assert.deepEqual(await run(helper.call, reply, csrf, sent), expected, `${name} ${label}`);
   }
   assert.equal(getCsrfToken(), "", "a failed refresh clears the cached CSRF token");
 });

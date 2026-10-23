@@ -18,7 +18,7 @@ const install = (key: string, value: unknown) => {
 };
 
 interface Sent {readonly method: string; readonly path: string; readonly query: URLSearchParams; readonly body: unknown; readonly signal: AbortSignal | null;
-  readonly session: string | null}
+  readonly session: string | null; readonly csrf: string | null}
 const sent: Sent[] = [];
 let reply: (request: Sent) => Promise<Response> = async () => new Response("{}", {status: 500});
 const storage = new Map<string, string>();
@@ -40,7 +40,7 @@ beforeAll(async () => {
     const url = new URL(input instanceof Request ? input.url : String(input), "http://supervisor.test");
     const body = init?.body instanceof Uint8Array ? JSON.parse(new TextDecoder().decode(init.body)) as unknown : undefined;
     const request = {method: init?.method ?? "GET", path: url.pathname, query: url.searchParams, body, signal: init?.signal ?? null,
-      session: new Headers(init?.headers).get("x-supervisor-session")};
+      session: new Headers(init?.headers).get("x-supervisor-session"), csrf: new Headers(init?.headers).get("x-csrf-token")};
     sent.push(request);
     return reply(request);
   });
@@ -165,8 +165,8 @@ it("an unconfirmed save keeps the draft and blocks until a read, a refused save 
   for (const [label, status, csrf, blocked, text] of [
     ["500", 500, 200, true, "The operation outcome could not be confirmed. Refresh Supervisor settings before trying again."],
     ["403 refreshed", 403, 200, false, "Session refreshed. Your Supervisor change was not performed; review the state and try again."],
-    // the session the request carried is still the stored one: an expiry first seen through this refusal keeps the baseline refusal
-    ["401 refresh failed", 401, 401, false, "Your Supervisor change was not performed. Session refresh failed; reconnect and try again."],
+    // target change (story03): a 401 for the sent session does not exclude a first attempt the browser resent after it applied
+    ["401 refresh failed", 401, 401, true, "The operation outcome could not be confirmed. Refresh Supervisor settings before trying again."],
   ] as const) {
     storage.set("supervisor-session", "session-1");
     const registry = AtomRegistry.make();
@@ -268,6 +268,95 @@ for (const [route, end] of Object.entries(endSession)) for (const applied of [fa
     storage.set("supervisor-session", "session-1");
   });
 }
+
+// story03, server side: the session or the server process ends while the save is held and before the tab sees any
+// change (no storage event, no poll); the connection drops and the browser's resend, with the original headers, is
+// refused. Neither refusal excludes a first attempt that applied, so the outcome stays unknown and Save stays blocked
+// until a verified read
+const serverEnds: Record<string, {status: 401 | 403; end: (server: {sessions: Set<string>; csrf: string}) => void}> = {
+  "the server expires the session": {status: 401, end: server => {server.sessions.delete("session-1");}},
+  // the CSRF token is per server process: a restart issues a new one, and the session survives in the access database
+  "the server restarts": {status: 403, end: server => {server.csrf = "csrf-after-restart";}},
+};
+
+for (const [route, {status, end}] of Object.entries(serverEnds)) for (const applied of [false, true]) {
+  it(`a save held while ${route}, then refused ${status} on the browser's resend before the tab saw a change, stays unknown and blocked until a verified read (first attempt ${applied ? "applied" : "not applied"})`, {timeout: 10_000}, async () => {
+    storage.set("supervisor-session", "session-1");
+    const registry = AtomRegistry.make();
+    sent.length = 0;
+    const server = {sessions: new Set(["session-1"]), csrf: "csrf-before-restart", snapshot: snapshot as ProjectSupervisorInfo};
+    const post = pending();
+    reply = async request => {
+      if (isPost("/api/guidance/project-supervisor")(request)) {post.arrive();return post.response;}
+      const valid = request.session !== null && server.sessions.has(request.session);
+      if (request.path === "/api/csrf") return valid ? json({csrf: server.csrf}) : json({message: "Sign in to Supervisor."}, 401);
+      if (isRead(request)) return valid ? json(server.snapshot) : json({message: "Sign in to Supervisor."}, 401);
+      return json({}, 500);
+    };
+    // the page holds the CSRF token of the running process, as after its first access check
+    const check = core.uiRuntime.fn(() => Effect.flatMap(access.SessionAccess, session => session.check));
+    const stopCheck = registry.subscribe(check, () => undefined, {immediate: true});
+    registry.set(check, undefined);
+    await until(registry, check, value => AsyncResult.isSuccess(value) && value.value, "the token is loaded");
+    stopCheck();
+    showSnapshot(registry);
+    const before = registry.get(ps.projectSupervisorDraft(projectKey()));
+    ps.startSettingsChange(registry, projectKey(), scopeA(), {kind: "save", input: saveInput(7)});
+    await post.reached;
+    const sentSave = sent.find(isPost("/api/guidance/project-supervisor"))!;
+    assert.deepEqual([sentSave.session, sentSave.csrf], ["session-1", "csrf-before-restart"], "the save went out with a valid session and token");
+    if (applied) server.snapshot = {...snapshot, settings: {...snapshot.settings, generation: 8, monitoring: {intervalMinutes: 12, activityThreshold: 10}}};
+    end(server);
+    assert.equal(storage.get("supervisor-session"), "session-1", "the tab saw no change before the refusal");
+    post.release(json({message: "refused"}, status));
+    const view = await until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, "settled");
+    assert.deepEqual(view.message, {scope: scopeA(), alert: true,
+      text: "The operation outcome could not be confirmed. Refresh Supervisor settings before trying again."}, "the resend's refusal is not reported as not performed");
+    assert.equal(view.blocked, true, "Save stays blocked");
+    assert.deepEqual(registry.get(ps.projectSupervisorDraft(projectKey())), before, "the draft is kept");
+    assert.equal(sent.filter(isPost("/api/guidance/project-supervisor")).length, 1, "the page sent the save once and replays nothing");
+
+    // a valid session (the same one after a restart, a new sign-in after the expiry) and a verified read lift the block
+    if (!server.sessions.has("session-1")) {server.sessions.add("session-2");storage.set("supervisor-session", "session-2");}
+    const readAtom = ps.projectSupervisorRead({environmentId: null, projectId: "project", mainThreadId: "task-thread", revision: 2, epoch: 2});
+    const stop = registry.subscribe(readAtom, () => undefined, {immediate: true});
+    const read = await until(registry, readAtom, value => AsyncResult.isSuccess(value) && !value.waiting, "verified read");
+    stop();
+    assert.ok(AsyncResult.isSuccess(read));
+    const refreshed = ps.settleRead({view, draft: registry.get(ps.projectSupervisorDraft(projectKey()))}, "project", scopeA(), read.value, true);
+    assert.equal(refreshed.view.blocked, false, "only the verified read lifts the block");
+    assert.equal(refreshed.view.snapshot?.settings.generation, applied ? 8 : 7, "the read shows what the first attempt did");
+    registry.dispose();
+    storage.set("supervisor-session", "session-1");
+  });
+}
+
+// the refusals that do exclude the first attempt stay definite: the check refuses the same headers on every attempt
+it("a change sent without a CSRF token, or with the token the same process still issues, is refused as not performed and stays editable", {timeout: 10_000}, async () => {
+  for (const [label, token] of [["without a token", null], ["with the token the process still issues", "csrf-current"]] as const) {
+    storage.set("supervisor-session", "session-1");
+    const registry = AtomRegistry.make();
+    sent.length = 0;
+    reply = async request => {
+      if (request.path === "/api/csrf") return json({csrf: "csrf-current"});
+      return json({message: "Refresh the local dashboard before changing settings."}, 403);
+    };
+    if (token !== null) {
+      const check = core.uiRuntime.fn(() => Effect.flatMap(access.SessionAccess, session => session.check));
+      const stopCheck = registry.subscribe(check, () => undefined, {immediate: true});
+      registry.set(check, undefined);
+      await until(registry, check, value => AsyncResult.isSuccess(value) && value.value, "the token is loaded");
+      stopCheck();
+      sent.length = 0;
+    }
+    showSnapshot(registry);
+    ps.startSettingsChange(registry, projectKey(), scopeA(), {kind: "save", input: saveInput(7)});
+    const view = await until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, label);
+    assert.equal(sent.find(isPost("/api/guidance/project-supervisor"))?.csrf ?? null, token === null ? "" : token, `${label}: the token sent`);
+    assert.deepEqual([view.blocked, view.message?.text], [false, "Session refreshed. Your Supervisor change was not performed; review the state and try again."], label);
+    registry.dispose();
+  }
+});
 
 it("a settings outcome that arrives after another chat was selected is dropped", {timeout: 10_000}, async () => {
   const registry = AtomRegistry.make();

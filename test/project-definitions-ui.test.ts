@@ -264,7 +264,7 @@ it("configuration client posts local project.yaml config and preserves the origi
   } finally {globalThis.fetch = previous;}
 });
 
-it("expired CSRF refresh keeps a definite no-save draft opportunity and never replays the POST", async () => {
+it("a CSRF token rotated by a restart leaves the save unknown, never replays the POST, and the next explicit save uses the new token", async () => {
   const previous = globalThis.fetch;
   const input: ProjectConfigSave = {projectId: "project", threadId: null, expectedRevision: definitions.revision!, config: definitions.projectConfig!};
   clearAccess();
@@ -279,7 +279,9 @@ it("expired CSRF refresh keeps a definite no-save draft opportunity and never re
     };
     assert.equal(await loadAccess(), true);
     currentToken = "after-restart";
-    await assert.rejects(onPage(saveProjectConfiguration(input)), (error: unknown) => error instanceof ProjectConfigRequestError && error.definitelyNotSaved && /Session refreshed/.test(error.message));
+    // target change (story03): the baseline reported this 403 as a definite no-save; a 403 for a token the process no
+    // longer issues may answer a browser resend after the first attempt applied before the restart, so it is unknown
+    await assert.rejects(onPage(saveProjectConfiguration(input)), (error: unknown) => error instanceof ProjectConfigRequestError && !error.definitelyNotSaved && /could not be confirmed/.test(error.message));
     assert.equal(writes, 1);
     assert.equal((await onPage(saveProjectConfiguration(input))).status, "saved");
     assert.equal(writes, 2);

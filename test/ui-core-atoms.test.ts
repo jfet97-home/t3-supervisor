@@ -144,8 +144,10 @@ it("disposing the registry aborts a pending admitted request and runs its finali
 
 it("mutation failures follow the baseline outcome rules without replaying the request", { timeout: 10_000 }, async () => {
   const cases: Array<[string, number, string, number, string]> = [
-    ["401 refreshed", 401, JSON.stringify({ csrf: "fresh" }), 200, "NotPerformed:refreshed"],
-    ["403 refresh failed", 403, "{}", 401, "NotPerformed:refresh_failed"],
+    // target change (story03): a 401 for a sent session may answer a browser resend after the first attempt applied
+    ["401 for a session, refreshed", 401, JSON.stringify({ csrf: "fresh" }), 200, "Unconfirmed"],
+    // a change sent without a CSRF token is refused on every attempt
+    ["403 without a token, refresh failed", 403, "{}", 401, "NotPerformed:refresh_failed"],
     ["413", 413, "{}", 200, "NotPerformed:too_large"],
     ["415", 415, "{}", 200, "NotPerformed:format"],
     ["500", 500, "{}", 200, "Unconfirmed"],

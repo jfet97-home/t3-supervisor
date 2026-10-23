@@ -202,10 +202,13 @@ and record it.
    the sign-in form should appear ("Sign in again", "Your open draft is kept in this tab").
    Sign in and read the draft back.
 4. Save after 401: `scenario/save-401?path=/api/guidance/project-configuration`, then
-   "Save project configuration" and accept the confirm. Record the message (source: "Your
-   draft was not saved. Session refresh failed; reconnect and save again."), the sign-in
-   form, the draft after re-sign-in, and whether Save is enabled. Repeat with `save-403`
-   (session stays valid; source: "Session refreshed. Your draft was not saved…").
+   "Save project configuration" and accept the confirm. A 401 for a sent session does not
+   exclude a first attempt the browser resent after it applied, so record the unknown message
+   (source: "The save outcome could not be confirmed. Refresh and inspect project.yaml before
+   retrying."), the sign-in form, the draft after re-sign-in, and that Save stays blocked until
+   a refresh. Repeat with `save-403`: the session stays valid and the fixture still issues the
+   token that was sent, so the refusal is definite (source: "Session refreshed. Your draft was
+   not saved…") and Save stays enabled.
 5. Conflict: `scenario/editor-conflict`, then Save. Record the message, whether Save is
    disabled, and "Your draft is kept. Refresh project definitions…". Then "Refresh
    definitions" and record the discard confirm. Repeat with `editor-uncertain` and
