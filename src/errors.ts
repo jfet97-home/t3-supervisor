@@ -13,9 +13,17 @@ export class InvalidConfiguration extends Data.TaggedError("InvalidConfiguration
   override readonly message: string = this.reason;
 }
 
+// the dashboard or the standalone workflow MCP listener could not listen; it carries no address, port or cause. The
+// health listener's failure stays the server's ServeError
+export class ListenerUnavailable extends Data.TaggedError("ListenerUnavailable")<{
+  readonly reason: "dashboard_listener_unavailable" | "workflow_mcp_listener_unavailable";
+}> {
+  override readonly message: string = this.reason;
+}
+
 // the fixed reason a failed supervisor program is reported with; typed failures name their own, nothing else is rendered
 export const failureReason = (cause: Cause.Cause<unknown>): string => {
   const failure = Cause.squash(cause);
-  if (failure instanceof InvalidConfiguration || failure instanceof T3TokenUnavailable) return failure.reason;
+  if (failure instanceof InvalidConfiguration || failure instanceof T3TokenUnavailable || failure instanceof ListenerUnavailable) return failure.reason;
   return Predicate.isTagged(failure, "ServeError") ? "health_listener_unavailable" : "supervisor_failed";
 };

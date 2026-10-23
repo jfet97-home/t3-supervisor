@@ -70,7 +70,7 @@ export const forgeDashboardToken = (dataDirectory: string, options: ServiceAuthO
   ));
 
 // the dashboard server in its own scope over its own service auth, runtime and workflow MCP endpoint, with the node file
-// system and crypto the supervisor root provides; a failed start releases them and rejects with the listen error itself.
+// system and crypto the supervisor root provides; a failed start releases them and rejects with its typed failure.
 // without a workflow MCP layer the endpoint has no controller tools, which these suites never call
 export const startGuidanceUi = async (config: SupervisorConfig, runtime: GuidanceRuntime["Service"],
   definitions?: GuidanceUiOptions["definitions"], editor?: GuidanceUiOptions["editor"], supervision?: GuidanceUiOptions["supervision"],
@@ -81,7 +81,6 @@ export const startGuidanceUi = async (config: SupervisorConfig, runtime: Guidanc
   const ui = await Effect.runPromise(Layer.buildWithScope(GuidanceUi.layer(config, {definitions, editor, supervision, workflowReader}).pipe(
     Layer.provide(services)), scope).pipe(
     Effect.map(context => Context.get(context, GuidanceUi)),
-    Effect.mapError(error => error._tag === "ServeError" ? error.cause : error),
   )).catch(async (error: unknown) => {
     await Effect.runPromise(Scope.close(scope, Exit.void));
     throw error;

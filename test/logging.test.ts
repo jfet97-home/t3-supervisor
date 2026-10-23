@@ -7,7 +7,7 @@ import { it } from "@effect/vitest";
 import { Cause, ConfigProvider, Effect, Exit, Layer, Logger } from "effect";
 import { HttpServerError } from "effect/http";
 import { TestClock, TestConsole } from "effect/testing";
-import { InvalidConfiguration, T3TokenUnavailable } from "../src/errors.js";
+import { InvalidConfiguration, ListenerUnavailable, T3TokenUnavailable } from "../src/errors.js";
 import { jsonLogger, logEvent } from "../src/logging.js";
 import { reportFailure, SupervisorLive } from "../src/supervisor.js";
 import { startFakeT3 } from "./support/cli-fake-t3.js";
@@ -63,6 +63,8 @@ it.effect("reportFailure prints one classified line per failure, without its cau
   yield* reportFailure(Cause.fail(new T3TokenUnavailable()));
   yield* reportFailure(Cause.fail(new InvalidConfiguration({ reason: "invalid_helper_provider_instance_id" })));
   yield* reportFailure(Cause.fail(new HttpServerError.ServeError({ cause: nested() })));
+  yield* reportFailure(Cause.fail(new ListenerUnavailable({ reason: "dashboard_listener_unavailable" })));
+  yield* reportFailure(Cause.fail(new ListenerUnavailable({ reason: "workflow_mcp_listener_unavailable" })));
   yield* reportFailure(Cause.die(nested()));
   yield* reportFailure(Cause.interrupt());
   const lines = yield* TestConsole.logLines;
@@ -70,6 +72,8 @@ it.effect("reportFailure prints one classified line per failure, without its cau
     `{"time":"1970-01-01T00:00:00.000Z","event":"supervisor_failed","reason":"t3_token_unavailable"}`,
     `{"time":"1970-01-01T00:00:00.000Z","event":"supervisor_failed","reason":"invalid_helper_provider_instance_id"}`,
     `{"time":"1970-01-01T00:00:00.000Z","event":"supervisor_failed","reason":"health_listener_unavailable"}`,
+    `{"time":"1970-01-01T00:00:00.000Z","event":"supervisor_failed","reason":"dashboard_listener_unavailable"}`,
+    `{"time":"1970-01-01T00:00:00.000Z","event":"supervisor_failed","reason":"workflow_mcp_listener_unavailable"}`,
     `{"time":"1970-01-01T00:00:00.000Z","event":"supervisor_failed","reason":"supervisor_failed"}`,
   ]);
   assert.deepEqual(leaks(lines), []);

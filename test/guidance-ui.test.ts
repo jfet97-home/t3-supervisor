@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
-import { Context, Effect, Exit, Layer, Scope, Tracer } from "effect";
+import { Cause, Context, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Scope, Tracer } from "effect";
 import { HttpMiddleware } from "effect/http";
+import { failureReason, ListenerUnavailable } from "../src/errors.js";
 import { GuidanceRuntime } from "../src/guidance.js";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { GuidanceUi } from "../src/guidance-ui.js";
@@ -17,6 +19,7 @@ import type { SupervisorConfig } from "../src/types.js";
 import { WorkflowMcp } from "../src/workflow-mcp.js";
 import type { WorkflowWriteController } from "../src/workflow-write-controller.js";
 import { connectRefused, jsonBody, rawRequest, readCsrf, signIn } from "./support/c3b-http.js";
+import { forgeDashboardToken } from "./support/service-auth-harness.js";
 import { privately } from "./support/private-assert.js";
 import { uiConfig } from "./support/c3b-ui.js";
 
@@ -34,13 +37,21 @@ const temporaryDirectory = Effect.acquireRelease(
 );
 
 // the dashboard listeners over the root's node file system and crypto, in the given scope
-const buildUi = (config: SupervisorConfig, controller: WorkflowWriteController, options: {definitions?: ProjectDefinitionLoader} = {}) =>
+// `auth` and `files` stand between the listeners and the real access service and file system
+const buildUi = (config: SupervisorConfig, controller: WorkflowWriteController, options: {definitions?: ProjectDefinitionLoader;
+  auth?: (real: ServiceAuth["Service"]) => ServiceAuth["Service"]; files?: (real: FileSystem.FileSystem) => FileSystem.FileSystem} = {}) =>
   Effect.gen(function* () {
     const store = yield* Effect.acquireRelease(Effect.sync(() => new GuidanceStore(config.dataDirectory)), (store) => Effect.sync(() => store.close()));
     const runtime = yield* GuidanceRuntime.make(config, store, {catalog: () => Effect.succeed({projects: [], threads: []})});
+    const auth = options.auth
+      ? Layer.effect(ServiceAuth, Effect.map(ServiceAuth, options.auth)).pipe(Layer.provide(ServiceAuth.layer(config.dataDirectory)))
+      : ServiceAuth.layer(config.dataDirectory);
+    const files = options.files
+      ? Layer.effect(FileSystem.FileSystem, Effect.map(FileSystem.FileSystem, options.files)).pipe(Layer.provide(NodeFileSystem.layer))
+      : NodeFileSystem.layer;
     const context = yield* Layer.build(GuidanceUi.layer(config, options).pipe(
-      Layer.provide(Layer.mergeAll(ServiceAuth.layer(config.dataDirectory), Layer.succeed(GuidanceRuntime, runtime), WorkflowMcp.layer(controller))),
-      Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer)),
+      Layer.provide(Layer.mergeAll(auth, Layer.succeed(GuidanceRuntime, runtime), WorkflowMcp.layer(controller))),
+      Layer.provide(Layer.mergeAll(files, NodeCrypto.layer)),
     ));
     const ui = Context.get(context, GuidanceUi);
     const token = (yield* Effect.promise(() => readFile(join(config.dataDirectory, "access", "workflow-mcp-token"), "utf8"))).trim();
@@ -171,4 +182,101 @@ describe("guidance ui listeners", () => {
     assert.equal(yield* Effect.promise(() => connectRefused(ui.port)), true);
     assert.equal(yield* Effect.promise(() => connectRefused(ui.mcpPort!)), true);
   }), {timeout: 10_000});
+
+  // sol-r20: effect's server runs a request uninterruptibly until its route matches, so the checks in front of the router
+  // own their reads' interruption: a client that goes away or the listener scope closing ends a held access check or file
+  // read at once, while a started sign-in still completes when its client goes away
+  type Held = {entered: Deferred.Deferred<void>; release: Deferred.Deferred<void>; interrupted: boolean};
+  const holding = Effect.gen(function* () {
+    return {entered: yield* Deferred.make<void>(), release: yield* Deferred.make<void>(), interrupted: false} satisfies Held;
+  });
+  const held = <A, E, R>(hold: Held, effect: Effect.Effect<A, E, R>) => Deferred.succeed(hold.entered, undefined).pipe(
+    Effect.andThen(Deferred.await(hold.release)),
+    Effect.onInterrupt(() => Effect.sync(() => {hold.interrupted = true;})),
+    Effect.andThen(effect));
+
+  const reads = [
+    ["the api access check", "authenticated", "/api/guidance/snapshot"],
+    ["the auth status check", "authenticated", "/auth/status"],
+    ["the dashboard file read", "file", "/held.html"],
+  ] as const;
+  for (const [label, target, path] of reads) for (const ending of ["the client goes away", "the listener scope closes"] as const) {
+    it.live(`GUI-06: ${label} held in front of the router ends at once when ${ending}`, () => Effect.gen(function* () {
+      const directory = yield* temporaryDirectory;
+      const hold = yield* holding;
+      let armed = false;
+      const scope = yield* Scope.make();
+      const ui = yield* buildUi(uiConfig(directory), countingController().controller, {
+        auth: (real) => ({...real, authenticated: (session) => armed && target === "authenticated" ? held(hold, real.authenticated(session)) : real.authenticated(session)}),
+        files: (real) => FileSystem.FileSystem.of({...real, readFile: (file) => target === "file" && file.endsWith("held.html") ? held(hold, real.readFile(file)) : real.readFile(file)}),
+      }).pipe(Scope.provide(scope));
+      const session = yield* Effect.promise(() => signIn(ui.origin, directory));
+      armed = true;
+      const client = httpRequest({host: "127.0.0.1", port: ui.port, path, method: "GET", agent: false,
+        headers: {"x-supervisor-session": session}});
+      const settled = new Promise<string>((resolve) => {
+        client.once("response", (response) => {response.resume();resolve(`response ${response.statusCode}`);});
+        client.once("error", (error) => resolve(`error ${(error as NodeJS.ErrnoException).code}`));
+      });
+      client.end();
+      yield* Deferred.await(hold.entered);
+      const ended = ending === "the client goes away"
+        ? Effect.sync(() => client.destroy())
+        : Scope.close(scope, Exit.void);
+      // bounded only so that a read that keeps running fails here by name; the hold is released afterwards either way
+      const closing = yield* Effect.forkChild(ended);
+      const done = yield* Effect.timeoutOption(Effect.gen(function* () {
+        yield* Fiber.join(closing);
+        while (!hold.interrupted) yield* Effect.sleep("10 millis");
+      }), "2 seconds");
+      const interrupted = hold.interrupted;
+      yield* Deferred.succeed(hold.release, undefined);
+      yield* Fiber.join(closing);
+      if (ending === "the client goes away") yield* Scope.close(scope, Exit.void);
+      assert.ok(done._tag === "Some" && interrupted, "the held read ended with its request, before its hold was released");
+      assert.match(yield* Effect.promise(() => settled), /^(?:error ECONNRESET|error ECONNREFUSED|response \d+)$/u);
+    }), {timeout: 10_000});
+  }
+
+  it.live("GUI-07: a started sign-in completes when its client goes away", () => Effect.gen(function* () {
+    const directory = yield* temporaryDirectory;
+    const hold = yield* holding;
+    let loggedIn: unknown = undefined;
+    const scope = yield* Scope.make();
+    const ui = yield* buildUi(uiConfig(directory), countingController().controller, {
+      auth: (real) => ({...real, login: (token) => held(hold, real.login(token)).pipe(Effect.tap((value) => Effect.sync(() => {loggedIn = value;})))}),
+    }).pipe(Scope.provide(scope));
+    const token = (yield* Effect.promise(() => forgeDashboardToken(directory))).token;
+    const body = JSON.stringify({token});
+    const client = httpRequest({host: "127.0.0.1", port: ui.port, path: "/auth/login", method: "POST", agent: false,
+      headers: {origin: ui.origin, "content-type": "application/json", "content-length": String(Buffer.byteLength(body))}});
+    client.once("error", () => undefined);
+    client.end(body);
+    yield* Deferred.await(hold.entered);
+    client.destroy();
+    yield* Effect.sleep("200 millis");
+    assert.equal(hold.interrupted, false, "the sign-in was not interrupted with its client");
+    yield* Deferred.succeed(hold.release, undefined);
+    while (loggedIn === undefined) yield* Effect.sleep("10 millis");
+    assert.notEqual(loggedIn, null, "the started sign-in completed and issued its session");
+    yield* Scope.close(scope, Exit.void);
+  }), {timeout: 10_000});
+
+  // sol-r20: each listener that cannot listen fails startup with its own reason; the health listener keeps its ServeError
+  for (const [listener, reason] of [["dashboard", "dashboard_listener_unavailable"], ["standalone workflow MCP", "workflow_mcp_listener_unavailable"]] as const) {
+    it.live(`GUI-08: a ${listener} listener whose port is taken fails startup with ${reason} and no address or cause`, () => Effect.gen(function* () {
+      const directory = yield* temporaryDirectory;
+      const blocker = createNetServer();
+      yield* Effect.acquireRelease(Effect.callback<void>((resume) => {blocker.listen(0, "127.0.0.1", () => resume(Effect.void));}),
+        () => Effect.callback<void>((resume) => {blocker.close(() => resume(Effect.void));}));
+      const taken = (blocker.address() as {port: number}).port;
+      const config = listener === "dashboard" ? uiConfig(directory, {uiPort: taken})
+        : uiConfig(directory, {workflowMcpBindHost: "127.0.0.1", workflowMcpPort: taken});
+      const failure = yield* Effect.flip(Effect.scoped(buildUi(config, countingController().controller)));
+      assert.ok(failure instanceof ListenerUnavailable, "a typed listener failure");
+      assert.equal(failure.reason, reason);
+      assert.equal("cause" in failure, false);
+      assert.equal(failureReason(Cause.fail(failure)), reason);
+    }), {timeout: 10_000});
+  }
 });

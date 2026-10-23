@@ -10,6 +10,7 @@ import { Effect } from "effect";
 import { HttpApi } from "effect/http-api";
 import { TestClock } from "effect/testing";
 import { it } from "vitest";
+import { ListenerUnavailable } from "../src/errors.js";
 import { GuidanceRuntime } from "../src/guidance.js";
 import { SupervisorApi } from "../src/guidance-contract.js";
 import { GuidanceStore } from "../src/guidance-store.js";
@@ -561,8 +562,10 @@ it("CT-UI-06: a listen failure on the MCP bind host closes the UI listener and t
   const login = join(directory, "access", "login.sqlite3");
   assert.equal(openDescriptors(login), 0);
 
+  // target change (R20, listener-specific startup codes): the start rejected with node's listen error; it now rejects with
+  // the typed failure of the listener that could not listen, which carries no address, port or cause
   await assert.rejects(startGuidanceUi(uiConfig(directory, {uiPort, workflowMcpBindHost: "127.0.0.1", workflowMcpPort: blocked}), runtime),
-    (error: NodeJS.ErrnoException & {port?: number}) => error.code === "EADDRINUSE" && error.port === blocked);
+    (error: unknown) => error instanceof ListenerUnavailable && error.reason === "workflow_mcp_listener_unavailable" && !("cause" in error));
   assert.equal(existsSync(login), true, "the login database was created before listening");
   assert.equal(openDescriptors(login), 0, "the login database was closed");
   assert.equal(await connectRefused(uiPort), true);

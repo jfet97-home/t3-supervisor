@@ -5,6 +5,7 @@ import { NodeHttpServer, NodeHttpServerRequest } from "@effect/platform-node";
 import { ByteSize, Cause, Context, Crypto, Data, Effect, FileSystem, Layer, Option, Redacted, Schema, type Types } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
 import { Headers, HttpEffect, HttpIncomingMessage, HttpRouter, HttpServer, HttpServerError, HttpServerRequest, HttpServerResponse } from "effect/http";
+import { ListenerUnavailable } from "./errors.js";
 import { LoginRequest, SupervisorApi, UiError } from "./guidance-contract.js";
 import { GuidanceRuntime } from "./guidance.js";
 import type { SupervisorConfig } from "./types.js";
@@ -189,17 +190,17 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
   const assets = resolve(config.uiAssetsDirectory ?? "ui-dist");
 
   // GET /auth/status, POST /auth/login and /auth/logout from the supervisor's own origin; a started sign-in or sign-out
-  // completes even when its client goes away
+  // completes even when its client goes away, while the status read and the sign-in body read end with their request
   const authRequest = (request: HttpServerRequest.HttpServerRequest, origin: string) => Effect.gen(function* () {
     const path = pathOf(request);
     const session = sessionOf(request);
-    if (path === "/auth/status" && request.method === "GET") return answer(200, {authenticated: yield* auth.authenticated(session)});
+    if (path === "/auth/status" && request.method === "GET") return answer(200, {authenticated: yield* Effect.interruptible(auth.authenticated(session))});
     if (request.method !== "POST" || !["/auth/login", "/auth/logout"].includes(path)) return reject(404, "Not found.");
     if (request.headers.origin !== origin || request.headers["content-type"]?.split(";", 1)[0]?.trim() !== "application/json")
       return reject(403, "Use the Supervisor sign-in page.");
     if (path === "/auth/login") {
       // an unreadable body is an invalid sign-in like malformed json; only an oversized one fails the request
-      const body = yield* readBody(request, 2048).pipe(
+      const body = yield* Effect.interruptible(readBody(request, 2048)).pipe(
         Effect.map(bytes => Option.some(Buffer.from(bytes).toString("utf8"))),
         Effect.catchTag("HttpServerError", () => Effect.succeedNone),
       );
@@ -234,7 +235,9 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
   });
 
   // the checks in front of every request of one listener, in the baseline order; the origin is always the dashboard's
-  // loopback address, and the workflow MCP host must name the receiving listener or a configured host
+  // loopback address, and the workflow MCP host must name the receiving listener or a configured host. effect's server
+  // runs a request uninterruptibly until its route matches, so the reads made here (the access check, a dashboard file,
+  // a body) are interruptible themselves and end when the client goes away or the listener scope closes
   const gate = (mcpOnly: boolean, uiPort: number | undefined) => HttpRouter.middleware(Effect.gen(function* () {
     const listener = (yield* HttpServer.HttpServer).address;
     const listenerPort = listener._tag === "UnixPathAddress" ? 0 : listener.port;
@@ -265,8 +268,8 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
         return reject(403, "Open the supervisor through its loopback address.");
       // effect's router decodes, splits and folds paths, so the auth and file answers stay on the path classified here
       if (url.pathname.startsWith("/auth/")) return yield* answerFailures(authRequest(routed, origin));
-      if (!url.pathname.startsWith("/api/")) return yield* answerFailures(staticFile(routed));
-      if (!(yield* auth.authenticated(sessionOf(request)))) return reject(401, "Sign in to Supervisor.");
+      if (!url.pathname.startsWith("/api/")) return yield* answerFailures(Effect.interruptible(staticFile(routed)));
+      if (!(yield* Effect.interruptible(auth.authenticated(sessionOf(request))))) return reject(401, "Sign in to Supervisor.");
       const csrfHeader: unknown = headers["x-csrf-token"];
       if (request.method !== "GET" && (headers.origin !== origin || typeof csrfHeader !== "string" || !equal(csrfHeader, csrf)))
         return reject(403, "Refresh the local dashboard before changing settings.");
@@ -277,7 +280,7 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
       const api = request.modify({url: url.pathname + url.search, headers: Headers.fromInput({"content-type": "application/json"})});
       const routedApi = HttpEffect.withPreResponseHandler(Effect.provideService(httpEffect, HttpServerRequest.HttpServerRequest, api), secured);
       if (request.method === "GET") return yield* routedApi;
-      return yield* Effect.matchCauseEffect(readBody(api, 64_000), {onFailure: failedAnswer, onSuccess: () => routedApi});
+      return yield* Effect.matchCauseEffect(Effect.interruptible(readBody(api, 64_000)), {onFailure: failedAnswer, onSuccess: () => routedApi});
     });
   }), {global: true});
 
@@ -287,22 +290,24 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
     : Effect.fail(new HttpServerError.HttpServerError({reason: new HttpServerError.RouteNotFound({request})})));
   const apiRoutes = HttpApiBuilder.layer(SupervisorApi).pipe(Layer.provide(handlers), Layer.provide(HttpServer.layerServices));
 
-  // one node listener serving the router in this scope; the scope drops its connections before releasing it
-  const listen = <E, R>(routes: Layer.Layer<never, E, R>, port: number, host: string) => Effect.gen(function* () {
+  // one node listener serving the router in this scope; the scope drops its connections before releasing it. A listener
+  // that cannot listen fails with its own reason
+  const listen = <E, R>(routes: Layer.Layer<never, E, R>, port: number, host: string, unavailable: ListenerUnavailable["reason"]) => Effect.gen(function* () {
     const server = createServer();
     const context = yield* Layer.build(HttpRouter.serve(routes, {disableLogger: true, disableListenLog: true}).pipe(
       Layer.provideMerge(NodeHttpServer.layerServer(() => server, {port, host, disablePreemptiveShutdown: true})),
       Layer.provide(Layer.succeed(Headers.CurrentRedactedNames, redactedHeaders)),
-    ));
+    )).pipe(Effect.catchTag("ServeError", () => Effect.fail(new ListenerUnavailable({reason: unavailable}))));
     yield* Effect.addFinalizer(() => closeNow(server));
     const address = Context.get(context, HttpServer.HttpServer).address;
     return {server, port: address._tag === "UnixPathAddress" ? 0 : address.port};
   });
 
   const ui = yield* listen(Layer.mergeAll(apiRoutes, csrfRoute, WorkflowMcpRoute, gate(false, undefined)),
-    config.uiPort ?? 9008, config.uiHost ?? "127.0.0.1");
+    config.uiPort ?? 9008, config.uiHost ?? "127.0.0.1", "dashboard_listener_unavailable");
   const mcpOnly = config.workflowMcpBindHost
-    ? yield* listen(Layer.mergeAll(WorkflowMcpRoute, gate(true, ui.port)), config.workflowMcpPort ?? ui.port, config.workflowMcpBindHost)
+    ? yield* listen(Layer.mergeAll(WorkflowMcpRoute, gate(true, ui.port)), config.workflowMcpPort ?? ui.port, config.workflowMcpBindHost,
+      "workflow_mcp_listener_unavailable")
     : undefined;
   // closing answers later workflow MCP requests 503 and interrupts its calls, then drops every connection of both listeners
   yield* Effect.addFinalizer(() => mcp.close.pipe(
