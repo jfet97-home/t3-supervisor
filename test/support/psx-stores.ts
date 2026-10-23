@@ -1,8 +1,10 @@
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, Exit, FileSystem, Layer, Scope } from "effect";
-import { GuidanceDb } from "../../src/db.js";
+import { DatabaseWorker, GuidanceDb } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { ProjectSupervisorStore, SupervisorOwnership } from "../../src/project-supervisor-store.js";
 import { SupervisionStoresLive } from "../../src/supervision-live.js";
@@ -13,7 +15,7 @@ import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { SupervisorConfig } from "../../src/types.js";
 import { WorkflowStateStore, type WorkflowEditingEnabled } from "../../src/workflow-state-store.js";
 import { guidanceLayer, ids, policyLayer, type SupervisionStoreServices } from "./g11-stores.js";
-import { dbSeam, recordConnections, type DbSeam } from "./psx-sql.js";
+import { dbSeam, seamWorker, type DbSeam } from "./psx-sql.js";
 
 export interface GuidanceOpen {
   readonly context: Context.Context<SupervisionStoreServices>;
@@ -22,13 +24,18 @@ export interface GuidanceOpen {
   readonly db: DbSeam;
 }
 
-/** Guidance store of `directory` in `scope`. The raw connection is recorded while the client opens. */
-export const openGuidance = (directory: string, scope: Scope.Scope): Effect.Effect<GuidanceOpen> =>
-  recordConnections(Effect.gen(function* () {
-    const context = yield* Layer.buildWithScope(guidanceLayer(directory).pipe(Layer.provideMerge(ids)), scope).pipe(Effect.orDie);
-    return {context: context as Context.Context<SupervisionStoreServices>, sql: Context.get(context, GuidanceDb), guidance: Context.get(context, GuidanceStore),
-      db: dbSeam(resolve(directory, "guidance.sqlite3"))};
-  }));
+let seamLogs = 0;
+
+/** Guidance store of `directory` in `scope`, its client on the seam worker; the seam's log is removed with `scope`. */
+export const openGuidance = (directory: string, scope: Scope.Scope): Effect.Effect<GuidanceOpen> => Effect.gen(function* () {
+  const log = join(tmpdir(), `t3-supervisor-seam-${process.pid}-${seamLogs++}.jsonl`);
+  yield* Scope.addFinalizer(scope, Effect.sync(() => rmSync(log, {force: true})));
+  const context = yield* Layer.buildWithScope(guidanceLayer(directory).pipe(Layer.provideMerge(ids)), scope).pipe(
+    Effect.provideService(DatabaseWorker, seamWorker(log)), Effect.orDie);
+  const sql = Context.get(context, GuidanceDb);
+  return {context: context as Context.Context<SupervisionStoreServices>, sql, guidance: Context.get(context, GuidanceStore),
+    db: dbSeam(sql, log, resolve(directory, "guidance.sqlite3"))};
+});
 
 export interface StoreOpen extends GuidanceOpen {
   readonly owned: Set<string>;
@@ -46,7 +53,7 @@ const settingsOf = (directory: string, excludedThreadIds: readonly string[] = []
 /** The supervision stores and the thread-policy store over an open guidance client, in `scope`. */
 export const openSupervisors = (directory: string, guidance: GuidanceOpen, scope: Scope.Scope, owned = new Set<string>(),
   excludedThreadIds: readonly string[] = []): Effect.Effect<StoreOpen> =>
-  recordConnections(Effect.gen(function* () {
+  Effect.gen(function* () {
     const built = yield* Layer.buildWithScope(SupervisionStoresLive.pipe(
       Layer.provide(Layer.succeedContext(guidance.context)), Layer.provide(Layer.succeed(SupervisorOwnership, owned))), scope).pipe(Effect.orDie);
     const policyContext = yield* Layer.buildWithScope(policyLayer(settingsOf(directory, excludedThreadIds)), scope).pipe(Effect.orDie);
@@ -57,7 +64,7 @@ export const openSupervisors = (directory: string, guidance: GuidanceOpen, scope
       supervisors: Context.get(context, ProjectSupervisorStore), requests: Context.get(context, SupervisorConversationStore),
       monitor: Context.get(context, ProjectSupervisorMonitorStore), team: Context.get(context, SupervisorTeamStore),
     };
-  }));
+  });
 
 /** The workflow state store over `stores`, closed with `scope`. */
 export const openWorkflows = (stores: StoreOpen, scope: Scope.Scope,
@@ -131,19 +138,10 @@ export const pssSession = (prefix: string) => Effect.gen(function* () {
 export const readOnlyDatabase = (path: string): Effect.Effect<DatabaseSync, never, Scope.Scope> =>
   Effect.acquireRelease(Effect.sync(() => new DatabaseSync(path, {readOnly: true})), (db) => Effect.sync(() => db.close()));
 
-/** Spies on `prepare` until the current scope closes. The calls are the statement texts. */
-export const spyPrepare = (connection: DatabaseSync): Effect.Effect<Array<string>, never, Scope.Scope> =>
-  Effect.acquireRelease(Effect.sync(() => {
-    const calls: Array<string> = [];
-    const own = Object.prototype.hasOwnProperty.call(connection, "prepare");
-    const original = connection.prepare;
-    connection.prepare = ((sql: string) => {
-      calls.push(String(sql));
-      return original.call(connection, sql);
-    }) as DatabaseSync["prepare"];
-    return {calls, own, original};
-  }), ({own, original}) => Effect.sync(() => {
-    if (own) connection.prepare = original;
-    else delete (connection as {prepare?: DatabaseSync["prepare"]}).prepare;
-  })).pipe(Effect.map(({calls}) => calls));
+/** The statement texts the seam's connection prepares from now on, as its seam worker logs them. */
+export const spyPrepare = (db: DbSeam): Effect.Effect<() => ReadonlyArray<string>> =>
+  Effect.sync(() => {
+    const from = db.logLength;
+    return () => db.prepared(from);
+  });
 

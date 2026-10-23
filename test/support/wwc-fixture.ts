@@ -140,7 +140,7 @@ export interface WwcFixture {
   readonly requests: WwcStores["requests"];
   readonly controller: WorkflowWriteController["Service"];
   readonly close: Effect.Effect<void>;
-  readonly inTransaction: boolean;
+  readonly inTransaction: Effect.Effect<boolean>;
   owner: WorkflowOwner;
   binding: BindingRecord;
   readonly projectId: string;
@@ -229,13 +229,12 @@ export const makeFixture = (mainThread: ThreadInfo = thread("main-workflows", "p
   });
   const fixture = {
     directory, db: stores.db, supervisors: stores.supervisors, workflows: stores.workflows, team: stores.team, requests: stores.requests,
-    close: stores.close, get inTransaction() {return stores.inTransaction;},
+    close: stores.close, inTransaction: stores.inTransaction,
     owner: {projectId, mainThreadId, supervisorThreadId, bindingGeneration: binding.generation},
     binding, projectId, mainThreadId, supervisorThreadId, threads, projection, projections, details, projectionCalls, detailCalls, calls,
     native, definitionReader, loadDefinitions, proposal, sourceBinding, context: stores.context,
   } as WwcFixture;
   const controller = yield* openWrite(fixture, {maxEvidenceWaitMs: 0, loadDefinitions});
-  // keep the inTransaction getter on this object
   return Object.assign(fixture, {controller});
 });
 

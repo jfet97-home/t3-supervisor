@@ -232,7 +232,7 @@ it.effect("CT-WWC-04: a throw from applyInTransaction after its writes yields wo
     }));
     assert.deepEqual(yield* fixture.controller.write(args), {status: "denied", operationId: "rollback-apply", reason: "workflow_write_transaction_failed"});
     assert.deepEqual(partial, [{status: "applied", revision: 2, operations: 1}], "the document and its operation were written inside the transaction");
-    assert.equal(fixture.inTransaction, false);
+    assert.equal(yield* fixture.inTransaction, false);
     assert.equal(yield* storedDocument(fixture), documentBefore);
     assert.equal(yield* rowCount(fixture, "supervisor_workflow_operations", "rollback-apply"), 0);
     assert.equal(yield* rowCount(fixture, "supervisor_workflow_write_receipts", "rollback-apply"), 0);

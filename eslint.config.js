@@ -50,7 +50,7 @@ const testRunSyntax = ["error",
   { selector: "MemberExpression[object.name='ManagedRuntime']", message: testRunMessage },
   { selector: "MemberExpression[property.name='runMain']", message: testRunMessage },
 ];
-const testEntries = ["test/support/access-sql-child.ts", "test/support/access-sql-worker.ts", "test/support/db-worker-fault.ts", "test/support/sql-semantics-child.ts", "test/support/g8-auth-child.ts",
+const testEntries = ["test/support/access-sql-child.ts", "test/support/access-sql-worker.ts", "test/support/db-worker-fault.ts", "test/support/db-seam-worker.ts", "test/support/sql-semantics-child.ts", "test/support/g8-auth-child.ts",
   "test/support/g8-auth-worker.ts", "test/support/g8-mcp-inflight-close.ts", "test/ui-fixture/run.ts"];
 
 export default tseslint.config(

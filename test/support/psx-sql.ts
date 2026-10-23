@@ -1,32 +1,84 @@
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { Clock, Effect } from "effect";
+import type { DatabaseSync } from "node:sqlite";
+import { Clock, Effect, Exit, Schema } from "effect";
+import type { SqlClient } from "effect/sql";
+import type { DatabaseWorkerEntry } from "../../src/db.js";
 
-// the raw connection of each guidance file, recorded while a handle opens it (the client keeps its connection private).
-// a depth count keeps a nested open on the same patch and restores the previous exec only when the outermost open ends.
-const connections = new Map<string, DatabaseSync>();
-let depth = 0;
-const nativeExec = DatabaseSync.prototype.exec;
-const patchedExec = function (this: DatabaseSync, statements: string) {
-  const location = this.location();
-  if (location) connections.set(resolve(location), this);
-  return nativeExec.call(this, statements);
+// the store characterizations' seam on a guidance file: statements through the store's own client, so on the one worker
+// connection the stores use, and the declarative hooks of the seam worker (test/support/db-seam-worker.ts), read back from its
+// log. a hook observes from inside a statement; nothing on this thread runs while the worker executes it
+
+/** The seam worker logging to `log`: the production database worker with the declarative test hooks. */
+export const seamWorker = (log: string): DatabaseWorkerEntry => ({
+  url: new URL("./db-seam-worker.ts", import.meta.url),
+  execArgv: ["--import", import.meta.resolve("tsx")],
+  workerData: {log},
+});
+
+const SeamEntry = Schema.Union([
+  Schema.Struct({kind: Schema.Literal("prepare"), db: Schema.String, sql: Schema.String}),
+  Schema.Struct({kind: Schema.Literal("log"), db: Schema.String, label: Schema.String, values: Schema.Array(Schema.Unknown)}),
+  Schema.Struct({kind: Schema.Literal("observe"), db: Schema.String, label: Schema.String,
+    results: Schema.Array(Schema.Array(Schema.Record(Schema.String, Schema.Unknown)))}),
+]);
+export type SeamEntry = typeof SeamEntry.Type;
+const decodeEntry = Schema.decodeUnknownSync(Schema.fromJsonString(SeamEntry));
+
+/** The hook entries the seam worker logged for one database file so far, in order. */
+export const seamEntries = (log: string, path: string): ReadonlyArray<SeamEntry> => {
+  if (!existsSync(log)) return [];
+  const file = resolve(path);
+  return readFileSync(log, "utf8").split("\n").filter((line) => line.length > 0).map((line) => decodeEntry(line)).filter((entry) => resolve(entry.db) === file);
 };
 
-/** Runs `effect` while guidance clients record the connection they open. */
-export const recordConnections = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
-  Effect.suspend(() => {
-    if (depth++ === 0) DatabaseSync.prototype.exec = patchedExec;
-    return effect.pipe(Effect.ensuring(Effect.sync(() => {
-      if (--depth === 0) DatabaseSync.prototype.exec = nativeExec;
-    })));
-  });
+/** A SQL string literal of `text`, for a hook's arguments in a trigger body. */
+export const sqlText = (text: string): string => `'${text.replaceAll("'", "''")}'`;
 
-/** The connection recorded for `path`, for a seam that the effect client keeps private. */
-export const connectionOf = (path: string): DatabaseSync => {
-  const connection = connections.get(resolve(path));
-  if (!connection) throw new Error("the guidance connection was not recorded");
-  return connection;
+export interface PreparedSeam {
+  run(...params: ReadonlyArray<unknown>): Effect.Effect<void>;
+  get(...params: ReadonlyArray<unknown>): Effect.Effect<Record<string, unknown> | undefined>;
+  all(...params: ReadonlyArray<unknown>): Effect.Effect<Array<Record<string, unknown>>>;
+}
+
+/** The seam of one guidance file: statements on the stores' client and the hooks its seam worker logged. */
+export interface DbSeam {
+  readonly sql: SqlClient.SqlClient;
+  /** Whether the connection is inside a transaction: a plain BEGIN fails exactly then and is otherwise rolled back. */
+  readonly inTransaction: Effect.Effect<boolean>;
+  exec(script: string): Effect.Effect<void>;
+  prepare(statement: string): PreparedSeam;
+  /** The calls of `seam_log(label, ...)` so far, their values in call order. */
+  logged(label: string): ReadonlyArray<ReadonlyArray<unknown>>;
+  /** The results of `seam_observe(label, ...)` so far: per call, the rows of each of its queries. */
+  observed(label: string): ReadonlyArray<ReadonlyArray<ReadonlyArray<Record<string, unknown>>>>;
+  /** The statement texts the connection prepared after the `from`th entry of its log. */
+  prepared(from?: number): ReadonlyArray<string>;
+  /** How many entries the seam worker logged for this file so far. */
+  readonly logLength: number;
+}
+
+/** The seam of the guidance file at `path`, its statements on `sql` and its hooks logged to `log`. */
+export const dbSeam = (sql: SqlClient.SqlClient, log: string, path: string): DbSeam => {
+  const rows = (row: object): Record<string, unknown> => ({...(row as Record<string, unknown>)});
+  const statement = (text: string, params: ReadonlyArray<unknown>) =>
+    sql.unsafe<Record<string, unknown>>(text, params).pipe(Effect.map((result) => result.map(rows)), Effect.orDie);
+  const entries = () => seamEntries(log, path);
+  return {
+    sql,
+    inTransaction: Effect.flatMap(Effect.exit(sql.unsafe("BEGIN")), (exit) =>
+      Exit.isSuccess(exit) ? Effect.as(Effect.orDie(sql.unsafe("ROLLBACK")), false) : Effect.succeed(true)),
+    exec: (script) => Effect.forEach(statementsOf(script), (text) => statement(text, []), {discard: true}),
+    prepare: (text) => ({
+      run: (...params) => Effect.asVoid(statement(text, params)),
+      get: (...params) => Effect.map(statement(text, params), (result) => result[0]),
+      all: (...params) => statement(text, params),
+    }),
+    logged: (label) => entries().flatMap((entry) => entry.kind === "log" && entry.label === label ? [entry.values] : []),
+    observed: (label) => entries().flatMap((entry) => entry.kind === "observe" && entry.label === label ? [entry.results] : []),
+    prepared: (from = 0) => entries().slice(from).flatMap((entry) => entry.kind === "prepare" ? [entry.sql] : []),
+    get logLength() {return entries().length;},
+  };
 };
 
 // the statements of an exec script; a trigger body's own semicolons stay inside its statement
@@ -44,44 +96,6 @@ export const statementsOf = (script: string): string[] => {
   }
   if (current.trim()) statements.push(current.trim());
   return statements;
-};
-
-export interface PreparedSeam {
-  run(...params: ReadonlyArray<unknown>): Effect.Effect<{changes: number; lastInsertRowid: number | bigint}>;
-  get(...params: ReadonlyArray<unknown>): Effect.Effect<Record<string, unknown> | undefined>;
-  all(...params: ReadonlyArray<unknown>): Effect.Effect<Array<Record<string, unknown>>>;
-}
-
-/** The baseline node:sqlite seam on the run's own guidance connection. */
-export interface DbSeam {
-  readonly isTransaction: boolean;
-  readonly connection: DatabaseSync;
-  function(name: string, implementation: (...args: Array<unknown>) => unknown): void;
-  exec(script: string): Effect.Effect<void>;
-  prepare(statement: string): PreparedSeam;
-}
-
-/** The seam of the guidance file at `path`. Statements run on the recorded connection, which the effect client also uses. */
-export const dbSeam = (path: string): DbSeam => {
-  const connection = () => connectionOf(path);
-  const rows = (row: unknown): Record<string, unknown> => ({...(row as Record<string, unknown>)});
-  return {
-    get isTransaction() {return connection().isTransaction;},
-    get connection() {return connection();},
-    function: (name, implementation) => {connection().function(name, implementation as never);},
-    exec: (script) => Effect.sync(() => {connection().exec(statementsOf(script).join(";\n"));}),
-    prepare: (statement) => {
-      const values = (params: ReadonlyArray<unknown>) => params as SQLInputValue[];
-      return {
-        run: (...params) => Effect.sync(() => connection().prepare(statement).run(...values(params)) as {changes: number; lastInsertRowid: number | bigint}),
-        get: (...params) => Effect.sync(() => {
-          const row = connection().prepare(statement).get(...values(params));
-          return row === undefined ? undefined : rows(row);
-        }),
-        all: (...params) => Effect.sync(() => connection().prepare(statement).all(...values(params)).map(rows)),
-      };
-    },
-  };
 };
 
 /** Meta rows in key order, as the characterization golden compares them. */

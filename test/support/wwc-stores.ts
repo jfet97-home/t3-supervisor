@@ -1,5 +1,3 @@
-import { DatabaseSync } from "node:sqlite";
-import { resolve, join } from "node:path";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, Exit, Layer, Scope } from "effect";
 import type { SqlClient } from "effect/sql";
@@ -12,8 +10,7 @@ import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
 
-// the guidance stores of one workflow-write fixture, on a production client. the raw connection is recorded while it opens
-// so a rolled-back apply can read isTransaction, which the public client does not expose
+// the guidance stores of one workflow-write fixture, on a production client and its worker connection
 
 export type WwcStoreServices = GuidanceDb | SupervisorIds | SupervisorOwnership | GuidanceStore | SupervisorStateReset |
   ProjectSupervisorStore | SupervisorConversationStore | SupervisorTeamStore | WorkflowStateStore;
@@ -36,25 +33,6 @@ const storesLayer = (directory: string): Layer.Layer<WwcStoreServices> => {
   )).pipe(Layer.orDie);
 };
 
-const connections = new Map<string, DatabaseSync>();
-const nativeExec = DatabaseSync.prototype.exec;
-
-// patch exec only while this open runs, then restore it. a later open of the same file replaces the recorded connection
-const recording = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
-  Effect.acquireUseRelease(
-    Effect.sync(() => {
-      DatabaseSync.prototype.exec = function (this: DatabaseSync, statements: string) {
-        const location = this.location();
-        if (location) connections.set(resolve(location), this);
-        return nativeExec.call(this, statements);
-      };
-    }),
-    () => effect,
-    () => Effect.sync(() => {
-      DatabaseSync.prototype.exec = nativeExec;
-    }),
-  );
-
 export interface WwcStores {
   readonly directory: string;
   readonly context: Context.Context<WwcStoreServices>;
@@ -64,36 +42,33 @@ export interface WwcStores {
   readonly workflows: WorkflowStateStore["Service"];
   readonly team: SupervisorTeamStore["Service"];
   readonly requests: SupervisorConversationStore["Service"];
-  // true while the recorded connection is inside a transaction
-  readonly inTransaction: boolean;
+  // whether the stores' connection is inside a transaction: a plain BEGIN fails exactly then and is otherwise rolled back
+  readonly inTransaction: Effect.Effect<boolean>;
   // closes this client once; a second close is a no-op
   readonly close: Effect.Effect<void>;
 }
 
 /** Opens the production stores of `directory` in a child scope the test can close and open again. */
 export const openWwcStores = (directory: string): Effect.Effect<WwcStores, never, Scope.Scope> =>
-  recording(Effect.gen(function* () {
+  Effect.gen(function* () {
     const scope = yield* Scope.make();
     yield* Effect.addFinalizer(() => idempotentClose(scope));
     const context = yield* Layer.buildWithScope(storesLayer(directory), scope).pipe(Effect.orDie);
-    const path = resolve(join(directory, "guidance.sqlite3"));
+    const db = Context.get(context, GuidanceDb);
     return {
       directory,
       context,
-      db: Context.get(context, GuidanceDb),
+      db,
       guidance: Context.get(context, GuidanceStore),
       supervisors: Context.get(context, ProjectSupervisorStore),
       workflows: Context.get(context, WorkflowStateStore),
       team: Context.get(context, SupervisorTeamStore),
       requests: Context.get(context, SupervisorConversationStore),
-      get inTransaction() {
-        const connection = connections.get(path);
-        if (!connection) throw new Error("the guidance connection was not recorded");
-        return connection.isTransaction;
-      },
+      inTransaction: Effect.flatMap(Effect.exit(db.unsafe("BEGIN")), (exit) =>
+        Exit.isSuccess(exit) ? Effect.as(Effect.orDie(db.unsafe("ROLLBACK")), false) : Effect.succeed(true)),
       close: idempotentClose(scope),
     };
-  }));
+  });
 
 /** The first row of a statement, or undefined when it returns nothing. */
 export const sqlGet = (sql: SqlClient.SqlClient, statement: string, ...params: ReadonlyArray<unknown>): Effect.Effect<Record<string, unknown> | undefined> =>

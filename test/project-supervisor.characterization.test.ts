@@ -8,7 +8,7 @@ import { prepareStopNotice, defaultSupervisorModel, type BindingRecord, type Sup
 import { SupervisorIds } from "../src/ids.js";
 import { SupervisorRpcError, type NativeRpcShape } from "../src/supervisor-native.js";
 import type { SupervisorConfig } from "../src/types.js";
-import { failsWith, metaRows, readerRows, tableRows, withMillis, type DbSeam } from "./support/psx-sql.js";
+import { failsWith, metaRows, readerRows, sqlText, tableRows, withMillis, type DbSeam } from "./support/psx-sql.js";
 import { openGuidance, openSupervisors, openWorkflows, pssSession, readOnlyDatabase, spyPrepare } from "./support/psx-stores.js";
 import { addSupervisorRequest, completeSupervisorRequest, retryInput, submitInterpretation, workflowFields } from "./support/psx-submission.js";
 import { assembleSupervisor, makeFixture, makeNoProjectFixture, supervisionStateDigest, type PsxFixture } from "./support/psx-supervisor.js";
@@ -444,7 +444,7 @@ it.live("CT-PS-07: a failing policy save rejects the dashboard Start without an 
       BEGIN SELECT RAISE(ABORT, 'simulated guidance failure during Start activation'); END`);
     const result = yield* f.supervisor.dashboardStart("manual", "enable-after-stop");
     assert.deepEqual(result, {status: "unavailable", reason: "Start preparation failed before activation. Use a new explicit request after inspecting this outcome."});
-    assert.equal(db.isTransaction, false, "the guidance transaction rolled back");
+    assert.equal(yield* db.inTransaction, false, "the guidance transaction rolled back");
     const policy = yield* f.policy.get();
     assert.equal(policy.generation, policyBefore.generation + 1, "the policy commit persists");
     assert.deepEqual(policy.excludedThreadIds, []);
@@ -738,14 +738,14 @@ it.live("CT-PSS-04: a stale global definitions generation changes nothing; a suc
   assert.deepEqual(yield* controlKeys(), []);
 
   // a failure on the second task update rolls back the first task update and the control rows of the same commit
-  const updated: string[] = [];
-  db.function("c2_task_updated", (threadId: unknown) => {updated.push(String(threadId)); return null;});
+  // the seam worker logs each update from the trigger as it runs, outside the transaction it is part of
   yield* db.exec(`CREATE TEMP TRIGGER c2_fail_queued BEFORE UPDATE ON main.supervisor_task_interpretations BEGIN
-    SELECT c2_task_updated(NEW.thread_id);
+    SELECT seam_log('c2_task_updated', NEW.thread_id);
     SELECT RAISE(ABORT, 'c2_task_update_failed') WHERE NEW.thread_id='main-queued'; END`);
   yield* failsWith(store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-1"), /supervision_store_unavailable/u);
+  const updated = db.logged("c2_task_updated").map(([threadId]) => String(threadId));
   assert.deepEqual(updated, ["main-inferred", "main-queued"], "the inferred task was rewritten before the failing update");
-  assert.equal(db.isTransaction, false);
+  assert.equal(yield* db.inTransaction, false);
   assert.deepEqual(yield* tableRows(db, "supervisor_task_interpretations"), tasksBefore, "the earlier task update rolled back");
   assert.deepEqual(yield* controlKeys(), [], "the control and event rows rolled back");
   assert.equal((yield* store.globalDefinitionsControl()).generation, 0);
@@ -753,16 +753,13 @@ it.live("CT-PSS-04: a stale global definitions generation changes nothing; a suc
 
   // a second connection observing at every task update sees none of the commit until it completes
   const reader = yield* readOnlyDatabase(session.path);
-  const observed: unknown[] = [];
-  db.function("c2_observe", () => {
-    observed.push({control: reader.prepare("SELECT value FROM meta WHERE key='supervisor_global_definitions_control'").get()?.value ?? null,
-      tasks: readerRows(reader, "supervisor_task_interpretations")});
-    return null;
-  });
-  yield* db.exec(`CREATE TEMP TRIGGER c2_observe_update AFTER UPDATE ON main.supervisor_task_interpretations BEGIN SELECT c2_observe(); END`);
+  // at every task update the seam worker reads the control row and the tasks through its own read-only connection
+  const observe = `seam_observe('c2_observe', ${sqlText("SELECT value FROM meta WHERE key='supervisor_global_definitions_control'")}, ${sqlText("SELECT * FROM supervisor_task_interpretations ORDER BY rowid")})`;
+  yield* db.exec(`CREATE TEMP TRIGGER c2_observe_update AFTER UPDATE ON main.supervisor_task_interpretations BEGIN SELECT ${observe}; END`);
   const changedAt = 1_790_000_000_000;
   const control = yield* withMillis(changedAt)(store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-1"));
   yield* db.exec("DROP TRIGGER temp.c2_observe_update");
+  const observed = db.observed("c2_observe").map(([controlRows, tasks]) => ({control: controlRows?.[0]?.value ?? null, tasks}));
   assert.equal(control.generation, 1);
   assert.equal(control.enabled, true);
   assert.equal(observed.length, 2);
@@ -872,9 +869,9 @@ it.live("CT-PSS-07: a legacy definition-save table gains expected_revision with 
   const columns = (db: DbSeam) => Effect.map(db.prepare("PRAGMA table_info(supervisor_definition_user_saves)").all(), (rows) => rows.map((row) => ({...row})));
   const expectedRow = {project_id: "project-a", workspace_root: "/work/a", signature: "signature-a", saved_at: 100, expected_revision: ""};
 
-  let firstCalls: Array<string> = [];
-  const first = yield* session.open((guidance) => Effect.gen(function* () {firstCalls = yield* spyPrepare(guidance.db.connection);}));
-  assert.equal(alters(firstCalls), 1);
+  let firstCalls: () => ReadonlyArray<string> = () => [];
+  const first = yield* session.open((guidance) => Effect.gen(function* () {firstCalls = yield* spyPrepare(guidance.db);}));
+  assert.equal(alters(firstCalls()), 1);
   const migratedColumns = yield* columns(first.db);
   assert.deepEqual(migratedColumns.filter(column => column.name === "expected_revision"),
     [{cid: 4, name: "expected_revision", type: "TEXT", notnull: 1, dflt_value: "''", pk: 0}]);
@@ -882,9 +879,9 @@ it.live("CT-PSS-07: a legacy definition-save table gains expected_revision with 
   const migratedSql = (yield* first.db.prepare("SELECT sql FROM sqlite_master WHERE name='supervisor_definition_user_saves'").get())?.sql;
   yield* first.close;
 
-  let secondCalls: Array<string> = [];
-  const second = yield* session.open((guidance) => Effect.gen(function* () {secondCalls = yield* spyPrepare(guidance.db.connection);}));
-  assert.equal(alters(secondCalls), 0, "a migrated table is not altered again");
+  let secondCalls: () => ReadonlyArray<string> = () => [];
+  const second = yield* session.open((guidance) => Effect.gen(function* () {secondCalls = yield* spyPrepare(guidance.db);}));
+  assert.equal(alters(secondCalls()), 0, "a migrated table is not altered again");
   assert.deepEqual(yield* columns(second.db), migratedColumns);
   assert.equal((yield* second.db.prepare("SELECT sql FROM sqlite_master WHERE name='supervisor_definition_user_saves'").get())?.sql, migratedSql);
   assert.deepEqual(yield* tableRows(second.db, "supervisor_definition_user_saves"), [expectedRow]);
@@ -900,14 +897,17 @@ it.live("CT-PSS-08: a start record never exists without its operation receipt an
   const recordKey = "supervisor_start:main-a";
   const receiptKey = 'supervisor_start_operation:["main-a","op-1"]';
 
-  // target (s6d step 1, CT-PSS-08): saveStart is one transaction, so the receipt and the record commit together
-  const views: unknown[] = [];
-  db.function("c2_start_view", () => {views.push({receipt: readMeta(receiptKey) !== null, record: readMeta(recordKey) !== null}); return null;});
+  // target (s6d step 1, CT-PSS-08): saveStart is one transaction, so the receipt and the record commit together. the start view
+  // is the seam worker's read of both rows through its own read-only connection, from the trigger before the record insert
+  const metaQuery = (key: string) => sqlText(`SELECT value FROM meta WHERE key=${sqlText(key)}`);
+  const startView = `seam_observe('c2_start_view', ${metaQuery(receiptKey)}, ${metaQuery(recordKey)})`;
+  const present = (rows: ReadonlyArray<Record<string, unknown>> | undefined) => (rows?.[0]?.value ?? null) !== null;
+  const views = (from = 0) => db.observed("c2_start_view").slice(from).map(([receipt, record]) => ({receipt: present(receipt), record: present(record)}));
   yield* db.exec(`CREATE TEMP TRIGGER c2_fail_record BEFORE INSERT ON main.meta WHEN NEW.key GLOB 'supervisor_start:*' BEGIN
-    SELECT c2_start_view(); SELECT RAISE(ABORT, 'c2_record_failed'); END`);
-  assert.equal(db.isTransaction, false);
+    SELECT ${startView}; SELECT RAISE(ABORT, 'c2_record_failed'); END`);
+  assert.equal(yield* db.inTransaction, false);
   yield* failsWith(store.saveStart(start), /supervision_store_unavailable/u);
-  assert.deepEqual(views, [{receipt: false, record: false}], "the receipt is not durable before the record statement runs");
+  assert.deepEqual(views(), [{receipt: false, record: false}], "the receipt is not durable before the record statement runs");
   assert.equal(yield* store.start("main-a"), null);
   assert.equal(yield* store.startOperation("main-a", "op-1"), null, "the failed record rolls its receipt back, never a record without its receipt");
   yield* db.exec("DROP TRIGGER temp.c2_fail_record");
@@ -918,10 +918,10 @@ it.live("CT-PSS-08: a start record never exists without its operation receipt an
   assert.equal(yield* store.start("main-a"), null, "a failed receipt prevents the record");
   assert.equal(yield* store.startOperation("main-a", "op-1"), null);
   yield* db.exec("DROP TRIGGER temp.c2_fail_receipt");
-  yield* db.exec(`CREATE TEMP TRIGGER c2_view_record BEFORE INSERT ON main.meta WHEN NEW.key GLOB 'supervisor_start:*' BEGIN SELECT c2_start_view(); END`);
-  views.length = 0;
+  yield* db.exec(`CREATE TEMP TRIGGER c2_view_record BEFORE INSERT ON main.meta WHEN NEW.key GLOB 'supervisor_start:*' BEGIN SELECT ${startView}; END`);
+  const viewsFrom = views().length;
   yield* store.saveStart(start);
-  assert.deepEqual(views, [{receipt: false, record: false}]);
+  assert.deepEqual(views(viewsFrom), [{receipt: false, record: false}]);
   assert.deepEqual({receipt: readMeta(receiptKey) !== null, record: readMeta(recordKey) !== null}, {receipt: true, record: true});
   yield* db.exec("DROP TRIGGER temp.c2_view_record");
 
@@ -931,7 +931,7 @@ it.live("CT-PSS-08: a start record never exists without its operation receipt an
   const metaBefore = yield* metaRows(db);
   yield* db.exec(`CREATE TEMP TRIGGER c2_fail_binding BEFORE INSERT ON main.supervisor_main_bindings BEGIN SELECT RAISE(ABORT, 'c2_binding_failed'); END`);
   yield* failsWith(store.reserve("project-a", "main-b", "Main B", defaultSupervisorModel, 1, 200), /supervision_store_unavailable/u);
-  assert.equal(db.isTransaction, false);
+  assert.equal(yield* db.inTransaction, false);
   assert.deepEqual(yield* metaRows(db), metaBefore, "the unbound stop is still stored");
   assert.deepEqual(yield* store.chatStop("main-b"), stop);
   assert.deepEqual(yield* tableRows(db, "supervisor_owned_threads"), [], "no owned root is recorded");
@@ -939,15 +939,11 @@ it.live("CT-PSS-08: a start record never exists without its operation receipt an
   assert.deepEqual([...ownedIds], []);
   yield* db.exec("DROP TRIGGER temp.c2_fail_binding");
 
-  const transfer: unknown[] = [];
-  db.function("c2_transfer_view", () => {
-    transfer.push({unbound: readMeta("supervisor_unbound_stop:main-b") !== null,
-      bindings: reader.prepare("SELECT count(*) AS n FROM supervisor_main_bindings").get()?.n});
-    return null;
-  });
-  yield* db.exec(`CREATE TEMP TRIGGER c2_view_binding AFTER INSERT ON main.supervisor_main_bindings BEGIN SELECT c2_transfer_view(); END`);
+  const transferView = `seam_observe('c2_transfer_view', ${metaQuery("supervisor_unbound_stop:main-b")}, ${sqlText("SELECT count(*) AS n FROM supervisor_main_bindings")})`;
+  yield* db.exec(`CREATE TEMP TRIGGER c2_view_binding AFTER INSERT ON main.supervisor_main_bindings BEGIN SELECT ${transferView}; END`);
   const binding = yield* store.reserve("project-a", "main-b", "Main B", defaultSupervisorModel, 1, 200);
   yield* db.exec("DROP TRIGGER temp.c2_view_binding");
+  const transfer = db.observed("c2_transfer_view").map(([unbound, bindings]) => ({unbound: present(unbound), bindings: bindings?.[0]?.n}));
   assert.deepEqual(transfer, [{unbound: true, bindings: 0}], "an outside reader sees the stop still unbound until the commit");
   assert.equal(readMeta("supervisor_unbound_stop:main-b"), null);
   assert.deepEqual(JSON.parse(String(reader.prepare("SELECT document FROM supervisor_main_bindings WHERE main_thread_id='main-b'").get()?.document)).supervisionStop, stop);
