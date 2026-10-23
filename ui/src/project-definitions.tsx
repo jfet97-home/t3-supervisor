@@ -4,7 +4,7 @@ import { Option } from "effect";
 import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
 import type { GuidanceSnapshot } from "../../src/guidance-contract.js";
 import { requiredReferences, type DefinitionNode, type DefinitionStepInfo, type DefinitionWorkflowInfo, type ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
-import { authEpochAtom, environmentAtom } from "./atoms.js";
+import { authEpochAtom, environmentAtom, scopeKey } from "./atoms.js";
 import { definitionsReadKey, projectDefinitionsAtom, type LoadedDefinitions, type ProjectDefinitionsReadError } from "./project-definitions-api.js";
 import { configurationDrafts, configurationScope, freshDraft, ProjectConfigurationEditor } from "./project-configuration-editor.js";
 import { discardSupervisorDrafts, ProjectSupervisorPanel } from "./project-supervisor.js";
@@ -216,36 +216,41 @@ export type DefinitionsView = {readonly key: string; readonly read: string | nul
 export const heldView = (held: DefinitionsView, live: DefinitionsView, holding: boolean): DefinitionsView =>
   holding && held.environmentId === live.environmentId ? held : live;
 
-// what the configuration editor last reported, for the environment its definitions were read for; a report counts only
-// while that environment is current
+// what the configuration editor of an environment last reported; a report counts only in its environment
 export type ConfigurationReport = {readonly environmentId: string | null; readonly dirty: boolean; readonly saving: boolean};
-export const reportedFor = (report: ConfigurationReport, environmentId: string | null) =>
-  report.environmentId === environmentId ? report : {environmentId, dirty: false, saving: false};
 
-// the panel state that saves and the configuration editor complete: the verified save that replaces the shown read until
-// the view reads again, its message and the editor's last report
+// the panel state that saves and the configuration editor complete, each kept with what it belongs to: a verified save
+// and its message with the read (environment, project, checkout and session) it answers, and an editor report with the
+// environment of the definitions the editor edits. a completion that arrives after the panel moved to another
+// environment or scope therefore settles its own entry and never changes what another view shows
 export type DefinitionsCompletion = {
-  readonly saved: {readonly read: string | null; readonly loaded: LoadedDefinitions} | null;
-  readonly message: {readonly environmentId: string | null; readonly text: string} | null;
-  readonly report: ConfigurationReport;
+  readonly saved: Readonly<Record<string, LoadedDefinitions>>;
+  readonly messages: Readonly<Record<string, string>>;
+  readonly reports: Readonly<Record<string, ConfigurationReport>>;
 };
-export const noCompletion: DefinitionsCompletion = {saved: null, message: null, report: {environmentId: null, dirty: false, saving: false}};
+export const noCompletion: DefinitionsCompletion = {saved: {}, messages: {}, reports: {}};
 const savedText = "Saved project configuration to .t3-supervisor/project.yaml.";
-// the verified save of a view's read: it replaces the shown read and its message is shown
+const without = <A,>(entries: Readonly<Record<string, A>>, key: string): Readonly<Record<string, A>> =>
+  Object.fromEntries(Object.entries(entries).filter(([entry]) => entry !== key));
+// the verified save of a read: it is shown for that read, with its message, until the read is newer or discarded
 export const recordSaved = (state: DefinitionsCompletion, read: string | null, loaded: LoadedDefinitions): DefinitionsCompletion =>
-  ({...state, saved: {read, loaded}, message: {environmentId: loaded.environmentId, text: savedText}});
-// an explicit discard or refresh of a view: its verified save and its message are gone
-export const discardSaved = (state: DefinitionsCompletion, _read: string | null): DefinitionsCompletion => ({...state, saved: null, message: null});
-// the verified save shown for a view's read
-export const savedFor = (state: DefinitionsCompletion, read: string | null, _latest: LoadedDefinitions | null): LoadedDefinitions | null =>
-  state.saved !== null && state.saved.read === read ? state.saved.loaded : null;
+  read === null ? state : {...state, saved: {...state.saved, [read]: loaded}, messages: {...state.messages, [read]: savedText}};
+// an explicit discard or refresh of a view: the verified save and the message of its read are gone
+export const discardSaved = (state: DefinitionsCompletion, read: string | null): DefinitionsCompletion =>
+  read === null ? state : {...state, saved: without(state.saved, read), messages: without(state.messages, read)};
+// the verified save shown for a read: the newer of it and the latest successful read of that key
+export const savedFor = (state: DefinitionsCompletion, read: string | null, latest: LoadedDefinitions | null): LoadedDefinitions | null => {
+  const saved = read === null ? undefined : state.saved[read];
+  return saved !== undefined && (latest === null || saved.loadedAt >= latest.loadedAt) ? saved : null;
+};
 // the message of a verified save shown for a view
 export const messageFor = (state: DefinitionsCompletion, view: {readonly read: string | null; readonly environmentId: string | null}): string | null =>
-  state.message?.environmentId === view.environmentId ? state.message.text : null;
+  view.read === null ? null : state.messages[view.read] ?? null;
 // the editor's report counted in an environment, and a new report of the editor of definitions read in `environmentId`
-export const reportOf = (state: DefinitionsCompletion, environmentId: string | null) => reportedFor(state.report, environmentId);
+export const reportOf = (state: DefinitionsCompletion, environmentId: string | null): ConfigurationReport =>
+  state.reports[scopeKey(environmentId)] ?? {environmentId, dirty: false, saving: false};
 export const recordReport = (state: DefinitionsCompletion, environmentId: string | null, report: {readonly dirty?: boolean; readonly saving?: boolean}): DefinitionsCompletion =>
-  ({...state, report: {...reportedFor(state.report, environmentId), ...report}});
+  ({...state, reports: {...state.reports, [scopeKey(environmentId)]: {...reportOf(state, environmentId), ...report}}});
 // the callbacks the panel hands the configuration editor of definitions read for `read` in `environmentId`
 export const editorCompletion = (update: (change: (state: DefinitionsCompletion) => DefinitionsCompletion) => void, read: string | null,
   environmentId: string | null, now: () => number) => ({
@@ -298,9 +303,8 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   held.current = heldView(held.current, live, configurationDirty || configurationSaving);
   const view = held.current;
   const read = useAtomValue(view.read === null ? noDefinitions : projectDefinitionsAtom(view.read));
-  // a verified save replaces the shown snapshot until the view reads again
+  // a verified save replaces the shown snapshot until the view reads it again
   const savedView = savedFor(completion, view.read, Option.getOrNull(AsyncResult.value(read)));
-  useEffect(() => {if (completion.saved !== null && completion.saved.read !== view.read) setCompletion(state => ({...state, saved: null}));}, [completion.saved, view.read]);
   const shown = definitionsShown(read, savedView);
   // definitions read for another environment are never shown or edited here
   const loaded = shown.result?.environmentId === environmentId ? shown.result : null;

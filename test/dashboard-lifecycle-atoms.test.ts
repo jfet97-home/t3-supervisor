@@ -346,7 +346,8 @@ it("A-R18-03 a definitions read records its environment, a draft never holds ano
   assert.equal(definitions.heldView(heldA, viewOf("environment-a", 1), true), heldA, "a draft holds its own environment's view");
   assert.deepEqual(definitions.heldView(heldA, viewOf("environment-b"), true), viewOf("environment-b"), "a draft of a never holds the view of b");
   const report = { environmentId: "environment-a", dirty: true, saving: true };
-  assert.deepEqual(definitions.reportedFor(report, "environment-a"), report);
-  assert.deepEqual(definitions.reportedFor(report, "environment-b"), { environmentId: "environment-b", dirty: false, saving: false },
+  const reported = definitions.recordReport(definitions.noCompletion, "environment-a", { dirty: true, saving: true });
+  assert.deepEqual(definitions.reportOf(reported, "environment-a"), report);
+  assert.deepEqual(definitions.reportOf(reported, "environment-b"), { environmentId: "environment-b", dirty: false, saving: false },
     "a's dirty or saving editor neither holds nor blocks b");
 });

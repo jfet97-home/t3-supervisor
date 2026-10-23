@@ -82,11 +82,13 @@ export interface EditorReports {
   readonly onSavingChange: (saving: boolean) => void;
 }
 
-// applies a resolved save to the draft it was made from and reports a verified save; it runs when the save settles, also
-// after the editor that started it is gone
+// applies a resolved save to the draft it was made from, reports that the save is over and reports a verified save; it runs
+// when the save settles, also after the editor that started it is gone, and reports only to the callbacks of the view it
+// was started from
 export const completeSave = (outcome: Exit.Exit<ProjectConfigSaveOutcome, ProjectConfigRequestError>, normalized: ProjectConfigurationInfo,
   setDraft: (change: (draft: ConfigurationDraft) => ConfigurationDraft) => void, reports: EditorReports) => {
   setDraft(current => settleSave(current, outcome, normalized));
+  reports.onSavingChange(false);
   const saved = savedDefinitions(outcome);
   if (saved) {reports.onDirtyChange(false);reports.onSaved(saved);}
 };
