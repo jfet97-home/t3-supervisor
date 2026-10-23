@@ -6,7 +6,7 @@ import { Clock, Context, Effect, FileSystem, Layer, Option, type Scope } from "e
 import { shebang } from "./cli-bin.js";
 import { startFakeT3, type FakeT3 as NativeFakeT3, type FakeT3Options, type FakeT3Traffic } from "./cli-fake-t3.js";
 import { nodePath, repositoryRoot, tsxLoader } from "./cli-process.js";
-import { freePort, portState, runProcess, startProcess, waitForHttp, type RunningProcess } from "./g8-process.js";
+import { bounded, freePort, portState, runProcess, startProcess, waitForHttp, type RunningProcess } from "./g8-process.js";
 
 // the supervisor, probe and installed bin harnesses of the process suites as scoped effects (test harness only): private
 // temporary homes, token files and a loopback fake T3 (cli-fake-t3.ts, the native peer), each released with the caller's
@@ -174,10 +174,16 @@ const step = (label: string, command: string, args: ReadonlyArray<string>, cwd: 
   Effect.flatMap(runProcess(command, args, { cwd, env, timeoutMs: stepTimeoutMs }), (result) => result.code === 0 ? Effect.void
     : Effect.die(new Error(`${label} failed (exit ${String(result.code)} ${String(result.signal)}): ${result.stderr.slice(-2_000)}`)));
 
+// the layer's release removes the temporary root within the 30 s teardown bound of the baseline afterAll (vitest's
+// hookTimeout); the layer's own hook bound covers the 120 s build, and this bound expires first on teardown
+export const installedBinTeardownMs = 30_000;
+
 // build, pack and an offline install of the packed package; the temporary root is removed with the layer
 export const installedBinLayer: Layer.Layer<InstalledBin, never, FileSystem.FileSystem> = Layer.effect(InstalledBin, Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  const root = yield* fs.makeTempDirectoryScoped({ prefix: "cli-bin-install-" }).pipe(Effect.orDie);
+  const root = yield* Effect.acquireRelease(Effect.orDie(fs.makeTempDirectory({ prefix: "cli-bin-install-" })), (root) =>
+    bounded(Effect.orDie(fs.remove(root, { recursive: true })), installedBinTeardownMs,
+      () => `the installed bin teardown did not finish within ${installedBinTeardownMs} ms`));
   const builtCli = join(repositoryRoot, "dist", "cli.js");
   const buildStarted = yield* Clock.currentTimeMillis;
   // the server half of `npm run build`; the ui bundle is not part of these cases
