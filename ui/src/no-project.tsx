@@ -109,19 +109,28 @@ export type ChatCandidates = typeof SupervisionCandidates.Type;
 type CandidatePurpose = "start" | "exclude";
 // the reload counter of each candidate search
 export const candidatesRevision = Atom.family((_purpose: CandidatePurpose) => Atom.keepAlive(Atom.make(0)));
+// the searches are single families keyed by their whole scope: a family keeps a member only while it is referenced, which
+// a mounted member is through its registry node, but a family nested in a family keeps its inner families only weakly,
+// so a garbage collection between two evaluations made a new atom for the same key and sent the search again
+
 // one candidate search of one T3 environment, requested 200 ms after a typed query and at once for the recent list; a new
 // query, purpose or reload is a new search, and the search it replaces is interrupted with its pending delay or request; a
 // new session searches again
-const environmentSearches = Atom.family((_environmentKey: string) => Atom.family((purpose: CandidatePurpose) => Atom.family((query: string) =>
-  Atom.family((_revision: number) => uiRuntime.atom((get) => {
+const environmentSearch = Atom.family((key: string) => {
+  const [, purpose, query] = JSON.parse(key) as [string | null, CandidatePurpose, string, number];
+  return uiRuntime.atom((get) => {
     authEpoch(get);
     return (query ? Effect.sleep("200 millis") : Effect.void).pipe(
       Effect.andThen(request((client) => client.guidance.supervisionCandidates({query: {query, purpose}}))));
-  })))));
+  });
+});
 // the candidate search of the current T3 environment: another environment's rows are never shown, so while the new
 // environment's search is unread or failed there is no row to act on
-export const chatCandidates = Atom.family((purpose: CandidatePurpose) => Atom.family((query: string) => Atom.family((revision: number) =>
-  Atom.make((get) => get(environmentSearches(scopeKey(get(environmentAtom)))(purpose)(query)(revision))))));
+const currentSearch = Atom.family((key: string) => {
+  const [purpose, query, revision] = JSON.parse(key) as [CandidatePurpose, string, number];
+  return Atom.make((get) => get(environmentSearch(scopeKey(get(environmentAtom), purpose, query, revision))));
+});
+export const chatCandidates = (purpose: CandidatePurpose) => (query: string) => (revision: number) => currentSearch(scopeKey(purpose, query, revision));
 // the search of an inactive panel: nothing is requested
 const noCandidates = Atom.keepAlive(Atom.make(AsyncResult.initial<ChatCandidates>()));
 
