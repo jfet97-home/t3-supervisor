@@ -5,7 +5,7 @@ import { NativeRpc, NativeShell, SupervisorRpcError, type NativeRpcShape, type N
 import type { SupervisorBaseline } from "../../src/project-supervisor-store.js";
 import type { ThreadInfo } from "../../src/types.js";
 
-// the baseline promise shapes over the ported native services, built as guidance-application.ts builds its b-03 facades
+// the baseline promise shapes over the ported native services, built as the baseline facades are (./root-facades.ts)
 
 const nativeClient = (baseUrl: string, token: string): NativeRpcShape =>
   Effect.runSync(NativeRpc.make({ baseUrl, token }).pipe(Effect.provide(NativeEnvelope.layer)));

@@ -12,7 +12,7 @@ import type { SupervisorMonitorBatch, SupervisorMonitorThreadBatch } from "../sr
 import { SupervisorConversationStore } from "../src/supervisor-conversation-store.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord } from "../src/project-supervisor-store.js";
 import { SupervisorTeamStore, type TeamBinding, type TeamMember, type TeamNotification } from "../src/supervisor-team-store.js";
-import type { SupervisorHelperDeliveryTransport } from "../src/supervisor-helper-transport.js";
+import type { SupervisorHelperDeliveryTransport } from "./support/root-facades.js";
 import { helperTransportUnit, teamRuntimeUnit } from "./support/team-units.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
 import { withDeadline } from "./support/c1-loopback.js";

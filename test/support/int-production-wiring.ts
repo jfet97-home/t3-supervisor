@@ -3,8 +3,7 @@ import { FetchHttpClient } from "effect/http";
 import { request as httpRequest } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { supervisorTeamServices, supervisorWorkflowControllers } from "../../src/guidance-application.js";
-import { supervisorTeamControllerFacade, workflowWriteControllerFacade } from "./root-facades.js";
+import { supervisorTeamControllerFacade, supervisorTeamServices, supervisorWorkflowControllers, workflowWriteControllerFacade } from "./root-facades.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { NativeEnvelope } from "../../src/native-envelope.js";
 import { GuidanceRuntime } from "../../src/guidance.js";
@@ -26,7 +25,8 @@ import { WorkflowNativeAccess, WorkflowWriteController } from "../../src/workflo
 import { SupervisorIds } from "../../src/ids.js";
 import { NodeCrypto } from "@effect/platform-node";
 
-// the production object graph of src/main.ts and src/guidance-application.ts, built over a loopback peer and temp files
+// the production object graph of src/main.ts, src/guidance-application.ts and src/supervision-live.ts, built over a loopback
+// peer and temp files
 
 export const readToken = "int-read-token";
 export const operateToken = "int-operate-token";
@@ -77,7 +77,7 @@ export const openIntSupervision = async (input: {directory: string; peerUrl: str
   const t3 = await buildT3Client(config.t3Url, readToken);
   const readRpc = makeSupervisorRpc(config.t3Url, readToken);
   const operateRpc = makeSupervisorRpc(config.t3Url, operateToken);
-  // the helper transport, team runtime, conversation and lifecycle as guidance-application.ts builds them: the operate client,
+  // the helper transport, team runtime, conversation and lifecycle as supervision-live.ts builds them: the operate client,
   // the T3 client, the definitions and global fetch in the supervision scope, with the admission gate guarding through the
   // supervisor's scope predicates
   const scope = Effect.runSync(Scope.make());

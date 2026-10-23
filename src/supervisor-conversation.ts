@@ -1,8 +1,7 @@
 import { Cause, Clock, Console, Context, Effect, FiberMap, HashMap, Layer, Option, Ref } from "effect";
 import { mainRunNodeReader, nativeUserMessageVisible, timestampMs } from "./domain.js";
-import type { ProjectSupervisorMonitorStore } from "./supervisor-monitor-store.js";
 import { isCurrentMainGraphRun, SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch, type SupervisorNativeChildLifecycleEvidence } from "./supervisor-monitor.js";
-import type { ConversationRequest, SupervisorConversationStore, WorkflowAgreementCandidate, WorkflowIntroduction } from "./supervisor-conversation-store.js";
+import type { ConversationRequest, WorkflowAgreementCandidate, WorkflowIntroduction } from "./supervisor-conversation-store.js";
 import { NativeOperateRpc, record, SupervisorRpcError, type NativeRpcInFlight } from "./supervisor-native.js";
 import { fixedOccurrencesPreserved, readerWorkflowInstruction, manifestMembers, parseWorkflowInterpretation, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, workflowTemplatesFor, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
 import { compactProposalDigest, exactFenceRecords, extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, resolveCompactAcceptance, resolveCompactProposal, workflowAgreementPlanHash, workflowProtocolDiagnosticCodes, type CompactProposalPins, type StoredProposalDigest, type WorkflowAgreementRecordKind } from "./supervisor-workflow-agreement.js";
@@ -19,7 +18,7 @@ import { resolveSupervisorScope } from "./supervisor-scope.js";
 import { childOrigin, directParentChildLifecycle, hasDirectParentChildLifecycleEvidence, normalizeLifecycle, observeScopeThread, monitorActivityReference } from "./supervisor-observation.js";
 import { contributionImportDecision, parseExternalContributionRecord, workflowPlanEntities } from "./workflow-state-store.js";
 import { externalContributionDiagnosticCodes, externalContributionLimits, type ExternalContributionDiagnosticCode, type WorkflowOwner } from "./workflow-state-contract.js";
-import { SupervisorTeamRuntime, type SupervisorTeamRuntimeFacade } from "./supervisor-team-runtime.js";
+import { SupervisorTeamRuntime } from "./supervisor-team-runtime.js";
 import { SupervisorIds } from "./ids.js";
 import { admitSend, SupervisionGate, SupervisionScopeService, type GateGuard, type SendPreparation } from "./supervision-gate.js";
 import { SupervisionStores } from "./supervision-stores.js";
@@ -307,25 +306,6 @@ export interface SupervisorConversationShape {
   readonly retry: (projectId: string, supervisorThreadId: string) => void;
   // runs inside the Stop bookkeeping section
   readonly fenceStoppedSupervision: (binding: BindingRecord) => void;
-}
-
-// the baseline promise shapes of the conversation its unported callers use (b-03); guidance-application.ts builds them over
-// the service. An aborted call interrupts its work; `now` stamps that call's wall clock as the baseline parameter did
-export interface SupervisorConversationFacade {
-  readonly requests: SupervisorConversationStore;
-  readonly monitor: ProjectSupervisorMonitorStore;
-  readonly teamRuntime: SupervisorTeamRuntimeFacade | null;
-  run(binding: BindingRecord, supervisor: Projection, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void>;
-  observe(threads: readonly ThreadInfo[], signal: AbortSignal, now?: number): Promise<void>;
-  reconcileStopNotice(owner: BindingRecord, signal: AbortSignal): Promise<void>;
-  reconcileStopped(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal, supervisor?: Projection): Promise<void>;
-  readContextView(binding: BindingRecord, input: SupervisorContextViewInput, signal: AbortSignal): Promise<SupervisorContextViewResult>;
-  status(projectId: string, supervisorThreadId: string | null): SupervisorMonitoringStatus;
-  hasInflight(projectId: string, supervisorThreadId: string): boolean;
-  interpretationRole(binding: BindingRecord): {text: string; roleVersion: string} | null;
-  roleDelivered(supervisorThreadId: string, roleVersion: string): void;
-  retry(projectId: string, supervisorThreadId: string): void;
-  fenceStoppedSupervision(binding: BindingRecord): void;
 }
 
 /** Uses existing T3 activity and ordinary conversations, with one durable service request per Supervisor. */

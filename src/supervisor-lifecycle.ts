@@ -96,14 +96,6 @@ export interface SupervisorLifecycleShape {
   readonly parkInactive: (input: BindingRecord, stillInactive: () => boolean) => Effect.Effect<void>;
 }
 
-// the baseline promise shapes of the lifecycle its unported callers use (b-03); guidance-application.ts builds them over the
-// service. An aborted call interrupts its work; `now` stamps that call's wall clock as the baseline parameter did
-export interface SupervisorLifecycleFacade {
-  readMain(binding: BindingRecord, signal: AbortSignal): Promise<Projection | null>;
-  check(input: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal, now?: number): Promise<void>;
-  parkInactive(input: BindingRecord, signal: AbortSignal, stillInactive: () => boolean): Promise<void>;
-}
-
 type StoppedSettlement = {binding: BindingRecord; stoppedAt: number; version: string};
 
 /** Parks only owned idle conversations, retaining their identity for normal native dispatch. */

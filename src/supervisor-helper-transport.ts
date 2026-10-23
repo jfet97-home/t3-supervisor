@@ -178,16 +178,6 @@ export interface HelperTransportShape {
   readonly retire: (binding: BindingRecord, helperThreadId: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<boolean>;
 }
 
-// the baseline promise shapes the unported callers and fakes use (b-03); guidance-application.ts builds them over the service
-export interface SupervisorHelperDeliveryTransport {
-  send(binding: BindingRecord, input: SupervisorHelperMessage, signal: AbortSignal, authorized?: () => boolean): Promise<SupervisorHelperSendResult>;
-  hasDelivery(binding: BindingRecord, input: SupervisorHelperMessage): boolean;
-  reconcileDelivery(binding: BindingRecord, input: SupervisorHelperMessage, signal: AbortSignal): Promise<"absent" | SupervisorHelperSendResult>;
-  receiptText(binding: BindingRecord, logicalMessageId: string): string | null | InvalidReceipt;
-  matchesMessage(binding: BindingRecord, logicalMessageId: string, text: string, message: MessageInfo, messages: readonly MessageInfo[]): boolean;
-  retire(binding: BindingRecord, helperThreadId: string, signal: AbortSignal): Promise<boolean>;
-}
-
 export type HelperTransportOptions = {store: ProjectSupervisorStore; baseUrl: string};
 
 /** Uses a genuine native webhook task, without timers or repeated tasks on the root. */

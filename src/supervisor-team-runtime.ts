@@ -138,22 +138,6 @@ const helperReviewText = (envelope: unknown, completionMarker: string): string =
   `${helperCore}\nAssess only the included target/thread records in this bounded envelope. Counts cover every pending item for each included thread; other pending targets remain for later reviews. IDs are a bounded preview. Target activityRefs contain ready-to-use links only for records in that target's preview. When adding workflow_write evidence, copy a supplied {sourceThreadId,sourceItemId} pair unchanged, or a message-only {sourceThreadId,sourceMessageId} pair unchanged when no item reference is supplied; add only your own evidence kind and note. Omit sourceRunId. Never decode, re-encode, normalize or reconstruct opaque IDs. For additional paged items, use exact native item or message IDs returned by T3. References are optional navigation evidence and do not prove semantic completion or write authority. Read further only where needed with bounded pagination, and do not infer completion from status alone. Each target carries its own complete toolInputs: use a target's workflow_read input, link input and targetThreadId only for that target, never for another. Use its link input only when that target has no document and is unarchived, undeleted and still assigned to you; a retry after uncertainty reuses the complete identical arguments. Do not guide or write for archived/deleted targets or coverage that is transferring, unavailable or uncertain; escalate if target_thread_unavailable is reported. If a listed notification applies, consider it in this turn. End with this exact marker: ${completionMarker}.\nUNTRUSTED_TEAM_MONITOR_ENVELOPE\n${JSON.stringify(envelope)}\nEND_UNTRUSTED_TEAM_MONITOR_ENVELOPE`;
 
 
-// the baseline promise shapes of the team runtime its unported callers use (b-03): the synchronous reads and in-memory
-// cycle start stay synchronous, the reconciliations take the caller's AbortSignal; guidance-application.ts builds them
-export interface SupervisorTeamRuntimeFacade {
-  startCycle(binding: BindingRecord): void;
-  rootOwnedBatch(binding: BindingRecord, batch: SupervisorMonitorBatch, threads: readonly ThreadInfo[]): SupervisorMonitorBatch | null;
-  partition(binding: BindingRecord, threads: readonly ThreadInfo[], batch: SupervisorMonitorBatch | null): SupervisorTeamPartition;
-  hasMembers(binding: BindingRecord): boolean;
-  coordinatorPolicy(binding: BindingRecord): {maxHelpersPerRoot: number; readyHelpers: number; registeringHelpers: number};
-  acknowledgeRootEvents(binding: BindingRecord, eventIds: readonly string[]): void;
-  hasInflightEffects(binding: BindingRecord): boolean;
-  hasBlockingWork(binding: BindingRecord): boolean;
-  reconcileStopped(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void>;
-  reconcile(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void>;
-  runHelperBatch(binding: BindingRecord, threads: readonly ThreadInfo[], batches: readonly SupervisorTeamHelperBatch[], signal: AbortSignal): Promise<void>;
-}
-
 type Cancel = Deferred.Deferred<void> | undefined;
 
 export interface SupervisorTeamRuntimeShape {

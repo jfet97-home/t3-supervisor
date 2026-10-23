@@ -15,7 +15,7 @@ import { supervisionGuideToolDefinition, supervisionTeamToolDefinition } from ".
 import { workflowReadToolDefinition, workflowWriteToolDefinition } from "../src/workflow-write-controller.js";
 import { directParentChildLifecycle } from "../src/supervisor-observation.js";
 import { T3TransportError } from "../src/t3.js";
-import type { SupervisorHelperDeliveryTransport } from "../src/supervisor-helper-transport.js";
+import type { SupervisorHelperDeliveryTransport } from "./support/root-facades.js";
 import { helperTransportUnit, supervisorConversationUnit, supervisorTeamView, teamRuntimeUnit } from "./support/team-units.js";
 import { workflowRequestHash } from "../src/workflow-write-evidence.js";
 import type { Projection, ThreadInfo } from "../src/types.js";

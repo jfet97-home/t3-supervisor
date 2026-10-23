@@ -1,8 +1,11 @@
 import { NodeCrypto } from "@effect/platform-node";
 import { Cause, Clock, Context, Deferred, Effect, Exit, Layer, Scope } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { helperTransportFacade, supervisorConversationFacade, supervisorLifecycleFacade, supervisorTeamServices, teamRuntimeFacade, type RootRun } from "../../src/guidance-application.js";
-import { definitionsService, type DefinitionsLoader, type ProjectDefinitionLoader } from "./root-facades.js";
+import {
+  definitionsService, helperTransportFacade, supervisorConversationFacade, supervisorLifecycleFacade, supervisorTeamServices, teamRuntimeFacade,
+  type DefinitionsLoader, type ProjectDefinitionLoader, type RootRun, type SupervisorConversationFacade, type SupervisorHelperDeliveryTransport,
+  type SupervisorLifecycleFacade, type SupervisorTeamRuntimeFacade,
+} from "./root-facades.js";
 import { SupervisorIds } from "../../src/ids.js";
 import { DefinitionSourceFailure, ProjectDefinitions, type ProjectDefinitionSetupInput } from "../../src/project-definitions.js";
 import type { BindingRecord, ProjectSupervisorStore, SupervisionFolderPresence, SupervisorBaseline, TaskRecord } from "../../src/project-supervisor-store.js";
@@ -19,13 +22,13 @@ import type { ThreadPolicySettings } from "../../src/thread-policy-contract.js";
 import type { SupervisionStartInput, SupervisionStartResult, SupervisionStopInput, SupervisionStopResult } from "../../src/workflow-write-controller.js";
 import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService, type GateGuard, type SupervisionGateShape } from "../../src/supervision-gate.js";
 import { SupervisionStores } from "../../src/supervision-stores.js";
-import { SupervisorConversation, type SupervisorConversationFacade } from "../../src/supervisor-conversation.js";
+import { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import { SupervisorConversationStore, type WorkflowIntroduction } from "../../src/supervisor-conversation-store.js";
-import { HelperTransport, type HelperTransportShape, type SupervisorHelperDeliveryTransport } from "../../src/supervisor-helper-transport.js";
-import { SupervisorLifecycle, type SupervisorLifecycleFacade } from "../../src/supervisor-lifecycle.js";
+import { HelperTransport, type HelperTransportShape } from "../../src/supervisor-helper-transport.js";
+import { SupervisorLifecycle } from "../../src/supervisor-lifecycle.js";
 import { ProjectSupervisorMonitorStore } from "../../src/supervisor-monitor-store.js";
 import { NativeOperateRpc, NativeRpc, NativeShell, SupervisorRpcError, type NativeRpcShape, type SupervisorRpc } from "../../src/supervisor-native.js";
-import { SupervisorTeamRuntime, type SupervisorTeamRuntimeFacade } from "../../src/supervisor-team-runtime.js";
+import { SupervisorTeamRuntime } from "../../src/supervisor-team-runtime.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { readTeamViewData, supervisorTeamView as presentTeamView } from "../../src/supervisor-team-view.js";
 import { T3Client, T3TransportError, type T3ClientShape } from "../../src/t3.js";
@@ -33,7 +36,7 @@ import type { Projection, SupervisorConfig, ThreadInfo } from "../../src/types.j
 import type { WorkflowStateStore } from "../../src/workflow-state-store.js";
 
 // the baseline constructors of the helper transport, the team runtime and their two owners, rebuilt over the ported
-// services and the production b-03 facades (src/guidance-application.ts); each unit keeps its constructor options
+// services and the baseline promise facades (./root-facades.ts); each unit keeps its constructor options
 
 export { definitionsService };
 
