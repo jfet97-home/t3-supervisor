@@ -156,7 +156,7 @@ only a handover notice of the ended transfer epoch that was never sent (pending)
 was definitively rejected (failed) is superseded, keeping its attempt and failure
 reason. Observing a quarantined helper's remaining notices never marks it missing,
 and neither does a helper read that was already in flight when the root quarantined it.
-Eligibility is re-read after every await and immediately before a POST, so nothing is
+Eligibility is re-read after every asynchronous step and immediately before a POST, so nothing is
 posted after quarantine; an attempted notice with no delivery receipt was never posted
 and, once its recipient is no longer eligible, fails as definitely undelivered. A
 check-in or readiness delivery whose authority ends before its POST likewise fails as
