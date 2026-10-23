@@ -38,6 +38,20 @@ const runSyntax = ({ runMain, fiberRuntimes }) => ["error",
   ...(fiberRuntimes ? [] : [{ selector: "MemberExpression[object.name=/^Fiber(Set|Map|Handle)$/][property.name=/^runtime/]", message: runMessage }]),
 ];
 
+// the suites run their effects in the test's own fiber (it.effect, it.live; plan S8): no Effect.run*, no runtime capture and no
+// ManagedRuntime in test files. The child, worker and fixture-server entries run one program each, and the runner harness
+// checks plain vitest behaviour, so they keep their allowance
+const testRunMessage = "suites run effects in the test's fiber (it.effect, it.live); Effect.run* stays in the child, worker and fixture-server entries and the runner harness";
+const testRunSyntax = ["error",
+  { selector: "MemberExpression[property.name=/^run(Promise|Sync|Fork|Callback)/]", message: testRunMessage },
+  { selector: "ImportSpecifier[imported.name=/^run(Promise|Sync|Fork|Callback)/]", message: testRunMessage },
+  { selector: "ImportDeclaration[source.value=/ManagedRuntime$/]", message: testRunMessage },
+  { selector: "MemberExpression[object.name='ManagedRuntime']", message: testRunMessage },
+  { selector: "MemberExpression[property.name='runMain']", message: testRunMessage },
+];
+const testEntries = ["test/support/access-sql-child.ts", "test/support/sql-semantics-child.ts", "test/support/g8-auth-child.ts",
+  "test/support/g8-auth-worker.ts", "test/support/g8-mcp-inflight-close.ts", "test/ui-fixture/run.ts"];
+
 export default tseslint.config(
   { ignores: ["dist/**", "node_modules/**", "vendor/**"] },
   ...tseslint.configs.recommended,
@@ -57,4 +71,5 @@ export default tseslint.config(
   { files: ["src/workflow-mcp.ts"], rules: { "no-restricted-syntax": runSyntax({ runMain: false, fiberRuntimes: true }) } },
   { files: ["src/db.ts"], rules: { "no-restricted-imports": restrictedImports({ sqlite: false, ws: true, timers: true }) } },
   { files: ["src/native-envelope.ts"], rules: { "no-restricted-imports": restrictedImports({ sqlite: true, ws: false, nodeSqlite: true, timers: true }) } },
+  { files: ["test/**/*.ts", "test/**/*.tsx"], ignores: ["test/harness/**", ...testEntries], rules: { "no-restricted-syntax": testRunSyntax } },
 );
