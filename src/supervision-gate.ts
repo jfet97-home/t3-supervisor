@@ -59,17 +59,16 @@ export class SupervisionScope implements GateGuard {
   }
   /** One scope predicate protects every effect; only a pending Start's interpretation can run before activation. */
   scopeEnabled(projectId: string, mainThreadId?: string, purpose: "effect" | "interpretation" | "reconcile" = "effect"): Effect.Effect<boolean, SupervisionStoreError> {
-    const scope = this;
     const store = this.stores.supervisors;
-    return Effect.gen(function* () {
-      if (!(yield* scope.isNoProject(projectId)))
-        return (yield* store.enabled(projectId)) && (purpose === "reconcile" || !mainThreadId || !(yield* scope.supervisionStopped(mainThreadId)));
+    return Effect.gen({self: this}, function* () {
+      if (!(yield* this.isNoProject(projectId)))
+        return (yield* store.enabled(projectId)) && (purpose === "reconcile" || !mainThreadId || !(yield* this.supervisionStopped(mainThreadId)));
       const control = yield* store.noProjectControl();
       if (!control.globallyEnabled || control.mode === "off") return false;
       if (!mainThreadId) return control.mode === "automatic";
       const start = yield* store.start(mainThreadId);
-      if (start?.status === "pending") return purpose !== "effect" && (yield* scope.validPendingStart(start));
-      if (purpose !== "reconcile" && (yield* scope.supervisionStopped(mainThreadId))) return false;
+      if (start?.status === "pending") return purpose !== "effect" && (yield* this.validPendingStart(start));
+      if (purpose !== "reconcile" && (yield* this.supervisionStopped(mainThreadId))) return false;
       return control.mode === "automatic" || start?.status === "active";
     });
   }
@@ -99,10 +98,9 @@ export class SupervisionScope implements GateGuard {
     return !isSupervisorThread(this.owned, thread) && !unavailable(thread) && thread.lineage.relationshipToParent !== "subagent";
   }
   eligible(thread: ThreadInfo, threads: readonly ThreadInfo[]): Effect.Effect<boolean, SupervisionStoreError> {
-    const scope = this;
-    return Effect.gen(function* () {
-      if (isSupervisorThread(scope.owned, thread) || unavailable(thread) || thread.lineage.relationshipToParent === "subagent" ||
-        (yield* scope.supervisionStopped(thread.id)) && !(yield* scope.validPendingStartFor(thread.id))) return false;
+    return Effect.gen({self: this}, function* () {
+      if (isSupervisorThread(this.owned, thread) || unavailable(thread) || thread.lineage.relationshipToParent === "subagent" ||
+        (yield* this.supervisionStopped(thread.id)) && !(yield* this.validPendingStartFor(thread.id))) return false;
       return mainConversation(thread, threads)?.id === thread.id;
     });
   }

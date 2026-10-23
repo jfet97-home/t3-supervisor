@@ -19,17 +19,15 @@ export const readWorkflowProgressPage = Effect.fn("readWorkflowProgressPage")(fu
       ? result
       : emptyPage(query, "too_large", "The combined live snapshot exceeds the dashboard response limit; no partial status was returned.", null, observedAt);
   const changed = Effect.map(Clock.currentTimeMillis, (observedAt) => emptyPage(query, "unavailable", changedDuringRead, null, observedAt));
-  const locator = supervision.workflowLocator(query.projectId, query.mainThreadId);
-  const matchingLocator = (expected: NonNullable<typeof locator>) => {
-    const current = supervision.workflowLocator(query.projectId, query.mainThreadId);
-    return current?.supervisorThreadId === expected.supervisorThreadId && current.bindingGeneration === expected.bindingGeneration;
-  };
+  const locator = yield* supervision.workflowLocator(query.projectId, query.mainThreadId);
+  const matchingLocator = (expected: NonNullable<typeof locator>) => Effect.map(supervision.workflowLocator(query.projectId, query.mainThreadId),
+    (current) => current?.supervisorThreadId === expected.supervisorThreadId && current.bindingGeneration === expected.bindingGeneration);
   const pageScope = supervision.scopeSnapshot(query.projectId, query.mainThreadId, {lineageOffset: query.lineageOffset, limit: query.limit});
 
   if (!locator) {
     const scope = yield* pageScope;
     if (scope.projectId !== query.projectId || scope.mainThreadId !== query.mainThreadId ||
-      supervision.workflowLocator(query.projectId, query.mainThreadId)) return yield* changed;
+      (yield* supervision.workflowLocator(query.projectId, query.mainThreadId))) return yield* changed;
     return bounded({...emptyPage(query, "unavailable", "No current ready Supervisor binding is available for this main conversation.",
       scope, scope.observedAt), lineageHasMore: scope.lineageHasMore}, yield* Clock.currentTimeMillis);
   }
@@ -43,10 +41,10 @@ export const readWorkflowProgressPage = Effect.fn("readWorkflowProgressPage")(fu
     lineageOffset: query.lineageOffset,
     limit: query.limit,
   }, requestBound);
-  if (!matchingLocator(locator)) return yield* changed;
+  if (!(yield* matchingLocator(locator))) return yield* changed;
   if (read.status !== "ok") {
     const scope = yield* pageScope;
-    if (!matchingLocator(locator) || scope.supervisorThreadId !== locator.supervisorThreadId ||
+    if (!(yield* matchingLocator(locator)) || scope.supervisorThreadId !== locator.supervisorThreadId ||
       scope.bindingGeneration !== locator.bindingGeneration || scope.projectId !== query.projectId || scope.mainThreadId !== query.mainThreadId) return yield* changed;
     return bounded({...emptyPage(query, read.status, read.reason, scope, scope.observedAt),
       lineageHasMore: scope.lineageHasMore,
@@ -56,7 +54,7 @@ export const readWorkflowProgressPage = Effect.fn("readWorkflowProgressPage")(fu
     read.owner.supervisorThreadId !== locator.supervisorThreadId || read.owner.bindingGeneration !== locator.bindingGeneration) return yield* changed;
   const workflowThreadIds = read.lineage.map(thread => thread.threadId);
   const scope = yield* supervision.scopeSnapshot(query.projectId, query.mainThreadId, {threadIds: workflowThreadIds});
-  if (!matchingLocator(locator) || scope.projectId !== query.projectId || scope.mainThreadId !== query.mainThreadId ||
+  if (!(yield* matchingLocator(locator)) || scope.projectId !== query.projectId || scope.mainThreadId !== query.mainThreadId ||
     scope.supervisorThreadId !== locator.supervisorThreadId || scope.bindingGeneration !== locator.bindingGeneration) return yield* changed;
   const threadScope = scopePage(scope, workflowThreadIds);
   const observedAt = yield* Clock.currentTimeMillis;

@@ -89,9 +89,5 @@ export interface SupervisorSettings {
   managedScratchRoot?: string;
 }
 
-// the configuration as the supervision run hands it to unported readers: the ThreadPolicy and SupervisorOwnership root
-// service values travel with it by reference (B-02) until those readers port
-export interface SupervisorConfig extends SupervisorSettings {
-  supervisorOwnedThreadIds?: Set<string>;
-  threadPolicy?: import("./thread-policy.js").ThreadPolicyStore;
-}
+// the configuration a supervision run reads: the parsed settings themselves (the thread policy and the ownership set are services)
+export type SupervisorConfig = SupervisorSettings;

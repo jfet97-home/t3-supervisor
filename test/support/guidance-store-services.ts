@@ -3,21 +3,17 @@ import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, Exit, FileSystem, Layer, Ref, Scope } from "effect";
 import type { SqlClient } from "effect/sql";
 import { GuidanceDb, guidanceDbLayer, PolicyDb, policyDbLayer } from "../../src/db.js";
+import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
-import { ProjectSupervisorStoreService, SupervisorOwnership } from "../../src/project-supervisor-store.js";
-import { SupervisorTeamStoreService } from "../../src/supervisor-team-store.js";
-import { WorkflowStateStoreService, type WorkflowEditingEnabled } from "../../src/workflow-state-store.js";
+import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
+import { ProjectSupervisorStore, SupervisorOwnership } from "../../src/project-supervisor-store.js";
+import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
+import { WorkflowStateStore, type WorkflowEditingEnabled } from "../../src/workflow-state-store.js";
 
-// the s6d store services on a temporary guidance database, each built through its production layer over the production
+// the store services on a temporary guidance database, each built through its production layer over the production
 // GuidanceDb client; nothing else opens the file while they are built
 
-// the guidance store's meta table, as its constructor creates it; the GuidanceStore layer (another package) builds it at the switch
-const guidanceMeta = Layer.effectDiscard(Effect.gen(function* () {
-  const sql = yield* GuidanceDb;
-  yield* sql.unsafe("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
-}));
-
-export type GuidanceStoreServices = GuidanceDb | ProjectSupervisorStoreService | SupervisorTeamStoreService | WorkflowStateStoreService;
+export type GuidanceStoreServices = GuidanceDb | ProjectSupervisorStore | SupervisorTeamStore | WorkflowStateStore;
 
 /** Runs before every templated statement whose text it answers for, inside that statement's transaction (a test seam). */
 export type StatementInterposer = (statement: string) => Effect.Effect<void> | undefined;
@@ -48,9 +44,9 @@ export const guidanceStoreServices = (directory: string, options: GuidanceStoreO
   const client = interpose ? Layer.effect(GuidanceDb, Effect.map(Effect.service(GuidanceDb), (sql) => interposed(sql, interpose))).pipe(Layer.provide(production)) : production;
   const ids = options.ids ?? SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer));
   const base = Layer.mergeAll(client, Layer.succeed(SupervisorOwnership, options.owned ?? new Set()), ids);
-  const supervisors = ProjectSupervisorStoreService.layer.pipe(Layer.provide(guidanceMeta));
-  const workflows = options.isEnabled ? WorkflowStateStoreService.layerWith(options.isEnabled) : WorkflowStateStoreService.layer;
-  return Layer.fresh(Layer.mergeAll(SupervisorTeamStoreService.layer, workflows).pipe(Layer.provideMerge(supervisors), Layer.provideMerge(base)));
+  const supervisors = ProjectSupervisorStore.layer.pipe(Layer.provide(SupervisorStateReset.layer), Layer.provide(GuidanceStore.layer));
+  const workflows = options.isEnabled ? WorkflowStateStore.layerWith(options.isEnabled) : WorkflowStateStore.layer;
+  return Layer.fresh(Layer.mergeAll(SupervisorTeamStore.layer, workflows).pipe(Layer.provideMerge(supervisors), Layer.provideMerge(base)));
 };
 
 /** Opens the services of `directory` in their own scope, so a test can close the database and open it again. */
@@ -60,10 +56,11 @@ export const openGuidanceStores = Effect.fnUntraced(function* (directory: string
     Effect.onError(() => Scope.close(scope, Exit.void)));
   return {
     owned: Context.get(context, SupervisorOwnership),
+    ids: Context.get(context, SupervisorIds),
     sql: Context.get(context, GuidanceDb),
-    supervisors: Context.get(context, ProjectSupervisorStoreService),
-    team: Context.get(context, SupervisorTeamStoreService),
-    workflows: Context.get(context, WorkflowStateStoreService),
+    supervisors: Context.get(context, ProjectSupervisorStore),
+    team: Context.get(context, SupervisorTeamStore),
+    workflows: Context.get(context, WorkflowStateStore),
     close: Scope.close(scope, Exit.void),
   };
 });

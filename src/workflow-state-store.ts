@@ -77,7 +77,6 @@ export const acceptedTaskPlanForBinding = (agreement: WorkflowAgreementInfo | nu
   return workflow.plan;
 };
 
-type StoredOperation = {request_hash: string; result: string};
 type WorkflowOperationNamespace = "edit" | "agreement";
 type WorkflowRow = {
   workflow_id: string;
@@ -541,7 +540,7 @@ const classifyReceipt = (operationId: string, text: string): WorkflowMutationRes
 const workflowReceipt = (status: "applied" | "created", operationId: string, document: WorkflowStateDocument): WorkflowMutationReceipt =>
   ({status, operationId, workflowId: document.workflowId, revision: document.revision, stateHash: fingerprint(document), formatVersion: 2});
 
-// the plan and evidence checks of the synchronous class, as pure functions
+// the plan and evidence checks, as pure functions
 const normalizeWorkflowPlan = (input: WorkflowStatePlan, existing: WorkflowStatePlan, submittedNodeIds: ReadonlySet<string>):
   {ok: true; plan: WorkflowStatePlan} | {ok: false; diagnostic: WorkflowApplyDiagnostic | null} => {
   if (!validPlan(input)) return {ok: false, diagnostic: null};
@@ -1033,7 +1032,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     return receipt;
   }));
 
-  // acquisition: the workflow schema, statement for statement as the synchronous constructor writes it
+  // acquisition: the workflow schema, statement for statement as the baseline constructor wrote it
   yield* run(Effect.gen(function* () {
     yield* sql.unsafe("CREATE TABLE IF NOT EXISTS supervisor_workflow_state (" +
       "workflow_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,thread_id TEXT NOT NULL," +

@@ -93,6 +93,8 @@ export interface ProjectSupervisorStoreShape {
   readonly noProjectControl: () => StoreEffect<NoProjectControlRecord>;
   readonly saveNoProjectControl: (expectedGeneration: number, mode: NoProjectModeValue, baseline: SupervisorBaseline) => StoreEffect<void>;
   readonly start: (threadId: string) => StoreEffect<SupervisionStartRecord | null>;
+  /** Every recorded Start, in stored order; a record that does not decode fails the read. */
+  readonly starts: () => StoreEffect<ReadonlyArray<SupervisionStartRecord>>;
   readonly startOperation: (threadId: string, operationId: string) => StoreEffect<SupervisionStartOperation | null>;
   readonly saveStartOperation: (value: SupervisionStartOperation) => StoreEffect<void>;
   readonly saveStart: (value: SupervisionStartRecord) => StoreEffect<void>;
@@ -158,7 +160,7 @@ const decodeCountRow = decodeRow(Schema.Struct({n: Schema.Finite}), rowInvalid("
 const decodeEnabledAtRow = decodeRow(Schema.Struct({enabled_at: Schema.Finite}), rowInvalid("chat_enable"));
 const decodeDefinitionSaveRow = decodeRow(Schema.Struct({signature: Schema.String, saved_at: Schema.Finite, expected_revision: Schema.String}), rowInvalid("definition_save"));
 
-// the supervision schema, statement for statement as the synchronous constructor writes it (the stored DDL text is golden)
+// the supervision schema, statement for statement as the baseline constructor wrote it (the stored DDL text is golden)
 const supervisionSchema = [
   "CREATE TABLE IF NOT EXISTS supervisor_owned_threads(id TEXT PRIMARY KEY)",
   "CREATE TABLE IF NOT EXISTS supervisor_project_settings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL)",
@@ -346,15 +348,18 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
   const recordChatEnable = (threadId: string, at: number) =>
     run(Effect.asVoid(sql`INSERT INTO supervisor_chat_enables VALUES(${threadId},${at}) ON CONFLICT(thread_id) DO UPDATE SET enabled_at=max(enabled_at,excluded.enabled_at)`));
   const noProjectControl = () => read(noProjectControlOf);
+  // every recorded Start in stored order, each decoded
+  const startsOf = Effect.flatMap(sql`SELECT value FROM meta WHERE key LIKE 'supervisor_start:%'`, (rows) => Effect.forEach(rows, (row) =>
+    Effect.flatMap(decodeValueRow(row), ({value}) => storedDocument<SupervisionStartRecord, ProjectSupervisorStoreError>(value, isStoredStart, rowInvalid("meta")))));
   const saveNoProjectControl = (expectedGeneration: number, mode: NoProjectModeValue, baseline: SupervisorBaseline) => write(Effect.gen(function* () {
     if ((yield* noProjectControlOf).generation !== expectedGeneration) return yield* refuse("no_project_control_conflict");
-    for (const row of yield* sql`SELECT value FROM meta WHERE key LIKE 'supervisor_start:%'`) {
-      const start = yield* storedDocument<SupervisionStartRecord, ProjectSupervisorStoreError>((yield* decodeValueRow(row)).value, isStoredStart, rowInvalid("meta"));
+    for (const start of yield* startsOf) {
       if (start.status === "pending") yield* saveStartOf({...start, status: "rejected", reason: "Superseded by a No Project mode change."});
     }
     yield* putMeta("supervisor_no_project", JSON.stringify({generation: expectedGeneration + 1, mode, baseline}));
   }));
   const start = (threadId: string) => run(metaDocument<SupervisionStartRecord>(startKey(threadId), isStoredStart));
+  const starts = () => read(startsOf);
   const startOperation = (threadId: string, operationId: string) => run(metaDocument<SupervisionStartOperation>(startOperationKey(threadId, operationId)));
   const saveStartOperation = (value: SupervisionStartOperation) => run(Effect.asVoid(saveStartOperationOf(value)));
   // the receipt and the record commit together, so no reader sees a record without its receipt (ct-pss-08)
@@ -650,7 +655,7 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     return expiredIds;
   }));
 
-  // ---- acquisition, in the synchronous constructor's order: ddl, the column addition, the scope reset, the preparing-Start
+  // ---- acquisition, in the baseline constructor's order: ddl, the column addition, the scope reset, the preparing-Start
   // recovery and the ownership preload
   const scopeCompatible = yield* run(Effect.gen(function* () {
     for (const statement of supervisionSchema) yield* sql.unsafe(statement);
@@ -671,7 +676,7 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
   }));
 
   return {
-    scopeCompatible, ownedIds: owned, recordOwnedThread, chatEnabledAt, recordChatEnable, noProjectControl, saveNoProjectControl, start, startOperation, saveStartOperation,
+    scopeCompatible, ownedIds: owned, recordOwnedThread, chatEnabledAt, recordChatEnable, noProjectControl, saveNoProjectControl, start, starts, startOperation, saveStartOperation,
     saveStart, chatStop, saveUnboundStop, activation, baseline, baselineOrdinal, projectBoundary, folderPresenceNeedsBoundary, setFolderPresence,
     clearFolderPresence, recordFolderPresence, autoControlInitialized, isManual, control, setGlobalFolderPresence, globalDefinitionsControl,
     useGlobalDefinitions, saveGlobalDefinitionsControl, hasGlobalDefinitionsEvent, globalDefinitionsChangeAuthorized, definitionUserGlobalToggle,

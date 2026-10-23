@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 import { Effect, Layer, Scheduler } from "effect";
 import { GuidanceDb } from "../src/db.js";
-import { GuidanceStoreError } from "../src/guidance-store.js";
+import { GuidanceStoreError } from "../src/guidance-sql.js";
 import { defaultMonitoringSettings } from "../src/project-supervisor-contract.js";
 import {
   SUPERVISOR_MONITOR_COOLDOWN_MS,
@@ -12,7 +12,7 @@ import {
   InvalidMonitorCapacity,
   InvalidMonitorObservation,
   makeProjectSupervisorMonitorStore,
-  ProjectSupervisorMonitorStoreService,
+  ProjectSupervisorMonitorStore,
   type ProjectSupervisorMonitorStoreShape,
 } from "../src/supervisor-monitor-store.js";
 import type { SupervisorMonitorObservation } from "../src/supervisor-monitor-store.js";
@@ -204,7 +204,7 @@ const event = (id: string, updatedAt = now - 30_000): EventInput => ({
   updatedAt,
 });
 
-const layer = (directory: string) => ProjectSupervisorMonitorStoreService.layer.pipe(Layer.provideMerge(guidanceDb(directory)));
+const layer = (directory: string) => ProjectSupervisorMonitorStore.layer.pipe(Layer.provideMerge(guidanceDb(directory)));
 
 type Monitor = ProjectSupervisorMonitorStoreShape;
 type Db = GuidanceDb["Service"];
@@ -212,7 +212,7 @@ type Db = GuidanceDb["Service"];
 // one open of the client and the store on `directory`; a second call is a store restart
 const withMonitorAt = <A, E>(directory: string, work: (monitor: Monitor, db: Db) => Effect.Effect<A, E, GuidanceDb>) =>
   Effect.gen(function* () {
-    return yield* work(yield* ProjectSupervisorMonitorStoreService, yield* GuidanceDb);
+    return yield* work(yield* ProjectSupervisorMonitorStore, yield* GuidanceDb);
   }).pipe(Effect.provide(layer(directory)));
 
 const withStore = <A, E>(work: (monitor: Monitor, db: Db) => Effect.Effect<A, E, GuidanceDb>) =>
@@ -222,7 +222,7 @@ const storedCount = (db: Db, thread: string) => Effect.map(
   rows(db, "SELECT COUNT(*) AS count FROM supervisor_monitor_items WHERE project_id=? AND thread_id=?", projectId, thread),
   ([row]) => Number(row?.count ?? 0));
 
-describe("ProjectSupervisorMonitorStoreService", () => {
+describe("ProjectSupervisorMonitorStore", () => {
   it.live("ten finalized activities or one priority event wakes a chat, while cooldown and unchanged acknowledgements stay quiet", () =>
     withStore((monitor) => Effect.gen(function* () {
       const ten = makeProjection({ events: Array.from({ length: 10 }, (_, index) => event(`count-${index}`)) });

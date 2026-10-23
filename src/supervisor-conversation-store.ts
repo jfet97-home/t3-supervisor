@@ -229,7 +229,7 @@ const makeConversationStore = Effect.gen(function* () {
   const db = yield* GuidanceDb;
   const ids = yield* SupervisorIds;
 
-  // the tables and the review_misses column addition, once, in the synchronous constructor's order
+  // the tables and the review_misses column addition, once, in the baseline constructor's order
   yield* guidanceSql(db.withTransaction(Effect.gen(function* () {
     for (const statement of schema) yield* db.unsafe(statement);
     if (!(yield* tableColumns(db, "supervisor_monitor_binding_clock")).includes("review_misses"))

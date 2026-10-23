@@ -16,6 +16,8 @@ const live = <A, E, R>(body: Effect.Effect<A, E, R>) => body.pipe(Effect.provide
 const interruptedStartReason = "Start intake was interrupted before permission was reserved. Submit a new explicit request.";
 const metaRows = (sql: SqlClient.SqlClient) => Effect.map(sql.unsafe<{key: string; value: string}>("SELECT key,value FROM meta ORDER BY key"),
   (rows) => rows.map((row): [string, string] => [row.key, row.value]));
+// the supervision meta rows, without the guidance store's own settings row that its layer writes first
+const supervisionMetaRows = (sql: SqlClient.SqlClient) => Effect.map(metaRows(sql), (rows) => rows.filter(([key]) => key !== "settings"));
 const tableRows = (sql: SqlClient.SqlClient, table: string) => Effect.map(sql.unsafe<Record<string, unknown>>(`SELECT * FROM ${table} ORDER BY rowid`), (rows) => rows.map((row) => ({...row})));
 const documentOf = (sql: SqlClient.SqlClient, mainThreadId: string) =>
   Effect.map(sql`SELECT document FROM supervisor_main_bindings WHERE main_thread_id=${mainThreadId}`, ([row]) => String(row?.document));
@@ -110,7 +112,7 @@ it.live("CT-PSS-02: concurrent reservations of one main yield one owned root and
 })), {timeout: 10_000});
 
 it.live("CT-PSS-03: a stale binding copy keeps the stored stop and notice, and the notice CAS honours the expected messageId", () => live(Effect.gen(function* () {
-  const {sql, supervisors: store} = yield* guidanceStoresFixture("pss-service-03-");
+  const {ids, sql, supervisors: store} = yield* guidanceStoresFixture("pss-service-03-");
   const binding = yield* store.reserve("project-a", "main-a", "Main", defaultSupervisorModel, 1, 100);
   const stale = (yield* store.binding("project-a", "main-a"))!;
   yield* store.setBinding({...stale, manualKeepActive: true, stopObservedAt: 150});
@@ -120,7 +122,7 @@ it.live("CT-PSS-03: a stale binding copy keeps the stored stop and notice, and t
   assert.deepEqual(stopped.supervisionStop, stop);
   assert.equal("manualKeepActive" in stopped || "stopObservedAt" in stopped, false, "a Stop clears keep-active and the observed stop marker");
 
-  const notice = prepareStopNotice(binding, 200, null);
+  const notice = yield* prepareStopNotice(ids, binding, 200, null);
   yield* store.setStopNotice(binding, null, notice);
   assert.deepEqual((yield* store.binding("project-a", "main-a"))!.stopNotice, notice, "expected null on an absent notice succeeds");
   assert.equal((yield* store.binding("project-a", "main-a"))!.stopNotice!.enabledAt, null);
@@ -247,12 +249,14 @@ it.effect("CT-PSS-06: the supervision DDL and every meta key format are golden a
   yield* writer.supervisors.saveStart({threadId: "main-a", projectId: "project-a", operationId: "op-1", requestHash: "hash-1", route: "ui", status: "active",
     reason: "Supervision is enabled until explicit Stop. Settlement only parks the Supervisor.", intentAt: 1_790_000_000_000, modeGeneration: 1, masterGeneration: 1, taskId: null});
   yield* writer.supervisors.saveUnboundStop("main-b", {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: 1_790_000_000_000});
-  assert.deepEqual(yield* metaRows(writer.sql), pssMetaGolden);
+  assert.deepEqual(yield* supervisionMetaRows(writer.sql), pssMetaGolden);
   assert.deepEqual(yield* pssDdl(writer.sql), pssDdlGolden);
+  const written = yield* metaRows(writer.sql);
   yield* writer.close;
 
   const {sql, supervisors: store} = yield* reopenGuidanceStores(directory);
-  assert.deepEqual(yield* metaRows(sql), pssMetaGolden, "opening rewrites no meta row");
+  assert.deepEqual(yield* supervisionMetaRows(sql), pssMetaGolden, "opening rewrites no meta row");
+  assert.deepEqual(yield* metaRows(sql), written, "opening rewrites no meta row, the guidance settings row included");
   assert.deepEqual(yield* pssDdl(sql), pssDdlGolden);
   assert.equal(store.scopeCompatible, true);
   assert.deepEqual(yield* store.control(null), {projectId: null, generation: 1, enabled: true, manual: true, globallyEnabled: true, effectiveEnabled: true,
@@ -276,7 +280,7 @@ it.effect("CT-PSS-06: the supervision DDL and every meta key format are golden a
   assert.deepEqual(yield* store.startOperation("main-a", "op-1"), {threadId: "main-a", operationId: "op-1", requestHash: "hash-1", status: "active",
     reason: "Supervision is enabled until explicit Stop. Settlement only parks the Supervisor."});
   assert.deepEqual(yield* store.chatStop("main-b"), {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: 1_790_000_000_000});
-  assert.deepEqual(yield* metaRows(sql), pssMetaGolden, "reads write nothing");
+  assert.deepEqual(yield* supervisionMetaRows(sql), pssMetaGolden, "reads write nothing");
 })), {timeout: 10_000});
 
 it.live("CT-PSS-07: a legacy definition-save table gains expected_revision with an empty default exactly once and keeps its rows", () => live(Effect.gen(function* () {

@@ -1,9 +1,11 @@
 import { Cause, Context, Effect, Layer } from "effect";
+import { GuidanceDb, guidanceDbLayer } from "./db.js";
+import { guidanceTransaction } from "./guidance-sql.js";
 import { GuidanceStore } from "./guidance-store.js";
 import { GuidanceRuntime } from "./guidance.js";
 import { GuidanceUi } from "./guidance-ui.js";
 import type { T3ClientShape } from "./t3.js";
-import type { SupervisorConfig } from "./types.js";
+import type { SupervisorSettings } from "./types.js";
 import { readFile } from "node:fs/promises";
 import { posix } from "node:path";
 import type { NativeTransport } from "./supervisor.js";
@@ -11,12 +13,12 @@ import { ProjectCommitter, ProjectFiles, ProjectWriter } from "./project-files.j
 import { ProjectDefinitions } from "./project-definitions.js";
 import { ProjectConfigEditorService } from "./project-config-editor.js";
 import { existsSync } from "node:fs";
-import { ProjectSupervisorStore, loadSupervisorOwnership } from "./project-supervisor-store.js";
+import { SupervisorIds } from "./ids.js";
+import { ProjectSupervisorStore } from "./project-supervisor-store.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
 import { NativeOperateRpc, NativeRpc, NativeShell } from "./supervisor-native.js";
-import { SupervisionScope } from "./supervision-gate.js";
 import { SupervisionControl } from "./supervision-control.js";
-import { SupervisionLive } from "./supervision-live.js";
+import { SupervisionLive, SupervisionStoresLive } from "./supervision-live.js";
 import { Store, type StoreShape } from "./store.js";
 import { T3Client } from "./t3.js";
 import { GitProbe } from "./git-probe.js";
@@ -25,20 +27,20 @@ import { WorkflowMcp } from "./workflow-mcp.js";
 import { ServiceAuth } from "./service-auth.js";
 
 export const runGuidanceApplication = (
-  config: SupervisorConfig,
+  config: SupervisorSettings,
   source: StoreShape,
   t3: T3ClientShape,
   onReady: () => void = () => {},
 ) =>
   Effect.gen(function* () {
-    const store = yield* Effect.acquireRelease(
-      Effect.sync(() => new GuidanceStore(config.dataDirectory)),
-      (store) => Effect.sync(() => store.close()),
-    );
-    const guidanceRuntime = yield* GuidanceRuntime.make(config, store, source);
+    // the run's guidance client and store: the schema, the default settings, the column additions and the restart recovery,
+    // once; the client is released with the run, after everything built over it
+    const guidance = yield* Layer.build(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(config.dataDirectory)), Layer.provide(SupervisorIds.layer)));
+    const store = Context.get(guidance, GuidanceStore);
+    const guidanceRuntime = yield* GuidanceRuntime.make(config, source).pipe(Effect.provide(guidance));
     const descriptor = yield* t3.descriptor();
     yield* guidanceRuntime.recordDescriptor(descriptor);
-    store.bind(descriptor.environmentId);
+    yield* store.bind(descriptor.environmentId);
     const readToken = yield* Effect.tryPromise(() => readFile(config.t3TokenFile, "utf8"));
     const writePath = config.projectWriteTokenFile;
     const writeToken = writePath && existsSync(writePath) ? yield* Effect.tryPromise(() => readFile(writePath, "utf8")) : "";
@@ -47,17 +49,20 @@ export const runGuidanceApplication = (
     const probePath = config.gitProbeTokenFile;
     const probeToken = probePath && existsSync(probePath) ? yield* Effect.tryPromise(() => readFile(probePath, "utf8")) : "";
     // the native file, writer, commit, probe and rpc clients run on the root native transport (one envelope, crypto and fetch
-    // client per process, d-08); the probe draws its ids from the platform crypto
+    // client per process, d-08); the probe draws its ids from the platform crypto and keeps its pending sessions in the guidance
+    // metadata
     const nativeClients = yield* Effect.context<NativeTransport>();
     const endpoint = (token: string) => ({baseUrl: config.t3Url, token});
-    const gitProbe = probeToken.trim() ? yield* Effect.provide(GitProbe.make(endpoint(probeToken.trim()), store), nativeClients) : undefined;
+    const gitProbe = probeToken.trim() ? yield* Effect.provide(GitProbe.make(endpoint(probeToken.trim())), Context.merge(nativeClients, guidance)) : undefined;
     const cleanupGitProbe = gitProbe ? gitProbe.cleanup.pipe(
       Effect.catch(() => Effect.sync(() => console.log(JSON.stringify({event: "native_git_probe_cleanup_unavailable"})))),
     ) : Effect.void;
     yield* Effect.acquireRelease(Effect.succeed(gitProbe), () => cleanupGitProbe);
     yield* cleanupGitProbe;
-    const owned = config.supervisorOwnedThreadIds ??= loadSupervisorOwnership(config.dataDirectory);
-    const supervisionStore = new ProjectSupervisorStore(store, owned);
+    // the supervision stores of the run over its guidance client: the project supervision store reloads the permanent ownership
+    // into the process's set here, before the run reads or filters the catalog (cc-ownership)
+    const stores = yield* Layer.build(SupervisionStoresLive.pipe(Layer.provideMerge(Layer.succeedContext(guidance)), Layer.provide(SupervisorIds.layer)));
+    const supervisionStore = Context.get(stores, ProjectSupervisorStore);
     const projectWriter = writeToken.trim() ? yield* Effect.provide(ProjectWriter.make(endpoint(writeToken.trim())), nativeClients) : undefined;
     const commitWriter = commitToken.trim() ? yield* Effect.provide(ProjectCommitter.make(endpoint(commitToken.trim())), nativeClients) : undefined;
     const setupWriter = projectWriter ? {
@@ -69,11 +74,8 @@ export const runGuidanceApplication = (
     const definitions = yield* ProjectDefinitions.make({source, t3, files: yield* Effect.provide(ProjectFiles.make(endpoint(readToken.trim())), nativeClients), options: {
       globalRoot: "~",
       useGlobalDefinitions: () => supervisionStore.useGlobalDefinitions(),
-      isScratchProject: (projectId, workspaceRoot) => {
-        const classification = store.classification(projectId);
-        if (classification !== "unclassified") return classification === "scratch";
-        return managedScratchRoot !== null && posix.normalize(workspaceRoot) === managedScratchRoot;
-      },
+      isScratchProject: (projectId, workspaceRoot) => Effect.map(store.classification(projectId), (classification) => classification !== "unclassified"
+        ? classification === "scratch" : managedScratchRoot !== null && posix.normalize(workspaceRoot) === managedScratchRoot),
       ...(setupWriter ? {setupWriter} : {}),
       ...(gitProbe ? {gitProbe: gitProbe.probe} : {}),
     }});
@@ -87,11 +89,11 @@ export const runGuidanceApplication = (
       operateToken.trim() ? NativeOperateRpc.layer(endpoint(operateToken.trim())) : Layer.empty,
       Layer.succeed(Store, source), Layer.succeed(T3Client, t3), Layer.succeed(ProjectDefinitions, definitions),
     );
-    // the services of the supervision run, one layer graph built once in this scope over those clients: the supervisor's scope
-    // predicates with the admission gate that guards with them, the team services, the Start/Stop control, the workflow
-    // controllers and the project supervisor
-    const services = yield* Layer.build(SupervisionLive({store: supervisionStore, scope: new SupervisionScope(config, supervisionStore, Boolean(operateToken.trim())),
-      baseUrl: config.t3Url, helperProviderInstanceId: config.helperProviderInstanceId}).pipe(Layer.provideMerge(clients)));
+    // the services of the supervision run, one layer graph built once in this scope over those clients and the run's stores: the
+    // supervisor's scope predicates with the admission gate that guards with them, the team services, the Start/Stop control, the
+    // workflow controllers and the project supervisor
+    const services = yield* Layer.build(SupervisionLive({operateRpcAvailable: Boolean(operateToken.trim()), baseUrl: config.t3Url,
+      helperProviderInstanceId: config.helperProviderInstanceId}).pipe(Layer.provideMerge(clients), Layer.provideMerge(Layer.succeedContext(stores))));
     const supervision = Context.get(services, ProjectSupervisor);
     // the dashboard's access client, runtime and workflow MCP endpoint over the run's controllers, provided once in this scope;
     // the listeners are acquired after them and released before them, and the api handlers yield the run's services
@@ -111,10 +113,8 @@ export const runGuidanceApplication = (
     // each cycle publishes the descriptor before binding and pruning; any failure but an interruption marks the runtime unavailable
     const cycle = t3.descriptor().pipe(
       Effect.tap(guidanceRuntime.recordDescriptor),
-      Effect.tap(next => Effect.sync(() => {
-        store.bind(next.environmentId);
-        store.prune();
-      })),
+      // the binding check and the pruning are one transaction
+      Effect.tap(next => guidanceTransaction(Context.get(guidance, GuidanceDb))(Effect.andThen(store.bind(next.environmentId), store.prune()))),
       Effect.andThen(guidanceRuntime.markActive),
       Effect.catchCause(cause => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : guidanceRuntime.markUnavailable),
       Effect.andThen(Effect.sleep("5 seconds")),

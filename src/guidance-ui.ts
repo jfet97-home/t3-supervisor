@@ -19,6 +19,7 @@ import { readWorkflowProgressPage } from "./workflow-progress-reader.js";
 import { ServiceAuth } from "./service-auth.js";
 import { WorkflowMcp, WorkflowMcpRoute } from "./workflow-mcp.js";
 import { overviewPage } from "./dashboard-overview.js";
+import { ThreadPolicyStore } from "./thread-policy.js";
 
 // the supervision services the api handlers yield
 export interface GuidanceSupervision {
@@ -108,6 +109,7 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
   const auth = yield* ServiceAuth;
   const runtime = yield* GuidanceRuntime;
   const mcp = yield* WorkflowMcp;
+  const policy = yield* ThreadPolicyStore;
   yield* fs.remove(join(config.dataDirectory, "ui-login-code"), { force: true });
   const { definitions, editor, supervision, workflowReader } = options;
   // a service call answers its fixed UiError for any failure or defect; an interruption stays one
@@ -121,12 +123,12 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
       snapshot: () => Effect.orDie(runtime.snapshot),
       dashboardOverview: ({query}) => supervised("The work overview is unavailable. Refresh to try again.",
         ({supervisor}) => Effect.suspend(() => supervisor.overview(overviewPage(query)))),
-      noProjectControl: () => Effect.try({try: () => {if (!supervision) throw new Error("unavailable");return supervision.supervisor.noProjectControl();}, catch: () => new UiError({message: "No Project mode unavailable."})}),
+      noProjectControl: () => supervised("No Project mode unavailable.", ({supervisor}) => supervisor.noProjectControl()),
       saveNoProjectControl: ({payload}) => supervised("Reload the No Project mode before retrying.", ({supervisor}) => supervisor.saveNoProjectControl(payload)),
       supervisionCandidates: ({query}) => supervised("Chat search unavailable.", ({supervisor}) => supervisor.candidates(query.query, query.purpose)),
       startSupervision: ({payload}) => supervised("Start outcome is unknown. Check its original operation ID; do not replay.", ({control}) =>
         Effect.map(control.dashboardStart(payload.threadId, payload.operationId), (result) => ({...payload, status: result.status === "invalid" ? "denied" as const : result.status, reason: result.reason}))),
-      supervisionStartStatus: ({query}) => Effect.try({try: () => {if (!supervision) throw new Error("unavailable");return supervision.control.startStatus(query.threadId, query.operationId);}, catch: () => new UiError({message: "Start status unavailable."})}),
+      supervisionStartStatus: ({query}) => supervised("Start status unavailable.", ({control}) => control.startStatus(query.threadId, query.operationId)),
       supervisionControl: ({query}) => supervised("Supervision control is unavailable.", ({supervisor}) => supervisor.control(query.projectId ?? null)),
       saveSupervisionControl: ({payload}) => supervised("The enable/disable outcome could not be confirmed. Reload before trying again.", ({supervisor}) => supervisor.saveControl(payload)),
       supervisionSetupOptions: ({query}) => supervised("Registered checkout options could not be loaded.", ({supervisor}) => supervisor.setupOptions(query.projectId)),
@@ -138,7 +140,7 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
         ({supervisor}) => supervisor.snapshot(query.projectId, query.mainThreadId ?? null)),
       workflowProgress: ({query}) => supervised("Live workflow progress is unavailable. Refresh and check the T3 connection.", ({supervisor}) => {
         const parsed = parseWorkflowProgressPageQuery(query);
-        if (!workflowReader || !parsed) return Effect.fail(new UiError({message: "Live workflow progress is unavailable. Refresh and check the T3 connection."}));
+        if (!workflowReader || !parsed) return Effect.fail<unknown>(new UiError({message: "Live workflow progress is unavailable. Refresh and check the T3 connection."}));
         return readWorkflowProgressPage(parsed).pipe(Effect.provideService(ProjectSupervisor, supervisor), Effect.provideService(WorkflowWriteController, workflowReader));
       }),
       saveProjectSupervisor: ({payload}) => supervised("Supervisor settings could not be confirmed. Refresh and inspect the current selection before saving again.",
@@ -154,11 +156,10 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
         : failingWith("The save outcome could not be confirmed. Refresh and inspect project.yaml before retrying.", Effect.suspend(() => editor.save(payload))),
       threadPolicy: ({ payload }) => {
         const invalid = (cause: unknown) => new UiError({ message: cause instanceof Error ? cause.message : "Chat settings invalid. Reload first." });
-        const policy = config.threadPolicy;
-        if (!policy) return Effect.fail(invalid(new Error("Chat settings unavailable.")));
         // each chat this editor adds or removes is a human Stop or Enable for that chat's supervision, saved as one admission
-        // section
-        return supervision ? Effect.mapError(supervision.control.saveThreadPolicy(payload), invalid) : Effect.try({ try: () => policy.save(payload), catch: invalid });
+        // section; without supervision the policy alone is saved
+        return supervision ? Effect.mapError(supervision.control.saveThreadPolicy(payload), invalid)
+          : Effect.mapError(policy.save(payload), invalid);
       },
     }),
   );

@@ -3,9 +3,10 @@ import { createHash } from "node:crypto";
 import { describe, it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import { GuidanceDb } from "../src/db.js";
-import { GuidanceStoreError, GuidanceStoreService } from "../src/guidance-store.js";
-import { SupervisorConversationStoreService } from "../src/supervisor-conversation-store.js";
-import { ProjectSupervisorMonitorStoreService } from "../src/supervisor-monitor-store.js";
+import { GuidanceStoreError } from "../src/guidance-sql.js";
+import { GuidanceStore } from "../src/guidance-store.js";
+import { SupervisorConversationStore } from "../src/supervisor-conversation-store.js";
+import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.js";
 import { SupervisorStateReset, type SupervisorStateResetShape } from "../src/supervisor-state-reset.js";
 import { guidanceDb, rows, sequentialIds, temporaryDirectory } from "./support/guidance-store-services.js";
 
@@ -13,8 +14,8 @@ import { guidanceDb, rows, sequentialIds, temporaryDirectory } from "./support/g
 // synchronous constructors' order (guidance schema first): the scope-lifecycle reset cases at service level, CT-RESET-01
 // and the reset inside the caller's transaction
 
-const layer = (directory: string) => Layer.mergeAll(SupervisorStateReset.layer, GuidanceStoreService.layer, SupervisorConversationStoreService.layer,
-  ProjectSupervisorMonitorStoreService.layer).pipe(Layer.provideMerge(guidanceDb(directory)), Layer.provide(sequentialIds()));
+const layer = (directory: string) => Layer.mergeAll(SupervisorStateReset.layer, SupervisorConversationStore.layer,
+  ProjectSupervisorMonitorStore.layer).pipe(Layer.provideMerge(GuidanceStore.layer), Layer.provideMerge(guidanceDb(directory)), Layer.provide(sequentialIds()));
 
 const withReset = <A, E>(directory: string, use: (reset: SupervisorStateResetShape, db: GuidanceDb["Service"]) => Effect.Effect<A, E>) =>
   Effect.gen(function* () {

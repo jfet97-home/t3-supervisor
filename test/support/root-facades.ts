@@ -7,12 +7,11 @@ import {
   type GlobalDefinitionPresence, type ProjectDefinitionGlobalSetupOutcome, type ProjectDefinitionSetupInput, type ProjectDefinitionSetupOutcome,
 } from "../../src/project-definitions.js";
 import type { SupervisorMonitoringStatus } from "../../src/project-supervisor-contract.js";
-import type { BindingRecord, ProjectSupervisorStore } from "../../src/project-supervisor-store.js";
-import type { SupervisionScope } from "../../src/supervision-gate.js";
+import type { BindingRecord } from "../../src/project-supervisor-store.js";
 import { SupervisionControllersLive, SupervisionTeamLive } from "../../src/supervision-live.js";
-import type { SupervisionStores } from "../../src/supervision-stores.js";
 import type { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import type { SupervisorConversationStore } from "../../src/supervisor-conversation-store.js";
+import type { Promised, StorePromise, StoreUnit } from "./store-units.js";
 import type { HelperTransport, InvalidReceipt, SupervisorHelperMessage, SupervisorHelperSendResult } from "../../src/supervisor-helper-transport.js";
 import type { SupervisorLifecycle } from "../../src/supervisor-lifecycle.js";
 import type { SupervisorMonitorBatch } from "../../src/supervisor-monitor.js";
@@ -50,26 +49,27 @@ export interface ProjectDefinitionLoader {
 export interface ProjectConfigEditor {
   save(input: ProjectConfigSave, parentSignal?: AbortSignal): Promise<ProjectConfigSaveOutcome>;
 }
-// the baseline promise shapes of the helper transport; its receipt reads stay synchronous
+// the baseline promise shapes of the helper transport; its receipt reads, synchronous at baseline, are store reads now and
+// answer as promises
 export interface SupervisorHelperDeliveryTransport {
   send(binding: BindingRecord, input: SupervisorHelperMessage, signal: AbortSignal, authorized?: () => boolean): Promise<SupervisorHelperSendResult>;
-  hasDelivery(binding: BindingRecord, input: SupervisorHelperMessage): boolean;
+  hasDelivery(binding: BindingRecord, input: SupervisorHelperMessage): StorePromise<boolean>;
   reconcileDelivery(binding: BindingRecord, input: SupervisorHelperMessage, signal: AbortSignal): Promise<"absent" | SupervisorHelperSendResult>;
-  receiptText(binding: BindingRecord, logicalMessageId: string): string | null | InvalidReceipt;
-  matchesMessage(binding: BindingRecord, logicalMessageId: string, text: string, message: MessageInfo, messages: readonly MessageInfo[]): boolean;
+  receiptText(binding: BindingRecord, logicalMessageId: string): StorePromise<string | null | InvalidReceipt>;
+  matchesMessage(binding: BindingRecord, logicalMessageId: string, text: string, message: MessageInfo, messages: readonly MessageInfo[]): StorePromise<boolean>;
   retire(binding: BindingRecord, helperThreadId: string, signal: AbortSignal): Promise<boolean>;
 }
-// the baseline promise shapes of the team runtime: the synchronous reads and in-memory cycle start stay synchronous, the
-// reconciliations take the caller's AbortSignal
+// the baseline promise shapes of the team runtime: the in-memory cycle start stays synchronous, its store reads and writes,
+// synchronous at baseline, answer as promises, the reconciliations take the caller's AbortSignal
 export interface SupervisorTeamRuntimeFacade {
   startCycle(binding: BindingRecord): void;
-  rootOwnedBatch(binding: BindingRecord, batch: SupervisorMonitorBatch, threads: readonly ThreadInfo[]): SupervisorMonitorBatch | null;
-  partition(binding: BindingRecord, threads: readonly ThreadInfo[], batch: SupervisorMonitorBatch | null): SupervisorTeamPartition;
-  hasMembers(binding: BindingRecord): boolean;
-  coordinatorPolicy(binding: BindingRecord): {maxHelpersPerRoot: number; readyHelpers: number; registeringHelpers: number};
-  acknowledgeRootEvents(binding: BindingRecord, eventIds: readonly string[]): void;
-  hasInflightEffects(binding: BindingRecord): boolean;
-  hasBlockingWork(binding: BindingRecord): boolean;
+  rootOwnedBatch(binding: BindingRecord, batch: SupervisorMonitorBatch, threads: readonly ThreadInfo[]): StorePromise<SupervisorMonitorBatch | null>;
+  partition(binding: BindingRecord, threads: readonly ThreadInfo[], batch: SupervisorMonitorBatch | null): StorePromise<SupervisorTeamPartition>;
+  hasMembers(binding: BindingRecord): StorePromise<boolean>;
+  coordinatorPolicy(binding: BindingRecord): StorePromise<{maxHelpersPerRoot: number; readyHelpers: number; registeringHelpers: number}>;
+  acknowledgeRootEvents(binding: BindingRecord, eventIds: readonly string[]): StorePromise<void>;
+  hasInflightEffects(binding: BindingRecord): StorePromise<boolean>;
+  hasBlockingWork(binding: BindingRecord): StorePromise<boolean>;
   reconcileStopped(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void>;
   reconcile(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void>;
   runHelperBatch(binding: BindingRecord, threads: readonly ThreadInfo[], batches: readonly SupervisorTeamHelperBatch[], signal: AbortSignal): Promise<void>;
@@ -77,26 +77,26 @@ export interface SupervisorTeamRuntimeFacade {
 // the baseline promise shapes of the conversation: an aborted call interrupts its work; `now` stamps that call's wall clock as
 // the baseline parameter did
 export interface SupervisorConversationFacade {
-  readonly requests: SupervisorConversationStore;
-  readonly monitor: ProjectSupervisorMonitorStore;
+  readonly requests: Promised<SupervisorConversationStore["Service"]>;
+  readonly monitor: Promised<ProjectSupervisorMonitorStore["Service"]>;
   readonly teamRuntime: SupervisorTeamRuntimeFacade | null;
   run(binding: BindingRecord, supervisor: Projection, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void>;
   observe(threads: readonly ThreadInfo[], signal: AbortSignal, now?: number): Promise<void>;
   reconcileStopNotice(owner: BindingRecord, signal: AbortSignal): Promise<void>;
   reconcileStopped(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal, supervisor?: Projection): Promise<void>;
   readContextView(binding: BindingRecord, input: SupervisorContextViewInput, signal: AbortSignal): Promise<SupervisorContextViewResult>;
-  status(projectId: string, supervisorThreadId: string | null): SupervisorMonitoringStatus;
-  hasInflight(projectId: string, supervisorThreadId: string): boolean;
-  interpretationRole(binding: BindingRecord): {text: string; roleVersion: string} | null;
-  roleDelivered(supervisorThreadId: string, roleVersion: string): void;
-  retry(projectId: string, supervisorThreadId: string): void;
-  fenceStoppedSupervision(binding: BindingRecord): void;
+  status(projectId: string, supervisorThreadId: string | null): StorePromise<SupervisorMonitoringStatus>;
+  hasInflight(projectId: string, supervisorThreadId: string): StorePromise<boolean>;
+  interpretationRole(binding: BindingRecord): StorePromise<{text: string; roleVersion: string} | null>;
+  roleDelivered(supervisorThreadId: string, roleVersion: string): StorePromise<void>;
+  retry(projectId: string, supervisorThreadId: string): StorePromise<void>;
+  fenceStoppedSupervision(binding: BindingRecord): StorePromise<void>;
 }
 // the baseline promise shapes of the lifecycle: an aborted call interrupts its work; `now` stamps that call's wall clock
 export interface SupervisorLifecycleFacade {
   readMain(binding: BindingRecord, signal: AbortSignal): Promise<Projection | null>;
   check(input: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal, now?: number): Promise<void>;
-  parkInactive(input: BindingRecord, signal: AbortSignal, stillInactive: () => boolean): Promise<void>;
+  parkInactive(input: BindingRecord, signal: AbortSignal, stillInactive: () => boolean | Promise<boolean>): Promise<void>;
 }
 // the baseline promise call shapes of the write controller; a call's signal is its cancel, else the tool's own 10 s applies
 export interface WorkflowWriteControllerPromises {
@@ -162,28 +162,29 @@ export const promiseEditorService = (editor: ProjectConfigEditor): ProjectConfig
 });
 
 // a call's AbortSignal is the service's cancel trigger for the lifetime of that call, as for the native rpc facade
-const cancelled = <A>(run: RootRun, signal: AbortSignal, call: (cancel: Deferred.Deferred<void>) => Effect.Effect<A>): Promise<A> =>
+const cancelled = <A, E>(run: RootRun, signal: AbortSignal, call: (cancel: Deferred.Deferred<void>) => Effect.Effect<A, E>): Promise<A> =>
   run(Effect.scoped(Effect.flatMap(cancelOnAbort(signal), call)));
-// the baseline promise shapes of the helper transport; its receipt reads stay synchronous b-02 reads
+// the baseline promise shapes of the helper transport; its receipt reads answer as promises
 export const helperTransportFacade = (run: RootRun, transport: HelperTransport["Service"]): SupervisorHelperDeliveryTransport => ({
   send: (binding, input, signal, authorized) =>
-    cancelled(run, signal, (cancel) => transport.send(binding, input, {cancel, ...(authorized ? {authorized: () => authorized()} : {})})),
-  hasDelivery: (binding, input) => Effect.runSync(transport.hasDelivery(binding, input)),
+    cancelled(run, signal, (cancel) => transport.send(binding, input, {cancel, ...(authorized ? {authorized: () => Effect.sync(authorized)} : {})})),
+  hasDelivery: (binding, input) => run(transport.hasDelivery(binding, input)),
   reconcileDelivery: (binding, input, signal) => cancelled(run, signal, (cancel) => transport.reconcileDelivery(binding, input, cancel)),
-  receiptText: (binding, logicalMessageId) => Effect.runSync(transport.receiptText(binding, logicalMessageId)),
-  matchesMessage: (binding, logicalMessageId, text, message, messages) => Effect.runSync(transport.matchesMessage(binding, logicalMessageId, text, message, messages)),
+  receiptText: (binding, logicalMessageId) => run(transport.receiptText(binding, logicalMessageId)),
+  matchesMessage: (binding, logicalMessageId, text, message, messages) => run(transport.matchesMessage(binding, logicalMessageId, text, message, messages)),
   retire: (binding, helperThreadId, signal) => cancelled(run, signal, (cancel) => transport.retire(binding, helperThreadId, cancel)),
 });
-// the baseline promise shapes of the team runtime; its cycle start and b-02 reads stay synchronous
+// the baseline promise shapes of the team runtime; its in-memory cycle start stays synchronous and its store reads and writes
+// answer as promises
 export const teamRuntimeFacade = (run: RootRun, runtime: SupervisorTeamRuntime["Service"]): SupervisorTeamRuntimeFacade => ({
   startCycle: (binding) => Effect.runSync(runtime.startCycle(binding)),
-  rootOwnedBatch: (binding, batch, threads) => Effect.runSync(runtime.rootOwnedBatch(binding, batch, threads)),
-  partition: (binding, threads, batch) => Effect.runSync(runtime.partition(binding, threads, batch)),
-  hasMembers: (binding) => Effect.runSync(runtime.hasMembers(binding)),
-  coordinatorPolicy: (binding) => Effect.runSync(runtime.coordinatorPolicy(binding)),
-  acknowledgeRootEvents: (binding, eventIds) => Effect.runSync(runtime.acknowledgeRootEvents(binding, eventIds)),
-  hasInflightEffects: (binding) => Effect.runSync(runtime.hasInflightEffects(binding)),
-  hasBlockingWork: (binding) => Effect.runSync(runtime.hasBlockingWork(binding)),
+  rootOwnedBatch: (binding, batch, threads) => run(runtime.rootOwnedBatch(binding, batch, threads)),
+  partition: (binding, threads, batch) => run(runtime.partition(binding, threads, batch)),
+  hasMembers: (binding) => run(runtime.hasMembers(binding)),
+  coordinatorPolicy: (binding) => run(runtime.coordinatorPolicy(binding)),
+  acknowledgeRootEvents: (binding, eventIds) => run(runtime.acknowledgeRootEvents(binding, eventIds)),
+  hasInflightEffects: (binding) => run(runtime.hasInflightEffects(binding)),
+  hasBlockingWork: (binding) => run(runtime.hasBlockingWork(binding)),
   reconcileStopped: (binding, threads, signal) => cancelled(run, signal, (cancel) => runtime.reconcileStopped(binding, threads, cancel)),
   reconcile: (binding, threads, signal) => cancelled(run, signal, (cancel) => runtime.reconcile(binding, threads, cancel)),
   runHelperBatch: (binding, threads, batches, signal) => cancelled(run, signal, (cancel) => runtime.runHelperBatch(binding, threads, batches, cancel)),
@@ -213,8 +214,9 @@ const atWallClock = (now: number | undefined) => <A, E>(work: Effect.Effect<A, E
     monotonicTimeNanos: clock.monotonicTimeNanos,
     sleep: (duration) => clock.sleep(duration),
   }));
-// the baseline promise shapes of the conversation; its status, retry, role and fence calls stay synchronous
-export const supervisorConversationFacade = (run: RootRun, conversation: SupervisorConversation["Service"], stores: SupervisionStores["Service"],
+// the baseline promise shapes of the conversation; its status, retry, role and fence calls, synchronous at baseline, are store
+// reads and writes now and answer as promises
+export const supervisorConversationFacade = (run: RootRun, conversation: SupervisorConversation["Service"], stores: Pick<StoreUnit, "requests" | "monitor">,
   teamRuntime: SupervisorTeamRuntimeFacade | null): SupervisorConversationFacade => ({
   requests: stores.requests,
   monitor: stores.monitor,
@@ -224,23 +226,23 @@ export const supervisorConversationFacade = (run: RootRun, conversation: Supervi
   reconcileStopNotice: (owner, signal) => settleCall(run, signal, conversation.reconcileStopNotice(owner)),
   reconcileStopped: (binding, threads, signal, supervisor) => settleCall(run, signal, conversation.reconcileStopped(binding, threads, supervisor)),
   readContextView: (binding, input, signal) => resultCall(run, signal, conversation.readContextView(binding, input)),
-  status: conversation.status,
-  hasInflight: conversation.hasInflight,
-  interpretationRole: conversation.interpretationRole,
-  roleDelivered: conversation.roleDelivered,
-  retry: conversation.retry,
-  fenceStoppedSupervision: conversation.fenceStoppedSupervision,
+  status: (projectId, supervisorThreadId) => run(conversation.status(projectId, supervisorThreadId)),
+  hasInflight: (projectId, supervisorThreadId) => run(conversation.hasInflight(projectId, supervisorThreadId)),
+  interpretationRole: (binding) => run(conversation.interpretationRole(binding)),
+  roleDelivered: (supervisorThreadId, roleVersion) => run(conversation.roleDelivered(supervisorThreadId, roleVersion)),
+  retry: (projectId, supervisorThreadId) => run(conversation.retry(projectId, supervisorThreadId)),
+  fenceStoppedSupervision: (binding) => run(conversation.fenceStoppedSupervision(binding)),
 });
 // the baseline promise shapes of the lifecycle
 export const supervisorLifecycleFacade = (run: RootRun, lifecycle: SupervisorLifecycle["Service"]): SupervisorLifecycleFacade => ({
   readMain: (binding, signal) => resultCall(run, signal, lifecycle.readMain(binding)),
   check: (input, threads, signal, now) => settleCall(run, signal, atWallClock(now)(lifecycle.check(input, threads))),
-  parkInactive: (input, signal, stillInactive) => settleCall(run, signal, lifecycle.parkInactive(input, stillInactive)),
+  parkInactive: (input, signal, stillInactive) => settleCall(run, signal, lifecycle.parkInactive(input, () => Effect.promise(async () => stillInactive()))),
 });
 // the baseline promise shapes of the write controller; a call's signal is its cancel, as the baseline signal stood for its
 // deadline, and without one the tool's own 10 s applies
 export const workflowWriteControllerFacade = (run: RootRun, controller: WorkflowWriteController["Service"]): WorkflowWriteControllerPromises => {
-  const call = <A>(start: (cancel?: Deferred.Deferred<void>) => Effect.Effect<A>, signal: AbortSignal | undefined): Promise<A> =>
+  const call = <A, E>(start: (cancel?: Deferred.Deferred<void>) => Effect.Effect<A, E>, signal: AbortSignal | undefined): Promise<A> =>
     signal ? cancelled(run, signal, start) : run(start());
   return {
     read: (input, signal) => call((cancel) => controller.read(input, cancel), signal),
@@ -259,11 +261,9 @@ export const supervisorTeamControllerFacade = (run: RootRun, controller: Supervi
   reconcileStopped: (binding, signal) => cancelled(run, signal, (cancel) => controller.reconcileStopped(binding, cancel)),
 });
 
-// the team services of one supervision run as the production graph builds them (src/supervision-live.ts): the interim stores
-// over one binding store, the scope predicates and their admission gate, the helper transport, the team runtime, the
-// conversation and the lifecycle
-export const supervisorTeamServices = (store: ProjectSupervisorStore, baseUrl: string, scope: SupervisionScope) =>
-  Layer.build(SupervisionTeamLive({store, scope, baseUrl}));
+// the team services of one supervision run as the production graph builds them (src/supervision-live.ts) over the run's
+// stores and scope predicates: the admission gate, the helper transport, the team runtime, the conversation and the lifecycle
+export const supervisorTeamServices = (baseUrl: string) => Layer.build(SupervisionTeamLive({baseUrl}));
 // the Start/Stop control, the workflow proof reads and the workflow write and team controllers over those services, as the
 // production graph builds them
 export const supervisorWorkflowControllers = (helperProviderInstanceId: string | undefined) =>

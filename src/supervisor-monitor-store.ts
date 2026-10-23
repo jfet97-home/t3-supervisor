@@ -21,30 +21,7 @@ import {
 import type { SupervisorMonitoringSettings } from "./project-supervisor-contract.js";
 import type { Projection } from "./types.js";
 
-interface MonitorThreadRow {
-  project_id: unknown;
-  thread_id: unknown;
-  source_ordinal: unknown;
-  activation_ordinal: unknown;
-  saturated: unknown;
-  saturation_at: unknown;
-  last_acknowledged_at: unknown;
-  untracked_count: unknown;
-}
 
-interface MonitorItemRow {
-  item_id: unknown;
-  read_item_id: unknown;
-  type: unknown;
-  status: unknown;
-  ordinal: unknown;
-  detected_at: unknown;
-  version: unknown;
-  priority: unknown;
-  eligible: unknown;
-  active: unknown;
-  reviewed_version: unknown;
-}
 
 export interface SupervisorMonitorObservation {
   projectId: string;
@@ -96,19 +73,6 @@ const isReviewable = (item: SupervisorMonitorActivity): boolean =>
 
 const liveRunStatuses = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 
-const asActivity = (row: MonitorItemRow): SupervisorMonitorActivity => ({
-  id: String(row.item_id),
-  readItemId: typeof row.read_item_id === "string" ? row.read_item_id : null,
-  type: String(row.type),
-  status: String(row.status),
-  ordinal: Number(row.ordinal),
-  detectedAt: Number(row.detected_at),
-  version: String(row.version),
-  priority: knownPriority(row.priority),
-});
-
-const optionalNumber = (value: unknown): number | null =>
-  value === null || value === undefined ? null : Number(value);
 
 const boundedInteger = (value: number | undefined, fallback: number, max: number): number =>
   Number.isSafeInteger(value) && value! > 0 ? Math.min(value!, max) : fallback;
@@ -267,7 +231,7 @@ const monitorSchema = [
 
 /**
  * Builds the monitor store on the run's GuidanceDb client with the given per-thread capacity: the tables and the
- * column additions are created once, in the synchronous constructor's order.
+ * column additions are created once, in the baseline constructor's order.
  */
 export const makeProjectSupervisorMonitorStore = (maxItemsPerThread = SUPERVISOR_MONITOR_MAX_ITEMS_PER_THREAD) => Effect.gen(function* () {
   if (!Number.isSafeInteger(maxItemsPerThread) || maxItemsPerThread < 1 || maxItemsPerThread > SUPERVISOR_MONITOR_MAX_ITEMS_PER_THREAD)

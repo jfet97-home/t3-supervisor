@@ -1,4 +1,4 @@
-import { Context, Data, Deferred, Duration, Effect, Exit, Layer, RcMap, Result, Schema, SchemaIssue, SchemaParser, SchemaTransformation, Scope, Semaphore } from "effect";
+import { Cause, Context, Data, Deferred, Duration, Effect, Exit, Layer, RcMap, Result, Schema, SchemaIssue, SchemaParser, SchemaTransformation, Scope, Semaphore } from "effect";
 import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import { parseDocument } from "yaml";
@@ -35,8 +35,9 @@ export interface ProjectDefinitionSetupWriter {
 }
 export interface ProjectDefinitionLoaderOptions {
   globalRoot?: string | null;
-  useGlobalDefinitions?: (projectId: string) => boolean;
-  isScratchProject?: (projectId: string, registeredWorkspaceRoot: string) => boolean;
+  // reads of the supervision stores; a failure is a definition source failure
+  useGlobalDefinitions?: (projectId: string) => Effect.Effect<boolean, unknown>;
+  isScratchProject?: (projectId: string, registeredWorkspaceRoot: string) => Effect.Effect<boolean, unknown>;
   managedScratchRoot?: string;
   setupWriter?: ProjectDefinitionSetupWriter;
   gitProbe?: FreshGitProbe;
@@ -485,13 +486,17 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
   const readCatalog = boundedRead(() => source.catalog());
   const readProjection = (threadId: string) => boundedRead(() => t3.projection(threadId));
 
-  const isScratchProject = (projectId: string, registeredWorkspaceRoot: string) => attempt(() => {
-    if (options.isScratchProject) return options.isScratchProject(projectId, registeredWorkspaceRoot);
+  // a store read's failure or defect is a definition source failure, as a throwing callback was
+  const sourceRead = <A, E>(read: Effect.Effect<A, E>): Effect.Effect<A, DefinitionSourceFailure> => Effect.catchCause(read, (cause) => Cause.hasInterruptsOnly(cause)
+    ? Effect.failCause(cause as Cause.Cause<never>) : Effect.fail(new DefinitionSourceFailure({error: Cause.squash(cause)})));
+  const isScratchProject = (projectId: string, registeredWorkspaceRoot: string) => {
+    if (options.isScratchProject) return sourceRead(Effect.suspend(() => options.isScratchProject!(projectId, registeredWorkspaceRoot)));
     const managedRoot = options.managedScratchRoot;
-    return Boolean(managedRoot && posix.isAbsolute(managedRoot) && posix.isAbsolute(registeredWorkspaceRoot) &&
-      posix.normalize(managedRoot) === posix.normalize(registeredWorkspaceRoot));
-  });
-  const globalEnabled = (projectId: string) => attempt(() => globalRoot !== null && (options.useGlobalDefinitions?.(projectId) ?? false));
+    return Effect.succeed(Boolean(managedRoot && posix.isAbsolute(managedRoot) && posix.isAbsolute(registeredWorkspaceRoot) &&
+      posix.normalize(managedRoot) === posix.normalize(registeredWorkspaceRoot)));
+  };
+  const globalEnabled = (projectId: string) => globalRoot === null || !options.useGlobalDefinitions ? Effect.succeed(false)
+    : sourceRead(Effect.suspend(() => options.useGlobalDefinitions!(projectId)));
 
   const currentWorkspace = Effect.fnUntraced(function* (projectId: string, threadId: string | null) {
     const catalog = yield* readCatalog;

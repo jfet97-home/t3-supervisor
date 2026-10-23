@@ -189,7 +189,7 @@ type TeamFailure = TeamStoreError | ProjectSupervisorStoreError | SqlError.SqlEr
 type TeamEffect<A> = Effect.Effect<A, TeamStoreError | ProjectSupervisorStoreError>;
 type ParentMap = ReadonlyMap<string, string | null>;
 
-/** Same methods and results as the synchronous class; each joins the caller's transaction when it runs inside one. */
+/** The supervisor team store; each method joins the caller's transaction when it runs inside one. */
 export interface SupervisorTeamStoreShape {
   readonly settings: (binding: TeamBinding) => TeamEffect<TeamSettings>;
   readonly setMaxHelpersPerRoot: (binding: TeamBinding, expectedGeneration: number, maxHelpersPerRoot: number) => TeamEffect<TeamSettings>;
@@ -247,7 +247,7 @@ const teamDocumentRow = <A>(value: unknown, guard: (value: unknown) => boolean, 
 const teamDocumentRows = <A>(rows: ReadonlyArray<unknown>, guard: (value: unknown) => boolean, row: TeamStoreRow) =>
   documentRows<A, TeamStoreError>(rows, guard, teamRowInvalid(row));
 
-// the subtree walks of the synchronous class, as pure functions
+// the subtree walks, as pure functions
 const inTeamBindingScope = (binding: TeamBinding, targetId: string, parentById: ParentMap): boolean => {
   if (targetId === binding.mainThreadId) return true;
   const seen = new Set<string>([targetId]);
@@ -983,7 +983,7 @@ const makeSupervisorTeamStore = Effect.gen(function* () {
   } satisfies SupervisorTeamStoreShape;
 });
 
-// the team schema, statement for statement as the synchronous constructor writes it (the stored DDL text is golden)
+// the team schema, statement for statement as the baseline constructor wrote it (the stored DDL text is golden)
 const teamSchema = [
   "CREATE INDEX IF NOT EXISTS supervisor_main_binding_thread ON supervisor_main_bindings(json_extract(document,'$.threadId'))",
   "CREATE TABLE IF NOT EXISTS supervisor_team_members(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,member_thread_id TEXT NOT NULL,state TEXT NOT NULL,epoch INTEGER NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,member_thread_id))",

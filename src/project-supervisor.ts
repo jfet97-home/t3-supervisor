@@ -6,7 +6,7 @@ import { readTeamViewData, supervisorTeamView } from "./supervisor-team-view.js"
 import { mainConversation, resolveSupervisorScope, supervisorScopeKey } from "./supervisor-scope.js";
 import { fingerprint } from "./guidance-store.js";
 import { GuidanceDb } from "./db.js";
-import { decodeGuidanceRow, GuidanceStoreError, guidanceSql, guidanceTransaction, storedDocument, type SupervisionStoreError } from "./guidance-sql.js";
+import { guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
 import { mainRunNodeReader, nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { ThreadPolicyStore } from "./thread-policy.js";
 import { isSupervisorThread, ProjectSupervisorStore, type ProjectSupervisorStoreError, type BindingRecord, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence,
@@ -141,9 +141,6 @@ const attempt = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<Attempt
 const notFound = (cause: unknown): boolean => cause instanceof T3TransportError && cause.httpStatus === 404;
 
 // a recorded Start row: its stored document keeps every field, with the ones its readers rely on checked
-const decodeStartRow = decodeGuidanceRow(Schema.Struct({value: Schema.String}), "meta");
-const isStoredStart = Schema.is(Schema.Struct({threadId: Schema.String, status: Schema.String}));
-const invalidStartRow = () => new GuidanceStoreError({reason: "row_invalid", row: "meta", sqlReason: null});
 
 type ControlInfo = SupervisionControlInfo;
 // the stored control with its effective state from the scope predicates
@@ -911,12 +908,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     if (launched._tag === "Uncertain") return yield* new SupervisorCreationUncertain();
     return launched.binding;
   });
-  // the recorded Start rows (the project store has no listing of them) and the record of one, decoded when it is reached
-  const recordedStarts = guidanceSql(db`SELECT value FROM meta WHERE key LIKE 'supervisor_start:%'`);
-  const recordedStart = (row: unknown) => Effect.flatMap(decodeStartRow(row), ({value}) => storedDocument<SupervisionStartRecord, GuidanceStoreError>(value, isStoredStart, invalidStartRow));
   const prepareStarts = Effect.gen(function* () {
-    for (const row of yield* recordedStarts) {
-      const start = yield* recordedStart(row);
+    for (const start of yield* store.starts()) {
       if (start.route === "ui" && start.status === "pending") {
         // the dashboard Start activation (or its rejection) as one admission section, acquired before its transaction opens
         const activated = yield* admitted(() => Effect.gen(function* () {

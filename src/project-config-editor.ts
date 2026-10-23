@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, RcMap, Result, Scope, Semaphore } from "effect";
+import { Cause, Context, Effect, Layer, RcMap, Result, Scope, Semaphore } from "effect";
 import { isMap, isSeq, parseDocument, stringify } from "yaml";
 import { posix } from "node:path";
 import {decodeDefinitionSource, definitionsCanceled, definitionsOperation, definitionsSignal, DefinitionSourceFailure, DefinitionSourceInvalid,
@@ -49,7 +49,8 @@ const serializeConfig = (config: ProjectConfigurationInfo, previous?: string): s
 // what saving needs from the definitions: fresh snapshots, the operative checkout and the native readback of project.yaml
 export type ProjectConfigDefinitions = Pick<ProjectDefinitions["Service"], "load" | "currentWorkspace" | "readProjectConfig">;
 // retains the user authorization of a verified save; a throw makes the save uncertain
-export type DefinitionSaveRecorder = (definitions: ProjectDefinitionSnapshot, expectedRevision: string) => void;
+// records an explicit user save in the supervision store; a failure leaves the save uncertain
+export type DefinitionSaveRecorder = (definitions: ProjectDefinitionSnapshot, expectedRevision: string) => Effect.Effect<void, unknown>;
 // what saving needs from the native writer: the target check and the fixed project.yaml write
 export type ProjectConfigWriter = Pick<ProjectWriter["Service"], "checkProjectConfigFile" | "writeProjectConfig">;
 type EditorOptions = {readonly definitions: ProjectConfigDefinitions; readonly writer: ProjectConfigWriter; readonly onSaved?: DefinitionSaveRecorder | undefined};
@@ -125,7 +126,8 @@ const makeProjectConfigEditor = Effect.fnUntraced(function* ({definitions, write
       if (!verified.complete || verified.workspaceRoot !== root || !verified.revision || !verified.projectConfig ||
         JSON.stringify(verified.projectConfig) !== JSON.stringify(intended))
         return outcome("uncertain", "T3 accepted the write, but the refreshed project configuration could not confirm it. Refresh and inspect project.yaml before retrying.", verified);
-      const recorded = yield* Effect.result(Effect.try({try: () => onSaved?.(verified, input.expectedRevision), catch: error => new DefinitionSourceFailure({error})}));
+      const recorded = yield* Effect.result(onSaved ? Effect.catchCause(Effect.suspend(() => onSaved(verified, input.expectedRevision)), (cause) => Cause.hasInterruptsOnly(cause)
+        ? Effect.failCause(cause as Cause.Cause<never>) : Effect.fail(new DefinitionSourceFailure({error: Cause.squash(cause)}))) : Effect.void);
       if (Result.isFailure(recorded)) return outcome("uncertain", "The file was saved, but its user-authorization record could not be retained. Refresh before retrying.", verified);
       return outcome("saved", "Saved .t3-supervisor/project.yaml. Required flags remain visible to the Supervisor for semantic review.", verified);
     }))));

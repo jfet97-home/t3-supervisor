@@ -8,7 +8,7 @@ import {
   ThreadPolicyConflict,
   ThreadPolicyInvalid,
   ThreadPolicyStoreError,
-  ThreadPolicyStoreService,
+  ThreadPolicyStore,
   type ThreadPolicyStoreShape,
 } from "../src/thread-policy.js";
 import { policyDb, rows, temporaryDirectory } from "./support/guidance-store-services.js";
@@ -28,7 +28,7 @@ const withPolicy = <A, E>(directory: string, seed: ReadonlyArray<string>, use: (
 
 const message = (error: unknown): string => error instanceof ThreadPolicyInvalid || error instanceof ThreadPolicyConflict ? error.message : `unexpected ${String(error)}`;
 
-describe("ThreadPolicyStoreService", () => {
+describe("ThreadPolicyStore", () => {
   it.live("excluded-thread policy persists and uses compare-and-swap generations", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     const saved = yield* withPolicy(directory, ["excluded"], (store) => Effect.gen(function* () {
@@ -87,13 +87,13 @@ describe("ThreadPolicyStoreService", () => {
 
   it.live("every get is an authoritative read of the stored row, and the layer seeds from the configured excluded chat ids once", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
-    const configured = (excluded: string) => ThreadPolicyStoreService.layer.pipe(
+    const configured = (excluded: string) => ThreadPolicyStore.layer.pipe(
       Layer.provideMerge(policyDb(directory)),
       Layer.provide(SupervisorConfig.layer.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnvRecord(
         { DATA_DIRECTORY: directory, EXCLUDED_THREAD_IDS: excluded }, { preserveEmptyStrings: true }))))),
       Layer.orDie);
     const observed = yield* Effect.gen(function* () {
-      const store = yield* ThreadPolicyStoreService;
+      const store = yield* ThreadPolicyStore;
       const db = yield* PolicyDb;
       const seeded = yield* store.get();
       // a write the store did not make is seen by the next read: nothing is cached
@@ -101,7 +101,7 @@ describe("ThreadPolicyStoreService", () => {
       return { seeded, reread: yield* store.get() };
     }).pipe(Effect.provide(configured(" a , b ,")));
     assert.deepEqual(observed, { seeded: { generation: 1, excludedThreadIds: ["a", "b"] }, reread: { generation: 7, excludedThreadIds: ["written-elsewhere"] } });
-    assert.deepEqual(yield* Effect.flatMap(ThreadPolicyStoreService, (store) => store.get()).pipe(Effect.provide(configured("ignored"))),
+    assert.deepEqual(yield* Effect.flatMap(ThreadPolicyStore, (store) => store.get()).pipe(Effect.provide(configured("ignored"))),
       { generation: 7, excludedThreadIds: ["written-elsewhere"] });
   }), { timeout: 10_000 });
 

@@ -10,7 +10,8 @@ import { SupervisorOwnership } from "./project-supervisor-store.js";
 import { makeStore, Store, type StoreStats } from "./store.js";
 import { NativeEnvelope } from "./native-envelope.js";
 import { T3Client } from "./t3.js";
-import { ThreadPolicy } from "./thread-policy.js";
+import { policyDbLayer } from "./db.js";
+import { ThreadPolicyStore } from "./thread-policy.js";
 import type { SupervisorSettings } from "./types.js";
 
 export interface SupervisorStatus {
@@ -109,15 +110,13 @@ export const runSupervisor = Effect.gen(function* () {
   yield* update(() => ({ environmentId: descriptor.environmentId, activation: new Date(activatedAt).toISOString() }));
   if (config.uiPort !== undefined) {
     yield* update(() => ({ supervisionState: "starting" }));
-    // unported readers receive the root service values with the configuration (B-02)
-    const readers = { ...config, threadPolicy: yield* ThreadPolicy, supervisorOwnedThreadIds: yield* SupervisorOwnership };
     const supervision = Effect.gen(function* () {
       // the application reports readiness through a synchronous callback; within this attempt the status follows it
       const ready = yield* Deferred.make<void>();
       yield* Effect.forkScoped(Deferred.await(ready).pipe(Effect.andThen(update((current) => ({
         supervisionState: "ready", ...(current.lastErrorPhase === "supervision" ? { lastErrorPhase: null } : {}),
       })))));
-      return yield* runGuidanceApplication(readers, store, t3, () => { Deferred.doneUnsafe(ready, Effect.void); });
+      return yield* runGuidanceApplication(config, store, t3, () => { Deferred.doneUnsafe(ready, Effect.void); });
     }).pipe(
       Effect.scoped,
       Effect.catchCause((cause) => {
@@ -165,14 +164,18 @@ export type NativeTransport = NativeEnvelope | Crypto.Crypto | HttpClient.HttpCl
 
 const catalog = Layer.unwrap(SupervisorConfig.useSync((config) => makeStore(config.dataDirectory)));
 
-export type SupervisorServices = SupervisorConfig | SupervisorStatusRef | Store | T3Client | ThreadPolicy | SupervisorOwnership | NativeTransport | FileSystem.FileSystem;
+export type SupervisorServices = SupervisorConfig | SupervisorStatusRef | Store | T3Client | ThreadPolicyStore | SupervisorOwnership | NativeTransport | FileSystem.FileSystem;
+
+// the process's thread-policy store on its own PolicyDb client (thread-settings.sqlite3), seeded from the configured excluded chats
+const threadPolicy = Layer.unwrap(SupervisorConfig.useSync((config) => ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(config.dataDirectory)))));
 
 // the root services over the configuration, acquired in today's order: ownership, thread policy, the native transport and
-// the T3 client over the read token, then the catalog and the status; they release in reverse
+// the T3 client over the read token, then the catalog and the status; they release in reverse. Each supervision run reloads
+// the permanent ownership into the process's set when its guidance stores are acquired
 export const SupervisorServicesLive = Layer.mergeAll(catalog, SupervisorStatusRef.layer).pipe(
   Layer.provideMerge(t3Client),
   Layer.provideMerge(NativeTransportLive),
-  Layer.provideMerge(ThreadPolicy.layer),
+  Layer.provideMerge(threadPolicy),
   Layer.provideMerge(SupervisorOwnership.layer),
 );
 

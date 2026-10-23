@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 import { Effect, Layer, Scheduler } from "effect";
 import { GuidanceDb } from "../src/db.js";
-import { GuidanceStoreError } from "../src/guidance-store.js";
+import { GuidanceStoreError } from "../src/guidance-sql.js";
 import {
   type ConversationRequest,
   RequestInflight,
-  SupervisorConversationStoreService,
+  SupervisorConversationStore,
   type SupervisorConversationStoreShape,
   type WorkflowAgreementCandidate,
   type WorkflowIntroduction,
@@ -21,12 +21,12 @@ const projectId = "project-a";
 const baseTime = Date.parse("2026-10-13T10:00:00.000Z");
 
 const layer = (directory: string) =>
-  SupervisorConversationStoreService.layer.pipe(Layer.provideMerge(guidanceDb(directory)), Layer.provide(sequentialIds()));
+  SupervisorConversationStore.layer.pipe(Layer.provideMerge(guidanceDb(directory)), Layer.provide(sequentialIds()));
 
 // every use opens the client and the store afresh and closes them again, as a process restart would
 const withStore = <A, E>(directory: string, use: (store: SupervisorConversationStoreShape, db: GuidanceDb["Service"]) => Effect.Effect<A, E>) =>
   Effect.gen(function* () {
-    return yield* use(yield* SupervisorConversationStoreService, yield* GuidanceDb);
+    return yield* use(yield* SupervisorConversationStore, yield* GuidanceDb);
   }).pipe(Effect.provide(layer(directory)));
 
 const requestCount = (db: GuidanceDb["Service"]) =>
@@ -40,7 +40,7 @@ const candidate = (taskId: string, proposalId: string, at: number): WorkflowAgre
 // a yield every eight operations interleaves concurrent fibers between any two statements that are not one transaction
 const forcedYields = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideService(effect, Scheduler.MaxOpsBeforeYield, 8);
 
-describe("SupervisorConversationStoreService", () => {
+describe("SupervisorConversationStore", () => {
   it.live("CT-CSTORE-01: prepare() beside a pending request throws supervisor_request_inflight before pruning or inserting", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     yield* withStore(directory, (store, db) => Effect.gen(function* () {

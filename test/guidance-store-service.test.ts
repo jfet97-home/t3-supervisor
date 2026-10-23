@@ -6,8 +6,9 @@ import { describe, it } from "@effect/vitest";
 import { Effect, Layer, Scheduler } from "effect";
 import { TestClock } from "effect/testing";
 import { GuidanceDb } from "../src/db.js";
-import type { GuidanceRule, GuidanceRuleInput, GuidanceSettings } from "../src/guidance-contract.js";
-import { GuidanceConflictError, GuidanceStoreError, GuidanceStoreService, type GuidanceStoreShape } from "../src/guidance-store.js";
+import type { GuidanceRule, GuidanceSettings } from "../src/guidance-contract.js";
+import { GuidanceStoreError } from "../src/guidance-sql.js";
+import { GuidanceConflictError, GuidanceStore, type GuidanceStoreShape } from "../src/guidance-store.js";
 import { guidanceDb, rows, sequentialIds, temporaryDirectory } from "./support/guidance-store-services.js";
 
 // target regressions of the GuidanceStore effect service on a temporary guidance.sqlite3 through the production layers:
@@ -15,12 +16,12 @@ import { guidanceDb, rows, sequentialIds, temporaryDirectory } from "./support/g
 // target), the CC-GDB-IMPLICIT sequences in one transaction, typed row and sql failures and the synchronous store's
 // method results
 
-const layer = (directory: string) => GuidanceStoreService.layer.pipe(Layer.provideMerge(guidanceDb(directory)), Layer.provide(sequentialIds()));
+const layer = (directory: string) => GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDb(directory)), Layer.provide(sequentialIds()));
 
 // every use opens the client and the store afresh and closes them again, as a process restart would
 const withGuidance = <A, E>(directory: string, use: (store: GuidanceStoreShape, db: GuidanceDb["Service"]) => Effect.Effect<A, E>) =>
   Effect.gen(function* () {
-    return yield* use(yield* GuidanceStoreService, yield* GuidanceDb);
+    return yield* use(yield* GuidanceStore, yield* GuidanceDb);
   }).pipe(Effect.provide(layer(directory)));
 
 const defaults: GuidanceSettings = {
@@ -28,10 +29,9 @@ const defaults: GuidanceSettings = {
   model: "gpt-6-luna", reasoning: "high", dailyTokenBudget: 100_000, evidenceHours: 24, maxAnchorAgeSeconds: 60,
 };
 
-const ruleInput = (patch: Partial<GuidanceRuleInput> = {}): GuidanceRuleInput => ({
-  id: null, expectedGeneration: 0, name: "Rule", condition: "When it applies.", message: "Do the right thing.", scope: "global",
-  projectId: null, mode: "observe", ...patch,
-});
+// a stored observing rule in the persisted document format, live since 1 000
+const storedRule = (): GuidanceRule => ({ id: "rule-a", expectedGeneration: 0, name: "Rule", condition: "When it applies.", message: "Do the right thing.",
+  scope: "global", projectId: null, mode: "observe", revision: 1, generation: 1, liveSince: 1_000, updatedAt: 1_000 });
 
 const conflictMessage = (error: unknown): string => {
   assert.ok(error instanceof GuidanceConflictError, `expected a GuidanceConflict, got ${String(error)}`);
@@ -40,7 +40,7 @@ const conflictMessage = (error: unknown): string => {
 
 const guidanceFile = (directory: string) => join(directory, "guidance.sqlite3");
 
-describe("GuidanceStoreService", () => {
+describe("GuidanceStore", () => {
   it.effect("the layer creates the schema and the default settings once and keeps saved settings on reopen", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     const first = yield* withGuidance(directory, (store, db) => Effect.gen(function* () {
@@ -172,52 +172,12 @@ describe("GuidanceStoreService", () => {
     assert.deepEqual(observed, { refused: "Guidance belongs to another T3 environment.", environment: [{ value: "environment-a" }] });
   }), { timeout: 10_000 });
 
-  it.effect("rules keep their generation compare-and-set, demote a changed send rule to observe and stamp liveSince from Clock", () => Effect.gen(function* () {
-    const directory = yield* temporaryDirectory;
-    yield* TestClock.setTime(1_000);
-    const observed = yield* withGuidance(directory, (store) => Effect.gen(function* () {
-      const created = yield* store.saveRule(ruleInput({ mode: "send" }));
-      const sent = yield* store.saveRule(ruleInput({ ...created, expectedGeneration: created.generation, mode: "send" }), 2_000);
-      yield* TestClock.setTime(3_000);
-      const unchanged = yield* store.saveRule(ruleInput({ ...sent, expectedGeneration: sent.generation, mode: "send" }));
-      const edited = yield* store.saveRule(ruleInput({ ...sent, expectedGeneration: sent.generation, message: "Do it differently.", mode: "send" }), 4_000);
-      const stale = conflictMessage(yield* Effect.flip(store.saveRule(ruleInput({ ...edited, expectedGeneration: sent.generation }))));
-      const missing = conflictMessage(yield* Effect.flip(store.saveRule(ruleInput({ id: "missing", expectedGeneration: 1 }))));
-      const invalid = conflictMessage(yield* Effect.flip(store.saveRule(ruleInput({ name: " " }))));
-      const scope = conflictMessage(yield* Effect.flip(store.saveRule(ruleInput({ scope: "project" }))));
-      return { created, sent, unchanged, edited, stale, missing, invalid, scope, rules: yield* store.rules(), rule: yield* store.rule(created.id) };
-    }));
-    const base = { name: "Rule", condition: "When it applies.", scope: "global", projectId: null } as const;
-    // a new rule asked to send starts observing
-    assert.deepEqual(observed.created, { ...base, id: "00000000-0000-4000-8000-000000000001", expectedGeneration: 0, message: "Do the right thing.",
-      mode: "observe", revision: 1, generation: 1, liveSince: 1_000, updatedAt: 1_000 } satisfies GuidanceRule);
-    assert.deepEqual(observed.sent, { ...observed.created, expectedGeneration: 1, mode: "send", generation: 2, liveSince: 2_000, updatedAt: 2_000 });
-    // the same content and mode is a no-op that keeps generation and updatedAt
-    assert.deepEqual(observed.unchanged, { ...observed.sent, expectedGeneration: 2 });
-    assert.deepEqual(observed.edited, { ...observed.sent, expectedGeneration: 2, message: "Do it differently.", mode: "observe", revision: 2, generation: 3,
-      liveSince: 4_000, updatedAt: 4_000 });
-    assert.equal(observed.stale, "This rule changed in another tab. Reload it before saving.");
-    assert.equal(observed.missing, "Rule no longer exists.");
-    assert.equal(observed.invalid, "Complete the name, condition and message within their length limits.");
-    assert.equal(observed.scope, "Choose a project for a project rule only.");
-    assert.deepEqual(observed.rules, [observed.edited]);
-    assert.deepEqual(observed.rule, observed.edited);
-  }), { timeout: 10_000 });
-
-  it.live("the rule capacity is 200 rules", () => Effect.gen(function* () {
-    const directory = yield* temporaryDirectory;
-    const refused = yield* withGuidance(directory, (store, db) => Effect.gen(function* () {
-      yield* db.withTransaction(Effect.forEach(Array.from({ length: 200 }, (_, index) => index), (index) => store.saveRule(ruleInput({ name: `Rule ${index}` }), 1)));
-      return conflictMessage(yield* Effect.flip(store.saveRule(ruleInput({ name: "One too many" }), 1)));
-    }));
-    assert.equal(refused, "Rule capacity reached.");
-  }), { timeout: 10_000 });
-
   it.effect("settings validation and compare-and-set, and a resume refreshes every rule's liveSince from Clock", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     yield* TestClock.setTime(10_000);
-    const observed = yield* withGuidance(directory, (store) => Effect.gen(function* () {
-      const rule = yield* store.saveRule(ruleInput(), 1_000);
+    const observed = yield* withGuidance(directory, (store, db) => Effect.gen(function* () {
+      const rule = storedRule();
+      yield* db`INSERT INTO rules VALUES(${rule.id},${JSON.stringify(rule)})`;
       const invalid = yield* Effect.forEach([{ dailyTokenBudget: 999 }, { evidenceHours: 48 }, { maxAnchorAgeSeconds: 601 }, { model: "other" }],
         (patch) => Effect.map(Effect.flip(store.saveSettings({ ...defaults, ...patch })), conflictMessage));
       const paused = yield* store.saveSettings({ ...defaults, guidancePaused: true });
@@ -235,65 +195,43 @@ describe("GuidanceStoreService", () => {
     assert.equal(observed.stale, "Settings changed in another tab. Reload first.");
   }), { timeout: 10_000 });
 
-  it.effect("mutes and classifications move their rule and settings generations", () => Effect.gen(function* () {
+  it.effect("stored mutes read back and classifications move the settings generation", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     yield* TestClock.setTime(5_000);
-    const observed = yield* withGuidance(directory, (store) => Effect.gen(function* () {
-      const global = yield* store.saveRule(ruleInput(), 1_000);
-      const project = yield* store.saveRule(ruleInput({ name: "Project rule", scope: "project", projectId: "project-a" }), 1_000);
-      yield* store.mute(global.id, "project-a", true, global.generation);
-      const muted = { mutes: yield* store.mutes(), rule: yield* store.rule(global.id) };
-      const staleMute = conflictMessage(yield* Effect.flip(store.mute(global.id, "project-a", false, global.generation)));
-      const projectMute = conflictMessage(yield* Effect.flip(store.mute(project.id, "project-a", true, project.generation)));
-      yield* store.mute(global.id, "project-a", false, global.generation + 1);
+    const observed = yield* withGuidance(directory, (store, db) => Effect.gen(function* () {
       const unmuted = yield* store.mutes();
+      yield* db`INSERT INTO mutes VALUES('rule-global','project-a')`;
+      const muted = yield* store.mutes();
       const before = yield* store.classification("project-a");
       yield* store.classify("project-a", "scratch", 1);
       const staleClassify = conflictMessage(yield* Effect.flip(store.classify("project-a", "project", 1)));
-      return { muted, staleMute, projectMute, unmuted, before, after: yield* store.classification("project-a"), staleClassify, settings: yield* store.settings() };
+      return { muted, unmuted, before, after: yield* store.classification("project-a"), staleClassify, settings: yield* store.settings() };
     }));
-    assert.deepEqual(observed.muted.mutes, [{ ruleId: "00000000-0000-4000-8000-000000000001", scopeId: "project-a" }]);
-    assert.deepEqual([observed.muted.rule?.generation, observed.muted.rule?.liveSince], [2, 5_000]);
-    assert.equal(observed.staleMute, "The global rule changed. Reload first.");
-    assert.equal(observed.projectMute, "The global rule changed. Reload first.");
+    assert.deepEqual(observed.muted, [{ ruleId: "rule-global", scopeId: "project-a" }]);
     assert.deepEqual(observed.unmuted, []);
     assert.deepEqual([observed.before, observed.after], ["unclassified", "scratch"]);
     assert.equal(observed.staleClassify, "Settings changed. Reload first.");
     assert.equal(observed.settings.generation, 2);
   }), { timeout: 10_000 });
 
-  it.effect("observations report a changed hash and the token budget reserves within the Clock's day", () => Effect.gen(function* () {
+  it.effect("observations report a changed hash and the token budget use is read within the Clock's day", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     const day = Date.parse("2026-10-23T08:00:00.000Z");
     yield* TestClock.setTime(day);
-    const observed = yield* withGuidance(directory, (store) => Effect.gen(function* () {
+    const observed = yield* withGuidance(directory, (store, db) => Effect.gen(function* () {
       const first = yield* store.observe("thread-a", "hash-1", 1);
       const same = yield* store.observe("thread-a", "hash-1", 2);
       const changed = yield* store.observe("thread-a", "hash-2", 3);
       const previous = [yield* store.previousHash("thread-a"), yield* store.previousHash("thread-b")];
-      yield* store.saveSettings({ ...defaults, dailyTokenBudget: 1_000 });
-      const reservations = [yield* store.reserveTokens(600), yield* store.reserveTokens(400), yield* store.reserveTokens(1)];
+      yield* db`INSERT INTO budget VALUES('2026-10-23',1000)`;
       const used = [yield* store.used(), yield* store.used(day - 86_400_000)];
       yield* TestClock.setTime(day + 86_400_000);
-      return { first, same, changed, previous, reservations, used, nextDay: [yield* store.reserveTokens(1_000), yield* store.used()] };
+      return { first, same, changed, previous, used, nextDay: yield* store.used() };
     }));
     assert.deepEqual([observed.first, observed.same, observed.changed], [false, false, true]);
     assert.deepEqual(observed.previous, ["hash-2", null]);
-    assert.deepEqual(observed.reservations, [true, true, false]);
     assert.deepEqual(observed.used, [1_000, 0]);
-    assert.deepEqual(observed.nextDay, [true, 1_000]);
-  }), { timeout: 10_000 });
-
-  it.live("concurrent reservations under forced fiber yields never exceed the daily budget", () => Effect.gen(function* () {
-    const directory = yield* temporaryDirectory;
-    const observed = yield* withGuidance(directory, (store) => Effect.gen(function* () {
-      yield* store.saveSettings({ ...defaults, dailyTokenBudget: 1_000 });
-      // a yield every eight operations interleaves the fibers between any two statements that are not one transaction
-      const granted = yield* Effect.all(Array.from({ length: 20 }, () => store.reserveTokens(100)), { concurrency: "unbounded" }).pipe(
-        Effect.provideService(Scheduler.MaxOpsBeforeYield, 8));
-      return { granted: granted.filter(Boolean).length, used: yield* store.used() };
-    }));
-    assert.deepEqual(observed, { granted: 10, used: 1_000 });
+    assert.equal(observed.nextDay, 0);
   }), { timeout: 10_000 });
 
   it.live("concurrent observations of one changed hash under forced fiber yields report the change exactly once", () => Effect.gen(function* () {
@@ -401,94 +339,4 @@ describe("GuidanceStoreService", () => {
     assert.equal("cause" in failure, false);
   }), { timeout: 10_000 });
 
-  it.live("the notice lifecycle commits, starts, finishes and reconciles under its generation and epoch checks", () => Effect.gen(function* () {
-    const directory = yield* temporaryDirectory;
-    const now = 1_000_000;
-    const observed = yield* withGuidance(directory, (store) => Effect.gen(function* () {
-      const observing = yield* store.saveRule(ruleInput(), 1);
-      const rule = yield* store.saveRule(ruleInput({ ...observing, expectedGeneration: observing.generation, mode: "send" }), 2);
-      const settings = yield* store.settings();
-      const notObserving = yield* store.commit(observing, settings.generation, "thread-a", "run-1", now);
-      const committed = yield* store.commit(rule, settings.generation, "thread-a", "run-1", now, "object-1");
-      const blocked = yield* store.commit(rule, settings.generation, "thread-a", "run-2", now);
-      const reset = conflictMessage(yield* Effect.flip(store.reset("thread-a", rule.id)));
-      const inFlight = conflictMessage(yield* Effect.flip(store.reset("thread-a", rule.id, true, 0, committed?.id ?? null)));
-      const started = [yield* store.start(committed!.id), yield* store.start(committed!.id)];
-      yield* store.finish(committed!.id, "accepted", "message-1");
-      const episodeAfterAccept = yield* store.episode("thread-a", rule.id);
-      const listed = yield* store.notices();
-      const sameSituation = yield* store.commit(rule, settings.generation, "thread-a", "run-3", now + 1, "object-1", true);
-      const newSituation = yield* store.commit(rule, settings.generation, "thread-a", "run-3", now + 1, "object-2", true);
-      yield* store.reconcile(committed!.id);
-      return { notObserving, committed, blocked, reset, inFlight, started, episodeAfterAccept, listed, sameSituation, newSituation,
-        afterReconcile: yield* store.notices(), episode: yield* store.episode("thread-a", rule.id) };
-    }));
-    assert.equal(observed.notObserving, null);
-    assert.deepEqual(observed.committed, { id: "00000000-0000-4000-8000-000000000002",
-      text: "[Supervisor guidance · Rule · notice 00000000-0000-4000-8000-000000000002]\n\nDo the right thing.", epoch: 0 });
-    assert.equal(observed.blocked, null, "an open committed notice blocks a second commit");
-    assert.equal(observed.reset, "Reconcile or explicitly accept the delivery uncertainty first.");
-    assert.equal(observed.inFlight, "A dispatch is still in flight.", "accepting the uncertainty of a committed notice still waits for its dispatch");
-    assert.deepEqual(observed.started, [true, false]);
-    assert.deepEqual(observed.episodeAfterAccept, { epoch: 0, objectId: "object-1" });
-    assert.deepEqual(observed.listed, [{ id: observed.committed!.id, threadId: "thread-a", ruleId: observed.listed[0]!.ruleId, runId: "run-1", state: "accepted",
-      text: observed.committed!.text, messageId: "message-1", epoch: 0 }]);
-    assert.equal(observed.sameSituation, null, "a notified episode stays quiet for the same object");
-    assert.equal(observed.newSituation?.epoch, 1, "a new object opens the next epoch");
-    assert.deepEqual(observed.afterReconcile, [], "a reconciled notice is visible and leaves the delivery list");
-    assert.deepEqual(observed.episode, { epoch: 1, objectId: "object-2" });
-  }), { timeout: 10_000 });
-
-  it.live("an uncertain notice blocks reset until its exact notice and epoch are accepted, and resolveEpisode advances only unchanged episodes", () => Effect.gen(function* () {
-    const directory = yield* temporaryDirectory;
-    const observed = yield* withGuidance(directory, (store) => Effect.gen(function* () {
-      const observing = yield* store.saveRule(ruleInput(), 1);
-      const rule = yield* store.saveRule(ruleInput({ ...observing, expectedGeneration: observing.generation, mode: "send" }), 2);
-      const settings = yield* store.settings();
-      const notice = (yield* store.commit(rule, settings.generation, "thread-a", "run-1", 10))!;
-      yield* store.start(notice.id);
-      yield* store.finish(notice.id, "uncertain", null);
-      yield* store.resolveEpisode("thread-a", rule.id);
-      const unresolved = yield* store.episode("thread-a", rule.id);
-      const wrongNotice = conflictMessage(yield* Effect.flip(store.reset("thread-a", rule.id, true, 0, "other")));
-      const wrongEpoch = conflictMessage(yield* Effect.flip(store.reset("thread-a", rule.id, true, 5, notice.id)));
-      yield* store.reset("thread-a", rule.id, true, 0, notice.id);
-      const afterReset = yield* store.episode("thread-a", rule.id);
-      yield* store.resolveEpisode("thread-a", rule.id, 0);
-      const staleExpectation = yield* store.episode("thread-a", rule.id);
-      yield* store.resolveEpisode("thread-a", rule.id, 1, rule.generation, settings.generation);
-      return { unresolved, wrongNotice, wrongEpoch, afterReset, staleExpectation, resolved: yield* store.episode("thread-a", rule.id),
-        notices: yield* store.notices() };
-    }));
-    assert.deepEqual(observed.unresolved, { epoch: 0, objectId: null }, "an uncertain notice holds the episode");
-    assert.equal(observed.wrongNotice, "The uncertain notice changed. Reload first.");
-    assert.equal(observed.wrongEpoch, "The episode changed. Reload first.");
-    assert.deepEqual(observed.afterReset, { epoch: 1, objectId: null });
-    assert.deepEqual(observed.staleExpectation, { epoch: 1, objectId: null });
-    assert.deepEqual(observed.resolved, { epoch: 2, objectId: null });
-    assert.deepEqual(observed.notices.map((notice) => notice.state), ["uncertainty_accepted"]);
-  }), { timeout: 10_000 });
-
-  it.live("start refuses a committed notice after its rule or settings generation changed, and commits stop at three per thread per hour", () => Effect.gen(function* () {
-    const directory = yield* temporaryDirectory;
-    const observed = yield* withGuidance(directory, (store) => Effect.gen(function* () {
-      const observing = yield* store.saveRule(ruleInput(), 1);
-      const rule = yield* store.saveRule(ruleInput({ ...observing, expectedGeneration: observing.generation, mode: "send" }), 2);
-      const settings = yield* store.settings();
-      const first = (yield* store.commit(rule, settings.generation, "thread-a", "run-1", 1_000))!;
-      const moved = yield* store.saveSettings(settings);
-      const refused = yield* store.start(first.id);
-      yield* store.finish(first.id, "rejected", null);
-      const hourly: Array<boolean> = [];
-      for (const [index, ruleName] of ["a", "b", "c", "d"].entries()) {
-        const other = yield* store.saveRule(ruleInput({ name: `Rule ${ruleName}` }), 3);
-        const sending = yield* store.saveRule(ruleInput({ ...other, expectedGeneration: other.generation, mode: "send" }), 3);
-        const notice = yield* store.commit(sending, moved.generation, "thread-b", `run-${index}`, 10_000 + index);
-        hourly.push(notice !== null);
-      }
-      return { refused, hourly };
-    }));
-    assert.equal(observed.refused, false);
-    assert.deepEqual(observed.hourly, [true, true, true, false]);
-  }), { timeout: 10_000 });
 });

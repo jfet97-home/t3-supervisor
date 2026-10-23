@@ -121,7 +121,7 @@ const makeGuidanceStore = Effect.gen(function* () {
   });
 
   // schema, the default settings row, the column additions and the restart recovery of committed notices, in the
-  // synchronous constructor's order and in one transaction
+  // baseline constructor's order and in one transaction
   yield* guidanceSql(db.withTransaction(Effect.gen(function* () {
     for (const statement of schema) yield* db.unsafe(statement);
     yield* db`INSERT OR IGNORE INTO meta VALUES('settings',${JSON.stringify(defaults)})`;
