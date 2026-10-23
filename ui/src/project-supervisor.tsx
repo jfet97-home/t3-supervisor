@@ -273,7 +273,7 @@ function WorkflowPlanNode({node, liveAssessment = false, contributions}: {node: 
     {node.localId && <p className="small">Task-local step ID: <code>{node.localId}</code></p>}
     <WorkflowSource source={node.source} templatePath={node.templatePath}/>
     <p>{node.description}</p>
-    <DefinitionReferences references={node.references}/>
+    <DefinitionReferences references={node.references} skills={node.skills}/>
     <p><strong>Plan status:</strong> {liveAssessment ? node.status === "underway" ? "Underway" : node.status === "completed" ? "Completed" : planStatusText[node.status] : planStatusText[node.status]} · <strong>Definition:</strong> {node.resolution === "resolved" ? "Resolved" : "Unresolved"}</p>
     <p>{node.reason}</p>
     {node.contributorThreadIds.length > 0 && <div><strong>Contributors</strong><ul>{node.contributorThreadIds.map(threadId => <li key={threadId}><a href={`t3-thread://v1/${threadId}`}>Child conversation <code>{threadId}</code></a></li>)}</ul></div>}
@@ -284,7 +284,7 @@ function WorkflowPlanNode({node, liveAssessment = false, contributions}: {node: 
     <p><strong>Workflow: {node.name}</strong> <span className="muted">({node.definitionId})</span></p>
     <WorkflowSource source={node.source} templatePath={node.templatePath}/>
     <p>{node.description}</p>
-    <DefinitionReferences references={node.references}/>
+    <DefinitionReferences references={node.references} skills={node.skills}/>
     <p><strong>Resolution:</strong> {node.resolution} · <strong>Plan status:</strong> {liveAssessment ? node.status === "underway" ? "Underway" : node.status === "completed" ? "Completed" : planStatusText[node.status] : planStatusText[node.status]} · <strong>Fixed:</strong> {node.fixed === null ? "Unknown" : node.fixed ? "Yes" : "No"}</p>
     <p>{node.reason}</p>
     {node.omissions.length > 0 && <div className="stack">

@@ -132,14 +132,16 @@ it("approved definitions require the stored complete snapshot and do not use a l
 });
 
 it("approved snapshots retain reusable, workflow and inline file references and reject malformed lists", () => {
-  const approved = definitions({steps: definitions().steps.map(step => ({...step, references: ["docs/verify.md"]})),
-    workflows: [{id: "delivery", name: "Delivery", description: "Deliver the change.", summary: testSummary("delivery"), fixed: false, references: ["docs/delivery.md"],
-      sequence: [{step: {id: "local", name: "Local", description: "Check local behavior.", references: ["src/local.ts"]}}]}]});
+  const approved = definitions({steps: definitions().steps.map(step => ({...step, references: ["docs/verify.md"], skills: ["plugin:review"]})),
+    workflows: [{id: "delivery", name: "Delivery", description: "Deliver the change.", summary: testSummary("delivery"), fixed: false, references: ["docs/delivery.md"], skills: ["SKILL.md"],
+      sequence: [{step: {id: "local", name: "Local", description: "Check local behavior.", references: ["src/local.ts"], skills: [".claude/skills/testing/SKILL.md"]}}]}]});
   assert.deepEqual(extractApprovedProjectDefinitions(task({definitionSnapshot: approved})), approved);
   const malformed = structuredClone(approved);
   Object.assign(malformed.steps[0]!, {references: ["/absolute/path.md"]});
   assert.equal(extractApprovedProjectDefinitions(task({definitionSnapshot: malformed})), null);
   Object.assign(malformed.steps[0]!, {references: ["docs/ghp_" + "A".repeat(32) + ".md"]});
+  assert.equal(extractApprovedProjectDefinitions(task({definitionSnapshot: malformed})), null);
+  Object.assign(malformed.steps[0]!, {references: [], skills: [{skill: {scope: "global", name: "review"}}]});
   assert.equal(extractApprovedProjectDefinitions(task({definitionSnapshot: malformed})), null);
 });
 

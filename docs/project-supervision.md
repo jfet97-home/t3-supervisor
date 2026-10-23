@@ -419,7 +419,7 @@ not raw `t3_thread_send`.
 The progress view is separate from definition authoring, proposals and saved
 agreements. It reads current main/child workflows, lifecycle and recent Supervisor
 observations without waking chats or changing plans. Missing child workflows,
-unavailable reads and incomplete scope are shown explicitly. Supporting references
+unavailable reads and incomplete scope are shown explicitly. Activity references
 are checked against fresh native scope and activity before storage; they explain
 the assessment without granting write authority. Historical agreement snapshots
 remain plans, not execution receipts.

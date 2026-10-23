@@ -1,4 +1,4 @@
-import {definitionReferenceFields, validDefinitionReferences} from "./definition-references.js";
+import {definitionGuidanceFields, validDefinitionGuidance} from "./definition-references.js";
 import {Buffer} from "node:buffer";
 import {Clock, Context, Data, Effect, Exit, Layer, Schema} from "effect";
 import type {SqlError} from "effect/sql";
@@ -295,7 +295,7 @@ const validPlan = (value: unknown): value is WorkflowStatePlan => {
       budget.nodes++;
       if (budget.nodes > workflowMutationLimits.maxPlanNodes || !validNodeId(node.nodeId) || budget.nodeIds.has(node.nodeId) ||
         !validPlanText(node.templatePath, true) && node.templatePath !== null || !validPlanText(node.name) || !validPlanText(node.description, true) ||
-        Object.hasOwn(node, "references") && !validDefinitionReferences(node.references) ||
+        !validDefinitionGuidance(node) ||
         !validWorkflowSource(node.source) || !isStatus(node.status) || !validContributorIds(node.contributorThreadIds)) return false;
       budget.nodeIds.add(node.nodeId);
       if (node.kind === "step") {
@@ -335,7 +335,7 @@ const validApplyPlan = (value: unknown): boolean => {
         !(node.nodeId === undefined || validNodeId(node.nodeId) && !budget.nodeIds.has(node.nodeId)) ||
         !(node.templatePath === undefined || node.templatePath === null || validPlanText(node.templatePath, true)) ||
         !optionalText(node, "name") || !optionalText(node, "description") ||
-        Object.hasOwn(node, "references") && !validDefinitionReferences(node.references) ||
+        !validDefinitionGuidance(node) ||
         !optionalStatus(node) || !optionalContributors(node) ||
         Object.hasOwn(node, "source") && !validWorkflowSource(node.source)) return false;
       if (validNodeId(node.nodeId)) budget.nodeIds.add(node.nodeId);
@@ -372,8 +372,8 @@ export const workflowPlanEntities = collectPlanEntities;
 
 const copyPlanNode = (node: WorkflowPlanNodeInfo): WorkflowPlanNodeInfo => {
   if (isPlanGroup(node)) return {...node, nodes: node.nodes.map(copyPlanNode)};
-  if (node.kind === "step") return {...node, ...definitionReferenceFields(node.references), source: node.source ? {...node.source} : null, contributorThreadIds: [...node.contributorThreadIds]};
-  return {...node, ...definitionReferenceFields(node.references), source: node.source ? {...node.source} : null, contributorThreadIds: [...node.contributorThreadIds],
+  if (node.kind === "step") return {...node, ...definitionGuidanceFields(node), source: node.source ? {...node.source} : null, contributorThreadIds: [...node.contributorThreadIds]};
+  return {...node, ...definitionGuidanceFields(node), source: node.source ? {...node.source} : null, contributorThreadIds: [...node.contributorThreadIds],
     omissions: node.omissions.map(item => ({...item, source: item.source ? {...item.source} : null})),
     plan: node.plan ? copyPlanNode(node.plan) as WorkflowPlanGroupInfo : null};
 };

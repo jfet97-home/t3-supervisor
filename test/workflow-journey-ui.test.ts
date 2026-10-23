@@ -29,6 +29,17 @@ it("a proposal never borrows completed step states from the saved plan", () => {
   assert.doesNotMatch(html, />Completed<|aria-current="step"|state-completed/);
 });
 
+it("journey disclosures expose separate read-only file and skill lists", () => {
+  const {task} = example("working");
+  const html = renderToStaticMarkup(createElement(PlanJourney, {node: task.workflow!.plan!, live: true}));
+  assert.match(html, /<strong>References<\/strong>/);
+  assert.match(html, /<strong>Skills<\/strong>/);
+  assert.match(html, /<code>docs\/payments\/webhook-retries.md<\/code>/);
+  assert.match(html, /webhook-retry-idempotency-validation\/SKILL.md/);
+  assert.match(html, /<code>plugin:review<\/code>/);
+  assert.doesNotMatch(html, /href="(?:docs|\.claude)/);
+});
+
 it("accepted commitments are labelled as agreed without implying execution", () => {
   const {task} = example("completed");
   const html = renderToStaticMarkup(createElement(PlanJourney, {node: task.workflow!.plan!, context: "agreed"}));

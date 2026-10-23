@@ -116,11 +116,12 @@ and uncertain notices are retained without replay. See
 and [workflow MCP](workflow-mcp.md) for connected mutable plans and authority.
 
 
-## Supporting references
+## References and skills
 
-Steps, workflows and inline steps accept canonical relative file strings and explicit
-local/global skill references. Keep the task-specific contract short and point to
-maintained guidance instead of duplicating it. The [definition syntax](steps-and-workflows.md#supporting-references)
+Steps, workflows and inline steps accept separate optional string lists:
+`references` for checkout-relative files and `skills` for local SKILL.md paths or
+exact global catalog names. Keep the task-specific contract short and point to
+maintained guidance instead of duplicating it. The [definition syntax](steps-and-workflows.md#references-and-skills)
 owns the format, lookup rules, bounds and revision semantics. Definitions and Plan
 show these pointers read-only; Supervisor does not open targets or discover host
 skill roots. Existing configuration editing still writes only the definition index.

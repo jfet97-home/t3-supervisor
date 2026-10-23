@@ -40,13 +40,13 @@ function NodeDescription({node, definitions}: {node: DefinitionNode; definitions
       return <div className="stack definition-node-content">
         <p><strong>Step:</strong> <DefinitionLink kind="step" id={node.step} steps={definitions.steps} workflows={definitions.workflows}/></p>
         {step && <p className="definition-copy">{step.description}</p>}
-        {step && <DefinitionReferences references={step.references}/>}
+        {step && <DefinitionReferences references={step.references} skills={step.skills}/>}
       </div>;
     }
     return <div className="stack definition-node-content">
       <p><strong>Local step:</strong> {node.step.name} <span className="muted small">({node.step.id})</span></p>
       <p className="definition-copy">{node.step.description}</p>
-      <DefinitionReferences references={node.step.references}/>
+      <DefinitionReferences references={node.step.references} skills={node.step.skills}/>
     </div>;
   }
   if ("workflow" in node) {
@@ -54,7 +54,7 @@ function NodeDescription({node, definitions}: {node: DefinitionNode; definitions
     return <div className="stack definition-node-content">
       <p><strong>Workflow:</strong> <DefinitionLink kind="workflow" id={node.workflow} steps={definitions.steps} workflows={definitions.workflows}/></p>
       {workflow && <><p className="definition-copy">{workflow.description}</p><p className="muted small">Open “{workflow.name}” below to inspect its contents.</p></>}
-      {workflow && <DefinitionReferences references={workflow.references}/>}
+      {workflow && <DefinitionReferences references={workflow.references} skills={workflow.skills}/>}
     </div>;
   }
   const kind = "sequence" in node ? "sequence" : "parallel";
@@ -77,7 +77,7 @@ function WorkflowContents({workflow, definitions}: {workflow: DefinitionWorkflow
     <DefinitionSource definition={workflow}/>
     {workflow.fixed && <p className="pill blue">Fixed fragment: original members and relationships are preserved; support work may be inserted around or between them.</p>}
     <p className="definition-copy">{workflow.description}</p>
-    <DefinitionReferences references={workflow.references}/>
+    <DefinitionReferences references={workflow.references} skills={workflow.skills}/>
     <div><h4>{kind === "sequence" ? "Sequence" : "Parallel group"}</h4>
       <p className="muted small">{kind === "sequence" ? "The sequence states intended semantic order; it is not an execution scheduler." : "Members have no declared order and may overlap; the group does not launch agents."}</p>
       <DefinitionNodes kind={kind} nodes={nodes} definitions={definitions}/>
@@ -129,7 +129,7 @@ function DefinitionCatalog({kind, definitions}: {kind: "workflows" | "steps"; de
           {workflow ? <WorkflowContents workflow={workflow} definitions={definitions}/> : <>
             <DefinitionSource definition={step!}/>
             <p className="definition-copy">{step!.description}</p>
-            <DefinitionReferences references={step!.references}/>
+            <DefinitionReferences references={step!.references} skills={step!.skills}/>
           </>}
         </details> : <p className="pill amber">Missing or invalid {singular}: {entry.sourceId}. Its index entry and required flag are retained.</p>}
       </div>;

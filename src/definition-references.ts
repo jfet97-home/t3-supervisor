@@ -1,16 +1,14 @@
 import {redact} from "./credential-redaction.js";
 import {Schema} from "effect";
 
-export type SupportingReference = string
-  | {readonly skill: {readonly scope: "local"; readonly path: string}}
-  | {readonly skill: {readonly scope: "global"; readonly name: string}};
-
-export const definitionReferenceLimits = {maxPaths: 100, maxPathLength: 4096} as const;
+export type SupportingReference = string;
+export type DefinitionGuidance = {readonly references?: readonly string[]; readonly skills?: readonly string[]};
+export const definitionReferenceLimits = {maxPaths: 100, maxPathLength: 4096, maxSkillNameLength: 256} as const;
 
 const referenceProblemText = {
-  references_not_list: "references must be a list of relative file paths or explicit skill references",
+  references_not_list: "references must be a list of relative file paths",
   references_too_many: `references may list at most ${definitionReferenceLimits.maxPaths} paths`,
-  reference_not_text: "each reference must be a text path or an explicit skill reference",
+  reference_not_text: "each reference must be a text path",
   reference_empty: "a reference cannot be empty",
   reference_too_long: `a reference can have at most ${definitionReferenceLimits.maxPathLength} characters`,
   reference_surrounding_whitespace: "a reference cannot start or end with whitespace",
@@ -21,14 +19,23 @@ const referenceProblemText = {
   reference_url_like: "a reference must be a file path, not a URL or scheme",
   reference_credential_like: "a reference cannot contain credential-like text",
   reference_traversal: "a reference cannot contain parent directory traversal",
-  reference_skill_shape: "a skill reference needs exactly a local scope and path or a global scope and name",
-  reference_skill_path: "a local skill path must name SKILL.md relative to the checkout root",
-  reference_skill_name: "a global skill name must be an exact catalog name with optional colon namespaces",
+  skills_not_list: "skills must be a list of relative SKILL.md paths or exact catalog names",
+  skills_too_many: `skills may list at most ${definitionReferenceLimits.maxPaths} entries`,
+  skill_not_text: "each skill must be a text path or catalog name",
+  skill_empty: "a skill cannot be empty",
+  skill_too_long: "a skill path can have at most 4096 characters and a catalog name at most 256",
+  skill_surrounding_whitespace: "a skill cannot start or end with whitespace",
+  skill_control_character: "a skill cannot contain control or formatting characters",
+  skill_credential_like: "a skill cannot contain credential-like text",
+  skill_path_invalid: "a skill path must be a canonical checkout-relative path with forward slashes and no traversal or scheme",
+  skill_path_not_skill_md: "a skill path must name SKILL.md exactly",
+  skill_name_invalid: "a skill name must match the exact catalog name with optional colon namespaces",
+  skill_duplicate: "a skill cannot appear more than once",
 } as const;
 
 export type DefinitionReferenceProblemCode = keyof typeof referenceProblemText;
-/** A rejected reference list: a fixed reason code and, for a single entry, its zero-based position. Input text is never included. */
-export type DefinitionReferenceProblem = {code: DefinitionReferenceProblemCode; index: number | null};
+/** A fixed reason, field and zero-based position. Rejected input is never included. */
+export type DefinitionReferenceProblem = {field: "references" | "skills"; code: DefinitionReferenceProblemCode; index: number | null};
 
 const pathProblem = (path: unknown): DefinitionReferenceProblemCode | null => {
   if (typeof path !== "string") return "reference_not_text";
@@ -45,75 +52,64 @@ const pathProblem = (path: unknown): DefinitionReferenceProblemCode | null => {
   return null;
 };
 
-const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
-const exactKeys = (value: Record<string, unknown>, keys: readonly string[]) =>
-  Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
-const referenceProblem = (value: unknown): DefinitionReferenceProblemCode | null => {
-  if (typeof value === "string") return pathProblem(value);
-  if (!record(value)) return "reference_not_text";
-  if (!exactKeys(value, ["skill"]) || !record(value.skill)) return "reference_skill_shape";
-  const skill = value.skill;
-  if (skill.scope === "local") {
-    if (!exactKeys(skill, ["scope", "path"])) return "reference_skill_shape";
-    const problem = pathProblem(skill.path);
-    if (problem) return problem;
-    return typeof skill.path === "string" && /(?:^|\/)SKILL\.md$/u.test(skill.path) ? null : "reference_skill_path";
+const skillProblem = (value: unknown): DefinitionReferenceProblemCode | null => {
+  if (typeof value !== "string") return "skill_not_text";
+  if (!value.length) return "skill_empty";
+  if (value.length > definitionReferenceLimits.maxPathLength) return "skill_too_long";
+  if (value.trim() !== value) return "skill_surrounding_whitespace";
+  if (/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(value)) return "skill_control_character";
+  if (redact(value) !== value) return "skill_credential_like";
+  if (value.includes("/") || /\.md$/iu.test(value)) {
+    if (pathProblem(value) || value.split("/").some(segment => segment === "" || segment === ".")) return "skill_path_invalid";
+    return value.split("/").at(-1) === "SKILL.md" ? null : "skill_path_not_skill_md";
   }
-  if (skill.scope === "global") {
-    if (!exactKeys(skill, ["scope", "name"])) return "reference_skill_shape";
-    if (typeof skill.name !== "string") return "reference_skill_name";
-    if (redact(skill.name) !== skill.name) return "reference_credential_like";
-    if (skill.name.length > definitionReferenceLimits.maxPathLength) return "reference_too_long";
-    return /^[a-zA-Z0-9][a-zA-Z0-9._-]*(?::[a-zA-Z0-9][a-zA-Z0-9._-]*)*$/u.test(skill.name) ? null : "reference_skill_name";
-  }
-  return "reference_skill_shape";
+  if (value.length > definitionReferenceLimits.maxSkillNameLength) return "skill_too_long";
+  return /^[a-zA-Z0-9][a-zA-Z0-9._-]*(?::[a-zA-Z0-9][a-zA-Z0-9._-]*)*$/u.test(value) ? null : "skill_name_invalid";
 };
 
-// validate the original representation, including excess keys, without stripping or normalizing authenticated values
-export const SupportingReference = Schema.declare((value): value is SupportingReference => referenceProblem(value) === null);
+// validate original strings without normalizing source-bound or authenticated input
+export const SupportingReference = Schema.declare((value): value is string => pathProblem(value) === null);
 export const SupportingReferences = Schema.Array(SupportingReference).check(Schema.makeFilter(value => value.length <= definitionReferenceLimits.maxPaths));
+export const SupportingSkill = Schema.declare((value): value is string => skillProblem(value) === null);
+export const SupportingSkills = Schema.Array(SupportingSkill).check(Schema.makeFilter(value => value.length <= definitionReferenceLimits.maxPaths && new Set(value).size === value.length));
 
-export const definitionReferenceProblem = (value: unknown): DefinitionReferenceProblem | null => {
-  if (!Array.isArray(value)) return {code: "references_not_list", index: null};
-  if (value.length > definitionReferenceLimits.maxPaths) return {code: "references_too_many", index: null};
-  for (const [index, path] of value.entries()) {
-    const code = referenceProblem(path);
-    if (code) return {code, index};
+export const definitionReferenceProblem = (value: unknown, field: "references" | "skills" = "references"): DefinitionReferenceProblem | null => {
+  if (!Array.isArray(value)) return {field, code: field === "skills" ? "skills_not_list" : "references_not_list", index: null};
+  if (value.length > definitionReferenceLimits.maxPaths) return {field, code: field === "skills" ? "skills_too_many" : "references_too_many", index: null};
+  const seen = new Set<string>();
+  for (const [index, entry] of value.entries()) {
+    const code = field === "skills" ? skillProblem(entry) : pathProblem(entry);
+    if (code) return {field, code, index};
+    if (field === "skills" && seen.has(entry as string)) return {field, code: "skill_duplicate", index};
+    seen.add(entry as string);
   }
   return null;
 };
+export const definitionGuidanceProblem = (value: Record<string, unknown>): DefinitionReferenceProblem | null => {
+  for (const field of ["references", "skills"] as const) {
+    const problem = Object.hasOwn(value, field) ? definitionReferenceProblem(value[field], field) : null;
+    if (problem) return problem;
+  }
+  return null;
+};
+export const validDefinitionGuidance = (value: Record<string, unknown>): boolean => definitionGuidanceProblem(value) === null;
 
-export const validDefinitionReferences = (value: unknown): value is readonly SupportingReference[] => definitionReferenceProblem(value) === null;
-
-/** Describes a rejected reference list with fixed text and a numeric position only. */
+/** Describes a rejected list with fixed text and a numeric position only. */
 export const describeDefinitionReferenceProblem = (problem: DefinitionReferenceProblem): string =>
-  `${problem.index === null ? "references" : `references[${problem.index}]`} is invalid: ${referenceProblemText[problem.code]}.`;
+  `${problem.field}${problem.index === null ? "" : `[${problem.index}]`} is invalid: ${referenceProblemText[problem.code]}.`;
 
-const copyReference = (reference: SupportingReference): SupportingReference => typeof reference === "string" ? reference
-  : reference.skill.scope === "local" ? {skill: {scope: "local", path: reference.skill.path}}
-    : {skill: {scope: "global", name: reference.skill.name}};
-export const definitionReferenceFields = (references: readonly SupportingReference[] | undefined): {references?: readonly SupportingReference[]} =>
-  references === undefined ? {} : {references: references.map(copyReference)};
-
-export const supportingReferenceLabel = (reference: SupportingReference): string => typeof reference === "string" ? `File: ${reference}`
-  : reference.skill.scope === "local" ? `Local skill: ${reference.skill.path}` : `Global skill: ${reference.skill.name}`;
-
-export const sameDefinitionReferences = (left: readonly SupportingReference[] | undefined, right: readonly SupportingReference[] | undefined): boolean =>
-  (left?.length ?? 0) === (right?.length ?? 0) && (left ?? []).every((reference, index) => {
-    const other = right?.[index];
-    if (typeof reference === "string") return reference === other;
-    if (!other || typeof other === "string") return false;
-    return reference.skill.scope === "local" ? other.skill.scope === "local" && reference.skill.path === other.skill.path
-      : other.skill.scope === "global" && reference.skill.name === other.skill.name;
-  });
-
-const skillSchema = (scope: "local" | "global", key: "path" | "name") => ({
-  type: "object", additionalProperties: false, required: ["skill"], properties: {skill: {
-    type: "object", additionalProperties: false, required: ["scope", key],
-    properties: {scope: {const: scope}, [key]: {type: "string", minLength: 1, maxLength: definitionReferenceLimits.maxPathLength}},
-  }},
+export const definitionGuidanceFields = ({references, skills}: {readonly references?: readonly string[] | undefined; readonly skills?: readonly string[] | undefined}): DefinitionGuidance => ({
+  ...(references === undefined ? {} : {references: [...references]}),
+  ...(skills === undefined ? {} : {skills: [...skills]}),
 });
+export const sameStringList = (left: readonly string[] | undefined, right: readonly string[] | undefined): boolean =>
+  (left?.length ?? 0) === (right?.length ?? 0) && (left ?? []).every((entry, index) => entry === right?.[index]);
+export const sameDefinitionGuidance = (left: DefinitionGuidance, right: DefinitionGuidance): boolean =>
+  sameStringList(left.references, right.references) && sameStringList(left.skills, right.skills);
+
 export const supportingReferencesJsonSchema = {
   type: "array", maxItems: definitionReferenceLimits.maxPaths,
-  items: {oneOf: [{type: "string", minLength: 1, maxLength: definitionReferenceLimits.maxPathLength}, skillSchema("local", "path"), skillSchema("global", "name")]},
+  items: {type: "string", minLength: 1, maxLength: definitionReferenceLimits.maxPathLength},
 } as const;
+export const supportingSkillsJsonSchema = {...supportingReferencesJsonSchema, uniqueItems: true,
+  description: "Canonical checkout-relative SKILL.md paths or exact catalog names (up to 256 characters, optional colon namespaces)."} as const;

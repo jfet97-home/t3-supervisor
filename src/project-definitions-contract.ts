@@ -1,16 +1,16 @@
-import {SupportingReferences, type SupportingReference} from "./definition-references.js";
+import {SupportingReferences, SupportingSkills, type SupportingReference} from "./definition-references.js";
 import { Effect, Schema } from "effect";
 
 export const workflowDefinitionExpansionLimits = {maxNodes: 500, maxDepth: 32} as const;
 
 export const DefinitionNode = Schema.suspend((): Schema.Codec<DefinitionNode> => Schema.Union([
-  Schema.Struct({step: Schema.Union([Schema.String, Schema.Struct({id: Schema.String, name: Schema.String, description: Schema.String, references: Schema.optionalKey(SupportingReferences)})])}),
+  Schema.Struct({step: Schema.Union([Schema.String, Schema.Struct({id: Schema.String, name: Schema.String, description: Schema.String, references: Schema.optionalKey(SupportingReferences), skills: Schema.optionalKey(SupportingSkills)})])}),
   Schema.Struct({workflow: Schema.String}),
   Schema.Struct({sequence: Schema.Array(DefinitionNode)}),
   Schema.Struct({parallel: Schema.Array(DefinitionNode)}),
 ]));
 export type DefinitionNode =
-  | {readonly step: string | {readonly id: string; readonly name: string; readonly description: string; readonly references?: readonly SupportingReference[]}}
+  | {readonly step: string | {readonly id: string; readonly name: string; readonly description: string; readonly references?: readonly SupportingReference[]; skills?: readonly string[]}}
   | {readonly workflow: string}
   | {readonly sequence: readonly DefinitionNode[]}
   | {readonly parallel: readonly DefinitionNode[]};
@@ -25,7 +25,7 @@ export const DefinitionStepInfo = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
   description: Schema.String,
-  references: Schema.optionalKey(SupportingReferences),
+  references: Schema.optionalKey(SupportingReferences), skills: Schema.optionalKey(SupportingSkills),
   /** The project.yaml index summary: navigation for readers, never a substitute for the description. */
   summary: Schema.String,
   origin: Schema.optional(Schema.Literals(["global", "project"])),
@@ -38,7 +38,7 @@ export const DefinitionWorkflowInfo = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
   description: Schema.String,
-  references: Schema.optionalKey(SupportingReferences),
+  references: Schema.optionalKey(SupportingReferences), skills: Schema.optionalKey(SupportingSkills),
   summary: Schema.String,
   fixed: Schema.Boolean,
   sequence: Schema.optional(Schema.Array(DefinitionNode)),

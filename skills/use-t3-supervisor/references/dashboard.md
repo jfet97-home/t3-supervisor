@@ -270,25 +270,34 @@ and delivery evidence reconcile the original attempt. A definite failed check-in
 needs an explicit root retry or reassignment.
 
 
-## File references on steps and workflows
+## References and skills on steps and workflows
 
 Reusable step YAML frontmatter, workflow YAML and inline local steps may include
-an optional `references` list of zero, one or more relative file paths. For example:
+separate optional `references` and `skills` string lists:
 
 ```yaml
 references:
   - docs/testing.md
-  - skills/use-project/SKILL.md
   - src/example.ts
+skills:
+  - .claude/skills/project-testing/SKILL.md
+  - effect-v4-development
+  - plugin:review
 ```
 
-Paths are relative to the operative project checkout root, even for shared
-catalog definitions. Omit the field or use `references: []` for none. Any file type
-is supported; absolute paths and URLs are invalid. Definitions and Plan show these
-lists read-only. Edit the original definition and refresh to change them. The
-service does not open referenced files or validate their existence, and a listed
-path grants no access or evidence of reading. Reference changes follow normal
-source review and remain part of saved/fixed workflow snapshots.
+Files and local skill paths are relative to the operative checkout root, even for
+shared definitions. Skill paths name `SKILL.md` exactly and have no empty, dot or
+parent segments. Other skills are exact names from the consuming agent's catalog,
+including namespaces. Missing or ambiguous guidance stays an explicit gap; never
+guess a host installation path. Omit either list or use `[]` for none. Each list
+allows at most 100 entries; skills cannot repeat. Paths allow 4096 characters and
+catalog names 256. No scope or object wrapper is used.
+
+Definitions and Plan show separate read-only lists. Edit the source and refresh
+to change them. The service loads no target, verifies no existence, installs no
+skill and grants no access or proof of reading. Both lists remain part of saved
+plans, source identity and fixed commitments. The Guide owns the full syntax and
+validation rules.
 
 ## No Project activation
 

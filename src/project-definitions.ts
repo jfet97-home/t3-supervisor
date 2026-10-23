@@ -2,7 +2,7 @@ import { Cause, Context, Data, Deferred, Duration, Effect, Exit, Layer, RcMap, R
 import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import { parseDocument } from "yaml";
-import {SupportingReferences, type SupportingReference, definitionReferenceFields, definitionReferenceProblem, describeDefinitionReferenceProblem } from "./definition-references.js";
+import {SupportingReferences, SupportingSkills, type DefinitionGuidance, definitionGuidanceFields, definitionGuidanceProblem, describeDefinitionReferenceProblem } from "./definition-references.js";
 import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import type { FreshGitProbe } from "./git-probe.js";
@@ -110,12 +110,11 @@ const definitionId = definitionIdPattern;
 const record = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const text = (v: unknown, max = 8000): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= max;
 const exact = (v: Record<string, unknown>, fields: string[]) => Object.keys(v).length === fields.length && fields.every(f => Object.hasOwn(v, f));
-const withOptionalReferences = (value: Record<string, unknown>, fields: string[]) =>
-  exact(value, [...fields, ...(Object.hasOwn(value, "references") ? ["references"] : [])]);
+const withOptionalGuidance = (value: Record<string, unknown>, fields: string[]) =>
+  exact(value, [...fields, ...["references", "skills"].filter(field => Object.hasOwn(value, field))]);
 // rejected reference lists report a fixed reason and position without repeating the path
-const checkReferences = (value: Record<string, unknown>, owner: string): void => {
-  if (!Object.hasOwn(value, "references")) return;
-  const problem = definitionReferenceProblem(value.references);
+const checkGuidance = (value: Record<string, unknown>, owner: string): void => {
+  const problem = definitionGuidanceProblem(value);
   if (problem) throw new Error(`${owner} ${describeDefinitionReferenceProblem(problem)}`);
 };
 
@@ -162,9 +161,9 @@ const projectConfigurationFromYaml = (config: unknown): ProjectConfigurationInfo
 export const ProjectConfigurationSource = DefinitionYaml.pipe(Schema.decodeTo(ProjectConfigurationInfo, validated<typeof ProjectConfigurationInfo.Encoded, unknown>(projectConfigurationFromYaml)));
 
 /** A definition file's own content; the summary comes from its project.yaml entry. */
-const ParsedStep = Schema.Struct({id: Schema.String, name: Schema.String, description: Schema.String, references: Schema.optionalKey(SupportingReferences)});
+const ParsedStep = Schema.Struct({id: Schema.String, name: Schema.String, description: Schema.String, references: Schema.optionalKey(SupportingReferences), skills: Schema.optionalKey(SupportingSkills)});
 const ParsedWorkflow = Schema.Struct({id: Schema.String, name: Schema.String, description: Schema.String, fixed: Schema.Boolean,
-  references: Schema.optionalKey(SupportingReferences), sequence: Schema.optionalKey(Schema.Array(DefinitionNode)), parallel: Schema.optionalKey(Schema.Array(DefinitionNode))});
+  references: Schema.optionalKey(SupportingReferences), skills: Schema.optionalKey(SupportingSkills), sequence: Schema.optionalKey(Schema.Array(DefinitionNode)), parallel: Schema.optionalKey(Schema.Array(DefinitionNode))});
 type ParsedStep = typeof ParsedStep.Type;
 type ParsedWorkflow = typeof ParsedWorkflow.Type;
 const StepDocument = Schema.Struct({frontmatter: Schema.String, body: Schema.String});
@@ -181,11 +180,11 @@ export const definitionStepSource = (id: string) => Schema.String.pipe(
   })),
   Schema.decodeTo(StepMetadata, validated<typeof StepMetadata.Type, typeof StepDocument.Type>(document => ({metadata: parseYaml(document.frontmatter), body: document.body}))),
   Schema.decodeTo(ParsedStep, validated<ParsedStep, typeof StepMetadata.Type>(({metadata, body}) => {
-    if (!record(metadata) || !withOptionalReferences(metadata, ["id", "name", "description"]) || metadata.id !== id || !definitionName(metadata.name) || !text(metadata.description))
-      throw new Error("Step frontmatter needs a matching id, name, nonempty description and optional references: relative file paths or explicit skill references.");
-    checkReferences(metadata, "Step");
+    if (!record(metadata) || !withOptionalGuidance(metadata, ["id", "name", "description"]) || metadata.id !== id || !definitionName(metadata.name) || !text(metadata.description))
+      throw new Error("Step frontmatter needs a matching id, name, nonempty description and optional references and skills lists.");
+    checkGuidance(metadata, "Step");
     if (body.trim() !== "") throw new Error("Step body must be empty; keep all guidance in description.");
-    return {id, name: metadata.name.trim(), description: metadata.description.trim(), ...definitionReferenceFields(metadata.references as readonly SupportingReference[] | undefined)};
+    return {id, name: metadata.name.trim(), description: metadata.description.trim(), ...definitionGuidanceFields(metadata as DefinitionGuidance)};
   })),
 );
 
@@ -195,12 +194,12 @@ const parseNode = (value: unknown, depth: number, budget: {count: number}): Defi
   if (!record(value) || Object.keys(value).length !== 1) throw new Error("Each workflow node must contain exactly one step, workflow, sequence or parallel key.");
   if (Object.hasOwn(value, "step")) {
     if (typeof value.step === "string" && definitionId.test(value.step)) return {step: value.step};
-    if (record(value.step) && withOptionalReferences(value.step, ["id", "name", "description"]) && typeof value.step.id === "string" &&
+    if (record(value.step) && withOptionalGuidance(value.step, ["id", "name", "description"]) && typeof value.step.id === "string" &&
       definitionId.test(value.step.id) && definitionName(value.step.name) && text(value.step.description)) {
-      checkReferences(value.step, `Local step ${value.step.id}`);
-      return {step: {id: value.step.id, name: value.step.name.trim(), description: value.step.description.trim(), ...definitionReferenceFields(value.step.references as readonly SupportingReference[] | undefined)}};
+      checkGuidance(value.step, `Local step ${value.step.id}`);
+      return {step: {id: value.step.id, name: value.step.name.trim(), description: value.step.description.trim(), ...definitionGuidanceFields(value.step as DefinitionGuidance)}};
     }
-    throw new Error("step must name a reusable step or define a local step with id, name, description and optional references: relative file paths or explicit skill references.");
+    throw new Error("step must name a reusable step or define a local step with id, name, description and optional references and skills lists.");
   }
   if (Object.hasOwn(value, "workflow")) {
     if (typeof value.workflow === "string" && definitionId.test(value.workflow)) return {workflow: value.workflow};
@@ -234,16 +233,16 @@ export const definitionWorkflowSource = (id: string) => Schema.String.pipe(
     const hasSequence = record(metadata) && Object.hasOwn(metadata, "sequence");
     const hasParallel = record(metadata) && Object.hasOwn(metadata, "parallel");
     const fields = ["name", "description", ...(record(metadata) && Object.hasOwn(metadata, "fixed") ? ["fixed"] : []), ...(hasSequence ? ["sequence"] : []), ...(hasParallel ? ["parallel"] : [])];
-    if (!record(metadata) || !withOptionalReferences(metadata, fields) || hasSequence === hasParallel || !definitionName(metadata.name) || !text(metadata.description) ||
+    if (!record(metadata) || !withOptionalGuidance(metadata, fields) || hasSequence === hasParallel || !definitionName(metadata.name) || !text(metadata.description) ||
       metadata.fixed !== undefined && typeof metadata.fixed !== "boolean")
-      throw new Error("A workflow needs name, description, optional fixed and references (relative file paths or explicit skills), and exactly one root sequence or parallel group.");
-    checkReferences(metadata, "Workflow");
+      throw new Error("A workflow needs name, description, optional fixed, references and skills lists, and exactly one root sequence or parallel group.");
+    checkGuidance(metadata, "Workflow");
     const root = hasSequence ? parseNode({sequence: metadata.sequence}, 0, {count: 0}) : parseNode({parallel: metadata.parallel}, 0, {count: 0});
     const nodes = hasSequence ? (root as {sequence: readonly DefinitionNode[]}).sequence : (root as {parallel: readonly DefinitionNode[]}).parallel;
     const localIds = collectLocalStepIds(nodes);
     if (new Set(localIds).size !== localIds.length) throw new Error("Local step identifiers must be unique within a workflow.");
     return {id, name: metadata.name.trim(), description: metadata.description.trim(), fixed: metadata.fixed === true,
-      ...definitionReferenceFields(metadata.references as readonly SupportingReference[] | undefined),
+      ...definitionGuidanceFields(metadata as DefinitionGuidance),
       ...(hasSequence ? {sequence: (root as {sequence: readonly DefinitionNode[]}).sequence} : {parallel: (root as {parallel: readonly DefinitionNode[]}).parallel})};
   })),
 );

@@ -22,8 +22,8 @@ uses the same format. Scope selection, permissions and source paths remain visib
 ## A step
 
 A step is a semantic piece of work, not a scheduled task or a command. Its complete
-required definition fields are `id`, `name` and `description`, with an optional
-`references` list of supporting file or skill references. All applicability, instructions,
+required definition fields are `id`, `name` and `description`, with optional
+`references` and `skills` string lists. All applicability, instructions,
 expected results, delegation details and iteration guidance belong in description.
 There are no separate instructions or outcome fields.
 
@@ -38,6 +38,7 @@ description: |
   Report what was verified, failures and any limitations.
 references:
   - docs/testing.md
+skills:
   - skills/use-project/SKILL.md
 ---
 ```
@@ -66,7 +67,7 @@ when it needs to be referenced project-wide. There is no `inline:` keyword.
 
 ## A workflow
 
-A reusable workflow has a filename ID, name, description, optional `references`
+A reusable workflow has a filename ID, name, description, optional `references` and `skills` lists
 and `fixed: true`,
 and a root `sequence:` or `parallel:` group. Ordered contents consistently use
 `sequence:`, never `steps:`. Groups may nest to express parallel lanes with ordered
@@ -112,25 +113,26 @@ Parallel means members may overlap, with no declared order between them. It does
 not demand simultaneous wall-clock execution or automatically create subagents.
 Sequence expresses the intended semantic order, not an execution scheduler.
 
-## Supporting references
+## References and skills
 
-Steps, workflows and local step objects accept an optional `references` list. A
-relative file string is the canonical file form. Skills use an explicit scope:
+Steps, workflows and local step objects accept separate optional string lists:
+`references` for checkout-relative files and `skills` for local SKILL.md paths or
+exact global catalog names. No scope, path/name fields or object wrappers are used:
 
 ```yaml
 references:
   - docs/testing.md
-  - skill:
-      scope: local
-      path: skills/project-testing/SKILL.md
-  - skill:
-      scope: global
-      name: effect-v4-development
+skills:
+  - .claude/skills/project-testing/SKILL.md
+  - effect-v4-development
+  - plugin:review
 ```
 
 File strings and local skill paths are relative to the operative checkout root,
-including in shared definitions. A local skill path names its `SKILL.md`; no folder
-layout is assumed. Global names match the consuming agent's configured skill catalog
+including in shared definitions. A local skill path names `SKILL.md` exactly; no folder
+layout is assumed. Entries containing `/` or ending in `.md` (case-insensitive)
+are paths, so root `SKILL.md` is valid but `review.md` is not a catalog name. Skill
+paths must use nonempty segments with no `.` or `..`; `./SKILL.md` is rejected. Global names match the consuming agent's configured skill catalog
 exactly, including namespaces such as `plugin:review`. Do not guess installation
 paths, search another host's home, silently shadow a local/global name or choose
 between ambiguous catalog entries. Missing, ambiguous or unreadable material is an
@@ -145,8 +147,10 @@ nothing and does not override the task or Supervisor's role. Interpretation does
 open these targets. Readers must respect their filesystem permissions and symlink
 boundaries; a valid locator is not proof of containment or access.
 
-Omit the list or use `[]` for none. At most 100 references, with each path/name at
-most 4096 characters. Absolute paths, home aliases, schemes, parent traversal,
+Omit either list or use `[]` for none. Each list allows at most 100 entries;
+skills cannot contain exact duplicates. Paths allow at most 4096 characters and
+global skill names at most 256. Names use letters, digits, dots, underscores and
+hyphens, with optional colon namespaces; each segment starts with a letter or digit. Absolute paths, home aliases, schemes, parent traversal,
 backslashes, control/formatting characters and credential-like values are rejected.
 A rejected list reports a fixed reason and zero-based position without echoing the
 input. `README.md:12` is not a supported line-number reference.
@@ -162,7 +166,7 @@ enable shared definitions or supervision.
 
 ## Fixed workflows
 
-`fixed: true` protects the original members, their descriptions, supporting references and requirements,
+`fixed: true` protects the original members, their descriptions, references, skills and requirements,
 their relative order and the declared parallel relationships. It permits added
 support work between original members and around the fragment. A flexible outer
 plan cannot remove or weaken an inner fixed fragment.

@@ -1,3 +1,4 @@
+import {definitionGuidanceFields, type DefinitionGuidance} from "../../src/definition-references.js";
 import {fixtureJourney, type JourneyCase} from "./journey.js";
 import { createHash } from "node:crypto";
 import { stringify } from "yaml";
@@ -94,8 +95,8 @@ const models: SupervisorModelInfo[] = [
 ];
 const steadyModel: SupervisorModelSelection = {instanceId: "fixture-provider", model: "fixture-model-steady", options: [{id: "reasoningEffort", value: "low"}]};
 
-const stepFiles: Record<string, {name: string; description: string}> = {
-  "fixture-tests": {name: "Fixture tests", description: "Fixture step: run the synthetic test suite. Synthetic definition for UI recordings."},
+const stepFiles: Record<string, {name: string; description: string} & DefinitionGuidance> = {
+  "fixture-tests": {name: "Fixture tests", description: "Fixture step: run the synthetic test suite. Synthetic definition for UI recordings.", references: ["docs/payments/webhook-retries.md"], skills: [".claude/skills/payments/webhook-retry-idempotency-validation/SKILL.md", "plugin:review"]},
   "fixture-review": {name: "Fixture review", description: "Fixture step: review the synthetic change. Synthetic definition for UI recordings."},
   "fixture-unindexed": {name: "Fixture unindexed step", description: "Fixture step present on disk but not indexed in project.yaml."},
 };
@@ -511,7 +512,7 @@ export class FixtureModel {
     return {
       projectId, threadId, workspaceRoot: project.workspaceRoot, globalOnly: false, globalRevision: null, revision: sha256(JSON.stringify(config)), editingAvailable: true,
       status: missing.length ? "invalid" : "ready", complete: true,
-      steps: entries("steps").flatMap(entry => {const file = files.steps[entry.id];return file ? [{id: entry.id, name: file.name, description: file.description, summary: entry.summary,
+      steps: entries("steps").flatMap(entry => {const file = files.steps[entry.id];return file ? [{id: entry.id, name: file.name, description: file.description, summary: entry.summary, ...definitionGuidanceFields(file),
         origin: "project" as const, path: `.t3-supervisor/${entry.path}`, sourceId: entry.id}] : [];}),
       workflows: entries("workflows").flatMap(entry => {const file = files.workflows[entry.id];return file ? [{id: entry.id, name: file.name, description: file.description,
         summary: entry.summary, fixed: false, sequence: file.sequence, origin: "project" as const, path: `.t3-supervisor/${entry.path}`, sourceId: entry.id}] : [];}),

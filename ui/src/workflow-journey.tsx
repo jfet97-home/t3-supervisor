@@ -1,4 +1,5 @@
 import React from "react";
+import {DefinitionReferences} from "./definition-references.js";
 import type { TaskInterpretationInfo, WorkflowPlanNodeInfo } from "../../src/project-supervisor-contract.js";
 import type { WorkflowAssessmentInfo } from "../../src/workflow-assessment.js";
 
@@ -42,6 +43,7 @@ export function PlanJourney({node, live = false, context = "proposed"}: {node: W
       </summary>
       <div className="step-explanation">
         {node.description && <p>{node.description}</p>}
+        <DefinitionReferences references={node.references} skills={node.skills}/>
         {node.reason && <div className="step-assessment"><strong>{live ? "Supervisor assessment" : "Why this step"}</strong><p>{node.reason}</p></div>}
         {node.resolution !== "resolved" && <p className="notice">Definition {node.resolution}. Some commitments still need clarification.</p>}
         {node.contributorThreadIds.length > 0 && <p className="small">Contributors: {node.contributorThreadIds.map((id, index) => <React.Fragment key={id}>{index > 0 && ", "}<a href={`t3-thread://v1/${id}`}>Conversation {index + 1}</a></React.Fragment>)}</p>}

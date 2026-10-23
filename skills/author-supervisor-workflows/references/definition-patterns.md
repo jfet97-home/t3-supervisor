@@ -24,15 +24,15 @@ references:
 ---
 ```
 
-Use real checkout-relative file strings. Explicit skill references use
-`{skill: {scope: local, path: skills/project-review/SKILL.md}}` or
-`{skill: {scope: global, name: effect-v4-development}}`. Global names come from the
+Use checkout-relative file strings in `references`. Keep `skills` separate, with
+plain strings such as `.claude/skills/project-review/SKILL.md` or
+`effect-v4-development`. There is no scope or path/name wrapper. Global names come from the
 consuming agent's configured catalog, including namespaces; do not invent host
 paths or assume availability. Missing or ambiguous guidance stays an explicit gap.
-The product Guide's Supporting references section owns the full syntax, bounds and
+The product Guide's References and skills section owns the full syntax, bounds and
 lookup rules. References grant no access and prove neither reading nor execution.
 
-A workflow has `name`, `description`, optional `references` and `fixed`, and one root
+A workflow has `name`, `description`, optional `references` and `skills` string lists and `fixed`, and one root
 `sequence` or `parallel`. Its ID is its YAML filename. Members can be `step` references,
 local step objects, named `workflow` references or nested groups. A workflow file has
 no `steps`, `inline`, `instructions`, `outcome` or `iterative` field; `steps` is an

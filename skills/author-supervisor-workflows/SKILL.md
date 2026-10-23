@@ -135,7 +135,7 @@ discard relevant detail.
 Descriptions carry applicability, roles, inputs, evidence and completion. Link real
 authoritative project files, especially maintained Markdown docs and skills. Read them:
 references prove neither consultation nor access and grant no permission. Use
-checkout-relative files and explicit local skill paths; name global skills through
+checkout-relative files in `references` and local SKILL.md paths in `skills`; name global skills through
 the consuming agent's configured catalog. Keep decision-critical obligations in the
 definition, and detailed procedures in the canonical referenced source. Missing or
 ambiguous skills remain gaps; never guess personal paths or claim consultation. See

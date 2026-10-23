@@ -506,17 +506,23 @@ it.effect("CT-ISUB-19: an identical replay keeps its attempt; a source edit or r
 
 it.effect("typed interpretation preserves task-local skill pointers and their exact native argument hash", () => Effect.gen(function* () {
   const context = {definitionContext: yield* definitionContext, pendingStart: false};
-  const references = ["docs/testing.md", {skill: {scope: "local", path: "skills/testing/SKILL.md"}},
-    {skill: {scope: "global", name: "plugin:testing"}}];
+  const references = ["docs/testing.md"];
+  const skills = [".claude/skills/testing/SKILL.md", "plugin:testing"];
   const plan = structuredClone(formalWorkflow);
-  Object.assign(plan.plan.nodes[1]!, {references});
+  Object.assign(plan.plan.nodes[1]!, {references, skills});
   const raw = workflowArguments({workflow: plan});
   const result = yield* decode(raw, context);
   assert.deepEqual(result.rawArguments, raw);
   assert.equal(result.argumentsHash, workflowRequestHash(raw));
+  assert.equal(result.payload.kind, "interpretation");
+  assert(result.payload.kind === "interpretation");
+  const local = result.payload.workflow?.plan?.nodes[1];
+  assert(local?.kind === "step");
+  assert.deepEqual(local.references, references);
+  assert.deepEqual(local.skills, skills);
   const changed = structuredClone(plan);
-  Object.assign(changed.plan.nodes[1]!, {references: [{skill: {scope: "global", name: "other:testing"}}]});
+  Object.assign(changed.plan.nodes[1]!, {skills: ["other:testing"]});
   assert.notEqual((yield* decode(workflowArguments({workflow: changed}), context)).argumentsHash, result.argumentsHash);
-  Object.assign(changed.plan.nodes[1]!, {references: [{skill: {scope: "global", name: "testing", path: "hidden"}}]});
+  Object.assign(changed.plan.nodes[1]!, {skills: [{skill: {scope: "global", name: "testing"}}]});
   assert.equal((yield* rejected(workflowArguments({workflow: changed}), context)).code, "arguments_schema");
 }));

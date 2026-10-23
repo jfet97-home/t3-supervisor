@@ -1,15 +1,17 @@
 import React from "react";
-import type {SupportingReference} from "../../src/definition-references.js";
+import type {DefinitionGuidance} from "../../src/definition-references.js";
 
-export function DefinitionReferences({references}: {references?: readonly SupportingReference[] | undefined}) {
-  if (!references?.length) return null;
-  return <div className="definition-references">
-    <p><strong>References</strong></p>
-    <ul>{references.map((reference, index) => <li key={index}>
-      {typeof reference === "string" ? <>File: <code>{reference}</code></>
-        : reference.skill.scope === "local" ? <>Local skill: <code>{reference.skill.path}</code></>
-          : <>Global skill: <code>{reference.skill.name}</code></>}
-    </li>)}</ul>
-    <p className="small muted">Files and local skills are relative to the working checkout; global skills use the agent’s configured catalog. Shown read-only; file contents are not loaded or verified.</p>
-  </div>;
+export function DefinitionReferences({references, skills}: {references?: DefinitionGuidance["references"]; skills?: DefinitionGuidance["skills"]}) {
+  return <>
+    {!!references?.length && <div className="definition-references">
+      <p><strong>References</strong></p>
+      <ul>{references.map((reference, index) => <li key={index}><code>{reference}</code></li>)}</ul>
+      <p className="small muted">Relative to the working checkout. Shown read-only; file contents are not loaded or verified.</p>
+    </div>}
+    {!!skills?.length && <div className="definition-references">
+      <p><strong>Skills</strong></p>
+      <ul>{skills.map((skill, index) => <li key={index}><code>{skill}</code></li>)}</ul>
+      <p className="small muted">Local paths use the working checkout; names use the agent’s configured catalog. Shown read-only; skills are not loaded or verified.</p>
+    </div>}
+  </>;
 }

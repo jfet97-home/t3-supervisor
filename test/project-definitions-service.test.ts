@@ -218,7 +218,7 @@ it.effect("TR-PD-04: authored sources are Schema-decoded from YAML, and a reject
   yield* rejects(definitionStepSource("check"), "not a step", "Step needs YAML frontmatter containing id, name and description.");
   yield* rejects(definitionStepSource("check"), "---\nid: [\n---\n", "Invalid YAML; check syntax, duplicate keys and tags.");
   yield* rejects(definitionStepSource("check"), "---\nid: other\nname: Check\ndescription: Inspect it.\n---\nBody.\n",
-    "Step frontmatter needs a matching id, name, nonempty description and optional references: relative file paths or explicit skill references.");
+    "Step frontmatter needs a matching id, name, nonempty description and optional references and skills lists.");
   yield* rejects(definitionStepSource("check"), "---\nid: check\nname: Check\ndescription: Inspect it.\n---\nBody.\n", "Step body must be empty; keep all guidance in description.");
   yield* rejects(definitionWorkflowSource("Flow"), "workflows: [", "Invalid workflow filename.");
   yield* rejects(definitionWorkflowSource("flow"), "name: Flow\ndescription: Run it.\nsequence: []\n", "sequence must contain at least one workflow node.");

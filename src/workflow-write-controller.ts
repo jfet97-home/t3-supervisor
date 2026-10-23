@@ -1,5 +1,5 @@
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, Layer, Option, Schema } from "effect";
-import {supportingReferencesJsonSchema, definitionReferenceProblem, describeDefinitionReferenceProblem, validDefinitionReferences} from "./definition-references.js";
+import {supportingReferencesJsonSchema, supportingSkillsJsonSchema, definitionGuidanceProblem, describeDefinitionReferenceProblem, validDefinitionGuidance} from "./definition-references.js";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb } from "./db.js";
 import { documentRow, type GuidanceStoreError, guidanceSql, guidanceTransaction, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan,
@@ -341,13 +341,13 @@ const validPlanRequest = (value: unknown): boolean => {
       !Array.isArray(group.nodes) || group.nodes.length === 0 || group.nodes.length > workflowMutationLimits.maxPlanNodes) return false;
     return group.nodes.every(node => {
       if (!isRecord(node) || typeof node.kind !== "string" ||
-        Object.hasOwn(node, "references") && !validDefinitionReferences(node.references)) return false;
+        !validDefinitionGuidance(node)) return false;
       if (node.kind === "sequence" || node.kind === "parallel") return visitGroup(node, depth + 1);
       if (++count > workflowMutationLimits.maxPlanNodes || !(node.nodeId === undefined || typeof node.nodeId === "string" && planNodeIdPattern.test(node.nodeId)) ||
         !(node.templatePath === undefined || node.templatePath === null || isText(node.templatePath, 2000)) ||
         !isText(node.reason, maxPlanReasonLength)) return false;
       if (node.kind === "step") {
-        if (!hasExactKeys(node, ["kind", "reason"], ["nodeId", "definitionId", "localId", "templatePath", "name", "description", "references", "source", "resolution", "status", "contributorThreadIds"])) return false;
+        if (!hasExactKeys(node, ["kind", "reason"], ["nodeId", "definitionId", "localId", "templatePath", "name", "description", "references", "skills", "source", "resolution", "status", "contributorThreadIds"])) return false;
         return (node.definitionId === undefined || node.definitionId === null || isText(node.definitionId, 200)) &&
           (node.localId === undefined || node.localId === null || isText(node.localId, 200)) &&
           (node.name === undefined || isText(node.name, 160)) &&
@@ -360,7 +360,7 @@ const validPlanRequest = (value: unknown): boolean => {
             new Set(node.contributorThreadIds).size === node.contributorThreadIds.length);
       }
       if (node.kind !== "workflow" || !hasExactKeys(node, ["kind", "definitionId", "reason"],
-        ["nodeId", "templatePath", "name", "description", "references", "fixed", "source", "resolution", "status", "contributorThreadIds", "omissions", "plan"]) ||
+        ["nodeId", "templatePath", "name", "description", "references", "skills", "fixed", "source", "resolution", "status", "contributorThreadIds", "omissions", "plan"]) ||
         !isText(node.definitionId, 200) || !(node.name === undefined || isText(node.name, 160)) ||
         !(node.description === undefined || isText(node.description, maxDefinitionTextLength, true)) ||
         !(node.fixed === undefined || node.fixed === null || typeof node.fixed === "boolean") ||
@@ -417,8 +417,8 @@ const referenceDiagnostic = (plan: unknown): WorkflowApplyDiagnostic | null => {
   let visited = 0;
   const visit = (node: unknown, path: string, depth: number): WorkflowApplyDiagnostic | null => {
     if (!isRecord(node) || depth > workflowMutationLimits.maxPlanDepth * 2 || ++visited > workflowMutationLimits.maxPlanNodes * 2) return null;
-    const problem = Object.hasOwn(node, "references") ? definitionReferenceProblem(node.references) : null;
-    if (problem) return {code: problem.code, path: `${path}/references${problem.index === null ? "" : `/${problem.index}`}`, expected: describeDefinitionReferenceProblem(problem)};
+    const problem = definitionGuidanceProblem(node);
+    if (problem) return {code: problem.code, path: `${path}/${problem.field}${problem.index === null ? "" : `/${problem.index}`}`, expected: describeDefinitionReferenceProblem(problem)};
     if (Array.isArray(node.nodes)) {
       for (const [index, child] of node.nodes.entries()) {
         const found = visit(child, `${path}/nodes/${index}`, depth + 1);
@@ -621,7 +621,7 @@ const workflowPlanDefinitions = {
     type: "object", additionalProperties: false, required: ["kind", "reason"], properties: {
       kind: {const: "step"}, nodeId: idSchema(64), definitionId: nullableTextSchema(200), localId: nullableTextSchema(200),
       templatePath: nullableTextSchema(2000), name: textSchema(160), description: {type: "string", maxLength: maxDefinitionTextLength},
-      references: supportingReferencesJsonSchema,
+      references: supportingReferencesJsonSchema, skills: supportingSkillsJsonSchema,
       source: {anyOf: [{$ref: "#/$defs/source"}, {type: "null"}]}, resolution: {type: "string", enum: ["resolved", "unresolved"]},
       reason: textSchema(maxPlanReasonLength), status: {type: "string", enum: workflowExecutionStatuses},
       contributorThreadIds: {type: "array", maxItems: workflowMutationLimits.maxContributorsPerNode, uniqueItems: true, items: idSchema()},
@@ -631,7 +631,7 @@ const workflowPlanDefinitions = {
     type: "object", additionalProperties: false, required: ["kind", "definitionId", "reason"], properties: {
       kind: {const: "workflow"}, nodeId: idSchema(64), definitionId: idSchema(200), templatePath: nullableTextSchema(2000),
       name: textSchema(160), description: {type: "string", maxLength: maxDefinitionTextLength},
-      references: supportingReferencesJsonSchema,
+      references: supportingReferencesJsonSchema, skills: supportingSkillsJsonSchema,
       fixed: {anyOf: [{type: "boolean"}, {type: "null"}]},
       source: {anyOf: [{$ref: "#/$defs/source"}, {type: "null"}]}, resolution: {type: "string", enum: ["resolved", "partial", "unresolved"]},
       reason: textSchema(maxPlanReasonLength), status: {type: "string", enum: workflowExecutionStatuses},
@@ -722,7 +722,7 @@ const interpretationPlanDefinitions = {
     {type: "object", additionalProperties: false, required: ["kind", "definitionId", "localId", "name", "description", "reason"],
       properties: {kind: {const: "step"}, definitionId: {type: "null"}, localId: interpretationText(interpretationLimits.maxDefinitionIdLength),
         name: interpretationText(interpretationLimits.maxPlanTextLength), description: interpretationText(interpretationLimits.maxPlanTextLength),
-        reason: interpretationText(interpretationLimits.maxReasonLength), references: supportingReferencesJsonSchema}},
+        reason: interpretationText(interpretationLimits.maxReasonLength), references: supportingReferencesJsonSchema, skills: supportingSkillsJsonSchema}},
     {type: "object", additionalProperties: false, required: ["kind", "definitionId", "reason"],
       properties: {kind: {const: "workflow"}, definitionId: interpretationText(interpretationLimits.maxDefinitionIdLength), reason: interpretationText(interpretationLimits.maxReasonLength)}},
     {$ref: "#/$defs/group"},

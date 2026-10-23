@@ -28,9 +28,10 @@ To create or refine a step/workflow catalog from a project's instructions, histo
 and human corrections, use [author-supervisor-workflows](../author-supervisor-workflows/SKILL.md).
 Authoring a catalog does not itself enable supervision or adopt its policy.
 
-Steps, workflows and inline local steps may carry optional `references` lists of
-checkout-relative file strings or explicit local/global skill references. Definitions
-and Plan label their kinds read-only; edit source YAML/frontmatter and refresh. The
+Steps, workflows and inline local steps may carry optional string lists:
+checkout-relative file paths in `references` and local SKILL.md paths or exact
+global catalog names in a separate `skills` string list. Definitions
+and Plan show separate lists read-only; edit source YAML/frontmatter and refresh. The
 Guide explains lookup and unavailable guidance. References are not opened or verified
 automatically and never enable supervision.
 

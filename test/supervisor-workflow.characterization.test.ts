@@ -45,9 +45,9 @@ it("CT-SW-01: canonical plan JSON, seeded node IDs and prompt digests are golden
   const taskText = "Check this task. token=github_pat_12345678901234567890";
   const prepared = prepareWorkflowRequest("thread-a", "message-a", taskText, goldenSnapshot);
   assert.ok(prepared.context);
-  // explicit local/global skill syntax adds 255 characters to the plain instructions; source-bound digests stay unchanged
-  assert.equal(prepared.requestText.length, 5794);
-  assert.equal(sha256(prepared.requestText), "2f5fab816abf66c86d4d0b804371d64eacaf2a2af8df2b0d2b7a20c6c8b1b24d");
+  // interpretation describes separate reference and skill string lists
+  assert.equal(prepared.requestText.length, 5828);
+  assert.equal(sha256(prepared.requestText), "dd83fdb6a432a737970707c987afcce4f6b57d879c6f343ac564f4985df53ba7");
   assert.equal(prepared.requestText.includes("github_pat_12345678901234567890"), false);
   assert.equal(sha256(JSON.stringify(prepared.context)), "4b22e3c45e9060410b2a752eea3eb602c960836021edd7c79e75d9d8d3e45f4f");
   assert.equal(sha256(JSON.stringify(prepared.workflow)), "a263f8572ef36eca2578bb7f9a3f3e0860a0690bca1f4869eba7ebf4b61d0db4");

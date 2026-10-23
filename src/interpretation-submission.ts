@@ -1,4 +1,4 @@
-import {SupportingReferences, type SupportingReference} from "./definition-references.js";
+import {SupportingReferences, SupportingSkills, type SupportingReference} from "./definition-references.js";
 import { Data, Effect, Schema, type SchemaAST, type SchemaIssue } from "effect";
 import { canonicalJson } from "./canonical-json.js";
 import type { LogFields } from "./logging.js";
@@ -51,7 +51,7 @@ const nonNegative = coded(Schema.isGreaterThanOrEqualTo(0), "too_small");
 const knownPathKeys = new Set([
   "supervisorThreadId", "bindingGeneration", "taskId", "attemptId", "sourcePin", "messageId", "runId", "ordinal", "hash",
   "objective", "reason", "sourceMessageIds", "supervision", "workflow", "startRequested", "requirements", "plan", "kind", "id",
-  "applies", "nodes", "definitionId", "localId", "name", "description", "references",
+  "applies", "nodes", "definitionId", "localId", "name", "description", "references", "skills",
 ]);
 const pathOf = (segments: ReadonlyArray<PropertyKey>): string => {
   let path = "";
@@ -162,7 +162,7 @@ export const retainedInterpretationAttempt = (current: InterpretationAttempt | n
 export type InterpretationPlanNode =
   | {readonly kind: "step"; readonly definitionId: string; readonly reason: string}
   | {readonly kind: "step"; readonly definitionId: null; readonly localId: string; readonly name: string; readonly description: string;
-    readonly reason: string; readonly references?: ReadonlyArray<SupportingReference>}
+    readonly reason: string; readonly references?: ReadonlyArray<SupportingReference>; readonly skills?: ReadonlyArray<string>}
   | {readonly kind: "workflow"; readonly definitionId: string; readonly reason: string}
   | InterpretationPlanGroup;
 export type InterpretationPlanGroup = {readonly kind: "sequence" | "parallel"; readonly nodes: ReadonlyArray<InterpretationPlanNode>};
@@ -174,7 +174,7 @@ const PlanText = Schema.String.check(maxLength(limits.maxPlanTextLength));
 const PlanNode: Schema.Codec<InterpretationPlanNode> = Schema.suspend((): Schema.Codec<InterpretationPlanNode> => Schema.Union([
   Schema.Struct({kind: Schema.Literal("step"), definitionId: DefinitionId, reason: Reason}),
   Schema.Struct({kind: Schema.Literal("step"), definitionId: Schema.Null, localId: DefinitionId, name: PlanText, description: PlanText, reason: Reason,
-    references: Schema.optionalKey(SupportingReferences)}),
+    references: Schema.optionalKey(SupportingReferences), skills: Schema.optionalKey(SupportingSkills)}),
   Schema.Struct({kind: Schema.Literal("workflow"), definitionId: DefinitionId, reason: Reason}),
   PlanGroup,
 ]));

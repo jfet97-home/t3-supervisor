@@ -19,6 +19,7 @@ description: |
   Report what was verified, failures and any limitations.
 references:
   - docs/testing.md
+skills:
   - skills/use-project/SKILL.md
 ---`;
 
@@ -187,7 +188,7 @@ export function StepsAndWorkflowsGuide() {
 
     <p className="guide-introduction">Turn a request into an agreed plan. Follow the agent’s work step by step, see what the Supervisor has assessed, and find out when your input is needed.</p>
     <nav className="guide-contents" aria-label="Guide topics"><strong>Find what you need</strong><ul>{[
-      ["layout", "Definition files"], ["step", "Steps"], ["workflow", "Workflow structure"], ["references", "References"], ["config", "Project configuration"], ["fixed", "Fixed commitments"], ["delegation", "Review and delegation"], ["children", "Child tasks"], ["team", "Supervisor team"], ["errors", "Recovery"], ["evidence", "Plans and evidence"], ["faq", "Common questions"],
+      ["layout", "Definition files"], ["step", "Steps"], ["workflow", "Workflow structure"], ["references", "References and skills"], ["config", "Project configuration"], ["fixed", "Fixed commitments"], ["delegation", "Review and delegation"], ["children", "Child tasks"], ["team", "Supervisor team"], ["errors", "Recovery"], ["evidence", "Plans and evidence"], ["faq", "Common questions"],
     ].map(([id, title]) => <li key={id}><button type="button" onClick={() => {const heading = document.getElementById(`guide-${id}-title`);heading?.focus();heading?.scrollIntoView({block: "start"});}}>{title}</button></li>)}</ul></nav>
 
     <Topic id="guide-layout-title" title="Where definitions live">
@@ -198,7 +199,7 @@ export function StepsAndWorkflowsGuide() {
     </Topic>
 
     <Topic id="guide-step-title" title="A step describes one piece of work">
-      <p>A reusable step is a Markdown file with YAML frontmatter. Its required fields are <code>id</code>, <code>name</code> and <code>description</code>, with an optional <code>references</code> list. The ID matches the filename. The Markdown body after the frontmatter must be empty; put all guidance in <code>description</code>. A step has no structural children.</p>
+      <p>A reusable step is a Markdown file with YAML frontmatter. Its required fields are <code>id</code>, <code>name</code> and <code>description</code>, with optional <code>references</code> and <code>skills</code> string lists. The ID matches the filename. The Markdown body after the frontmatter must be empty; put all guidance in <code>description</code>. A step has no structural children.</p>
       <Example label="steps/e2e-testing.md" value={stepExample}/>
       <p>Put applicability, instructions, expected results, delegation details and iteration guidance in <code>description</code>. There are no separate instruction or outcome fields.</p>
       <p>A workflow can refer to a reusable step by ID or define a task-local step object under <code>step:</code>. Give local steps an ID to distinguish them. Promote one to <code>steps/</code> when it should be reusable across workflows.</p>
@@ -206,25 +207,23 @@ export function StepsAndWorkflowsGuide() {
     </Topic>
 
     <Topic id="guide-workflow-title" title="A workflow composes steps and other workflows">
-      <p>A reusable workflow file has a filename ID, <code>name</code>, <code>description</code>, optional <code>references</code> and <code>fixed: true</code>, and one root group: <code>sequence:</code> or <code>parallel:</code>. Ordered contents always use <code>sequence:</code>. Groups may contain step references, local step objects, workflow references or nested groups.</p>
+      <p>A reusable workflow file has a filename ID, <code>name</code>, <code>description</code>, optional <code>references</code> and <code>skills</code> lists, <code>fixed: true</code>, and one root group: <code>sequence:</code> or <code>parallel:</code>. Ordered contents always use <code>sequence:</code>. Groups may contain step references, local step objects, workflow references or nested groups.</p>
       <p><code>workflow:</code> accepts only a reusable workflow ID. Workflow definitions cannot be declared inline. A reference includes its contents in the plan; it does not start an agent or require delegation by itself.</p>
       <Example label="A delivery workflow with a reusable reviewer" value={compositionExample}/>
       <Example label="Nested parallel lanes inside a sequence" value={reviewerExample}/>
       <p>A sequence communicates intended semantic order. Members of a parallel group may overlap and have no declared order; parallel does not require simultaneous execution or create child agents.</p>
     </Topic>
 
-    <Topic id="guide-references-title" title="Supporting references">
-      <p>Reusable steps, workflows and local steps may carry <code>references</code>. Keep their applicability, responsibility and completion in a short description; point to maintained documents or skills for detailed procedures.</p>
+    <Topic id="guide-references-title" title="References and skills">
+      <p>Reusable steps, workflows and local steps may carry separate <code>references</code> and <code>skills</code> string lists. References are file paths; skills are local paths or exact catalog names. No scope or object wrapper is needed. Keep their applicability, responsibility and completion in a short description; point to maintained documents or skills for detailed procedures.</p>
       <pre><code>{`references:
   - docs/testing.md
-  - skill:
-      scope: local
-      path: skills/project-testing/SKILL.md
-  - skill:
-      scope: global
-      name: effect-v4-development`}</code></pre>
-      <p>File strings and local skill paths are relative to the operative checkout root, including for shared definitions. Local skill paths name <code>SKILL.md</code>. Global skill names match the consuming agent’s configured catalog exactly, including namespaces; missing or ambiguous names remain explicit gaps. Do not guess installation paths.</p>
-      <p>Omit the list or use <code>[]</code> for none. At most 100 references, with paths or names up to 4096 characters. Absolute paths, home aliases, schemes, parent traversal, backslashes, control characters and credential-like values are rejected. References grant no access or authority; readers must respect filesystem and symlink boundaries.</p>
+skills:
+  - .claude/skills/project-testing/SKILL.md
+  - effect-v4-development
+  - plugin:review`}</code></pre>
+      <p>File strings and local skill paths are relative to the operative checkout root, including for shared definitions. Entries with a slash or an ending of <code>.md</code> are paths and must name <code>SKILL.md</code> exactly, including a root <code>SKILL.md</code>. Skill paths have no empty, dot or parent segments; <code>./SKILL.md</code> is invalid. Global skill names match the consuming agent’s configured catalog exactly, including namespaces; missing or ambiguous names remain explicit gaps. Do not guess installation paths.</p>
+      <p>Omit either list or use <code>[]</code> for none. Each list allows at most 100 entries; skills cannot repeat. Paths allow up to 4096 characters and catalog names up to 256. Names use letters, digits, dots, underscores and hyphens with optional colon namespaces; each segment starts with a letter or digit. Absolute paths, home aliases, schemes, parent traversal, backslashes, control characters and credential-like values are rejected. References grant no access or authority; readers must respect filesystem and symlink boundaries.</p>
       <p>Definitions and Plan show pointers read-only; introductions carry them without loading their contents. Read applicable guidance progressively within the available tools and context budget. Changing a locator changes definition identity; its content is not frozen or verified by that revision. A listed reference proves neither consultation nor execution. Global skills do not enable shared definitions or supervision.</p>
     </Topic>
 
@@ -239,7 +238,7 @@ export function StepsAndWorkflowsGuide() {
     </Topic>
 
     <Topic id="guide-fixed-title" title="What fixed protects">
-      <p><code>fixed: true</code> preserves the workflow's original members, descriptions, supporting references and requirements, their relative order, and its declared parallel relationships, including nested commitments. Supporting work can be added around that fragment or between its original members.</p>
+      <p><code>fixed: true</code> preserves the workflow's original members, descriptions, references, skills and requirements, their relative order, and its declared parallel relationships, including nested commitments. Supporting work can be added around that fragment or between its original members.</p>
       <p>For example, the original <code>implementation → deployment</code> sequence may become <code>implementation → e2e-testing → deployment</code>.</p>
       <Example label="Required support work can be inserted between fixed members" value={fixedInsertionExample}/>
       <p>A genuinely not-applicable original member remains visible with its reason in the plan. An applicable commitment cannot be silently removed or weakened. Fixed does not make the workflow a project-wide requirement; <code>required</code> controls inclusion.</p>
