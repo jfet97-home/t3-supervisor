@@ -17,9 +17,9 @@ import { temporaryDirectory as dataDirectory } from "./support/g11-stores.js";
 
 // target regressions of the dashboard listeners on effect (plan 3.7, CC-WEBSEC, CC-MCP, CC-REDACT, CC-SHUTDOWN): the
 // checks stay in front of the workflow MCP route on both routers, the host checks read the Host header as sent, session
-// and csrf header values are redacted in rendered request headers, startup validation precedes any effect, and closing
-// the scope drops in-flight requests without a graceful wait. it.live: every case serves real loopback listeners over the
-// production stores on database files
+// and csrf header values are redacted in rendered request headers, startup validation fails with its fixed message, no
+// startup removes a legacy ui-login-code file (D-11), and closing the scope drops in-flight requests without a graceful
+// wait. it.live: every case serves real loopback listeners over the production stores on database files
 
 const mcpHeaders = {"Content-Type": "application/json", Accept: "application/json, text/event-stream"};
 const toolCall = JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
@@ -112,7 +112,7 @@ describe("guidance ui listeners", () => {
     assert.equal(rendered.some((value) => value.includes(session) || value.includes(csrf)), false);
   }), {timeout: 10_000});
 
-  it.live("GUI-04: an inexact WORKFLOW_MCP_HOSTS entry fails startup with the fixed message before the legacy login code is removed", () => Effect.gen(function* () {
+  it.live("GUI-04: an inexact WORKFLOW_MCP_HOSTS entry fails startup with the fixed message, and no startup removes a legacy login code file (D-11)", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     const legacy = join(directory, "ui-login-code");
     yield* writeText(legacy, "legacy");
@@ -121,7 +121,7 @@ describe("guidance ui listeners", () => {
     assert.equal(failed.cause.reasons.some((reason) => reason._tag === "Fail" && (reason.error as {message?: unknown}).message === "Workflow MCP hosts must be exact host:port values."), true);
     assert.equal(existsSync(legacy), true);
     yield* Effect.scoped(buildUi(uiConfig(directory, {workflowMcpHosts: ["supervisor.internal:9100"]}), countingController().controller));
-    assert.equal(existsSync(legacy), false);
+    assert.equal(existsSync(legacy), true);
   }), {timeout: 10_000});
 
   it.live("GUI-05: closing the scope with an in-flight api request and an in-flight workflow MCP call drops both promptly and aborts their signals", () => Effect.gen(function* () {

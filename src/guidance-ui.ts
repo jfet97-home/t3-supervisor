@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from "node:http";
-import { extname, join, resolve, sep } from "node:path";
+import { extname, resolve, sep } from "node:path";
 import { NodeHttpServer, NodeHttpServerRequest } from "@effect/platform-node";
 import { ByteSize, Cause, Context, Crypto, Data, Effect, FileSystem, Layer, Option, Redacted, Schema, type Types } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
@@ -110,7 +110,6 @@ const make = Effect.fnUntraced(function* (config: SupervisorConfig, options: Gui
   const runtime = yield* GuidanceRuntime;
   const mcp = yield* WorkflowMcp;
   const policy = yield* ThreadPolicyStore;
-  yield* fs.remove(join(config.dataDirectory, "ui-login-code"), { force: true });
   const { definitions, editor, supervision, workflowReader } = options;
   // a service call answers its fixed UiError for any failure or defect; an interruption stays one
   const failingWith = <A, E, R>(message: string, call: Effect.Effect<A, E, R>): Effect.Effect<A, UiError, R> => Effect.catchCause(call,
