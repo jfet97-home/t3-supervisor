@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
-import { Effect, Option } from "effect";
+import { beforeAll, it } from "@effect/vitest";
+import { Effect, Fiber, Option } from "effect";
 import { AsyncResult, type Atom, AtomRegistry } from "effect/reactivity";
-import { afterAll, beforeAll, it } from "vitest";
 import type { ProjectConfigurationInfo, ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { json, makeBrowser, until } from "./support/ui-browser.js";
+import { scopedRegistry } from "./support/g7-page.js";
+import { json, makeBrowser, until } from "./support/g7-browser.js";
 
 // target regressions of the definitions panel's save completions (R22 A-R18-03) over a stubbed browser and the real page
 // runtime: a save of environment a whose answer arrives after the panel moved to environment b and saved there settles a
 // only. the panel keeps this state in pure reducers (DefinitionsCompletion) and hands the editor callbacks built by
 // editorCompletion; the editor settles a save through completeSave. the cases drive real reads and admitted saves and
-// apply every completion through those functions, in the order the mounted panel applies them
+// apply every completion through those functions, in the order the mounted panel applies them. the tests wait only for
+// requests and atom values (bounded on the live clock), so they are it.effect
 
 const browser = makeBrowser();
 let atoms: typeof import("../ui/src/atoms.js");
@@ -17,15 +19,14 @@ let panel: typeof import("../ui/src/project-definitions.js");
 let api: typeof import("../ui/src/project-definitions-api.js");
 let editor: typeof import("../ui/src/project-configuration-editor.js");
 
-beforeAll(async () => {
-  browser.install();
+beforeAll(() => Effect.gen(function* () {
+  yield* browser.install;
   browser.local.set("supervisor-session", "session-1");
-  atoms = await import("../ui/src/atoms.js");
-  panel = await import("../ui/src/project-definitions.js");
-  api = await import("../ui/src/project-definitions-api.js");
-  editor = await import("../ui/src/project-configuration-editor.js");
-});
-afterAll(() => browser.restore());
+  atoms = yield* Effect.promise(() => import("../ui/src/atoms.js"));
+  panel = yield* Effect.promise(() => import("../ui/src/project-definitions.js"));
+  api = yield* Effect.promise(() => import("../ui/src/project-definitions-api.js"));
+  editor = yield* Effect.promise(() => import("../ui/src/project-configuration-editor.js"));
+}));
 
 type Environment = "environment-a" | "environment-b";
 const savedText = "Saved project configuration to .t3-supervisor/project.yaml.";
@@ -90,13 +91,13 @@ const mountedPanel = (registry: AtomRegistry.AtomRegistry) => {
     get state() { return state; },
     update,
     // the panel shows one view at a time: a view change unmounts the previous read and mounts the new one
-    async show(environmentId: Environment) {
+    show: (environmentId: Environment) => Effect.gen(function* () {
       stopRead?.();
       const shown = view(environmentId);
       stopRead = registry.mount(shown.atom);
-      await until(registry, shown.atom, (result) => AsyncResult.isSuccess(result) && !result.waiting, `the read of ${environmentId}`);
+      yield* until(registry, shown.atom, (result) => AsyncResult.isSuccess(result) && !result.waiting, `the read of ${environmentId}`);
       return shown;
-    },
+    }),
     // what the panel shows for a view: a verified save, else the latest successful read, and the saved message
     shownFor(shown: ReturnType<typeof view>) {
       const read = registry.get(shown.atom);
@@ -108,8 +109,8 @@ const mountedPanel = (registry: AtomRegistry.AtomRegistry) => {
 };
 
 // one editor save of the shown definitions, completed as the mounted editor completes it: the admitted save written
-// through the registry, its settled exit awaited as the promiseExit setter awaits it, then completeSave with the panel's
-// callbacks for the view it was started from
+// through the registry, its settled exit awaited as the promiseExit setter awaits it (in a fiber started at once, which the
+// test joins), then completeSave with the panel's callbacks for the view it was started from
 const startSave = (registry: AtomRegistry.AtomRegistry, mounted: ReturnType<typeof mountedPanel>, shown: {read: string; environmentId: Environment; atom: Atom.Atom<AsyncResult.AsyncResult<{definitions: ProjectDefinitionSnapshot}, unknown>>}, summary: string) => {
   const loaded = registry.get(shown.atom);
   assert.ok(AsyncResult.isSuccess(loaded));
@@ -124,39 +125,39 @@ const startSave = (registry: AtomRegistry.AtomRegistry, mounted: ReturnType<type
   const attempt = api.saveProjectConfigurationAtom({scope, operationId: registry.get(draft).operationId});
   reports.onSavingChange(true);
   registry.set(attempt, plan.input);
-  return Effect.runPromiseExit(AtomRegistry.getResult(registry, attempt, {suspendOnWaiting: true})).then((exit) =>
-    editor.completeSave(api.resolveSave(plan.input)(exit), plan.normalized, (change) => registry.update(draft, change), reports));
+  return Effect.forkChild(Effect.exit(AtomRegistry.getResult(registry, attempt, {suspendOnWaiting: true})).pipe(Effect.map((exit) =>
+    editor.completeSave(api.resolveSave(plan.input)(exit), plan.normalized, (change) => registry.update(draft, change), reports))), {startImmediately: true});
 };
 
-it("A-R22 a save of a answered after b saved settles a only: b keeps its verified definitions and message, and a shows its own on return", {timeout: 10_000}, async () => {
+it.effect("A-R22 a save of a answered after b saved settles a only: b keeps its verified definitions and message, and a shows its own on return", () => Effect.gen(function* () {
   const fake = server();
-  const registry = AtomRegistry.make();
+  const registry = yield* scopedRegistry();
   const stopSnapshot = registry.mount(atoms.snapshotAtom);
-  const switchTo = async (next: Environment) => {
+  const switchTo = (next: Environment) => Effect.suspend(() => {
     fake.switchTo(next);
     registry.refresh(atoms.snapshotAtom);
-    await until(registry, atoms.environmentAtom, (value) => value === next, next);
-  };
+    return until(registry, atoms.environmentAtom, (value) => value === next, next);
+  });
   const mounted = mountedPanel(registry);
-  await until(registry, atoms.environmentAtom, (value) => value === "environment-a", "environment a");
+  yield* until(registry, atoms.environmentAtom, (value) => value === "environment-a", "environment a");
 
   // a saves, and its answer is held after the server applied it
-  const viewA = await mounted.show("environment-a");
+  const viewA = yield* mounted.show("environment-a");
   fake.holding.add("environment-a");
-  const saveA = startSave(registry, mounted, viewA, "A pending save marker");
-  await saveSent("A pending save marker");
+  const saveA = yield* startSave(registry, mounted, viewA, "A pending save marker");
+  yield* saveSent("A pending save marker");
 
   // the page moves to b, which saves normally
-  await switchTo("environment-b");
-  const viewB = await mounted.show("environment-b");
+  yield* switchTo("environment-b");
+  const viewB = yield* mounted.show("environment-b");
   assert.equal(summaryOf(mounted.shownFor(viewB).definitions), "Fixture B step: environment b.");
-  await startSave(registry, mounted, viewB, "B verified save marker");
+  yield* Fiber.join(yield* startSave(registry, mounted, viewB, "B verified save marker"));
   const beforeLate = mounted.shownFor(viewB);
   assert.deepEqual([summaryOf(beforeLate.definitions), beforeLate.message], ["B verified save marker", savedText], "b shows its verified save");
 
   // a's answer arrives late
   fake.release("environment-a");
-  await saveA;
+  yield* Fiber.join(saveA);
   const afterLate = mounted.shownFor(viewB);
   assert.equal(summaryOf(afterLate.definitions), "B verified save marker", "b still shows its verified definitions");
   assert.equal(afterLate.definitions?.environmentId, "environment-b");
@@ -167,8 +168,8 @@ it("A-R22 a save of a answered after b saved settles a only: b keeps its verifie
   assert.equal(summaryOf({definitions: fake.stored["environment-b"]}), "B verified save marker", "b's stored data is b's");
 
   // back in a, the page shows a's applied save and its message
-  await switchTo("environment-a");
-  const returned = await mounted.show("environment-a");
+  yield* switchTo("environment-a");
+  const returned = yield* mounted.show("environment-a");
   const shownA = mounted.shownFor(returned);
   assert.deepEqual([summaryOf(shownA.definitions), shownA.definitions?.environmentId, shownA.message], ["A pending save marker", "environment-a", savedText]);
   assert.deepEqual([shownA.report.dirty, shownA.report.saving], [false, false], "a's settled save leaves a clean and not saving");
@@ -177,35 +178,35 @@ it("A-R22 a save of a answered after b saved settles a only: b keeps its verifie
   mounted.stop();
   stopSnapshot();
   registry.dispose();
-});
+}), { timeout: 10_000 });
 
-it("A-R22 a late completion of a never changes b's dirty or saving report", {timeout: 10_000}, async () => {
+it.effect("A-R22 a late completion of a never changes b's dirty or saving report", () => Effect.gen(function* () {
   const fake = server();
-  const registry = AtomRegistry.make();
+  const registry = yield* scopedRegistry();
   const stopSnapshot = registry.mount(atoms.snapshotAtom);
   const mounted = mountedPanel(registry);
-  await until(registry, atoms.environmentAtom, (value) => value === "environment-a", "environment a");
-  const viewA = await mounted.show("environment-a");
+  yield* until(registry, atoms.environmentAtom, (value) => value === "environment-a", "environment a");
+  const viewA = yield* mounted.show("environment-a");
   fake.holding.add("environment-a");
-  const saveA = startSave(registry, mounted, viewA, "A pending save marker");
-  await saveSent("A pending save marker");
+  const saveA = yield* startSave(registry, mounted, viewA, "A pending save marker");
+  yield* saveSent("A pending save marker");
 
   fake.switchTo("environment-b");
   registry.refresh(atoms.snapshotAtom);
-  await until(registry, atoms.environmentAtom, (value) => value === "environment-b", "environment b");
-  const viewB = await mounted.show("environment-b");
+  yield* until(registry, atoms.environmentAtom, (value) => value === "environment-b", "environment b");
+  const viewB = yield* mounted.show("environment-b");
   // b's editor holds a draft whose save is still running
   fake.holding.add("environment-b");
-  const saveB = startSave(registry, mounted, viewB, "B pending save marker");
-  await saveSent("B pending save marker");
+  const saveB = yield* startSave(registry, mounted, viewB, "B pending save marker");
+  yield* saveSent("B pending save marker");
 
   fake.release("environment-a");
-  await saveA;
+  yield* Fiber.join(saveA);
   assert.deepEqual([mounted.shownFor(viewB).report.dirty, mounted.shownFor(viewB).report.saving], [true, true], "b's draft and save still guard b");
   fake.release("environment-b");
-  await saveB;
+  yield* Fiber.join(saveB);
   assert.deepEqual([mounted.shownFor(viewB).report.dirty, mounted.shownFor(viewB).report.saving], [false, false]);
   mounted.stop();
   stopSnapshot();
   registry.dispose();
-});
+}), { timeout: 10_000 });
