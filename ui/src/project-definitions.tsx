@@ -1,4 +1,4 @@
-import React, { useCallback, useContext, useEffect, useRef, useState } from "react";
+import React, { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { Option } from "effect";
 import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
@@ -222,6 +222,38 @@ export type ConfigurationReport = {readonly environmentId: string | null; readon
 export const reportedFor = (report: ConfigurationReport, environmentId: string | null) =>
   report.environmentId === environmentId ? report : {environmentId, dirty: false, saving: false};
 
+// the panel state that saves and the configuration editor complete: the verified save that replaces the shown read until
+// the view reads again, its message and the editor's last report
+export type DefinitionsCompletion = {
+  readonly saved: {readonly read: string | null; readonly loaded: LoadedDefinitions} | null;
+  readonly message: {readonly environmentId: string | null; readonly text: string} | null;
+  readonly report: ConfigurationReport;
+};
+export const noCompletion: DefinitionsCompletion = {saved: null, message: null, report: {environmentId: null, dirty: false, saving: false}};
+const savedText = "Saved project configuration to .t3-supervisor/project.yaml.";
+// the verified save of a view's read: it replaces the shown read and its message is shown
+export const recordSaved = (state: DefinitionsCompletion, read: string | null, loaded: LoadedDefinitions): DefinitionsCompletion =>
+  ({...state, saved: {read, loaded}, message: {environmentId: loaded.environmentId, text: savedText}});
+// an explicit discard or refresh of a view: its verified save and its message are gone
+export const discardSaved = (state: DefinitionsCompletion, _read: string | null): DefinitionsCompletion => ({...state, saved: null, message: null});
+// the verified save shown for a view's read
+export const savedFor = (state: DefinitionsCompletion, read: string | null, _latest: LoadedDefinitions | null): LoadedDefinitions | null =>
+  state.saved !== null && state.saved.read === read ? state.saved.loaded : null;
+// the message of a verified save shown for a view
+export const messageFor = (state: DefinitionsCompletion, view: {readonly read: string | null; readonly environmentId: string | null}): string | null =>
+  state.message?.environmentId === view.environmentId ? state.message.text : null;
+// the editor's report counted in an environment, and a new report of the editor of definitions read in `environmentId`
+export const reportOf = (state: DefinitionsCompletion, environmentId: string | null) => reportedFor(state.report, environmentId);
+export const recordReport = (state: DefinitionsCompletion, environmentId: string | null, report: {readonly dirty?: boolean; readonly saving?: boolean}): DefinitionsCompletion =>
+  ({...state, report: {...reportedFor(state.report, environmentId), ...report}});
+// the callbacks the panel hands the configuration editor of definitions read for `read` in `environmentId`
+export const editorCompletion = (update: (change: (state: DefinitionsCompletion) => DefinitionsCompletion) => void, read: string | null,
+  environmentId: string | null, now: () => number) => ({
+  onDirtyChange: (dirty: boolean) => update(state => recordReport(state, environmentId, {dirty})),
+  onSavingChange: (saving: boolean) => update(state => recordReport(state, environmentId, {saving})),
+  onSaved: (definitions: ProjectDefinitionSnapshot) => update(state => recordSaved(state, read, {definitions, loadedAt: now(), environmentId})),
+});
+
 // what the definitions view shows for its read: a verified save, else the latest successful read, which a failed refresh
 // keeps beside its failure; the failure is shown once no read is running
 export const definitionsShown = (read: AsyncResult.AsyncResult<LoadedDefinitions, unknown>, saved: LoadedDefinitions | null) => ({
@@ -245,14 +277,12 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   retained.current = selection;
   const [revision, setRevision] = useState(0);
   const environmentId = useAtomValue(environmentAtom);
-  const [configurationReport, setConfigurationReport] = useState<ConfigurationReport>({environmentId: null, dirty: false, saving: false});
-  const {dirty: configurationDirty, saving: configurationSaving} = reportedFor(configurationReport, environmentId);
+  const [completion, setCompletion] = useState<DefinitionsCompletion>(noCompletion);
+  const {dirty: configurationDirty, saving: configurationSaving} = reportOf(completion, environmentId);
   const [supervisorDirty, setSupervisorDirty] = useState(false);
   const [supervisorSaving, setSupervisorSaving] = useState(false);
   const dirty = configurationDirty || supervisorDirty;
   const saving = configurationSaving || supervisorSaving;
-  // the message of a verified save, shown only in the environment it was saved in
-  const [savedMessage, setSavedMessage] = useState<{environmentId: string | null; text: string} | null>(null);
   useEffect(() => {onDirtyChange?.(dirty || saving);}, [dirty, saving, onDirtyChange]);
   useEffect(() => {onDraftTargetChange?.(draftTarget(selection, {dirty, saving, configurationDirty}));}, [dirty, saving, selection.projectId, selection.threadId, selection.contextSelected, configurationDirty, onDraftTargetChange]);
   const projects = data.projects.filter(project => project.available);
@@ -269,26 +299,22 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   const view = held.current;
   const read = useAtomValue(view.read === null ? noDefinitions : projectDefinitionsAtom(view.read));
   // a verified save replaces the shown snapshot until the view reads again
-  const [saved, setSaved] = useState<{read: string | null; loaded: LoadedDefinitions} | null>(null);
-  const savedView = saved !== null && saved.read === view.read ? saved.loaded : null;
-  useEffect(() => {if (saved !== null && saved.read !== view.read) setSaved(null);}, [saved, view.read]);
+  const savedView = savedFor(completion, view.read, Option.getOrNull(AsyncResult.value(read)));
+  useEffect(() => {if (completion.saved !== null && completion.saved.read !== view.read) setCompletion(state => ({...state, saved: null}));}, [completion.saved, view.read]);
   const shown = definitionsShown(read, savedView);
   // definitions read for another environment are never shown or edited here
   const loaded = shown.result?.environmentId === environmentId ? shown.result : null;
   const current = view.key === key ? {result: loaded, error: shown.error, loadedAt: loaded?.loadedAt ?? null} : null;
   const busy = Boolean(canLoad && (shown.reading || !current?.result && !current?.error));
   const registry = useContext(RegistryContext);
-  // the editor's reports belong to the environment of the definitions it edits
+  // the editor's reports and completions belong to the read and environment of the definitions it edits
   const editorEnvironment = loaded?.environmentId ?? environmentId;
-  const reportDirty = useCallback((value: boolean) =>
-    setConfigurationReport(report => ({...reportedFor(report, editorEnvironment), dirty: value})), [editorEnvironment]);
-  const reportSaving = useCallback((value: boolean) =>
-    setConfigurationReport(report => ({...reportedFor(report, editorEnvironment), saving: value})), [editorEnvironment]);
+  const editorReports = useMemo(() => editorCompletion(setCompletion, view.read, editorEnvironment, Date.now), [view.read, editorEnvironment]);
   const discard = (includeSupervisor = false) => {
     if (!confirmDiscard({saving, configurationDirty, supervisorDirty}, includeSupervisor, question => confirm(question))) return false;
     if (includeSupervisor) setSupervisorDirty(false);
     discardProjectDrafts(registry, environmentId, selection.projectId, loaded, includeSupervisor);
-    reportDirty(false);setSavedMessage(null);setSaved(null);return true;
+    setCompletion(state => discardSaved(recordReport(state, editorEnvironment, {dirty: false}), view.read));return true;
   };
   // a refresh reads the shown checkout again; its latest successful read stays visible until the new one settles
   const refresh = () => {
@@ -369,11 +395,11 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
     <div hidden={!showDefinitions} className="stack">
       {busy && <p className="panel" role="status">Reading project definitions…</p>}
       {canLoad && current?.error && <p className="panel" role="alert">Could not load definitions. Refresh to try again or check the Supervisor connection.</p>}
-      {savedMessage?.environmentId === environmentId && <p role="status">{savedMessage.text}</p>}
+      {messageFor(completion, {read: view.read, environmentId}) !== null && <p role="status">{messageFor(completion, {read: view.read, environmentId})}</p>}
       {canLoad && current?.result && <div className="stack"><p className="muted small" role="status">Loaded {new Date(current.loadedAt!).toLocaleTimeString()}. Refresh after repository changes.</p><DefinitionsContent key={key} definitions={current.result.definitions}/></div>}
       {loaded && <div hidden={!canLoad || view.key !== key} inert={supervisorSaving || configurationSaving}>
-        <ProjectConfigurationEditor key={JSON.stringify([loaded.environmentId, loaded.definitions.projectId, loaded.definitions.threadId, loaded.definitions.revision, revision])} definitions={loaded.definitions} onDirtyChange={reportDirty} onSavingChange={reportSaving}
-          onSaved={result => {setSaved({read: view.read, loaded: {definitions: result, loadedAt: Date.now(), environmentId: loaded.environmentId}});setSavedMessage({environmentId: loaded.environmentId, text: "Saved project configuration to .t3-supervisor/project.yaml."});}}/>
+        <ProjectConfigurationEditor key={JSON.stringify([loaded.environmentId, loaded.definitions.projectId, loaded.definitions.threadId, loaded.definitions.revision, revision])} definitions={loaded.definitions} onDirtyChange={editorReports.onDirtyChange}
+          onSavingChange={editorReports.onSavingChange} onSaved={editorReports.onSaved}/>
       </div>}
     </div>
   </section>;

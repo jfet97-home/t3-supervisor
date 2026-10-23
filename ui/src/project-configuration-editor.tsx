@@ -75,6 +75,22 @@ export const settleSave = (draft: ConfigurationDraft, outcome: Exit.Exit<Project
     blocked: result.status === "conflict" || result.status === "uncertain" || result.status === "unavailable" || result.status === "permission_required"};
 };
 
+// the callbacks through which the editor reports to its panel
+export interface EditorReports {
+  readonly onSaved: (result: ProjectDefinitionSnapshot) => void;
+  readonly onDirtyChange: (dirty: boolean) => void;
+  readonly onSavingChange: (saving: boolean) => void;
+}
+
+// applies a resolved save to the draft it was made from and reports a verified save; it runs when the save settles, also
+// after the editor that started it is gone
+export const completeSave = (outcome: Exit.Exit<ProjectConfigSaveOutcome, ProjectConfigRequestError>, normalized: ProjectConfigurationInfo,
+  setDraft: (change: (draft: ConfigurationDraft) => ConfigurationDraft) => void, reports: EditorReports) => {
+  setDraft(current => settleSave(current, outcome, normalized));
+  const saved = savedDefinitions(outcome);
+  if (saved) {reports.onDirtyChange(false);reports.onSaved(saved);}
+};
+
 // The index is the source of rows, including entries whose full definition cannot be read.
 export function ProjectCatalogFields({kind, config, definitions, disabled, onChange}: {
   kind: CatalogKind;
@@ -174,10 +190,7 @@ export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange,
     if (plan._tag === "Invalid") {setDraft(current => ({...current, message: plan.message, messageAlert: true}));error.current?.focus();return;}
     if (plan._tag === "Declined") return;
     setDraft(current => ({...current, message: "", messageAlert: false}));
-    const outcome = resolveSave(plan.input)(await save(plan.input));
-    setDraft(current => settleSave(current, outcome, plan.normalized));
-    const saved = savedDefinitions(outcome);
-    if (saved) {onDirtyChange(false);onSaved(saved);}
+    completeSave(resolveSave(plan.input)(await save(plan.input)), plan.normalized, setDraft, {onSaved, onDirtyChange, onSavingChange});
   }}>
     <div className="stack">
       <h3>{projectConfig ? "Edit project configuration" : "Repair project configuration"}</h3>
