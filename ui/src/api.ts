@@ -36,24 +36,32 @@ export class Unconfirmed extends Data.TaggedError("Unconfirmed") {}
 
 export type MutationFailure = NotPerformed | Unconfirmed;
 
-// the HTTP status behind a client failure: a declared error status arrives as StatusCodeError, an undeclared one
-// (401, 403, 413, 415, 500) as DecodeError; both carry the response
-const statusOf = (failure: unknown): number | undefined => {
+// the response behind a client failure: a declared error status arrives as StatusCodeError, an undeclared one
+// (401, 403, 413, 415, 500) as DecodeError; both carry the response and, on it, the request as it was sent
+const responseOf = (failure: unknown) => {
   if (!HttpClientError.isHttpClientError(failure)) return undefined;
   const reason = failure.reason;
-  return reason._tag === "StatusCodeError" || reason._tag === "DecodeError" ? reason.response?.status : undefined;
+  return reason._tag === "StatusCodeError" || reason._tag === "DecodeError" ? reason.response : undefined;
 };
 
 // the baseline outcome rules of every mutation helper (CT-UI-API-01): 401 and 403 refresh access and report whether the
 // refresh worked, 413 and 415 are refusals, and any other failure, status, transport or decode error is unconfirmed;
-// failures surfaced as defects by AtomHttpApi are classified the same way, interruption stays interruption
+// failures surfaced as defects by AtomHttpApi are classified the same way, interruption stays interruption.
+// fetch shows only the last attempt of a request: a browser that resends it after a dropped connection repeats the
+// original headers, so when the stored session changed while the request was out (another tab signed out, an expiry
+// this tab saw, a new sign-in) a 401 or 403 does not show that the first attempt was refused, and the outcome stays
+// unconfirmed
 export const classifyMutation = <A, E, R>(self: Effect.Effect<A, E, R>): Effect.Effect<A, MutationFailure, R | SessionAccess> =>
   self.pipe(Effect.catchCause((cause): Effect.Effect<never, MutationFailure, SessionAccess> => {
     if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause as Cause.Cause<never>);
-    const status = statusOf(Cause.squash(cause));
-    if (status === 401 || status === 403)
-      return Effect.flatMap(SessionAccess, (access) => access.load).pipe(
-        Effect.flatMap((refreshed) => Effect.fail(new NotPerformed({ reason: refreshed ? "refreshed" : "refresh_failed" }))));
+    const response = responseOf(Cause.squash(cause));
+    const status = response?.status;
+    if (response && (status === 401 || status === 403))
+      return Effect.flatMap(SessionAccess, (access) => Effect.gen(function* () {
+        const changed = response.request.headers["x-supervisor-session"] !== (yield* access.session);
+        const refreshed = yield* access.load;
+        return yield* changed ? new Unconfirmed() : new NotPerformed({ reason: refreshed ? "refreshed" : "refresh_failed" });
+      }));
     if (status === 413) return Effect.fail(new NotPerformed({ reason: "too_large" }));
     if (status === 415) return Effect.fail(new NotPerformed({ reason: "format" }));
     return Effect.fail(new Unconfirmed());

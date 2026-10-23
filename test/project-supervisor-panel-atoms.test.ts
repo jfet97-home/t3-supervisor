@@ -17,15 +17,18 @@ const install = (key: string, value: unknown) => {
   Object.defineProperty(globalThis, key, {configurable: true, writable: true, value});
 };
 
-interface Sent {readonly method: string; readonly path: string; readonly query: URLSearchParams; readonly body: unknown; readonly signal: AbortSignal | null}
+interface Sent {readonly method: string; readonly path: string; readonly query: URLSearchParams; readonly body: unknown; readonly signal: AbortSignal | null;
+  readonly session: string | null}
 const sent: Sent[] = [];
 let reply: (request: Sent) => Promise<Response> = async () => new Response("{}", {status: 500});
 const storage = new Map<string, string>();
 
 type Core = typeof import("../ui/src/atoms.js");
 type Panel = typeof import("../ui/src/project-supervisor.js");
+type Access = typeof import("../ui/src/access.js");
 let core: Core;
 let ps: Panel;
+let access: Access;
 
 beforeAll(async () => {
   install("location", {origin: "http://supervisor.test", pathname: "/"});
@@ -36,13 +39,15 @@ beforeAll(async () => {
   install("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input), "http://supervisor.test");
     const body = init?.body instanceof Uint8Array ? JSON.parse(new TextDecoder().decode(init.body)) as unknown : undefined;
-    const request = {method: init?.method ?? "GET", path: url.pathname, query: url.searchParams, body, signal: init?.signal ?? null};
+    const request = {method: init?.method ?? "GET", path: url.pathname, query: url.searchParams, body, signal: init?.signal ?? null,
+      session: new Headers(init?.headers).get("x-supervisor-session")};
     sent.push(request);
     return reply(request);
   });
   storage.set("supervisor-session", "session-1");
   core = await import("../ui/src/atoms.js");
   ps = await import("../ui/src/project-supervisor.js");
+  access = await import("../ui/src/access.js");
 });
 
 afterAll(() => {
@@ -160,7 +165,10 @@ it("an unconfirmed save keeps the draft and blocks until a read, a refused save 
   for (const [label, status, csrf, blocked, text] of [
     ["500", 500, 200, true, "The operation outcome could not be confirmed. Refresh Supervisor settings before trying again."],
     ["403 refreshed", 403, 200, false, "Session refreshed. Your Supervisor change was not performed; review the state and try again."],
+    // the session the request carried is still the stored one: an expiry first seen through this refusal keeps the baseline refusal
+    ["401 refresh failed", 401, 401, false, "Your Supervisor change was not performed. Session refresh failed; reconnect and try again."],
   ] as const) {
+    storage.set("supervisor-session", "session-1");
     const registry = AtomRegistry.make();
     sent.length = 0;
     showSnapshot(registry);
@@ -174,6 +182,7 @@ it("an unconfirmed save keeps the draft and blocks until a read, a refused save 
     assert.equal(sent.filter(isPost("/api/guidance/project-supervisor")).length, 1, `${label}: never replayed`);
     registry.dispose();
   }
+  storage.set("supervisor-session", "session-1");
 
   const draft = {...ps.mergeLoadedDraft(null, "project", snapshot).draft, monitoringValue: {intervalMinutes: "12", activityThreshold: "10"}};
   const view = {scope: "s", snapshot, readAt: 1, message: null, blocked: false, operation: null, chat: null, chatMessage: null};
@@ -190,6 +199,75 @@ it("an unconfirmed save keeps the draft and blocks until a read, a refused save 
   assert.deepEqual([uncertain.view.blocked, uncertain.view.message?.alert, uncertain.draft], [true, true, draft]);
   assert.equal(ps.settleRead(uncertain, "project", "s", {snapshot: newer, readAt: 2}, true).view.blocked, false, "only a read lifts the block");
 });
+
+// story03 of the UI replay: the server holds a save while the session ends, the connection then drops and the browser
+// resends the request with its original headers, so the page sees only the resend's pre-body 401. the first attempt may
+// have been applied, so the outcome stays unconfirmed and Save stays blocked until a verified read under a new session
+const endSession: Record<string, (registry: AtomRegistry.AtomRegistry) => Promise<void>> = {
+  // another tab signs out everywhere: it removes the shared session and this tab receives the storage event
+  "another tab signs out": async () => {
+    storage.delete("supervisor-session");
+    const event = new Event("storage");
+    Object.defineProperties(event, {key: {value: "supervisor-session"}, storageArea: {value: globalThis.localStorage}});
+    globalThis.window.dispatchEvent(event);
+  },
+  // this tab's own access check finds the session expired and forgets it
+  "this tab sees the session expire": async registry => {
+    const check = core.uiRuntime.fn(() => Effect.flatMap(access.SessionAccess, session => session.check));
+    const stop = registry.subscribe(check, () => undefined, {immediate: true});
+    registry.set(check, undefined);
+    await until(registry, check, value => AsyncResult.isSuccess(value), "the expiry check");
+    stop();
+  },
+};
+
+for (const [route, end] of Object.entries(endSession)) for (const applied of [false, true]) {
+  it(`a save held while ${route}, then refused 401 on the browser's resend after its connection dropped, stays unconfirmed and blocked until a verified read (first attempt ${applied ? "applied" : "not applied"})`, {timeout: 10_000}, async () => {
+    storage.set("supervisor-session", "session-1");
+    const registry = AtomRegistry.make();
+    sent.length = 0;
+    showSnapshot(registry);
+    const before = registry.get(ps.projectSupervisorDraft(projectKey()));
+    const saved = {...snapshot, settings: {...snapshot.settings, generation: 8, monitoring: {intervalMinutes: 12, activityThreshold: 10}}};
+    let server: ProjectSupervisorInfo = snapshot;
+    const post = pending();
+    reply = async request => {
+      if (isPost("/api/guidance/project-supervisor")(request)) {post.arrive();return post.response;}
+      const signedIn = request.session === "session-2";
+      if (request.path === "/api/csrf") return signedIn ? json({csrf: "fresh"}) : json({message: "Sign in again."}, 401);
+      if (isRead(request)) return signedIn ? json(server) : json({message: "Sign in again."}, 401);
+      return json({}, 500);
+    };
+    ps.startSettingsChange(registry, projectKey(), scopeA(), {kind: "save", input: saveInput(7)});
+    await post.reached;
+    assert.equal(sent.find(isPost("/api/guidance/project-supervisor"))?.session, "session-1", "the save went out with the valid session");
+    if (applied) server = saved;
+    await end(registry);
+    assert.equal(storage.has("supervisor-session"), false, "the session ended while the save was out");
+    // the held connection drops; the browser's resend carries the original headers and is refused before its body is read
+    post.release(json({message: "Sign in again."}, 401));
+    const view = await until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, "settled");
+    assert.deepEqual(view.message, {scope: scopeA(), alert: true,
+      text: "The operation outcome could not be confirmed. Refresh Supervisor settings before trying again."}, "the refusal of the resend is not reported as not performed");
+    assert.equal(view.blocked, true, "Save stays blocked");
+    assert.deepEqual(registry.get(ps.projectSupervisorDraft(projectKey())), before, "the draft is kept");
+    assert.equal(sent.filter(isPost("/api/guidance/project-supervisor")).length, 1, "the page sent the save once and replays nothing");
+
+    // a new sign-in and a verified read show what the first attempt did and lift the block
+    storage.set("supervisor-session", "session-2");
+    const readAtom = ps.projectSupervisorRead({environmentId: null, projectId: "project", mainThreadId: "task-thread", revision: 1, epoch: 1});
+    const stop = registry.subscribe(readAtom, () => undefined, {immediate: true});
+    const read = await until(registry, readAtom, value => AsyncResult.isSuccess(value) && !value.waiting, "verified read");
+    stop();
+    assert.ok(AsyncResult.isSuccess(read));
+    const refreshed = ps.settleRead({view, draft: registry.get(ps.projectSupervisorDraft(projectKey()))}, "project", scopeA(), read.value, true);
+    assert.equal(refreshed.view.blocked, false, "only the verified read lifts the block");
+    assert.equal(refreshed.view.snapshot?.settings.generation, applied ? 8 : 7, "the read shows what the first attempt did");
+    assert.equal(refreshed.draft?.expectedGeneration, applied ? 8 : 7);
+    registry.dispose();
+    storage.set("supervisor-session", "session-1");
+  });
+}
 
 it("a settings outcome that arrives after another chat was selected is dropped", {timeout: 10_000}, async () => {
   const registry = AtomRegistry.make();
