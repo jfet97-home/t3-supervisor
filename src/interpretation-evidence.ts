@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { Schema } from "effect";
 import { InterpretationAttempt, InterpretationAttemptId, InterpretationSourcePin } from "./interpretation-submission.js";
+import type { WorkflowPlanValue } from "./supervisor-workflow.js";
 
 // the evidence an interpretation or a proposal rests on (plan 3.12 item 8). a new interpretation rests on its attempt's
 // recorded tool submission; a later negotiated proposal, and an interpretation converted once by the cut-over (item 11),
@@ -44,3 +46,17 @@ export const TaskInterpretationFields = Schema.Struct({
   interpretationEvidence: Schema.optional(InterpretationEvidence),
 });
 export type TaskInterpretationFields = typeof TaskInterpretationFields.Type;
+
+// the one digest of an interpretation's plan, for interpretation_submission.planDigest, the cut-over's
+// supervisor_message.planDigest and every digest comparison: sha256 of the JSON of the plan fields in this order with every
+// nodeId omitted (node ids are minted per attempt and never part of the plan's identity, as today's interpretation match
+// compares shapes); null without a workflow
+export const interpretationPlanDigest = (workflow: WorkflowPlanValue | null | undefined): string | null =>
+  workflow ? createHash("sha256").update(JSON.stringify({
+    definitionsStatus: workflow.definitionsStatus,
+    definitionsComplete: workflow.definitionsComplete,
+    requirementsKnown: workflow.requirementsKnown,
+    requirements: workflow.requirements,
+    issues: workflow.issues,
+    plan: workflow.plan,
+  }, (key, item: unknown) => key === "nodeId" ? undefined : item)).digest("hex") : null;
