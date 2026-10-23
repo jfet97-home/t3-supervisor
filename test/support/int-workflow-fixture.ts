@@ -1,6 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { Clock, Effect, Fiber, type Scope } from "effect";
 import { fingerprint } from "../../src/guidance-store.js";
 import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../../src/project-supervisor-store.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
@@ -10,8 +8,8 @@ import type { Projection, ThreadInfo } from "../../src/types.js";
 import type { WorkflowApplyPatch } from "../../src/workflow-write-controller.js";
 import { workflowToolNames } from "../../src/workflow-write-evidence.js";
 import { effectiveIndex, projectIndex } from "../project-definitions-fixture.js";
-import { nativeReadRoutes, nativeReadState, startIntPeer, type IntNativePeer, type NativeReadState, type ShellThread } from "./int-native-peer.js";
-import { openIntSupervision, startIntEndpoint, type IntEndpoint, type IntSupervision } from "./int-production-wiring.js";
+import { execute, intEndpoint, intRun, temporaryDirectory, type IntEndpoint, type IntRun } from "./glinint-wiring.js";
+import { hookRuntime, intPeer, nativeReadRoutes, nativeReadState, type IntNativePeer, type NativeReadState, type ShellThread } from "./int-native-peer.js";
 
 // builders copied from test/workflow-write-controller.test.ts (:49-60, :62-88, :90-206, :218-279, :285-298), values unchanged
 
@@ -51,13 +49,14 @@ export const sequencePlan = (nodes: readonly unknown[], templatePath: string | n
 
 export const shellThread = (value: ThreadInfo): ShellThread => ({...value, latestRunId: null});
 
-export type DefinitionReader = {current: ProjectDefinitionSnapshot; calls: number; onLoad: (() => void) | null};
+// the definitions read: its snapshot, its count and a hook that runs, as its own fiber of the fixture, before each read answers
+export type DefinitionReader = {current: ProjectDefinitionSnapshot; calls: number; onLoad: Effect.Effect<void> | null};
 
 export type IntWorkflowFixture = {
   directory: string;
   peer: IntNativePeer;
   native: NativeReadState;
-  core: IntSupervision;
+  core: IntRun;
   endpoint: IntEndpoint;
   binding: BindingRecord;
   projectId: string;
@@ -69,126 +68,122 @@ export type IntWorkflowFixture = {
   definitionReader: DefinitionReader;
   proposal: WorkflowProposalInfo;
   sourceBinding: WorkflowSourceBindingInfo;
-  close(): Promise<void>;
 };
 
-// seeds the controller suite's fixture rows into a production-wired service whose native reads go over a loopback peer
-export const startWorkflowFixture = async (mainThread = thread("main-workflows", "project-workflows")): Promise<IntWorkflowFixture> => {
-  const native = nativeReadState();
-  const peer = await startIntPeer([nativeReadRoutes(native)]);
-  const directory = await mkdtemp(join(tmpdir(), "native-authority-integration-"));
-  const projectId = "project-workflows";
-  const mainThreadId = mainThread.id;
-  const catalogThreads: ThreadInfo[] = [mainThread];
-  const definitionReader: DefinitionReader = {current: null as unknown as ProjectDefinitionSnapshot, calls: 0, onLoad: null};
-  const definitions = {load: async () => {definitionReader.calls++;definitionReader.onLoad?.();return definitionReader.current;}};
-  const core = await openIntSupervision({directory, peerUrl: peer.baseUrl, definitions,
-    catalog: () => ({projects: [{project: {id: projectId, title: "Project workflows", workspaceRoot: "/workspace/project-workflows"}, available: true}],
-      threads: catalogThreads})});
-  const {guidance, store: supervisors} = core;
-  const supervisorControl = async (scope: string | null, enabled: boolean) => await guidance.db.prepare(
-    "INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-  ).run(`supervisor_control:${JSON.stringify(scope)}`, JSON.stringify({generation: 1, enabled, manual: true}));
-  await supervisorControl(null, true);
-  await supervisorControl(projectId, true);
-  const reserved = await supervisors.reserve(projectId, mainThreadId, "Main thread", defaultSupervisorModel, 1, 1);
-  const binding = {...reserved, state: "ready" as const};
-  await supervisors.setBinding(binding);
-  const supervisorThreadId = binding.threadId;
-  const definitionSnapshot: ProjectDefinitionSnapshot = {
-    projectId,
-    threadId: mainThreadId,
-    workspaceRoot: "/workspace/project-workflows",
-    globalOnly: false,
-    globalRevision: null,
-    revision: "definition-revision-1",
-    editingAvailable: true,
-    status: "ready",
-    steps: [],
-    workflows: [],
-    config: effectiveIndex({steps: [], workflows: []}),
-    projectConfig: projectIndex(),
-    definitionFiles: [],
-    complete: true,
-    sources: [],
-    issues: [],
-  };
-  definitionReader.current = definitionSnapshot;
-  const definitionContext = proposalContextFromDefinitions(definitionSnapshot);
-  const normalized = validateWorkflowPlan({requirements: [], plan: sequencePlan([localStep("Baseline review", "Review the current task context.")])}, definitionContext);
-  if (!normalized?.plan) throw new Error("test_workflow_proposal_invalid");
-  const proposal: WorkflowProposalInfo = {
-    status: "proposed",
-    message: "A source-bound workflow proposal for this task.",
-    workspaceRoot: definitionSnapshot.workspaceRoot,
-    revision: definitionSnapshot.revision,
-    globalRevision: null,
-    definitionsStatus: "ready",
-    definitionsComplete: true,
-    requirementsKnown: true,
-    requirements: normalized.requirements,
-    issues: normalized.issues,
-    plan: normalized.plan,
-  };
-  const taskSourceHash = fingerprint("Complete the current project task.");
-  const taskId = "task-current";
-  const proposalId = "proposal-current";
-  const task: TaskRecord = {
-    id: taskId,
-    threadId: mainThreadId,
-    projectId,
-    sourceRunId: "source-run-current",
-    sourceMessageId: "source-message-current",
-    status: "inferred",
-    objective: "Complete the current project task.",
-    reason: "The latest user message describes an actionable task.",
-    updatedAt: Date.now(),
-    workflow: proposal,
-    agreement: null,
-    workflowProposalId: proposalId,
-    sourceHash: taskSourceHash,
-    requestText: "Complete the current project task.",
-    supervisorThreadId,
-    messageId: "source-message-current",
-    dispatchedAt: null,
-    replayCount: 0,
-    supervisorRunId: "source-run-current",
-    sourceOrdinal: 1,
-    definitionContext,
-    definitionSnapshot,
-  };
-  await supervisors.saveTask(task);
-  const sourceBinding: WorkflowSourceBindingInfo = {
-    workspaceRoot: definitionSnapshot.workspaceRoot,
-    revision: definitionSnapshot.revision,
-    globalRevision: null,
-    definitionsStatus: "ready",
-    definitionsComplete: true,
-    requirementsKnown: true,
-    taskId,
-    proposalId,
-    sourceHash: taskSourceHash,
-  };
-  catalogThreads.push(thread(supervisorThreadId, projectId));
-  native.shellThreads = catalogThreads.map(shellThread);
-  const projection = makeProjection(supervisorThreadId, projectId);
-  native.projections.set(supervisorThreadId, projection);
-  // sets catalogClassificationsReady, without which workflowEditingEnabled denies every write (project-supervisor.ts:130-136,165)
-  await core.supervision.candidates("");
-  const endpoint = await startIntEndpoint(core);
-  return {directory, peer, native, core, endpoint, binding, projectId, mainThreadId, supervisorThreadId, catalogThreads, projection,
-    details: native.details, definitionReader, proposal, sourceBinding,
-    close: async () => {
-      try {await endpoint.close();}
-      finally {
-        try {await core.close();}
-        finally {
-          try {await peer.close();}
-          finally {await rm(directory, {recursive: true, force: true});}
-        }
-      }
-    }};
-};
+// seeds the controller suite's fixture rows into a production-wired run whose native reads go over a loopback peer, all in
+// the caller's scope
+export const startWorkflowFixture = (mainThread = thread("main-workflows", "project-workflows")): Effect.Effect<IntWorkflowFixture, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const directory = yield* temporaryDirectory("native-authority-integration-");
+    const native = nativeReadState();
+    const peer = yield* intPeer([nativeReadRoutes(native)]);
+    const hooks = yield* hookRuntime;
+    const projectId = "project-workflows";
+    const mainThreadId = mainThread.id;
+    const catalogThreads: ThreadInfo[] = [mainThread];
+    const definitionReader: DefinitionReader = {current: null as unknown as ProjectDefinitionSnapshot, calls: 0, onLoad: null};
+    const definitions = () => Effect.suspend(() => {
+      definitionReader.calls++;
+      const hook = definitionReader.onLoad;
+      return Effect.andThen(hook ? Fiber.join(hooks.run(hook)) : Effect.void, Effect.sync(() => definitionReader.current));
+    });
+    const core = yield* intRun({directory, peerUrl: peer.baseUrl, definitions,
+      catalog: () => ({projects: [{project: {id: projectId, title: "Project workflows", workspaceRoot: "/workspace/project-workflows"}, available: true}],
+        threads: catalogThreads})});
+    const {sql, store: supervisors} = core;
+    const supervisorControl = (scope: string | null, enabled: boolean) => execute(sql,
+      "INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+      `supervisor_control:${JSON.stringify(scope)}`, JSON.stringify({generation: 1, enabled, manual: true}));
+    yield* supervisorControl(null, true);
+    yield* supervisorControl(projectId, true);
+    const reserved = yield* supervisors.reserve(projectId, mainThreadId, "Main thread", defaultSupervisorModel, 1, 1).pipe(Effect.orDie);
+    const binding = {...reserved, state: "ready" as const};
+    yield* supervisors.setBinding(binding).pipe(Effect.orDie);
+    const supervisorThreadId = binding.threadId;
+    const definitionSnapshot: ProjectDefinitionSnapshot = {
+      projectId,
+      threadId: mainThreadId,
+      workspaceRoot: "/workspace/project-workflows",
+      globalOnly: false,
+      globalRevision: null,
+      revision: "definition-revision-1",
+      editingAvailable: true,
+      status: "ready",
+      steps: [],
+      workflows: [],
+      config: effectiveIndex({steps: [], workflows: []}),
+      projectConfig: projectIndex(),
+      definitionFiles: [],
+      complete: true,
+      sources: [],
+      issues: [],
+    };
+    definitionReader.current = definitionSnapshot;
+    const definitionContext = proposalContextFromDefinitions(definitionSnapshot);
+    const normalized = validateWorkflowPlan({requirements: [], plan: sequencePlan([localStep("Baseline review", "Review the current task context.")])}, definitionContext);
+    if (!normalized?.plan) return yield* Effect.die(new Error("test_workflow_proposal_invalid"));
+    const proposal: WorkflowProposalInfo = {
+      status: "proposed",
+      message: "A source-bound workflow proposal for this task.",
+      workspaceRoot: definitionSnapshot.workspaceRoot,
+      revision: definitionSnapshot.revision,
+      globalRevision: null,
+      definitionsStatus: "ready",
+      definitionsComplete: true,
+      requirementsKnown: true,
+      requirements: normalized.requirements,
+      issues: normalized.issues,
+      plan: normalized.plan,
+    };
+    const taskSourceHash = fingerprint("Complete the current project task.");
+    const taskId = "task-current";
+    const proposalId = "proposal-current";
+    const task: TaskRecord = {
+      id: taskId,
+      threadId: mainThreadId,
+      projectId,
+      sourceRunId: "source-run-current",
+      sourceMessageId: "source-message-current",
+      status: "inferred",
+      objective: "Complete the current project task.",
+      reason: "The latest user message describes an actionable task.",
+      updatedAt: yield* Clock.currentTimeMillis,
+      workflow: proposal,
+      agreement: null,
+      workflowProposalId: proposalId,
+      sourceHash: taskSourceHash,
+      requestText: "Complete the current project task.",
+      supervisorThreadId,
+      messageId: "source-message-current",
+      dispatchedAt: null,
+      replayCount: 0,
+      supervisorRunId: "source-run-current",
+      sourceOrdinal: 1,
+      definitionContext,
+      definitionSnapshot,
+    };
+    yield* supervisors.saveTask(task).pipe(Effect.orDie);
+    const sourceBinding: WorkflowSourceBindingInfo = {
+      workspaceRoot: definitionSnapshot.workspaceRoot,
+      revision: definitionSnapshot.revision,
+      globalRevision: null,
+      definitionsStatus: "ready",
+      definitionsComplete: true,
+      requirementsKnown: true,
+      taskId,
+      proposalId,
+      sourceHash: taskSourceHash,
+    };
+    catalogThreads.push(thread(supervisorThreadId, projectId));
+    native.shellThreads = catalogThreads.map(shellThread);
+    const projection = makeProjection(supervisorThreadId, projectId);
+    native.projections.set(supervisorThreadId, projection);
+    // sets catalogClassificationsReady, without which workflowEditingEnabled denies every write (project-supervisor.ts:130-136,165)
+    yield* core.supervisor.candidates("").pipe(Effect.orDie);
+    const endpoint = yield* intEndpoint(core);
+    return {directory, peer, native, core, endpoint, binding, projectId, mainThreadId, supervisorThreadId, catalogThreads, projection,
+      details: native.details, definitionReader, proposal, sourceBinding};
+  });
 
 export const locator = (fixture: IntWorkflowFixture) => ({
   supervisorThreadId: fixture.supervisorThreadId,
@@ -258,8 +253,9 @@ export const installEvidence = (fixture: Pick<IntWorkflowFixture, "supervisorThr
   return itemId;
 };
 
-export const applyArgs = async (fixture: IntWorkflowFixture, input: WorkflowApplyPatch) => {
-  const current = (await fixture.core.supervision.workflowStates.list(fixture.projectId, fixture.mainThreadId)).find(document => document.workflowId === input.workflowId);
+export const applyArgs = (fixture: IntWorkflowFixture, input: WorkflowApplyPatch) => Effect.gen(function* () {
+  const current = (yield* fixture.core.workflowStates.list(fixture.projectId, fixture.mainThreadId).pipe(Effect.orDie))
+    .find(document => document.workflowId === input.workflowId);
   return {
   action: "apply",
   ...locator(fixture),
@@ -270,4 +266,4 @@ export const applyArgs = async (fixture: IntWorkflowFixture, input: WorkflowAppl
       ...input,
     },
   };
-};
+});
