@@ -17,9 +17,9 @@ import { createStatus, NativeTransportLive, readiness, supervise, SupervisorStat
 import { makeT3Client, T3Client, T3TransportError, type T3ClientShape } from "../src/t3.js";
 import { ThreadPolicyStore } from "../src/thread-policy.js";
 import type { SupervisorConfig } from "../src/types.js";
-import { startFakeT3, type FakeT3, type FakeT3Options } from "./support/cli-fake-t3.js";
+import { startFakeT3, untilTraffic, type FakeT3Options } from "./support/cli-fake-t3.js";
 import { fingerprint, leakedSecrets } from "./support/cli-process.js";
-import { cancelAfter } from "./support/g11-http.js";
+import { cancelAfter, onLiveClock } from "./support/g11-http.js";
 import { temporaryDirectory } from "./support/g11-stores.js";
 import { mockMethod } from "./support/node-test.js";
 
@@ -61,7 +61,8 @@ interface Observation {
 }
 
 // the console is the process's own: the code under test writes some lines through Effect's Console and some through
-// console directly, so the observation replaces the global console methods (restored when the test finishes)
+// console directly, so the observation replaces the global console methods (restored when the test finishes). A wait for a
+// line removes its waiter when it ends, and its bound is a live-clock sleep that ends with it
 const observe = (t: TestContext): Observation => {
   const lines: string[] = [];
   const waiters = new Set<() => void>();
@@ -83,7 +84,7 @@ const observe = (t: TestContext): Observation => {
       waiters.add(check);
       check();
       return Effect.sync(() => waiters.delete(check));
-    }).pipe(Effect.timeoutOrElse({ duration: timeoutMs, orElse: () => Effect.die(new Error(`no ${label} within ${timeoutMs} ms`)) })),
+    }).pipe(Effect.timeoutOrElse({ duration: timeoutMs, orElse: () => Effect.die(new Error(`no ${label} within ${timeoutMs} ms`)) }), onLiveClock),
   };
 };
 
@@ -139,13 +140,10 @@ const healthBody = (status: SubscriptionRef.SubscriptionRef<SupervisorStatus>, s
 // the first status that holds the condition, within the deadline
 const until = (status: SubscriptionRef.SubscriptionRef<SupervisorStatus>, condition: (current: SupervisorStatus) => boolean, timeoutMs: number, label: string) =>
   SubscriptionRef.changes(status).pipe(Stream.filter(condition), Stream.runHead,
-    Effect.timeoutOrElse({ duration: timeoutMs, orElse: () => Effect.die(new Error(`${label} not reached within ${timeoutMs} ms`)) }));
+    Effect.timeoutOrElse({ duration: timeoutMs, orElse: () => Effect.die(new Error(`${label} not reached within ${timeoutMs} ms`)) }), onLiveClock);
 
-// the cli suites' loopback fake T3, closed with the test scope
+// the cli suites' loopback fake T3, closed with the test scope; its traffic waits are untilTraffic, which an interruption ends
 const fakeT3 = (options: FakeT3Options) => Effect.acquireRelease(Effect.promise(() => startFakeT3(options)), (fake) => Effect.promise(() => fake.close()));
-// the fake's own wait for its recorded traffic
-const traffic = (fake: FakeT3, predicate: Parameters<FakeT3["until"]>[0], timeoutMs: number, label: string) =>
-  Effect.promise(() => fake.until(predicate, timeoutMs, label));
 
 // a case that expects a failure; a success fails the case by name
 const failureOf = <A, E, R>(effect: Effect.Effect<A, E, R>, unexpected: string) =>
@@ -169,7 +167,7 @@ it.live("CT-REDACT-01: native transport failures carrying a token, a native erro
     const refused = yield* Effect.forkChild(instrumented(supervise(services(refusedConfig, refusedStatus,
       Layer.mergeAll(makeStore(refusedDirectory), makeT3Client({ baseUrl: refusing.baseUrl, token: secrets.token })))), observation));
     yield* Effect.gen(function* () {
-      yield* traffic(refusing, (requests) => requests.http.length > 0, 5_000, "a descriptor request");
+      yield* untilTraffic(refusing, (requests) => requests.http.length > 0, 5_000, "a descriptor request");
       yield* until(refusedStatus, (status) => status.lastErrorPhase === "t3_authentication", 5_000, "the descriptor failure phase");
     }).pipe(Effect.ensuring(Fiber.interrupt(refused)));
     assertNoLeak("descriptor status", [yield* healthBody(refusedStatus, refusedConfig)], secrets);

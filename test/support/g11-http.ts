@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
 import { request as httpRequest, type ClientRequest } from "node:http";
 import { connect, createServer as createNetServer } from "node:net";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { Deferred, type Duration, Effect, Layer, type Scope } from "effect";
+import { Clock, Deferred, type Duration, Effect, Layer, type Scope } from "effect";
 import { FetchHttpClient, HttpBody, HttpClient, HttpClientRequest } from "effect/http";
 
 // the loopback client side of the g11 dashboard and supervisor suites: small adapters over node's http and net clients
@@ -13,6 +13,15 @@ import { FetchHttpClient, HttpBody, HttpClient, HttpClientRequest } from "effect
 export type RawResponse = { status: number; headers: Record<string, string | string[] | undefined>; body: string };
 
 export type RawRequest = { method?: string; path: string; headers?: Record<string, string>; body?: string | Buffer };
+
+// a bound of these helpers runs on the live clock, as the baseline's native timers ran on real time, also inside a suite
+// whose services hold a test clock; each bound is a fiber's sleep, so it ends with the wait it bounds
+const liveClock = Clock.Clock.defaultValue();
+
+/** Runs a native wait and its bound on the live clock; the wait itself reads no clock. */
+export const onLiveClock = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> => Effect.provideService(effect, Clock.Clock, liveClock);
+
+const liveSleep = (duration: Duration.Input) => onLiveClock(Effect.sleep(duration));
 
 // the baseline helper's bound of each raw request (test/support/c3b-http.ts AbortSignal.timeout(5_000)), on the live clock
 const rawRequestBound = "5 seconds";
@@ -32,7 +41,7 @@ export const rawRequest = (port: number, options: RawRequest): Effect.Effect<Raw
   request.once("error", (error) => resume(Effect.fail(error)));
   request.end(payload);
   return Effect.sync(() => request.destroy());
-}).pipe(Effect.timeout(rawRequestBound), Effect.orDie);
+}).pipe(Effect.timeout(rawRequestBound), onLiveClock, Effect.orDie);
 
 export const jsonBody = (response: RawResponse): unknown => JSON.parse(response.body) as unknown;
 
@@ -136,13 +145,16 @@ export const exchangeJson = (url: string, init: ExchangeInit = {}): Effect.Effec
 // the platform fetch, which the client runs over
 const fetchClient = FetchHttpClient.layer.pipe(Layer.provide(Layer.sync(FetchHttpClient.Fetch, () => globalThis.fetch)));
 
-/** An awaited event with an explicit deadline on the live clock: past it the case fails by the event's name. */
+/**
+ * An awaited event with an explicit deadline on the live clock: past it the case fails by the event's name. The awaited
+ * effect keeps its own clock; whichever ends first interrupts the other, so the deadline's sleep never outlives the wait.
+ */
 export const within = <A, E, R>(effect: Effect.Effect<A, E, R>, duration: Duration.Input, label: string): Effect.Effect<A, E, R> =>
-  Effect.timeoutOrElse(effect, { duration, orElse: () => Effect.die(new Error(`timed out waiting for ${label}`)) });
+  Effect.raceFirst(effect, Effect.andThen(liveSleep(duration), Effect.die(new Error(`timed out waiting for ${label}`))));
 
-/** A call's cancel that completes at its deadline on the live clock, as the baseline AbortSignal.timeout aborted. */
+/** A call's cancel that completes at its deadline on the live clock, as the baseline AbortSignal.timeout aborted; its sleep ends with the scope. */
 export const cancelAfter = (duration: Duration.Input): Effect.Effect<Deferred.Deferred<void>, never, Scope.Scope> => Effect.gen(function* () {
   const cancel = yield* Deferred.make<void>();
-  yield* Effect.forkScoped(Effect.andThen(Effect.sleep(duration), Deferred.succeed(cancel, undefined)));
+  yield* Effect.forkScoped(Effect.andThen(liveSleep(duration), Deferred.succeed(cancel, undefined)));
   return cancel;
 });
