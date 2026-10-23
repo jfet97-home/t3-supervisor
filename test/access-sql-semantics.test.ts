@@ -8,6 +8,7 @@ import type { SqlClient } from "effect/sql";
 import { AccessDb, accessDbLayer } from "../src/db.js";
 import { forgeDashboardToken, ServiceAuth } from "../src/service-auth.js";
 import { repositoryRoot, tsxLoader } from "./support/cli-process.js";
+import { privately } from "./support/private-assert.js";
 
 // target-regression sql semantics of the access client on a real login database (plan 3.2 rules 4, 6 and 7; CT-SQL-01..04
 // for access/login.sqlite3)
@@ -35,6 +36,94 @@ const grantHashes = (db: SqlClient.SqlClient) =>
 
 const insertGrant = (db: SqlClient.SqlClient, index: number) =>
   db.unsafe("INSERT INTO dashboard_login_grants(token_hash,issued_at,expires_at) VALUES(?,?,?)", [hash(index), 1_000, 2_000]);
+
+const contendedGrants = 30;
+const contendedRuns = 10;
+const Ready = Schema.fromJsonString(Schema.Struct({ step: Schema.Literal("ready") }));
+const Waiting = Schema.fromJsonString(Schema.Struct({
+  step: Schema.Literal("waiting"), grant: Schema.Finite, probe: Schema.Literals(["busy", "free", "failed"]) }));
+const Begun = Schema.fromJsonString(Schema.Struct({ step: Schema.Literal("begun"), grant: Schema.Finite, ok: Schema.Boolean }));
+const Done = Schema.fromJsonString(Schema.Struct({ step: Schema.Literal("done"), won: Schema.Array(Schema.Finite) }));
+
+// one CT-SQL-04 run: this process's service auth and the child's (test/support/access-sql-child.ts) on one fresh grant
+// set. a separate holder connection of this process takes BEGIN IMMEDIATE before the child starts and is released only
+// once the child's barrier reports from the BEGIN IMMEDIATE step of its first login, the last grant, which this process
+// then claims as well
+const contendedRun = Effect.gen(function* () {
+  const { directory, path } = yield* loginDatabase;
+  const contested = contendedGrants - 1;
+  // forged one after another, each over its own short-lived client, before this process opens its service client
+  const tokens: string[] = [];
+  for (let index = 0; index < contendedGrants; index += 1) tokens.push(Redacted.value((yield* forgeDashboardToken(directory)).token));
+
+  const observed = yield* Effect.gen(function* () {
+    const auth = yield* ServiceAuth;
+    const commands = yield* Queue.unbounded<string, Cause.Done>();
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const child = yield* spawner.spawn(ChildProcess.make(process.execPath,
+      ["--disable-warning=ExperimentalWarning", "--import", tsxLoader, "test/support/access-sql-child.ts", directory], {
+        cwd: repositoryRoot,
+        stdin: { stream: Stream.fromQueue(commands).pipe(Stream.map((line) => `${line}\n`), Stream.encodeText) },
+      }));
+    const lines = yield* Queue.unbounded<string, Cause.Done | PlatformError.PlatformError>();
+    yield* Effect.forkChild(child.stdout.pipe(Stream.decodeText(), Stream.splitLines, Stream.runIntoQueue(lines)));
+    const stderr = yield* Effect.forkChild(child.stderr.pipe(Stream.decodeText(), Stream.mkString));
+    // a stopped child is reported by its stderr size only
+    const next = <S extends Schema.Decoder<unknown>>(schema: S) => Queue.take(lines).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(schema)),
+      Effect.catchCause(() => Fiber.join(stderr).pipe(
+        Effect.flatMap((output) => Effect.die(new Error(`the child process stopped (stderr ${output.length} bytes)`))))));
+
+    yield* next(Ready);
+    for (const token of tokens) yield* Queue.offer(commands, token);
+    // the first grant is consumed here before the child starts, so the child's walk always ends on a replay of a grant
+    // another process consumed
+    const won: number[] = [];
+    if ((yield* auth.login(tokens[0]!)) !== null) won.push(0);
+
+    // the holder: BEGIN IMMEDIATE on the same file over a separate connection, kept until released
+    const holding = yield* Deferred.make<number>();
+    const release = yield* Deferred.make<void>();
+    const holder = yield* Effect.forkChild(Effect.gen(function* () {
+      const db = yield* AccessDb;
+      yield* db.withTransaction(Effect.gen(function* () {
+        yield* Deferred.succeed(holding, (yield* grantHashes(db)).length);
+        yield* Deferred.await(release);
+      }));
+    }).pipe(Effect.provide(Layer.fresh(accessDbLayer(path)))));
+    const pendingWhileHeld = yield* Deferred.await(holding);
+
+    // the child's barrier line arrives while the holder holds; the child's step behind it cannot return before the release
+    yield* Queue.offer(commands, "go");
+    const waiting = yield* next(Waiting);
+    const barrier = { ...waiting, pendingWhileHeld, holderHeld: holder.pollUnsafe() === undefined, linesBeforeRelease: yield* Queue.size(lines) };
+
+    yield* Deferred.succeed(release, undefined);
+    const holderExit = yield* Fiber.await(holder);
+    // the grant the child is waiting for, claimed here as soon as the holder is gone
+    if ((yield* auth.login(tokens[contested]!)) !== null) won.push(contested);
+    const begun = yield* next(Begun);
+    // then the rest: this process walks up from the second grant while the child walks down to the first
+    for (let index = 1; index < contested; index += 1) if ((yield* auth.login(tokens[index]!)) !== null) won.push(index);
+    const done = yield* next(Done);
+    yield* Queue.end(commands);
+    const exitCode = yield* child.exitCode;
+    return { barrier, holderCommitted: Exit.isSuccess(holderExit), begun, won, childWon: done.won, exitCode };
+  }).pipe(Effect.provide(ServiceAuth.layer(directory)));
+
+  const fs = yield* FileSystem.FileSystem;
+  const db = yield* Effect.gen(function* () {
+    const client = yield* AccessDb;
+    return {
+      sessions: (yield* client.unsafe<{ readonly count: number }>("SELECT COUNT(*) AS count FROM dashboard_login_sessions"))[0]?.count,
+      grants: yield* grantHashes(client),
+      journal: (yield* client.unsafe<{ readonly journal_mode: string }>("PRAGMA journal_mode"))[0]?.journal_mode,
+      integrity: (yield* client.unsafe<{ readonly integrity_check: string }>("PRAGMA integrity_check"))[0]?.integrity_check,
+      mode: (yield* fs.stat(path)).mode & 0o777,
+    };
+  }).pipe(Effect.provide(Layer.fresh(accessDbLayer(path))));
+  return { tokens, observed, db };
+});
 
 describe("AccessDb sql semantics", () => {
   it.live("CT-SQL-01 (access): an interrupted waiter returns while the holder still holds the connection, its body never runs and the holder commits unaffected", () =>
@@ -121,65 +210,30 @@ describe("AccessDb sql semantics", () => {
       assert.deepEqual(yield* grantHashes(db), [hash(2)]);
     })).pipe(Effect.provide(NodeServices.layer)), { timeout: 10_000 });
 
-  it.live("CT-SQL-04 (access): two service auth clients in two processes consume every grant exactly once under BEGIN IMMEDIATE", () =>
-    Effect.gen(function* () {
-      const grants = 30;
-      const { directory, path } = yield* loginDatabase;
-      // forged one after another, each over its own short-lived client, before this process opens its service client
-      const tokens: string[] = [];
-      for (let index = 0; index < grants; index += 1) tokens.push(Redacted.value((yield* forgeDashboardToken(directory)).token));
-      const Ready = Schema.fromJsonString(Schema.Struct({ step: Schema.Literal("ready") }));
-      const Started = Schema.fromJsonString(Schema.Struct({ step: Schema.Literal("started") }));
-      const Done = Schema.fromJsonString(Schema.Struct({ step: Schema.Literal("done"), won: Schema.Array(Schema.Finite) }));
 
-      const observed = yield* Effect.gen(function* () {
-        const auth = yield* ServiceAuth;
-        const commands = yield* Queue.unbounded<string, Cause.Done>();
-        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-        const child = yield* spawner.spawn(ChildProcess.make(process.execPath,
-          ["--disable-warning=ExperimentalWarning", "--import", tsxLoader, "test/support/access-sql-child.ts", directory], {
-            cwd: repositoryRoot,
-            stdin: { stream: Stream.fromQueue(commands).pipe(Stream.map((line) => `${line}\n`), Stream.encodeText) },
-          }));
-        const lines = yield* Queue.unbounded<string, Cause.Done | PlatformError.PlatformError>();
-        yield* Effect.forkChild(child.stdout.pipe(Stream.decodeText(), Stream.splitLines, Stream.runIntoQueue(lines)));
-        const stderr = yield* Effect.forkChild(child.stderr.pipe(Stream.decodeText(), Stream.mkString));
-        // a stopped child is reported by its stderr size only
-        const next = <S extends Schema.Decoder<unknown>>(schema: S) => Queue.take(lines).pipe(
-          Effect.flatMap(Schema.decodeUnknownEffect(schema)),
-          Effect.catchCause(() => Fiber.join(stderr).pipe(
-            Effect.flatMap((output) => Effect.die(new Error(`the child process stopped (stderr ${output.length} bytes)`))))));
+  for (let run = 1; run <= contendedRuns; run += 1) {
+    it.live(`CT-SQL-04 (access) run ${run}/${contendedRuns}: one process holds BEGIN IMMEDIATE while the other's login waits on busy_timeout for a grant both claim, then two service auth clients consume every grant exactly once`, () =>
+      Effect.gen(function* () {
+        const { tokens, observed, db } = yield* contendedRun;
+        const contested = contendedGrants - 1;
+        privately(`CT-SQL-04 run ${run}`, tokens, () => {
+          // the contention, observed: as the child entered its login's BEGIN IMMEDIATE step, a no-wait BEGIN IMMEDIATE from
+          // its process was refused busy and this process's holder was still inside its transaction over the same grants
+          assert.deepEqual(observed.barrier, {
+            step: "waiting", grant: contested, probe: "busy", pendingWhileHeld: contendedGrants - 1, holderHeld: true, linesBeforeRelease: 0,
+          });
+          assert.equal(observed.holderCommitted, true);
+          // a step entered under a held lock that returns instead of failing busy waited on busy_timeout until the release
+          assert.deepEqual(observed.begun, { step: "begun", grant: contested, ok: true });
+          // the waiter consumes the contested grant unless this process did first, never both
+          assert.notEqual(observed.won.includes(contested), observed.childWon.includes(contested), "the contested grant went to exactly one client");
 
-        yield* next(Ready);
-        for (const token of tokens) yield* Queue.offer(commands, token);
-        // the first grant is consumed here before the child starts, so the child's walk always ends on a replay of a grant
-        // another process consumed; from the go line the child walks the grants from the last one while this process walks
-        // the rest from the first, each login under one BEGIN IMMEDIATE
-        const won: number[] = [];
-        if ((yield* auth.login(tokens[0]!)) !== null) won.push(0);
-        yield* Queue.offer(commands, "go");
-        for (const [index, token] of tokens.entries()) if (index > 0 && (yield* auth.login(token)) !== null) won.push(index);
-        yield* next(Started);
-        const done = yield* next(Done);
-        yield* Queue.end(commands);
-        const exitCode = yield* child.exitCode;
-        return { won, childWon: done.won, exitCode };
-      }).pipe(Effect.provide(ServiceAuth.layer(directory)));
-
-      const db = yield* Effect.gen(function* () {
-        const client = yield* AccessDb;
-        return {
-          sessions: (yield* client.unsafe<{ readonly count: number }>("SELECT COUNT(*) AS count FROM dashboard_login_sessions"))[0]?.count,
-          grants: yield* grantHashes(client),
-          journal: (yield* client.unsafe<{ readonly journal_mode: string }>("PRAGMA journal_mode"))[0]?.journal_mode,
-          integrity: (yield* client.unsafe<{ readonly integrity_check: string }>("PRAGMA integrity_check"))[0]?.integrity_check,
-        };
-      }).pipe(Effect.provide(Layer.fresh(accessDbLayer(path))));
-
-      const all = [...observed.won, ...observed.childWon].sort((left, right) => left - right);
-      assert.equal(observed.won[0], 0, "the grant consumed before the race is rejected in the other process");
-      assert.deepEqual(all, Array.from({ length: grants }, (_, index) => index), "every grant is consumed exactly once, none lost and none twice");
-      assert.equal(observed.exitCode, 0);
-      assert.deepEqual(db, { sessions: grants, grants: [], journal: "delete", integrity: "ok" });
-    }).pipe(Effect.provide(NodeServices.layer)), { timeout: 60_000 });
+          const all = [...observed.won, ...observed.childWon].sort((left, right) => left - right);
+          assert.equal(observed.won[0], 0, "the grant consumed before the race is rejected in the other process");
+          assert.deepEqual(all, Array.from({ length: contendedGrants }, (_, index) => index), "every grant is consumed exactly once, none lost and none twice");
+          assert.equal(observed.exitCode, 0);
+          assert.deepEqual(db, { sessions: contendedGrants, grants: [], journal: "delete", integrity: "ok", mode: 0o600 });
+        });
+      }).pipe(Effect.provide(NodeServices.layer)), { timeout: 30_000 });
+  }
 });
