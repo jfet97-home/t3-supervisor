@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { it } from "@effect/vitest";
-import { Cause, Context, Deferred, Effect, Exit, Fiber, Predicate } from "effect";
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Predicate, Scope } from "effect";
 import { GuidanceDb } from "../src/db.js";
 import { defaultSupervisorModel } from "../src/project-supervisor-store.js";
 import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService, type GateGuard, type SupervisionGateShape, type SupervisionScopeStores } from "../src/supervision-gate.js";
@@ -14,12 +11,12 @@ import type { Projection, SupervisorConfig, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
 import { workflowToolNames } from "../src/workflow-write-evidence.js";
-import { openStores, openWorkflows, serviceOf } from "./support/store-units.js";
-import { scopeStores } from "./support/team-units.js";
+import { openGuidance, openSupervisors, openWorkflows, temporaryDirectory, type StoreOpen } from "./support/psx-stores.js";
 
 // CT-LIN-08 (target regression, plan 3.11): the workflow_write commit, a supervision_team mutation and a guide's reservation and
 // steer each run as one admission section. A writer that asks for the section while a Stop holds it waits: its guard reads the
 // Stop's commit and it writes nothing. A writer that committed before the Stop keeps its write.
+// it.live: the sections commit to real sqlite files.
 
 type Fixture = Effect.Success<typeof setup>;
 
@@ -34,14 +31,23 @@ class StopScope extends SupervisionScope {
 }
 
 const setup = Effect.gen(function* () {
-  const directory = mkdtempSync(join(tmpdir(), "workflow-team-admission-"));
-  const stores = yield* Effect.promise(() => openStores(directory));
+  const directory = yield* temporaryDirectory("workflow-team-admission-");
+  const scope = yield* Scope.make();
+  let closed = false;
+  const close = Effect.gen(function* () {
+    if (closed) return;
+    closed = true;
+    yield* Scope.close(scope, Exit.void);
+  });
+  yield* Effect.addFinalizer(() => close);
+  const guidance = yield* openGuidance(directory, scope);
+  const stores: StoreOpen = yield* openSupervisors(directory, guidance, scope);
   const sql = stores.sql;
-  const supervisors = serviceOf(stores.supervisors);
-  for (const scope of [null, "project"]) yield* sql`INSERT INTO meta VALUES(${`supervisor_control:${JSON.stringify(scope)}`},${JSON.stringify({generation: 1, enabled: true, manual: true})}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
+  const supervisors = stores.supervisors;
+  for (const id of [null, "project"]) yield* sql`INSERT INTO meta VALUES(${`supervisor_control:${JSON.stringify(id)}`},${JSON.stringify({generation: 1, enabled: true, manual: true})}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
   const binding = {...(yield* supervisors.reserve("project", "main", "main", defaultSupervisorModel, 1, 1)), state: "ready" as const};
   yield* supervisors.setBinding(binding);
-  const team = serviceOf(stores.team);
+  const team = stores.team;
   const registered = yield* team.registerMember(binding, {threadId: "helper", taskId: "task", bootstrapRunId: "bootstrap"});
   const member = yield* team.markReady(binding, registered.threadId, registered.epoch);
   const modes = {runtimeMode: "full-access", interactionMode: "default"};
@@ -87,14 +93,15 @@ const setup = Effect.gen(function* () {
   // admission request and each stop read of the admission guard, which only a section reads
   const stopped = new Set<string>();
   const log: string[] = [];
-  const display = new StopScope(scopeStores(stores.supervisors), stopped);
+  const display = new StopScope({guidance: stores.guidance, supervisors, policy: stores.policy}, stopped);
   const guard: GateGuard = {scopeEnabled: () => Effect.succeed(true), supervisionStopped: (threadId) => Effect.sync(() => {log.push("guard");return stopped.has(threadId);}),
     workflowEditingEnabled: () => Effect.succeed(true)};
-  const close = Effect.promise(() => stores.close()).pipe(Effect.andThen(Effect.sync(() => rmSync(directory, {recursive: true, force: true}))));
-  return {stores, sql, supervisors, binding, team, member, assignment, threads, projections, details, proof, stopped, log, display, guard, close};
+  const workflows = yield* openWorkflows(stores, scope, () => Effect.succeed(true));
+  return {stores, sql, supervisors, binding, team, member, assignment, threads, projections, details, proof, stopped, log, display, guard, workflows, close};
 });
 
-// the services over one admission gate, which records each admission request before it waits for the section
+// the services over one admission gate, which records each admission request before it waits for the section.
+// HelperTransport.receiptDocument is unused by these actions; the real transport would open its own tables and a socket.
 const services = (f: Fixture) => Effect.gen(function* () {
   const sections = yield* makeSupervisionGate(f.guard).pipe(Effect.provideService(GuidanceDb, f.sql));
   const gate: SupervisionGateShape = {admit: (body) => Effect.andThen(Effect.sync(() => f.log.push("admit")), sections.admit(body))};
@@ -111,14 +118,12 @@ const services = (f: Fixture) => Effect.gen(function* () {
       return {sent: Effect.succeed(true), result: Effect.succeed({sequence: dispatched.length}), release: Effect.void};
     }),
   };
-  const workflows = yield* Effect.promise(() => openWorkflows(f.stores, () => true));
-  const stores = Context.add(f.stores.context, WorkflowStateStore, serviceOf(workflows));
+  const provided = Context.add(f.stores.context, WorkflowStateStore, f.workflows);
   const writes = yield* WorkflowWriteController.make({maxEvidenceWaitMs: 0}).pipe(Effect.provideService(SupervisionGate, gate),
-    Effect.provideService(WorkflowNativeAccess, native), Effect.provideService(SupervisionScopeService, f.display), Effect.provide(stores));
-  const team = yield* SupervisorTeamController.make().pipe(Effect.provide(stores),
+    Effect.provideService(WorkflowNativeAccess, native), Effect.provideService(SupervisionScopeService, f.display), Effect.provide(provided));
+  const team = yield* SupervisorTeamController.make().pipe(Effect.provide(provided),
     Effect.provideService(WorkflowWriteController, writes), Effect.provideService(WorkflowNativeAccess, native),
     Effect.provideService(SupervisionGate, gate), Effect.provideService(NativeOperateRpc, operate),
-    // the helper receipts are not read by these actions
     Effect.provideService(HelperTransport, {receiptDocument: () => Effect.succeed(null)} as unknown as HelperTransport["Service"]));
   return {gate, writes, team, dispatched};
 });

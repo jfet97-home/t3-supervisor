@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { it } from "@effect/vitest";
-import { Clock, Context, Effect, Fiber } from "effect";
+import { Clock, Context, Effect, Exit, Fiber, Scope } from "effect";
 import { TestClock } from "effect/testing";
 import { GuidanceDb } from "../src/db.js";
 import { defaultSupervisorModel } from "../src/project-supervisor-store.js";
@@ -13,29 +10,26 @@ import type { Projection, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
 import { workflowToolNames } from "../src/workflow-write-evidence.js";
-import { openStores, openWorkflows, serviceOf } from "./support/store-units.js";
-import { scopeStores } from "./support/team-units.js";
+import { openGuidance, openSupervisors, openWorkflows, temporaryDirectory } from "./support/psx-stores.js";
 
 // CT-WWC-07 (target regression): the 400 ms evidence budget runs on the Effect clock (monotonic time, 50 ms pauses) instead of
-// performance.now and setTimeout, so its polls and its single 100 ms detail retry are counted exactly under the TestClock
+// performance.now and setTimeout, so its polls and its single 100 ms detail retry are counted exactly under the TestClock.
+// Real sqlite files, so the opens use the live filesystem; the budget itself is the TestClock.
 
 const thread = (id: string, projectId: string): ThreadInfo => ({id, title: id, projectId, archivedAt: null, deletedAt: null,
   lineage: {parentThreadId: null, relationshipToParent: null}});
 
-// a ready binding on a temp guidance database, released with the test
-const store = Effect.acquireRelease(Effect.gen(function* () {
-  const directory = mkdtempSync(join(tmpdir(), "workflow-write-evidence-clock-"));
-  const stores = yield* Effect.promise(() => openStores(directory));
-  const supervisors = serviceOf(stores.supervisors);
-  for (const scope of [null, "project-workflows"]) yield* stores.sql`INSERT INTO meta VALUES(${`supervisor_control:${JSON.stringify(scope)}`},${JSON.stringify({generation: 1, enabled: true, manual: true})}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
+it.effect("CT-WWC-07: with a 400 ms budget a pending write polls the projection every 50 ms nine times and retries one unavailable detail read once after 100 ms", () => Effect.gen(function* () {
+  const directory = yield* temporaryDirectory("workflow-write-evidence-clock-");
+  const scope = yield* Scope.make();
+  yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+  const guidance = yield* openGuidance(directory, scope);
+  const stores = yield* openSupervisors(directory, guidance, scope);
+  for (const id of [null, "project-workflows"]) yield* stores.sql`INSERT INTO meta VALUES(${`supervisor_control:${JSON.stringify(id)}`},${JSON.stringify({generation: 1, enabled: true, manual: true})}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
+  const supervisors = stores.supervisors;
   const binding = {...(yield* supervisors.reserve("project-workflows", "main-workflows", "Main thread", defaultSupervisorModel, 1, 1)), state: "ready" as const};
   yield* supervisors.setBinding(binding);
-  const workflows = serviceOf(yield* Effect.promise(() => openWorkflows(stores, id => supervisors.enabled(id))));
-  return {directory, stores, supervisors, binding, workflows};
-}), ({directory, stores}) => Effect.promise(() => stores.close()).pipe(Effect.andThen(Effect.sync(() => rmSync(directory, {recursive: true, force: true})))));
-
-it.effect("CT-WWC-07: with a 400 ms budget a pending write polls the projection every 50 ms nine times and retries one unavailable detail read once after 100 ms", () => Effect.gen(function* () {
-  const {stores, workflows, binding} = yield* store;
+  const workflows = yield* openWorkflows(stores, scope, (projectId) => supervisors.enabled(projectId));
   const args = {action: "ensure_main", supervisorThreadId: binding.threadId, bindingGeneration: binding.generation, operationId: "budget-op", note: "Wait for evidence."};
   const identity = {threadId: binding.threadId, runId: "supervisor-run", providerThreadId: "provider-thread"};
   // one snapshot candidate whose detail read always fails, so the write stays pending through the whole budget
@@ -55,10 +49,11 @@ it.effect("CT-WWC-07: with a 400 ms budget a pending write polls the projection 
   });
   const gate = yield* makeSupervisionGate({scopeEnabled: () => Effect.succeed(true), supervisionStopped: () => Effect.succeed(false),
     workflowEditingEnabled: () => Effect.succeed(true)}).pipe(Effect.provideService(GuidanceDb, stores.sql));
-  const scope = new SupervisionScope({dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0}, scopeStores(stores.supervisors), true);
-  yield* scope.rememberScratchProjects([]);
+  const display = new SupervisionScope({dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0},
+    {guidance: stores.guidance, supervisors, policy: stores.policy}, true);
+  yield* display.rememberScratchProjects([]);
   const controller = yield* WorkflowWriteController.make({maxEvidenceWaitMs: 400, withoutTeam: true}).pipe(Effect.provideService(SupervisionGate, gate),
-    Effect.provideService(WorkflowNativeAccess, native), Effect.provideService(SupervisionScopeService, scope),
+    Effect.provideService(WorkflowNativeAccess, native), Effect.provideService(SupervisionScopeService, display),
     Effect.provide(Context.add(stores.context, WorkflowStateStore, workflows)));
 
   const writing = yield* Effect.forkChild(controller.write(args));

@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { it } from "@effect/vitest";
 import { Effect } from "effect";
 import { renderRolloutScan, rolloutScan, type RolloutScan } from "../src/rollout-scan.js";
-import { openStores, openWorkflows } from "./support/store-units.js";
+import { openRun, temporaryDirectory } from "./support/psx-stores.js";
 
 // the read-only rollout scan on fixture files: one stored row of each kind that a switched store would not read as stored is
 // reported by file, table, row kind, problem, read point and key, the report never carries row content, the open's changes to
-// a pre-migration file are listed, and the scan writes no file
+// a pre-migration file are listed, and the scan writes no file.
+// it.live: the scan and the fixture opens read real sqlite files. The directory snapshot below is the native observation that
+// the scan wrote nothing.
 
 const marker = "SECRET-CONTENT";
 
@@ -129,23 +129,17 @@ const expected = [
 const flattened = (scan: RolloutScan) => scan.files.flatMap((file) => file.findings.flatMap((group) =>
   group.keys.map((key) => [file.file, group.table, group.kind, group.problem, group.read, key].join(" | ")))).sort();
 
-// every file of the directory with its bytes and modification time
+// every file of the directory with its bytes and modification time. node:fs is the observation that the scan touches nothing.
 const snapshot = (directory: string) => readdirSync(directory).sort().map((name) => {
   const path = join(directory, name);
   return [name, createHash("sha256").update(readFileSync(path)).digest("hex"), statSync(path).mtimeMs];
 });
 
-const temporary = Effect.acquireRelease(Effect.promise(() => mkdtemp(join(tmpdir(), "rollout-scan-"))),
-  (directory) => Effect.promise(() => rm(directory, {recursive: true, force: true})));
-
 it.live("the rollout scan reports one stored row of each failing kind by file, table, kind, problem, read point and key, and writes nothing", () => Effect.gen(function* () {
-  const directory = yield* temporary;
-  // the tables of a run that opened its stores, closed again
-  yield* Effect.promise(async () => {
-    const stores = await openStores(directory);
-    await openWorkflows(stores);
-    await stores.close();
-  });
+  const directory = yield* temporaryDirectory("rollout-scan-");
+  // the tables of a run that opened its stores, closed again. The controller tables are created afterwards, so this open must not.
+  const run = yield* openRun(directory, {workflows: true});
+  yield* run.close;
   const guidance = new DatabaseSync(join(directory, "guidance.sqlite3"));
   guidance.exec(controllerTables);
   guidance.exec(failingRows);
@@ -165,7 +159,7 @@ it.live("the rollout scan reports one stored row of each failing kind by file, t
 }), {timeout: 30_000});
 
 it.live("the rollout scan lists what the open changes in a pre-migration file: added columns, created tables, recovered notices and the one-time reset", () => Effect.gen(function* () {
-  const directory = yield* temporary;
+  const directory = yield* temporaryDirectory("rollout-scan-");
   const legacy = new DatabaseSync(join(directory, "guidance.sqlite3"));
   legacy.exec(`CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
     CREATE TABLE notices(id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,run_id TEXT NOT NULL,epoch INTEGER NOT NULL,state TEXT NOT NULL,
@@ -196,11 +190,9 @@ it.live("the rollout scan lists what the open changes in a pre-migration file: a
 }), {timeout: 30_000});
 
 it.live("the rollout scan reads a live writer's committed rows through its write-ahead log", () => Effect.gen(function* () {
-  const directory = yield* temporary;
-  yield* Effect.promise(async () => {
-    const stores = await openStores(directory);
-    await stores.close();
-  });
+  const directory = yield* temporaryDirectory("rollout-scan-");
+  const run = yield* openRun(directory);
+  yield* run.close;
   const writer = new DatabaseSync(join(directory, "guidance.sqlite3"));
   yield* Effect.addFinalizer(() => Effect.sync(() => writer.close()));
   writer.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;");
