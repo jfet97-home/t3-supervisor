@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { NodeServices } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
-import { Cause, Deferred, Effect, Exit, Fiber, FileSystem, Layer, type PlatformError, Queue, Redacted, Schema, Stream } from "effect";
+import { Cause, Context, Deferred, Effect, Exit, Fiber, FileSystem, Layer, type PlatformError, Queue, Redacted, Schema, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import type { SqlClient } from "effect/sql";
 import { AccessDb, accessDbLayer } from "../src/db.js";
 import { forgeDashboardToken, ServiceAuth } from "../src/service-auth.js";
 import { repositoryRoot, tsxLoader } from "./support/cli-process.js";
+import { seedGrants } from "./support/g8-auth.js";
 import { privately } from "./support/private-assert.js";
 
 // target-regression sql semantics of the access client on a real login database (plan 3.2 rules 4, 6 and 7; CT-SQL-01..04
@@ -114,21 +115,20 @@ const holdWriteLock = (path: string) => Effect.gen(function* () {
   };
 });
 
-// the committed grant hashes and the session hashes in the login's eviction order (issued_at, then rowid)
-const authRows = (path: string) => Effect.gen(function* () {
-  const db = yield* AccessDb;
-  const sessions = yield* db.unsafe<{ readonly token_hash: string }>("SELECT token_hash FROM dashboard_login_sessions ORDER BY issued_at ASC, rowid ASC");
-  return { grants: yield* grantHashes(db), sessions: sessions.map((row) => row.token_hash) };
-}).pipe(Effect.provide(Layer.fresh(accessDbLayer(path))));
+// the committed grant hashes and the session hashes in the login's eviction order (issued_at, then rowid), read outside
+// any transaction by a reader client of its own
+const authRows = (reader: SqlClient.SqlClient) => Effect.gen(function* () {
+  const sessions = yield* reader.unsafe<{ readonly token_hash: string }>("SELECT token_hash FROM dashboard_login_sessions ORDER BY issued_at ASC, rowid ASC");
+  return { grants: yield* grantHashes(reader), sessions: sessions.map((row) => row.token_hash) };
+});
 
 // one race run on a fresh grant set; the holder is released once the child's barrier reports from the BEGIN IMMEDIATE
 // step of its first login, the last grant, which this process then claims as well
 const contendedRun = Effect.gen(function* () {
   const { directory, path } = yield* loginDatabase;
   const contested = contendedGrants - 1;
-  // forged four at a time, each over its own short-lived client, before this process opens its service client
-  const tokens = yield* Effect.forEach(Array.from({ length: contendedGrants }), () =>
-    Effect.map(forgeDashboardToken(directory), (forged) => Redacted.value(forged.token)), { concurrency: 4 });
+  // setup grants, seeded before this process opens its service client; issuance is not what the race is about
+  const tokens = yield* seedGrants(directory, contendedGrants);
 
   const observed = yield* Effect.gen(function* () {
     const auth = yield* ServiceAuth;
@@ -174,35 +174,35 @@ const contendedRun = Effect.gen(function* () {
 // then the child's login of that grant under the holder, then its retry and replay after the release
 const expiryRun = Effect.gen(function* () {
   const { directory, path } = yield* loginDatabase;
-  // forged four at a time, each over its own short-lived client as concurrent cli runs would be, so that the start of
-  // each client's database worker does not add up across the whole seeding
-  const seeded = yield* Effect.forEach(Array.from({ length: maxSessions }), () =>
-    Effect.map(forgeDashboardToken(directory), (forged) => Redacted.value(forged.token)), { concurrency: 4 });
+  // setup grants for the logins that fill the session table to its cap; the grant the child logs in with is forged
+  const seeded = yield* seedGrants(directory, maxSessions);
   yield* Effect.gen(function* () {
     const auth = yield* ServiceAuth;
     for (const token of seeded) if ((yield* auth.login(token)) === null) return yield* Effect.die(new Error("a seeding login failed"));
   }).pipe(Effect.provide(ServiceAuth.layer(directory)));
   const token = Redacted.value((yield* forgeDashboardToken(directory)).token);
+  // one reader for every state read below, so each read is not a client start of its own
+  const reader = Context.get(yield* Layer.build(Layer.fresh(accessDbLayer(path))), AccessDb);
 
   const child = yield* accessChild(directory, "expiry");
   yield* child.send(token);
   const holder = yield* holdWriteLock(path);
-  const before = yield* authRows(path);
+  const before = yield* authRows(reader);
   yield* child.send("login");
   const waiting = yield* child.next(Waiting);
   const begun = yield* child.next(Begun);
   const expired = yield* child.next(Login);
   // read after the child's login answered: the holder was inside its transaction for all of it
   const heldThroughout = yield* holder.held;
-  const afterFailure = yield* authRows(path);
+  const afterFailure = yield* authRows(reader);
 
   const holderCommitted = yield* holder.release;
   yield* child.send("login");
   const retried = yield* child.next(Login);
-  const afterRetry = yield* authRows(path);
+  const afterRetry = yield* authRows(reader);
   yield* child.send("login");
   const replayed = yield* child.next(Login);
-  const afterReplay = yield* authRows(path);
+  const afterReplay = yield* authRows(reader);
   const exitCode = yield* child.exit;
   return {
     secrets: [...seeded, token], pending: holder.pending, before, waiting, begun, expired: expired.session, heldThroughout, afterFailure,

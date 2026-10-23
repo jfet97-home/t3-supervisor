@@ -10,7 +10,7 @@ import { describe, it } from "@effect/vitest";
 import { Deferred, Effect, Exit, FileSystem } from "effect";
 import { TestClock } from "effect/testing";
 import { tsxLoader } from "./support/cli-process.js";
-import { forge, openServiceAuth, temporaryDirectory } from "./support/g8-auth.js";
+import { forge, openServiceAuth, seedGrants, temporaryDirectory } from "./support/g8-auth.js";
 import { startProcess } from "./support/g8-process.js";
 
 // the Effect service auth on real files: cases that set the service clock run under TestClock (it.effect); cases with a
@@ -383,10 +383,9 @@ it.effect("logout revokes across open instances and durable sessions keep a glob
   yield* TestClock.setTime(currentTime);
   const auth = yield* openServiceAuth(directory);
   const concurrent = yield* openServiceAuth(directory);
-  const expiresGrant = yield* forge(directory);
-  const revokedGrant = yield* forge(directory);
-  const expires = yield* auth.login(expiresGrant.token);
-  const revoked = yield* auth.login(revokedGrant.token);
+  const [expiresGrant, revokedGrant] = yield* seedGrants(directory, 2);
+  const expires = yield* auth.login(expiresGrant!);
+  const revoked = yield* auth.login(revokedGrant!);
   assert.equal(typeof expires, "string");
   assert.equal(typeof revoked, "string");
   if (expires === null || revoked === null) throw new Error("valid dashboard grant was rejected");
@@ -405,17 +404,17 @@ it.effect("logout revokes across open instances and durable sessions keep a glob
   currentTime += 1;
   yield* TestClock.setTime(currentTime);
   const sessions: string[] = [];
+  const grants = yield* seedGrants(directory, 32);
   for (let index = 0; index < 32; index += 1) {
-    const grant = yield* forge(directory);
-    const session = yield* (index % 2 === 0 ? auth : concurrent).login(grant.token);
+    const session = yield* (index % 2 === 0 ? auth : concurrent).login(grants[index]!);
     if (session === null) throw new Error("valid dashboard grant was rejected");
     sessions.push(session);
   }
   yield* concurrent.logout(sessions[16]);
   yield* concurrent.logout(sessions[31]);
+  const later = yield* seedGrants(directory, 3);
   for (let index = 0; index < 3; index += 1) {
-    const grant = yield* forge(directory);
-    const session = yield* (index % 2 === 0 ? concurrent : auth).login(grant.token);
+    const session = yield* (index % 2 === 0 ? concurrent : auth).login(later[index]!);
     if (session === null) throw new Error("valid dashboard grant was rejected");
     sessions.push(session);
   }

@@ -10,6 +10,7 @@ import { SupervisionScopeService } from "../src/supervision-gate.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
 import type { Projection } from "../src/types.js";
 import { abortCall, atWallTime, execute, openConversationStore, query, rejectionOf, temporaryDirectory, within } from "./support/g1b-conversation.js";
+import { seedAgreementCandidates, storedCandidateCounts } from "./support/agreement-candidates.js";
 import { recordReview, rootNative } from "./support/review-record.js";
 import {
   abortHonouringSend, addCommandActivity, appendMessageToRun, proceed, appendNoticeToOperative, appendOperativeAcceptance, appendSupervisorProposal, baseTime, completeRun,
@@ -579,14 +580,19 @@ it.effect("CT-CSTORE-04: agreement evidence is write-once and candidates are ful
   assert.equal(yield* store.saveAgreementCandidate(candidate("task-0", "p-50", 50)), "full");
   assert.equal(yield* store.saveAgreementCandidate(candidate("task-0", "p-1", 1)), "same");
   assert.equal(yield* store.saveAgreementCandidate({...candidate("task-0", "p-1", 1), planHash: "changed"}), "conflict");
-  // one transaction keeps the 4950 store writes from paying a synchronous commit each
+  // tasks 1-98 are seeded as the store's rows, 50 each; the store reads a seeded task back as its candidates
+  yield* seedAgreementCandidates(sql, Array.from({length: 98}, (_, task) =>
+    Array.from({length: 50}, (_, index) => candidate(`task-${task + 1}`, `p-${index}`, index))).flat());
+  assert.deepEqual(yield* store.agreementCandidates("task-1"), Array.from({length: 50}, (_, index) => candidate("task-1", `p-${index}`, index)));
+  // task-99's saves bring the project from 4950 to exactly 5000 candidates; one transaction spares each its commit
   yield* sql.withTransaction(Effect.gen(function* () {
-    for (let task = 1; task < 100; task++)
-      for (let index = 0; index < 50; index++) assert.equal(yield* store.saveAgreementCandidate(candidate(`task-${task}`, `p-${index}`, index)), "saved");
+    for (let index = 0; index < 50; index++) assert.equal(yield* store.saveAgreementCandidate(candidate("task-99", `p-${index}`, index)), "saved");
   }));
   assert.equal((yield* store.agreementCandidates("task-99")).length, 50);
   assert.equal(yield* store.saveAgreementCandidate(candidate("task-100", "p-0", 0)), "full");
   assert.equal((yield* store.agreementCandidates("task-100")).length, 0);
+  assert.deepEqual(yield* storedCandidateCounts(sql),
+    {tasks: Object.fromEntries(Array.from({length: 100}, (_, task) => [`task-${task}`, 50])), projects: {[projectId]: 5000}});
 }), {timeout: 10_000});
 
 it.effect("CT-CSTORE-04: prune never deletes uncertain or unacknowledged failed review requests", () => Effect.gen(function* () {
