@@ -2,6 +2,7 @@ import React from "react";
 import { useAtomValue } from "@effect/atom-react";
 import { Effect, Option, Schema } from "effect";
 import { Atom } from "effect/reactivity";
+import { uiRuntime } from "./atoms.js";
 
 const sections = ["progress", "plan", "supervision", "definitions", "settings", "conversations"] as const;
 export type ProjectSection = typeof sections[number];
@@ -169,8 +170,9 @@ export function createNavigator(initial: Route, host: NavigationHistory, allow: 
   };
 }
 
-// the route of this page and its guarded navigator; history and hash events feed the route, and the listeners and the
-// bounded restore timer are released with the atom (the residual history adapter, plan section 9)
+// the route of this page and its guarded navigator; history and hash events feed the route, the bounded restore timer
+// runs on the page runtime's clock, and the listeners and the timer are released with the atom (the residual history
+// adapter, plan section 9)
 export interface Navigation {
   readonly route: Route;
   readonly navigate: (next: Route) => void;
@@ -180,7 +182,7 @@ export const navigationAtom: Atom.Atom<Navigation> = Atom.make((get) => {
   const guard = {current: (() => true) as NavigationGuard};
   // the latest restore deadline; a newer one replaces it, and the navigator ignores a superseded deadline anyway
   const deadline = Atom.make<{readonly callback: () => void; readonly ms: number} | null>(null);
-  get.mount(Atom.make((get) => {
+  get.mount(uiRuntime.atom((get) => {
     const pending = get(deadline);
     return pending === null ? Effect.void : Effect.sleep(pending.ms).pipe(Effect.andThen(Effect.sync(pending.callback)));
   }));
