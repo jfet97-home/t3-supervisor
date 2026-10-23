@@ -18,8 +18,9 @@ const serve = (handler: (request: IncomingMessage, response: ServerResponse) => 
 }), server => Effect.callback<void>(resume => {server.close(() => resume(Effect.void)); server.closeAllConnections();}));
 
 // the archived snapshot rpc a test answers itself
-const archive = (call: (tag: string) => Promise<unknown>) => Layer.succeed(NativeRpc, NativeRpc.of({
-  call: tag => Effect.promise(() => call(tag)),
+// the archived shell read answered synchronously in the caller's fiber; a throw is a defect, as the read's failure
+const archive = (answer: (tag: string) => unknown) => Layer.succeed(NativeRpc, NativeRpc.of({
+  call: tag => Effect.sync(() => answer(tag)),
   initiate: () => Effect.die("the shell reads only call"),
 }));
 
@@ -46,7 +47,7 @@ it.live("workflow native inventory retries inconsistent views and retains archiv
   });
   const address = server.address();
   assert.ok(address && typeof address === "object");
-  const read = readThreads(`http://127.0.0.1:${address.port}`, archive(async tag => {
+  const read = readThreads(`http://127.0.0.1:${address.port}`, archive(tag => {
     assert.equal(tag, "orchestration.getArchivedShellSnapshot");
     archiveReads++;
     return {schemaVersion: 2, snapshotSequence: archiveReads === 1 ? 0 : 2, threads: [archived]};
@@ -66,13 +67,13 @@ it.live("workflow native inventory rejects malformed lineage and never merges ov
   assert.ok(address && typeof address === "object");
   const baseUrl = `http://127.0.0.1:${address.port}`;
   let reads = 0;
-  const overlap = readThreads(baseUrl, archive(async () => {
+  const overlap = readThreads(baseUrl, archive(() => {
     reads++;
     return {schemaVersion: 2, snapshotSequence: 5, threads: [active]};
   }));
   yield* rejectsRpc(overlap.pipe(Effect.timeout("5 seconds")));
   assert.equal(reads, 3);
-  const malformed = readThreads(baseUrl, archive(async () => ({
+  const malformed = readThreads(baseUrl, archive(() => ({
     schemaVersion: 2, snapshotSequence: 5, threads: [{...thread("child-a"), lineage: {parentThreadId: 1, relationshipToParent: "subagent"}}],
   })));
   yield* rejectsRpc(malformed.pipe(Effect.timeout("5 seconds")));

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { it } from "@effect/vitest";
-import { Deferred, Effect, Layer } from "effect";
+import { Deferred, Effect, Exit, Layer } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { WebSocketServer } from "ws";
 import { NativeEnvelope } from "../src/native-envelope.js";
@@ -38,10 +38,12 @@ const rpc = (url: string, token: string, tag: string, payload: Record<string, un
   NativeRpc.use((client) => client.call(tag, payload, cancel)).pipe(Effect.provide(NativeRpc.layer({ baseUrl: url, token })), Effect.provide(NativeEnvelope.layer));
 
 // the archived snapshot rpc a test answers itself
-const archive = (call: (tag: string, payload: Record<string, unknown>) => Promise<unknown>) => Layer.succeed(NativeRpc, NativeRpc.of({
-  call: (tag, payload) => Effect.promise(() => call(tag, { ...payload })),
+// the archived shell read answered in the caller's fiber; a throw or defect is the read's failure
+const archiveWith = (call: (tag: string, payload: Record<string, unknown>) => Effect.Effect<unknown>) => Layer.succeed(NativeRpc, NativeRpc.of({
+  call: (tag, payload) => call(tag, { ...payload }),
   initiate: () => Effect.die("the shell reads only call"),
 }));
+const archive = (answer: (tag: string, payload: Record<string, unknown>) => unknown) => archiveWith((tag, payload) => Effect.sync(() => answer(tag, payload)));
 
 const readBaseline = (url: string, token: string, archived: Layer.Layer<NativeRpc>) =>
   NativeShell.use((shell) => shell.baseline).pipe(Effect.provide(NativeShell.layer({ baseUrl: url, token }).pipe(Layer.provide([archived, FetchHttpClient.layer]))));
@@ -243,7 +245,7 @@ it.live("shell activation baseline includes more than 128 active threads and arc
     response.end(JSON.stringify({ schemaVersion: 2, snapshotSequence: 161, threads: activeThreads, archivedThreads: [] }));
   });
 
-  const archiveRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
+  const archiveRpc = (tag: string, payload: Record<string, unknown>): unknown => {
     rpcCalls.push({ tag, payload });
     return { schemaVersion: 2, snapshotSequence: 161, threads: archivedThreads };
   };
@@ -273,7 +275,7 @@ it.live("shell baseline rejects malformed or ambiguous thread anchors", () => Ef
 
   let archiveCalls = 0;
   yield* rejects(
-    readBaseline(url, "malformed-baseline-token", archive(async () => { archiveCalls += 1; return {}; })).pipe(Effect.timeout("1500 millis")),
+    readBaseline(url, "malformed-baseline-token", archive(() => { archiveCalls += 1; return {}; })).pipe(Effect.timeout("1500 millis")),
     (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && !cause.message.includes("malformed-baseline-token"),
   );
   assert.equal(archiveCalls, 1, "the active and archived snapshot requests start concurrently");
@@ -287,7 +289,7 @@ it.live("active and archived shell snapshots must share a revision within three 
     response.end(JSON.stringify({ schemaVersion: 2, snapshotSequence: 161, threads: [], archivedThreads: [] }));
   });
   let archiveCalls = 0;
-  const archiveRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
+  const archiveRpc = (tag: string, payload: Record<string, unknown>): unknown => {
     archiveCalls += 1;
     assert.equal(tag, "orchestration.getArchivedShellSnapshot");
     assert.deepEqual(payload, {});
@@ -303,26 +305,29 @@ it.live("active and archived shell snapshots must share a revision within three 
 }));
 
 it.live("active and archived baseline reads start concurrently for each revision pair", () => Effect.gen(function* () {
-  let noteHttpStarted!: () => void;
-  let noteRpcStarted!: () => void;
-  const httpStarted = new Promise<void>((resolve) => { noteHttpStarted = resolve; });
-  const rpcStarted = new Promise<void>((resolve) => { noteRpcStarted = resolve; });
+  // the archived read waits until the active read reached the server, and the server answers only once the archived read started
+  const httpStarted = yield* Deferred.make<void>();
+  let rpcStarted = false;
+  const held: Array<() => void> = [];
   const { url } = yield* startHttpServer((_request, response) => {
-    noteHttpStarted();
-    void rpcStarted.then(() => {
+    Deferred.doneUnsafe(httpStarted, Exit.void);
+    const answer = () => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ schemaVersion: 2, snapshotSequence: 161, threads: [], archivedThreads: [] }));
-    });
+    };
+    if (rpcStarted) answer();
+    else held.push(answer);
   });
-  const archiveRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
-    noteRpcStarted();
-    await httpStarted;
+  const archiveRpc = (tag: string, payload: Record<string, unknown>) => Effect.gen(function* () {
+    rpcStarted = true;
+    for (const answer of held.splice(0)) answer();
+    yield* Deferred.await(httpStarted);
     assert.equal(tag, "orchestration.getArchivedShellSnapshot");
     assert.deepEqual(payload, {});
     return { schemaVersion: 2, snapshotSequence: 161, threads: [] };
-  };
+  });
 
-  const baseline = yield* readBaseline(url, "concurrent-baseline-token", archive(archiveRpc)).pipe(Effect.timeout("1500 millis"));
+  const baseline = yield* readBaseline(url, "concurrent-baseline-token", archiveWith(archiveRpc)).pipe(Effect.timeout("1500 millis"));
   assert.equal(baseline.snapshotSequence, 161);
   assert.deepEqual(baseline.threads, []);
 }));
@@ -340,7 +345,7 @@ it.live("overlapping active and archived thread identities fail closed after thr
     }));
   });
   let archiveCalls = 0;
-  const archiveRpc = async (): Promise<unknown> => {
+  const archiveRpc = (): unknown => {
     archiveCalls += 1;
     return { schemaVersion: 2, snapshotSequence: 161, threads: [{ id: "overlapping-thread", latestRunId: "archived-run" }] };
   };
