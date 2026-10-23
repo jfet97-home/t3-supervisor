@@ -1005,6 +1005,22 @@ LOW becomes the default only if it shows equal or better correctness on every ca
 lower interpretation and negotiation latency than Luna MAX; until then models, defaults and
 settings stay unchanged.
 
+**Post-S6e comparison and default decision (2026-10-23, coordinator evidence on the typed
+protocol).** Single trials on the retained VM history, uncoached, native-only MCP/MCPX calls:
+
+| Trial | Luna MAX | Sol 6.1 LOW |
+| --- | --- | --- |
+| Bare Start (typed submission) | 25.354 s, passed (null objective gave `needs_context`, `not_supervised` desired) | 20.285 s, passed |
+| Coding interpretation | 17.894 s, passed | 32.482 s, passed |
+| Operative coding | acceptance before first edit, 11 tests passed | acceptance before first edit, 11 tests passed |
+| Monitoring | 279.963 s; generic workflow writes validated, malformed new-node updates rejected safely; an unsupported missing-test correction to the operative | no optional final assessment (the contract permits silence) |
+| Genuine Stop | native, accepted | native, accepted |
+
+Andrea chose GPT-6.1 Sol LOW as the default for projects without saved settings: a pragmatic
+default, not a claim of broad superiority. The strict D-28 gate is not met on every case (the
+coding interpretation took longer than Luna MAX's). Saved settings and existing bindings keep
+their own selection.
+
 ## 4. Cross-file contract map
 
 Full invariants, participants (derived from manifest rows, each row tagged) and pins are in
@@ -1644,7 +1660,7 @@ the frozen v2):
 | D-27 | Typed interpretation submission (Andrea) | architecture accepted by both reviewers (run 3); 3.12 as reconciled: CAS intake bound to the exact request run, prompt return plus wake, existing completed-run finalization and introduction path, discriminated candidate provenance, one-off evidence-preserving cut-over, no model-chosen target, no fallback; slice S6e after S6d so it is built once on the final engine |
 | D-29 | Synchronous cross-slice calls | explicit transitions T-01..T-07 (3.9): `ServiceAuth` and the CLI port in S6c with their synchronous HTTP callers; kept synchronous methods are B-02 reads or pure computations only |
 | D-30 | UI baseline proof | an isolated loopback Effect v4 fixture serving the unchanged compiled UI with recorded or synthetic data and deterministic scenarios (section 7, WP-S1-UI); the coordinator records UI-STORY-01..08 with the preview tools before S7 |
-| D-28 | Interpretation model default (Andrea) | evidence-based only (3.12): GPT-6.1 Sol LOW becomes the default only with equal or better correctness on every fixture case and lower interpretation/negotiation latency than GPT-6 Luna MAX; defaults and settings unchanged until then |
+| D-28 | Interpretation model default (Andrea) | evidence-based only (3.12): GPT-6.1 Sol LOW becomes the default only with equal or better correctness on every fixture case and lower interpretation/negotiation latency than GPT-6 Luna MAX; defaults and settings unchanged until then; decided 2026-10-23 by Andrea after the post-S6e trials (3.12): GPT-6.1 Sol LOW is the default for projects without saved settings, a pragmatic choice with the every-case gate not met; saved settings and bindings unchanged |
 
 Owner defaults (reviewers may object):
 

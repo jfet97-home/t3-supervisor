@@ -25,7 +25,7 @@ const modelConfig = {
     displayName: "Codex",
     installed: true,
     status: "ready",
-    models: ["gpt-6-luna", "gpt-6-astra"].map((slug) => ({
+    models: ["gpt-6-luna", "gpt-6-astra", "gpt-6.1-sol"].map((slug) => ({
       slug,
       name: slug,
       capabilities: {optionDescriptors: [{

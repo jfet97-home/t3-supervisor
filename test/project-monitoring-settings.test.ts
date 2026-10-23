@@ -78,7 +78,7 @@ it.effect("only a changed model selection starts a new native model mutation", (
     });
     const changed = yield* supervisor.saveSettings("project", 3, {
       ...defaultSupervisorModel,
-      options: [{id: "reasoningEffort", value: "low"}],
+      options: [{id: "reasoningEffort", value: "high"}],
     });
     assert.equal(changed.pending, false);
     assert.equal(changed.modelMutationGeneration, 4, "a legacy generation 3 advances when the model target changes");
@@ -87,9 +87,21 @@ it.effect("only a changed model selection starts a new native model mutation", (
     assert.deepEqual(changed.monitoring, {...defaultMonitoringSettings, intervalMinutes: 9});
   })));
 
+it.effect("a project without saved settings uses the GPT-6.1 Sol LOW default, while saved settings and existing bindings keep their selection", () =>
+  withStore((supervisor) => Effect.gen(function* () {
+    assert.deepEqual(defaultSupervisorModel, {instanceId: "codex", model: "gpt-6.1-sol", options: [{id: "reasoningEffort", value: "low"}]});
+    assert.deepEqual((yield* supervisor.settings("unsaved")).modelSelection, defaultSupervisorModel);
+    // a selection saved before the default changed, and a binding reserved with it, stay as they are
+    const saved = {instanceId: "codex", model: "gpt-6-luna", options: [{id: "reasoningEffort", value: "high"}]};
+    yield* supervisor.saveSettings("project", 0, saved);
+    const binding = yield* supervisor.reserve("project", "main-a", "Main", saved, 10, yield* Clock.currentTimeMillis);
+    assert.deepEqual((yield* supervisor.settings("project")).modelSelection, saved);
+    assert.deepEqual((yield* supervisor.modelState(binding)).modelSelection, saved);
+  })));
+
 it.effect("native model readback changes only its binding and preserves project defaults", () =>
   withStore((supervisor) => Effect.gen(function* () {
-    const requested = {...defaultSupervisorModel, options: [{id: "reasoningEffort", value: "low"}]};
+    const requested = {...defaultSupervisorModel, options: [{id: "reasoningEffort", value: "high"}]};
     yield* supervisor.saveSettings("project", 0, requested);
     const first = yield* supervisor.reserve("project", "main-a", "First", requested, 10, yield* Clock.currentTimeMillis);
     const second = yield* supervisor.reserve("project", "main-b", "Second", requested, 10, yield* Clock.currentTimeMillis);

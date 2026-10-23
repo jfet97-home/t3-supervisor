@@ -28,7 +28,7 @@ export const hookPath = "/api/hooks/fixture/fixture-only-token";
 export const modelConfig = {
   providers: [{
     enabled: true, instanceId: "codex", displayName: "Codex", installed: true, status: "ready",
-    models: ["gpt-6-luna", "gpt-6-astra"].map(slug => ({
+    models: ["gpt-6-luna", "gpt-6-astra", "gpt-6.1-sol"].map(slug => ({
       slug, name: slug,
       capabilities: {optionDescriptors: [{id: "reasoningEffort", label: "Reasoning effort", type: "select", currentValue: "high",
         options: [{id: "low", label: "Low"}, {id: "high", label: "High"}, {id: "max", label: "Max"}]}]},

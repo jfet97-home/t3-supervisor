@@ -16,7 +16,8 @@ import type { ProposalContext } from "./supervisor-workflow.js";
 import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 import type { TaskInterpretationFields } from "./interpretation-evidence.js";
 
-export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "codex", model: "gpt-6-luna", options: [{id: "reasoningEffort", value: "high"}]};
+// the model of a project without saved settings (D-28, Andrea 2026-10-23): GPT-6.1 Sol LOW; saved settings and existing bindings keep theirs
+export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "codex", model: "gpt-6.1-sol", options: [{id: "reasoningEffort", value: "low"}]};
 export const SUPERVISOR_ROOT_THREAD_PREFIX = "supervisor-root:";
 export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; teamSettings?: {maxHelpersPerRoot: number}; applyAttempts?: number; applicationMessage?: string | null};
 export type SupervisorStopNotice = {messageId: string; commandId: string; stoppedAt: number; enabledAt: number | null;

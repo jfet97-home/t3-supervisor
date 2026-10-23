@@ -596,17 +596,17 @@ const makeFixture = Effect.fnUntraced(function* (clock: FixtureClock, options: F
       displayName: "Codex",
       installed: true,
       status: "ready",
-      models: [{
-        slug: "gpt-6-luna",
-        name: "GPT-6 Luna",
+      models: [["gpt-6-luna", "GPT-6 Luna", "high"], ["gpt-6.1-sol", "GPT-6.1 Sol", "low"]].map(([slug, name, currentValue]) => ({
+        slug,
+        name,
         capabilities: { optionDescriptors: [{
           id: "reasoningEffort",
           label: "Reasoning effort",
           type: "select",
-          currentValue: "high",
+          currentValue,
           options: [{ id: "low", label: "Low" }, { id: "high", label: "High" }, { id: "max", label: "Max" }],
         }] },
-      }],
+      })),
     }],
   };
   const projectSupervisor = yield* projectSupervisorUnit({
