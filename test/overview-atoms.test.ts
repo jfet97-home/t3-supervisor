@@ -1,24 +1,27 @@
 import assert from "node:assert/strict";
-import { it } from "@effect/vitest";
+import { beforeAll, it } from "@effect/vitest";
 import { Effect, Exit, Option } from "effect";
-import { AsyncResult, AtomRegistry } from "effect/reactivity";
-import { afterAll, beforeAll } from "vitest";
+import { AsyncResult } from "effect/reactivity";
+import { TestClock } from "effect/testing";
 import { OverviewRangeError, readOverviewPages, type DashboardOverviewInfo } from "../src/dashboard-overview.js";
-import { held, json, makeBrowser, until, type SentRequest } from "./support/ui-browser.js";
+import { clockedRegistry, scopedRegistry } from "./support/g7-page.js";
+import { abortOf, held, json, makeBrowser, until, type SentRequest } from "./support/g7-browser.js";
 
 // target regressions of the work overview over atoms (CT-UI-OVERVIEW-01): the loaded range and load-more, the retained
-// last read and its message, polling only while enabled and visible, and interruption on deactivation
+// last read and its message, polling only while enabled and visible, and interruption on deactivation. the waits for a
+// read are bounded on the live clock; the polling test steps the poll interval on the page runtime's test clock
 
 const browser = makeBrowser();
 type Overview = typeof import("../ui/src/overview.js");
 let ui: Overview;
+let atoms: typeof import("../ui/src/atoms.js");
 
-beforeAll(async () => {
-  browser.install();
+beforeAll(() => Effect.gen(function* () {
+  yield* browser.install;
   browser.local.set("supervisor-session", "session-1");
-  ui = await import("../ui/src/overview.js");
-});
-afterAll(() => browser.restore());
+  atoms = yield* Effect.promise(() => import("../ui/src/atoms.js"));
+  ui = yield* Effect.promise(() => import("../ui/src/overview.js"));
+}));
 
 const row = (id: string) => ({projectId: "p", mainThreadId: id, title: id, supervisorThreadId: "s", nativeState: "quiet" as const,
   supervision: "enabled" as const, objective: null, reason: "", taskStatus: null, planStatus: null, assessment: null, attention: [], updatedAt: null});
@@ -29,17 +32,17 @@ const reads = () => browser.sent.filter((request) => request.path === "/api/guid
 const offsets = (requests: ReadonlyArray<SentRequest>) => requests.map((request) => [request.search.get("offset"), request.search.get("limit")]);
 const loaded = (result: AsyncResult.AsyncResult<DashboardOverviewInfo, unknown>) => Option.match(AsyncResult.value(result), {onNone: () => 0, onSome: (value) => value.work.length});
 
-it("CT-UI-OVERVIEW-01 the overview reads 100 conversations, load-more adds 100 keeping prior pages, a failure keeps the last read and its message, and deactivation interrupts the read in flight", { timeout: 10_000 }, async () => {
+it.effect("CT-UI-OVERVIEW-01 the overview reads 100 conversations, load-more adds 100 keeping prior pages, a failure keeps the last read and its message, and deactivation interrupts the read in flight", () => Effect.gen(function* () {
   assert.equal(ui.overviewRefreshMillis, 30_000);
   browser.sent.length = 0;
   browser.state.reply = (request) => json(page(Number(request.search.get("offset"))));
-  const registry = AtomRegistry.make();
+  const registry = yield* scopedRegistry();
   const model = ui.makeOverview(60_000);
   const seen: Array<AsyncResult.AsyncResult<DashboardOverviewInfo, unknown>> = [];
   const stop = registry.subscribe(model.polled, (value) => { seen.push(value); }, { immediate: true });
   assert.equal(reads().length, 0, "nothing is read before the overview is enabled");
   registry.set(model.enabled, true);
-  await until(registry, model.read, (result) => AsyncResult.isSuccess(result) && !result.waiting, "the first read");
+  yield* until(registry, model.read, (result) => AsyncResult.isSuccess(result) && !result.waiting, "the first read");
   assert.equal(loaded(registry.get(model.read)), 100);
   assert.deepEqual(offsets(reads()), [["0", "100"]]);
 
@@ -47,7 +50,7 @@ it("CT-UI-OVERVIEW-01 the overview reads 100 conversations, load-more adds 100 k
   seen.length = 0;
   registry.set(model.more, true);
   registry.refresh(model.read);
-  await until(registry, model.read, (result) => AsyncResult.isSuccess(result) && !result.waiting && loaded(result) === 200, "load more");
+  yield* until(registry, model.read, (result) => AsyncResult.isSuccess(result) && !result.waiting && loaded(result) === 200, "load more");
   assert.deepEqual(offsets(reads()), [["0", "100"], ["100", "100"]]);
   assert.ok(seen.every((result) => loaded(result) >= 100), "prior pages stay visible while more load");
   assert.equal(registry.get(model.more), false, "a load-more request is used once");
@@ -55,17 +58,17 @@ it("CT-UI-OVERVIEW-01 the overview reads 100 conversations, load-more adds 100 k
   // a refresh keeps the loaded range
   browser.sent.length = 0;
   registry.refresh(model.read);
-  await until(registry, model.read, (result) => AsyncResult.isSuccess(result) && !result.waiting, "the refresh");
+  yield* until(registry, model.read, (result) => AsyncResult.isSuccess(result) && !result.waiting, "the refresh");
   assert.deepEqual(offsets(reads()), [["0", "100"], ["100", "100"]]);
 
   browser.state.reply = () => json({message: "Unavailable."}, 500);
   registry.refresh(model.read);
-  const failed = await until(registry, model.read, (result) => AsyncResult.isFailure(result) && !result.waiting, "the failed refresh");
+  const failed = yield* until(registry, model.read, (result) => AsyncResult.isFailure(result) && !result.waiting, "the failed refresh");
   assert.deepEqual(ui.overviewView(failed, true), {data: Option.getOrNull(AsyncResult.value(failed)), loading: false,
     error: "The work overview could not be refreshed. The last successful read is kept; current state may have changed."});
   assert.equal(loaded(failed), 200, "the last successful read is kept");
   registry.refresh(model.read);
-  const again = await until(registry, model.read, (result) => AsyncResult.isFailure(result) && !result.waiting, "a second failed refresh");
+  const again = yield* until(registry, model.read, (result) => AsyncResult.isFailure(result) && !result.waiting, "a second failed refresh");
   assert.equal(loaded(again), 200, "repeated failures keep the latest success");
   browser.state.reply = held;
   const before = browser.sent.length;
@@ -75,41 +78,44 @@ it("CT-UI-OVERVIEW-01 the overview reads 100 conversations, load-more adds 100 k
   assert.equal(ui.overviewView(refreshing, true).loading, true);
 
   // deactivation interrupts the read in flight and keeps the last result without loading
-  const inFlight = await browser.request((request) => browser.sent.indexOf(request) >= before, "the held read");
+  const inFlight = yield* browser.request((request) => browser.sent.indexOf(request) >= before, "the held read");
   registry.set(model.enabled, false);
-  await new Promise<void>((resolve) => { if (inFlight.signal.aborted) resolve(); else inFlight.signal.addEventListener("abort", () => resolve(), {once: true}); });
+  yield* abortOf(inFlight.signal);
   assert.deepEqual(ui.overviewView(registry.get(model.read), false).loading, false);
   assert.equal(loaded(registry.get(model.read)), 200);
   stop();
   registry.dispose();
-});
+}), { timeout: 10_000 });
 
-it("the overview polls only while enabled and visible", { timeout: 10_000 }, async () => {
+it.effect("the overview polls only while enabled and visible", () => Effect.gen(function* () {
   browser.sent.length = 0;
   browser.state.reply = (request) => json(page(Number(request.search.get("offset"))));
-  const registry = AtomRegistry.make();
+  const registry = yield* clockedRegistry(atoms.uiRuntime);
   const model = ui.makeOverview(20);
   registry.set(model.enabled, true);
   const stop = registry.subscribe(model.polled, () => undefined, { immediate: true });
-  await browser.request(() => reads().length >= 3, "two polls after the first read");
+  // two intervals pass on the page runtime's clock
+  yield* TestClock.adjust("40 millis");
+  yield* browser.request(() => reads().length >= 3, "two polls after the first read");
   browser.state.visibility = "hidden";
-  await until(registry, model.read, (result) => !result.waiting, "the last visible read");
+  yield* until(registry, model.read, (result) => !result.waiting, "the last visible read");
   const hidden = reads().length;
-  // absence of a poll can only be observed over time: six intervals pass while hidden
-  await new Promise((resolve) => setTimeout(resolve, 120));
+  // six intervals pass while hidden
+  yield* TestClock.adjust("120 millis");
   assert.equal(reads().length, hidden, "no polling while hidden");
   browser.state.visibility = "visible";
-  await browser.request(() => reads().length > hidden, "polling resumes when visible");
+  yield* TestClock.adjust("20 millis");
+  yield* browser.request(() => reads().length > hidden, "polling resumes when visible");
   stop();
   // the shell mounts only the read while the overview is disabled
   registry.set(model.enabled, false);
   const stopRead = registry.subscribe(model.read, () => undefined, { immediate: true });
   const paused = reads().length;
-  await new Promise((resolve) => setTimeout(resolve, 120));
+  yield* TestClock.adjust("120 millis");
   assert.equal(reads().length, paused, "no polling while disabled");
   stopRead();
   registry.dispose();
-});
+}), { timeout: 10_000 });
 
 it.effect("the Effect range reader keeps the loaded range, restarts a reordered prefix once and rejects incoherent pages", () => Effect.gen(function* () {
   const calls: number[] = [];
