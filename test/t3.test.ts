@@ -1,29 +1,21 @@
 import assert from "node:assert/strict";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { gzipSync } from "node:zlib";
 import type { Duplex } from "node:stream";
 import { it } from "@effect/vitest";
-import { Cause, Context, Effect, Exit, Fiber, Layer } from "effect";
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer } from "effect";
 import { TestClock } from "effect/testing";
 import { WebSocketServer } from "ws";
 import { makeT3Client, T3Client, T3TransportError, type T3ClientOptions } from "../src/t3.js";
 import type { JsonRecord, SourceItem } from "../src/types.js";
 
+// the T3 client against mock T3 peers over real loopback sockets (node http and ws servers, the native boundary of this
+// suite, whose events complete deferreds). a test that steps the client's own timeout, heartbeat or memo expiry runs on
+// the TestClock (it.effect); the others run live (it.live) because their outcome needs real socket progress: a read,
+// a body stalled mid-way, or a Pong that must arrive within the heartbeat timeout. every awaited peer event is bounded
+// on the live clock
 
 const token = "read-scope-test-token";
-
-interface MockServer {
-  baseUrl: string;
-  http: ReturnType<typeof createServer>;
-  webSockets: WebSocketServer;
-  close(): Promise<void>;
-}
-
-interface HungHandshakeServer {
-  baseUrl: string;
-  accepted: Promise<void>;
-  close(): Promise<void>;
-}
 
 const isRecord = (value: unknown): value is JsonRecord =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -65,85 +57,64 @@ const sendJson = (response: ServerResponse, status: number, value: unknown): voi
   response.end(body);
 };
 
-const startMockServer = async (
-  onHttp: (request: IncomingMessage, response: ServerResponse) => void
-): Promise<MockServer> => {
-  const http = createServer(onHttp);
-  const webSockets = new WebSocketServer({ server: http, path: "/ws" });
-  await new Promise<void>((resolve, reject) => {
-    http.once("error", reject);
-    http.listen(0, "127.0.0.1", resolve);
-  });
-  const address = http.address();
-  if (address === null || typeof address === "string") throw new Error("mock server did not bind a TCP port");
-  return {
-    baseUrl: `http://127.0.0.1:${address.port}`,
-    http,
-    webSockets,
-    close: async () => {
-      for (const socket of webSockets.clients) socket.terminate();
-      await new Promise<void>((resolve, reject) => {
-        webSockets.close((error) => error ? reject(error) : resolve());
-      });
-      await new Promise<void>((resolve, reject) => {
-        http.close((error) => error ? reject(error) : resolve());
-      });
-    }
-  };
+// a peer event, from the peer's native callbacks
+const complete = (event: Deferred.Deferred<void>): void => {
+  Deferred.doneUnsafe(event, Exit.void);
 };
 
-const startHungHandshakeServer = async (): Promise<HungHandshakeServer> => {
-  const server = createServer();
-  const sockets = new Set<Duplex>();
-  const connectionAccepted = deferred<void>();
-  server.on("upgrade", (_request, socket) => {
-    sockets.add(socket);
-    connectionAccepted.resolve();
-    socket.once("close", () => sockets.delete(socket));
+const listen = (server: Server): Effect.Effect<string> => Effect.callback<string>((resume) => {
+  const failed = (error: Error) => resume(Effect.die(error));
+  server.once("error", failed);
+  server.listen(0, "127.0.0.1", () => {
+    server.off("error", failed);
+    const address = server.address();
+    resume(address === null || typeof address === "string"
+      ? Effect.die(new Error("mock server did not bind a TCP port"))
+      : Effect.succeed(`http://127.0.0.1:${address.port}`));
   });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  if (address === null || typeof address === "string") throw new Error("mock server did not bind a TCP port");
-  return {
-    baseUrl: `http://127.0.0.1:${address.port}`,
-    accepted: connectionAccepted.promise,
-    close: async () => {
-      for (const socket of sockets) socket.destroy();
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
-      });
-    }
-  };
-};
+});
 
+// a node close that reports through an error-first callback
+const closed = (close: (callback: (error?: Error) => void) => void): Effect.Effect<void> =>
+  Effect.callback<void>((resume) => {close((error) => resume(error ? Effect.die(error) : Effect.void));});
 
 // a mock T3 that lives for the test's scope
-const mockServer = (onHttp: (request: IncomingMessage, response: ServerResponse) => void) =>
-  Effect.acquireRelease(Effect.promise(() => startMockServer(onHttp)), (server) => Effect.promise(() => server.close()));
+const mockServer = (onHttp: (request: IncomingMessage, response: ServerResponse) => void) => Effect.gen(function*() {
+  const http = createServer(onHttp);
+  const webSockets = new WebSocketServer({ server: http, path: "/ws" });
+  const baseUrl = yield* Effect.acquireRelease(listen(http), () => Effect.gen(function*() {
+    for (const socket of webSockets.clients) socket.terminate();
+    yield* closed((callback) => webSockets.close(callback));
+    yield* closed((callback) => http.close(callback));
+  }));
+  return { baseUrl, http, webSockets };
+});
 
-const hungHandshakeServer = Effect.acquireRelease(Effect.promise(() => startHungHandshakeServer()),
-  (server) => Effect.promise(() => server.close()));
+// accepts the websocket upgrade request and never answers it
+const hungHandshakeServer = Effect.gen(function*() {
+  const server = createServer();
+  const sockets = new Set<Duplex>();
+  const accepted = yield* Deferred.make<void>();
+  server.on("upgrade", (_request, socket: Duplex) => {
+    sockets.add(socket);
+    complete(accepted);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  const baseUrl = yield* Effect.acquireRelease(listen(server), () => Effect.suspend(() => {
+    for (const socket of sockets) socket.destroy();
+    return closed((callback) => server.close(callback));
+  }));
+  return { baseUrl, accepted };
+});
 
 const getClient = (
   baseUrl: string,
   extra: Omit<T3ClientOptions, "baseUrl" | "token"> = {}
 ) => Effect.map(Layer.build(makeT3Client({ baseUrl, token, ...extra })), (context) => Context.get(context, T3Client));
 
-const deferred = <A = void>() => {
-  let resolve!: (value: A) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<A>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-};
-
-const within = <A>(promise: Promise<A>, milliseconds = 2500): Effect.Effect<A> =>
-  Effect.promise(() => promise).pipe(Effect.timeoutOrElse({
+// an awaited peer event with its own deadline; a TestClock test runs it with the live clock
+const within = <A>(event: Deferred.Deferred<A>, milliseconds = 2500): Effect.Effect<A> =>
+  Deferred.await(event).pipe(Effect.timeoutOrElse({
     duration: milliseconds,
     orElse: () => Effect.die(new Error("timed out waiting for mock T3 event")),
   }));
@@ -377,24 +348,25 @@ it.live("a snapshot read that stalls mid-body times out without being memoized",
 
 it.effect("the stream deadline and a broken body map to retryable timeout and unreadable failures through the client", () => Effect.gen(function*() {
   const text = JSON.stringify(paddedSnapshot("thread-1", 100_000));
-  const firstPart = deferred<void>();
-  const proceed = deferred<void>();
+  const firstPart = yield* Deferred.make<void>();
+  // the response whose rest the peer sends once the clock has moved
+  let held: ServerResponse | undefined;
   let mode: "deadline" | "broken" | "whole" = "deadline";
   let reads = 0;
   const server = yield* mockServer((_request, response) => {
     reads++;
     response.writeHead(200, {"content-type": "application/json", "content-length": Buffer.byteLength(text)});
     if (mode === "whole") {response.end(text);return;}
-    response.write(text.slice(0, 40_000), () => firstPart.resolve());
+    response.write(text.slice(0, 40_000), () => complete(firstPart));
     if (mode === "broken") {setTimeout(() => response.socket?.destroy(), 20);return;}
-    void proceed.promise.then(() => response.end(text.slice(40_000)));
+    held = response;
   });
   const client = yield* getClient(server.baseUrl);
   // the clock jumps past the stream deadline and the request timeout while the body is still arriving
   const pending = yield* Effect.forkChild(failureOf(client.projection("thread-1")));
-  yield* TestClock.withLive(within(firstPart.promise));
+  yield* TestClock.withLive(within(firstPart));
   yield* TestClock.adjust("60 seconds");
-  proceed.resolve();
+  held?.end(text.slice(40_000));
   const timedOut = yield* Fiber.join(pending);
   assert.ok(timedOut instanceof T3TransportError && timedOut.code === undefined && /request timed out/.test(timedOut.message));
   mode = "broken";
@@ -405,16 +377,26 @@ it.effect("the stream deadline and a broken body map to retryable timeout and un
   assert.equal(reads, 3, "neither failure is remembered as an oversized snapshot");
 }));
 
-it.live("a timed-out snapshot read is not memoized as oversized", () => Effect.gen(function*() {
+it.effect("a timed-out snapshot read is not memoized as oversized", () => Effect.gen(function*() {
   let reads = 0;
   let slow = true;
+  const requested = yield* Deferred.make<void>();
   const server = yield* mockServer((_request, response) => {
     reads++;
-    if (slow) setTimeout(() => {if (!response.destroyed) sendJson(response, 200, paddedSnapshot("thread-1", 1000));}, 150);
+    if (slow) {
+      // a late answer, unless the client went away first
+      const late = setTimeout(() => {if (!response.destroyed) sendJson(response, 200, paddedSnapshot("thread-1", 1000));}, 150);
+      response.once("close", () => clearTimeout(late));
+      complete(requested);
+    }
     else sendJson(response, 200, paddedSnapshot("thread-1", 1000));
   });
   const client = yield* getClient(server.baseUrl, {httpTimeoutMs: 25});
-  yield* rejects(client.projection("thread-1"),
+  // the clock passes the 25 ms timeout while the peer holds its answer
+  const pending = yield* Effect.forkChild(client.projection("thread-1"));
+  yield* TestClock.withLive(within(requested));
+  yield* TestClock.adjust("25 millis");
+  yield* rejects(Fiber.join(pending),
     (error: unknown) => error instanceof T3TransportError && error.code === undefined && /timed out/.test(error.message));
   slow = false;
   yield* client.projection("thread-1");
@@ -476,36 +458,44 @@ it.live("HTTP 404 exposes only a safe status hint", () => Effect.gen(function*()
   assert.equal(failure.message.includes("missing resource"), false);
 }));
 
-it.live("HTTP requests time out and abort their underlying fetch", () => Effect.gen(function*() {
-  const aborted = deferred<void>();
+it.effect("HTTP requests time out and abort their underlying fetch", () => Effect.gen(function*() {
+  const requested = yield* Deferred.make<void>();
+  const aborted = yield* Deferred.make<void>();
   const server = yield* mockServer((request, response) => {
-    request.on("close", () => aborted.resolve());
-    setTimeout(() => {
+    request.on("close", () => complete(aborted));
+    // a late answer, unless the client went away first
+    const late = setTimeout(() => {
       if (!response.destroyed) sendJson(response, 200, {
         environmentId: "environment-1",
         orchestrationProtocolVersion: 2,
         serverVersion: "nightly-test"
       });
     }, 150);
+    response.once("close", () => clearTimeout(late));
+    complete(requested);
   });
 
   const client = yield* getClient(server.baseUrl, { httpTimeoutMs: 25 });
-  const failure = yield* failureOf(client.descriptor());
+  // the clock passes the 25 ms timeout while the peer holds its answer
+  const pending = yield* Effect.forkChild(failureOf(client.descriptor()));
+  yield* TestClock.withLive(within(requested));
+  yield* TestClock.adjust("25 millis");
+  const failure = yield* Fiber.join(pending);
   assert.ok(failure instanceof T3TransportError);
   assert.match(failure.message, /timed out/);
-  yield* within(aborted.promise);
+  yield* TestClock.withLive(within(aborted));
 }));
 
 it.live("watch handles RPC envelopes and waits for durable ingestion before acknowledging chunks", () => Effect.gen(function*() {
   const subscriptions: JsonRecord[] = [];
   const acknowledgements: string[] = [];
-  const requestsSeen = deferred<void>();
-  const acknowledgementsSeen = deferred<void>();
-  const pongSeen = deferred<void>();
-  const callbackStarted = deferred<void>();
-  const remoteClosed = deferred<void>();
+  const requestsSeen = yield* Deferred.make<void>();
+  const acknowledgementsSeen = yield* Deferred.make<void>();
+  const pongSeen = yield* Deferred.make<void>();
+  const callbackStarted = yield* Deferred.make<void>();
+  const releaseIngest = yield* Deferred.make<void>();
+  const remoteClosed = yield* Deferred.make<void>();
   const items: SourceItem[] = [];
-  let releaseIngest: (() => void) | undefined;
 
   const server = yield* mockServer((_request, response) => {
     sendJson(response, 404, {});
@@ -513,14 +503,14 @@ it.live("watch handles RPC envelopes and waits for durable ingestion before ackn
   server.webSockets.on("connection", (socket, request) => {
     assert.equal(request.url, "/ws?orchestrationProtocol=2");
     assert.equal(request.headers.authorization, `Bearer ${token}`);
-    socket.once("close", () => remoteClosed.resolve());
+    socket.once("close", () => complete(remoteClosed));
     socket.on("message", (data) => {
       const frame: unknown = JSON.parse(data.toString());
       if (!isRecord(frame)) return;
       if (frame._tag === "Request") {
         subscriptions.push(frame);
         if (subscriptions.length === 2) {
-          requestsSeen.resolve();
+          complete(requestsSeen);
           const activeSnapshot = {
             kind: "snapshot",
             snapshot: { schemaVersion: 2, snapshotSequence: 11, projects: [], threads: [], archivedThreads: [] },
@@ -536,28 +526,27 @@ it.live("watch handles RPC envelopes and waits for durable ingestion before ackn
         }
         return;
       }
-      if (frame._tag === "Pong") pongSeen.resolve();
+      if (frame._tag === "Pong") complete(pongSeen);
       if (frame._tag === "Ack" && typeof frame.requestId === "string") {
         acknowledgements.push(frame.requestId);
-        if (acknowledgements.length === 2) acknowledgementsSeen.resolve();
+        if (acknowledgements.length === 2) complete(acknowledgementsSeen);
       }
     });
   });
 
   const client = yield* getClient(server.baseUrl);
-  const watch = client.watch(7, (item) => Effect.callback<void>((resume) => {
+  const watch = client.watch(7, (item) => Effect.gen(function*() {
     items.push(item);
+    // the active snapshot's ingestion holds until the test releases it
     if (item.stream === "active" && item.item.kind === "snapshot") {
-      callbackStarted.resolve();
-      releaseIngest = () => resume(Effect.void);
-      return;
+      yield* Deferred.succeed(callbackStarted, undefined);
+      yield* Deferred.await(releaseIngest);
     }
-    resume(Effect.void);
   }));
   const fiber = yield* Effect.forkChild(watch);
-  yield* within(requestsSeen.promise);
-  yield* within(pongSeen.promise);
-  yield* within(callbackStarted.promise);
+  yield* within(requestsSeen);
+  yield* within(pongSeen);
+  yield* within(callbackStarted);
   assert.deepEqual(acknowledgements, []);
   assert.equal(items.length, 1);
   assert.deepEqual(subscriptions, [
@@ -577,25 +566,27 @@ it.live("watch handles RPC envelopes and waits for durable ingestion before ackn
     }
   ]);
 
-  releaseIngest?.();
-  yield* within(acknowledgementsSeen.promise);
+  yield* Deferred.succeed(releaseIngest, undefined);
+  yield* within(acknowledgementsSeen);
   assert.deepEqual(acknowledgements, ["1", "2"]);
   assert.deepEqual(items.map((item) => item.stream), ["active", "active", "archive"]);
   assert.deepEqual(items[0]?.item.resolvedRepositoryIdentityRoots, ["/workspace/repo"]);
 
   yield* Fiber.interrupt(fiber);
-  yield* within(remoteClosed.promise);
+  yield* within(remoteClosed);
 }));
 
-it.live("watch bounds a websocket peer that completes the handshake but never answers native Ping", () => Effect.gen(function*() {
-  const pingSeen = deferred<void>();
-  const remoteClosed = deferred<void>();
+it.effect("watch bounds a websocket peer that completes the handshake but never answers native Ping", () => Effect.gen(function*() {
+  const subscribed = yield* Deferred.make<void>();
+  const pingSeen = yield* Deferred.make<void>();
+  const remoteClosed = yield* Deferred.make<void>();
   const server = yield* mockServer((_request, response) => sendJson(response, 404, {}));
   server.webSockets.on("connection", (socket) => {
-    socket.once("close", () => remoteClosed.resolve());
+    socket.once("close", () => complete(remoteClosed));
     socket.on("message", (data) => {
       const frame: unknown = JSON.parse(data.toString());
-      if (isRecord(frame) && frame._tag === "Ping") pingSeen.resolve();
+      if (isRecord(frame) && frame._tag === "Request" && frame.id === "2") complete(subscribed);
+      if (isRecord(frame) && frame._tag === "Ping") complete(pingSeen);
     });
   });
 
@@ -604,26 +595,31 @@ it.live("watch bounds a websocket peer that completes the handshake but never an
     heartbeatIntervalMs: 10,
     heartbeatTimeoutMs: 25
   });
-  const failure = yield* failureOf(client.watch(undefined, () => Effect.void));
-  yield* within(pingSeen.promise);
+  const pending = yield* Effect.forkChild(failureOf(client.watch(undefined, () => Effect.void)));
+  // once subscribed, the clock passes one interval, then the heartbeat timeout of the unanswered Ping
+  yield* TestClock.withLive(within(subscribed));
+  yield* TestClock.adjust("10 millis");
+  yield* TestClock.withLive(within(pingSeen));
+  yield* TestClock.adjust("25 millis");
+  const failure = yield* Fiber.join(pending);
   assert.ok(failure instanceof T3TransportError);
   assert.match(failure.message, /heartbeat timed out/);
-  yield* within(remoteClosed.promise);
+  yield* TestClock.withLive(within(remoteClosed));
 }));
 
 it.live("watch keeps a quiet websocket alive when the peer answers native Ping", () => Effect.gen(function*() {
   let pingCount = 0;
-  const twoPingsAnswered = deferred<void>();
-  const remoteClosed = deferred<void>();
+  const twoPingsAnswered = yield* Deferred.make<void>();
+  const remoteClosed = yield* Deferred.make<void>();
   const server = yield* mockServer((_request, response) => sendJson(response, 404, {}));
   server.webSockets.on("connection", (socket) => {
-    socket.once("close", () => remoteClosed.resolve());
+    socket.once("close", () => complete(remoteClosed));
     socket.on("message", (data) => {
       const frame: unknown = JSON.parse(data.toString());
       if (!isRecord(frame) || frame._tag !== "Ping") return;
       pingCount += 1;
       socket.send(JSON.stringify({ _tag: "Pong" }));
-      if (pingCount === 2) twoPingsAnswered.resolve();
+      if (pingCount === 2) complete(twoPingsAnswered);
     });
   });
 
@@ -633,19 +629,22 @@ it.live("watch keeps a quiet websocket alive when the peer answers native Ping",
     heartbeatTimeoutMs: 40
   });
   const fiber = yield* Effect.forkChild(client.watch(undefined, () => Effect.void));
-  yield* within(twoPingsAnswered.promise);
+  yield* within(twoPingsAnswered);
   yield* Fiber.interrupt(fiber);
-  yield* within(remoteClosed.promise);
+  yield* within(remoteClosed);
 }));
 
-it.live("watch bounds a websocket handshake that never completes", () => Effect.gen(function*() {
+it.effect("watch bounds a websocket handshake that never completes", () => Effect.gen(function*() {
   const server = yield* hungHandshakeServer;
 
   const client = yield* getClient(server.baseUrl, { webSocketHandshakeTimeoutMs: 100 });
-  const failure = yield* failureOf(client.watch(undefined, () => Effect.void));
+  // the clock passes the handshake timeout once the peer holds the upgrade request
+  const pending = yield* Effect.forkChild(failureOf(client.watch(undefined, () => Effect.void)));
+  yield* TestClock.withLive(within(server.accepted));
+  yield* TestClock.adjust("100 millis");
+  const failure = yield* Fiber.join(pending);
   assert.ok(failure instanceof T3TransportError);
   assert.match(failure.message, /handshake timed out/);
-  yield* within(server.accepted);
 }));
 
 it.live("watch fails closed on subscription Exit and Defect frames so the caller can reconnect", () => Effect.gen(function*() {
@@ -654,18 +653,18 @@ it.live("watch fails closed on subscription Exit and Defect frames so the caller
     { _tag: "Defect", requestId: "2", defect: { message: "private server detail" } }
   ]) {
     yield* Effect.scoped(Effect.gen(function*() {
-      const sent = deferred<void>();
+      const sent = yield* Deferred.make<void>();
       const server = yield* mockServer((_request, response) => sendJson(response, 404, {}));
       server.webSockets.on("connection", (socket) => {
         socket.once("message", () => {
           socket.send(JSON.stringify(terminal));
-          sent.resolve();
+          complete(sent);
         });
       });
 
       const client = yield* getClient(server.baseUrl);
       const failure = yield* failureOf(client.watch(undefined, () => Effect.void));
-      yield* within(sent.promise);
+      yield* within(sent);
       assert.ok(failure instanceof T3TransportError);
       assert.equal(failure.message.includes("private server detail"), false);
     }));
@@ -673,7 +672,7 @@ it.live("watch fails closed on subscription Exit and Defect frames so the caller
 }));
 
 it.live("watch rejects shell snapshots with an unsupported schema version", () => Effect.gen(function*() {
-  const sent = deferred<void>();
+  const sent = yield* Deferred.make<void>();
   const acknowledgements: string[] = [];
   const server = yield* mockServer((_request, response) => sendJson(response, 404, {}));
   server.webSockets.on("connection", (socket) => {
@@ -689,7 +688,7 @@ it.live("watch rejects shell snapshots with an unsupported schema version", () =
             snapshot: { schemaVersion: 3, snapshotSequence: 2, projects: [], threads: [], archivedThreads: [] }
           }]
         }));
-        sent.resolve();
+        complete(sent);
       } else if (frame._tag === "Ack" && typeof frame.requestId === "string") {
         acknowledgements.push(frame.requestId);
       }
@@ -698,13 +697,13 @@ it.live("watch rejects shell snapshots with an unsupported schema version", () =
 
   const client = yield* getClient(server.baseUrl);
   const failure = yield* failureOf(client.watch(undefined, () => Effect.void));
-  yield* within(sent.promise);
+  yield* within(sent);
   assert.ok(failure instanceof T3TransportError);
   assert.deepEqual(acknowledgements, []);
 }));
 
 it.live("watch propagates ingestion failures without acknowledging their chunk", () => Effect.gen(function*() {
-  const sent = deferred<void>();
+  const sent = yield* Deferred.make<void>();
   const acknowledgements: string[] = [];
   const server = yield* mockServer((_request, response) => sendJson(response, 404, {}));
   server.webSockets.on("connection", (socket) => {
@@ -717,7 +716,7 @@ it.live("watch propagates ingestion failures without acknowledging their chunk",
           requestId: "1",
           values: [{ kind: "thread.removed", sequence: 2, threadId: "thread-1" }]
         }));
-        sent.resolve();
+        complete(sent);
       } else if (frame._tag === "Ack" && typeof frame.requestId === "string") {
         acknowledgements.push(frame.requestId);
       }
@@ -728,6 +727,6 @@ it.live("watch propagates ingestion failures without acknowledging their chunk",
   // assert.rejects with a RegExp matched the rejection's string form
   const failure = yield* failureOf(client.watch(undefined, () => Effect.fail(new Error("durable store unavailable"))));
   assert.match(String(failure), /durable store unavailable/);
-  yield* within(sent.promise);
+  yield* within(sent);
   assert.deepEqual(acknowledgements, []);
 }));

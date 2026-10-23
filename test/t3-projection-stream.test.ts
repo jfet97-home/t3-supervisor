@@ -3,6 +3,11 @@ import { it } from "@effect/vitest";
 import { Cause, Clock, Effect, Exit, Fiber } from "effect";
 import { ProjectionStreamError, readProjectionSnapshot, UNREAD_PROJECTION_KEYS } from "../src/t3-projection-stream.js";
 
+// the projection reader over in-memory web streams. the parser tests run live (it.live): every read keeps the
+// baseline's 5 s bound on the live clock, and the reader yields to the event loop by live monotonic time, which the
+// native timer probes observe; a test that needs time to pass during a read provides a stepping effect clock to that
+// read. the two interruption tests use no time (it.effect)
+
 const encoder = new TextEncoder();
 
 const streamOf = (bytes: Uint8Array, cuts: readonly number[] = []): ReadableStream<Uint8Array> => {
