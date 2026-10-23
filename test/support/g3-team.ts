@@ -241,5 +241,5 @@ export const supervisorConversationUnit = (options: SupervisorConversationUnitOp
     Layer.succeed(T3Client, t3Projections(options.projection)), Layer.succeed(SupervisorTeamRuntime, teamRuntime),
     options.rpc ? Layer.succeed(NativeOperateRpc, operateRpc(options.rpc)) : Layer.empty))));
   const conversation: SupervisorConversationShape = Context.get(built, SupervisorConversation);
-  return {conversation, teamRuntime, callbacks, requests: stores.requests, monitor: stores.monitor};
+  return {...conversation, conversation, teamRuntime, callbacks, requests: stores.requests, monitor: stores.monitor};
 });
