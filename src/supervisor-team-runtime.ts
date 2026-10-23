@@ -1,9 +1,11 @@
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, HashMap, HashSet, Layer, Option, Ref } from "effect";
-import type { BindingRecord, ProjectSupervisorStore } from "./project-supervisor-store.js";
+import { GuidanceDb } from "./db.js";
+import { guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
+import { ProjectSupervisorStore, type BindingRecord } from "./project-supervisor-store.js";
 import { SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorBatch, type SupervisorMonitorThreadBatch } from "./supervisor-monitor.js";
-import type { ProjectSupervisorMonitorStore } from "./supervisor-monitor-store.js";
-import { conversationRequestMessageId, type ConversationRequest, type SupervisorConversationStore } from "./supervisor-conversation-store.js";
-import { endedWithoutCompletion, notificationClosed, type HandoverAttempt, type SupervisorTeamSnapshot, type SupervisorTeamStore, type TeamEvent, type TeamMember, type TeamNotification, type TeamRequest, type TeamRequestTarget } from "./supervisor-team-store.js";
+import { ProjectSupervisorMonitorStore, type InvalidMonitorObservation } from "./supervisor-monitor-store.js";
+import { conversationRequestMessageId, SupervisorConversationStore, type ConversationRequest, type RequestInflight } from "./supervisor-conversation-store.js";
+import { endedWithoutCompletion, notificationClosed, SupervisorTeamStore, type HandoverAttempt, type SupervisorTeamSnapshot, type TeamEvent, type TeamMember, type TeamNotification, type TeamRequest, type TeamRequestTarget } from "./supervisor-team-store.js";
 import { T3Client } from "./t3.js";
 import { helperDeliveryBudget, HelperTransport, type HelperTransportShape, type SupervisorHelperMessage, type SupervisorHelperSendResult } from "./supervisor-helper-transport.js";
 import { SupervisionGate, type GateGuard } from "./supervision-gate.js";
@@ -30,13 +32,9 @@ export type SupervisorTeamPartition = {
 type SupervisorTeamRootCoverage = "root" | "transferring" | "unavailable";
 
 export type SupervisorTeamRuntimeOptions = {
-  store: ProjectSupervisorStore;
-  teamStore: SupervisorTeamStore;
-  requests: SupervisorConversationStore;
-  monitor: ProjectSupervisorMonitorStore;
   // whether supervision of the owning main is stopped, read with the admission guard right before every fresh helper
   // delivery; by default the per-chat stop or a disabled scope of that main
-  stopped?: (guard: GateGuard, mainThreadId: string) => boolean;
+  readonly stopped?: (guard: GateGuard, mainThreadId: string) => Effect.Effect<boolean, SupervisionStoreError>;
 };
 
 const terminal = new Set(["completed", "failed", "interrupted", "cancelled", "rolled_back"]);
@@ -140,21 +138,24 @@ const helperReviewText = (envelope: unknown, completionMarker: string): string =
 
 type Cancel = Deferred.Deferred<void> | undefined;
 
+// a store failure of a team operation; the native outcomes stay values
+type TeamRuntimeError = SupervisionStoreError | InvalidMonitorObservation | RequestInflight;
+
 export interface SupervisorTeamRuntimeShape {
   // a fresh bounded read budget for one supervision cycle of this root
   readonly startCycle: (binding: BindingRecord) => Effect.Effect<void>;
-  readonly rootOwnedBatch: (binding: BindingRecord, batch: SupervisorMonitorBatch, threads: readonly ThreadInfo[]) => Effect.Effect<SupervisorMonitorBatch | null>;
-  readonly partition: (binding: BindingRecord, threads: readonly ThreadInfo[], batch: SupervisorMonitorBatch | null) => Effect.Effect<SupervisorTeamPartition>;
-  readonly hasMembers: (binding: BindingRecord) => Effect.Effect<boolean>;
-  readonly coordinatorPolicy: (binding: BindingRecord) => Effect.Effect<{maxHelpersPerRoot: number; readyHelpers: number; registeringHelpers: number}>;
-  readonly acknowledgeRootEvents: (binding: BindingRecord, eventIds: readonly string[]) => Effect.Effect<void>;
+  readonly rootOwnedBatch: (binding: BindingRecord, batch: SupervisorMonitorBatch, threads: readonly ThreadInfo[]) => Effect.Effect<SupervisorMonitorBatch | null, SupervisionStoreError>;
+  readonly partition: (binding: BindingRecord, threads: readonly ThreadInfo[], batch: SupervisorMonitorBatch | null) => Effect.Effect<SupervisorTeamPartition, SupervisionStoreError>;
+  readonly hasMembers: (binding: BindingRecord) => Effect.Effect<boolean, SupervisionStoreError>;
+  readonly coordinatorPolicy: (binding: BindingRecord) => Effect.Effect<{maxHelpersPerRoot: number; readyHelpers: number; registeringHelpers: number}, SupervisionStoreError>;
+  readonly acknowledgeRootEvents: (binding: BindingRecord, eventIds: readonly string[]) => Effect.Effect<void, SupervisionStoreError>;
   /**
    * Team effects that are still in flight: an unresolved team request, a notification being delivered and any helper request.
    * A human stop waits only for these. A transfer is bookkeeping whose native effects are exactly its notices and requests,
    * and review-only events and undelivered notices are superseded by the stop.
    */
-  readonly hasInflightEffects: (binding: BindingRecord) => Effect.Effect<boolean>;
-  readonly hasBlockingWork: (binding: BindingRecord) => Effect.Effect<boolean>;
+  readonly hasInflightEffects: (binding: BindingRecord) => Effect.Effect<boolean, SupervisionStoreError>;
+  readonly hasBlockingWork: (binding: BindingRecord) => Effect.Effect<boolean, SupervisionStoreError>;
   /**
    * Observation-only reconciliation while a human has stopped supervision of this chat, also while supervision is disabled.
    * Nothing is sent, retried or retired: requests and notices that were never posted are fenced, accepted helper check-ins
@@ -162,9 +163,9 @@ export interface SupervisorTeamRuntimeShape {
    * settlement never waits only because ordinary processing is skipped. An effect whose delivery cannot be proven either way
    * keeps its identity and remains unresolved.
    */
-  readonly reconcileStopped: (binding: BindingRecord, threads: readonly ThreadInfo[], cancel?: Cancel) => Effect.Effect<void>;
-  readonly reconcile: (binding: BindingRecord, threads: readonly ThreadInfo[], cancel?: Cancel) => Effect.Effect<void>;
-  readonly runHelperBatch: (binding: BindingRecord, threads: readonly ThreadInfo[], batches: readonly SupervisorTeamHelperBatch[], cancel?: Cancel) => Effect.Effect<void>;
+  readonly reconcileStopped: (binding: BindingRecord, threads: readonly ThreadInfo[], cancel?: Cancel) => Effect.Effect<void, TeamRuntimeError>;
+  readonly reconcile: (binding: BindingRecord, threads: readonly ThreadInfo[], cancel?: Cancel) => Effect.Effect<void, TeamRuntimeError>;
+  readonly runHelperBatch: (binding: BindingRecord, threads: readonly ThreadInfo[], batches: readonly SupervisorTeamHelperBatch[], cancel?: Cancel) => Effect.Effect<void, TeamRuntimeError>;
 }
 
 // a caller's cancel completed during an awaited read: it ends like the aborted read it replaces
@@ -178,31 +179,36 @@ const lastAssistantText = (projection: Projection, runId: string): string | unde
   projection.messages.filter(item => item.runId === runId && item.role === "assistant" && item.streaming !== true && typeof item.text === "string")
     .sort((left, right) => Number(left.ordinal ?? 0) - Number(right.ordinal ?? 0)).at(-1)?.text;
 
-const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Effect.gen(function* () {
+const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) => Effect.gen(function* () {
   const gate = yield* SupervisionGate;
   const t3 = yield* T3Client;
   const ids = yield* SupervisorIds;
+  const store = yield* ProjectSupervisorStore;
+  const teamStore = yield* SupervisorTeamStore;
+  const requests = yield* SupervisorConversationStore;
+  const monitor = yield* ProjectSupervisorMonitorStore;
+  const transaction = guidanceTransaction(yield* GuidanceDb);
   const transport: HelperTransportShape | null = Option.getOrNull(yield* Effect.serviceOption(HelperTransport));
   const helperOffset = yield* Ref.make(HashMap.empty<string, number>());
   const notificationOffset = yield* Ref.make(HashMap.empty<string, number>());
   const transferOffset = yield* Ref.make(HashMap.empty<string, number>());
   const readBudget = yield* Ref.make(HashMap.empty<string, number>());
   const retiredHelpers = yield* Ref.make(HashSet.empty<string>());
-  const {store, teamStore, requests, monitor} = options;
-  const projectOf = (mainThreadId: string) => store.bindings().find(item => item.mainThreadId === mainThreadId)?.projectId ?? "";
-  const stoppedWith = options.stopped ?? ((guard: GateGuard, mainThreadId: string) =>
-    guard.supervisionStopped(mainThreadId) || !guard.scopeEnabled(projectOf(mainThreadId), mainThreadId));
+  const projectOf = (mainThreadId: string) => Effect.map(store.bindings(), (bindings) => bindings.find(item => item.mainThreadId === mainThreadId)?.projectId ?? "");
+  const stoppedWith = options.stopped ?? ((guard: GateGuard, mainThreadId: string) => Effect.gen(function* () {
+    return (yield* guard.supervisionStopped(mainThreadId)) || !(yield* guard.scopeEnabled(yield* projectOf(mainThreadId), mainThreadId));
+  }));
   const offsetOf = (ref: Ref.Ref<HashMap.HashMap<string, number>>, key: string) =>
     Effect.map(Ref.get(ref), (offsets) => Option.getOrElse(HashMap.get(offsets, key), () => 0));
   const setOffset = (ref: Ref.Ref<HashMap.HashMap<string, number>>, key: string, value: number) => Ref.update(ref, HashMap.set(key, value));
 
   const startCycle = (binding: BindingRecord) => Ref.update(readBudget, HashMap.set(binding.threadId, 5));
   // the per-chat stop and scope of the owning main, read with the admission guard
-  const stopped = (binding: BindingRecord) => gate.admit((guard) => Effect.sync(() => stoppedWith(guard, binding.mainThreadId)));
-  const memberUnchanged = (binding: BindingRecord, member: TeamMember) => {
-    const current = teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
+  const stopped = (binding: BindingRecord) => gate.admit((guard) => transaction(stoppedWith(guard, binding.mainThreadId)));
+  const memberUnchanged = (binding: BindingRecord, member: TeamMember) => Effect.map(teamStore.snapshot(binding), (snapshot) => {
+    const current = snapshot.members.find(value => value.threadId === member.threadId);
     return current?.state === member.state && current.epoch === member.epoch;
-  };
+  });
 
   const consumeReadBudget = (binding: BindingRecord) => Ref.modify(readBudget, (budgets): [boolean, HashMap.HashMap<string, number>] => {
     const remaining = Option.getOrElse(HashMap.get(budgets, binding.threadId), () => 5);
@@ -218,26 +224,24 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
       now - startedAt >= SUPERVISOR_MONITOR_COOLDOWN_MS;
   });
 
-  const emitServiceAttention = (binding: BindingRecord, eventId: string, memberThreadId: string, targetThreadId: string | undefined, summary: string): void => {
-    try {
-      teamStore.serviceAttention(binding, {eventId, memberThreadId, ...(targetThreadId ? {targetThreadId} : {}), summary});
-    } catch { /* a replaced binding owns its own service events */ }
-  };
+  // a replaced binding owns its own service events: any failure of the event write is ignored, as the baseline catch did
+  const emitServiceAttention = (binding: BindingRecord, eventId: string, memberThreadId: string, targetThreadId: string | undefined, summary: string) =>
+    teamStore.serviceAttention(binding, {eventId, memberThreadId, ...(targetThreadId ? {targetThreadId} : {}), summary}).pipe(Effect.asVoid, otherwise(undefined));
 
-  const serviceUnresolvedDelivery = (binding: BindingRecord, memberThreadId: string, request: ConversationRequest): void => {
+  const serviceUnresolvedDelivery = (binding: BindingRecord, memberThreadId: string, request: ConversationRequest) => {
     const targetThreadId = request.batch?.threads[0]?.threadId;
-    emitServiceAttention(binding, `helper-checkin-unresolved:${fingerprint([binding.threadId, binding.generation, memberThreadId, request.id]).slice(0, 32)}`,
+    return emitServiceAttention(binding, `helper-checkin-unresolved:${fingerprint([binding.threadId, binding.generation, memberThreadId, request.id]).slice(0, 32)}`,
       memberThreadId, targetThreadId,
       `Helper check-in ${request.id} has no visible terminal native run after bounded reconciliation. No success or rejection is confirmed; preserve its original request and delivery identities, do not retry or acknowledge it as failed, and keep assigned activity fenced.`);
   };
 
-  const hasUnacknowledgedFailure = (binding: BindingRecord, memberThreadId: string): boolean =>
-    requests.requests(binding.projectId, memberThreadId).some(request => request.kind === "review" &&
-      (request.id.startsWith("team-review:") || request.id.startsWith("team-ready:")) && request.state === "failed" && !request.failureAcknowledged);
+  const hasUnacknowledgedFailure = (binding: BindingRecord, memberThreadId: string) =>
+    Effect.map(requests.requests(binding.projectId, memberThreadId), (owned) => owned.some(request => request.kind === "review" &&
+      (request.id.startsWith("team-review:") || request.id.startsWith("team-ready:")) && request.state === "failed" && !request.failureAcknowledged));
 
-  const serviceAttention = (binding: BindingRecord, memberThreadId: string, request: ConversationRequest, summary: string): void => {
+  const serviceAttention = (binding: BindingRecord, memberThreadId: string, request: ConversationRequest, summary: string) => {
     const targetThreadId = request.batch?.threads[0]?.threadId;
-    emitServiceAttention(binding, `helper-checkin-failed:${fingerprint([binding.threadId, binding.generation, memberThreadId, request.id]).slice(0, 32)}`,
+    return emitServiceAttention(binding, `helper-checkin-failed:${fingerprint([binding.threadId, binding.generation, memberThreadId, request.id]).slice(0, 32)}`,
       memberThreadId, targetThreadId, `Helper check-in failed: ${request.error ?? summary}`);
   };
 
@@ -263,36 +267,40 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
   });
 
   const loseMember = (binding: BindingRecord, member: TeamMember, cancel: Cancel, reason: string, retire = true) => Effect.gen(function* () {
-    const current = teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
-    // quarantine is terminal for service handling: its requests and notices stay fenced and it never becomes missing
-    if (current?.state === "quarantined") return;
-    if (current && current.state !== "missing" && current.state !== "retired") teamStore.markMissing(binding, member.threadId);
-    const owned = requests.requests(binding.projectId, member.threadId).filter(request => request.kind === "review" &&
-      (request.id.startsWith("team-review:") || request.id.startsWith("team-ready:")) &&
-      (["prepared", "sending", "waiting", "uncertain"].includes(request.state) || request.state === "failed" && !request.failureAcknowledged));
-    for (const request of owned) {
-      const failed = request.state === "failed" ? {...request, error: request.error ?? reason} : {...request, state: "failed" as const, error: reason};
-      if (request.state !== "failed" || !request.error) requests.saveRequest(failed);
-      serviceAttention(binding, member.threadId, failed, reason);
-    }
-    for (const request of teamStore.unresolvedRequests(binding).filter(value => value.memberThreadId === member.threadId &&
-      (value.requestId.startsWith("team-review:") || value.requestId.startsWith("team-ready:"))))
-      teamStore.settleRequest(binding, request.requestId);
-    if (retire) yield* retireHelper(binding, member.threadId, cancel);
+    // the member state, its closed requests, their service events and the settled fences commit together
+    const lost = yield* transaction(Effect.gen(function* () {
+      const current = (yield* teamStore.snapshot(binding)).members.find(value => value.threadId === member.threadId);
+      // quarantine is terminal for service handling: its requests and notices stay fenced and it never becomes missing
+      if (current?.state === "quarantined") return false;
+      if (current && current.state !== "missing" && current.state !== "retired") yield* teamStore.markMissing(binding, member.threadId);
+      const owned = (yield* requests.requests(binding.projectId, member.threadId)).filter(request => request.kind === "review" &&
+        (request.id.startsWith("team-review:") || request.id.startsWith("team-ready:")) &&
+        (["prepared", "sending", "waiting", "uncertain"].includes(request.state) || request.state === "failed" && !request.failureAcknowledged));
+      for (const request of owned) {
+        const failed = request.state === "failed" ? {...request, error: request.error ?? reason} : {...request, state: "failed" as const, error: reason};
+        if (request.state !== "failed" || !request.error) yield* requests.saveRequest(failed);
+        yield* serviceAttention(binding, member.threadId, failed, reason);
+      }
+      for (const request of (yield* teamStore.unresolvedRequests(binding)).filter(value => value.memberThreadId === member.threadId &&
+        (value.requestId.startsWith("team-review:") || value.requestId.startsWith("team-ready:"))))
+        yield* teamStore.settleRequest(binding, request.requestId);
+      return true;
+    }));
+    if (lost && retire) yield* retireHelper(binding, member.threadId, cancel);
   });
 
   const readMemberProjection = (binding: BindingRecord, member: TeamMember, cancel: Cancel, observeOnly = false) => Effect.gen(function* () {
     if ((yield* cancelled(cancel)) || !(yield* consumeReadBudget(binding))) return null;
     // the member can change during the awaited read (for example a root quarantine); a lost conversation
     // only applies to the exact member state and epoch that was read
-    const unchanged = () => memberUnchanged(binding, member);
+    const unchanged = memberUnchanged(binding, member);
     const read = yield* Effect.exit(Effect.gen(function* () {
       const snapshot = yield* (cancel === undefined ? t3.projection(member.threadId)
         : Effect.raceFirst(t3.projection(member.threadId), Effect.andThen(Deferred.await(cancel), Effect.fail(new Cancelled()))));
       const value = snapshot.projection;
       if (value.thread.id !== member.threadId) return null;
       if (value.thread.archivedAt != null || value.thread.deletedAt != null) {
-        if (!observeOnly && unchanged()) yield* loseMember(binding, member, cancel, "The helper conversation is archived or deleted; its check-in was closed and pending operational effects remain fenced.");
+        if (!observeOnly && (yield* unchanged)) yield* loseMember(binding, member, cancel, "The helper conversation is archived or deleted; its check-in was closed and pending operational effects remain fenced.");
         return null;
       }
       return value;
@@ -300,7 +308,7 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
     if (Exit.isSuccess(read)) return read.value;
     if (Cause.hasInterruptsOnly(read.cause)) return yield* Effect.failCause(read.cause as Cause.Cause<never>);
     const error = Option.getOrNull(Cause.findErrorOption(read.cause));
-    if (!observeOnly && error !== null && error._tag === "T3TransportError" && error.httpStatus === 404 && unchanged()) {
+    if (!observeOnly && error !== null && error._tag === "T3TransportError" && error.httpStatus === 404 && (yield* unchanged)) {
       yield* loseMember(binding, member, cancel, "The helper conversation returned native 404; its check-in was closed and pending operational effects remain fenced.");
     }
     return null;
@@ -315,19 +323,19 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
   const subset = (binding: BindingRecord, batch: SupervisorMonitorBatch, threads: SupervisorMonitorThreadBatch[]): SupervisorMonitorBatch | null =>
     scopedBatch({...batch, projectId: binding.projectId}, threads);
 
-  const hasOutstandingHelperCheckin = (binding: BindingRecord, targetThreadId: string): boolean =>
-    teamStore.unresolvedRequests(binding).some(request => request.requestId.startsWith("team-review:") &&
-      request.targets.some(target => target.targetThreadId === targetThreadId));
+  const hasOutstandingHelperCheckin = (binding: BindingRecord, targetThreadId: string) =>
+    Effect.map(teamStore.unresolvedRequests(binding), (unresolved) => unresolved.some(request => request.requestId.startsWith("team-review:") &&
+      request.targets.some(target => target.targetThreadId === targetThreadId)));
 
-  const rootOwnedBatch = (binding: BindingRecord, batch: SupervisorMonitorBatch, threads: readonly ThreadInfo[]): SupervisorMonitorBatch | null => {
+  const rootOwnedBatch = (binding: BindingRecord, batch: SupervisorMonitorBatch, threads: readonly ThreadInfo[]) => transaction(Effect.gen(function* () {
     const parents = parentById(binding, threads);
     if (!parents) return null;
-    return subset(binding, batch, batch.threads.filter(monitored =>
-      teamStore.coverage(binding, monitored.threadId, parents).state === "root"));
-  };
+    return subset(binding, batch, yield* Effect.filter(batch.threads, (monitored) =>
+      Effect.map(teamStore.coverage(binding, monitored.threadId, parents), (coverage) => coverage.state === "root")));
+  }));
 
-  const partition = (binding: BindingRecord, threads: readonly ThreadInfo[], batch: SupervisorMonitorBatch | null): SupervisorTeamPartition => {
-    const snapshot = teamStore.snapshot(binding);
+  const partition = (binding: BindingRecord, threads: readonly ThreadInfo[], batch: SupervisorMonitorBatch | null) => transaction(Effect.gen(function* (): Effect.fn.Return<SupervisorTeamPartition, SupervisionStoreError> {
+    const snapshot = yield* teamStore.snapshot(binding);
     const rootEvents = snapshot.events.filter(event => event.acknowledgedAt === null && event.kind !== "assignment_handover_completed" &&
       (event.severity === "attention" || event.severity === "result")).slice(-50);
     if (!batch) return {rootBatch: null, helperBatches: [], rootEvents};
@@ -338,10 +346,10 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
     const helpers = new Map<string, {memberEpoch: number; targets: TeamRequestTarget[]; threads: SupervisorMonitorThreadBatch[]}>();
     for (const monitored of batch.threads) {
       if (!parents.has(monitored.threadId)) {rootThreads.push({...monitored, teamCoverageState: "unavailable"});continue;}
-      const coverage = teamStore.coverage(binding, monitored.threadId, parents);
-      const actor = coverage.state === "assigned" ? teamStore.resolveActor(binding, coverage.actorThreadId, coverage.memberEpoch ?? undefined) : null;
+      const coverage = yield* teamStore.coverage(binding, monitored.threadId, parents);
+      const actor = coverage.state === "assigned" ? yield* teamStore.resolveActor(binding, coverage.actorThreadId, coverage.memberEpoch ?? undefined) : null;
       if (coverage.state === "root") {rootThreads.push({...monitored, teamCoverageState: "root"});continue;}
-      if ((coverage.state === "transferring" || coverage.state === "unavailable") && !hasOutstandingHelperCheckin(binding, monitored.threadId)) {
+      if ((coverage.state === "transferring" || coverage.state === "unavailable") && !(yield* hasOutstandingHelperCheckin(binding, monitored.threadId))) {
         rootThreads.push({...monitored, teamCoverageState: coverage.state});continue;
       }
       if (coverage.state !== "assigned" || !actor || actor.role !== "helper" || coverage.memberEpoch === null || coverage.assignmentRootThreadId === null || coverage.assignmentEpoch === null) continue;
@@ -355,96 +363,99 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
     const hasRootOwnedActivity = rootThreads.some(thread => thread.teamCoverageState === "root");
     const rootBatch = hasRootOwnedActivity || rootEvents.length ? subset(binding, batch, rootThreads) : null;
     return {rootBatch, helperBatches, rootEvents};
-  };
+  }));
 
-  const hasInflightEffects = (binding: BindingRecord): boolean => {
-    const snapshot = teamStore.snapshot(binding);
-    return teamStore.unresolvedRequests(binding).length > 0 ||
+  const pendingRequest = (binding: BindingRecord) => (member: TeamMember) => Effect.map(requests.pending(binding.projectId, member.threadId), (request) => request !== null);
+  const hasInflightEffects = (binding: BindingRecord) => transaction(Effect.gen(function* () {
+    const snapshot = yield* teamStore.snapshot(binding);
+    return (yield* teamStore.unresolvedRequests(binding)).length > 0 ||
       snapshot.notifications.some(notification => !notificationClosed(notification) && ["sending", "uncertain"].includes(notification.state)) ||
-      snapshot.members.some(member => requests.pending(binding.projectId, member.threadId) !== null);
-  };
-  const hasBlockingWork = (binding: BindingRecord): boolean => {
-    const snapshot = teamStore.snapshot(binding);
+      (yield* Effect.findFirst(snapshot.members, pendingRequest(binding)))._tag === "Some";
+  }));
+  const hasBlockingWork = (binding: BindingRecord) => transaction(Effect.gen(function* () {
+    const snapshot = yield* teamStore.snapshot(binding);
     const members = new Map(snapshot.members.map(member => [member.threadId, member]));
     const hasUnsettledTransfer = snapshot.assignments.some(assignment => assignment.state === "transferring");
-    const hasUnresolvedEffect = teamStore.unresolvedRequests(binding).length > 0;
+    const hasUnresolvedEffect = (yield* teamStore.unresolvedRequests(binding)).length > 0;
     const hasPendingNotification = snapshot.notifications.some(notification => !notificationClosed(notification) &&
       (["sending", "uncertain", "delivered"].includes(notification.state) || members.get(notification.recipientThreadId)?.state === "ready" &&
         members.get(notification.recipientThreadId)?.epoch === notification.memberEpoch));
     const hasUnreviewedEvent = snapshot.events.some(event => event.acknowledgedAt === null && event.kind !== "assignment_handover_completed" &&
       (event.severity === "attention" || event.severity === "result"));
     if (hasUnsettledTransfer || hasUnresolvedEffect || hasPendingNotification || hasUnreviewedEvent) return true;
-    return snapshot.members.some(member => member.state === "registering" ||
-      requests.pending(binding.projectId, member.threadId) !== null);
-  };
+    return (yield* Effect.findFirst(snapshot.members, (member) => member.state === "registering" ? Effect.succeed(true) : pendingRequest(binding)(member)))._tag === "Some";
+  }));
 
   const validHelper = (member: TeamMember, binding: BindingRecord, projection: Projection): boolean =>
     projection.thread.id === member.threadId && projection.thread.projectId === binding.projectId &&
       projection.thread.lineage.relationshipToParent === "subagent" && projection.thread.lineage.parentThreadId === binding.threadId &&
       !projection.thread.archivedAt && !projection.thread.deletedAt;
 
-  const helperRequest = (binding: BindingRecord, member: TeamMember): ConversationRequest | null => requests.pending(binding.projectId, member.threadId);
+  const helperRequest = (binding: BindingRecord, member: TeamMember) => requests.pending(binding.projectId, member.threadId);
 
-  const currentRequest = (binding: BindingRecord, requestId: string): TeamRequest | null =>
-    teamStore.unresolvedRequests(binding).find(request => request.requestId === requestId && request.requestId.startsWith("team-review:")) ?? null;
+  const currentRequest = (binding: BindingRecord, requestId: string) => Effect.map(teamStore.unresolvedRequests(binding), (unresolved): TeamRequest | null =>
+    unresolved.find(request => request.requestId === requestId && request.requestId.startsWith("team-review:")) ?? null);
 
-  const currentTargets = (binding: BindingRecord, member: TeamMember, request: TeamRequest, threads: readonly ThreadInfo[]): boolean => {
+  const currentTargets = (binding: BindingRecord, member: TeamMember, request: TeamRequest, threads: readonly ThreadInfo[]) => Effect.gen(function* () {
     const parents = parentById(binding, threads);
     if (!parents || request.memberThreadId !== member.threadId || request.memberEpoch !== member.epoch) return false;
     if (!request.targets.length) return false;
     const targetIds = request.targets.map(target => target.targetThreadId).sort();
-    const pending = requests.pending(binding.projectId, member.threadId);
+    const pending = yield* requests.pending(binding.projectId, member.threadId);
     if (!pending?.batch || JSON.stringify([...pending.batch.threads.map(thread => thread.threadId)].sort()) !== JSON.stringify(targetIds)) return false;
-    return request.targets.every(target => {
-      const coverage = teamStore.coverage(binding, target.targetThreadId, parents);
-      return coverage.state === "assigned" && coverage.actorThreadId === member.threadId && coverage.memberEpoch === member.epoch &&
-        coverage.assignmentRootThreadId === target.assignmentRootThreadId && coverage.assignmentEpoch === target.assignmentEpoch;
-    });
-  };
+    for (const target of request.targets) {
+      const coverage = yield* teamStore.coverage(binding, target.targetThreadId, parents);
+      if (!(coverage.state === "assigned" && coverage.actorThreadId === member.threadId && coverage.memberEpoch === member.epoch &&
+        coverage.assignmentRootThreadId === target.assignmentRootThreadId && coverage.assignmentEpoch === target.assignmentEpoch)) return false;
+    }
+    return true;
+  });
 
   // a helper delivery admitted by the transport only while the main is not stopped and the member keeps the exact
   // state and epoch read before; the transport evaluates it with the admission guard right before its receipt and POST
-  const deliveryAuthority = (binding: BindingRecord, member: TeamMember) => (guard: GateGuard) =>
-    !stoppedWith(guard, binding.mainThreadId) && memberUnchanged(binding, member);
+  const deliveryAuthority = (binding: BindingRecord, member: TeamMember) => (guard: GateGuard) => Effect.gen(function* () {
+    return !(yield* stoppedWith(guard, binding.mainThreadId)) && (yield* memberUnchanged(binding, member));
+  });
 
-  const reconcileRequest = (binding: BindingRecord, member: TeamMember, threads: readonly ThreadInfo[], cancel: Cancel, observeOnly = false): Effect.Effect<void> => Effect.gen(function* () {
-    const request = helperRequest(binding, member);
+  const reconcileRequest = (binding: BindingRecord, member: TeamMember, threads: readonly ThreadInfo[], cancel: Cancel, observeOnly = false): Effect.Effect<void, TeamRuntimeError> => Effect.gen(function* () {
+    const request = yield* helperRequest(binding, member);
     if (!request || request.id.startsWith("team-note:") || !request.id.startsWith("team-review:")) return;
-    const teamRequest = currentRequest(binding, request.id);
+    const teamRequest = yield* currentRequest(binding, request.id);
     if (!teamRequest || teamRequest.memberThreadId !== member.threadId) return;
     const projection = yield* readMemberProjection(binding, member, cancel, observeOnly);
     if (!projection) return;
-    if (!validHelper(member, binding, projection) || !teamStore.resolveActor(binding, member.threadId, teamRequest.memberEpoch)) return;
+    if (!validHelper(member, binding, projection) || !(yield* teamStore.resolveActor(binding, member.threadId, teamRequest.memberEpoch))) return;
     const message = yield* firstMatch(binding, request.messageId, request.text, projection, member.threadId);
     const run = projection.runs.find(item => item.threadId === member.threadId && (item.id === message?.runId || item.id === request.runId || item.userMessageId === message?.id));
     if (!run) {
-      if (yield* unresolvedDeliveryTooLong(request)) serviceUnresolvedDelivery(binding, member.threadId, request);
+      if (yield* unresolvedDeliveryTooLong(request)) yield* serviceUnresolvedDelivery(binding, member.threadId, request);
       if (observeOnly) {yield* observeUndeliveredRequest(binding, member, request, teamRequest.requestId, cancel);return;}
       if (["prepared", "uncertain", "waiting"].includes(request.state)) yield* dispatchHelperRequest(binding, member, request, teamRequest, threads, cancel);
-      else if (request.state === "sending") requests.saveRequest({...request, state: "uncertain", error: "The helper request may have been accepted; its original native identity is retained."});
+      else if (request.state === "sending") yield* requests.saveRequest({...request, state: "uncertain", error: "The helper request may have been accepted; its original native identity is retained."});
       return;
     }
-    if (request.runId !== run.id) {request.runId = run.id;requests.saveRequest(request);}
+    if (request.runId !== run.id) {request.runId = run.id;yield* requests.saveRequest(request);}
     if (!terminal.has(run.status)) return;
     // the message was matched against the receipt's proven native rendering, so its text is not compared again
     const completed = run.status === "completed" && message !== undefined && run.userMessageId === message.id &&
       !projection.messages.some(item => item.runId === run.id && item.role === "user" && item.id !== message.id && typeof item.senderThreadId !== "string") &&
       lastAssistantText(projection, run.id)?.includes(request.completionMarker) === true &&
       hasCompletionMarker(lastAssistantText(projection, run.id) ?? "", request.completionMarker);
-    const current = completed && currentTargets(binding, member, teamRequest, threads);
-    const state = completed ? "completed" as const : "failed" as const;
-    const error = current ? null : completed ? "Coverage changed during this check-in; pending activity remains for its current owner." : "The helper check-in ended without its exact completion marker; pending activity is retained.";
-    const resultRequest = {...request, state, error};
-    store.store.transaction(() => {
-      if (current && request.batch) monitor.acknowledgeInTransaction(request.batch);
-      requests.saveRequest(resultRequest);
-      teamStore.settleRequest(binding, teamRequest.requestId);
+    const resultRequest = yield* transaction(Effect.gen(function* () {
+      const current = completed && (yield* currentTargets(binding, member, teamRequest, threads));
+      const state = completed ? "completed" as const : "failed" as const;
+      const error = current ? null : completed ? "Coverage changed during this check-in; pending activity remains for its current owner." : "The helper check-in ended without its exact completion marker; pending activity is retained.";
+      const resultRequest = {...request, state, error};
+      if (current && request.batch) yield* monitor.acknowledge(request.batch);
+      yield* requests.saveRequest(resultRequest);
+      yield* teamStore.settleRequest(binding, teamRequest.requestId);
       if (current && request.teamNotificationIds) for (const notificationId of request.teamNotificationIds) {
-        const notice = teamStore.snapshot(binding).notifications.find(value => value.id === notificationId);
-        if (notice?.kind === "note") teamStore.acknowledgeNotification(binding, member.threadId, notificationId, member.epoch);
+        const notice = (yield* teamStore.snapshot(binding)).notifications.find(value => value.id === notificationId);
+        if (notice?.kind === "note") yield* teamStore.acknowledgeNotification(binding, member.threadId, notificationId, member.epoch);
       }
-    });
-    if (!current && !completed) serviceAttention(binding, member.threadId, resultRequest,
+      return {request: resultRequest, current};
+    }));
+    if (!resultRequest.current && !completed) yield* serviceAttention(binding, member.threadId, resultRequest.request,
       "The helper check-in failed without an exact native completion marker. Review the failed request and use the team retry action before another check-in.");
   });
 
@@ -452,19 +463,19 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
   // transport records a receipt first), including one interrupted between a revoked send and its failure. It fails
   // and settles only its own fence; anything with a receipt keeps its fence and nothing is resent.
   const failNeverPostedRequests = (binding: BindingRecord, member: TeamMember) => Effect.gen(function* () {
-    const unresolved = new Set(teamStore.unresolvedRequests(binding).map(value => value.requestId));
-    for (const request of requests.requests(binding.projectId, member.threadId)) {
+    const unresolved = new Set((yield* teamStore.unresolvedRequests(binding)).map(value => value.requestId));
+    for (const request of yield* requests.requests(binding.projectId, member.threadId)) {
       if (request.kind !== "review" || !(request.id.startsWith("team-review:") || request.id.startsWith("team-ready:")) ||
         (transport ? yield* transport.receiptText(binding, request.messageId) : undefined) !== null) continue;
       const open = ["prepared", "sending", "waiting", "uncertain"].includes(request.state);
       if (!open && !(request.state === "failed" && unresolved.has(request.id))) continue;
       const failed = open ? {...request, state: "failed" as const,
         error: "The helper lost its authority before this request was posted; nothing was posted and pending activity is retained."} : request;
-      store.store.transaction(() => {
-        if (open) requests.saveRequest(failed);
-        if (unresolved.has(request.id)) teamStore.settleRequest(binding, request.id);
-      });
-      if (open) serviceAttention(binding, member.threadId, failed, "A quarantined helper's request was never posted. Pending activity is retained; its other fences remain.");
+      yield* transaction(Effect.gen(function* () {
+        if (open) yield* requests.saveRequest(failed);
+        if (unresolved.has(request.id)) yield* teamStore.settleRequest(binding, request.id);
+      }));
+      if (open) yield* serviceAttention(binding, member.threadId, failed, "A quarantined helper's request was never posted. Pending activity is retained; its other fences remain.");
     }
   });
 
@@ -476,41 +487,41 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
     let request = initial;
     if (request.state === "sending") {
       request = {...request, state: "uncertain", error: "The helper request may have been accepted; its original native identity is retained."};
-      requests.saveRequest(request);
+      yield* requests.saveRequest(request);
     }
     if (!transport || !(yield* consumeReadBudget(binding))) return;
     const input = {threadId: member.threadId, commandId: `supervisor-review:${request.id}`, messageId: request.messageId, text: request.text};
     if ((yield* transport.reconcileDelivery(binding, input, cancel)) !== "rejected") return;
     const failed = {...request, state: "failed" as const, failureAcknowledged: true,
       error: "Supervision was stopped for this chat; the native delivery of this helper request was rejected, so it was not delivered."};
-    store.store.transaction(() => {
-      requests.saveRequest(failed);
-      if (teamStore.unresolvedRequests(binding).some(value => value.requestId === teamRequestId)) teamStore.settleRequest(binding, teamRequestId);
-    });
+    yield* transaction(Effect.gen(function* () {
+      yield* requests.saveRequest(failed);
+      if ((yield* teamStore.unresolvedRequests(binding)).some(value => value.requestId === teamRequestId)) yield* teamStore.settleRequest(binding, teamRequestId);
+    }));
   });
 
   const reconcileStopped = (binding: BindingRecord, threads: readonly ThreadInfo[], cancel?: Cancel) => Effect.gen(function* () {
     // each stopped cycle observes with its own bounded read budget, so a delayed native outcome is still seen later
     yield* startCycle(binding);
-    let snapshot = teamStore.snapshot(binding);
+    let snapshot = yield* teamStore.snapshot(binding);
     for (const member of snapshot.members) yield* failNeverPostedRequests(binding, member);
     for (const member of snapshot.members.filter(value => value.state === "missing" || value.state === "retired"))
       yield* loseMember(binding, member, cancel, `The helper is already ${member.state}; its check-in was closed and pending operational effects remain fenced.`, false);
-    snapshot = teamStore.snapshot(binding);
-    for (let index = 0; index < snapshot.notifications.length && !(yield* cancelled(cancel)); index++) yield* reconcileNotifications(binding, teamStore.snapshot(binding), cancel, true);
-    for (const member of teamStore.snapshot(binding).members.filter(value => value.state === "ready" || value.state === "registering")) {
+    snapshot = yield* teamStore.snapshot(binding);
+    for (let index = 0; index < snapshot.notifications.length && !(yield* cancelled(cancel)); index++) yield* reconcileNotifications(binding, yield* teamStore.snapshot(binding), cancel, true);
+    for (const member of (yield* teamStore.snapshot(binding)).members.filter(value => value.state === "ready" || value.state === "registering")) {
       if (yield* cancelled(cancel)) return;
-      const request = helperRequest(binding, member);
+      const request = yield* helperRequest(binding, member);
       if (!request) continue;
       if (request.id.startsWith("team-ready:")) yield* reconcileReadiness(binding, member, request, cancel, true);
       else if (member.state === "ready") yield* reconcileRequest(binding, member, threads, cancel, true);
     }
-    const transfers = teamStore.snapshot(binding).assignments.filter(assignment => assignment.state === "transferring").length;
+    const transfers = (yield* teamStore.snapshot(binding)).assignments.filter(assignment => assignment.state === "transferring").length;
     for (let index = 0; index < transfers; index++) yield* completeTransfer(binding);
   });
 
   const reconcile = (binding: BindingRecord, threads: readonly ThreadInfo[], cancel?: Cancel) => Effect.gen(function* () {
-    let snapshot = teamStore.snapshot(binding);
+    let snapshot = yield* teamStore.snapshot(binding);
     for (const member of snapshot.members.filter(value => value.state === "missing" || value.state === "retired"))
       yield* loseMember(binding, member, cancel, `The helper is already ${member.state}; its check-in was closed and pending operational effects remain fenced.`);
     for (const member of snapshot.members.filter(value => value.state === "quarantined")) {
@@ -518,18 +529,18 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
       yield* retireHelper(binding, member.threadId, cancel);
     }
     yield* reconcileNotifications(binding, snapshot, cancel);
-    snapshot = teamStore.snapshot(binding);
+    snapshot = yield* teamStore.snapshot(binding);
     const members = snapshot.members.filter(member => member.state === "ready" || member.state === "registering");
     if (!members.length) {yield* completeTransfer(binding);return;}
     const offset = yield* offsetOf(helperOffset, binding.threadId);
     const ordered = [...members.slice(offset % members.length), ...members.slice(0, offset % members.length)];
     for (const member of ordered) {
       if (yield* cancelled(cancel)) return;
-      const request = helperRequest(binding, member);
+      const request = yield* helperRequest(binding, member);
       if (request) {
         if (request.id.startsWith("team-ready:")) yield* reconcileReadiness(binding, member, request, cancel);
         else if (member.state === "ready") yield* reconcileRequest(binding, member, threads, cancel);
-      } else if (member.state === "registering" && !hasUnacknowledgedFailure(binding, member.threadId)) yield* startReadiness(binding, member, cancel);
+      } else if (member.state === "registering" && !(yield* hasUnacknowledgedFailure(binding, member.threadId))) yield* startReadiness(binding, member, cancel);
       yield* setOffset(helperOffset, binding.threadId, (members.indexOf(member) + 1) % members.length);
       yield* completeTransfer(binding);
       return;
@@ -540,46 +551,49 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
   const startReadiness = (binding: BindingRecord, member: TeamMember, cancel: Cancel) => Effect.gen(function* () {
     if (!transport) return;
     const now = yield* Clock.currentTimeMillis;
-    if (now - (requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
+    if (now - ((yield* requests.lastNotice(member.threadId)) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
     const readinessKey = fingerprint([binding.threadId, member.threadId, member.epoch]).slice(0, 24);
     const requestId = `team-ready:${readinessKey}:${yield* ids.uuid}`;
     const completionMarker = `Supervisor team readiness ${requestId} completed`;
     const operationId = `team-ready:${readinessKey}`;
     const text = `${helperRole}\nThis is the bounded service readiness check. Confirm that you understand the helper role and current root binding; do not inspect or guide operational children in this turn. Call direct alias t3-supervisor-workflows.supervision_team (or direct MCPX alias mcpx.mcpx_call_tool / mcp__mcpx__mcpx_call_tool with name "t3-supervisor-workflows__supervision_team" and arguments equal to the complete schema object) using action "ready" and exactly these arguments: supervisorThreadId=${JSON.stringify(member.threadId)}, bindingGeneration=${binding.generation}, memberEpoch=${member.epoch}, operationId=${JSON.stringify(operationId)}. Then finish with this exact marker: ${completionMarker}.`;
-    const request = requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: member.threadId,
+    const request = yield* requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: member.threadId,
       kind: "review", taskId: null, text, batch: null, completionMarker, teamMemberEpoch: member.epoch}, now);
     yield* dispatchReadiness(binding, member, request, cancel);
   });
 
+  // the sending mark and the first attempt's notice clock commit together
+  const markSending = (member: TeamMember, request: ConversationRequest, sentAt: number, attemptedAt: number) => transaction(Effect.gen(function* () {
+    yield* requests.saveRequest({...request, state: "sending", sentAt});
+    if (request.sentAt === null) yield* requests.noticeSent(member.threadId, attemptedAt);
+  }));
+
   const dispatchReadiness = (binding: BindingRecord, member: TeamMember, request: ConversationRequest, cancel: Cancel) => Effect.gen(function* () {
     if (!transport || !["prepared", "uncertain", "waiting"].includes(request.state)) return;
-    if (request.state === "prepared" && (yield* Clock.currentTimeMillis) - (requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
+    if (request.state === "prepared" && (yield* Clock.currentTimeMillis) - ((yield* requests.lastNotice(member.threadId)) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
     if (!(yield* consumeReadBudget(binding))) return;
     const attemptedAt = yield* Clock.currentTimeMillis;
     const sentAt = request.sentAt ?? attemptedAt;
-    store.store.transaction(() => {
-      requests.saveRequest({...request, state: "sending", sentAt});
-      if (request.sentAt === null) requests.noticeSent(member.threadId, attemptedAt);
-    });
+    yield* markSending(member, request, sentAt, attemptedAt);
     const result: SupervisorHelperSendResult = yield* transport.send(binding, {threadId: member.threadId, commandId: `supervisor-review:${request.id}`,
       messageId: request.messageId, text: request.text}, {cancel, authorized: deliveryAuthority(binding, member)});
     if (result === "waiting") {
       const waiting = {...request, state: "waiting" as const, sentAt, error: null};
-      requests.saveRequest(waiting);
-      if (yield* unresolvedDeliveryTooLong(waiting)) serviceUnresolvedDelivery(binding, member.threadId, waiting);
+      yield* requests.saveRequest(waiting);
+      if (yield* unresolvedDeliveryTooLong(waiting)) yield* serviceUnresolvedDelivery(binding, member.threadId, waiting);
     }
-    else if (result === "busy") requests.saveRequest({...request, state: request.sentAt === null ? "prepared" : "uncertain",
+    else if (result === "busy") yield* requests.saveRequest({...request, state: request.sentAt === null ? "prepared" : "uncertain",
       sentAt: request.sentAt, error: "The helper is busy or its delivery transport is unavailable; readiness keeps its identity and will wait."});
     else if (result === "rejected" || result === "revoked") {
       const failed = {...request, state: "failed" as const, sentAt, error: result === "revoked"
         ? "The helper lost its authority before the readiness delivery was posted; nothing was posted." : "T3 rejected the exact helper readiness delivery."};
-      requests.saveRequest(failed);
-      serviceAttention(binding, member.threadId, failed, "The helper readiness delivery was rejected. Review the failed request and use the team retry action before another readiness attempt.");
+      yield* requests.saveRequest(failed);
+      yield* serviceAttention(binding, member.threadId, failed, "The helper readiness delivery was rejected. Review the failed request and use the team retry action before another readiness attempt.");
     }
     else {
       const uncertain = {...request, state: "uncertain" as const, sentAt, error: "Helper readiness delivery is uncertain; its original native identity is retained."};
-      requests.saveRequest(uncertain);
-      if (yield* unresolvedDeliveryTooLong(uncertain)) serviceUnresolvedDelivery(binding, member.threadId, uncertain);
+      yield* requests.saveRequest(uncertain);
+      if (yield* unresolvedDeliveryTooLong(uncertain)) yield* serviceUnresolvedDelivery(binding, member.threadId, uncertain);
     }
   });
 
@@ -589,34 +603,38 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
     const message = yield* firstMatch(binding, request.messageId, request.text, projection, member.threadId);
     const run = projection.runs.find(item => item.threadId === member.threadId && (item.id === message?.runId || item.id === request.runId || item.userMessageId === message?.id));
     if (!run) {
-      if (yield* unresolvedDeliveryTooLong(request)) serviceUnresolvedDelivery(binding, member.threadId, request);
+      if (yield* unresolvedDeliveryTooLong(request)) yield* serviceUnresolvedDelivery(binding, member.threadId, request);
       if (observeOnly) {yield* observeUndeliveredRequest(binding, member, request, request.id, cancel);return;}
       if (["prepared", "uncertain", "waiting"].includes(request.state)) yield* dispatchReadiness(binding, member, request, cancel);
-      else if (request.state === "sending") requests.saveRequest({...request, state: "uncertain", error: "Helper readiness may have been accepted; its original native identity is retained."});
+      else if (request.state === "sending") yield* requests.saveRequest({...request, state: "uncertain", error: "Helper readiness may have been accepted; its original native identity is retained."});
       return;
     }
-    if (request.runId !== run.id) {request.runId = run.id;requests.saveRequest(request);}
+    if (request.runId !== run.id) {request.runId = run.id;yield* requests.saveRequest(request);}
     if (!terminal.has(run.status)) return;
     const finalText = lastAssistantText(projection, run.id) ?? "";
     const nativeComplete = run.status === "completed" && message !== undefined && run.userMessageId === message.id &&
       !projection.messages.some(item => item.runId === run.id && item.role === "user" && item.id !== message.id && typeof item.senderThreadId !== "string") &&
       hasCompletionMarker(finalText, request.completionMarker);
-    const current = teamStore.snapshot(binding).members.find(item => item.threadId === member.threadId);
-    const ready = Boolean(nativeComplete && request.teamMemberEpoch !== undefined && current?.state === "ready" && current.epoch === request.teamMemberEpoch + 1);
-    const failed = {...request, state: ready ? "completed" as const : "failed" as const,
-      error: ready ? null : "The readiness check-in ended without a confirmed native ready call and completion marker."};
-    requests.saveRequest(failed);
-    if (!ready) serviceAttention(binding, member.threadId, failed,
+    // the member read and the request's result are one block
+    const settled = yield* transaction(Effect.gen(function* () {
+      const current = (yield* teamStore.snapshot(binding)).members.find(item => item.threadId === member.threadId);
+      const ready = Boolean(nativeComplete && request.teamMemberEpoch !== undefined && current?.state === "ready" && current.epoch === request.teamMemberEpoch + 1);
+      const failed = {...request, state: ready ? "completed" as const : "failed" as const,
+        error: ready ? null : "The readiness check-in ended without a confirmed native ready call and completion marker."};
+      yield* requests.saveRequest(failed);
+      return {ready, failed};
+    }));
+    if (!settled.ready) yield* serviceAttention(binding, member.threadId, settled.failed,
       "The helper readiness check-in ended without its exact native ready evidence and completion marker. Review the failed request and use the team retry action before another readiness attempt.");
   });
 
   const completeTransfer = (binding: BindingRecord) => Effect.gen(function* () {
-    const transfers = teamStore.snapshot(binding).assignments.filter(assignment => assignment.state === "transferring");
+    const transfers = (yield* teamStore.snapshot(binding)).assignments.filter(assignment => assignment.state === "transferring");
     if (!transfers.length) return;
     const offset = (yield* offsetOf(transferOffset, binding.threadId)) % transfers.length;
     const assignment = transfers[offset]!;
-    try {teamStore.completeTransfer(binding, assignment.subtreeRootThreadId, assignment.epoch);}
-    catch { /* unresolved notifications or requests keep this transfer pending */ }
+    // unresolved notifications or requests keep this transfer pending
+    yield* teamStore.completeTransfer(binding, assignment.subtreeRootThreadId, assignment.epoch).pipe(Effect.asVoid, otherwise(undefined));
     yield* setOffset(transferOffset, binding.threadId, (offset + 1) % transfers.length);
   });
 
@@ -624,25 +642,17 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
     Effect.map(Clock.currentTimeMillis, (now) => now - notification.createdAt >= SUPERVISOR_MONITOR_COOLDOWN_MS);
 
   const updateNotificationDelivery = (binding: BindingRecord, notification: TeamNotification, state: "sending" | "delivered" | "uncertain") =>
-    Effect.map(Clock.currentTimeMillis, (now) => {
-      try {
-        teamStore.updateNotificationDelivery(binding, binding.threadId, notification.id, state, now, notification.deliveryAttempt ?? 0);
-        return true;
-      } catch { return false; }
-    });
+    Effect.flatMap(Clock.currentTimeMillis, (now) =>
+      teamStore.updateNotificationDelivery(binding, binding.threadId, notification.id, state, now, notification.deliveryAttempt ?? 0).pipe(Effect.as(true), otherwise(false)));
 
   const markNotificationRejected = (binding: BindingRecord, notification: TeamNotification,
-    reason = "The native webhook delivery was definitively rejected."): boolean => {
-    try {
-      teamStore.markNotificationRejected(binding, binding.threadId, notification.id, reason, notification.deliveryAttempt ?? 0);
-      return true;
-    } catch { return false; }
-  };
+    reason = "The native webhook delivery was definitively rejected.") =>
+    teamStore.markNotificationRejected(binding, binding.threadId, notification.id, reason, notification.deliveryAttempt ?? 0).pipe(Effect.as(true), otherwise(false));
 
-  const serviceNotificationAttention = (binding: BindingRecord, notification: TeamNotification): void => {
+  const serviceNotificationAttention = (binding: BindingRecord, notification: TeamNotification) => {
     const attempt = notification.deliveryAttempt ?? 0;
     const summary = "A helper handover notice has no visible completion marker after bounded reconciliation. Preserve its identity and handover fence; do not infer acknowledgment or retry with a new ID. The team read lists its exact notification and attempt.";
-    emitServiceAttention(binding,
+    return emitServiceAttention(binding,
       `helper-notification-unresolved:${fingerprint([binding.threadId, binding.generation, notification.id, attempt]).slice(0, 32)}`,
       notification.recipientThreadId, notification.assignmentRootThreadId ?? undefined, summary);
   };
@@ -667,7 +677,7 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
   // closure repeats the creation-time native check on the current projection: an attempt whose message has a
   // running, missing or marker-completed run is not closed by the review and keeps its own fence.
   const nativelyClosable = (binding: BindingRecord, projection: Projection, review: TeamNotification) => Effect.gen(function* () {
-    const notifications = teamStore.snapshot(binding).notifications;
+    const notifications = (yield* teamStore.snapshot(binding)).notifications;
     const closable: HandoverAttempt[] = [];
     for (const entry of review.reviewChain ?? []) {
       const member = notifications.find(value => value.id === entry.notificationId && value.deliveryAttempt === entry.deliveryAttempt);
@@ -685,18 +695,20 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
     if (evidence.completedRun || !evidence.runs.length || evidence.runs.some(item => !endedWithoutCompletion.has(item.status))) return false;
     const run = evidence.runs.find(item => item.id === notification.observedRun?.runId) ??
       [...evidence.runs].sort((left, right) => right.ordinal - left.ordinal)[0]!;
-    try {
-      teamStore.recordNotificationRun(binding, binding.threadId, notification.id, notification.deliveryAttempt ?? 0, {runId: run.id, status: run.status});
-    } catch { return false; }
     const attempt = notification.deliveryAttempt ?? 0;
-    emitServiceAttention(binding,
-      `helper-notification-interrupted:${fingerprint([binding.threadId, binding.generation, notification.id, attempt, run.id]).slice(0, 32)}`,
-      notification.recipientThreadId, notification.assignmentRootThreadId ?? undefined,
-      `A delivered helper handover notice's native run ended ${run.status} before confirming. Its effects are unknown: the handover stays fenced, the root keeps responsibility, and nothing was resent. Read the team for its exact notification, attempt and observed run, then use the root review_handover action to inspect all unresolved attempts, or consider reassignment or quarantine.`);
-    return true;
+    // the observed run and its service event are one block
+    return yield* transaction(Effect.gen(function* () {
+      if (!(yield* teamStore.recordNotificationRun(binding, binding.threadId, notification.id, attempt, {runId: run.id, status: run.status}).pipe(Effect.as(true), otherwise(false))))
+        return false;
+      yield* emitServiceAttention(binding,
+        `helper-notification-interrupted:${fingerprint([binding.threadId, binding.generation, notification.id, attempt, run.id]).slice(0, 32)}`,
+        notification.recipientThreadId, notification.assignmentRootThreadId ?? undefined,
+        `A delivered helper handover notice's native run ended ${run.status} before confirming. Its effects are unknown: the handover stays fenced, the root keeps responsibility, and nothing was resent. Read the team for its exact notification, attempt and observed run, then use the root review_handover action to inspect all unresolved attempts, or consider reassignment or quarantine.`);
+      return true;
+    }));
   });
 
-  const reconcileNotifications = (binding: BindingRecord, snapshot: SupervisorTeamSnapshot, cancel: Cancel, observeOnly = false): Effect.Effect<void> => Effect.gen(function* () {
+  const reconcileNotifications = (binding: BindingRecord, snapshot: SupervisorTeamSnapshot, cancel: Cancel, observeOnly = false): Effect.Effect<void, SupervisionStoreError> => Effect.gen(function* () {
     if (!transport) return;
     // while stopped only notices already being delivered are observed; a notice not yet attempted is never sent
     const candidates = snapshot.notifications.filter(notification => notification.state !== "acknowledged" && notification.state !== "superseded" && notification.state !== "failed" &&
@@ -712,12 +724,12 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
     const message: SupervisorHelperMessage = {threadId: member.threadId, commandId: messageId, messageId, text};
     const attempted = ["sending", "uncertain"].includes(notification.state) && (yield* transport.hasDelivery(binding, message));
     // membership can change during any await (for example a root quarantine), so eligibility is always re-read
-    const eligible = () => {
-      const current = teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
-      return current?.state === "ready" && current.epoch === notification.memberEpoch;
-    };
+    const eligible = Effect.map(teamStore.snapshot(binding), (current) => {
+      const recipient = current.members.find(value => value.threadId === member.threadId);
+      return recipient?.state === "ready" && recipient.epoch === notification.memberEpoch;
+    });
     // the transport records a receipt before any POST, so an attempted notice without one was never posted
-    const neverPosted = () => Effect.gen(function* () {
+    const neverPosted = Effect.gen(function* () {
       return ["sending", "uncertain"].includes(notification.state) && (yield* transport.receiptText(binding, messageId)) === null;
     });
     const neverPostedReason = "The notice was never posted: no delivery receipt exists and its recipient is no longer eligible.";
@@ -727,8 +739,10 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
       // a durable or native rejection of an attempted POST needs no helper read; reconcile it read-only so an
       // archived, deleted or no longer eligible helper cannot strand a definitely undelivered notice
       if (attempted && (yield* consumeReadBudget(binding)) &&
-        (yield* transport.reconcileDelivery(binding, message, cancel)) === "rejected") markNotificationRejected(binding, notification);
-      else if (!eligible() && (yield* neverPosted())) markNotificationRejected(binding, notification, neverPostedReason);
+        (yield* transport.reconcileDelivery(binding, message, cancel)) === "rejected") yield* markNotificationRejected(binding, notification);
+      else yield* transaction(Effect.gen(function* () {
+        if (!(yield* eligible) && (yield* neverPosted)) yield* markNotificationRejected(binding, notification, neverPostedReason);
+      }));
       return;
     }
     const visible = (yield* firstMatch(binding, messageId, text, projection, member.threadId)) !== undefined;
@@ -742,16 +756,16 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
         yield* Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
           const closable = notification.reviewOf ? yield* nativelyClosable(binding, projection, notification) : [];
-          teamStore.acknowledgeNotificationRun(binding, binding.threadId, notification.id, notification.deliveryAttempt, completedRunId, now, closable);
+          yield* teamStore.acknowledgeNotificationRun(binding, binding.threadId, notification.id, notification.deliveryAttempt, completedRunId, now, closable);
         }).pipe(otherwise(undefined));
       }
       else if (notification.resolvedByReview) return;
       else if (yield* notificationRunEnded(binding, projection, notification)) return;
-      else if (yield* notificationNeedsAttention(notification)) serviceNotificationAttention(binding, notification);
+      else if (yield* notificationNeedsAttention(notification)) yield* serviceNotificationAttention(binding, notification);
       return;
     }
     if (notification.state === "delivered") {
-      if (yield* notificationNeedsAttention(notification)) serviceNotificationAttention(binding, notification);
+      if (yield* notificationNeedsAttention(notification)) yield* serviceNotificationAttention(binding, notification);
       return;
     }
     // the transport durably records an attempt before POST. With a receipt, a review is never sent again:
@@ -760,19 +774,25 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
     if (notification.kind === "handover_review" && attempted) {
       if (!(yield* consumeReadBudget(binding))) return;
       const outcome = yield* transport.reconcileDelivery(binding, message, cancel);
-      if (outcome === "rejected") markNotificationRejected(binding, notification);
-      else if (yield* notificationNeedsAttention(notification)) serviceNotificationAttention(binding, notification);
+      if (outcome === "rejected") yield* markNotificationRejected(binding, notification);
+      else if (yield* notificationNeedsAttention(notification)) yield* serviceNotificationAttention(binding, notification);
       return;
     }
-    if (!eligible()) {
-      if (yield* neverPosted()) markNotificationRejected(binding, notification, neverPostedReason);
+    if (!(yield* eligible)) {
+      yield* transaction(Effect.gen(function* () {
+        if (yield* neverPosted) yield* markNotificationRejected(binding, notification, neverPostedReason);
+      }));
       return;
     }
     if (observeOnly) {
       // a stop supersedes a notice that was never posted; an attempted one is only reconciled read-only from its receipt
-      if (yield* neverPosted()) markNotificationRejected(binding, notification, "Supervision was stopped for this chat before this notice was posted; it was not posted.");
-      else if (attempted && (yield* consumeReadBudget(binding)) &&
-        (yield* transport.reconcileDelivery(binding, message, cancel)) === "rejected") markNotificationRejected(binding, notification);
+      if (yield* transaction(Effect.gen(function* () {
+        if (!(yield* neverPosted)) return false;
+        yield* markNotificationRejected(binding, notification, "Supervision was stopped for this chat before this notice was posted; it was not posted.");
+        return true;
+      }))) return;
+      if (attempted && (yield* consumeReadBudget(binding)) &&
+        (yield* transport.reconcileDelivery(binding, message, cancel)) === "rejected") yield* markNotificationRejected(binding, notification);
       return;
     }
     if (!(yield* consumeReadBudget(binding))) return;
@@ -780,31 +800,33 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
     if (!(yield* updateNotificationDelivery(binding, notification, "sending"))) return;
     const result = yield* transport.send(binding, {threadId: member.threadId,
       commandId: `supervisor-team-notice:${notification.id}:attempt:${notification.deliveryAttempt ?? 0}`,
-      messageId, text}, {cancel, authorized: (guard) => !stoppedWith(guard, binding.mainThreadId) && eligible()});
-    requests.noticeSent(member.threadId, yield* Clock.currentTimeMillis);
+      messageId, text}, {cancel, authorized: (guard) => Effect.gen(function* () {
+        return !(yield* stoppedWith(guard, binding.mainThreadId)) && (yield* eligible);
+      })});
+    yield* requests.noticeSent(member.threadId, yield* Clock.currentTimeMillis);
     if (result !== "waiting") {
       if (result === "rejected") {
-        markNotificationRejected(binding, notification);
+        yield* markNotificationRejected(binding, notification);
       } else if (result === "revoked") {
-        markNotificationRejected(binding, notification, (yield* stopped(binding))
+        yield* markNotificationRejected(binding, notification, (yield* stopped(binding))
           ? "Supervision was stopped for this chat before this notice was posted; it was not posted." : neverPostedReason);
       } else {
         if (!(yield* updateNotificationDelivery(binding, notification, "uncertain"))) return;
-        if (yield* notificationNeedsAttention(notification)) serviceNotificationAttention(binding, notification);
+        if (yield* notificationNeedsAttention(notification)) yield* serviceNotificationAttention(binding, notification);
       }
       return;
     }
     const fresh = yield* readMemberProjection(binding, member, cancel);
     if (!fresh) {
       if (!(yield* updateNotificationDelivery(binding, notification, "uncertain"))) return;
-      if (yield* notificationNeedsAttention(notification)) serviceNotificationAttention(binding, notification);
+      if (yield* notificationNeedsAttention(notification)) yield* serviceNotificationAttention(binding, notification);
       return;
     }
     if ((yield* firstMatch(binding, messageId, text, fresh, member.threadId)) !== undefined)
       yield* updateNotificationDelivery(binding, notification, "delivered");
     else {
       if (!(yield* updateNotificationDelivery(binding, notification, "uncertain"))) return;
-      if (yield* notificationNeedsAttention(notification)) serviceNotificationAttention(binding, notification);
+      if (yield* notificationNeedsAttention(notification)) yield* serviceNotificationAttention(binding, notification);
     }
   });
 
@@ -812,39 +834,47 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
     if (!transport || !batches.length || (yield* stopped(binding))) return;
     const offset = yield* offsetOf(helperOffset, binding.threadId);
     const ordered = [...batches.slice(offset % batches.length), ...batches.slice(0, offset % batches.length)];
-    const eligible = ordered.filter(candidate => !hasUnacknowledgedFailure(binding, candidate.actorThreadId) &&
-      !requests.pending(binding.projectId, candidate.actorThreadId) &&
-      !teamStore.unresolvedRequests(binding).some(request => request.memberThreadId === candidate.actorThreadId));
+    const eligible = yield* transaction(Effect.filter(ordered, (candidate) => Effect.gen(function* () {
+      return !(yield* hasUnacknowledgedFailure(binding, candidate.actorThreadId)) &&
+        !(yield* requests.pending(binding.projectId, candidate.actorThreadId)) &&
+        !(yield* teamStore.unresolvedRequests(binding)).some(request => request.memberThreadId === candidate.actorThreadId);
+    })));
     // a helper none of whose targets fits a check-in yields this call to the next eligible helper; any other stop ends it
     for (const batch of eligible) if ((yield* runSelectedHelperBatch(binding, threads, batches, batch, cancel)) !== "unfittable") return;
   });
 
+  // whether every target of the batch is still assigned to the member at its exact epochs
+  const batchCovered = (binding: BindingRecord, member: TeamMember, batch: SupervisorTeamHelperBatch, parents: Map<string, string | null>) => Effect.gen(function* () {
+    for (const target of batch.targets) {
+      const coverage = yield* teamStore.coverage(binding, target.targetThreadId, parents);
+      if (coverage.state !== "assigned" || coverage.actorThreadId !== member.threadId || coverage.memberEpoch !== member.epoch ||
+        coverage.assignmentRootThreadId !== target.assignmentRootThreadId || coverage.assignmentEpoch !== target.assignmentEpoch) return false;
+    }
+    return true;
+  });
+
   const runSelectedHelperBatch = (binding: BindingRecord, threads: readonly ThreadInfo[], batches: readonly SupervisorTeamHelperBatch[],
-    batch: SupervisorTeamHelperBatch, cancel: Cancel) => Effect.gen(function* (): Effect.fn.Return<"prepared" | "unfittable" | "stopped"> {
+    batch: SupervisorTeamHelperBatch, cancel: Cancel) => Effect.gen(function* (): Effect.fn.Return<"prepared" | "unfittable" | "stopped", TeamRuntimeError> {
     const parents = parentById(binding, threads);
     if (!parents) return "stopped";
-    const member = teamStore.snapshot(binding).members.find(value => value.threadId === batch.actorThreadId && value.state === "ready" && value.epoch === batch.memberEpoch);
-    if (!member || teamStore.resolveActor(binding, member.threadId, member.epoch)?.role !== "helper") return "stopped";
     const now = yield* Clock.currentTimeMillis;
-    if (now - (requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return "stopped";
-    for (const target of batch.targets) {
-      const coverage = teamStore.coverage(binding, target.targetThreadId, parents);
-      if (coverage.state !== "assigned" || coverage.actorThreadId !== member.threadId || coverage.memberEpoch !== member.epoch ||
-        coverage.assignmentRootThreadId !== target.assignmentRootThreadId || coverage.assignmentEpoch !== target.assignmentEpoch) return "stopped";
-    }
+    // the member, actor, notice clock and coverage reads before the helper read are one block
+    const member = yield* transaction(Effect.gen(function* () {
+      const member = (yield* teamStore.snapshot(binding)).members.find(value => value.threadId === batch.actorThreadId && value.state === "ready" && value.epoch === batch.memberEpoch);
+      if (!member || (yield* teamStore.resolveActor(binding, member.threadId, member.epoch))?.role !== "helper") return null;
+      if (now - ((yield* requests.lastNotice(member.threadId)) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return null;
+      return (yield* batchCovered(binding, member, batch, parents)) ? member : null;
+    }));
+    if (!member) return "stopped";
     const projection = yield* readMemberProjection(binding, member, cancel);
     if (!projection) return "stopped";
     if (!validHelper(member, binding, projection)) return "stopped";
     const currentParents = parentById(binding, threads);
-    if (!currentParents || batch.targets.some(target => {
-      const coverage = teamStore.coverage(binding, target.targetThreadId, currentParents);
-      return coverage.state !== "assigned" || coverage.actorThreadId !== member.threadId || coverage.memberEpoch !== member.epoch ||
-        coverage.assignmentRootThreadId !== target.assignmentRootThreadId || coverage.assignmentEpoch !== target.assignmentEpoch;
-    })) return "stopped";
+    if (!currentParents || !(yield* batchCovered(binding, member, batch, currentParents))) return "stopped";
     const requestId = `team-review:${yield* ids.uuid}`;
     const completionMarker = `Supervisor team check-in ${requestId} completed`;
     // a notice closed by a completed review is history; re-presenting it would replay its instruction
-    const deliveredNotifications = teamStore.snapshot(binding).notifications.filter(value => value.recipientThreadId === member.threadId &&
+    const deliveredNotifications = (yield* teamStore.snapshot(binding)).notifications.filter(value => value.recipientThreadId === member.threadId &&
       value.memberEpoch === member.epoch && value.state === "delivered" && !notificationClosed(value));
     const threadsById = new Map(threads.map(thread => [thread.id, thread]));
     const monitorThreadsById = new Map(batch.batch.threads.map(thread => [thread.threadId, thread]));
@@ -906,48 +936,46 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
       const bodyCount = unprocessableTargets.filter(value => value.reason === "body_too_large").length;
       const missingThreadCount = unprocessableTargets.length - renderedCount - bodyCount;
       const targetIds = unprocessableTargets.slice(0, 4).map(value => value.target.targetThreadId).join(", ");
-      emitServiceAttention(binding, eventId, member.threadId, unprocessableTargets[0]?.target.targetThreadId,
+      yield* emitServiceAttention(binding, eventId, member.threadId, unprocessableTargets[0]?.target.targetThreadId,
         `A one-target check-in, including the applicable notifications, exceeds the ${maxHelperCheckinRenderedLength}-code-unit rendered bound for ${renderedCount} assigned target(s) and the 64 KiB delivery body T3 records for proof for ${bodyCount}; ${missingThreadCount} target(s) lack a matching frozen monitor thread. No request was prepared for them, and their recorded monitor activity remains pending and unacknowledged. Root review is needed for: ${targetIds}${unprocessableTargets.length > 4 ? ", and others" : ""}.`);
     }
     const review = selectedReview;
     if (!review) return unprocessableTargets.length ? "unfittable" : "stopped";
     // a stop saved during the awaited helper read prepares no check-in: the stop check and the preparation are one
     // policy-dependent write in the admission section (plan 3.11)
-    const request = yield* gate.admit((guard) => Effect.sync(() => stoppedWith(guard, binding.mainThreadId) ? null : store.store.transaction(() => {
-      const value = requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: member.threadId,
+    const request = yield* gate.admit((guard) => transaction(Effect.gen(function* () {
+      if (yield* stoppedWith(guard, binding.mainThreadId)) return null;
+      const value = yield* requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: member.threadId,
         kind: "review", taskId: null, text: review.text, batch: review.batch, completionMarker,
         teamNotificationIds: review.notifications.map(item => item.id)}, now);
-      teamStore.recordRequest(binding, {requestId: value.id, memberThreadId: member.threadId, memberEpoch: member.epoch,
+      yield* teamStore.recordRequest(binding, {requestId: value.id, memberThreadId: member.threadId, memberEpoch: member.epoch,
         targets: review.targets, parentById: parents, now});
       return value;
     })));
     if (!request) return "stopped";
     yield* setOffset(helperOffset, binding.threadId, (batches.indexOf(batch) + 1) % batches.length);
-    yield* dispatchHelperRequest(binding, member, request, currentRequest(binding, request.id)!, threads, cancel);
+    yield* dispatchHelperRequest(binding, member, request, (yield* currentRequest(binding, request.id))!, threads, cancel);
     return "prepared";
   });
 
   const dispatchHelperRequest = (binding: BindingRecord, member: TeamMember, request: ConversationRequest, teamRequest: TeamRequest,
     threads: readonly ThreadInfo[], cancel: Cancel) => Effect.gen(function* () {
     if (!transport || !["prepared", "uncertain", "waiting"].includes(request.state)) return;
-    if (request.state === "prepared" && (yield* Clock.currentTimeMillis) - (requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
+    if (request.state === "prepared" && (yield* Clock.currentTimeMillis) - ((yield* requests.lastNotice(member.threadId)) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
     const input = {threadId: member.threadId, commandId: `supervisor-review:${request.id}`, messageId: request.messageId, text: request.text};
-    const current = currentTargets(binding, member, teamRequest, threads);
+    const current = yield* currentTargets(binding, member, teamRequest, threads);
     if (!current && !(yield* transport.hasDelivery(binding, input))) return;
     if (!(yield* consumeReadBudget(binding))) return;
     const attemptedAt = yield* Clock.currentTimeMillis;
     const sentAt = request.sentAt ?? attemptedAt;
-    store.store.transaction(() => {
-      requests.saveRequest({...request, state: "sending", sentAt});
-      if (request.sentAt === null) requests.noticeSent(member.threadId, attemptedAt);
-    });
+    yield* markSending(member, request, sentAt, attemptedAt);
     const result = yield* transport.send(binding, input, {cancel, authorized: deliveryAuthority(binding, member)});
     if (result === "waiting") {
       const waiting = {...request, state: "waiting" as const, sentAt, error: null};
-      requests.saveRequest(waiting);
-      if (yield* unresolvedDeliveryTooLong(waiting)) serviceUnresolvedDelivery(binding, member.threadId, waiting);
+      yield* requests.saveRequest(waiting);
+      if (yield* unresolvedDeliveryTooLong(waiting)) yield* serviceUnresolvedDelivery(binding, member.threadId, waiting);
     }
-    else if (result === "busy") requests.saveRequest({...request, state: request.sentAt === null ? "prepared" : "uncertain",
+    else if (result === "busy") yield* requests.saveRequest({...request, state: request.sentAt === null ? "prepared" : "uncertain",
       sentAt: request.sentAt, error: "The helper is busy or its delivery transport is unavailable; this request keeps its identity and will wait."});
     else if (result === "rejected" || result === "revoked") {
       // both prove this exact check-in was never delivered, so only its own request fence settles
@@ -955,36 +983,34 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
         ? "The helper lost its authority before this check-in was posted; nothing was posted and pending activity is retained."
         : "T3 rejected this exact helper delivery; pending activity is retained."};
       // failure and its own fence settle together, so a restart cannot leave one without the other
-      store.store.transaction(() => {
-        requests.saveRequest(failed);
-        teamStore.settleRequest(binding, teamRequest.requestId);
-      });
-      serviceAttention(binding, member.threadId, failed,
+      yield* transaction(Effect.gen(function* () {
+        yield* requests.saveRequest(failed);
+        yield* teamStore.settleRequest(binding, teamRequest.requestId);
+      }));
+      yield* serviceAttention(binding, member.threadId, failed,
         "T3 rejected the helper check-in delivery. Pending activity is retained; review the failed request and use the team retry action before another check-in.");
     } else {
       const uncertain = {...request, state: "uncertain" as const, sentAt, error: "Helper delivery is uncertain; its original native identity is retained."};
-      requests.saveRequest(uncertain);
-      teamStore.setRequestState(binding, binding.threadId, teamRequest.requestId, 0, "uncertain");
-      if (yield* unresolvedDeliveryTooLong(uncertain)) serviceUnresolvedDelivery(binding, member.threadId, uncertain);
+      yield* transaction(Effect.gen(function* () {
+        yield* requests.saveRequest(uncertain);
+        yield* teamStore.setRequestState(binding, binding.threadId, teamRequest.requestId, 0, "uncertain");
+      }));
+      if (yield* unresolvedDeliveryTooLong(uncertain)) yield* serviceUnresolvedDelivery(binding, member.threadId, uncertain);
     }
   });
 
   return SupervisorTeamRuntime.of({
     startCycle,
-    rootOwnedBatch: (binding, batch, threads) => Effect.sync(() => rootOwnedBatch(binding, batch, threads)),
-    partition: (binding, threads, batch) => Effect.sync(() => partition(binding, threads, batch)),
-    hasMembers: (binding) => Effect.sync(() => teamStore.snapshot(binding).members.some(member => member.state !== "retired")),
-    coordinatorPolicy: (binding) => Effect.sync(() => {
-      const snapshot = teamStore.snapshot(binding);
-      return {maxHelpersPerRoot: snapshot.settings.maxHelpersPerRoot,
-        readyHelpers: snapshot.members.filter(member => member.state === "ready").length,
-        registeringHelpers: snapshot.members.filter(member => member.state === "registering").length};
-    }),
-    acknowledgeRootEvents: (binding, eventIds) => Effect.sync(() => {
-      for (const eventId of eventIds) teamStore.acknowledgeEvent(binding, binding.threadId, eventId);
-    }),
-    hasInflightEffects: (binding) => Effect.sync(() => hasInflightEffects(binding)),
-    hasBlockingWork: (binding) => Effect.sync(() => hasBlockingWork(binding)),
+    rootOwnedBatch,
+    partition,
+    hasMembers: (binding) => Effect.map(teamStore.snapshot(binding), (snapshot) => snapshot.members.some(member => member.state !== "retired")),
+    coordinatorPolicy: (binding) => Effect.map(teamStore.snapshot(binding), (snapshot) => ({maxHelpersPerRoot: snapshot.settings.maxHelpersPerRoot,
+      readyHelpers: snapshot.members.filter(member => member.state === "ready").length,
+      registeringHelpers: snapshot.members.filter(member => member.state === "registering").length})),
+    // the acknowledgements of one confirmed request commit together
+    acknowledgeRootEvents: (binding, eventIds) => transaction(Effect.forEach(eventIds, (eventId) => teamStore.acknowledgeEvent(binding, binding.threadId, eventId), {discard: true})),
+    hasInflightEffects,
+    hasBlockingWork,
     reconcileStopped,
     reconcile,
     runHelperBatch,
@@ -994,5 +1020,5 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
 // the bounded helper team of each root: membership, check-ins, readiness, notices and transfers over the helper transport
 export class SupervisorTeamRuntime extends Context.Service<SupervisorTeamRuntime, SupervisorTeamRuntimeShape>()("t3-supervisor/SupervisorTeamRuntime") {
   static readonly make = makeSupervisorTeamRuntime;
-  static readonly layer = (options: SupervisorTeamRuntimeOptions) => Layer.effect(SupervisorTeamRuntime, makeSupervisorTeamRuntime(options));
+  static readonly layer = (options: SupervisorTeamRuntimeOptions = {}) => Layer.effect(SupervisorTeamRuntime, makeSupervisorTeamRuntime(options));
 }

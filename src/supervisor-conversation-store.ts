@@ -1,8 +1,7 @@
-import { randomUUID } from "node:crypto";
 import { Context, Data, Effect, Layer, Schema } from "effect";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
-import { decodeGuidanceRow, type GuidanceStore, GuidanceStoreError, guidanceSql, tableColumns } from "./guidance-store.js";
+import { decodeGuidanceRow, documentRow, GuidanceStoreError, guidanceSql, tableColumns } from "./guidance-sql.js";
 import { SupervisorIds } from "./ids.js";
 import type { SupervisorMonitorBatch } from "./supervisor-monitor.js";
 import { WorkflowProposal, type WorkflowProposalInfo } from "./project-supervisor-contract.js";
@@ -74,117 +73,7 @@ export const conversationRequestMessageId = (requestId: string): string => `supe
 export const introductionOutcomeUnknown = (introduction: WorkflowIntroduction): boolean => introduction.state !== "sent" &&
   (["sending", "accepted", "uncertain"].includes(introduction.state) || introduction.acceptedAt !== undefined || introduction.definiteRejection === false);
 
-// the synchronous store of today's callers; the s6d switch removes it for SupervisorConversationStoreService
-export class SupervisorConversationStore {
-  constructor(readonly store: GuidanceStore) {
-    store.db.exec(`CREATE TABLE IF NOT EXISTS supervisor_conversation_requests(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS supervisor_conversation_project ON supervisor_conversation_requests(project_id);
-      CREATE TABLE IF NOT EXISTS supervisor_workflow_introductions(task_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS supervisor_workflow_agreement_candidates(task_id TEXT NOT NULL,proposal_id TEXT NOT NULL,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(task_id,proposal_id));
-      CREATE INDEX IF NOT EXISTS supervisor_workflow_agreement_project ON supervisor_workflow_agreement_candidates(project_id);
-      CREATE TABLE IF NOT EXISTS supervisor_monitor_binding_clock(supervisor_thread_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL,review_misses INTEGER NOT NULL DEFAULT 0);`);
-    if (!store.db.prepare("PRAGMA table_info(supervisor_monitor_binding_clock)").all().some(row => row.name === "review_misses")) store.db.exec("ALTER TABLE supervisor_monitor_binding_clock ADD COLUMN review_misses INTEGER NOT NULL DEFAULT 0");
-  }
-  requests(projectId: string, supervisorThreadId?: string): ConversationRequest[] {
-    return this.store.db.prepare("SELECT document FROM supervisor_conversation_requests WHERE project_id=? ORDER BY created_at").all(projectId)
-      .map(row => JSON.parse(String(row.document)) as ConversationRequest).filter(request => !supervisorThreadId || request.supervisorThreadId === supervisorThreadId);
-  }
-  pending(projectId: string, supervisorThreadId: string): ConversationRequest | null {
-    return this.requests(projectId, supervisorThreadId).find(request => ["prepared", "sending", "waiting", "uncertain"].includes(request.state)) ?? null;
-  }
-  saveRequest(request: ConversationRequest): void {
-    this.store.db.prepare("INSERT INTO supervisor_conversation_requests VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document")
-      .run(request.id, request.projectId, JSON.stringify(request), request.createdAt);
-  }
-  prepare(input: Pick<ConversationRequest, "projectId" | "supervisorThreadId" | "kind" | "taskId" | "text" | "batch" | "completionMarker"> &
-    Partial<Pick<ConversationRequest, "id" | "teamNotificationIds" | "teamEventIds" | "teamMemberEpoch" | "roleVersion">>, now: number): ConversationRequest {
-    if (this.pending(input.projectId, input.supervisorThreadId)) throw new Error("supervisor_request_inflight");
-    this.prune(now);
-    const id = input.id ?? randomUUID();
-    const request: ConversationRequest = {...input, id, messageId: conversationRequestMessageId(id), state: "prepared", createdAt: now, sentAt: null, runId: null, error: null};
-    this.saveRequest(request);return request;
-  }
-  introduction(taskId: string): WorkflowIntroduction | null {
-    const row = this.store.db.prepare("SELECT document FROM supervisor_workflow_introductions WHERE task_id=?").get(taskId);
-    return row ? JSON.parse(String(row.document)) as WorkflowIntroduction : null;
-  }
-  introductions(projectId: string): WorkflowIntroduction[] {
-    return this.store.db.prepare("SELECT document FROM supervisor_workflow_introductions WHERE project_id=?").all(projectId)
-      .map(row => JSON.parse(String(row.document)) as WorkflowIntroduction);
-  }
-  saveIntroduction(introduction: WorkflowIntroduction): void {
-    this.store.db.prepare("INSERT INTO supervisor_workflow_introductions VALUES(?,?,?) ON CONFLICT(task_id) DO UPDATE SET document=excluded.document")
-      .run(introduction.taskId, introduction.projectId, JSON.stringify(introduction));
-  }
-  removeUnsentIntroduction(taskId: string): void {
-    const introduction = this.introduction(taskId);
-    if (introduction && ["context", "ready", "blocked"].includes(introduction.state) && !introduction.dispatchMode &&
-      !introduction.acceptedAt && !introduction.rejectedAttempts?.length)
-      this.store.db.prepare("DELETE FROM supervisor_workflow_introductions WHERE task_id=?").run(taskId);
-  }
-  agreementCandidates(taskId: string): WorkflowAgreementCandidate[] {
-    return this.store.db.prepare("SELECT document FROM supervisor_workflow_agreement_candidates WHERE task_id=? ORDER BY created_at,rowid").all(taskId)
-      .map(row => JSON.parse(String(row.document)) as WorkflowAgreementCandidate);
-  }
-  agreementCandidate(taskId: string, proposalId: string): WorkflowAgreementCandidate | null {
-    const row = this.store.db.prepare("SELECT document FROM supervisor_workflow_agreement_candidates WHERE task_id=? AND proposal_id=?").get(taskId, proposalId);
-    return row ? JSON.parse(String(row.document)) as WorkflowAgreementCandidate : null;
-  }
-  saveAgreementCandidate(candidate: WorkflowAgreementCandidate): "saved" | "same" | "conflict" | "full" {
-    const existing = this.agreementCandidate(candidate.taskId, candidate.proposalId);
-    if (existing) return existing.planHash === candidate.planHash ? "same" : "conflict";
-    const taskCount = Number(this.store.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_agreement_candidates WHERE task_id=?").get(candidate.taskId)?.n ?? 0);
-    const projectCount = Number(this.store.db.prepare("SELECT count(*) AS n FROM supervisor_workflow_agreement_candidates WHERE project_id=?").get(candidate.projectId)?.n ?? 0);
-    if (taskCount >= 50 || projectCount >= 5000) return "full";
-    this.store.db.prepare("INSERT INTO supervisor_workflow_agreement_candidates VALUES(?,?,?,?,?)")
-      .run(candidate.taskId, candidate.proposalId, candidate.projectId, JSON.stringify(candidate), candidate.proposedAt);
-    return "saved";
-  }
-  saveAgreementEvidence(taskId: string, proposalId: string, agentMessageId: string, agentTextHash: string): void {
-    const candidate = this.agreementCandidate(taskId, proposalId);
-    if (!candidate || candidate.agentMessageId && (candidate.agentMessageId !== agentMessageId || candidate.agentTextHash !== agentTextHash)) return;
-    this.store.db.prepare("UPDATE supervisor_workflow_agreement_candidates SET document=? WHERE task_id=? AND proposal_id=?")
-      .run(JSON.stringify({...candidate, agentMessageId, agentTextHash}), taskId, proposalId);
-  }
-  clearAgreementCandidates(taskId: string): void {
-    this.store.db.prepare("DELETE FROM supervisor_workflow_agreement_candidates WHERE task_id=?").run(taskId);
-  }
-  pruneAgreementCandidates(taskIds: readonly string[]): void {
-    if (taskIds.length === 0) return;
-    const placeholders = taskIds.map(() => "?").join(",");
-    this.store.db.prepare(`DELETE FROM supervisor_workflow_agreement_candidates WHERE task_id IN (${placeholders})`).run(...taskIds);
-  }
-  lastNotice(supervisorThreadId: string): number | null {
-    const row = this.store.db.prepare("SELECT last_notice_at FROM supervisor_monitor_binding_clock WHERE supervisor_thread_id=?").get(supervisorThreadId);
-    return row ? Number(row.last_notice_at) : null;
-  }
-  noticeSent(supervisorThreadId: string, now: number): void {
-    this.store.db.prepare("INSERT INTO supervisor_monitor_binding_clock(supervisor_thread_id,last_notice_at) VALUES(?,?) ON CONFLICT(supervisor_thread_id) DO UPDATE SET last_notice_at=excluded.last_notice_at").run(supervisorThreadId, now);
-  }
-  reviewMisses(supervisorThreadId: string, reset = false): number {
-    if (reset) this.store.db.prepare("UPDATE supervisor_monitor_binding_clock SET review_misses=0 WHERE supervisor_thread_id=?").run(supervisorThreadId);
-    return Number(this.store.db.prepare("SELECT review_misses FROM supervisor_monitor_binding_clock WHERE supervisor_thread_id=?").get(supervisorThreadId)?.review_misses ?? 0);
-  }
-  missedReview(supervisorThreadId: string): number {
-    this.store.db.prepare("UPDATE supervisor_monitor_binding_clock SET review_misses=review_misses+1 WHERE supervisor_thread_id=?").run(supervisorThreadId);
-    return this.reviewMisses(supervisorThreadId);
-  }
-  prune(now: number): void {
-    for (const request of this.store.db.prepare("SELECT id,document FROM supervisor_conversation_requests WHERE created_at<?").all(now - 30 * 86400_000)) {
-      const value = JSON.parse(String(request.document)) as ConversationRequest;
-      if (value.state === "completed" || value.state === "failed" && (value.kind !== "review" || value.failureAcknowledged)) this.store.db.prepare("DELETE FROM supervisor_conversation_requests WHERE id=?").run(String(request.id));
-    }
-    const terminalCount = new Map<string, number>();
-    for (const row of this.store.db.prepare("SELECT id,document FROM supervisor_conversation_requests ORDER BY created_at DESC,rowid DESC").all()) {
-      const request = JSON.parse(String(row.document)) as ConversationRequest;
-      if (request.state !== "completed" && !(request.state === "failed" && (request.kind !== "review" || request.failureAcknowledged))) continue;
-      const n = (terminalCount.get(request.supervisorThreadId) ?? 0) + 1;terminalCount.set(request.supervisorThreadId, n);
-      if (n > 100) this.store.db.prepare("DELETE FROM supervisor_conversation_requests WHERE id=?").run(String(row.id));
-    }
-  }
-}
-
-/** prepare() beside a pending request of the same Supervisor; the message is the synchronous store's. */
+/** prepare() beside a pending request of the same Supervisor, with the baseline store's message. */
 export class RequestInflight extends Data.TaggedError("RequestInflight") {
   override readonly message = "supervisor_request_inflight";
 }
@@ -285,12 +174,8 @@ const isConversationRequest: (value: unknown) => value is ConversationRequest = 
 const isWorkflowIntroduction: (value: unknown) => value is WorkflowIntroduction = Schema.is(WorkflowIntroductionDocument);
 const isWorkflowAgreementCandidate: (value: unknown) => value is WorkflowAgreementCandidate = Schema.is(WorkflowAgreementCandidateDocument);
 
-const storedDocument = <T>(is: (value: unknown) => value is T, row: string) => {
-  const decode = decodeGuidanceRow(Schema.Struct({ document: Schema.fromJsonString(Schema.Unknown) }), row);
-  return (value: unknown): Effect.Effect<T, GuidanceStoreError> => decode(value).pipe(Effect.flatMap(({ document }) => is(document)
-    ? Effect.succeed(document)
-    : Effect.fail(new GuidanceStoreError({ reason: "row_invalid", row, sqlReason: null }))));
-};
+const storedDocument = <T>(is: (value: unknown) => value is T, row: string) => (value: unknown): Effect.Effect<T, GuidanceStoreError> =>
+  documentRow<T, GuidanceStoreError>(value, is, () => new GuidanceStoreError({ reason: "row_invalid", row, sqlReason: null }));
 const decodeRequestRow = storedDocument(isConversationRequest, "conversation_request");
 const decodeIntroductionRow = storedDocument(isWorkflowIntroduction, "workflow_introduction");
 const decodeCandidateRow = storedDocument(isWorkflowAgreementCandidate, "agreement_candidate");
@@ -302,7 +187,7 @@ const decodeReviewMissesRow = decodeGuidanceRow(Schema.Struct({ review_misses: S
 type PrepareInput = Pick<ConversationRequest, "projectId" | "supervisorThreadId" | "kind" | "taskId" | "text" | "batch" | "completionMarker"> &
   Partial<Pick<ConversationRequest, "id" | "teamNotificationIds" | "teamEventIds" | "teamMemberEpoch" | "roleVersion">>;
 
-/** The Effect API of the conversation store: the synchronous store's methods, returning Effects. */
+/** The conversation store: the durable Supervisor requests, workflow introductions, agreement candidates and notice clocks. */
 export interface SupervisorConversationStoreShape {
   readonly requests: (projectId: string, supervisorThreadId?: string) => Effect.Effect<ConversationRequest[], GuidanceStoreError>;
   readonly pending: (projectId: string, supervisorThreadId: string) => Effect.Effect<ConversationRequest | null, GuidanceStoreError>;
@@ -312,6 +197,8 @@ export interface SupervisorConversationStoreShape {
   readonly introductions: (projectId: string) => Effect.Effect<WorkflowIntroduction[], GuidanceStoreError>;
   readonly saveIntroduction: (introduction: WorkflowIntroduction) => Effect.Effect<void, GuidanceStoreError>;
   readonly removeUnsentIntroduction: (taskId: string) => Effect.Effect<void, GuidanceStoreError>;
+  /** Deletes an introduction unconditionally; the caller has checked that it carries no recorded send. */
+  readonly deleteIntroduction: (taskId: string) => Effect.Effect<void, GuidanceStoreError>;
   readonly agreementCandidates: (taskId: string) => Effect.Effect<WorkflowAgreementCandidate[], GuidanceStoreError>;
   readonly agreementCandidate: (taskId: string, proposalId: string) => Effect.Effect<WorkflowAgreementCandidate | null, GuidanceStoreError>;
   readonly saveAgreementCandidate: (candidate: WorkflowAgreementCandidate) => Effect.Effect<"saved" | "same" | "conflict" | "full", GuidanceStoreError>;
@@ -411,6 +298,8 @@ const makeConversationStore = Effect.gen(function* () {
       yield* db`DELETE FROM supervisor_workflow_introductions WHERE task_id=${taskId}`;
   })));
 
+  const deleteIntroduction = (taskId: string) => guidanceSql(Effect.asVoid(db`DELETE FROM supervisor_workflow_introductions WHERE task_id=${taskId}`));
+
   const agreementCandidates = (taskId: string) => guidanceSql(
     db`SELECT document FROM supervisor_workflow_agreement_candidates WHERE task_id=${taskId} ORDER BY created_at,rowid`.pipe(
       Effect.flatMap(Effect.forEach((row) => decodeCandidateRow(row)))));
@@ -458,8 +347,8 @@ const makeConversationStore = Effect.gen(function* () {
 
   const prune = (now: number) => guidanceSql(db.withTransaction(prunePass(now)));
 
-  return SupervisorConversationStoreService.of({
-    requests, pending, saveRequest, prepare, introduction, introductions, saveIntroduction, removeUnsentIntroduction, agreementCandidates,
+  return SupervisorConversationStore.of({
+    requests, pending, saveRequest, prepare, introduction, introductions, saveIntroduction, removeUnsentIntroduction, deleteIntroduction, agreementCandidates,
     agreementCandidate, saveAgreementCandidate, saveAgreementEvidence, clearAgreementCandidates, pruneAgreementCandidates, lastNotice,
     noticeSent, reviewMisses, missedReview, prune,
   });
@@ -470,9 +359,8 @@ const makeConversationStore = Effect.gen(function* () {
  * every multi-statement method runs in one transaction and joins the caller's transaction when there is one (a
  * savepoint); request identities come from SupervisorIds.
  */
-// it takes the name SupervisorConversationStore when the s6d switch removes the synchronous class
-export class SupervisorConversationStoreService extends Context.Service<SupervisorConversationStoreService, SupervisorConversationStoreShape>()(
+export class SupervisorConversationStore extends Context.Service<SupervisorConversationStore, SupervisorConversationStoreShape>()(
   "t3-supervisor/SupervisorConversationStore") {
-  static readonly layer: Layer.Layer<SupervisorConversationStoreService, GuidanceStoreError, GuidanceDb | SupervisorIds> =
-    Layer.effect(SupervisorConversationStoreService, untracedSql(makeConversationStore));
+  static readonly layer: Layer.Layer<SupervisorConversationStore, GuidanceStoreError, GuidanceDb | SupervisorIds> =
+    Layer.effect(SupervisorConversationStore, untracedSql(makeConversationStore));
 }

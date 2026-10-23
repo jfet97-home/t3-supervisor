@@ -1,6 +1,7 @@
 import { Cause, Context, Crypto, Data, Deferred, Effect, Exit, Layer, Schema, Semaphore } from "effect";
 import { posix } from "node:path";
-import type { GuidanceStore } from "./guidance-store.js";
+import type { SqlError } from "effect/sql";
+import { GuidanceDb, untracedSql } from "./db.js";
 import { NativeEnvelope, NativeFraming, nativeMaxPayload, NativeStep, type NativeEndpoint, type NativeEnvelopeError, type NativeExit } from "./native-envelope.js";
 import type { FreshGitInfo, GitOperationState } from "./project-files.js";
 
@@ -231,12 +232,13 @@ const PendingSessions = Schema.Array(Schema.Struct({threadId: GeneratedId, termi
 const isPendingSessions = Schema.is(PendingSessions);
 
 // the stored entries themselves, so a rewrite keeps every stored byte of the remaining entries
-const parsePending = (value: unknown): SessionIds[] => {
-  if (value === undefined) return [];
-  const parsed = decodeJson(String(value));
-  if (parsed._tag === "None" || !isPendingSessions(parsed.value)) throw new GitProbeError("Pending native Git probe cleanup state is invalid.");
-  return parsed.value as SessionIds[];
+const parsePending = (value: string | undefined): Effect.Effect<SessionIds[], GitProbeError> => {
+  if (value === undefined) return Effect.succeed([]);
+  const parsed = decodeJson(value);
+  return parsed._tag === "None" || !isPendingSessions(parsed.value) ? Effect.fail(new GitProbeError("Pending native Git probe cleanup state is invalid."))
+    : Effect.succeed(parsed.value as SessionIds[]);
 };
+const decodeMetaValue = Schema.decodeUnknownEffect(Schema.Struct({value: Schema.String}));
 
 // envelope failures of a terminal rpc, with the baseline's fixed messages
 const rpcFailure = (error: NativeEnvelopeError): GitProbeError => new GitProbeError(
@@ -254,8 +256,9 @@ interface AttachStream {
   readonly result: Deferred.Deferred<ProbeResult, GitProbeError>;
 }
 
-const makeGitProbe = Effect.fnUntraced(function* (endpoint: NativeEndpoint, store: GuidanceStore) {
+const makeGitProbe = Effect.fnUntraced(function* (endpoint: NativeEndpoint) {
   const native = yield* NativeEnvelope;
+  const db = yield* GuidanceDb;
   const crypto = yield* Crypto.Crypto;
   // v4 generation never fails; its signature only shares the platform error of randomBytes
   const uuid = Effect.orDie(crypto.randomUUIDv4());
@@ -394,17 +397,15 @@ const makeGitProbe = Effect.fnUntraced(function* (endpoint: NativeEndpoint, stor
     return {ready, helperReady, capture, result} satisfies AttachStream;
   });
 
-  const pending = Effect.try({try: () => parsePending(store.db.prepare("SELECT value FROM meta WHERE key=?").get(PENDING_KEY)?.value),
-    catch: error => error instanceof GitProbeError ? error : new GitProbeError()});
-  const savePending = (sessions: SessionIds[]): void => {
-    store.db.prepare("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-      .run(PENDING_KEY, JSON.stringify(sessions));
-  };
-  // read, change and write the pending list in one synchronous step over the interim guidance store (b-02)
-  const updatePending = (change: (sessions: SessionIds[]) => SessionIds[]) => Effect.try({
-    try: () => savePending(change(parsePending(store.db.prepare("SELECT value FROM meta WHERE key=?").get(PENDING_KEY)?.value))),
-    catch: error => error instanceof GitProbeError ? error : new GitProbeError(),
-  });
+  // a failed statement or an unreadable meta row is a probe failure without its cause
+  const probeSql = <A, R>(effect: Effect.Effect<A, GitProbeError | SqlError.SqlError | Schema.SchemaError, R>): Effect.Effect<A, GitProbeError, R> =>
+    effect.pipe(Effect.mapError(error => error instanceof GitProbeError ? error : new GitProbeError()), untracedSql);
+  const readPending = Effect.flatMap(db`SELECT value FROM meta WHERE key=${PENDING_KEY}`, ([row]) =>
+    row === undefined ? parsePending(undefined) : Effect.flatMap(decodeMetaValue(row), (stored) => parsePending(stored.value)));
+  const pending = probeSql(readPending);
+  // read, change and write the pending list in one guidance transaction
+  const updatePending = (change: (sessions: SessionIds[]) => SessionIds[]) => probeSql(db.withTransaction(Effect.flatMap(readPending, (sessions) =>
+    db`INSERT INTO meta(key,value) VALUES(${PENDING_KEY},${JSON.stringify(change(sessions))}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)).pipe(Effect.asVoid));
   const addPending = (session: SessionIds) => updatePending(sessions => [...sessions, session]);
   const removePending = (session: SessionIds) =>
     updatePending(sessions => sessions.filter(item => item.threadId !== session.threadId || item.terminalId !== session.terminalId));
@@ -486,9 +487,9 @@ export class GitProbe extends Context.Service<GitProbe, {
   // closes every pending session left by an earlier process
   readonly cleanup: Effect.Effect<void, GitProbeError>;
 }>()("t3-supervisor/GitProbe") {
-  static readonly make: (endpoint: NativeEndpoint, store: GuidanceStore) => Effect.Effect<GitProbe["Service"], never, NativeEnvelope | Crypto.Crypto> = makeGitProbe;
-  static readonly layer = (endpoint: NativeEndpoint, store: GuidanceStore): Layer.Layer<GitProbe, never, NativeEnvelope | Crypto.Crypto> =>
-    Layer.effect(GitProbe, makeGitProbe(endpoint, store));
+  static readonly make: (endpoint: NativeEndpoint) => Effect.Effect<GitProbe["Service"], never, NativeEnvelope | Crypto.Crypto | GuidanceDb> = makeGitProbe;
+  static readonly layer = (endpoint: NativeEndpoint): Layer.Layer<GitProbe, never, NativeEnvelope | Crypto.Crypto | GuidanceDb> =>
+    Layer.effect(GitProbe, makeGitProbe(endpoint));
 }
 
 // the probe call shape the definitions take

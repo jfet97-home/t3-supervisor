@@ -1,14 +1,18 @@
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, Layer, Option, Schema } from "effect";
 import {definitionReferenceLimits, definitionReferenceProblem, describeDefinitionReferenceProblem, validDefinitionReferences} from "./definition-references.js";
-import type { BindingRecord, TaskRecord } from "./project-supervisor-store.js";
+import type { SqlError } from "effect/sql";
+import { GuidanceDb } from "./db.js";
+import { documentRow, type GuidanceStoreError, guidanceSql, guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
+import { ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "./project-supervisor-store.js";
 import { ProjectDefinitions } from "./project-definitions.js";
 import { SupervisionControl } from "./supervision-control.js";
 import { SupervisionGate, SupervisionScopeService, type GateGuard } from "./supervision-gate.js";
-import { SupervisionStores } from "./supervision-stores.js";
+import { SupervisorTeamStore } from "./supervisor-team-store.js";
 import { SupervisorConversation } from "./supervisor-conversation.js";
+import { StoreError } from "./store.js";
 import { NativeRpc, NativeShell, record, type SupervisorRpcError } from "./supervisor-native.js";
 import { T3Client, type T3TransportError } from "./t3.js";
-import {acceptedTaskPlanForBinding, acceptedWorkflowPlansForBinding, type WorkflowApplyValidationContext} from "./workflow-state-store.js";
+import {acceptedTaskPlanForBinding, acceptedWorkflowPlansForBinding, WorkflowStateStore, type WorkflowApplyValidationContext} from "./workflow-state-store.js";
 import {
   externalContributionDecisions,
   externalContributionLimits,
@@ -214,16 +218,52 @@ type ActivityReferenceResult =
   | {status: "ready"; evidence?: WorkflowStateEvidenceInput[]}
   | {status: "invalid" | "denied" | "pending" | "unavailable"; reason: string};
 
-type ProofRow = {
-  request_hash: string;
-  operation_id: string;
-  operation_namespace: "edit";
-  project_id: string;
-  main_thread_id: string;
-  supervisor_thread_id: string;
-  binding_generation: number;
-  result: string;
+// the controller's own receipt and evidence rows: the columns are decoded with Schema; a stored result is parsed JSON, kept whole
+const ProofRow = Schema.Struct({request_hash: Schema.String, project_id: Schema.String, main_thread_id: Schema.String, supervisor_thread_id: Schema.String,
+  binding_generation: Schema.Finite, operation_namespace: Schema.String, result: Schema.String});
+const EvidenceRow = Schema.Struct({operation_id: Schema.String, operation_namespace: Schema.String, request_hash: Schema.String, project_id: Schema.String,
+  main_thread_id: Schema.String, binding_generation: Schema.Finite, result: Schema.String});
+const decodeProofRow = Schema.decodeUnknownExit(ProofRow);
+const decodeEvidenceRow = Schema.decodeUnknownExit(EvidenceRow);
+const decodeStoredJson = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
+// a stored receipt or evidence row that does not decode; inside the commit it denies the write as any failed statement does
+class WorkflowWriteRowInvalid extends Data.TaggedError("WorkflowWriteRowInvalid") {}
+// the result a stored row recorded
+const storedResult = (text: string): Option.Option<WorkflowWriteResult> => {
+  const parsed = decodeStoredJson(text);
+  return Exit.isSuccess(parsed) ? Option.some(parsed.value as WorkflowWriteResult) : Option.none();
 };
+const writeSchema = [
+  `CREATE TABLE IF NOT EXISTS supervisor_workflow_write_receipts (
+        operation_id TEXT NOT NULL,
+        operation_namespace TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        main_thread_id TEXT NOT NULL,
+        supervisor_thread_id TEXT NOT NULL,
+        binding_generation INTEGER NOT NULL,
+        result TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id)
+      )`,
+  `CREATE TABLE IF NOT EXISTS supervisor_workflow_write_evidence (
+        supervisor_thread_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        operation_namespace TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        main_thread_id TEXT NOT NULL,
+        binding_generation INTEGER NOT NULL,
+        native_evidence TEXT NOT NULL,
+        result TEXT NOT NULL,
+        successful INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(supervisor_thread_id,item_id)
+      )`,
+  `CREATE INDEX IF NOT EXISTS supervisor_workflow_write_evidence_operation
+        ON supervisor_workflow_write_evidence(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id,created_at)`,
+];
 
 const maxBindingGeneration = 2_147_483_647;
 const maxWorkflowReadDocs = 50;
@@ -695,7 +735,7 @@ const pause = (cancel: WorkflowCallCancel) => Effect.raceFirst(Effect.sleep(evid
 const elapsedMillis = Effect.map(Clock.monotonicTimeNanos, (nanos) => Number(nanos) / 1_000_000);
 // a tool call's cancel: the caller's own, else one completed by the tool's 10 s deadline (the baseline
 // AbortSignal.timeout(10_000) default), released with the call
-const withToolDeadline = <A>(cancel: WorkflowCallCancel | undefined, body: (cancel: WorkflowCallCancel) => Effect.Effect<A>): Effect.Effect<A> =>
+const withToolDeadline = <A, E>(cancel: WorkflowCallCancel | undefined, body: (cancel: WorkflowCallCancel) => Effect.Effect<A, E>): Effect.Effect<A, E> =>
   cancel !== undefined ? body(cancel) : Effect.scoped(Effect.gen(function* () {
     const expired = yield* Deferred.make<void>();
     yield* Effect.forkScoped(Effect.andThen(Effect.sleep(toolDeadline), Deferred.succeed(expired, undefined)));
@@ -703,28 +743,30 @@ const withToolDeadline = <A>(cancel: WorkflowCallCancel | undefined, body: (canc
   }));
 
 export interface WorkflowWriteControllerShape {
-  readonly read: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowReadResult>;
-  readonly readTool: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowReadResult | SupervisorContextViewResult>;
-  readonly write: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowWriteResult>;
+  readonly read: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowReadResult, SupervisionStoreError>;
+  readonly readTool: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowReadResult | SupervisorContextViewResult, SupervisionStoreError>;
+  readonly write: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowWriteResult, SupervisionStoreError>;
   /** Native Start reserves nothing until the exact own-thread tool call is verified. */
-  readonly startSupervision: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<SupervisionStartResult>;
+  readonly startSupervision: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<SupervisionStartResult, SupervisionStoreError>;
   /** The MCP supervision_stop entry: verifies the caller's own native tool call, then applies the durable per-chat stop. */
-  readonly stopSupervision: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<SupervisionStopResult>;
+  readonly stopSupervision: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<SupervisionStopResult, SupervisionStoreError>;
   // verified native caller proof for a team or guide effect, rechecked after the evidence read
   readonly authorizeNative: (input: WorkflowLocator & Record<string, unknown>, tool: WorkflowEvidenceTool, allowRegistering?: boolean,
-    cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowNativeAuthorization>;
+    cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowNativeAuthorization, SupervisionStoreError>;
   /**
    * The current ready binding for a verified actor; an effect also requires that a human has not stopped supervision of its main.
-   * A synchronous b-02 read: `reads` is the admission guard inside a section, the display predicates otherwise.
+   * `reads` is the admission guard inside a section, the display predicates otherwise.
    */
   readonly resolveBinding: (locator: WorkflowLocator, allowRegistering?: boolean, purpose?: "effect" | "read" | "status",
-    reads?: WorkflowScopeReads) => BindingRecord | null;
+    reads?: WorkflowScopeReads) => Effect.Effect<BindingRecord | null, SupervisionStoreError>;
 }
 
 const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {}) => Effect.gen(function* () {
   const gate = yield* SupervisionGate;
   const native = yield* WorkflowNativeAccess;
-  const stores = yield* SupervisionStores;
+  const supervisors = yield* ProjectSupervisorStore;
+  const sql = yield* GuidanceDb;
+  const transaction = guidanceTransaction(sql);
   // the display predicates; the per-chat stop lets a stopped main's Supervisor and helpers still read but make no new effect
   const scope: WorkflowScopeReads = yield* SupervisionScopeService;
   const definitions = Option.getOrNull(yield* Effect.serviceOption(ProjectDefinitions));
@@ -733,72 +775,46 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
   // the Start and Stop of verified native calls (a native Start on own-thread evidence; a durable per-chat stop on genuine human
   // evidence, backed by the same thread policy as the dashboard control)
   const control = Option.getOrNull(yield* Effect.serviceOption(SupervisionControl));
-  const {supervisors} = stores;
-  const team = options.withoutTeam ? undefined : stores.team;
-  if (!stores.workflows) return yield* Effect.die(new Error("the workflow write controller needs the workflow state store"));
-  const workflows = stores.workflows;
+  const team = options.withoutTeam ? undefined : yield* SupervisorTeamStore;
+  const workflowStore = Option.getOrNull(yield* Effect.serviceOption(WorkflowStateStore));
+  if (!workflowStore) return yield* Effect.die(new Error("the workflow write controller needs the workflow state store"));
+  const workflows = workflowStore;
   const maxEvidenceWaitMs = options.maxEvidenceWaitMs ?? 400;
-  const db = supervisors.store.db;
-  db.exec(`
-      CREATE TABLE IF NOT EXISTS supervisor_workflow_write_receipts (
-        operation_id TEXT NOT NULL,
-        operation_namespace TEXT NOT NULL,
-        request_hash TEXT NOT NULL,
-        project_id TEXT NOT NULL,
-        main_thread_id TEXT NOT NULL,
-        supervisor_thread_id TEXT NOT NULL,
-        binding_generation INTEGER NOT NULL,
-        result TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id)
-      );
-      CREATE TABLE IF NOT EXISTS supervisor_workflow_write_evidence (
-        supervisor_thread_id TEXT NOT NULL,
-        item_id TEXT NOT NULL,
-        operation_id TEXT NOT NULL,
-        operation_namespace TEXT NOT NULL,
-        request_hash TEXT NOT NULL,
-        project_id TEXT NOT NULL,
-        main_thread_id TEXT NOT NULL,
-        binding_generation INTEGER NOT NULL,
-        native_evidence TEXT NOT NULL,
-        result TEXT NOT NULL,
-        successful INTEGER NOT NULL,
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY(supervisor_thread_id,item_id)
-      );
-      CREATE INDEX IF NOT EXISTS supervisor_workflow_write_evidence_operation
-        ON supervisor_workflow_write_evidence(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id,created_at);
-    `);
+  // the controller's own receipt and evidence tables on the run's guidance client
+  yield* guidanceSql(Effect.forEach(writeSchema, (statement) => sql.unsafe(statement)));
 
+  // the read's own failures (an unreadable row or a failed predicate or actor read) deny the binding, as the baseline catches did
+  const denyOnFailure = <A, E>(effect: Effect.Effect<A, E>): Effect.Effect<A | null> =>
+    Effect.catchCauseIf(effect, (cause) => !Cause.hasInterruptsOnly(cause), () => Effect.succeed(null)) as Effect.Effect<A | null>;
   const resolveBinding = (locator: WorkflowLocator, allowRegistering = false, purpose: "effect" | "read" | "status" = "effect",
-    reads: WorkflowScopeReads = scope): BindingRecord | null => {
+    reads: WorkflowScopeReads = scope): Effect.Effect<BindingRecord | null, SupervisionStoreError> => Effect.gen(function* () {
     if (!supervisors.scopeCompatible) return null;
-    const rows = db.prepare(
-      "SELECT document FROM supervisor_main_bindings WHERE json_extract(document,'$.threadId')=? LIMIT 2",
-    ).all(locator.supervisorThreadId);
+    const rows = yield* guidanceSql(sql`SELECT document FROM supervisor_main_bindings WHERE json_extract(document,'$.threadId')=${locator.supervisorThreadId} LIMIT 2`);
     if (rows.length > 1) return null;
-    let binding: BindingRecord;
-    try {binding = rows.length === 1 ? JSON.parse(String(rows[0]?.document)) as BindingRecord :
-      team?.bindingForActor(locator.supervisorThreadId, locator.bindingGeneration) as BindingRecord;}
-    catch {return null;}
+    const stored: Effect.Effect<BindingRecord | null | undefined, unknown> = rows.length === 1
+      ? documentRow<BindingRecord, WorkflowWriteRowInvalid>(rows[0], isRecord, () => new WorkflowWriteRowInvalid())
+      : team ? team.bindingForActor(locator.supervisorThreadId, locator.bindingGeneration) : Effect.succeed(undefined);
+    const binding = yield* denyOnFailure(stored);
     if (!binding || binding.generation !== locator.bindingGeneration ||
       binding.state !== "ready" || !supervisors.ownedIds.has(binding.threadId) ||
       !isId(binding.projectId) || !isId(binding.mainThreadId)) return null;
-    try {if ((!reads.workflowEditingEnabled(binding.projectId, binding.mainThreadId, purpose) && !(purpose === "status" && reads.supervisionStopped(binding.mainThreadId))) || purpose === "effect" && reads.supervisionStopped(binding.mainThreadId)) return null;}
-    catch {return null;}
+    const denied = yield* denyOnFailure(Effect.gen(function* () {
+      return (!(yield* reads.workflowEditingEnabled(binding.projectId, binding.mainThreadId, purpose)) && !(purpose === "status" && (yield* reads.supervisionStopped(binding.mainThreadId)))) ||
+        purpose === "effect" && (yield* reads.supervisionStopped(binding.mainThreadId));
+    }));
+    if (denied !== false) return null;
     if (binding.threadId !== locator.supervisorThreadId) {
-      const member = team?.snapshot(binding).members.find(item => item.threadId === locator.supervisorThreadId);
+      const member = team ? (yield* team.snapshot(binding)).members.find(item => item.threadId === locator.supervisorThreadId) : undefined;
       if (!member || member.epoch !== locator.memberEpoch ||
         member.state !== "ready" && !(allowRegistering && member.state === "registering")) return null;
     }
     return binding;
-  };
+  });
 
-  // a synchronous block from a write path's last await through its commit, run as one admission section (plan 3.11): its
-  // binding rechecks read the admission guard, and its persisted times the wall clock (CC-CLOCK-WALL)
-  const admitted = <A>(block: (guard: GateGuard, now: number) => A): Effect.Effect<A> =>
-    gate.admit((guard) => Effect.flatMap(Clock.currentTimeMillis, (now) => Effect.sync(() => block(guard, now))));
+  // a block from a write path's last await through its commit, run as one admission section (plan 3.11): its binding rechecks read
+  // the admission guard, its persisted times the wall clock (CC-CLOCK-WALL), and its commit is one guidance transaction
+  const admitted = <A, E>(block: (guard: GateGuard, now: number) => Effect.Effect<A, E>) =>
+    gate.admit((guard) => Effect.flatMap(Clock.currentTimeMillis, (now) => block(guard, now)));
 
   /** Finds the caller thread's own executed main-run tool item whose complete arguments equal this request. */
   const findToolEvidence = Effect.fnUntraced(function* (callerThreadId: string, projectId: string, payload: Record<string, unknown>,
@@ -887,29 +903,28 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     tool: WorkflowEvidenceTool = "write") => findToolEvidence(payload.supervisorThreadId, owner.projectId, payload, tool, cancel);
 
   const authorizeNative = Effect.fnUntraced(function* (input: WorkflowLocator & Record<string, unknown>, tool: WorkflowEvidenceTool,
-    allowRegistering = false, cancel?: WorkflowCallCancel): Effect.fn.Return<WorkflowNativeAuthorization> {
-    const binding = resolveBinding(input, allowRegistering);
+    allowRegistering = false, cancel?: WorkflowCallCancel): Effect.fn.Return<WorkflowNativeAuthorization, SupervisionStoreError> {
+    const binding = yield* resolveBinding(input, allowRegistering);
     if (!binding) return {status: "denied", reason: "actor_not_current_ready_enabled"};
     const result = yield* findEvidence(input, ownerFor(binding), cancel ?? (yield* Deferred.make<void>()), tool);
     if (result.status !== "verified") return result;
-    if (!resolveBinding(input, allowRegistering)) return {status: "denied", reason: "actor_changed"};
+    if (!(yield* resolveBinding(input, allowRegistering))) return {status: "denied", reason: "actor_changed"};
     return {status: "verified", binding, evidence: result.evidence};
   });
 
-  const readOperationReceipt = (owner: WorkflowOwner, namespace: string, operationId: string, requestHash: string):
-    | {kind: "none"}
-    | {kind: "replay"; result: WorkflowWriteResult}
-    | {kind: "conflict"} => {
-    const row = db.prepare(
-      "SELECT request_hash,project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,result FROM supervisor_workflow_write_receipts WHERE project_id=? AND main_thread_id=? AND supervisor_thread_id=? AND binding_generation=? AND operation_namespace=? AND operation_id=?",
-    ).get(owner.projectId, owner.mainThreadId, owner.supervisorThreadId, owner.bindingGeneration, namespace, operationId) as ProofRow | undefined;
-    if (!row) return {kind: "none"};
-    if (row.request_hash !== requestHash || row.operation_namespace !== namespace || row.project_id !== owner.projectId ||
-      row.main_thread_id !== owner.mainThreadId || row.supervisor_thread_id !== owner.supervisorThreadId ||
-      Number(row.binding_generation) !== owner.bindingGeneration) return {kind: "conflict"};
-    try {return {kind: "replay", result: JSON.parse(row.result) as WorkflowWriteResult};}
-    catch {return {kind: "conflict"};}
-  };
+  const readOperationReceipt = (owner: WorkflowOwner, namespace: string, operationId: string, requestHash: string) => guidanceSql(Effect.map(
+    sql`SELECT request_hash,project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,result FROM supervisor_workflow_write_receipts WHERE project_id=${owner.projectId} AND main_thread_id=${owner.mainThreadId} AND supervisor_thread_id=${owner.supervisorThreadId} AND binding_generation=${owner.bindingGeneration} AND operation_namespace=${namespace} AND operation_id=${operationId}`,
+    ([stored]): {kind: "none"} | {kind: "replay"; result: WorkflowWriteResult} | {kind: "conflict"} => {
+      if (stored === undefined) return {kind: "none"};
+      // an unreadable receipt is a conflict, never an absent one
+      const decoded = decodeProofRow(stored);
+      if (Exit.isFailure(decoded)) return {kind: "conflict"};
+      const row = decoded.value;
+      if (row.request_hash !== requestHash || row.operation_namespace !== namespace || row.project_id !== owner.projectId ||
+        row.main_thread_id !== owner.mainThreadId || row.supervisor_thread_id !== owner.supervisorThreadId ||
+        row.binding_generation !== owner.bindingGeneration) return {kind: "conflict"};
+      return Option.match(storedResult(row.result), {onNone: () => ({kind: "conflict" as const}), onSome: (result) => ({kind: "replay" as const, result})});
+    }));
 
   const recordEvidence = (
     owner: WorkflowOwner,
@@ -919,7 +934,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     result: WorkflowWriteResult,
     successful: boolean,
     now: number,
-  ): void => {
+  ) => {
     const nativeEvidence = canonicalJson({
       itemId: evidence.itemId,
       runId: evidence.runId,
@@ -933,64 +948,55 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       owner,
       actorThreadId: payload.supervisorThreadId,
     });
-    db.prepare(
-      "INSERT INTO supervisor_workflow_write_evidence(supervisor_thread_id,item_id,operation_id,operation_namespace,request_hash,project_id,main_thread_id,binding_generation,native_evidence,result,successful,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-    ).run(payload.supervisorThreadId, evidence.itemId, operationIdOf(payload), operationNamespace(owner, payload), requestHash, owner.projectId, owner.mainThreadId,
-      owner.bindingGeneration, nativeEvidence, JSON.stringify(result), successful ? 1 : 0, now);
+    return sql`INSERT INTO supervisor_workflow_write_evidence(supervisor_thread_id,item_id,operation_id,operation_namespace,request_hash,project_id,main_thread_id,binding_generation,native_evidence,result,successful,created_at) VALUES(${payload.supervisorThreadId},${evidence.itemId},${operationIdOf(payload)},${operationNamespace(owner, payload)},${requestHash},${owner.projectId},${owner.mainThreadId},${owner.bindingGeneration},${nativeEvidence},${JSON.stringify(result)},${successful ? 1 : 0},${now})`;
   };
 
   // the workflow_write commit inside its admission section: the owner, evidence and receipt rechecks, the mutation, its receipt and
-  // its evidence in one transaction; any thrown statement rolls it back and the write is denied
-  const commit = (
+  // its evidence in one transaction; any failed statement rolls it back and the write is denied
+  const commit = <E>(
     guard: GateGuard,
     now: number,
     owner: WorkflowOwner,
     payload: WorkflowWritePayload,
     evidence: WorkflowEvidenceMatch,
     requestHash: string,
-    execute: () => WorkflowWriteResult,
-  ): WorkflowWriteResult => {
+    execute: () => Effect.Effect<WorkflowWriteResult, E>,
+  ): Effect.Effect<WorkflowWriteResult> => {
     const operationId = operationIdOf(payload);
-    try {
-      return supervisors.store.transaction(() => {
-        const latest = resolveBinding(payload, false, "effect", guard);
-        if (!latest || !sameOwner(owner, ownerFor(latest))) return {status: "denied", operationId, reason: "owner_changed"};
-        const existingEvidence = db.prepare(
-          "SELECT operation_id,operation_namespace,request_hash,project_id,main_thread_id,binding_generation,result FROM supervisor_workflow_write_evidence WHERE supervisor_thread_id=? AND item_id=?",
-        ).get(payload.supervisorThreadId, evidence.itemId);
-        if (existingEvidence) {
-          const row = existingEvidence as {operation_id: string; operation_namespace: string; request_hash: string; project_id: string; main_thread_id: string; binding_generation: number; result: string};
-          if (row.operation_id !== operationId || row.operation_namespace !== operationNamespace(owner, payload) || row.request_hash !== requestHash || row.project_id !== owner.projectId ||
-            row.main_thread_id !== owner.mainThreadId || Number(row.binding_generation) !== owner.bindingGeneration)
-            return {status: "denied", operationId, reason: "native_evidence_reused"};
-          return JSON.parse(row.result) as WorkflowWriteResult;
-        }
-        const prior = readOperationReceipt(owner, operationNamespace(owner, payload), operationId, requestHash);
-        if (prior.kind === "conflict") return operationConflict(operationId);
-        if (prior.kind === "replay") {
-          recordEvidence(owner, payload, evidence, requestHash, prior.result, true, now);
-          return prior.result;
-        }
-        const result = execute();
-        if (result.status === "owner_mismatch") return result;
-        const successful = isSuccessfulResult(result);
-        if (successful) {
-          db.prepare(
-            "INSERT INTO supervisor_workflow_write_receipts(operation_id,operation_namespace,request_hash,project_id,main_thread_id,supervisor_thread_id,binding_generation,result,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-          ).run(operationId, operationNamespace(owner, payload), requestHash, owner.projectId, owner.mainThreadId, owner.supervisorThreadId,
-            owner.bindingGeneration, JSON.stringify(result), now);
-        }
-        recordEvidence(owner, payload, evidence, requestHash, result, successful, now);
-        return result;
-      });
-    } catch {
-      return {status: "denied", operationId, reason: "workflow_write_transaction_failed"};
-    }
+    const denied: WorkflowWriteResult = {status: "denied", operationId, reason: "workflow_write_transaction_failed"};
+    return transaction(Effect.gen(function* (): Effect.fn.Return<WorkflowWriteResult, E | SupervisionStoreError | WorkflowWriteRowInvalid | SqlError.SqlError> {
+      const latest = yield* resolveBinding(payload, false, "effect", guard);
+      if (!latest || !sameOwner(owner, ownerFor(latest))) return {status: "denied", operationId, reason: "owner_changed"};
+      const [existingEvidence] = yield* sql`SELECT operation_id,operation_namespace,request_hash,project_id,main_thread_id,binding_generation,result FROM supervisor_workflow_write_evidence WHERE supervisor_thread_id=${payload.supervisorThreadId} AND item_id=${evidence.itemId}`;
+      if (existingEvidence !== undefined) {
+        const decoded = decodeEvidenceRow(existingEvidence);
+        if (Exit.isFailure(decoded)) return yield* new WorkflowWriteRowInvalid();
+        const row = decoded.value;
+        if (row.operation_id !== operationId || row.operation_namespace !== operationNamespace(owner, payload) || row.request_hash !== requestHash || row.project_id !== owner.projectId ||
+          row.main_thread_id !== owner.mainThreadId || row.binding_generation !== owner.bindingGeneration)
+          return {status: "denied", operationId, reason: "native_evidence_reused"};
+        return yield* Option.match(storedResult(row.result), {onNone: () => Effect.fail(new WorkflowWriteRowInvalid()), onSome: Effect.succeed});
+      }
+      const prior = yield* readOperationReceipt(owner, operationNamespace(owner, payload), operationId, requestHash);
+      if (prior.kind === "conflict") return operationConflict(operationId);
+      if (prior.kind === "replay") {
+        yield* recordEvidence(owner, payload, evidence, requestHash, prior.result, true, now);
+        return prior.result;
+      }
+      const result = yield* execute();
+      if (result.status === "owner_mismatch") return result;
+      const successful = isSuccessfulResult(result);
+      if (successful) {
+        yield* sql`INSERT INTO supervisor_workflow_write_receipts(operation_id,operation_namespace,request_hash,project_id,main_thread_id,supervisor_thread_id,binding_generation,result,created_at) VALUES(${operationId},${operationNamespace(owner, payload)},${requestHash},${owner.projectId},${owner.mainThreadId},${owner.supervisorThreadId},${owner.bindingGeneration},${JSON.stringify(result)},${now})`;
+      }
+      yield* recordEvidence(owner, payload, evidence, requestHash, result, successful, now);
+      return result;
+    })).pipe(Effect.catchCause((cause) => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause as Cause.Cause<never>) : Effect.succeed(denied)));
   };
 
   const commitDenied = (guard: GateGuard, now: number, owner: WorkflowOwner, payload: WorkflowWritePayload, evidence: WorkflowEvidenceMatch,
-    requestHash: string, reason: string): WorkflowWriteResult =>
-    commit(guard, now, owner, payload, evidence, requestHash, () => ({status: "denied", operationId: operationIdOf(payload), reason}));
+    requestHash: string, reason: string): Effect.Effect<WorkflowWriteResult> =>
+    commit(guard, now, owner, payload, evidence, requestHash, () => Effect.succeed({status: "denied", operationId: operationIdOf(payload), reason}));
 
   const commitWrite = (
     guard: GateGuard,
@@ -1002,24 +1008,24 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     nativeScope: NativeScope,
     validation?: WorkflowApplyValidationContext,
     validatedEvidence?: WorkflowStateEvidenceInput[],
-  ): WorkflowWriteResult => commit(guard, now, owner, payload, evidence, requestHash, () => {
+  ): Effect.Effect<WorkflowWriteResult> => commit(guard, now, owner, payload, evidence, requestHash, () => Effect.gen(function* (): Effect.fn.Return<WorkflowWriteResult, SupervisionStoreError> {
     if (team) {
-      const binding = resolveBinding(payload, false, "effect", guard);
+      const binding = yield* resolveBinding(payload, false, "effect", guard);
       const targetWorkflowId = payload.action === "apply" ? payload.input.workflowId : payload.action === "assess_contribution" ? payload.workflowId : null;
-      const document = targetWorkflowId ? workflows.getByIdForOwnerInTransaction(owner, targetWorkflowId) : null;
+      const document = targetWorkflowId ? yield* workflows.getByIdForOwner(owner, targetWorkflowId) : null;
       const targetId = payload.action === "link_child" ? payload.childThreadId :
         document?.status === "found" ? document.document.threadId : owner.mainThreadId;
       const parents = new Map([...nativeScope.byId].map(([id, thread]) => [id, thread.lineage.parentThreadId]));
-      if (!binding || !team.authorizeWrite(binding, payload.supervisorThreadId, targetId, parents, payload))
+      if (!binding || !(yield* team.authorizeWrite(binding, payload.supervisorThreadId, targetId, parents, payload)))
         return {status: "denied", operationId: operationIdOf(payload), reason: "actor_outside_current_assignment"};
     }
     if (payload.action === "ensure_main")
-      return workflows.ensureMainInTransaction(owner, payload.operationId, payload.note, now);
+      return yield* workflows.ensureMain(owner, payload.operationId, payload.note, now);
     if (payload.action === "assess_contribution") {
-      const found = workflows.getByIdForOwnerInTransaction(owner, payload.workflowId);
+      const found = yield* workflows.getByIdForOwner(owner, payload.workflowId);
       if (found.status === "found" && !nativeScope.allowedIds.has(found.document.threadId))
         return {status: "denied", operationId: payload.operationId, reason: "workflow_outside_current_scope"};
-      return workflows.assessContributionInTransaction(owner, {operationId: payload.operationId, workflowId: payload.workflowId,
+      return yield* workflows.assessContribution(owner, {operationId: payload.operationId, workflowId: payload.workflowId,
         expectedRevision: payload.expectedRevision, contributionId: payload.contributionId, resultRevision: payload.resultRevision,
         decision: payload.decision, note: payload.note}, now);
     }
@@ -1031,10 +1037,10 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       if (!child || !nativeScope.liveIds.has(child.id) || typeof parentThreadId !== "string" || !nativeScope.allowedIds.has(parentThreadId))
         return {status: "denied", operationId: payload.operationId, reason: "child_parent_not_in_current_scope"};
       const lineage: WorkflowControllerLineage = {threadId: child.id, parentThreadId, relationshipToParent: "subagent"};
-      const result = workflows.linkChildInTransaction(owner, {operationId: internalOperationId, lineage, note: payload.note}, now);
+      const result = yield* workflows.linkChild(owner, {operationId: internalOperationId, lineage, note: payload.note}, now);
       return {...result, operationId: payload.operationId};
     }
-    const found = workflows.getByIdForOwnerInTransaction(owner, payload.input.workflowId);
+    const found = yield* workflows.getByIdForOwner(owner, payload.input.workflowId);
     if (found.status === "owner_mismatch") return {status: "owner_mismatch", operationId: payload.input.operationId};
     if (found.status === "not_found") return {status: "not_found", operationId: payload.input.operationId};
     if (found.status === "incompatible") return {...found, operationId: payload.input.operationId};
@@ -1043,7 +1049,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       return {status: "denied", operationId: payload.input.operationId, reason: "workflow_outside_current_scope"};
     if (!validation) return {status: "invalid", operationId: payload.input.operationId, reason: "pinned_definition_context_required"};
     const current = found.document;
-    const activeTask = supervisors.task(owner.mainThreadId);
+    const activeTask = yield* supervisors.task(owner.mainThreadId);
     const activeProposalId = activeTask?.workflowProposalId ?? activeTask?.id;
     if (!activeTask || !activeTask.workflow || activeTask.id !== validation.expectedTaskId || activeProposalId !== validation.expectedProposalId ||
       activeTask.sourceHash !== validation.expectedSourceHash || canonicalJson(activeTask.workflow) !== canonicalJson(validation.originalProposal) ||
@@ -1125,18 +1131,18 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
           return {status: "denied", operationId: applyInput.operationId, reason: "new_contributor_not_live"};
       }
     }
-    const result = workflows.applyInTransaction(owner, normalizedInput, now, validation);
+    const result = yield* workflows.apply(owner, normalizedInput, validation, now);
     if (result.status === "invalid" && result.diagnostic)
       return {...result, diagnostic: {...result.diagnostic, path: submittedApplyPointer(payload.input.plan, result.diagnostic.path)}, operationId: payload.input.operationId};
     return {...result, operationId: payload.input.operationId};
-  });
+  }));
 
   const validateActivityReferences = Effect.fnUntraced(function* (
     payload: Extract<WorkflowWritePayload, {action: "apply"}>,
     owner: WorkflowOwner,
     nativeScope: NativeScope,
     cancel: WorkflowCallCancel,
-  ): Effect.fn.Return<ActivityReferenceResult> {
+  ): Effect.fn.Return<ActivityReferenceResult, SupervisionStoreError> {
     const evidence = payload.input.evidence;
     if (!evidence) return {status: "ready"};
     const references = evidence.filter(item => [item.sourceThreadId, item.sourceRunId, item.sourceMessageId, item.sourceItemId]
@@ -1144,7 +1150,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     if (!references.length) return {status: "ready", evidence};
     if (references.length > maxActivityReferencesPerWrite)
       return {status: "invalid", reason: "activity_reference_limit"};
-    const target = workflows.getByIdForOwner(owner, payload.input.workflowId);
+    const target = yield* workflows.getByIdForOwner(owner, payload.input.workflowId);
     if (target.status === "not_found") return {status: "invalid", reason: "activity_reference_workflow_not_found"};
     if (target.status === "owner_mismatch") return {status: "denied", reason: "activity_reference_owner_mismatch"};
     if (target.status === "incompatible") return {status: "unavailable", reason: "activity_reference_workflow_incompatible"};
@@ -1211,9 +1217,8 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
   });
 
   // the apply pin's checks before its fresh definitions read
-  const applyPinTask = (owner: WorkflowOwner): {status: "task"; task: PinnedTask; definitions: ProjectDefinitions["Service"]} |
+  const applyPinTask = (owner: WorkflowOwner) => Effect.map(supervisors.task(owner.mainThreadId), (task): {status: "task"; task: PinnedTask; definitions: ProjectDefinitions["Service"]} |
     {status: "invalid" | "unavailable"; reason: string} => {
-    const task = supervisors.task(owner.mainThreadId);
     if (!task || task.threadId !== owner.mainThreadId || task.projectId !== owner.projectId || task.supervisorThreadId !== owner.supervisorThreadId ||
       task.status !== "inferred" || !task.workflowProposalId && !isId(task.id) || !task.definitionSnapshot || !task.definitionContext || !task.workflow ||
       task.workflow.status !== "proposed" || task.workflow.definitionsStatus !== "ready" || !task.workflow.definitionsComplete ||
@@ -1224,7 +1229,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     if (!definitionSnapshotIndexed(task.definitionSnapshot)) return {status: "invalid", reason: "definitions_refresh_required"};
     if (!definitions) return {status: "unavailable", reason: "definition_source_reader_unavailable"};
     return {status: "task", task: task as PinnedTask, definitions};
-  };
+  });
 
   // the apply pin's checks after the fresh definitions read, in the commit's admission section; `fresh` is none when the read
   // failed or was cancelled
@@ -1244,15 +1249,15 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       acceptedTaskAgreement: task.agreement ?? null, acceptedTaskAgreementSourceHash: task.agreementSourceHash ?? null}};
   };
 
-  const parentNodeReferences = (owner: WorkflowOwner, nativeScope: NativeScope, document: WorkflowStateDocument): Array<{
+  const parentNodeReferences = (owner: WorkflowOwner, nativeScope: NativeScope, document: WorkflowStateDocument) => Effect.gen(function* (): Effect.fn.Return<Array<{
     parentWorkflowId: string;
     parentThreadId: string;
     nodeId: string;
     nodeKind: "step" | "workflow";
     nodeName: string;
-  }> => {
+  }>, SupervisionStoreError> {
     if (!document.parentWorkflowId || !document.parentThreadId || !nativeScope.allowedIds.has(document.parentThreadId)) return [];
-    const parent = workflows.get(owner.projectId, owner.mainThreadId, document.parentThreadId);
+    const parent = yield* workflows.get(owner.projectId, owner.mainThreadId, document.parentThreadId);
     if (!parent || parent.workflowId !== document.parentWorkflowId) return [];
     const references: Array<{parentWorkflowId: string; parentThreadId: string; nodeId: string; nodeKind: "step" | "workflow"; nodeName: string}> = [];
     const walk = (group: WorkflowPlanGroupInfo | null): void => {
@@ -1268,9 +1273,9 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     };
     walk(parent.plan);
     return references;
-  };
+  });
 
-  const startSupervision = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<SupervisionStartResult> {
+  const startSupervision = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<SupervisionStartResult, SupervisionStoreError> {
     try {if (workflowToolInputSize(input) > workflowToolInputMaxBytes) return {status: "invalid", reason: "arguments_too_large"};}
     catch {return {status: "invalid", reason: "arguments_not_json"};}
     const decoded = decodeStartArguments(input, exactKeys);
@@ -1287,7 +1292,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     return yield* control.startSupervision(args, verified.evidence, cancel);
   });
 
-  const stopSupervision = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<SupervisionStopResult> {
+  const stopSupervision = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<SupervisionStopResult, SupervisionStoreError> {
     let inputBytes: number;
     try {inputBytes = workflowToolInputSize(input);} catch {return {status: "invalid", reason: "arguments_not_json"};}
     if (inputBytes > workflowToolInputMaxBytes) return {status: "invalid", reason: "arguments_too_large"};
@@ -1305,24 +1310,25 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     if (verified.status === "pending") return {status: "pending", reason: verified.reason, retryable: true};
     if (verified.status === "denied") return {status: "denied", reason: verified.reason};
     // a failed catalog read ends the call as the baseline rejection did
-    return yield* Effect.orDie(control.stopSupervision(args, verified.evidence, cancel));
+    return yield* control.stopSupervision(args, verified.evidence, cancel).pipe(
+      Effect.catchIf((error): error is StoreError => error instanceof StoreError, (error) => Effect.die(error)));
   });
 
-  const read = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<WorkflowReadResult> {
+  const read = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<WorkflowReadResult, SupervisionStoreError> {
     let inputBytes: number;
     try {inputBytes = workflowToolInputSize(input);} catch {return {status: "invalid", reason: "arguments_not_json"};}
     if (inputBytes > workflowToolInputMaxBytes) return {status: "invalid", reason: "arguments_too_large"};
     const parsed = parseReadPayload(input);
     if (!parsed.ok) return {status: "invalid", reason: parsed.reason};
-    const binding = resolveBinding(parsed.value, false, "read");
+    const binding = yield* resolveBinding(parsed.value, false, "read");
     if (!binding) return {status: "denied", reason: "owner_not_current_ready_enabled"};
     if (parsed.value.view) return {status: "invalid", reason: "invalid_read_arguments"};
     const owner = ownerFor(binding);
     const listed = yield* settled(native.listThreads(cancel));
     if (Option.isNone(listed)) return {status: "unavailable", reason: "native_lineage_unavailable"};
     const threads = listed.value;
-    // one synchronous block after the lineage read: coherent rows, references, coverage and the response bound
-    return yield* Effect.sync((): WorkflowReadResult => {
+    // one block after the lineage read, one guidance transaction: coherent rows, references, coverage and the response bound
+    return yield* transaction(Effect.gen(function* (): Effect.fn.Return<WorkflowReadResult, SupervisionStoreError> {
       const nativeScope = currentNativeScope(threads, owner, supervisors.ownedIds);
       if (!nativeScope) return {status: "unavailable", reason: "native_lineage_incomplete"};
       const limit = parsed.value.limit ?? 20;
@@ -1334,11 +1340,11 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
         relationshipToParent: thread.lineage.relationshipToParent,
         archivedAt: typeof thread.archivedAt === "string" ? thread.archivedAt : null,
       }));
-      const rows = supervisors.store.transaction(() => {
-        const current = resolveBinding(parsed.value, false, "read");
+      const rows = yield* Effect.gen(function* () {
+        const current = yield* resolveBinding(parsed.value, false, "read");
         if (!current || !sameOwner(owner, ownerFor(current))) return {status: "owner_mismatch" as const};
         if (parsed.value.workflowId) {
-          const result = workflows.getByIdForOwnerInTransaction(owner, parsed.value.workflowId);
+          const result = yield* workflows.getByIdForOwner(owner, parsed.value.workflowId);
           if (result.status === "owner_mismatch") return {status: "owner_mismatch" as const};
           if (result.status === "not_found") return {status: "not_found" as const};
           if (result.status === "incompatible") return {status: "incompatible" as const, workflowId: result.workflowId, formatVersion: result.formatVersion};
@@ -1347,7 +1353,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
             return {status: "not_found" as const};
           return {status: "ok" as const, documents: [document], incompatible: [] as Array<{workflowId: string; formatVersion: number | null}>};
         }
-        const listedDocuments = workflows.listResult(owner.projectId, owner.mainThreadId);
+        const listedDocuments = yield* workflows.listResult(owner.projectId, owner.mainThreadId);
         return {status: "ok" as const, documents: listedDocuments.documents
           .filter(document => nativeScope.allowedIds.has(document.threadId) && document.projectId === owner.projectId && document.mainThreadId === owner.mainThreadId)
           .sort((left, right) => nativeScope.depthById.get(left.threadId)! - nativeScope.depthById.get(right.threadId)! || left.threadId.localeCompare(right.threadId)),
@@ -1359,19 +1365,18 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
         reason: "This workflow uses an older or unknown storage format and is retained read-only."};
       const all = rows.documents;
       const page = all.slice(workflowOffset, workflowOffset + limit);
-      const withReferences = page.map(document => ({
-        document,
-        parentNodeReferences: parentNodeReferences(owner, nativeScope, document),
-      }));
-      const task = supervisors.task(owner.mainThreadId);
+      const withReferences = yield* Effect.forEach(page, (document) => Effect.map(parentNodeReferences(owner, nativeScope, document),
+        (parentNodeReferences) => ({document, parentNodeReferences})));
+      const task = yield* supervisors.task(owner.mainThreadId);
+      const coverage = team ? yield* Effect.forEach(requestedLineage, (thread) => Effect.gen(function* () {
+        const coverage = yield* team.coverage(binding, thread.threadId, new Map([...nativeScope.byId].map(([id, value]) => [id, value.lineage.parentThreadId])));
+        const member = (yield* team.snapshot(binding)).members.find(value => value.threadId === coverage.actorThreadId);
+        return {threadId: thread.threadId, ...coverage, actorTitle: member?.title ?? (coverage.actorThreadId === binding.threadId ? binding.title : null)};
+      })) : null;
       const result: WorkflowReadResult = {
         status: "ok",
         owner,
-        ...(team ? {coverage: requestedLineage.map(thread => {
-          const coverage = team.coverage(binding, thread.threadId, new Map([...nativeScope.byId].map(([id, value]) => [id, value.lineage.parentThreadId])));
-          const member = team.snapshot(binding).members.find(value => value.threadId === coverage.actorThreadId);
-          return {threadId: thread.threadId, ...coverage, actorTitle: member?.title ?? (coverage.actorThreadId === binding.threadId ? binding.title : null)};
-        })} : {}),
+        ...(coverage ? {coverage} : {}),
         mainTaskAgreementStatus: task?.agreement?.status ?? null,
         workflowProtocolDiagnostic: task?.workflowProtocolDiagnostic ?? null,
         agreementValidityNote: "Agreement status is current task metadata. currentAgreementKey only marks content matching a retained accepted snapshot; neither field proves execution or current definition validity.",
@@ -1392,18 +1397,18 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       }
       if (size > maxWorkflowReadBytes) return {status: "too_large", reason: "workflow_read_exceeds_response_limit"};
       return result;
-    });
+    }));
   });
 
   /** The MCP workflow_read entry: bounded context views for the verified binding, or the workflow documents. */
-  const readTool = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<WorkflowReadResult | SupervisorContextViewResult> {
+  const readTool = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<WorkflowReadResult | SupervisorContextViewResult, SupervisionStoreError> {
     let inputBytes: number;
     try {inputBytes = workflowToolInputSize(input);} catch {return {status: "invalid", reason: "arguments_not_json"};}
     if (inputBytes > workflowToolInputMaxBytes) return {status: "invalid", reason: "arguments_too_large"};
     const parsed = parseReadPayload(input);
     if (!parsed.ok) return {status: "invalid", reason: parsed.reason};
     if (!parsed.value.view) return yield* read(input, cancel);
-    const binding = resolveBinding(parsed.value, false, parsed.value.view === "context" ? "status" : "read");
+    const binding = yield* resolveBinding(parsed.value, false, parsed.value.view === "context" ? "status" : "read");
     if (!binding) return {status: "denied", reason: "owner_not_current_ready_enabled"};
     if (!conversation) return {status: "unavailable", reason: "context_views_unavailable"};
     const {view, definitionIds, includeSources, record: viewRecord} = parsed.value;
@@ -1413,7 +1418,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     return Buffer.byteLength(JSON.stringify(result), "utf8") > maxWorkflowReadBytes ? {status: "too_large", reason: "workflow_read_exceeds_response_limit"} : result;
   });
 
-  const write = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<WorkflowWriteResult> {
+  const write = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<WorkflowWriteResult, SupervisionStoreError> {
     let inputBytes: number;
     try {inputBytes = workflowToolInputSize(input);} catch {return {status: "invalid", reason: "arguments_not_json"};}
     if (inputBytes > workflowToolInputMaxBytes) return {status: "invalid", reason: "arguments_too_large"};
@@ -1421,7 +1426,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     if (!parsed.ok) return {status: "invalid", ...(parsed.operationId ? {operationId: parsed.operationId} : {}), reason: parsed.reason,
       ...(parsed.diagnostic ? {diagnostic: parsed.diagnostic} : {})};
     const payload = parsed.value;
-    const binding = resolveBinding(payload);
+    const binding = yield* resolveBinding(payload);
     if (!binding) return {status: "denied", operationId: operationIdOf(payload), reason: "owner_not_current_ready_enabled"};
     // only the root that owns the main workflow assesses external results; helpers and other actors never do
     if (payload.action === "assess_contribution" && payload.supervisorThreadId !== binding.threadId)
@@ -1429,7 +1434,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     const owner = ownerFor(binding);
     const operationId = operationIdOf(payload);
     const requestHash = workflowRequestHash({owner, arguments: payload});
-    const receipt = readOperationReceipt(owner, operationNamespace(owner, payload), operationId, requestHash);
+    const receipt = yield* readOperationReceipt(owner, operationNamespace(owner, payload), operationId, requestHash);
     if (receipt.kind === "replay") return receipt.result;
     if (receipt.kind === "conflict") return operationConflict(operationId);
 
@@ -1445,27 +1450,27 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     if (yield* Deferred.isDone(cancel)) return {status: "pending", operationId, reason: "native_lineage_interrupted", retryable: true};
 
     // the block after the lineage read: an incomplete lineage or a dead child is a durable denial, any other action but apply commits
-    const lineage = yield* admitted((guard, now): {done: WorkflowWriteResult} | {scope: NativeScope; apply: Extract<WorkflowWritePayload, {action: "apply"}>} => {
+    const lineage = yield* admitted((guard, now) => Effect.gen(function* (): Effect.fn.Return<{done: WorkflowWriteResult} | {scope: NativeScope; apply: Extract<WorkflowWritePayload, {action: "apply"}>}> {
       const nativeScope = currentNativeScope(listed.value, owner, supervisors.ownedIds);
-      if (!nativeScope) return {done: commitDenied(guard, now, owner, payload, evidence, requestHash, "native_lineage_incomplete")};
+      if (!nativeScope) return {done: yield* commitDenied(guard, now, owner, payload, evidence, requestHash, "native_lineage_incomplete")};
       if (payload.action === "link_child" && !nativeScope.liveIds.has(payload.childThreadId))
-        return {done: commitDenied(guard, now, owner, payload, evidence, requestHash, "child_not_current_native_descendant")};
-      if (payload.action !== "apply") return {done: commitWrite(guard, now, owner, payload, evidence, requestHash, nativeScope)};
+        return {done: yield* commitDenied(guard, now, owner, payload, evidence, requestHash, "child_not_current_native_descendant")};
+      if (payload.action !== "apply") return {done: yield* commitWrite(guard, now, owner, payload, evidence, requestHash, nativeScope)};
       return {scope: nativeScope, apply: payload};
-    });
+    }));
     if ("done" in lineage) return lineage.done;
 
     const references = yield* validateActivityReferences(lineage.apply, owner, lineage.scope, cancel);
     if (references.status !== "ready") return {status: references.status, operationId, reason: references.reason,
       ...(references.status === "pending" ? {retryable: true} : {})};
-    const pinned = applyPinTask(owner);
+    const pinned = yield* applyPinTask(owner);
     if (pinned.status !== "task") return {status: pinned.status, operationId, reason: pinned.reason};
     const fresh = yield* settled(untilCancelled(pinned.definitions.load(owner.projectId, owner.mainThreadId), cancel));
     const interrupted = yield* Deferred.isDone(cancel);
     // the block after the definitions read: the pin's checks and the commit
-    return yield* admitted((guard, now): WorkflowWriteResult => {
+    return yield* admitted((guard, now) => {
       const pin = applyPinFinish(owner, pinned.task, fresh, interrupted);
-      if (pin.status !== "ready") return {status: pin.status, operationId, reason: pin.reason};
+      if (pin.status !== "ready") return Effect.succeed<WorkflowWriteResult>({status: pin.status, operationId, reason: pin.reason});
       return commitWrite(guard, now, owner, payload, evidence, requestHash, lineage.scope, pin.validation, references.evidence);
     });
   });
@@ -1481,10 +1486,10 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
   });
 });
 
-// the workflow write controller: verified native proof, receipts and the admitted workflow_write commit over the interim stores
+// the workflow write controller: verified native proof, receipts and the admitted workflow_write commit over the supervision stores
 export class WorkflowWriteController extends Context.Service<WorkflowWriteController, WorkflowWriteControllerShape>()("t3-supervisor/WorkflowWriteController") {
   static readonly make = makeWorkflowWriteController;
-  static readonly layer = (options: WorkflowWriteControllerOptions = {}): Layer.Layer<WorkflowWriteController, never,
-    SupervisionGate | WorkflowNativeAccess | SupervisionStores | SupervisionScopeService> =>
+  static readonly layer = (options: WorkflowWriteControllerOptions = {}): Layer.Layer<WorkflowWriteController, GuidanceStoreError,
+    SupervisionGate | WorkflowNativeAccess | SupervisionScopeService | GuidanceDb | ProjectSupervisorStore | SupervisorTeamStore> =>
     Layer.effect(WorkflowWriteController, makeWorkflowWriteController(options));
 }

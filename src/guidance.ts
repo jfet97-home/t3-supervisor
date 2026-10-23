@@ -1,13 +1,15 @@
 import { Clock, Context, Effect, Layer, SubscriptionRef } from "effect";
 import { resolve } from "node:path";
 import { SupervisorConfig as Configuration } from "./config.js";
-import { currentThreadPolicy, ThreadPolicy } from "./thread-policy.js";
+import { GuidanceDb } from "./db.js";
 import type { GuidanceSnapshot } from "./guidance-contract.js";
-import type { GuidanceStore } from "./guidance-store.js";
+import { type GuidanceStoreError, guidanceTransaction } from "./guidance-sql.js";
+import { GuidanceStore } from "./guidance-store.js";
 import { isSupervisorThread, SupervisorOwnership } from "./project-supervisor-store.js";
 import { Store, type StoreError, type StoreShape } from "./store.js";
 import type { T3EnvironmentDescriptor } from "./t3.js";
-import type { SupervisorConfig } from "./types.js";
+import { ThreadPolicyStore, type ThreadPolicyStoreError } from "./thread-policy.js";
+import type { SupervisorSettings } from "./types.js";
 
 // the connection state the supervision cycle publishes and every snapshot reads
 export interface RuntimeState {
@@ -21,12 +23,12 @@ export interface RuntimeState {
 type Classification = "project" | "scratch" | "unclassified";
 
 // an explicit store value wins; otherwise scratch at the resolved managed scratch root, else project, and unclassified without one
-const classifyCatalog = (config: SupervisorConfig, store: GuidanceStore,
-  projects: ReadonlyArray<{project: {id: string; workspaceRoot: string}; available: boolean}>): Map<string, Classification> => {
+const classifyCatalog = (config: SupervisorSettings, store: GuidanceStore["Service"],
+  projects: ReadonlyArray<{project: {id: string; workspaceRoot: string}; available: boolean}>) => Effect.gen(function* () {
   const classifications = new Map<string, Classification>();
   for (const {project, available} of projects) {
     if (!available) continue;
-    const explicit = store.classification(project.id);
+    const explicit = yield* store.classification(project.id);
     classifications.set(
       project.id,
       explicit !== "unclassified"
@@ -39,10 +41,14 @@ const classifyCatalog = (config: SupervisorConfig, store: GuidanceStore,
     );
   }
   return classifications;
-};
+});
 
-// the configuration is read at snapshot time, so ownership and thread policy follow the values it carries (b-02)
-const makeGuidanceRuntime = (config: SupervisorConfig, store: GuidanceStore, source: Pick<StoreShape, "catalog">) => Effect.gen(function* () {
+// ownership and the thread policy are read at snapshot time
+const makeGuidanceRuntime = (config: SupervisorSettings, source: Pick<StoreShape, "catalog">) => Effect.gen(function* () {
+  const db = yield* GuidanceDb;
+  const store = yield* GuidanceStore;
+  const policy = yield* ThreadPolicyStore;
+  const owned = yield* SupervisorOwnership;
   const state = yield* SubscriptionRef.make<RuntimeState>({
     descriptor: null, lastCycleAt: null, connected: false, coverage: "Starting", startedAt: yield* Clock.currentTimeMillis,
   });
@@ -50,9 +56,11 @@ const makeGuidanceRuntime = (config: SupervisorConfig, store: GuidanceStore, sou
   const snapshot = Effect.gen(function* () {
     const catalog = yield* source.catalog();
     const current = yield* SubscriptionRef.get(state);
-    // the guidance store and the thread policy are synchronous reads (b-02), taken in one block in their baseline order
-    return yield* Effect.sync((): GuidanceSnapshot => {
-      const classifications = classifyCatalog(config, store, catalog.projects);
+    // the guidance and thread-policy reads in their baseline order, the guidance reads as one snapshot
+    return yield* guidanceTransaction(db)(Effect.gen(function* (): Effect.fn.Return<GuidanceSnapshot, GuidanceStoreError | ThreadPolicyStoreError> {
+      const classifications = yield* classifyCatalog(config, store, catalog.projects);
+      const settings = yield* store.settings();
+      const threadPolicy = yield* policy.get();
       return {
         environmentId: current.descriptor?.environmentId ?? null,
         serverVersion: current.descriptor?.serverVersion ?? null,
@@ -60,10 +68,10 @@ const makeGuidanceRuntime = (config: SupervisorConfig, store: GuidanceStore, sou
         lastCycleAt: current.lastCycleAt,
         sendingReady: false,
         sendingReason: "Native project and workflow supervision uses T3 conversations.",
-        settings: store.settings(),
-        threadPolicy: currentThreadPolicy(config),
+        settings,
+        threadPolicy,
         threads: catalog.threads
-          .filter(thread => thread.lineage?.relationshipToParent !== "subagent" && !isSupervisorThread(config, thread))
+          .filter(thread => thread.lineage?.relationshipToParent !== "subagent" && !isSupervisorThread(owned, thread))
           .map(thread => ({
             id: thread.id,
             title: thread.title,
@@ -76,13 +84,13 @@ const makeGuidanceRuntime = (config: SupervisorConfig, store: GuidanceStore, sou
           available,
           classification: classifications.get(project.id) ?? "unclassified",
         })),
-        rules: store.rules(),
-        mutes: store.mutes(),
-        activity: store.activities(),
+        rules: yield* store.rules(),
+        mutes: yield* store.mutes(),
+        activity: yield* store.activities(),
         coverage: current.coverage,
-        tokensUsed: store.used(),
+        tokensUsed: yield* store.used(),
       };
-    });
+    }));
   });
   return {
     state,
@@ -98,19 +106,18 @@ const makeGuidanceRuntime = (config: SupervisorConfig, store: GuidanceStore, sou
 export class GuidanceRuntime extends Context.Service<GuidanceRuntime, {
   // written only by the operations below; readers may follow its changes
   readonly state: SubscriptionRef.SubscriptionRef<RuntimeState>;
-  readonly snapshot: Effect.Effect<GuidanceSnapshot, StoreError>;
+  readonly snapshot: Effect.Effect<GuidanceSnapshot, StoreError | GuidanceStoreError | ThreadPolicyStoreError>;
   readonly recordDescriptor: (descriptor: T3EnvironmentDescriptor) => Effect.Effect<void>;
   // a completed cycle: connected, its time on the Effect clock and the active coverage text
   readonly markActive: Effect.Effect<void>;
   // a failed cycle keeps the last descriptor and cycle time
   readonly markUnavailable: Effect.Effect<void>;
 }>()("t3-supervisor/GuidanceRuntime") {
-  static readonly make: (config: SupervisorConfig, store: GuidanceStore, source: Pick<StoreShape, "catalog">) => Effect.Effect<GuidanceRuntime["Service"]> =
-    makeGuidanceRuntime;
-  // the runtime over the root services and the interim guidance store (b-02, a service from s6d)
-  static readonly layer = (store: GuidanceStore): Layer.Layer<GuidanceRuntime, never, Store | Configuration | ThreadPolicy | SupervisorOwnership> =>
+  static readonly make: (config: SupervisorSettings, source: Pick<StoreShape, "catalog">) =>
+    Effect.Effect<GuidanceRuntime["Service"], never, GuidanceDb | GuidanceStore | ThreadPolicyStore | SupervisorOwnership> = makeGuidanceRuntime;
+  // the runtime over the root services and the run's guidance store
+  static readonly layer: Layer.Layer<GuidanceRuntime, never, Store | Configuration | GuidanceDb | GuidanceStore | ThreadPolicyStore | SupervisorOwnership> =
     Layer.effect(GuidanceRuntime, Effect.gen(function* () {
-      const config = { ...yield* Configuration, threadPolicy: yield* ThreadPolicy, supervisorOwnedThreadIds: yield* SupervisorOwnership };
-      return yield* makeGuidanceRuntime(config, store, yield* Store);
+      return yield* makeGuidanceRuntime(yield* Configuration, yield* Store);
     }));
 }

@@ -3,7 +3,9 @@ import {HttpClient, HttpClientRequest, type HttpClientResponse} from "effect/htt
 import {workflowRequestHash} from "./workflow-write-evidence.js";
 import {NativeOperateRpc, record, type NativeRpcShape, type SupervisorRpcError} from "./supervisor-native.js";
 import {admitSend, SupervisionGate, type AdmittedInFlight, type GateGuard, type SendPreparation} from "./supervision-gate.js";
-import type {BindingRecord, ProjectSupervisorStore} from "./project-supervisor-store.js";
+import {GuidanceDb} from "./db.js";
+import {type GuidanceStoreError, guidanceSql, guidanceTransaction, type SupervisionStoreError} from "./guidance-sql.js";
+import {ProjectSupervisorStore, type BindingRecord} from "./project-supervisor-store.js";
 import {T3Client, type T3TransportError} from "./t3.js";
 import type {MessageInfo, Projection} from "./types.js";
 
@@ -123,18 +125,20 @@ const decodeDocument = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.U
  */
 export const invalidReceipt: unique symbol = Symbol.for("t3-supervisor/invalidReceipt");
 export type InvalidReceipt = typeof invalidReceipt;
-const storedDocument = <A>(guard: (value: unknown) => value is A, document: unknown): A | InvalidReceipt => {
-  const value = Option.getOrUndefined(decodeDocument(String(document)));
+const storedDocument = <A>(guard: (value: unknown) => value is A, document: string): A | InvalidReceipt => {
+  const value = Option.getOrUndefined(decodeDocument(document));
   return value !== undefined && guard(value) ? value : invalidReceipt;
 };
 // a write over a row that turned invalid since this operation read it: nothing is written and the operation ends
-// unresolved at its boundary
+// unresolved at its boundary (a defect, as the baseline throw was)
 class InvalidReceiptOverwrite extends Data.TaggedError("InvalidReceiptOverwrite") {}
 // a row read again during an operation that already read it valid
-const readable = <A>(value: A | null | InvalidReceipt): A | null => {
-  if (value === invalidReceipt) throw new InvalidReceiptOverwrite();
-  return value;
-};
+const readable = <A>(value: A | null | InvalidReceipt): Effect.Effect<A | null> =>
+  value === invalidReceipt ? Effect.die(new InvalidReceiptOverwrite()) : Effect.succeed(value);
+// a receipt or channel row: its document column; an unreadable row is an invalid receipt, never absent
+const decodeDocumentRow = Schema.decodeUnknownOption(Schema.Struct({document: Schema.String}));
+const storedRow = <A>(guard: (value: unknown) => value is A, row: unknown): A | InvalidReceipt =>
+  Option.match(decodeDocumentRow(row), {onNone: () => invalidReceipt, onSome: ({document}) => storedDocument(guard, document)});
 
 // the native webhook delivery that matches a receipt, with its rendered prompt when the log proves it
 type NativeDelivery = {id: string; outcome: string; renderedPrompt?: string};
@@ -159,26 +163,32 @@ const receipt: Admission = {_tag: "Receipt"};
 export type HelperSendOptions = {
   // completes when the caller gives up, as the baseline AbortSignal did; an awaited read then fails and the POST is aborted
   readonly cancel?: Deferred.Deferred<void> | undefined;
-  // the caller's authority, rechecked with the admission guard immediately before the receipt and the POST
-  readonly authorized?: ((guard: GateGuard) => boolean) | undefined;
+  // the caller's authority, rechecked with the admission guard immediately before the receipt and the POST, in the
+  // receipt's transaction
+  readonly authorized?: ((guard: GateGuard) => Effect.Effect<boolean, SupervisionStoreError>) | undefined;
 };
 
 export interface HelperTransportShape {
-  readonly send: (binding: BindingRecord, input: SupervisorHelperMessage, options?: HelperSendOptions) => Effect.Effect<SupervisorHelperSendResult>;
-  readonly hasDelivery: (binding: BindingRecord, input: SupervisorHelperMessage) => Effect.Effect<boolean>;
+  readonly send: (binding: BindingRecord, input: SupervisorHelperMessage, options?: HelperSendOptions) => Effect.Effect<SupervisorHelperSendResult, SupervisionStoreError>;
+  readonly hasDelivery: (binding: BindingRecord, input: SupervisorHelperMessage) => Effect.Effect<boolean, GuidanceStoreError>;
   // read-only reconciliation of an existing receipt; it never posts
-  readonly reconcileDelivery: (binding: BindingRecord, input: SupervisorHelperMessage, cancel?: Deferred.Deferred<void>) => Effect.Effect<"absent" | SupervisorHelperSendResult>;
+  readonly reconcileDelivery: (binding: BindingRecord, input: SupervisorHelperMessage, cancel?: Deferred.Deferred<void>) => Effect.Effect<"absent" | SupervisorHelperSendResult, GuidanceStoreError>;
   // the exact bytes an existing attempt sent; they, not regenerated text, identify that attempt from then on. An
   // attempt whose stored receipt is invalid has no readable text but is never reported as absent
-  readonly receiptText: (binding: BindingRecord, logicalMessageId: string) => Effect.Effect<string | null | InvalidReceipt>;
+  readonly receiptText: (binding: BindingRecord, logicalMessageId: string) => Effect.Effect<string | null | InvalidReceipt, GuidanceStoreError>;
   // `messages` is the helper projection. A per-message call must not treat the first of several unbound copies as the delivery.
-  readonly matchesMessage: (binding: BindingRecord, logicalMessageId: string, text: string, message: MessageInfo, messages: readonly MessageInfo[]) => Effect.Effect<boolean>;
+  readonly matchesMessage: (binding: BindingRecord, logicalMessageId: string, text: string, message: MessageInfo, messages: readonly MessageInfo[]) => Effect.Effect<boolean, GuidanceStoreError>;
   // the stored receipt document, for callers that apply the shared attribution predicate themselves
-  readonly receiptDocument: (binding: BindingRecord, logicalMessageId: string) => Effect.Effect<HelperDeliveryAttribution | null | InvalidReceipt>;
-  readonly retire: (binding: BindingRecord, helperThreadId: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<boolean>;
+  readonly receiptDocument: (binding: BindingRecord, logicalMessageId: string) => Effect.Effect<HelperDeliveryAttribution | null | InvalidReceipt, GuidanceStoreError>;
+  readonly retire: (binding: BindingRecord, helperThreadId: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<boolean, GuidanceStoreError>;
 }
 
-export type HelperTransportOptions = {store: ProjectSupervisorStore; baseUrl: string};
+export type HelperTransportOptions = {baseUrl: string};
+
+const helperSchema = [
+  "CREATE TABLE IF NOT EXISTS supervisor_helper_channels(\n      owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,helper_thread_id TEXT NOT NULL,document TEXT NOT NULL,\n      PRIMARY KEY(owner_thread_id,owner_generation,helper_thread_id))",
+  "CREATE TABLE IF NOT EXISTS supervisor_helper_deliveries(\n      owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,message_id TEXT NOT NULL,document TEXT NOT NULL,\n      PRIMARY KEY(owner_thread_id,owner_generation,message_id))",
+];
 
 /** Uses a genuine native webhook task, without timers or repeated tasks on the root. */
 const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(function* () {
@@ -189,48 +199,40 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
   const rpc: NativeRpcShape | null = Option.getOrNull(yield* Effect.serviceOption(NativeOperateRpc));
   // the transport's service-lifetime in-flight posts (plan 3.11): closing its scope aborts each one and keeps its receipt
   const inFlight = yield* FiberMap.make<string, Admission>();
-  const db = options.store.store.db;
-  db.exec(`CREATE TABLE IF NOT EXISTS supervisor_helper_channels(
-      owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,helper_thread_id TEXT NOT NULL,document TEXT NOT NULL,
-      PRIMARY KEY(owner_thread_id,owner_generation,helper_thread_id));
-      CREATE TABLE IF NOT EXISTS supervisor_helper_deliveries(
-      owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,message_id TEXT NOT NULL,document TEXT NOT NULL,
-      PRIMARY KEY(owner_thread_id,owner_generation,message_id));`);
+  const store = yield* ProjectSupervisorStore;
+  const db = yield* GuidanceDb;
+  const transaction = guidanceTransaction(db);
+  // the transport's own two tables on the run's guidance client
+  yield* guidanceSql(Effect.forEach(helperSchema, (statement) => db.unsafe(statement)));
 
   const projection = (threadId: string, cancel: Deferred.Deferred<void> | undefined): Effect.Effect<Projection, T3TransportError | Cancelled> =>
     untilCancelled(Effect.map(t3.projection(threadId), (snapshot) => snapshot.projection), cancel);
-  const channel = (binding: BindingRecord, helperThreadId: string): Channel | null | InvalidReceipt => {
-    const row = db.prepare("SELECT document FROM supervisor_helper_channels WHERE owner_thread_id=? AND owner_generation=? AND helper_thread_id=?")
-      .get(binding.threadId, binding.generation, helperThreadId);
-    return row ? storedDocument(isChannel, row.document) : null;
-  };
-  const saveChannel = (binding: BindingRecord, value: Channel): void => {
-    if (channel(binding, value.helperThreadId) === invalidReceipt) throw new InvalidReceiptOverwrite();
-    db.prepare("INSERT INTO supervisor_helper_channels VALUES(?,?,?,?) ON CONFLICT(owner_thread_id,owner_generation,helper_thread_id) DO UPDATE SET document=excluded.document")
-      .run(binding.threadId, binding.generation, value.helperThreadId, JSON.stringify(value));
-  };
-  const delivery = (binding: BindingRecord, messageId: string): Delivery | null | InvalidReceipt => {
-    const row = db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
-      .get(binding.threadId, binding.generation, messageId);
-    return row ? storedDocument(isDelivery, row.document) : null;
-  };
+  const channelOf = (binding: BindingRecord, helperThreadId: string) => Effect.map(
+    db`SELECT document FROM supervisor_helper_channels WHERE owner_thread_id=${binding.threadId} AND owner_generation=${binding.generation} AND helper_thread_id=${helperThreadId}`,
+    ([row]): Channel | null | InvalidReceipt => row === undefined ? null : storedRow(isChannel, row));
+  const channel = (binding: BindingRecord, helperThreadId: string) => guidanceSql(channelOf(binding, helperThreadId));
+  const saveChannel = (binding: BindingRecord, value: Channel) => transaction(Effect.gen(function* () {
+    if ((yield* channelOf(binding, value.helperThreadId)) === invalidReceipt) return yield* Effect.die(new InvalidReceiptOverwrite());
+    yield* db`INSERT INTO supervisor_helper_channels VALUES(${binding.threadId},${binding.generation},${value.helperThreadId},${JSON.stringify(value)}) ON CONFLICT(owner_thread_id,owner_generation,helper_thread_id) DO UPDATE SET document=excluded.document`;
+  }));
+  const deliveryOf = (binding: BindingRecord, messageId: string) => Effect.map(
+    db`SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=${binding.threadId} AND owner_generation=${binding.generation} AND message_id=${messageId}`,
+    ([row]): Delivery | null | InvalidReceipt => row === undefined ? null : storedRow(isDelivery, row));
+  const delivery = (binding: BindingRecord, messageId: string) => guidanceSql(deliveryOf(binding, messageId));
   // a rendering, its native message id and a contradiction are write-once for the same attempt: every later write
-  // re-reads and keeps them, so an overlapping reconciliation or a late POST reply can neither replace nor erase them
-  const save = (binding: BindingRecord, value: Delivery): void => {
-    const write = () => {
-      const stored = readable(delivery(binding, value.messageId));
-      const sameAttempt = stored !== null && stored.hash === value.hash;
-      const keptContradiction = sameAttempt && stored.contradicted === true;
-      const next = {...value,
-        ...(sameAttempt && typeof stored.renderedText === "string" ? {renderedText: stored.renderedText} : {}),
-        ...(sameAttempt && typeof stored.nativeMessageId === "string" ? {nativeMessageId: stored.nativeMessageId} : {}),
-        // a stored contradiction also keeps the receipt rejected, so a late posted write cannot clear either
-        ...(keptContradiction ? {contradicted: true as const, state: "rejected" as const} : {})};
-      db.prepare("INSERT INTO supervisor_helper_deliveries VALUES(?,?,?,?) ON CONFLICT(owner_thread_id,owner_generation,message_id) DO UPDATE SET document=excluded.document")
-        .run(binding.threadId, binding.generation, value.messageId, JSON.stringify(next));
-    };
-    if (db.isTransaction) write(); else options.store.store.transaction(write);
-  };
+  // re-reads and keeps them in the same transaction, so an overlapping reconciliation or a late POST reply can neither
+  // replace nor erase them
+  const save = (binding: BindingRecord, value: Delivery) => transaction(Effect.gen(function* () {
+    const stored = yield* readable(yield* deliveryOf(binding, value.messageId));
+    const sameAttempt = stored !== null && stored.hash === value.hash;
+    const keptContradiction = sameAttempt && stored.contradicted === true;
+    const next = {...value,
+      ...(sameAttempt && typeof stored.renderedText === "string" ? {renderedText: stored.renderedText} : {}),
+      ...(sameAttempt && typeof stored.nativeMessageId === "string" ? {nativeMessageId: stored.nativeMessageId} : {}),
+      // a stored contradiction also keeps the receipt rejected, so a late posted write cannot clear either
+      ...(keptContradiction ? {contradicted: true as const, state: "rejected" as const} : {})};
+    yield* db`INSERT INTO supervisor_helper_deliveries VALUES(${binding.threadId},${binding.generation},${value.messageId},${JSON.stringify(next)}) ON CONFLICT(owner_thread_id,owner_generation,message_id) DO UPDATE SET document=excluded.document`;
+  }));
   const tasks = (operate: NativeRpcShape, cancel: Deferred.Deferred<void> | undefined): Effect.Effect<ReadonlyArray<Record<string, unknown>>, SupervisorRpcError | ChannelsUnavailable> =>
     Effect.flatMap(operate.call("scheduledTasks.list", {}, cancel), (result) => isTaskList(result) ? Effect.succeed(result.tasks) : Effect.fail(new ChannelsUnavailable()));
   // native delivery detail is evidence for this attempt only when it reproduces the exact durable request: same
@@ -299,12 +301,12 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
       (value.createdAt === null || task.createdAt === value.createdAt);
   // the channel upsert keeps its baseline behaviour: no policy recheck after its awaited reads (L-01)
   const readyChannel = (operate: NativeRpcShape, binding: BindingRecord, helper: Projection, cancel: Deferred.Deferred<void> | undefined) => Effect.gen(function* () {
-    let current = channel(binding, helper.thread.id);
+    let current = yield* channel(binding, helper.thread.id);
     if (current === invalidReceipt || current?.state === "retired" || current?.state === "retiring") return null;
     if (!current) {
       current = {taskId: `supervisor-helper:${workflowRequestHash({root: binding.threadId, generation: binding.generation, helper: helper.thread.id})}`,
         helperThreadId: helper.thread.id, createdAt: null, state: "creating"};
-      saveChannel(binding, current);
+      yield* saveChannel(binding, current);
     }
     const taskId = current.taskId;
     let task = (yield* tasks(operate, cancel)).find(item => item.id === taskId);
@@ -324,7 +326,7 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
       task = result.task;
     }
     if (typeof task.createdAt !== "string" || !record(task.webhook) || typeof task.webhook.path !== "string" || !task.webhook.path.startsWith("/api/hooks/")) return null;
-    current = {...current, createdAt: task.createdAt, state: "ready"};saveChannel(binding, current);
+    current = {...current, createdAt: task.createdAt, state: "ready"};yield* saveChannel(binding, current);
     return {channel: current, task};
   });
   // whether this rejection coexists with delivery evidence for the same attempt: recorded acceptance (a posted receipt
@@ -332,8 +334,7 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
   // already bound (both stay evidence after the message can no longer be read), or an exact message in `messages`,
   // which is null when the projection could not be read. The message check uses a posted view and ignores a flag
   // already stored, so the message that proves the contradiction is still visible to the predicate.
-  const contradicts = (binding: BindingRecord, value: Delivery, messages: readonly MessageInfo[] | null): boolean => {
-    const stored = delivery(binding, value.messageId);
+  const contradicts = (binding: BindingRecord, value: Delivery, messages: readonly MessageInfo[] | null) => Effect.map(delivery(binding, value.messageId), (stored): boolean => {
     // an unreadable stored receipt is never evidence of non-delivery
     if (stored === invalidReceipt) return true;
     const attempts = stored !== null && stored.hash === value.hash ? [value, stored] : [value];
@@ -341,9 +342,9 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
       typeof item.nativeMessageId === "string")) return true;
     const projected: HelperDeliveryAttribution = {...value, state: "posted", contradicted: undefined};
     return messages !== null && messages.some(message => attributesHelperDelivery(projected, message, messages));
-  };
+  });
   // an exact chat frame fills a rendering the native log did not supply. It never replaces one already stored.
-  const bindAttributed = (binding: BindingRecord, value: Delivery, messages: readonly MessageInfo[]): Delivery => {
+  const bindAttributed = (binding: BindingRecord, value: Delivery, messages: readonly MessageInfo[]) => Effect.gen(function* () {
     if (value.state === "rejected") return value;
     const attributed = messages.filter(message => attributesHelperDelivery(value, message, messages));
     if (attributed.length !== 1) return value;
@@ -352,18 +353,16 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
     const nativeMessageId = typeof value.nativeMessageId === "string" ? value.nativeMessageId : message.id;
     const state = value.state === "posting" ? "posted" as const : value.state;
     if (renderedText === value.renderedText && nativeMessageId === value.nativeMessageId && state === value.state) return value;
-    save(binding, {...value, state, renderedText, nativeMessageId});
-    return readable(delivery(binding, value.messageId)) ?? {...value, state, renderedText, nativeMessageId};
-  };
+    yield* save(binding, {...value, state, renderedText, nativeMessageId});
+    return (yield* readable(yield* delivery(binding, value.messageId))) ?? {...value, state, renderedText, nativeMessageId};
+  });
   // a result computed across an await re-reads the receipt: an overlap may have stored a contradiction meanwhile,
   // and a contradicted receipt is never reported rejected, waiting or anything else but uncertain
-  const settled = (binding: BindingRecord, messageId: string, value: SupervisorHelperSendResult): SupervisorHelperSendResult => {
-    const stored = delivery(binding, messageId);
-    return stored === invalidReceipt || stored?.contradicted === true ? "uncertain" : value;
-  };
+  const settled = (binding: BindingRecord, messageId: string, value: SupervisorHelperSendResult) => Effect.map(delivery(binding, messageId),
+    (stored): SupervisorHelperSendResult => stored === invalidReceipt || stored?.contradicted === true ? "uncertain" : value);
   // `messages` is the helper's current native projection, or null when it could not be read
   const reconcileReceipt = (operate: NativeRpcShape, binding: BindingRecord, value: Delivery, cancel: Deferred.Deferred<void> | undefined,
-    messages: readonly MessageInfo[] | null): Effect.Effect<SupervisorHelperSendResult> => Effect.gen(function* () {
+    messages: readonly MessageInfo[] | null): Effect.Effect<SupervisorHelperSendResult, GuidanceStoreError> => Effect.gen(function* () {
     if (value.contradicted === true) return "uncertain";
     const settle = (result: SupervisorHelperSendResult) => settled(binding, value.messageId, result);
     // a failing delivery-log read is not proof the chat frame is absent
@@ -375,43 +374,43 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
       const seen = {...value, nativeDeliveryId: native.id};
       // a bound rendering or a visible exact message contradicts a pre-render rejection: remember it, or a later
       // disappearance becomes definite
-      if (contradicts(binding, seen, messages)) {
-        save(binding, {...seen, state: "rejected", contradicted: true});
+      if (yield* contradicts(binding, seen, messages)) {
+        yield* save(binding, {...seen, state: "rejected", contradicted: true});
         return "uncertain";
       }
-      save(binding, {...seen, state: "rejected"});
-      return settle("rejected");
+      yield* save(binding, {...seen, state: "rejected"});
+      return yield* settle("rejected");
     }
     const rendered = value.renderedText ?? native?.renderedPrompt;
     // a bound rendered prompt is never replaced; the sent text, hash and identities are never changed
-    if (native) save(binding, {...value, nativeDeliveryId: native.id, state: "posted",
+    if (native) yield* save(binding, {...value, nativeDeliveryId: native.id, state: "posted",
       ...(value.renderedText === undefined && rendered !== undefined ? {renderedText: rendered} : {})});
-    let current = readable(delivery(binding, value.messageId)) ?? value;
-    if (messages && current.state !== "rejected") current = bindAttributed(binding, current, messages);
+    let current = (yield* readable(yield* delivery(binding, value.messageId))) ?? value;
+    if (messages && current.state !== "rejected") current = yield* bindAttributed(binding, current, messages);
     const projected = messages;
     const attributed = projected !== null && projected.some(message => attributesHelperDelivery(current, message, projected));
     // dispatch_failed is also logged after T3 created the message. Only the attributed message proves delivery.
-    if (native?.outcome === "dispatch_failed") return settle(attributed ? "waiting" : "uncertain");
-    if (attributed) return settle("waiting");
+    if (native?.outcome === "dispatch_failed") return yield* settle(attributed ? "waiting" : "uncertain");
+    if (attributed) return yield* settle("waiting");
     // without current native evidence (T3 trims its delivery log) an earlier read proves nothing, so a posted
     // receipt alone never makes an attempt waiting
-    return settle(native?.outcome === "accepted" ? "waiting" : "uncertain");
+    return yield* settle(native?.outcome === "accepted" ? "waiting" : "uncertain");
   });
   // read-only reconciliation of an existing receipt; it never posts. A durable rejected receipt or a native
   // rejection before rendering proves non-delivery; anything else leaves the identity unresolved.
   const reconcileDelivery = (binding: BindingRecord, input: SupervisorHelperMessage, cancel?: Deferred.Deferred<void>) => Effect.gen(function* () {
-    const value = delivery(binding, input.messageId);
+    const value = yield* delivery(binding, input.messageId);
     if (!value) return "absent" as const;
     if (value === invalidReceipt || value.hash !== workflowRequestHash(input)) return "uncertain" as const;
     // a stored contradiction is unresolved with no projection read, so a later disappearance cannot reject it
     if (value.contradicted === true) return "uncertain" as const;
     const messages = yield* projection(value.threadId, cancel).pipe(Effect.map((helper): readonly MessageInfo[] | null => helper.messages), otherwise(null));
-    const reread = delivery(binding, value.messageId);
+    const reread = yield* delivery(binding, value.messageId);
     if (reread === invalidReceipt || reread?.contradicted === true) return "uncertain" as const;
     // a durable rejection plus a bound rendering or an exact message is a contradiction: persist it, never acknowledge it
     if (value.state === "rejected") {
-      if (contradicts(binding, value, messages)) {
-        save(binding, {...value, state: "rejected", contradicted: true});
+      if (yield* contradicts(binding, value, messages)) {
+        yield* save(binding, {...value, state: "rejected", contradicted: true});
         return "uncertain" as const;
       }
       return "rejected" as const;
@@ -423,17 +422,17 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
   // again, only reconciled; a different request under the same identity or a contradiction stays unresolved
   const existing = (operate: NativeRpcShape, binding: BindingRecord, input: SupervisorHelperMessage, helper: Projection,
     cancel: Deferred.Deferred<void> | undefined) => Effect.gen(function* () {
-    const value = delivery(binding, input.messageId);
+    const value = yield* delivery(binding, input.messageId);
     if (!value || value === invalidReceipt) return "uncertain" as const;
     if (value.hash !== workflowRequestHash(input) || value.contradicted === true) return value.contradicted === true || value.state !== "rejected" ? "uncertain" as const : "rejected" as const;
     if (value.state === "rejected") {
-      if (contradicts(binding, value, helper.messages)) {
-        save(binding, {...value, state: "rejected", contradicted: true});
+      if (yield* contradicts(binding, value, helper.messages)) {
+        yield* save(binding, {...value, state: "rejected", contradicted: true});
         return "uncertain" as const;
       }
-      return settled(binding, value.messageId, "rejected");
+      return yield* settled(binding, value.messageId, "rejected");
     }
-    return settled(binding, value.messageId, yield* reconcileReceipt(operate, binding, value, cancel, helper.messages));
+    return yield* settled(binding, value.messageId, yield* reconcileReceipt(operate, binding, value, cancel, helper.messages));
   });
   // the POST, started by the admission section's initiation and awaited outside it. A webhook has no client
   // idempotency key, so an uncertain post is never repeated; an interruption leaves the receipt 'posting', which is
@@ -455,22 +454,22 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
         const response: HttpClientResponse.HttpClientResponse = yield* untilCancelled(Fiber.join(post), cancel);
         if (response.status >= 400 && response.status < 500) {
           // a rendering bound by an overlapping reconciliation while the POST was in flight is read back from the receipt
-          const contradicted = contradicts(binding, posting, messages);
-          save(binding, {...posting, state: "rejected", ...(contradicted ? {contradicted: true as const} : {})});
+          const contradicted = yield* contradicts(binding, posting, messages);
+          yield* save(binding, {...posting, state: "rejected", ...(contradicted ? {contradicted: true as const} : {})});
           // the rejection response and an exact message together stay unresolved; they are not acknowledged. The
           // snapshot predates the POST, so a contradiction stored while it was in flight is read back from the receipt.
-          return sent(posting.hash, contradicted ? "uncertain" : settle("rejected"));
+          return sent(posting.hash, contradicted ? "uncertain" : yield* settle("rejected"));
         }
         if (response.status < 200 || response.status >= 300) return sent(posting.hash, "uncertain");
         // a 2xx is recorded acceptance even when its body cannot be read; only the delivery id is then unknown
         const reply = yield* untilCancelled(response.json, cancel).pipe(otherwise(null));
         const nativeDeliveryId = isPostReply(reply) ? reply.deliveryId : undefined;
         const posted: Delivery = {...posting, state: "posted", ...(nativeDeliveryId ? {nativeDeliveryId} : {})};
-        save(binding, posted);
-        const bound = bindAttributed(binding, readable(delivery(binding, posting.messageId)) ?? posted, messages);
+        yield* save(binding, posted);
+        const bound = yield* bindAttributed(binding, (yield* readable(yield* delivery(binding, posting.messageId))) ?? posted, messages);
         const attributed = messages.some(message => attributesHelperDelivery(bound, message, messages));
         // a delivery id in the reply does not outweigh a contradiction stored while the POST was in flight
-        return sent(posting.hash, settle(nativeDeliveryId || attributed ? "waiting" : "uncertain"));
+        return sent(posting.hash, yield* settle(nativeDeliveryId || attributed ? "waiting" : "uncertain"));
       }).pipe(otherwise(sent(posting.hash, "uncertain"))),
       // exactly once, at any end of the operation
       release: Scope.close(exchange, Exit.void).pipe(Effect.andThen(Fiber.interrupt(post)), Effect.asVoid),
@@ -478,13 +477,13 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
   });
   // `authorized` is re-checked with the admission guard after this method's own awaits, immediately before the
   // receipt and POST, so authority revoked meanwhile (for example a quarantine) posts nothing.
-  const send = (binding: BindingRecord, input: SupervisorHelperMessage, sendOptions: HelperSendOptions = {}): Effect.Effect<SupervisorHelperSendResult> => Effect.gen(function* () {
+  const send = (binding: BindingRecord, input: SupervisorHelperMessage, sendOptions: HelperSendOptions = {}): Effect.Effect<SupervisorHelperSendResult, SupervisionStoreError> => Effect.gen(function* () {
     const {cancel, authorized} = sendOptions;
     if (!rpc) return "busy";
     const operate = rpc;
-    if (!(yield* gate.admit((guard) => Effect.sync(() => guard.scopeEnabled(binding.projectId, binding.mainThreadId))))) return "busy";
+    if (!(yield* gate.admit((guard) => transaction(guard.scopeEnabled(binding.projectId, binding.mainThreadId))))) return "busy";
     const hash = workflowRequestHash(input);
-    const read = delivery(binding, input.messageId);
+    const read = yield* delivery(binding, input.messageId);
     // an invalid stored receipt is an attempt whose content cannot be read: unresolved, and nothing is posted over it
     if (read === invalidReceipt) return "uncertain";
     const stored = read;
@@ -492,7 +491,7 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
     // "rejected" promises this identity was never delivered. A contradicted receipt is never that promise:
     // binding replacement, an unready binding and a hash mismatch stay uncertain, and nothing is posted again.
     const refused: SupervisorHelperSendResult = contradicted || (stored !== null && stored.state !== "rejected") ? "uncertain" : "rejected";
-    const current = options.store.binding(binding.projectId, binding.mainThreadId);
+    const current = yield* store.binding(binding.projectId, binding.mainThreadId);
     if (current?.threadId !== binding.threadId || current.generation !== binding.generation || current.state !== "ready") return refused;
     if (stored && stored.hash !== hash) return refused;
     // already contradicted: unresolved whether or not the helper can be read
@@ -503,36 +502,37 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
       const helper = yield* projection(input.threadId, cancel);
       // a durable rejection plus a bound rendering or an exact message is persisted, then stays unresolved with no acknowledgement
       if (stored?.state === "rejected") {
-        if (contradicts(binding, stored, helper.messages)) {
-          save(binding, {...stored, state: "rejected", contradicted: true});
+        if (yield* contradicts(binding, stored, helper.messages)) {
+          yield* save(binding, {...stored, state: "rejected", contradicted: true});
           return "uncertain" as const;
         }
-        return settle("rejected");
+        return yield* settle("rejected");
       }
       if (helper.thread.id !== input.threadId || helper.thread.lineage.parentThreadId !== binding.threadId ||
         helper.thread.lineage.relationshipToParent !== "subagent" || helper.thread.archivedAt != null || helper.thread.deletedAt != null ||
-        !options.store.ownedIds.has(input.threadId)) return settle(refused);
-      if (stored) return settle(yield* reconcileReceipt(operate, binding, stored, cancel, helper.messages));
-      if (!Array.isArray(helper.runtimeRequests) || helper.runtimeRequests.some(item => !record(item) || item.status === "pending")) return settle("busy");
+        !store.ownedIds.has(input.threadId)) return yield* settle(refused);
+      if (stored) return yield* settle(yield* reconcileReceipt(operate, binding, stored, cancel, helper.messages));
+      if (!Array.isArray(helper.runtimeRequests) || helper.runtimeRequests.some(item => !record(item) || item.status === "pending")) return yield* settle("busy");
       const ready = yield* readyChannel(operate, binding, helper, cancel);
-      if (!ready || !record(ready.task.webhook) || typeof ready.task.webhook.path !== "string") return settle("busy");
+      if (!ready || !record(ready.task.webhook) || typeof ready.task.webhook.path !== "string") return yield* settle("busy");
       const endpoint = new URL(ready.task.webhook.path, options.baseUrl);
-      if (endpoint.origin !== new URL(options.baseUrl).origin || endpoint.search || endpoint.hash) return settle("rejected");
+      if (endpoint.origin !== new URL(options.baseUrl).origin || endpoint.search || endpoint.hash) return yield* settle("rejected");
       // the admission section (plan 3.11): a live post of this identity is joined; otherwise the final guard, the
       // durable 'posting' receipt and the start of the POST happen in one section, and its reply is awaited outside it
       const admission = yield* admitSend(gate, {
         identity: `${binding.threadId}\u0000${binding.generation}\u0000${input.messageId}`,
         inFlight,
-        prepare: (guard) => Effect.sync((): SendPreparation<Admission> => {
+        // the rechecks and the receipt commit in one transaction; the initiation follows its commit
+        prepare: (guard) => transaction(Effect.gen(function* (): Effect.fn.Return<SendPreparation<Admission>, SupervisionStoreError> {
           // a receipt written since this send's first read is only reconciled
-          if (delivery(binding, input.messageId) !== null) return {_tag: "Answer", value: receipt};
+          if ((yield* delivery(binding, input.messageId)) !== null) return {_tag: "Answer", value: receipt};
           // project or global supervision disabled during the awaited reads: nothing is posted and the identity waits
-          if (!guard.scopeEnabled(binding.projectId, binding.mainThreadId)) return {_tag: "Answer", value: sent(hash, "busy")};
-          if (authorized && !authorized(guard)) return {_tag: "Answer", value: sent(hash, "revoked")};
+          if (!(yield* guard.scopeEnabled(binding.projectId, binding.mainThreadId))) return {_tag: "Answer", value: sent(hash, "busy")};
+          if (authorized && !(yield* authorized(guard))) return {_tag: "Answer", value: sent(hash, "revoked")};
           const posting: Delivery = {...input, hash, taskId: ready.channel.taskId, state: "posting"};
-          save(binding, posting);
+          yield* save(binding, posting);
           return {_tag: "Initiate", initiate: initiate(binding, posting, endpoint, helper.messages, cancel)};
-        }),
+        })),
         // the interrupted original's receipt decides: it is only reconciled
         reconcile: Effect.succeed(receipt),
       });
@@ -542,7 +542,7 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
     }).pipe(otherwise("uncertain" as const));
   });
   const retire = (binding: BindingRecord, helperThreadId: string, cancel?: Deferred.Deferred<void>) => Effect.gen(function* () {
-    const current = channel(binding, helperThreadId);
+    const current = yield* channel(binding, helperThreadId);
     // an invalid channel row is never reported retired
     if (current === invalidReceipt) return false;
     if (!current || current.state === "retired") return true;
@@ -551,28 +551,22 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
     return yield* Effect.gen(function* () {
       const task = (yield* tasks(operate, cancel)).find(item => item.id === current.taskId);
       if (task && !owned(task, current, binding)) return false;
-      saveChannel(binding, {...current, state: "retiring"});
+      yield* saveChannel(binding, {...current, state: "retiring"});
       if (task) yield* operate.call("scheduledTasks.delete", {id: current.taskId}, cancel);
-      saveChannel(binding, {...current, state: "retired"});return true;
+      yield* saveChannel(binding, {...current, state: "retired"});return true;
     }).pipe(otherwise(false));
   });
   return HelperTransport.of({
     send,
     // an invalid stored receipt counts as an attempt, so no caller treats its identity as never posted
-    hasDelivery: (binding, input) => Effect.sync(() => {
-      const value = delivery(binding, input.messageId);
-      return value === invalidReceipt || (value !== null && value.hash === workflowRequestHash(input));
-    }),
+    hasDelivery: (binding, input) => Effect.map(delivery(binding, input.messageId), (value) =>
+      value === invalidReceipt || (value !== null && value.hash === workflowRequestHash(input))),
     reconcileDelivery,
-    receiptText: (binding, logicalMessageId) => Effect.sync(() => {
-      const value = delivery(binding, logicalMessageId);
-      return value === invalidReceipt ? value : value?.text ?? null;
-    }),
-    matchesMessage: (binding, logicalMessageId, text, message, messages) => Effect.sync(() => {
-      const value = delivery(binding, logicalMessageId);
-      return value !== null && value !== invalidReceipt && value.text === text && attributesHelperDelivery(value, message, messages);
-    }),
-    receiptDocument: (binding, logicalMessageId) => Effect.sync(() => delivery(binding, logicalMessageId)),
+    receiptText: (binding, logicalMessageId) => Effect.map(delivery(binding, logicalMessageId), (value) =>
+      value === invalidReceipt ? value : value?.text ?? null),
+    matchesMessage: (binding, logicalMessageId, text, message, messages) => Effect.map(delivery(binding, logicalMessageId), (value) =>
+      value !== null && value !== invalidReceipt && value.text === text && attributesHelperDelivery(value, message, messages)),
+    receiptDocument: (binding, logicalMessageId) => delivery(binding, logicalMessageId),
     retire,
   });
 });
