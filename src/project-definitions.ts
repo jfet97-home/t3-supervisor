@@ -94,7 +94,7 @@ export const definitionsCanceled: Effect.Effect<boolean> = Effect.flatMap(Operat
 export const withOperationCancel = <A, E>(call: (cancel: Deferred.Deferred<void> | undefined) => Effect.Effect<A, E>): Effect.Effect<A, DefinitionSourceFailure> =>
   Effect.flatMap(OperationCancel, call).pipe(Effect.mapError(error => new DefinitionSourceFailure({error})));
 // the operation's trigger completed while a catalog or projection read was pending
-class DefinitionsOperationEnded extends Data.TaggedError("DefinitionsOperationEnded")<{}> {
+class DefinitionsOperationEnded extends Data.TaggedError("DefinitionsOperationEnded") {
   override get message() {return "The definitions read was canceled or ran past its deadline.";}
 }
 // a catalog or projection read ends when the operation's trigger completes

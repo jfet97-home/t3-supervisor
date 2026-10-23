@@ -1,4 +1,4 @@
-import { Cause, Clock, Console, Context, Deferred, Effect, FiberMap, HashMap, Layer, Option, Ref, type Scope } from "effect";
+import { Cause, Clock, Console, Context, Deferred, Effect, FiberMap, HashMap, Layer, Option, Ref } from "effect";
 import { mainRunNodeReader, nativeUserMessageVisible, timestampMs } from "./domain.js";
 import { isCurrentMainGraphRun, SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch, type SupervisorNativeChildLifecycleEvidence } from "./supervisor-monitor.js";
 import { SupervisorConversationStore, type ConversationRequest, type RequestInflight, type WorkflowAgreementCandidate, type WorkflowIntroduction } from "./supervisor-conversation-store.js";
