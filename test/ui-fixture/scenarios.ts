@@ -201,6 +201,12 @@ export class FixtureModel {
   private get data(): FixtureData {return this.datasets[this.current];}
   get environment() {return {name: this.current, environmentId: fixtureEnvironments[this.current]};}
   switchEnvironment(name: FixtureEnvironmentName) {this.current = name;}
+  // one synchronous model call against the given environment's data, whatever the fixture answers for meanwhile
+  inEnvironment<A>(name: FixtureEnvironmentName, run: () => A): A {
+    const shown = this.current;
+    this.current = name;
+    try {return run();} finally {this.current = shown;}
+  }
 
   reset() {
     this.datasets = {a: initialFixtureData("a"), b: initialFixtureData("b")};

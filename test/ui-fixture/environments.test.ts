@@ -37,9 +37,15 @@ it("CT-UI-FIXTURE-02 the environment control switches the synthetic T3 environme
     const fixture = await Effect.runPromise(startUiFixture({assets: root}).pipe(Scope.provide(scope)));
     const port = fixture.port;
     const origin = fixture.url.slice(0, -1);
-    const login = await call(port, {method: "POST", path: "/auth/login", headers: {origin, "content-type": "application/json"}, body: JSON.stringify({token: fixtureToken})});
-    const session = login.json<{session: string}>().session;
-    const csrf = (await call(port, {path: "/api/csrf", headers: {"x-supervisor-session": session}})).json<{csrf: string}>().csrf;
+    // a reset ends every fixture session, so the cases below sign in again after theirs
+    let session = "";
+    let csrf = "";
+    const signIn = async () => {
+      const login = await call(port, {method: "POST", path: "/auth/login", headers: {origin, "content-type": "application/json"}, body: JSON.stringify({token: fixtureToken})});
+      session = login.json<{session: string}>().session;
+      csrf = (await call(port, {path: "/api/csrf", headers: {"x-supervisor-session": session}})).json<{csrf: string}>().csrf;
+    };
+    await signIn();
     const get = (path: string) => call(port, {path, headers: {"x-supervisor-session": session}});
     const post = (path: string, payload: unknown) => call(port, {method: "POST", path, body: JSON.stringify(payload),
       headers: {origin, "content-type": "application/json", "x-supervisor-session": session, "x-csrf-token": csrf}});
@@ -79,6 +85,28 @@ it("CT-UI-FIXTURE-02 the environment control switches the synthetic T3 environme
 
     assert.equal((await control("/__fixture/reset")).status, 200);
     assert.deepEqual((await control("/__fixture/state", "GET")).json<{environment: unknown}>().environment, {name: "a", environmentId: fixtureEnvironments.a});
+
+    // sol-r22: a held mutation computes in the environment it was received in, whenever it is released
+    for (const apply of [false, true]) {
+      assert.equal((await control("/__fixture/reset")).status, 200);
+      await signIn();
+      const armed = await control(`/__fixture/scenario/mutation-never-answered?path=/api/guidance/no-project-control${apply ? "&apply=1" : ""}`);
+      assert.equal(armed.status, 200);
+      const before = {a: await view()};
+      const held = post("/api/guidance/no-project-control", {expectedGeneration: 1, mode: "automatic"});
+      while ((await control("/__fixture/state", "GET")).json<{held: unknown[]}>().held.length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal((await control("/__fixture/environment/b")).status, 200);
+      const bBefore = await view();
+      assert.equal((await control("/__fixture/held/answer", "POST")).status, 200);
+      const answered = Schema.decodeUnknownSync(NoProjectControlResult)((await held).json());
+      assert.deepEqual([answered.status, answered.control.generation], ["saved", 2], `apply=${apply}: the held save answers from a`);
+      assert.deepEqual(await view(), bBefore, `apply=${apply}: b is unchanged by the save received in a`);
+      assert.equal((await control("/__fixture/environment/a")).status, 200);
+      assert.deepEqual(await view(), {...before.a, mode: 2}, `apply=${apply}: a holds the save it received`);
+      const entries = (await control("/__fixture/log", "GET")).json<{entries: LogEntry[]}>().entries;
+      const heldSave = entries.filter((entry) => entry.mutation && entry.path === "/api/guidance/no-project-control").at(-1)!;
+      assert.equal(heldSave.environment, fixtureEnvironments.a, `apply=${apply}: the log names the environment of the receipt`);
+    }
   } finally {
     await Effect.runPromise(Scope.close(scope, Exit.void));
     await rm(root, {recursive: true, force: true});

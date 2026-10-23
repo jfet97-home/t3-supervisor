@@ -10,7 +10,7 @@ import { performance } from "node:perf_hooks";
 import { SupervisorApi, UiError } from "../../src/guidance-contract.js";
 import {
   FixtureFailure, FixtureModel, fixtureEnvironmentNames, fixtureToken, isFixtureEnvironmentName, isScenarioName, parseScenarioParams, scenarioCatalog, scenarioNames,
-  type Arm, type ForcedOutcome, type ScenarioName, type ScenarioParams,
+  type Arm, type FixtureEnvironmentName, type ForcedOutcome, type ScenarioName, type ScenarioParams,
 } from "./scenarios.js";
 
 export type AssetInfo = {path: string; bytes: number; sha256: string};
@@ -210,6 +210,8 @@ export class FixtureController {
 
 const Forced = Context.Reference<ForcedOutcome | null>("ui-fixture/ForcedOutcome", {defaultValue: () => null});
 const CurrentEntry = Context.Reference<LogEntry | null>("ui-fixture/CurrentEntry", {defaultValue: () => null});
+// the environment the fixture answered for when the request arrived; a held or delayed request still computes in it
+const ReceiptEnvironment = Context.Reference<FixtureEnvironmentName | null>("ui-fixture/ReceiptEnvironment", {defaultValue: () => null});
 
 // reads the cached request body once, bounded like the baseline server, and records only its sha256 and size
 const readBody = (request: HttpServerRequest.HttpServerRequest, limit: number) => Effect.gen(function*() {
@@ -228,16 +230,15 @@ const readBody = (request: HttpServerRequest.HttpServerRequest, limit: number) =
 });
 
 const failure = (cause: unknown) => new UiError({message: cause instanceof FixtureFailure ? cause.message : "Fixture: the operation failed."});
-const read = <A>(evaluate: () => A) => Effect.try({try: evaluate, catch: failure});
-const mutate = <A>(evaluate: (forced: ForcedOutcome | null) => A) => Effect.gen(function*() {
-  const forced = yield* Forced;
-  return yield* read(() => evaluate(forced));
-});
 
 const apiHandlers = (controller: FixtureController) => {
   const model = controller.model;
+  // every model call runs against the environment of its request's receipt
+  const read = <A>(evaluate: () => A) => Effect.flatMap(ReceiptEnvironment, environment =>
+    Effect.try({try: () => environment === null ? evaluate() : model.inEnvironment(environment, evaluate), catch: failure}));
+  const mutate = <A>(evaluate: (forced: ForcedOutcome | null) => A) => Effect.flatMap(Forced, forced => read(() => evaluate(forced)));
   return HttpApiBuilder.group(SupervisorApi, "guidance", handlers => handlers.handleAll({
-    snapshot: () => Effect.sync(() => model.guidanceSnapshot(controller.now())),
+    snapshot: () => Effect.orDie(read(() => model.guidanceSnapshot(controller.now()))),
     dashboardOverview: ({query}) => read(() => model.dashboardOverview(query, controller.now())),
     noProjectControl: () => read(() => model.noProjectControl()),
     saveNoProjectControl: ({payload}) => mutate(forced => model.saveNoProjectControl(payload, forced)),
@@ -349,7 +350,8 @@ const mutationArm = (path: string) => (arm: Arm) =>
   (arm.kind === "status" || arm.kind === "hold" || arm.kind === "drop" || arm.kind === "outcome" || arm.kind === "delayed-answer") &&
   (arm.path === null || arm.path === path);
 
-type Receipt = {request: HttpServerRequest.HttpServerRequest; path: string; kind: LogEntry["kind"]; scenario: ScenarioName; entry: LogEntry | null};
+type Receipt = {request: HttpServerRequest.HttpServerRequest; path: string; kind: LogEntry["kind"]; scenario: ScenarioName; entry: LogEntry | null;
+  environment: FixtureEnvironmentName};
 
 // records the receipt before any check, so every request except log and state reads appears once in the log
 const gate = <E, R>(controller: FixtureController, app: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>) => Effect.gen(function*() {
@@ -359,14 +361,15 @@ const gate = <E, R>(controller: FixtureController, app: Effect.Effect<HttpServer
   const scenario = controller.scenario;
   const kind = path.startsWith("/api/") ? "api" as const : path.startsWith("/auth/") ? "auth" as const : path.startsWith("/__fixture/") ? "fixture" as const : "static" as const;
   const quiet = request.method === "GET" && (path === "/__fixture/log" || path === "/__fixture/state");
-  const entry = quiet ? null : controller.log.begin({method: request.method, path: path + url.search, kind, scenario, environment: controller.model.environment.environmentId,
+  const environment = controller.model.environment;
+  const entry = quiet ? null : controller.log.begin({method: request.method, path: path + url.search, kind, scenario, environment: environment.environmentId,
     mutation: request.method !== "GET" && request.method !== "HEAD" && (kind === "api" || kind === "auth")});
-  return yield* screen(controller, app, {request, path, kind, scenario, entry}).pipe(Effect.onInterrupt(() => Effect.sync(() => controller.log.settle(entry, "interrupted"))));
+  return yield* screen(controller, app, {request, path, kind, scenario, entry, environment: environment.name}).pipe(Effect.onInterrupt(() => Effect.sync(() => controller.log.settle(entry, "interrupted"))));
 }).pipe(Effect.interruptible);
 
 // cross-cutting checks in the baseline order (host/origin, session, csrf, content type, body bound), then scenario effects and labels
 const screen = <E, R>(controller: FixtureController, app: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>, receipt: Receipt) => Effect.gen(function*() {
-  const {request, path, kind, scenario, entry} = receipt;
+  const {request, path, kind, scenario, entry, environment} = receipt;
   const origin = controller.origin;
   const mark = (effect: string) => {if (entry) entry.effect = effect;};
   const finish = (response: HttpServerResponse.HttpServerResponse) => {
@@ -375,6 +378,7 @@ const screen = <E, R>(controller: FixtureController, app: Effect.Effect<HttpServ
   };
   const compute = app.pipe(
     Effect.provideService(CurrentEntry, entry),
+    Effect.provideService(ReceiptEnvironment, environment),
     Effect.catchCause(cause => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(message(500, "Supervisor operation unavailable."))),
   );
   const drop = Effect.andThen(Effect.sync(() => {
