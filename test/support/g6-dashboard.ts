@@ -1,0 +1,65 @@
+import assert from "node:assert/strict";
+import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
+import { Context, Effect, FileSystem, Layer, Redacted } from "effect";
+import { FetchHttpClient, HttpBody, HttpClient } from "effect/http";
+import { GuidanceRuntime } from "../../src/guidance.js";
+import { GuidanceStore } from "../../src/guidance-store.js";
+import { GuidanceUi, type GuidanceUiOptions } from "../../src/guidance-ui.js";
+import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
+import { ProjectDefinitions } from "../../src/project-definitions.js";
+import { forgeDashboardToken, ServiceAuth } from "../../src/service-auth.js";
+import type { WorkflowWriteController } from "../../src/workflow-write-controller.js";
+import { uiConfig } from "./c3b-ui.js";
+import { workflowMcpLayer } from "./mcp-controllers.js";
+
+// the dashboard server of guidance-ui.ts on a temp data directory in the caller's scope, built as c3b-ui.ts startUi builds
+// it (the interim guidance store and runtime, its own service auth, a workflow MCP endpoint without controller tools, the
+// node file system and crypto), and sign-in over loopback; requests go through the current globalThis.fetch
+
+// the listeners close before the store, and the directory is removed last
+export const dashboard = (options: GuidanceUiOptions = {}) => Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const directory = yield* fs.makeTempDirectoryScoped({prefix: "c3b-ui-"});
+  const config = uiConfig(directory);
+  const store = yield* Effect.acquireRelease(Effect.sync(() => new GuidanceStore(directory)), (store) => Effect.sync(() => store.close()));
+  const runtime = yield* GuidanceRuntime.make(config, store, {catalog: () => Effect.succeed({projects: [], threads: []})});
+  const context = yield* Layer.build(GuidanceUi.layer(config, options).pipe(
+    Layer.provide(Layer.mergeAll(ServiceAuth.layer(directory), Layer.succeed(GuidanceRuntime, runtime), workflowMcpLayer({} as WorkflowWriteController["Service"]))),
+    Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer)),
+  ));
+  const {port} = Context.get(context, GuidanceUi);
+  return {directory, port, origin: `http://127.0.0.1:${port}`};
+}).pipe(Effect.provide(NodeFileSystem.layer));
+
+// the definitions service of a dashboard whose definitions the test answers: a read is `load`, no global fingerprint is
+// read, and no other definitions operation is used
+export const answeredDefinitions = (load: (projectId: string, threadId: string | null) => Effect.Effect<ProjectDefinitionSnapshot>) => {
+  const unused = () => Effect.die(new Error("unused definitions operation"));
+  return ProjectDefinitions.of({
+    globalHomePath: "~",
+    globalDefinitionsPath: "~/.t3-supervisor",
+    load: (projectId, threadId = null) => load(projectId, threadId),
+    globalFingerprint: () => Effect.succeed(null),
+    presence: unused, presenceGlobal: unused, presenceForCheckout: unused, checkoutTargets: unused, currentWorkspace: unused,
+    initialize: unused, initializeGlobal: unused, readProjectConfig: unused,
+  });
+};
+
+// the dashboard session of a forged grant, signed in from the supervisor's own origin
+export const signIn = (origin: string, directory: string) => Effect.gen(function* () {
+  const {token} = yield* forgeDashboardToken(directory);
+  const client = yield* HttpClient.HttpClient;
+  const response = yield* client.post(origin + "/auth/login", {headers: {Origin: origin}, body: HttpBody.text(JSON.stringify({token: Redacted.value(token)}), "application/json")});
+  assert.equal(response.status, 200);
+  const payload = (yield* response.json) as {session?: unknown};
+  assert.equal(typeof payload.session, "string");
+  return payload.session as string;
+}).pipe(Effect.orDie, Effect.provide(Layer.mergeAll(NodeFileSystem.layer, FetchHttpClient.layer)));
+
+// the CSRF token the dashboard issues to the session
+export const readCsrf = (origin: string, session: string) => Effect.gen(function* () {
+  const client = yield* HttpClient.HttpClient;
+  const response = yield* client.get(origin + "/api/csrf", {headers: {"x-supervisor-session": session}});
+  assert.equal(response.status, 200);
+  return ((yield* response.json) as {csrf: string}).csrf;
+}).pipe(Effect.orDie, Effect.provide(FetchHttpClient.layer));

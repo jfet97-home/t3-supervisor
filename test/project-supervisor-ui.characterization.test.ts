@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Schema } from "effect";
-import { it, type TestContext } from "vitest";
+import { it } from "@effect/vitest";
+import { Cause, Context, Effect, Exit, Layer, Schema } from "effect";
+import { FetchHttpClient, HttpBody, HttpClient } from "effect/http";
 import { ProjectSupervisorSaveResult, ProjectSupervisorSnapshot, type ProjectSupervisorChatSupervisionInput, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput } from "../src/project-supervisor-contract.js";
 import type { ProjectConfigSave } from "../src/project-definitions-contract.js";
+import { SessionAccess } from "../ui/src/access.js";
+import type { ApiClient } from "../ui/src/api.js";
 import { ProjectConfigRequestError, saveProjectConfiguration } from "../ui/src/project-definitions-api.js";
 import { loadProjectSupervisor, ProjectSupervisorRequestError, retryProjectSupervisor, saveProjectSupervisor, setChatSupervision } from "../ui/src/project-supervisor-api.js";
-import { defer, readCsrf, signIn } from "./support/c3b-http.js";
 import { fakeSupervision, supervisorSnapshot } from "./support/c3b-project-supervisor.js";
-import { startUi } from "./support/c3b-ui.js";
-import { clearAccess, getCsrfToken, installPageLocation, loadAccess, runUi } from "./support/ui-run.js";
+import { dashboard, readCsrf, signIn } from "./support/g6-dashboard.js";
+import { installGlobal, locationLayer, pageLayer, rejects } from "./support/g6-page.js";
 
 type Golden = {snapshot: unknown; saveResult: unknown; retryResult: unknown};
 const golden = JSON.parse(readFileSync(new URL("./support/c3b-project-supervisor.golden.json", import.meta.url), "utf8")) as Golden;
@@ -21,81 +23,87 @@ const retryInput: ProjectSupervisorRetryInput = {projectId: "project", mainThrea
 const chatInput: ProjectSupervisorChatSupervisionInput = {projectId: "project", mainThreadId: "task-thread", enabled: false, policyGeneration: 4};
 const configInput: ProjectConfigSave = {projectId: "project", threadId: null, expectedRevision: "a".repeat(64), config: {workflows: [], steps: []}};
 
-it("CT-PSC-01: the baseline server's snapshot and save results match the golden JSON and survive decode and re-encode unchanged; extra payload fields are stripped", {timeout: 10_000}, async t => {
+// real loopback sockets to the dashboard server: it.live
+it.live("CT-PSC-01: the baseline server's snapshot and save results match the golden JSON and survive decode and re-encode unchanged; extra payload fields are stripped", () => Effect.gen(function* () {
   const {supervision, calls} = fakeSupervision();
-  const {origin, directory} = await startUi(t, {supervision});
-  const session = await signIn(origin, directory);
-  const csrf = await readCsrf(origin, session);
+  const {origin, directory} = yield* dashboard({supervision});
+  const session = yield* signIn(origin, directory);
+  const csrf = yield* readCsrf(origin, session);
   const headers = {"x-supervisor-session": session};
   const roundTrip = <S extends Schema.Top>(schema: S, value: unknown) =>
     JSON.parse(JSON.stringify(Schema.encodeUnknownSync(schema as never)(Schema.decodeUnknownSync(schema as never)(value)))) as unknown;
+  const client = yield* HttpClient.HttpClient;
 
-  const loaded = await fetch(origin + "/api/guidance/project-supervisor?projectId=project&mainThreadId=task-thread", {headers});
+  const loaded = yield* client.get(origin + "/api/guidance/project-supervisor?projectId=project&mainThreadId=task-thread", {headers});
   assert.equal(loaded.status, 200);
-  const snapshot = await loaded.json();
+  const snapshot = yield* loaded.json;
   assert.deepEqual(snapshot, golden.snapshot);
   assert.deepEqual(roundTrip(ProjectSupervisorSnapshot, snapshot), golden.snapshot);
   assert.deepEqual(snapshot, JSON.parse(JSON.stringify(supervisorSnapshot)), "the server encodes the handler value unchanged");
 
-  const post = async (path: string, payload: unknown) => {
-    const response = await fetch(origin + path, {method: "POST", body: JSON.stringify(payload),
+  const post = (path: string, payload: unknown) => Effect.gen(function* () {
+    const response = yield* client.post(origin + path, {body: HttpBody.text(JSON.stringify(payload), "application/json"),
       headers: {...headers, Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf}});
-    return [response.status, await response.json()];
-  };
-  const [saveStatus, saved] = await post("/api/guidance/project-supervisor", saveInput);
+    return [response.status, yield* response.json];
+  });
+  const [saveStatus, saved] = yield* post("/api/guidance/project-supervisor", saveInput);
   assert.equal(saveStatus, 200);
   assert.deepEqual(saved, golden.saveResult);
   assert.deepEqual(roundTrip(ProjectSupervisorSaveResult, saved), golden.saveResult);
-  const [retryStatus, retried] = await post("/api/guidance/project-supervisor/retry", retryInput);
+  const [retryStatus, retried] = yield* post("/api/guidance/project-supervisor/retry", retryInput);
   assert.equal(retryStatus, 200);
   assert.deepEqual(retried, golden.retryResult);
   assert.deepEqual(roundTrip(ProjectSupervisorSaveResult, retried), golden.retryResult);
 
   // default HttpApi parse options drop unknown fields at every level before the handler runs
-  assert.deepEqual(await post("/api/guidance/project-supervisor", {...saveInput, unexpected: true,
+  assert.deepEqual(yield* post("/api/guidance/project-supervisor", {...saveInput, unexpected: true,
     modelSelection: {...saveInput.modelSelection, extra: "x"}}), [200, golden.saveResult]);
-  assert.deepEqual(await post("/api/guidance/project-supervisor/retry", {...retryInput, unexpected: true}), [200, golden.retryResult]);
-  assert.deepEqual(await post("/api/guidance/project-supervisor/chat-supervision", {...chatInput, unexpected: true}), [200, golden.retryResult]);
+  assert.deepEqual(yield* post("/api/guidance/project-supervisor/retry", {...retryInput, unexpected: true}), [200, golden.retryResult]);
+  assert.deepEqual(yield* post("/api/guidance/project-supervisor/chat-supervision", {...chatInput, unexpected: true}), [200, golden.retryResult]);
   assert.deepEqual(calls.saves, [saveInput, saveInput]);
   assert.deepEqual(calls.retries, [retryInput, retryInput]);
   assert.deepEqual(calls.chats, [chatInput]);
-});
+}).pipe(Effect.provide(FetchHttpClient.layer)), {timeout: 10_000});
 
-// a browser storage, window, location and fetch installed on globalThis for the exported fetch helpers, restored afterwards
-const installBrowser = (t: TestContext) => {
-  const values = new Map<string, string>();
-  const storage = {getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => {values.set(key, value);},
-    removeItem: (key: string) => {values.delete(key);}};
-  const window = new EventTarget();
-  const originals = new Map(["localStorage", "window", "fetch"].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
-  const install = (key: string, value: unknown) => Object.defineProperty(globalThis, key, {configurable: true, writable: true, value});
-  install("localStorage", storage);
-  install("window", window);
-  defer(t, installPageLocation());
-  defer(t, () => {
-    for (const [key, descriptor] of originals) {
-      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
-      else Reflect.deleteProperty(globalThis, key);
-    }
-  });
-  return {values, window, setFetch: (fetch: (url: string, init?: RequestInit) => Promise<Response>) => install("fetch", fetch)};
-};
+// a browser storage, window, location and fetch installed on globalThis for the client effects, restored when the layer
+// closes; the page of each test is built over it, so its session access listens to this window
+class Browser extends Context.Service<Browser, {
+  readonly values: Map<string, string>;
+  readonly window: EventTarget;
+  readonly setFetch: (fetch: (url: string, init?: RequestInit) => Promise<Response>) => void;
+}>()("test/project-supervisor-ui.characterization/Browser") {
+  static readonly layer = Layer.effect(Browser, Effect.gen(function* () {
+    const values = new Map<string, string>();
+    const storage = {getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => {values.set(key, value);},
+      removeItem: (key: string) => {values.delete(key);}};
+    const window = new EventTarget();
+    yield* installGlobal("fetch", globalThis.fetch);
+    yield* installGlobal("window", window);
+    yield* installGlobal("localStorage", storage);
+    const install = (key: string, value: unknown) => Object.defineProperty(globalThis, key, {configurable: true, writable: true, value});
+    return {values, window, setFetch: (fetch: (url: string, init?: RequestInit) => Promise<Response>) => install("fetch", fetch)};
+  })).pipe(Layer.provideMerge(locationLayer()));
+}
+// the page of one test over its browser
+const browserPage = pageLayer.pipe(Layer.provideMerge(Browser.layer));
 
 type Reply = {status: number; body: string};
 const json = (value: unknown, status = 200): Reply => ({status, body: JSON.stringify(value)});
 
-it("CT-UI-API-01: every exported mutation helper maps 401, 403, 413, 415, 500 and malformed responses to the golden outcome text and flag without replaying", {timeout: 10_000}, async t => {
-  const browser = installBrowser(t);
+// a stubbed browser fetch and the page's own session access, no time: it.effect
+it.effect("CT-UI-API-01: every exported mutation helper maps 401, 403, 413, 415, 500 and malformed responses to the golden outcome text and flag without replaying", () => Effect.gen(function* () {
+  const browser = yield* Browser;
+  const access = yield* SessionAccess;
   let expired = 0;
   browser.window.addEventListener("supervisor-auth-required", () => {expired++;});
   // sent: the session the request carries (null: none) and the CSRF token cached before it is sent ("" when none)
-  const run = async (helper: () => Promise<unknown>, reply: Reply, csrf: Reply, sent: {session: string | null; token: string}) => {
+  const run = (helper: Effect.Effect<unknown, unknown, ApiClient | SessionAccess>, reply: Reply, csrf: Reply, sent: {session: string | null; token: string}) => Effect.gen(function* () {
     browser.values.set("supervisor-session", "session-1");
-    clearAccess("session-1");
+    yield* access.clear("session-1");
     if (sent.session !== null) browser.values.set("supervisor-session", sent.session);
     if (sent.token !== "") {
       browser.setFetch(async () => new Response(JSON.stringify({csrf: sent.token}), {status: 200}));
-      assert.equal(await loadAccess(), true);
+      assert.equal(yield* access.load, true);
     }
     const requests: string[] = [];
     browser.setFetch(async (url, init) => {
@@ -105,22 +113,21 @@ it("CT-UI-API-01: every exported mutation helper maps 401, 403, 413, 415, 500 an
       return new Response(chosen.body, {status: chosen.status});
     });
     const before = expired;
-    try {
-      await helper();
-      return {outcome: "resolved", requests};
-    } catch (error) {
-      const known = error instanceof ProjectSupervisorRequestError || error instanceof ProjectConfigRequestError;
-      return {outcome: known ? [error.message, error.definitelyNotSaved] : "not a request error", requests,
-        session: browser.values.get("supervisor-session") ?? null, expired: expired - before};
-    }
-  };
+    const exit = yield* Effect.exit(helper);
+    if (Exit.isSuccess(exit)) return {outcome: "resolved", requests};
+    // the error the helper's baseline promise rejected with
+    const error = Cause.squash(exit.cause);
+    const known = error instanceof ProjectSupervisorRequestError || error instanceof ProjectConfigRequestError;
+    return {outcome: known ? [error.message, error.definitelyNotSaved] : "not a request error", requests,
+      session: browser.values.get("supervisor-session") ?? null, expired: expired - before};
+  });
   const refreshed = json({csrf: "refreshed-csrf"});
   const refreshFailed = json({message: "Sign in to Supervisor."}, 401);
   const helpers = {
-    saveProjectSupervisor: {call: () => runUi(saveProjectSupervisor(saveInput)), path: "/api/guidance/project-supervisor"},
-    retryProjectSupervisor: {call: () => runUi(retryProjectSupervisor(retryInput)), path: "/api/guidance/project-supervisor/retry"},
-    setChatSupervision: {call: () => runUi(setChatSupervision(chatInput)), path: "/api/guidance/project-supervisor/chat-supervision"},
-    saveProjectConfiguration: {call: () => runUi(saveProjectConfiguration(configInput)), path: "/api/guidance/project-configuration"},
+    saveProjectSupervisor: {call: saveProjectSupervisor(saveInput), path: "/api/guidance/project-supervisor"},
+    retryProjectSupervisor: {call: retryProjectSupervisor(retryInput), path: "/api/guidance/project-supervisor/retry"},
+    setChatSupervision: {call: setChatSupervision(chatInput), path: "/api/guidance/project-supervisor/chat-supervision"},
+    saveProjectConfiguration: {call: saveProjectConfiguration(configInput), path: "/api/guidance/project-configuration"},
   };
   const supervisorText = {
     refreshed: "Session refreshed. Your Supervisor change was not performed; review the state and try again.",
@@ -177,13 +184,14 @@ it("CT-UI-API-01: every exported mutation helper maps 401, 403, 413, 415, 500 an
       ["undecodable JSON", json({status: "saved", message: 1}), refreshed, signedIn,
         {outcome: [text.unknown, false], requests: [post], session: "session-1", expired: 0}],
     ];
-    for (const [label, reply, csrf, sent, expected] of matrix) assert.deepEqual(await run(helper.call, reply, csrf, sent), expected, `${name} ${label}`);
+    for (const [label, reply, csrf, sent, expected] of matrix) assert.deepEqual(yield* run(helper.call, reply, csrf, sent), expected, `${name} ${label}`);
   }
-  assert.equal(getCsrfToken(), "", "a failed refresh clears the cached CSRF token");
-});
+  assert.equal((yield* access.headers)["x-csrf-token"], "", "a failed refresh clears the cached CSRF token");
+}).pipe(Effect.provide(browserPage)), {timeout: 10_000});
 
-it("CT-PSC-02: an undecodable snapshot or save response never resolves as success; a save reports an unknown outcome", {timeout: 10_000}, async t => {
-  const browser = installBrowser(t);
+// a stubbed browser fetch, no time: it.effect
+it.effect("CT-PSC-02: an undecodable snapshot or save response never resolves as success; a save reports an unknown outcome", () => Effect.gen(function* () {
+  const browser = yield* Browser;
   browser.values.set("supervisor-session", "session-1");
   const respond = (body: unknown) => browser.setFetch(async () => new Response(JSON.stringify(body), {status: 200}));
   const unknown = (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved &&
@@ -191,19 +199,19 @@ it("CT-PSC-02: an undecodable snapshot or save response never resolves as succes
 
   respond({...supervisorSnapshot, tasks: [{...supervisorSnapshot.tasks[0], status: "unknown-status"}]});
   const loadFailure = (error: unknown) => !(error instanceof ProjectSupervisorRequestError);
-  await assert.rejects(runUi(loadProjectSupervisor("project", "task-thread"), AbortSignal.timeout(5_000)), loadFailure);
+  yield* rejects(loadProjectSupervisor("project", "task-thread"), loadFailure);
   respond({...supervisorSnapshot, binding: {...supervisorSnapshot.binding, generation: "7"}});
-  await assert.rejects(runUi(loadProjectSupervisor("project", "task-thread"), AbortSignal.timeout(5_000)), loadFailure);
+  yield* rejects(loadProjectSupervisor("project", "task-thread"), loadFailure);
 
   // a saved status whose snapshot does not decode is not reported as saved
   const brokenSnapshot = {...supervisorSnapshot, models: [{instanceId: "provider-one"}]};
-  for (const helper of [() => runUi(saveProjectSupervisor(saveInput)), () => runUi(retryProjectSupervisor(retryInput)), () => runUi(setChatSupervision(chatInput))]) {
+  for (const helper of [saveProjectSupervisor(saveInput), retryProjectSupervisor(retryInput), setChatSupervision(chatInput)]) {
     respond({status: "saved", message: "Saved.", snapshot: brokenSnapshot});
-    await assert.rejects(helper(), unknown);
+    yield* rejects(helper, unknown);
     respond({status: "saved", message: "Saved."});
-    await assert.rejects(helper(), unknown);
+    yield* rejects(helper, unknown);
   }
   // the same decodable response is accepted, so the rejection above is the decode failure
   respond({status: "saved", message: "Saved.", snapshot: supervisorSnapshot});
-  assert.equal((await runUi(saveProjectSupervisor(saveInput))).status, "saved");
-});
+  assert.equal((yield* saveProjectSupervisor(saveInput)).status, "saved");
+}).pipe(Effect.provide(browserPage)), {timeout: 10_000});
