@@ -335,22 +335,22 @@ it.live("CT-LIN-03: a dashboard Stop whose notice bookkeeping fails keeps the po
   assert.deepEqual(f.peer.unexpected, []);
 }), {timeout: 10_000});
 
-it.live("CT-LIN-03: a dashboard Enable whose bookkeeping fails keeps a stale enable time, so a request written while stopped is interpreted", () => Effect.gen(function* () {
-  const prepare = (failEnable: boolean) => Effect.gen(function* () {
-    const f = yield* startLinFixture();
-    yield* f.bindSupervisor;
-    yield* f.stop();
-    const stoppedAt = (yield* f.binding).supervisionStop!.stoppedAt;
-    addTurn(f.main, {id: "stopped-turn", text: "Request written while supervision was stopped.", createdAt: new Date(stoppedAt).toISOString()});
-    yield* interpose(f.core.store, "recordChatEnable", (recordChatEnable) => (...args) =>
-      failEnable ? Effect.die(new Error("injected_enable_failure")) : recordChatEnable(...args));
-    const ui = yield* dashboard(f);
-    const reply = yield* ui.post("/api/guidance/project-supervisor/chat-supervision", {projectId, mainThreadId, enabled: true,
-      policyGeneration: (yield* f.core.policy.get()).generation});
-    return {f, reply, stoppedAt};
-  });
+const prepareDashboardEnable = (failEnable: boolean) => Effect.gen(function* () {
+  const f = yield* startLinFixture();
+  yield* f.bindSupervisor;
+  yield* f.stop();
+  const stoppedAt = (yield* f.binding).supervisionStop!.stoppedAt;
+  addTurn(f.main, {id: "stopped-turn", text: "Request written while supervision was stopped.", createdAt: new Date(stoppedAt).toISOString()});
+  yield* interpose(f.core.store, "recordChatEnable", (recordChatEnable) => (...args) =>
+    failEnable ? Effect.die(new Error("injected_enable_failure")) : recordChatEnable(...args));
+  const ui = yield* dashboard(f);
+  const reply = yield* ui.post("/api/guidance/project-supervisor/chat-supervision", {projectId, mainThreadId, enabled: true,
+    policyGeneration: (yield* f.core.policy.get()).generation});
+  return {f, reply, stoppedAt};
+});
 
-  const failed = yield* prepare(true);
+it.live("CT-LIN-03: a dashboard Enable whose bookkeeping fails keeps a stale enable time, so a request written while stopped is interpreted", () => Effect.gen(function* () {
+  const failed = yield* prepareDashboardEnable(true);
   assert.equal(failed.reply.status, 400);
   assert.deepEqual(failed.reply.body, {_tag: "UiError", message: "The chat supervision change could not be confirmed. Refresh to inspect the saved state."});
   assert.equal(yield* failed.f.stopped(), false);
@@ -362,9 +362,11 @@ it.live("CT-LIN-03: a dashboard Enable whose bookkeeping fails keeps a stale ena
   assert.equal(interpreted.sourceMessageId, "stopped-turn");
   assert.equal(interpreted.status, "waiting");
   assert.deepEqual(dispatches(failed.f).map(payload => payload.commandId), [`supervisor-objective:${interpreted.id}`]);
+}), {timeout: 10_000});
 
-  // control: a complete Enable records its time, and the same request is not interpreted (project-supervisor.ts:1179)
-  const enabled = yield* prepare(false);
+// the independent control owns a separate test scope, so the failed case releases its workers before this setup
+it.live("CT-LIN-03: a complete dashboard Enable records its time, so a request written while stopped is not interpreted", () => Effect.gen(function* () {
+  const enabled = yield* prepareDashboardEnable(false);
   assert.equal(enabled.reply.status, 200);
   assert.ok((yield* enabled.f.core.store.chatEnabledAt(mainThreadId))! >= enabled.stoppedAt);
   yield* enabled.f.runOnce;

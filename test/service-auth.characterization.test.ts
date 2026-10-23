@@ -151,18 +151,26 @@ it.live("CT-AUTH-04: service open and forge failures never carry token, session 
     onFailure: (error) => {failures.push([label, error]);},
     onSuccess: () => assert.fail(`${label} succeeded`),
   });
-  // a valid installation whose secrets are then placed into each failing state
+  // seed through the real service once; all clients close before independent copies receive their failing state
+  const seedDirectory = join(root, "seed");
+  const auth = yield* openServiceAuth(seedDirectory);
+  const grant = yield* forge(seedDirectory);
+  const session = yield* auth.login(grant.token);
+  assert.ok(session);
+  yield* auth.close;
+  const pending = yield* forge(seedDirectory);
+  const workflowToken = yield* fs.readFileString(tokenPath(seedDirectory));
+  remember(workflowToken, grant.token, session, pending.token);
+  const seedBytes = Buffer.from(yield* fs.readFile(databasePath(seedDirectory)));
+  assert.deepEqual(journalVersions(seedBytes), [1, 1]);
+  assert.deepEqual((yield* fs.readDirectory(accessPath(seedDirectory))).sort(), ["login.sqlite3", "workflow-mcp-token"]);
   const seeded = (name: string) => Effect.gen(function* () {
     const directory = join(root, name);
-    const auth = yield* openServiceAuth(directory);
-    const grant = yield* forge(directory);
-    const session = yield* auth.login(grant.token);
-    assert.ok(session);
-    yield* auth.close;
-    const pending = yield* forge(directory);
-    const workflowToken = yield* fs.readFileString(tokenPath(directory));
-    remember(workflowToken, grant.token, session, pending.token);
-    return { directory, workflowToken, session };
+    yield* fs.makeDirectory(accessPath(directory), {recursive: true, mode: 0o700});
+    yield* fs.copyFile(databasePath(seedDirectory), databasePath(directory));
+    yield* fs.copyFile(tokenPath(seedDirectory), tokenPath(directory));
+    assert.equal(Buffer.from(yield* fs.readFile(databasePath(directory))).equals(seedBytes), true, "each failure starts from the closed seed");
+    return {directory, workflowToken, session};
   });
   const edit = (directory: string, sql: string, ...values: Array<string | number>) => {
     const database = new DatabaseSync(databasePath(directory));
