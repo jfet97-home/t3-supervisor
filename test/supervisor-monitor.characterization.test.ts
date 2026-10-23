@@ -60,6 +60,7 @@ it.effect("CT-MSTORE-01: an observe that fails at its item insert rolls back flo
     const failure = yield* Effect.flip(monitor.observe(next));
     assert.ok(failure instanceof GuidanceStoreError);
     assert.match(failure.message, /^guidance store sql failed: ConstraintError$/u);
+    assert.deepEqual([failure.reason, failure.sqlReason], ["sql_failed", "ConstraintError"]);
     assert.deepEqual(yield* rows(db), before);
     assert.deepEqual(yield* open((_monitor, other) => rows(other)), before);
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import { Effect } from "effect";
-import { guidanceTransaction } from "../src/guidance-sql.js";
+import { Effect, Scheduler } from "effect";
+import { GuidanceStoreError, guidanceTransaction } from "../src/guidance-sql.js";
 import {
   collectSupervisorActivity,
   evaluateSupervisorMonitoring,
@@ -10,15 +10,23 @@ import {
   type SupervisorMonitorActivity,
   type SupervisorNativeChildLifecycleEvidence,
 } from "../src/supervisor-monitor.js";
-import { makeProjectSupervisorMonitorStore, type ProjectSupervisorMonitorStoreShape } from "../src/supervisor-monitor-store.js";
+import {
+  InvalidMonitorCapacity,
+  InvalidMonitorObservation,
+  makeProjectSupervisorMonitorStore,
+  type ProjectSupervisorMonitorStoreShape,
+  type SupervisorMonitorObservation,
+} from "../src/supervisor-monitor-store.js";
 import { defaultMonitoringSettings } from "../src/project-supervisor-contract.js";
 import type { Projection } from "../src/types.js";
 import type { SqlClient } from "effect/sql";
 import { rows } from "./support/guidance-store-services.js";
-import { dataDirectory, withMonitor } from "./support/g9-stores.js";
+import { dataDirectory, withGuidanceDb, withMonitor } from "./support/g9-stores.js";
 
 // the pure extraction cases stay plain tests; the store cases run as Effect tests on the ProjectSupervisorMonitorStore
-// service over a temporary guidance.sqlite3 (its production client and layers), every time given explicitly
+// service over a temporary guidance.sqlite3 (its production client and layers), every time given explicitly; then
+// CT-MSTORE-02, the frozen-batch acknowledgement inside the caller's transaction (CC-MONITOR-ACK), typed input failures and
+// the schema upgrade at service level
 
 const now = Date.parse("2026-10-13T10:00:00.000Z");
 const projectId = "project-a";
@@ -1120,3 +1128,129 @@ it.effect("an over-cap active run reports saturation and blocks its closed-run f
     assert.equal((yield* bounded.state(projectId, threadId)).activities.length, 0);
     assert.equal(yield* storedCount(db, threadId), 1);
   })));
+
+// target regressions
+
+it.effect("CT-MSTORE-02: an observe concurrent with the acknowledgement of a frozen batch ends in one of the two serial orders", () =>
+  withStore((monitor) => Effect.gen(function* () {
+    const settings = { ...defaultMonitoringSettings, activityThreshold: 1 };
+    const initial = (thread: string) => makeProjection({ threadId: thread, events: Array.from({ length: 10 }, (_, index) => event(`work-${index}`)) });
+    // the concurrent observation revises work-0 and adds an arrival
+    const revised = (thread: string) => makeProjection({ threadId: thread,
+      events: [...Array.from({ length: 10 }, (_, index) => event(`work-${index}`, index === 0 ? now : now - 30_000)), event("arrival")] });
+    // one thread per run; the outcome leaves the thread out, so runs compare across threads
+    type Failure = InvalidMonitorObservation | GuidanceStoreError;
+    type Acknowledgement = { acknowledged: number; stale: number };
+    const outcome = (thread: string, run: (observe: Effect.Effect<SupervisorMonitorObservation, Failure>, acknowledge: Effect.Effect<Acknowledgement, Failure>) =>
+      Effect.Effect<readonly [SupervisorMonitorObservation, Acknowledgement], Failure>) => Effect.gen(function* () {
+      yield* monitor.observe({ projectId, threadId: thread, sourceOrdinal: 1, projection: initial(thread), now });
+      const frozen = (yield* monitor.select(projectId, settings, now, null, { eligibleThreadIds: new Set([thread]) }))!;
+      const [observed, acknowledged] = yield* run(
+        monitor.observe({ projectId, threadId: thread, sourceOrdinal: 1, projection: revised(thread), now: now + 1 }),
+        monitor.acknowledge(frozen, now + 2));
+      return {
+        observed: { sourceOrdinal: observed.sourceOrdinal, inserted: observed.inserted, updated: observed.updated, pendingItemCount: observed.pendingItemCount },
+        acknowledged,
+        pending: (yield* monitor.pending(projectId, thread)).map((item) => `${item.id.replace(thread, "")}@${item.version}`).sort(),
+        lastAcknowledgedAt: (yield* monitor.state(projectId, thread)).lastAcknowledgedAt,
+      };
+    });
+    const yields = (count: number) => Effect.forEach(Array.from({ length: count }), () => Effect.yieldNow, { discard: true });
+    const serial = [
+      yield* outcome("serial-observe-first", (observe, acknowledge) => Effect.all([observe, acknowledge])),
+      yield* outcome("serial-acknowledge-first", (observe, acknowledge) => Effect.map(Effect.all([acknowledge, observe]), ([ack, obs]) => [obs, ack] as const)),
+    ];
+    assert.notDeepEqual(serial[0], serial[1], "the two serial orders are distinguishable");
+    // the acknowledgement starts after a growing number of fiber yields, so it lands at every point of the observation;
+    // a yield every eight operations interleaves the fibers between any two statements that are not one transaction
+    for (let delay = 0; delay <= 120; delay += 4) {
+      const concurrent = yield* outcome(`concurrent-${delay}`, (observe, acknowledge) => Effect.all([
+        observe,
+        Effect.andThen(yields(delay), acknowledge),
+      ], { concurrency: "unbounded" }).pipe(Effect.provideService(Scheduler.MaxOpsBeforeYield, 8)));
+      assert.ok(serial.some((expected) => JSON.stringify(expected) === JSON.stringify(concurrent)), `delay ${delay}: ${JSON.stringify(concurrent)}`);
+    }
+  })));
+
+it.effect("CC-MONITOR-ACK: an acknowledgement inside the caller's transaction commits and rolls back with it", () =>
+  withStore((monitor, db) => Effect.gen(function* () {
+    yield* monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: makeProjection({ events: [event("reviewed")] }), now });
+    const frozen = (yield* monitor.select(projectId, { ...defaultMonitoringSettings, activityThreshold: 1 }, now, null))!;
+    const failed = yield* Effect.flip(db.withTransaction(Effect.gen(function* () {
+      assert.deepEqual(yield* monitor.acknowledge(frozen, now + 1), { acknowledged: 1, stale: 0 });
+      return yield* Effect.fail("caller failed" as const);
+    })));
+    assert.equal(failed, "caller failed");
+    assert.equal((yield* monitor.pending(projectId, threadId)).length, 1, "the rolled-back acknowledgement left the item pending");
+    assert.equal((yield* monitor.state(projectId, threadId)).lastAcknowledgedAt, null);
+    assert.deepEqual(yield* db.withTransaction(monitor.acknowledge(frozen, now + 2)), { acknowledged: 1, stale: 0 });
+    assert.deepEqual(yield* monitor.pending(projectId, threadId), []);
+    assert.equal((yield* monitor.state(projectId, threadId)).lastAcknowledgedAt, now + 2);
+    // a second acknowledgement of the same frozen batch finds the version already reviewed and changes nothing
+    assert.deepEqual(yield* monitor.acknowledge(frozen, now + 3), { acknowledged: 1, stale: 0 });
+  })));
+
+it.effect("CC-MONITOR-ACK: an acknowledgement whose thread clock update fails acknowledges no item", () =>
+  withStore((monitor, db) => Effect.gen(function* () {
+    yield* monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection: makeProjection({ events: [event("one"), event("two")] }), now });
+    const frozen = (yield* monitor.select(projectId, { ...defaultMonitoringSettings, activityThreshold: 1 }, now, null))!;
+    yield* db.unsafe("CREATE TEMP TRIGGER s6d_fail_clock BEFORE UPDATE OF last_acknowledged_at ON supervisor_monitor_threads BEGIN SELECT RAISE(ABORT, 's6d injected clock failure'); END");
+    const failure = yield* Effect.flip(monitor.acknowledge(frozen, now + 1));
+    assert.ok(failure instanceof GuidanceStoreError);
+    assert.deepEqual(yield* rows(db, "SELECT item_id FROM supervisor_monitor_items WHERE reviewed_version IS NOT NULL"), []);
+    assert.equal((yield* monitor.pending(projectId, threadId)).length, 2);
+    yield* db.unsafe("DROP TRIGGER s6d_fail_clock");
+    assert.deepEqual(yield* monitor.acknowledge(frozen, now + 2), { acknowledged: 2, stale: 0 });
+    assert.deepEqual(yield* monitor.pending(projectId, threadId), []);
+  })));
+
+it.effect("invalid input fails typed, and the pending scan is incomplete on invalid input or a failed read", () =>
+  withStore((monitor, db) => Effect.gen(function* () {
+    const projection = makeProjection({ events: [event("one")] });
+    const invalid = [
+      yield* Effect.flip(monitor.observe({ projectId: " ", threadId, sourceOrdinal: 1, projection, now })),
+      yield* Effect.flip(monitor.observe({ projectId, threadId: "other", sourceOrdinal: 1, projection, now })),
+      yield* Effect.flip(monitor.observe({ projectId, threadId, sourceOrdinal: -1, projection, now })),
+      yield* Effect.flip(monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection, now: Number.NaN })),
+      yield* Effect.flip(monitor.acknowledge({ projectId, createdAt: now, trigger: "priority", finalizedActivityCount: 0, pendingItemCount: 0,
+        truncated: false, threads: [] }, Number.POSITIVE_INFINITY)),
+    ];
+    assert.ok(invalid.every((error) => error instanceof InvalidMonitorObservation));
+    assert.deepEqual(invalid.map((error) => error.message), ["invalid_monitor_observation", "invalid_monitor_observation", "invalid_monitor_observation",
+      "invalid_monitor_time", "invalid_monitor_review_time"]);
+    const capacity = yield* Effect.flip(makeProjectSupervisorMonitorStore(1_001));
+    assert.ok(capacity instanceof InvalidMonitorCapacity);
+    assert.equal(capacity.message, "invalid_monitor_capacity");
+    assert.equal(yield* monitor.select(projectId, defaultMonitoringSettings, Number.NaN, null), null);
+
+    yield* monitor.observe({ projectId, threadId, sourceOrdinal: 1, projection, now });
+    assert.deepEqual(yield* monitor.hasPendingReviewableActivity(projectId, [threadId]), { status: "complete", pending: true });
+    for (const threadIds of [[], [threadId, threadId], [" "], Array.from({ length: 10_001 }, (_, index) => `t-${index}`)])
+      assert.deepEqual(yield* monitor.hasPendingReviewableActivity(projectId, threadIds), { status: "incomplete" });
+    assert.deepEqual(yield* monitor.hasPendingReviewableActivity(" ", [threadId]), { status: "incomplete" });
+    // a temporary table shadows the items table on this connection, so the scan's read fails
+    yield* db.unsafe("CREATE TEMP TABLE supervisor_monitor_items(unrelated TEXT)");
+    assert.deepEqual(yield* monitor.hasPendingReviewableActivity(projectId, [threadId]), { status: "incomplete" });
+    yield* db.unsafe("DROP TABLE temp.supervisor_monitor_items");
+    assert.deepEqual(yield* monitor.hasPendingReviewableActivity(projectId, Array.from({ length: 900 }, (_, index) => index === 899 ? threadId : `t-${index}`)),
+      { status: "complete", pending: true }, "a match in the third chunk of 400 ids is found");
+  })));
+
+it.effect("the layer adds the activation, capacity, read-item and active columns to an older monitor schema", () => Effect.gen(function* () {
+  const directory = yield* dataDirectory("supervisor-monitor-schema-");
+  yield* withGuidanceDb(directory, (db) => Effect.gen(function* () {
+    yield* db.unsafe("CREATE TABLE supervisor_monitor_threads(project_id TEXT NOT NULL,thread_id TEXT NOT NULL,source_ordinal INTEGER NOT NULL,saturated INTEGER NOT NULL DEFAULT 0,saturation_at INTEGER,last_acknowledged_at INTEGER,PRIMARY KEY(project_id, thread_id))");
+    yield* db.unsafe("CREATE TABLE supervisor_monitor_items(project_id TEXT NOT NULL,thread_id TEXT NOT NULL,item_id TEXT NOT NULL,type TEXT NOT NULL,status TEXT NOT NULL,ordinal INTEGER NOT NULL,detected_at INTEGER NOT NULL,version TEXT NOT NULL,priority TEXT,eligible INTEGER NOT NULL,reviewed_version TEXT,updated_at INTEGER NOT NULL,PRIMARY KEY(project_id, thread_id, item_id))");
+    yield* db`INSERT INTO supervisor_monitor_threads(project_id,thread_id,source_ordinal) VALUES(${projectId},${threadId},3)`;
+  })).pipe(Effect.orDie);
+  const observed = yield* withMonitor(directory, (monitor, db) => Effect.gen(function* () {
+    return {
+      thread: yield* rows(db, "SELECT activation_ordinal,untracked_count FROM supervisor_monitor_threads"),
+      itemColumns: (yield* rows(db, "PRAGMA table_info(supervisor_monitor_items)")).map((row) => row.name).slice(-2),
+      state: yield* monitor.state(projectId, threadId),
+    };
+  }));
+  assert.deepEqual(observed.thread, [{ activation_ordinal: 3, untracked_count: 0 }]);
+  assert.deepEqual(observed.itemColumns, ["read_item_id", "active"]);
+  assert.equal(observed.state.sourceOrdinal, 3);
+}));
