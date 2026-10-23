@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
+import { NodeFileSystem } from "@effect/platform-node";
 import { Cause, Effect, Exit, Fiber, Layer, Logger, SubscriptionRef, Tracer } from "effect";
 import { it, type TestContext } from "vitest";
 import { SupervisorConfig as Configuration } from "../src/config.js";
@@ -131,6 +132,7 @@ const liveStatus = (settings: SupervisorConfig): SupervisorStatus => {
 // the services of the run: the given catalog and T3 client, the status and the root thread-policy and ownership services
 const services = (settings: SupervisorConfig, status: SupervisorStatus, base: Layer.Layer<Store | T3Client, unknown>) => Layer.mergeAll(
   base, Layer.succeed(SupervisorStatusRef, statusRefs.get(status)!), ThreadPolicy.layer, SupervisorOwnership.layer, NativeTransportLive,
+  NodeFileSystem.layer,
 ).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)));
 
 // the /health body the status would serve at the given time

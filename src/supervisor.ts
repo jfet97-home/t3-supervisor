@@ -165,7 +165,7 @@ export type NativeTransport = NativeEnvelope | Crypto.Crypto | HttpClient.HttpCl
 
 const catalog = Layer.unwrap(SupervisorConfig.useSync((config) => makeStore(config.dataDirectory)));
 
-export type SupervisorServices = SupervisorConfig | SupervisorStatusRef | Store | T3Client | ThreadPolicy | SupervisorOwnership | NativeTransport;
+export type SupervisorServices = SupervisorConfig | SupervisorStatusRef | Store | T3Client | ThreadPolicy | SupervisorOwnership | NativeTransport | FileSystem.FileSystem;
 
 // the root services over the configuration, acquired in today's order: ownership, thread policy, the native transport and
 // the T3 client over the read token, then the catalog and the status; they release in reverse
@@ -179,7 +179,7 @@ export const SupervisorServicesLive = Layer.mergeAll(catalog, SupervisorStatusRe
 // the server graph over the current ConfigProvider: the configuration, the node file system and the root services
 export const SupervisorLive = SupervisorServicesLive.pipe(
   Layer.provideMerge(SupervisorConfig.layer),
-  Layer.provide(NodeFileSystem.layer),
+  Layer.provideMerge(NodeFileSystem.layer),
 );
 
 // the supervisor run over its services: the run scope (health listener and supervision, maintenance and watch fibers)

@@ -3,6 +3,7 @@ import {mkdtemp, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {it} from "@effect/vitest";
+import {NodeFileSystem} from "@effect/platform-node";
 import {Clock, Effect, Fiber, Layer, Option, Stream, SubscriptionRef} from "effect";
 import {SupervisorConfig as Configuration} from "../src/config.js";
 import {SupervisorOwnership} from "../src/project-supervisor-store.js";
@@ -51,7 +52,7 @@ it.live("native T3 events persist into the generic catalog and mark the service 
   };
   const fiber = yield* Effect.forkScoped(supervise(Layer.mergeAll(
     makeStore(directory), Layer.succeed(T3Client, fake), Layer.succeed(SupervisorStatusRef, statusRef), ThreadPolicy.layer, SupervisorOwnership.layer,
-    NativeTransportLive,
+    NativeTransportLive, NodeFileSystem.layer,
   ).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)))));
   // the first status in which the stored item marked the service connected after activation
   const status = Option.getOrThrow(yield* SubscriptionRef.changes(statusRef).pipe(

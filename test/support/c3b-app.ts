@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { NodeFileSystem } from "@effect/platform-node";
 import { Clock, Context, Effect, Fiber, Layer } from "effect";
 import type { TestContext } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -126,7 +127,7 @@ export const runApp = (t: TestContext, config: SupervisorConfig, t3: T3ClientSha
       return clock.sleep(duration);
     }),
   };
-  const application = Effect.scoped(runGuidanceApplication(config, source, t3, () => ready.resolve())).pipe(Effect.provide(NativeTransportLive));
+  const application = Effect.scoped(runGuidanceApplication(config, source, t3, () => ready.resolve())).pipe(Effect.provide(Layer.merge(NativeTransportLive, NodeFileSystem.layer)));
   const fiber = Effect.runFork(observed ? Effect.provideService(application, Clock.Clock, observed) : application);
   root.id = fiber.id;
   fiber.addObserver((exit) => { if (exit._tag === "Failure") ready.reject(new Error("the application stopped before it was ready")); });

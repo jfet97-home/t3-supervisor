@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {mkdtemp, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
+import {NodeFileSystem} from "@effect/platform-node";
 import {Clock, Effect, Fiber, Layer, Queue, SubscriptionRef, type Scope} from "effect";
 import {TestClock} from "effect/testing";
 import {it, vi, type TestContext} from "vitest";
@@ -63,7 +64,7 @@ const liveStatus = (settings: SupervisorConfig): SupervisorStatus => {
 // the services of the run: the catalog, the fake T3 client, the status and the root thread-policy and ownership services
 const layers = (settings: SupervisorConfig, status: SupervisorStatus, client: T3ClientShape) => Layer.mergeAll(
   makeStore(settings.dataDirectory), Layer.succeed(T3Client, client), Layer.succeed(SupervisorStatusRef, statusRefs.get(status)!),
-  ThreadPolicy.layer, SupervisorOwnership.layer, NativeTransportLive,
+  ThreadPolicy.layer, SupervisorOwnership.layer, NativeTransportLive, NodeFileSystem.layer,
 ).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)));
 
 const startReal = (t: TestContext, settings: SupervisorConfig, status: SupervisorStatus, client: T3ClientShape, settle: () => void) => {
