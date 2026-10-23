@@ -6,7 +6,7 @@ import { type DatabaseOpenError, GuidanceDb, PolicyDb } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
 import { ProjectSupervisorStore, SupervisorOwnership } from "../../src/project-supervisor-store.js";
-import { SupervisionStoresLive } from "../../src/supervision-live.js";
+import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
 import { makeProjectSupervisorMonitorStore, ProjectSupervisorMonitorStore } from "../../src/supervisor-monitor-store.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { ThreadPolicyStore, type ThreadPolicyStoreError } from "../../src/thread-policy.js";
@@ -44,7 +44,7 @@ export const withMonitor = <A, E, R>(directory: string, use: (monitor: ProjectSu
   withGuidanceDb(directory, (db) => Effect.flatMap(Effect.service(ProjectSupervisorMonitorStore), (monitor) => use(monitor, db)).pipe(
     Effect.provide(Layer.fresh(monitorStores(capacity)))));
 
-/** The supervision stores of one run on its client, with the process's ownership set. */
+/** The guidance-file stores of one run on its client, with the process's ownership set. */
 export interface SupervisionStores {
   readonly db: SqlClient.SqlClient;
   readonly guidance: GuidanceStore["Service"];
@@ -53,8 +53,11 @@ export interface SupervisionStores {
   readonly owned: Set<string>;
 }
 
-// the production store graph of a supervision run over the guidance store, the identities and the ownership set
-const supervisionStores = (owned: Set<string>) => SupervisionStoresLive.pipe(
+// the guidance store, the state reset, the project supervision store and the team store in their production order, over
+// the identities and the ownership set
+const supervisionStores = (owned: Set<string>) => SupervisorTeamStore.layer.pipe(
+  Layer.provideMerge(ProjectSupervisorStore.layer),
+  Layer.provideMerge(SupervisorStateReset.layer),
   Layer.provideMerge(GuidanceStore.layer),
   Layer.provideMerge(Layer.mergeAll(Layer.succeed(SupervisorOwnership, owned), ids)));
 

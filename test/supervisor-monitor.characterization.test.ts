@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
-import { it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
-import { GuidanceStore } from "../src/guidance-store.js";
-import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.js";
+import { it } from "@effect/vitest";
+import { Effect } from "effect";
+import type { SqlClient } from "effect/sql";
+import { GuidanceStoreError } from "../src/guidance-sql.js";
 import type { Projection } from "../src/types.js";
-import { after } from "./support/node-test.js";
+import { rows as query } from "./support/guidance-store-services.js";
+import { dataDirectory, withMonitor } from "./support/g9-stores.js";
 
 const now = Date.parse("2026-10-13T10:00:00.000Z");
 const projectId = "project-a";
@@ -38,42 +36,39 @@ const projection = (replies: ReadonlyArray<{id: string; run: number}>, completed
   };
 };
 
-const rows = (db: DatabaseSync) => ({
-  thread: db.prepare("SELECT * FROM supervisor_monitor_threads WHERE project_id=? AND thread_id=?").get(projectId, threadId),
-  items: db.prepare("SELECT * FROM supervisor_monitor_items WHERE project_id=? AND thread_id=? ORDER BY item_id").all(projectId, threadId),
+const rows = (db: SqlClient.SqlClient) => Effect.all({
+  thread: Effect.map(query(db, "SELECT * FROM supervisor_monitor_threads WHERE project_id=? AND thread_id=?", projectId, threadId), ([row]) => row),
+  items: query(db, "SELECT * FROM supervisor_monitor_items WHERE project_id=? AND thread_id=? ORDER BY item_id", projectId, threadId),
 });
 
-it("CT-MSTORE-01: an observe that fails at its item insert rolls back floor, active flags and saturation, also after reopen", {timeout: 10_000}, async t => {
-  const directory = await mkdtemp(join(tmpdir(), "c1-monitor-"));
-  const opened: GuidanceStore[] = [];
-  const open = () => {
-    const guidance = new GuidanceStore(directory);
-    opened.push(guidance);
-    return {guidance, monitor: new ProjectSupervisorMonitorStore(guidance, 2)};
-  };
-  after(t, async () => {
-    for (const guidance of opened) guidance.close();
-    await rm(directory, {recursive: true, force: true});
-  });
-  const {guidance, monitor} = open();
-  const first = monitor.observe({projectId, threadId, sourceOrdinal: 1, now,
-    projection: projection([{id: "one", run: 1}, {id: "two", run: 1}, {id: "three", run: 1}])});
-  assert.deepEqual([first.saturated, first.untrackedCount, first.sourceOrdinal], [true, 1, 1]);
-  const before = rows(guidance.db);
-  assert.equal(before.items.length, 2);
+it.effect("CT-MSTORE-01: an observe that fails at its item insert rolls back floor, active flags and saturation, also after reopen", () => Effect.gen(function* () {
+  const directory = yield* dataDirectory("c1-monitor-");
+  // the guidance and monitor stores of capacity two on their own client; a second open is a second connection to the file
+  const open = <A, E, R>(use: Parameters<typeof withMonitor<A, E, R>>[1]) => withMonitor(directory, use, 2);
+  yield* open((monitor, db) => Effect.gen(function* () {
+    const first = yield* monitor.observe({projectId, threadId, sourceOrdinal: 1, now,
+      projection: projection([{id: "one", run: 1}, {id: "two", run: 1}, {id: "three", run: 1}])});
+    assert.deepEqual([first.saturated, first.untrackedCount, first.sourceOrdinal], [true, 1, 1]);
+    const before = yield* rows(db);
+    assert.equal(before.items.length, 2);
 
-  // the next observation raises the floor, retires the tracked run-1 items and inserts a run-2 item
-  const next = {projectId, threadId, sourceOrdinal: 2, now: now + 1_000, projection: projection([{id: "one", run: 1}, {id: "four", run: 2}], [1])};
-  guidance.db.exec("CREATE TEMP TRIGGER c1_fail_item_insert BEFORE INSERT ON supervisor_monitor_items BEGIN SELECT RAISE(ABORT, 'c1 injected item failure'); END");
-  assert.throws(() => monitor.observe(next), /c1 injected item failure/u);
-  assert.deepEqual(rows(guidance.db), before);
-  assert.deepEqual(rows(open().guidance.db), before);
+    // the next observation raises the floor, retires the tracked run-1 items and inserts a run-2 item
+    const next = {projectId, threadId, sourceOrdinal: 2, now: now + 1_000, projection: projection([{id: "one", run: 1}, {id: "four", run: 2}], [1])};
+    yield* db.unsafe("CREATE TEMP TRIGGER c1_fail_item_insert BEFORE INSERT ON supervisor_monitor_items BEGIN SELECT RAISE(ABORT, 'c1 injected item failure'); END");
+    // target change (S6d contract, errors): the failed statement surfaces as the typed store error with the driver's
+    // classification and without the driver text
+    const failure = yield* Effect.flip(monitor.observe(next));
+    assert.ok(failure instanceof GuidanceStoreError);
+    assert.match(failure.message, /^guidance store sql failed: ConstraintError$/u);
+    assert.deepEqual(yield* rows(db), before);
+    assert.deepEqual(yield* open((_monitor, other) => rows(other)), before);
 
-  guidance.db.exec("DROP TRIGGER c1_fail_item_insert");
-  const applied = monitor.observe(next);
-  const after2 = rows(guidance.db);
-  assert.deepEqual([applied.saturated, applied.sourceOrdinal, applied.inserted], [false, 2, 1]);
-  assert.notDeepEqual(after2, before, "the same observation changes the floor, items and saturation once it can commit");
-  assert.deepEqual(before.items.map(item => item.item_id), ["message:message-one", "message:message-three"]);
-  assert.deepEqual(after2.items.map(item => item.item_id), ["message:message-four", "message:message-one"]);
-});
+    yield* db.unsafe("DROP TRIGGER c1_fail_item_insert");
+    const applied = yield* monitor.observe(next);
+    const after2 = yield* rows(db);
+    assert.deepEqual([applied.saturated, applied.sourceOrdinal, applied.inserted], [false, 2, 1]);
+    assert.notDeepEqual(after2, before, "the same observation changes the floor, items and saturation once it can commit");
+    assert.deepEqual(before.items.map(item => item.item_id), ["message:message-one", "message:message-three"]);
+    assert.deepEqual(after2.items.map(item => item.item_id), ["message:message-four", "message:message-one"]);
+  }));
+}), {timeout: 10_000});

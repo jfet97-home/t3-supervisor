@@ -1,21 +1,23 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { it } from "vitest";
-import { ThreadPolicyStore } from "../src/thread-policy.js";
+import { it } from "@effect/vitest";
+import { Effect } from "effect";
+import { failsWith } from "./support/guidance-store-services.js";
+import { dataDirectory, withThreadPolicy } from "./support/g9-stores.js";
 
-it("excluded-thread policy persists and uses compare-and-swap generations", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "supervisor-policy-"));
-  let store = new ThreadPolicyStore(directory, {excludedThreadIds: ["excluded"]});
-  try {
-    const previous = store.get();
-    const saved = store.save({...previous, excludedThreadIds: []});
-    assert.throws(() => store.save(previous), /another tab/u);
-    assert.throws(() => store.save({...saved, excludedThreadIds: ["invalid id"]}), /valid/u);
-    assert.throws(() => store.save({...saved, excludedThreadIds: ["excluded", "excluded"]}), /unique/u);
-    store.close();
-    store = new ThreadPolicyStore(directory, {excludedThreadIds: ["new-default"]});
-    assert.deepEqual(store.get(), saved);
-  } finally {store.close(); await rm(directory, {recursive: true, force: true});}
-});
+// the ThreadPolicyStore service over a temporary thread-settings.sqlite3 (its production client and layer)
+
+it.effect("excluded-thread policy persists and uses compare-and-swap generations", () => Effect.gen(function* () {
+  const directory = yield* dataDirectory("supervisor-policy-");
+  const saved = yield* withThreadPolicy(directory, ["excluded"], (store) => Effect.gen(function* () {
+    const previous = yield* store.get();
+    const saved = yield* store.save({...previous, excludedThreadIds: []});
+    yield* failsWith(store.save(previous), /another tab/u);
+    yield* failsWith(store.save({...saved, excludedThreadIds: ["invalid id"]}), /valid/u);
+    yield* failsWith(store.save({...saved, excludedThreadIds: ["excluded", "excluded"]}), /unique/u);
+    return saved;
+  }));
+  // the first client closed; the store reopens on the same file with a different configured seed
+  yield* withThreadPolicy(directory, ["new-default"], (store) => Effect.gen(function* () {
+    assert.deepEqual(yield* store.get(), saved);
+  }));
+}));
