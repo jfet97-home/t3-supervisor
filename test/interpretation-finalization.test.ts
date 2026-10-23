@@ -105,10 +105,10 @@ it.live("CT-ISUB-10: a run that does not complete discards its submission, a rol
 // the final proof read awaits getturnitem after its main snapshot. a genuine source edit inside that await is a later revision
 const editSourceAtProof = (f: InterpretationFixture, task: {sourceMessageId: string}) => {
   let changed = 0;
-  f.native.beforeTurnItem = () => {
+  f.native.beforeTurnItem = Effect.sync(() => {
     if (changed++) return;
     f.main().messages.find(message => message.id === task.sourceMessageId)!.text = "Hello, I do not request supervision.";
-  };
+  });
   return () => changed;
 };
 

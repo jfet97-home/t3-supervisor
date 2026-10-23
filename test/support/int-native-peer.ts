@@ -184,8 +184,8 @@ export type NativeReadState = {
   details: Map<string, unknown>;
   // hooks that run when the request arrived, before the peer replies
   beforeShell: Effect.Effect<void> | null;
-  // synchronous, and called before the item value is produced, so a caller can edit the genuine source first
-  beforeTurnItem: (() => void) | null;
+  // runs before the item value is produced, so a caller can edit the genuine source or commit a change first
+  beforeTurnItem: Effect.Effect<void> | null;
   beforeProjection: ((threadId: string) => Effect.Effect<void>) | null;
 };
 
@@ -220,10 +220,8 @@ export const nativeReadRoutes = (state: NativeReadState): PeerRoutes => ({
     if (entry.tag === "orchestration.getArchivedShellSnapshot")
       return {value: {schemaVersion: 2, snapshotSequence: state.archivedSequence(), threads: []}};
     if (entry.tag === "orchestration.getTurnItem")
-      return Effect.sync(() => {
-        state.beforeTurnItem?.();
-        return {value: {item: state.details.get(String(entry.payload.itemId)) ?? null}};
-      });
+      return Effect.andThen(state.beforeTurnItem ?? Effect.void,
+        Effect.sync(() => ({value: {item: state.details.get(String(entry.payload.itemId)) ?? null}})));
     return undefined;
   },
 });

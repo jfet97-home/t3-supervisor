@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import { Cause, Clock, Effect, Exit } from "effect";
+import { Clock, Effect } from "effect";
 import { fingerprint } from "../src/guidance-store.js";
 import type { WorkflowApplyPatch } from "../src/workflow-write-controller.js";
 import { workflowRequestHash, workflowToolNames } from "../src/workflow-write-evidence.js";
 import { httpJson, mcpCall, mcpRawPost, operateToken, readToken, row, rows } from "./support/glinint-wiring.js";
-import { hookRuntime, httpRequests, rpcRequests, type HookRuntime, type IntNativePeer } from "./support/int-native-peer.js";
+import { httpRequests, rpcRequests, type IntNativePeer } from "./support/int-native-peer.js";
 import { applyArgs, ensureArgs, installEvidence, localStep, sequencePlan, shellThread, startWorkflowFixture, thread,
   type IntWorkflowFixture } from "./support/int-workflow-fixture.js";
 
@@ -55,22 +55,6 @@ const once = (work: Effect.Effect<void>): Effect.Effect<void> => {
     done = true;
     return work;
   });
-};
-
-// runs a non-suspending effect to its end on the calling turn, before the proof item is produced
-const onTurn = (hooks: HookRuntime, work: Effect.Effect<void>): (() => void) => {
-  let done = false;
-  return () => {
-    if (done) return;
-    done = true;
-    const fiber = hooks.run(work);
-    const exit = fiber.pollUnsafe();
-    if (exit === undefined) {
-      fiber.interruptUnsafe();
-      throw new Error("a native hook suspended inside the turn");
-    }
-    if (Exit.isFailure(exit)) throw Cause.squash(exit.cause);
-  };
 };
 
 // the elapsed live milliseconds of an effect
@@ -393,9 +377,8 @@ it.live("CT-INT-02: weak proof denies the quarantine with no lineage read and no
 
 it.live("CT-INT-02: a Stop between proof and mutation is caught by the post-proof recheck and by the atomic section", () => Effect.gen(function* () {
   const first = yield* teamFixture;
-  const hooks = yield* hookRuntime;
   // (a) committed while the proof item is read: authorizeNative rechecks after the proof (workflow-write-controller.ts:1030)
-  first.f.native.beforeTurnItem = onTurn(hooks, stopMain(first.f));
+  first.f.native.beforeTurnItem = once(stopMain(first.f));
   installEvidence(first.f, first.args, {toolName: workflowToolNames.team.direct[0]});
   const proofStop = yield* mcpCall(first.f.endpoint, "supervision_team", first.args);
   assert.equal(proofStop.isError, true);

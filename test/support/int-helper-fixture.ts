@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit, Scope } from "effect";
+import { Effect, Exit, Scope } from "effect";
 import { defaultSupervisorModel, type BindingRecord } from "../../src/project-supervisor-store.js";
 import type { ConversationRequest } from "../../src/supervisor-conversation-store.js";
 import type { SupervisorMonitorBatch, SupervisorMonitorThreadBatch } from "../../src/supervisor-monitor.js";
@@ -36,8 +36,8 @@ export type HelperPeerState = {
   // hooks that run when the request arrived, before the peer replies
   beforeUpsert: Effect.Effect<void> | null;
   beforeHelperProjection: ((read: number) => Effect.Effect<void>) | null;
-  // runs inside the fetch call when the transport starts a request (inside its admission section for a webhook POST), and ends
-  // there unless it suspends, which fails the fixture's close
+  // starts inside the fetch call when the transport starts a request (inside its admission section for a webhook POST) and runs
+  // on that turn until it suspends; the request is sent when it ends, and its failure fails the fixture's close
   onFetch: ((url: string) => Effect.Effect<void>) | null;
   // the reply to a POST on the hook path; the default answers 202 with the logged delivery id
   reply: WebhookReply;
@@ -107,20 +107,17 @@ export const startHelperFixture: Effect.Effect<HelperFixture, never, Scope.Scope
       return undefined;
     },
   }]);
-  // the platform fetch of the webhook POSTs, with the case's hook run inside each call before the request starts (the native
-  // fetch boundary: the transport calls it synchronously inside its admission section)
+  // the platform fetch of the webhook POSTs, with the case's hook started inside each call and the request sent when it ends
+  // (the native fetch boundary: the transport calls it synchronously inside its admission section)
   const hooks = yield* hookRuntime;
   const fetch: typeof globalThis.fetch = (url, init) => {
     const hook = state.onFetch;
-    if (hook) {
-      const fiber = hooks.run(hook(url instanceof Request ? url.url : String(url)));
-      const exit = fiber.pollUnsafe();
-      if (exit === undefined) {
-        hooks.fault(Cause.die(new Error("a fetch hook suspended inside the fetch call")));
-        fiber.interruptUnsafe();
-      } else if (Exit.isFailure(exit)) hooks.fault(exit.cause);
-    }
-    return globalThis.fetch(url, init);
+    if (!hook) return globalThis.fetch(url, init);
+    const fiber = hooks.run(hook(url instanceof Request ? url.url : String(url)));
+    return new Promise<void>((resolve) => fiber.addObserver((exit) => {
+      if (Exit.isFailure(exit)) hooks.fault(exit.cause);
+      resolve();
+    })).then(() => globalThis.fetch(url, init));
   };
   const main: ThreadInfo = {id: "main", title: "main", projectId: "p", lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: "main"}};
   const operational: ThreadInfo = {id: "branch", title: "branch", projectId: "p",
