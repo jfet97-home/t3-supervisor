@@ -5721,6 +5721,16 @@ it("an unresolved activation boundary never authorizes a wake, while a resolvabl
   assert.equal(await since.humanMessageSince(operativeThreadId, clock.now, AbortSignal.timeout(5_000)), false, "a message at the boundary is history");
 });
 
+it("the interpretation request's standing role carries no final-chat interpretation instructions and permits the typed submission", async t => {
+  const fixture = await makeFixture({now: baseTime});
+  after(t, fixture.cleanup);
+  const role = await fixture.conversation.interpretationRole(fixture.binding);
+  assert.ok(role);
+  assert.doesNotMatch(role.text, /follow only the interpretation instructions|use no tool except the workflow_read reader/u);
+  assert.match(role.text, /supervision_interpretation_submit when an interpretation request asks for it/u);
+  assert.match(role.text, /Standing instructions version [0-9a-f]{16}\. They govern your later check-ins and dialogue, not the request below\.$/u);
+});
+
 it("a direct stop cites the freshly read latest human message with its own operationId, in the standing role and the tool description", async t => {
   const fixture = await makeFixture({now: baseTime});
   after(t, fixture.cleanup);
