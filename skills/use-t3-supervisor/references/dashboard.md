@@ -70,11 +70,20 @@ Supervisor preferences belong to the project, independently of the configuration
 selected working directory. Model and reasoning choices come from native T3
 capabilities. Save stores defaults for new Supervisors. The selected conversation’s Supervision view shows its separately observed model. Each main gets its own bound Supervisor automatically.
 Edit existing models in T3. Independent requests and retries do not cross mains.
+When no preference is saved, new roots default to Sol 6.1 with low reasoning;
+this does not replace an existing root's model or a saved selection.
 
 Model drafts follow the same explicit refresh/conflict/session-guard rules. A
 request whose save outcome is unknown is never automatically repeated. Refresh to inspect native model changes. Project root has no selected binding.
 Select a task conversation to see a source-linked objective or its unavailable/
 needs-context state. Matching native proposal/acceptance records save a semantic agreement, not execution evidence.
+
+The owning Supervisor returns an interpretation through the typed native MCP tool
+`supervision_interpretation_submit`. Its receipt can remain pending while the native
+turn completes and the service verifies its source. Final prose or JSON in the chat
+is not parsed as an interpretation. A tool submission is separate from a proposal,
+operative acceptance and assessed completion. Check the current task and diagnostic
+before retrying; keep an uncertain operation's exact identity and bound destination.
 
 Initial proposal delivery follows the main's live state. An idle main receives a
 normal new turn through queued delivery. A steerable running main receives targeted active

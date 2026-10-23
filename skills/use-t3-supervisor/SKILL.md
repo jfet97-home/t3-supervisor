@@ -70,6 +70,8 @@ hidden inside a dashboard task.
 The global supervision master switch overrides remembered project choices. Global
 definitions are separately opt-in in the T3 server user's home; scratch needs that
 input. Model/reasoning choices are defaults for new roots; edit existing chats in T3.
+Without saved preferences, new roots use Sol 6.1 with low reasoning. Existing roots
+and saved selections keep their models; a model change does not establish a valid plan.
 Settings chat exclusions are per-instance, persistent and independent of Telegram.
 
 Select the actual main to inspect its binding, objective, proposal, agreement,
@@ -146,6 +148,13 @@ exact native tool evidence and scope authorize writes; a transport credential or
 supplied thread ID does not. Preserve exact returned IDs and inspect bounded protocol
 diagnostics in their source chat. Product use does not authorize proxies, T3
 modifications or manufactured agreement/activity evidence.
+
+The owning Supervisor submits its task interpretation through
+`supervision_interpretation_submit`, discovered through the instance's native MCP
+connection. Final chat prose is not an interpretation result. A submitted or pending
+result is not an agreement: wait for the source-linked state and actual proposal/
+acceptance. The service derives delivery from the existing binding; never supply a
+different destination or manufacture a submission for another conversation.
 
 ## No Project activation
 
