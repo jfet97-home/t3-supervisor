@@ -14,7 +14,7 @@ import { connectRefused, within } from "./support/g8-process.js";
 
 type McpBody = {result?: {isError?: boolean; content?: Array<{text?: string}>; tools?: Array<{name: string}>}};
 
-it.live("SUP-LIVE-01: the running application's workflow MCP endpoint lists six tools and answers through the run's own write and team controllers", () => Effect.gen(function* () {
+it.live("SUP-LIVE-01: the running application's workflow MCP endpoint lists seven tools and answers through the run's own write and team controllers", () => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const directory = yield* temporaryDirectory("supervision-live-");
   const peer = yield* fakeT3;
@@ -34,7 +34,7 @@ it.live("SUP-LIVE-01: the running application's workflow MCP endpoint lists six 
 
   const listed = yield* post("tools/list", {});
   assert.deepEqual(listed.result?.tools?.map(tool => tool.name),
-    ["workflow_read", "workflow_write", "supervision_start", "supervision_stop", "supervision_team", "supervision_guide"]);
+    ["workflow_read", "workflow_write", "supervision_start", "supervision_stop", "supervision_interpretation_submit", "supervision_team", "supervision_guide"]);
   // each answer is the controller's own typed refusal of the empty arguments, never the route's internal error
   const read = yield* post("tools/call", {name: "workflow_read", arguments: {}});
   assert.equal(read.result?.isError, true);
