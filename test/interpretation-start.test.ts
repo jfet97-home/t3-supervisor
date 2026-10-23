@@ -1,23 +1,22 @@
 import assert from "node:assert/strict";
+import { it } from "@effect/vitest";
 import { Effect } from "effect";
-import { it, type TestContext } from "vitest";
-import { after } from "./support/node-test.js";
 import { workflowToolNames } from "../src/workflow-write-evidence.js";
 import type { TaskRecord } from "../src/project-supervisor-store.js";
-import { callTool } from "./support/int-production-wiring.js";
+import { mcpCall } from "./support/glinint-wiring.js";
 import { submissionArguments } from "./support/interpretation-submit.js";
 import { planFields, startInterpretationFixture, type InterpretationFixture } from "./support/interpretation-fixture.js";
 
-// a pending Start's verdict inside the typed interpretation (plan 3.12 items 5 and 7; extends the project-supervisor Start cases)
+// a pending start's verdict inside the typed interpretation (plan 3.12 items 5 and 7; extends the project-supervisor start cases)
 // over the production boundary: the main's own supervision_start call and the root's submission both go through the authenticated
-// /mcp/workflows route, with their native items in the loopback peer's projections
+// /mcp/workflows route, with their native items in the loopback peer's projections.
+// it.live: every case crosses the real mcp listener and the peer's http and websocket sockets, and the real sqlite files
 
 const startText = "Have Supervisor follow this task: add a CSV export.";
 
-// a No Project main whose genuine request asked for supervision through its own native supervision_start call, interpreted once
-const pendingStart = async (t: TestContext): Promise<{f: InterpretationFixture; task: TaskRecord}> => {
-  const f = await startInterpretationFixture({noProject: true});
-  after(t, f.close);
+// a no project main whose genuine request asked for supervision through its own native supervision_start call, interpreted once
+const pendingStart = Effect.gen(function* () {
+  const f = yield* startInterpretationFixture({noProject: true});
   f.addRequest("request-start", startText);
   const main = f.main();
   const run = main.runs.find(value => value.userMessageId === "request-start")!;
@@ -29,74 +28,74 @@ const pendingStart = async (t: TestContext): Promise<{f: InterpretationFixture; 
     parentItemId: null, ordinal: 1, status: "completed", toolName: workflowToolNames.start.direct[1], input: args};
   main.turnItems = [item];
   f.native.details.set(item.id, {...item, nativeItemRef: {driver: "codex", nativeId: "native-start-item", strength: "strong"}, toolNonExecutionKind: null});
-  assert.equal(((await callTool(f.endpoint, "supervision_start", args)).value as {status: string}).status, "pending");
-  assert.equal((await f.core.store.start(f.mainThreadId))?.status, "pending");
-  await f.runOnce();
-  await f.runOnce();
-  const task = await f.task();
+  assert.equal(((yield* mcpCall(f.endpoint, "supervision_start", args)).value as {status: string}).status, "pending");
+  assert.equal((yield* f.core.store.start(f.mainThreadId).pipe(Effect.orDie))?.status, "pending");
+  yield* f.runOnce();
+  yield* f.runOnce();
+  const task = yield* f.task();
   assert.equal(task.status, "waiting");
   const request = String(f.interpretationDispatches().at(-1)?.text);
   assert.match(request, /START AUTHORIZATION/u);
   assert.match(request, /startRequested/u);
   return {f, task};
-};
+});
 
 const verdict = (task: TaskRecord, startRequested: boolean, objective: string | null = null) =>
   submissionArguments(task, {...planFields(task, objective ?? "unused"), objective, ...(objective === null ? {workflow: null} : {}), startRequested});
 
-it("CT-ISUB-07: a positive verdict activates the Start only after its run completes; recording never activates it and grants no general effect", {timeout: 60_000}, async (t) => {
-  const {f, task} = await pendingStart(t);
-  assert.equal((await f.submit(task, verdict(task, true))).value.status, "submitted");
-  assert.equal((await f.core.store.start(f.mainThreadId))?.status, "pending", "recording never activates a Start");
-  assert.equal(await f.core.supervision.scopeEnabled(task.projectId, f.mainThreadId), false, "no widening to general effects before activation");
+it.live("CT-ISUB-07: a positive verdict activates the Start only after its run completes; recording never activates it and grants no general effect", () => Effect.gen(function* () {
+  const {f, task} = yield* pendingStart;
+  assert.equal((yield* f.submit(task, verdict(task, true))).value.status, "submitted");
+  assert.equal((yield* f.core.store.start(f.mainThreadId).pipe(Effect.orDie))?.status, "pending", "recording never activates a Start");
+  assert.equal(yield* f.core.scope.scopeEnabled(task.projectId, f.mainThreadId).pipe(Effect.orDie), false, "no widening to general effects before activation");
   f.endRun(task, "completed");
-  await f.runOnce();
-  assert.equal((await f.core.store.start(f.mainThreadId))?.status, "active");
-  assert.equal(await f.core.supervision.scopeEnabled(task.projectId, f.mainThreadId), true);
-  // a bare Start without a task activates permission and contacts nobody
-  assert.equal((await f.task()).status, "needs_context");
+  yield* f.runOnce();
+  assert.equal((yield* f.core.store.start(f.mainThreadId).pipe(Effect.orDie))?.status, "active");
+  assert.equal(yield* f.core.scope.scopeEnabled(task.projectId, f.mainThreadId).pipe(Effect.orDie), true);
+  // a bare start without a task activates permission and contacts nobody
+  assert.equal((yield* f.task()).status, "needs_context");
   assert.equal(f.operativeSends().length, 0);
-});
+}), {timeout: 60_000});
 
-it("CT-ISUB-07: a negative verdict rejects the Start and a submission without the verdict is invalid", {timeout: 60_000}, async (t) => {
+it.live("CT-ISUB-07: a negative verdict rejects the Start and a submission without the verdict is invalid", () => Effect.gen(function* () {
   {
-    const {f, task} = await pendingStart(t);
+    const {f, task} = yield* pendingStart;
     const missing = submissionArguments(task, {...planFields(task, "unused"), objective: null, workflow: null});
-    const reply = await f.submit(task, missing);
+    const reply = yield* f.submit(task, missing);
     assert.equal(reply.value.status, "invalid");
     assert.deepEqual(reply.value.status === "invalid" ? reply.value.issues : [], [{code: "missing_key", path: "/startRequested"}]);
-    assert.equal((await f.receipts()).length, 0);
-    assert.equal((await f.submit(task, verdict(task, false))).value.status, "submitted", "a corrected submission in the same run");
+    assert.equal((yield* f.receipts()).length, 0);
+    assert.equal((yield* f.submit(task, verdict(task, false))).value.status, "submitted", "a corrected submission in the same run");
     f.endRun(task, "completed");
-    await f.runOnce();
-    assert.equal((await f.core.store.start(f.mainThreadId))?.status, "rejected");
-    assert.equal((await f.task()).status, "not_supervised");
-    assert.equal(await f.core.supervision.scopeEnabled(task.projectId, f.mainThreadId), false);
+    yield* f.runOnce();
+    assert.equal((yield* f.core.store.start(f.mainThreadId).pipe(Effect.orDie))?.status, "rejected");
+    assert.equal((yield* f.task()).status, "not_supervised");
+    assert.equal(yield* f.core.scope.scopeEnabled(task.projectId, f.mainThreadId).pipe(Effect.orDie), false);
     assert.equal(f.operativeSends().length, 0);
   }
-});
+}), {timeout: 60_000});
 
-it("CT-ISUB-07: a mode change, a later Stop or a rolled-back tool item before activation prevents it", {timeout: 60_000}, async (t) => {
+it.live("CT-ISUB-07: a mode change, a later Stop or a rolled-back tool item before activation prevents it", () => Effect.gen(function* () {
   for (const change of ["mode", "stop", "rolled_back"] as const) {
-    const {f, task} = await pendingStart(t);
+    const {f, task} = yield* pendingStart;
     const args = verdict(task, true);
-    assert.equal((await f.submit(task, args, {itemId: "start-verdict"})).value.status, "submitted", change);
+    assert.equal((yield* f.submit(task, args, {itemId: "start-verdict"})).value.status, "submitted", change);
     if (change === "mode") {
-      const control = await Effect.runPromise(f.core.supervision.noProjectControl());
-      assert.equal((await f.core.supervision.saveNoProjectControl({expectedGeneration: control.generation, mode: "off"}, AbortSignal.timeout(5_000))).status, "saved");
+      const control = yield* f.core.supervisor.noProjectControl().pipe(Effect.orDie);
+      assert.equal((yield* f.core.supervisor.saveNoProjectControl({expectedGeneration: control.generation, mode: "off"}).pipe(Effect.orDie)).status, "saved");
     }
-    if (change === "stop") await f.core.supervision.setChatSupervision({projectId: task.projectId, mainThreadId: f.mainThreadId,
-      policyGeneration: (await f.core.policy.get()).generation, enabled: false}, AbortSignal.timeout(5_000));
+    if (change === "stop") yield* f.core.supervisor.setChatSupervision({projectId: task.projectId, mainThreadId: f.mainThreadId,
+      policyGeneration: (yield* f.core.policy.get().pipe(Effect.orDie)).generation, enabled: false}).pipe(Effect.orDie);
     if (change === "rolled_back") f.setItemStatus("start-verdict", "rolled_back");
     f.endRun(task, "completed");
-    await f.runOnce();
-    assert.notEqual((await f.core.store.start(f.mainThreadId))?.status, "active", change);
-    assert.equal(await f.core.supervision.scopeEnabled(task.projectId, f.mainThreadId), false, change);
+    yield* f.runOnce();
+    assert.notEqual((yield* f.core.store.start(f.mainThreadId).pipe(Effect.orDie))?.status, "active", change);
+    assert.equal(yield* f.core.scope.scopeEnabled(task.projectId, f.mainThreadId).pipe(Effect.orDie), false, change);
     assert.equal(f.operativeSends().length, 0, change);
   }
-});
+}), {timeout: 60_000});
 
-// the final proof read awaits getTurnItem after its main snapshot. a genuine source edit inside that await is a later revision
+// the final proof read awaits getturnitem after its main snapshot. a genuine source edit inside that await is a later revision
 const editSourceAtProof = (f: InterpretationFixture, task: TaskRecord) => {
   let changed = 0;
   f.native.beforeTurnItem = () => {
@@ -106,35 +105,35 @@ const editSourceAtProof = (f: InterpretationFixture, task: TaskRecord) => {
   return () => changed;
 };
 
-it("SOL-R42-01: a genuine source edit during the final proof read does not activate a bare Start", {timeout: 60_000}, async (t) => {
-  const {f, task} = await pendingStart(t);
-  assert.equal((await f.submit(task, verdict(task, true))).value.status, "submitted");
+it.live("SOL-R42-01: a genuine source edit during the final proof read does not activate a bare Start", () => Effect.gen(function* () {
+  const {f, task} = yield* pendingStart;
+  assert.equal((yield* f.submit(task, verdict(task, true))).value.status, "submitted");
   f.endRun(task, "completed");
   const changed = editSourceAtProof(f, task);
-  await f.runOnce();
+  yield* f.runOnce();
   assert.ok(changed() > 0, "mutation crossed actual getTurnItem boundary");
-  const closed = await f.task();
-  assert.notEqual((await f.core.store.start(f.mainThreadId))?.status, "active", "edited source must be checked after final native proof read");
+  const closed = yield* f.task();
+  assert.notEqual((yield* f.core.store.start(f.mainThreadId).pipe(Effect.orDie))?.status, "active", "edited source must be checked after final native proof read");
   assert.equal(closed.status, "unavailable");
   assert.equal(closed.reason, "The task source changed before the interpretation completed.");
   assert.equal(closed.interpretationEvidence, undefined);
-  assert.equal((await f.receipts()).length, 1, "the recorded receipt stays; nothing is resent");
+  assert.equal((yield* f.receipts()).length, 1, "the recorded receipt stays; nothing is resent");
   assert.equal(f.interpretationDispatches().length, 1);
   assert.equal(f.operativeSends().length, 0);
-});
+}), {timeout: 60_000});
 
-it("SOL-R42-01: a genuine source edit during the final proof read does not apply a negative Start", {timeout: 60_000}, async (t) => {
-  const {f, task} = await pendingStart(t);
-  assert.equal((await f.submit(task, verdict(task, false))).value.status, "submitted");
+it.live("SOL-R42-01: a genuine source edit during the final proof read does not apply a negative Start", () => Effect.gen(function* () {
+  const {f, task} = yield* pendingStart;
+  assert.equal((yield* f.submit(task, verdict(task, false))).value.status, "submitted");
   f.endRun(task, "completed");
   const changed = editSourceAtProof(f, task);
-  await f.runOnce();
+  yield* f.runOnce();
   assert.ok(changed() > 0, "mutation crossed actual getTurnItem boundary");
-  const closed = await f.task();
-  assert.notEqual((await f.core.store.start(f.mainThreadId))?.status, "active");
+  const closed = yield* f.task();
+  assert.notEqual((yield* f.core.store.start(f.mainThreadId).pipe(Effect.orDie))?.status, "active");
   assert.equal(closed.status, "unavailable");
   assert.equal(closed.reason, "The task source changed before the interpretation completed.");
-  assert.equal((await f.receipts()).length, 1);
+  assert.equal((yield* f.receipts()).length, 1);
   assert.equal(f.interpretationDispatches().length, 1);
   assert.equal(f.operativeSends().length, 0);
-});
+}), {timeout: 60_000});
