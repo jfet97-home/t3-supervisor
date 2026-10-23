@@ -2137,7 +2137,7 @@
   },
   "CC-SYNC-ATOMIC": {
    "owner": "cross-cutting (plan section 3.3)",
-   "slice": "S4–S6c",
+   "slice": "S4\u2013S6c",
    "invariant": "every baseline synchronous block (DB or in-memory read-check-write) maps to one Effect.sync section, Ref.modify, SynchronizedRef or Semaphore-guarded section; every baseline await window between check and write keeps exactly that window.",
    "pins": [
     "s1-baseline characterizations per controller",
@@ -2374,7 +2374,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "dashboard snapshot uses the native catalog and excludes owned roots and descendants — test/guidance.test.ts:47",
+   "reuses": "dashboard snapshot uses the native catalog and excludes owned roots and descendants \u2014 test/guidance.test.ts:47",
    "newObservation": "Explicit override + trailing-slash managed root.",
    "clarification": "Pin both classification paths as they are today (GuidanceRuntime path.resolve strips a trailing slash; definitions isScratchProject posix.normalize keeps it).",
    "notes": "guidance-application.ts:58,69 isScratchProject uses posix.normalize (keeps trailing slash) - differs from guidance.ts; specify which path the CT pins.",
@@ -2435,7 +2435,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "malformed, oversized, symlink and non-regular auth databases fail closed > corrupt database remains untouched — test/service-auth.test.ts:684",
+   "reuses": "malformed, oversized, symlink and non-regular auth databases fail closed > corrupt database remains untouched \u2014 test/service-auth.test.ts:684",
    "newObservation": "Valid DB byte-identical, no -wal created.",
    "suite": "test/service-auth.test.ts"
   },
@@ -2454,7 +2454,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "symlink subtests — test/service-auth.test.ts:643/684 (token file and database only)",
+   "reuses": "symlink subtests \u2014 test/service-auth.test.ts:643/684 (token file and database only)",
    "newObservation": "Access-directory symlink for server and forge.",
    "suite": "test/service-auth.test.ts"
   },
@@ -2473,7 +2473,7 @@
    "targetRegression": "Clock service version after S3",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "grants and sessions persist across reopen without renewing their original deadlines — test/service-auth.test.ts:215 (t-60001/t-60000 at :235-237)",
+   "reuses": "grants and sessions persist across reopen without renewing their original deadlines \u2014 test/service-auth.test.ts:215 (t-60001/t-60000 at :235-237)",
    "newObservation": "Grant consumed exactly at expires_at.",
    "suite": "test/service-auth.test.ts"
   },
@@ -2492,7 +2492,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "malformed, oversized, symlink and non-regular workflow token files fail closed — test/service-auth.test.ts:643",
+   "reuses": "malformed, oversized, symlink and non-regular workflow token files fail closed \u2014 test/service-auth.test.ts:643",
    "newObservation": "Systematic scan of messages for token/session/hash values.",
    "suite": "test/service-auth.test.ts"
   },
@@ -2536,7 +2536,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "direct installations find the user state from any directory and support an explicit instance — test/auth-cli.test.ts:81 (--help regex + empty stderr)",
+   "reuses": "direct installations find the user state from any directory and support an explicit instance \u2014 test/auth-cli.test.ts:81 (--help regex + empty stderr)",
    "newObservation": "Exact two-line bytes, '-h' alias, exit 0.",
    "suite": "test/auth-cli.test.ts"
   },
@@ -2555,7 +2555,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "the local CLI does not bootstrap missing service state or accept unknown commands — test/auth-cli.test.ts:66 (code 2 + /Usage:/)",
+   "reuses": "the local CLI does not bootstrap missing service state or accept unknown commands \u2014 test/auth-cli.test.ts:66 (code 2 + /Usage:/)",
    "newObservation": "'--data-dir=/abs', 'auth forge extra', 'start --data-dir' and exact stderr bytes.",
    "suite": "test/auth-cli.test.ts"
   },
@@ -2593,7 +2593,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "the local CLI rejects an existing database without both current auth tables — test/auth-cli.test.ts:57 (regex only)",
+   "reuses": "the local CLI rejects an existing database without both current auth tables \u2014 test/auth-cli.test.ts:57 (regex only)",
    "newObservation": "Exact sentence bytes; no path/stack/token on stderr.",
    "suite": "test/auth-cli.test.ts"
   },
@@ -2612,7 +2612,7 @@
    "targetRegression": null,
    "disposition": "drop-reuse",
    "consolidateInto": null,
-   "reuses": "direct installations find the user state from any directory and support an explicit instance — test/auth-cli.test.ts:81 (env DATA_DIRECTORY=home/unused + --data-dir accepted)",
+   "reuses": "direct installations find the user state from any directory and support an explicit instance \u2014 test/auth-cli.test.ts:81 (env DATA_DIRECTORY=home/unused + --data-dir accepted)",
    "newObservation": "Only optional: negative that the env instance rejects the token.",
    "suite": "test/auth-cli.test.ts"
   },
@@ -2807,7 +2807,7 @@
    "targetRegression": "interruption variant after S6b",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "uncertain operative introduction is never replayed, also after explicit Retry, and keeps its identity and target — test/supervisor-conversation.test.ts:1269; Retry native access only re-observes unknown root check-ins and introductions... — :5379",
+   "reuses": "uncertain operative introduction is never replayed, also after explicit Retry, and keeps its identity and target \u2014 test/supervisor-conversation.test.ts:1269; Retry native access only re-observes unknown root check-ins and introductions... \u2014 :5379",
    "newObservation": "Abort/crash during the POST itself.",
    "clarification": "Baseline variants as CT-CONV-01 (abort -> 'uncertain' at :2005; crash -> 'prepared' kept).",
    "suite": "test/supervisor-conversation.test.ts"
@@ -2827,7 +2827,7 @@
    "targetRegression": "post-S6b",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "a lost Stop-notice response preserves its exact identity across Stop, Enable and observation — test/supervisor-conversation.test.ts:5616",
+   "reuses": "a lost Stop-notice response preserves its exact identity across Stop, Enable and observation \u2014 test/supervisor-conversation.test.ts:5616",
    "newObservation": "Abort seam (vs lost response).",
    "suite": "test/supervisor-conversation.test.ts"
   },
@@ -3041,7 +3041,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "indexes an existing unlisted file and rejects stale, missing-file, global, malformed or old-format indexes before writing — test/project-config-editor.test.ts:96",
+   "reuses": "indexes an existing unlisted file and rejects stale, missing-file, global, malformed or old-format indexes before writing \u2014 test/project-config-editor.test.ts:96",
    "newObservation": "Concurrent same-revision saves serialize; second conflict.",
    "suite": "test/project-config-editor.test.ts"
   },
@@ -3079,7 +3079,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "matching action_failed events retain the uncertain result — test/project-committer.test.ts:96",
+   "reuses": "matching action_failed events retain the uncertain result \u2014 test/project-committer.test.ts:96",
    "newObservation": "Drop after request frame; pre-aborted signal.",
    "notes": "Any close (even before open) also yields uncertain in the committer.",
    "suite": "test/project-committer.test.ts"
@@ -3118,7 +3118,7 @@
    "targetRegression": null,
    "disposition": "drop-reuse",
    "consolidateInto": null,
-   "reuses": "native Git operation inspection follows a worktree .git pointer with existing T3 read RPCs — test/project-definition-initialization.test.ts:292",
+   "reuses": "native Git operation inspection follows a worktree .git pointer with existing T3 read RPCs \u2014 test/project-definition-initialization.test.ts:292",
    "newObservation": "None (fully pinned).",
    "suite": "test/project-committer.test.ts"
   },
@@ -3282,7 +3282,7 @@
    "targetRegression": "TestClock-driven /live after S2",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "readiness depends on native T3 connection, activation, catalog health, and enabled supervision — test/supervisor.test.ts:20",
+   "reuses": "readiness depends on native T3 connection, activation, catalog health, and enabled supervision \u2014 test/supervisor.test.ts:20",
    "newObservation": "Real HTTP status/key matrix and 404 bodies.",
    "clarification": "Use a pre-allocated free port; the health server address is not exposed (supervisor.ts:52-67).",
    "suite": "test/supervisor.test.ts"
@@ -3576,7 +3576,7 @@
   "CT-ISUB-01": {
    "kind": "characterization",
    "boundary": "production-wired controller, authenticated /mcp/workflows route, loopback T3 peer serving the root's dynamic_tool items, temp-file guidance.sqlite3",
-   "description": "valid submission in the exact request run → `submitted` → finalized once on run completion → one introduction to the bound main",
+   "description": "valid submission in the exact request run \u2192 `submitted` \u2192 finalized once on run completion \u2192 one introduction to the bound main",
    "ownerFile": "test/project-supervisor.test.ts",
    "referencedBy": [
     "src/project-supervisor.ts",
@@ -3594,7 +3594,7 @@
    "disposition": "keep",
    "consolidateInto": null,
    "reuses": "CT-INT-01 fixtures",
-   "newObservation": "valid submission in the exact request run → `submitted` → finalized once on run completion → one introduction to the bound main",
+   "newObservation": "valid submission in the exact request run \u2192 `submitted` \u2192 finalized once on run completion \u2192 one introduction to the bound main",
    "findings": [
     "ANDREA-ITOOL-01",
     "ANDREA-ROUTE-01",
@@ -3615,7 +3615,7 @@
   "CT-ISUB-02": {
    "kind": "native-authority",
    "boundary": "production-wired controller, authenticated /mcp/workflows route, loopback T3 peer serving the root's dynamic_tool items, temp-file guidance.sqlite3",
-   "description": "authority: other root, helper, operative, earlier run of the same root, another provider identity, changed raw arguments, weak, truncated, forged or rolled-back item → nothing recorded; direct and MCPX wrappers",
+   "description": "authority: other root, helper, operative, earlier run of the same root, another provider identity, changed raw arguments, weak, truncated, forged or rolled-back item \u2192 nothing recorded; direct and MCPX wrappers",
    "ownerFile": "test/project-supervisor.test.ts",
    "referencedBy": [
     "src/project-supervisor.ts",
@@ -3633,7 +3633,7 @@
    "disposition": "keep",
    "consolidateInto": null,
    "reuses": "CT-INT-01 fixtures",
-   "newObservation": "authority: other root, helper, operative, earlier run of the same root, another provider identity, changed raw arguments, weak, truncated, forged or rolled-back item → nothing recorded; direct and MCPX wrappers",
+   "newObservation": "authority: other root, helper, operative, earlier run of the same root, another provider identity, changed raw arguments, weak, truncated, forged or rolled-back item \u2192 nothing recorded; direct and MCPX wrappers",
    "findings": [
     "ANDREA-ITOOL-01",
     "ANDREA-ROUTE-01",
@@ -3888,7 +3888,7 @@
   "CT-ISUB-09": {
    "kind": "characterization",
    "boundary": "production-wired controller, authenticated /mcp/workflows route, loopback T3 peer serving the root's dynamic_tool items, temp-file guidance.sqlite3",
-   "description": "completed run without submission → `unavailable`; well-formed or malformed final-chat JSON and arbitrary final prose are ignored",
+   "description": "completed run without submission \u2192 `unavailable`; well-formed or malformed final-chat JSON and arbitrary final prose are ignored",
    "ownerFile": "test/project-supervisor.test.ts",
    "referencedBy": [
     "src/project-supervisor.ts",
@@ -3906,7 +3906,7 @@
    "disposition": "keep",
    "consolidateInto": null,
    "reuses": "CT-INT-01 fixtures",
-   "newObservation": "completed run without submission → `unavailable`; well-formed or malformed final-chat JSON and arbitrary final prose are ignored",
+   "newObservation": "completed run without submission \u2192 `unavailable`; well-formed or malformed final-chat JSON and arbitrary final prose are ignored",
    "findings": [
     "ANDREA-ITOOL-01",
     "ANDREA-ROUTE-01",
@@ -3927,7 +3927,7 @@
   "CT-ISUB-10": {
    "kind": "characterization",
    "boundary": "production-wired controller, authenticated /mcp/workflows route, loopback T3 peer serving the root's dynamic_tool items, temp-file guidance.sqlite3",
-   "description": "failed, interrupted, cancelled or rolled-back run after submission → discarded; an item or node rolled back while the run completes → discarded before apply and before Start activation; unchanged proof → applied; another run's completion does not finalize",
+   "description": "failed, interrupted, cancelled or rolled-back run after submission \u2192 discarded; an item or node rolled back while the run completes \u2192 discarded before apply and before Start activation; unchanged proof \u2192 applied; another run's completion does not finalize",
    "ownerFile": "test/project-supervisor.test.ts",
    "referencedBy": [
     "src/project-supervisor.ts",
@@ -3945,7 +3945,7 @@
    "disposition": "keep",
    "consolidateInto": null,
    "reuses": "CT-INT-01 fixtures",
-   "newObservation": "failed, interrupted, cancelled or rolled-back run after submission → discarded; an item or node rolled back while the run completes → discarded before apply and before Start activation; unchanged proof → applied; another run's completion does not finalize",
+   "newObservation": "failed, interrupted, cancelled or rolled-back run after submission \u2192 discarded; an item or node rolled back while the run completes \u2192 discarded before apply and before Start activation; unchanged proof \u2192 applied; another run's completion does not finalize",
    "findings": [
     "ANDREA-ITOOL-01",
     "ANDREA-ROUTE-01",
@@ -3966,7 +3966,7 @@
   "CT-ISUB-11": {
    "kind": "atomicity-restart",
    "boundary": "production-wired controller, authenticated /mcp/workflows route, loopback T3 peer serving the root's dynamic_tool items, temp-file guidance.sqlite3",
-   "description": "restart after commit and before the wake → finalized exactly once",
+   "description": "restart after commit and before the wake \u2192 finalized exactly once",
    "ownerFile": "test/project-supervisor.test.ts",
    "referencedBy": [
     "src/project-supervisor.ts",
@@ -3984,7 +3984,7 @@
    "disposition": "keep",
    "consolidateInto": null,
    "reuses": "CT-INT-01 fixtures",
-   "newObservation": "restart after commit and before the wake → finalized exactly once",
+   "newObservation": "restart after commit and before the wake \u2192 finalized exactly once",
    "findings": [
     "ANDREA-ITOOL-01",
     "ANDREA-ROUTE-01",
@@ -4005,7 +4005,7 @@
   "CT-ISUB-12": {
    "kind": "no-contact",
    "boundary": "production-wired controller, authenticated /mcp/workflows route, loopback T3 peer serving the root's dynamic_tool items, temp-file guidance.sqlite3",
-   "description": "greeting and negative Start → no contact",
+   "description": "greeting and negative Start \u2192 no contact",
    "ownerFile": "test/project-supervisor.test.ts",
    "referencedBy": [
     "src/project-supervisor.ts",
@@ -4023,7 +4023,7 @@
    "disposition": "keep",
    "consolidateInto": null,
    "reuses": "CT-INT-01 fixtures",
-   "newObservation": "greeting and negative Start → no contact",
+   "newObservation": "greeting and negative Start \u2192 no contact",
    "findings": [
     "ANDREA-ITOOL-01",
     "ANDREA-ROUTE-01",
@@ -4161,7 +4161,7 @@
   "CT-ISUB-16": {
    "kind": "characterization",
    "boundary": "production-wired controller, authenticated /mcp/workflows route, loopback T3 peer serving the root's dynamic_tool items, temp-file guidance.sqlite3",
-   "description": "conversation proposal and agreement evidence follow the recorded tool item end to end (rolled-back or changed item → not current); bare Start and no-workflow results never enter proposal checks; no hidden final-text re-parse",
+   "description": "conversation proposal and agreement evidence follow the recorded tool item end to end (rolled-back or changed item \u2192 not current); bare Start and no-workflow results never enter proposal checks; no hidden final-text re-parse",
    "ownerFile": "test/project-supervisor.test.ts",
    "referencedBy": [
     "src/project-supervisor.ts",
@@ -4179,7 +4179,7 @@
    "disposition": "keep",
    "consolidateInto": null,
    "reuses": "CT-INT-01 fixtures",
-   "newObservation": "conversation proposal and agreement evidence follow the recorded tool item end to end (rolled-back or changed item → not current); bare Start and no-workflow results never enter proposal checks; no hidden final-text re-parse",
+   "newObservation": "conversation proposal and agreement evidence follow the recorded tool item end to end (rolled-back or changed item \u2192 not current); bare Start and no-workflow results never enter proposal checks; no hidden final-text re-parse",
    "findings": [
     "ANDREA-ITOOL-01",
     "ANDREA-ROUTE-01",
@@ -4350,7 +4350,7 @@
    "targetRegression": "post-S6b",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "a stopped chat settles only its owned Supervisor once idle... — test/supervisor-scope-lifecycle.test.ts:624",
+   "reuses": "a stopped chat settles only its owned Supervisor once idle... \u2014 test/supervisor-scope-lifecycle.test.ts:624",
    "newObservation": "Stop committed during lifecycle await.",
    "suite": "test/supervisor-scope-lifecycle.test.ts"
   },
@@ -4629,7 +4629,7 @@
    "targetRegression": "post-S2 runMain/Layer graph rerun",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "native T3 events persist into the generic catalog and mark the service connected — test/supervisor.test.ts:38 (in-process interrupt only)",
+   "reuses": "native T3 events persist into the generic catalog and mark the service connected \u2014 test/supervisor.test.ts:38 (in-process interrupt only)",
    "newObservation": "Process-level exit code and resource release on SIGTERM.",
    "suite": "test/cli-bin.test.ts"
   },
@@ -4708,7 +4708,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "native T3 events persist into the generic catalog and mark the service connected — test/supervisor.test.ts:38",
+   "reuses": "native T3 events persist into the generic catalog and mark the service connected \u2014 test/supervisor.test.ts:38",
    "newObservation": "Health port closed; no operation_deferred on interruption.",
    "suite": "test/supervisor.test.ts"
   },
@@ -4746,7 +4746,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "workflow MCP exposes read, write and the scoped stop tool and serves stateless JSON calls — test/workflow-mcp.test.ts:22 (sends initialize)",
+   "reuses": "workflow MCP exposes read, write and the scoped stop tool and serves stateless JSON calls \u2014 test/workflow-mcp.test.ts:22 (sends initialize)",
    "newObservation": "tools/list without initialize/session header; no Mcp-Session-Id.",
    "suite": "test/workflow-mcp.test.ts"
   },
@@ -4881,7 +4881,7 @@
    "targetRegression": "Effect interruption after send -> uncertain, socket terminated",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "native RPC classifies a connection drop after sending as uncertain — test/supervisor-native.test.ts:141",
+   "reuses": "native RPC classifies a connection drop after sending as uncertain \u2014 test/supervisor-native.test.ts:141",
    "newObservation": "Abort (not drop) after send; no second frame.",
    "suite": "test/supervisor-native.test.ts"
   },
@@ -5005,7 +5005,7 @@
    "targetRegression": "post-S6b",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "setup rechecks the operative checkout branch before each native file write — test/project-definition-initialization.test.ts:331",
+   "reuses": "setup rechecks the operative checkout branch before each native file write \u2014 test/project-definition-initialization.test.ts:331",
    "newObservation": "Abort (not branch change) between writes.",
    "suite": "test/project-definitions.test.ts"
   },
@@ -5082,7 +5082,7 @@
    "targetRegression": null,
    "disposition": "drop-reuse",
    "consolidateInto": null,
-   "reuses": "startup cleanup closes pending probe sessions from the private metadata table — test/git-probe.test.ts:261",
+   "reuses": "startup cleanup closes pending probe sessions from the private metadata table \u2014 test/git-probe.test.ts:261",
    "newObservation": "None material (crash after open == seeded pending row).",
    "suite": "test/git-probe.test.ts"
   },
@@ -5416,7 +5416,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "the overview reads retained supervision state without native calls, writes, or invented completion — test/dashboard-overview.test.ts:16",
+   "reuses": "the overview reads retained supervision state without native calls, writes, or invented completion \u2014 test/dashboard-overview.test.ts:16",
    "newObservation": "Four read paths with pending tasks.",
    "suite": "test/project-supervisor.test.ts"
   },
@@ -5438,7 +5438,7 @@
    "targetRegression": "target-regression for the requeue-with-reason path",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "an Enable or re-enable saved during the final awaits leaves the request undispatched and a finished result unapplied — test/project-supervisor-workflow.test.ts:875",
+   "reuses": "an Enable or re-enable saved during the final awaits leaves the request undispatched and a finished result unapplied \u2014 test/project-supervisor-workflow.test.ts:875",
    "newObservation": "Stop mirror.",
    "clarification": "A Stop saved during models() makes projectEnabled() false; the task stays 'queued' with its prior reason and is never dispatched. The 'stopped for this chat before dispatch' reason (:1357) is reachable only through a target-only forced yield.",
    "notes": "Rewrite: assert queued + no dispatch; drop the reason clause at baseline.",
@@ -5697,7 +5697,7 @@
    "targetRegression": null,
    "disposition": "drop-reuse",
    "consolidateInto": null,
-   "reuses": "strict workflow records ignore object key order while preserving values and array order — test/supervisor-workflow.test.ts:207; plus hash-bearing receipt tests via workflowRequestHash (src/workflow-write-evidence.ts:81)",
+   "reuses": "strict workflow records ignore object key order while preserving values and array order \u2014 test/supervisor-workflow.test.ts:207; plus hash-bearing receipt tests via workflowRequestHash (src/workflow-write-evidence.ts:81)",
    "newObservation": "None required (O-02).",
    "notes": "'depth 65' wording: root depth 0; throws when any value is at depth > 64.",
    "suite": null
@@ -5717,7 +5717,7 @@
    "targetRegression": null,
    "disposition": "drop-reuse",
    "consolidateInto": null,
-   "reuses": "redaction is stable while source identities and paths remain exact — test/supervisor-workflow.test.ts:75",
+   "reuses": "redaction is stable while source identities and paths remain exact \u2014 test/supervisor-workflow.test.ts:75",
    "newObservation": "None required (O-02).",
    "suite": "test/definition-references.test.ts"
   },
@@ -5892,7 +5892,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "failed shell ingestion leaves its cursor unacknowledged — test/store.test.ts:109",
+   "reuses": "failed shell ingestion leaves its cursor unacknowledged \u2014 test/store.test.ts:109",
    "newObservation": "Projects/threads unchanged, not only the cursor.",
    "suite": "test/store.test.ts"
   },
@@ -5911,7 +5911,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "stored shells omit conversation and goal text while retaining policy fields — test/store.test.ts:118",
+   "reuses": "stored shells omit conversation and goal text while retaining policy fields \u2014 test/store.test.ts:118",
    "newObservation": "Reopen rewrite of legacy shell; malformed row aborts open without change.",
    "suite": "test/store.test.ts"
   },
@@ -5992,7 +5992,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "watch handles RPC envelopes and waits for durable ingestion before acknowledging chunks — test/t3.test.ts:575",
+   "reuses": "watch handles RPC envelopes and waits for durable ingestion before acknowledging chunks \u2014 test/t3.test.ts:575",
    "newObservation": "Second chunk neither processed nor ACKed before first ACK.",
    "suite": "test/t3.test.ts"
   },
@@ -6032,7 +6032,7 @@
    "targetRegression": "post-S4 socket",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "watch bounds a websocket handshake that never completes — test/t3.test.ts:734",
+   "reuses": "watch bounds a websocket handshake that never completes \u2014 test/t3.test.ts:734",
    "newObservation": "Interruption (not timeout) path.",
    "suite": "test/t3.test.ts"
   },
@@ -6072,7 +6072,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "a snapshot over a byte budget is typed, memoized for its thread and read again after expiry — test/t3.test.ts:347",
+   "reuses": "a snapshot over a byte budget is typed, memoized for its thread and read again after expiry \u2014 test/t3.test.ts:347",
    "newObservation": "513th distinct thread evicts the oldest.",
    "suite": "test/t3.test.ts"
   },
@@ -6091,7 +6091,7 @@
    "targetRegression": "post-S4",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "an aborted read stops with interrupted and keeps no partial result — test/t3-projection-stream.test.ts:243",
+   "reuses": "an aborted read stops with interrupted and keeps no partial result \u2014 test/t3-projection-stream.test.ts:243",
    "newObservation": "Pull stops after cancel.",
    "suite": "test/t3-projection-stream.test.ts"
   },
@@ -6382,7 +6382,7 @@
    "targetRegression": null,
    "disposition": "drop-reuse",
    "consolidateInto": null,
-   "reuses": "deferred owner guidance raises one stable attention after grace and routes only after resolution — test/workflow-write-controller.test.ts:2309 (asserts deferred wording)",
+   "reuses": "deferred owner guidance raises one stable attention after grace and routes only after resolution \u2014 test/workflow-write-controller.test.ts:2309 (asserts deferred wording)",
    "newObservation": "Optional: other member not marked.",
    "suite": "test/supervisor-team-runtime.test.ts"
   },
@@ -6401,7 +6401,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "project-configuration endpoint keeps session, origin and CSRF checks — test/project-config-editor.test.ts:197",
+   "reuses": "project-configuration endpoint keeps session, origin and CSRF checks \u2014 test/project-config-editor.test.ts:197",
    "newObservation": "localhost Host and cross-site navigation matrix.",
    "suite": "test/guidance.test.ts"
   },
@@ -6420,7 +6420,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "dashboard sessions retain authenticated snapshot and excluded-thread settings access — test/guidance.test.ts:69",
+   "reuses": "dashboard sessions retain authenticated snapshot and excluded-thread settings access \u2014 test/guidance.test.ts:69",
    "newObservation": "Login status/body matrix and old-session revocation.",
    "suite": "test/guidance.test.ts"
   },
@@ -6439,7 +6439,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "project-configuration endpoint keeps session, origin and CSRF checks — test/project-config-editor.test.ts:197",
+   "reuses": "project-configuration endpoint keeps session, origin and CSRF checks \u2014 test/project-config-editor.test.ts:197",
    "newObservation": "415 and 413 on /api.",
    "suite": "test/guidance.test.ts"
   },
@@ -6576,7 +6576,7 @@
    "targetRegression": "SessionAccess service test after S7",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "browser access keeps a shared session, synchronizes sign-out and ignores stale access responses — test/browser-access.test.ts:10",
+   "reuses": "browser access keeps a shared session, synchronizes sign-out and ignores stale access responses \u2014 test/browser-access.test.ts:10",
    "newObservation": "Exact blocked-storage message; 401 for an older session never clears a newer one.",
    "suite": "test/browser-access.test.ts"
   },
@@ -6648,7 +6648,7 @@
    "targetRegression": "Atom-level No Project save test after S7",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "No Project presents three named native modes independently of shared definitions — test/no-project-ui.test.ts:8 (SSR only)",
+   "reuses": "No Project presents three named native modes independently of shared definitions \u2014 test/no-project-ui.test.ts:8 (SSR only)",
    "newObservation": "Unconfirmed save keeps panel uncertain until Reload; draft mode survives reload failure.",
    "baselineEvidence": "coordinator mounted story UI-STORY-07",
    "baselineSuite": "coordinator mounted story (coordinator mounted story UI-STORY-07)",
@@ -6669,7 +6669,7 @@
    "targetRegression": "TestClock-driven refresh/interrupt after S7",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "overview refresh preserves the loaded range and restarts a reordered prefix — test/dashboard-overview.test.ts:74",
+   "reuses": "overview refresh preserves the loaded range and restarts a reordered prefix \u2014 test/dashboard-overview.test.ts:74",
    "newObservation": "Visibility/activity gating and deactivation abort of the in-flight request.",
    "baselineEvidence": "coordinator mounted story UI-STORY-06",
    "baselineSuite": "coordinator mounted story (coordinator mounted story UI-STORY-06)",
@@ -6782,7 +6782,7 @@
    "targetRegression": "Atom-level Start-fence test after S7 port",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "Start is a collapsed progressive picker with a visible associated search label — test/no-project-ui.test.ts:15 (SSR markup only)",
+   "reuses": "Start is a collapsed progressive picker with a visible associated search label \u2014 test/no-project-ui.test.ts:15 (SSR markup only)",
    "newObservation": "Fence lifetime across reload, failed/unknown POST and a 'denied' read during the POST.",
    "baselineEvidence": "coordinator mounted story UI-STORY-07",
    "baselineSuite": "coordinator mounted story (coordinator mounted story UI-STORY-07)",
@@ -6805,7 +6805,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "workflow progress preserves scope limitations when the binding is missing or changes during the read — test/workflow-progress.test.ts:171",
+   "reuses": "workflow progress preserves scope limitations when the binding is missing or changes during the read \u2014 test/workflow-progress.test.ts:171",
    "newObservation": "Change between read and scopeSnapshot.",
    "suite": "test/workflow-progress.test.ts"
   },
@@ -6845,7 +6845,7 @@
    "targetRegression": "Schema equivalence after port (mandatory per SOL-PLAN-09)",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "unversioned flat documents and receipts are reported incompatible and retained raw — test/workflow-state.test.ts:442",
+   "reuses": "unversioned flat documents and receipts are reported incompatible and retained raw \u2014 test/workflow-state.test.ts:442",
    "newObservation": "Accept/incompatible golden.",
    "clarification": "Schema decoding is mandatory (3.10); the case pins acceptance of every stored shape.",
    "notes": "Drop the 'If a Schema ... is introduced' conditional.",
@@ -6873,7 +6873,7 @@
   "CT-WSS-01": {
    "kind": "atomicity-restart",
    "boundary": "real sqlite file",
-   "description": "A failure after the CAS UPDATE but before recordOperation (TEMP trigger RAISE on supervisor_workflow_operations insert) rolls back the document revision — pins single-transaction semantics for the SqlClient port.",
+   "description": "A failure after the CAS UPDATE but before recordOperation (TEMP trigger RAISE on supervisor_workflow_operations insert) rolls back the document revision \u2014 pins single-transaction semantics for the SqlClient port.",
    "ownerFile": "src/workflow-state-store.ts",
    "referencedBy": [
     "test/workflow-state.test.ts"
@@ -6929,7 +6929,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "file references survive agreement import, apply, restart and defensive state copies — test/workflow-state.test.ts:112",
+   "reuses": "file references survive agreement import, apply, restart and defensive state copies \u2014 test/workflow-state.test.ts:112",
    "newObservation": "Byte-identical receipt replay after reopen.",
    "suite": "test/workflow-state.test.ts"
   },
@@ -7076,7 +7076,7 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "assertAdvertisedInput uses — test/supervisor-team-runtime.test.ts:479 (shape only)",
+   "reuses": "assertAdvertisedInput uses \u2014 test/supervisor-team-runtime.test.ts:479 (shape only)",
    "newObservation": "Exact JSON golden.",
    "suite": "test/workflow-write-controller.test.ts"
   },
@@ -7118,7 +7118,7 @@
    "targetRegression": "post-S6b",
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "a human stop of the main fences workflow_write at the first and the final commit check, while reads continue — test/workflow-write-controller.test.ts:741",
+   "reuses": "a human stop of the main fences workflow_write at the first and the final commit check, while reads continue \u2014 test/workflow-write-controller.test.ts:741",
    "newObservation": "Generation bump variant.",
    "suite": "test/workflow-write-controller.test.ts"
   },
@@ -9295,7 +9295,7 @@
    ],
    "target": {
     "services": [
-     "GuidanceStoreSync (interim B-02, S4–S6c: the existing synchronous store exposed as a service; deleted in S6d)",
+     "GuidanceStoreSync (interim B-02, S4\u2013S6c: the existing synchronous store exposed as a service; deleted in S6d)",
      "GuidanceDb (named SqlClient interface for guidance.sqlite3, S6d)",
      "GuidanceStore (Context.Service with Effect methods, S6d)"
     ],
@@ -9385,7 +9385,7 @@
      "work": "no source change; owning suites converted mechanically"
     },
     {
-     "slice": "S4–S6c",
+     "slice": "S4\u2013S6c",
      "work": "existing synchronous API kept, exposed to ported callers only as the interim GuidanceStoreSync / PolicyStoreSync service (boundary B-02, the existing object acquired where it is today), called inside whole-block Effect.sync critical sections; no signature change, no second connection"
     },
     {
@@ -10006,7 +10006,7 @@
    "behaviorsToPreserve": [
     "Read bounds: <=100 files, 64 KiB each, 512 KiB total; truncated/permission/unavailable never complete (L13-15, L254-265)",
     "Readable paths only project.yaml, steps/, workflows/; caller-supplied roots never accepted; operative worktree comes from the native projection (L185-199, L255-256)",
-    "revision = sha256(JSON.stringify([projectId, threadId, root, scratch, inputs])) only when complete; null on permission_required/unavailable (L960-967) — persisted in tasks and workflow pins",
+    "revision = sha256(JSON.stringify([projectId, threadId, root, scratch, inputs])) only when complete; null on permission_required/unavailable (L960-967) \u2014 persisted in tasks and workflow pins",
     "Global IDs `g` + sha256(`${namespace}\\0${sourceId}\\0${counter}`)[0..63], collision-free (L487-494)",
     "Missing project folder => status missing, complete true; unreadable index invents no empty policy (L276-281)",
     "Scratch projects use only global definitions (L230-233)",
@@ -10140,7 +10140,7 @@
    "testMigration": "",
    "risks": [
     "The revision hash covers the raw inputs array in read order; refactors that reorder reads change every revision and stale all tasks",
-    "makeDefinitionFixture supplies Promise-based ProjectFiles to 13 test files (incl. other workers) — the fixture and the service port must change together"
+    "makeDefinitionFixture supplies Promise-based ProjectFiles to 13 test files (incl. other workers) \u2014 the fixture and the service port must change together"
    ],
    "disposition": "port",
    "inventory": "W3-workflow",
@@ -10296,7 +10296,7 @@
    "path": "src/project-supervisor-contract.ts",
    "kind": "source",
    "role": "Effect Schema contracts for the Supervisor HTTP API (payloads/responses) and shared workflow plan/proposal/agreement/task/binding types used by server, stores and the UI client.",
-   "currentEffectUsage": "partial: effect Schema only (Struct, Literal, Literals, Union, NullOr, optional, optionalKey, Array, suspend, Codec, String, Number, Boolean) — already the v4 API",
+   "currentEffectUsage": "partial: effect Schema only (Struct, Literal, Literals, Union, NullOr, optional, optionalKey, Array, suspend, Codec, String, Number, Boolean) \u2014 already the v4 API",
    "imperativeMachinery": [],
    "behaviorsToPreserve": [
     "Inbound trust-boundary payloads decoded by HttpApi (CC-HTTPAPI, guidance-contract.ts L140-148): ProjectSupervisorSave (L352-359), ProjectSupervisorRetry with action retry|replace (L361-368), ProjectSupervisorChatSupervision (L345-350); numbers are plain Schema.Number so range errors surface as {status:'invalid'} from the store/controller, not as decode failures",
@@ -10421,7 +10421,7 @@
    "liveProofTrigger": "none",
    "testMigration": "",
    "risks": [
-    "Adding refinements (Int, ranges, maxLength) changes HTTP 400 vs {status:'invalid'} and UI draft handling — only with characterization",
+    "Adding refinements (Int, ranges, maxLength) changes HTTP 400 vs {status:'invalid'} and UI draft handling \u2014 only with characterization",
     "Schema changes alter persisted BindingRecord/TaskRecord JSON (types double as storage shapes)"
    ],
    "disposition": "keep-pure",
@@ -10587,7 +10587,7 @@
      "FolderPresence in Ref<Map>"
     ],
     "layers": [
-     "GuidanceDb: @effect/sql-sqlite-node SqliteClient.layer({filename: <dataDirectory>/guidance.sqlite3}) — ONE connection shared by every guidance.sqlite3 store (CC-GDB)",
+     "GuidanceDb: @effect/sql-sqlite-node SqliteClient.layer({filename: <dataDirectory>/guidance.sqlite3}) \u2014 ONE connection shared by every guidance.sqlite3 store (CC-GDB)",
      "ProjectSupervisorStore.layer: DDL/ALTER, initializeMainSupervisionState and preparing-recovery at build (Layer.effect)"
     ],
     "apis": [
@@ -10673,7 +10673,7 @@
    "liveProofTrigger": "VM: after the GuidanceDb cut-over, start on the existing Lab data volume (no reset): bindings, tasks, controls, No Project mode and owned IDs read back unchanged; an existing pending/uncertain task is reconciled with its original IDs; concurrent MCP workflow_write + supervision cycle show no SQLITE_BUSY; a bounded MCP workflow_read succeeds.",
    "testMigration": "",
    "risks": [
-    "CC-GDB single connection: SqliteClient.make opens its own DatabaseSync (SqliteClient.ts makeConnection); any guidance.sqlite3 user left on GuidanceStore.db during a partial migration is a second connection — with BEGIN IMMEDIATE and a 5s busy_timeout that blocks the event loop while an Effect transaction yields, this self-deadlocks or fails SQLITE_BUSY. All guidance.sqlite3 stores must cut over together",
+    "CC-GDB single connection: SqliteClient.make opens its own DatabaseSync (SqliteClient.ts makeConnection); any guidance.sqlite3 user left on GuidanceStore.db during a partial migration is a second connection \u2014 with BEGIN IMMEDIATE and a 5s busy_timeout that blocks the event loop while an Effect transaction yields, this self-deadlocks or fails SQLITE_BUSY. All guidance.sqlite3 stores must cut over together",
     "Methods atomic today only by being synchronous (saveTask, saveStart, observeModel, modelAttempt, chatStop/saveUnboundStop, activation) become interleavable under fibers; each needs withTransaction",
     "Imported by 16 src modules: a sync -> Effect signature change forces every caller in the same commit (no compatibility layer)",
     "Schema-decoding stored JSON must not reject old rows (no migration policy)",
@@ -10690,7 +10690,7 @@
      "work": "no source change; owning suites converted mechanically"
     },
     {
-     "slice": "S4–S6c",
+     "slice": "S4\u2013S6c",
      "work": "existing synchronous API kept, exposed to ported callers only as the interim GuidanceStoreSync / PolicyStoreSync service (boundary B-02, the existing object acquired where it is today), called inside whole-block Effect.sync critical sections; no signature change, no second connection"
     },
     {
@@ -10968,13 +10968,13 @@
    ],
    "slice": "S6b",
    "order": 5,
-   "liveProofTrigger": "VM: after S6b — uncoached No Project Start via supervision_start (pending -> one interpretation -> active, startRequested verdict), dashboard Stop and supervision_stop while an interpretation is in flight (no resend, one notice), container restart with a 'dispatching'/'uncertain' task (same messageId reconciled, no fresh send), and a trivial no-contact case (dashboard snapshot/overview reads make zero native writes).",
+   "liveProofTrigger": "VM: after S6b \u2014 uncoached No Project Start via supervision_start (pending -> one interpretation -> active, startRequested verdict), dashboard Stop and supervision_stop while an interpretation is in flight (no resend, one notice), container restart with a 'dispatching'/'uncertain' task (same messageId reconciled, no fresh send), and a trivial no-contact case (dashboard snapshot/overview reads make zero native writes).",
    "testMigration": "",
    "risks": [
-    "Turning synchronous predicates (scopeEnabled, supervisionStopped, eligible, workflowEditingEnabled — each reads guidance.sqlite3 and thread-settings.sqlite3) into Effects cascades into every callback consumer (helperTransport.enabled, workflowStates.isEnabled, conversation.scopeEnabled, controller.isEnabled/isChatStopped); they must move in one commit",
+    "Turning synchronous predicates (scopeEnabled, supervisionStopped, eligible, workflowEditingEnabled \u2014 each reads guidance.sqlite3 and thread-settings.sqlite3) into Effects cascades into every callback consumer (helperTransport.enabled, workflowStates.isEnabled, conversation.scopeEnabled, controller.isEnabled/isChatStopped); they must move in one commit",
     "Await ordering is load-bearing: each 'recheck after the final await' (L1347-1349, L1355-1356, L1468) must stay the last step before the native effect/commit; batching reads with Effect.all can reorder them",
     "activateStart spans two SQLite files with no shared transaction; keep the documented order (pending durable -> policy -> guidance active)",
-    "Single-flight today shares the first caller's AbortSignal; a Cache/Deferred replacement changes interruption semantics — decide and pin with CT-PS-05",
+    "Single-flight today shares the first caller's AbortSignal; a Cache/Deferred replacement changes interruption semantics \u2014 decide and pin with CT-PS-05",
     "project-supervisor-workflow.test.ts monkey-patches private members (internal.models, definitions.load, store) to inject races (L881-913); after the port these must be Layer-injected hooks without weakening",
     "Tests mock Date.now (project-supervisor.test.ts L1015) while code mixes now() and Date.now(); after Clock port they need TestClock",
     "extraction of SupervisionGate/SupervisionControl moves methods verbatim on the Promise code with no new await and no change to any synchronous block; the S1 suite must pass unchanged on the extraction commits"
@@ -11539,7 +11539,7 @@
      "work": "no source change; owning suites converted mechanically"
     },
     {
-     "slice": "S4–S6c",
+     "slice": "S4\u2013S6c",
      "work": "existing synchronous API kept, exposed to ported callers only as the interim GuidanceStoreSync / PolicyStoreSync service (boundary B-02, the existing object acquired where it is today), called inside whole-block Effect.sync critical sections; no signature change, no second connection"
     },
     {
@@ -12312,7 +12312,7 @@
      "work": "no source change; owning suites converted mechanically"
     },
     {
-     "slice": "S4–S6c",
+     "slice": "S4\u2013S6c",
      "work": "existing synchronous API kept, exposed to ported callers only as the interim GuidanceStoreSync / PolicyStoreSync service (boundary B-02, the existing object acquired where it is today), called inside whole-block Effect.sync critical sections; no signature change, no second connection"
     },
     {
@@ -12799,7 +12799,7 @@
      "work": "no source change; owning suites converted mechanically"
     },
     {
-     "slice": "S4–S6c",
+     "slice": "S4\u2013S6c",
      "work": "existing synchronous API kept, exposed to ported callers only as the interim GuidanceStoreSync / PolicyStoreSync service (boundary B-02, the existing object acquired where it is today), called inside whole-block Effect.sync critical sections; no signature change, no second connection"
     },
     {
@@ -13334,7 +13334,7 @@
      "work": "no source change; owning suites converted mechanically"
     },
     {
-     "slice": "S4–S6c",
+     "slice": "S4\u2013S6c",
      "work": "existing synchronous API kept, exposed to ported callers only as the interim GuidanceStoreSync / PolicyStoreSync service (boundary B-02, the existing object acquired where it is today), called inside whole-block Effect.sync critical sections; no signature change, no second connection"
     },
     {
@@ -13440,7 +13440,7 @@
     "Only exact top-level fences count; quoted/indented/nested copies inert; enclosing ``` or ~~~ runs (indent <=3) close only on an equal-or-longer bare run; unclosed leaves rest inert (L26-71)",
     "Bounds: record text <=128000 chars, <=20 records (L15-16)",
     "Compact draft requires exactly taskId, taskRevision, proposalId, revision, draft (+objective); acceptance exactly {taskId, proposalId, digest}; failure codes/paths fixed (L157-202)",
-    "compactProposalDigest = fingerprint({taskId, taskRevision, workspaceRoot, revision, workflow}) and workflowAgreementPlanHash (L122-139) — persisted identities",
+    "compactProposalDigest = fingerprint({taskId, taskRevision, workspaceRoot, revision, workflow}) and workflowAgreementPlanHash (L122-139) \u2014 persisted identities",
     "Formal agreement requires a ready, complete, revisioned context and a fully resolved plan (L94-118)",
     "Diagnostic code set workflowProtocolDiagnosticCodes (L21-24)"
    ],
@@ -13514,7 +13514,7 @@
    ],
    "behaviorsToPreserve": [
     "Prompt texts and bounds are protocol: maxPromptLength 120000, definition context 82000, task excerpt 24000, 40 prompt issues (L28-37); interpretationPrompt wording (L65-66)",
-    "seededNodeIds = sha256(`${seed}\\0${counter}`) deterministic occurrence IDs (L473-477) — compact proposal digests and stored candidates depend on them",
+    "seededNodeIds = sha256(`${seed}\\0${counter}`) deterministic occurrence IDs (L473-477) \u2014 compact proposal digests and stored candidates depend on them",
     "canonicalJson equality (L38-39), fixedOccurrencesPreserved (L1368-1386) and validateWorkflowApplyAgainstPinnedContext required/fixed commitment rules (L1388-1465)",
     "parseInterpretation/parseWorkflowInterpretation: <=16000 chars, optional ```json fence, sourceMessageIds exactly [sourceId] (L68-71, L1467-1500)",
     "Diagnostics use fixed expected text and never echo submitted names/paths/IDs; path max 512 (L55-64)",
@@ -14136,7 +14136,7 @@
    ],
    "target": {
     "services": [
-     "PolicyStoreSync (interim B-02, S4–S6c)",
+     "PolicyStoreSync (interim B-02, S4\u2013S6c)",
      "PolicyDb (named SqlClient interface for thread-settings.sqlite3, S6d)",
      "ThreadPolicy (Context.Service: get/save Effects; every read stays an authoritative database read as today, no snapshot; save runs inside the admission section of plan 3.11)"
     ],
@@ -14201,7 +14201,7 @@
      "work": "no source change; owning suites converted mechanically"
     },
     {
-     "slice": "S4–S6c",
+     "slice": "S4\u2013S6c",
      "work": "existing synchronous API kept, exposed to ported callers only as the interim GuidanceStoreSync / PolicyStoreSync service (boundary B-02, the existing object acquired where it is today), called inside whole-block Effect.sync critical sections; no signature change, no second connection"
     },
     {
@@ -14737,7 +14737,7 @@
     "hand-written validators for stored/inbound JSON (L100-365, L997-1025)"
    ],
    "behaviorsToPreserve": [
-    "Revision CAS: UPDATE … WHERE workflow_id AND project/main AND revision=? with changes===1, else conflict carrying the current revision (L626-633, L754-756, L795-797, L836-838)",
+    "Revision CAS: UPDATE \u2026 WHERE workflow_id AND project/main AND revision=? with changes===1, else conflict carrying the current revision (L626-633, L754-756, L795-797, L836-838)",
     "Receipts keyed (project, main, actor, bindingGeneration, namespace, operationId); same id + different request hash => operation_id_reused; replay returns the stored receipt; 'agreement' namespace separate from 'edit' (L702-707, L852-869)",
     "Receipt insert in the same transaction as the document write (L634-636, L661-663, L695-697, L758-760, L839-841)",
     "currentOwner: scopeCompatible, ready binding, exact supervisor thread + generation, isEnabled (L844-850)",
@@ -14779,7 +14779,7 @@
      "id": "CT-WSS-01",
      "kind": "atomicity-restart",
      "boundary": "real sqlite file",
-     "description": "A failure after the CAS UPDATE but before recordOperation (TEMP trigger RAISE on supervisor_workflow_operations insert) rolls back the document revision — pins single-transaction semantics for the SqlClient port."
+     "description": "A failure after the CAS UPDATE but before recordOperation (TEMP trigger RAISE on supervisor_workflow_operations insert) rolls back the document revision \u2014 pins single-transaction semantics for the SqlClient port."
     },
     {
      "id": "CT-WSS-02",
@@ -14802,7 +14802,7 @@
    ],
    "target": {
     "services": [
-     "WorkflowStateStore (Context.Service) over SqlClient; *InTransaction methods become Effects that must run inside SqlClient.withTransaction (make the requirement explicit, e.g. wrap internally — nested => SAVEPOINT)",
+     "WorkflowStateStore (Context.Service) over SqlClient; *InTransaction methods become Effects that must run inside SqlClient.withTransaction (make the requirement explicit, e.g. wrap internally \u2014 nested => SAVEPOINT)",
      "isEnabled comes from SupervisionGate.workflowEditingEnabled (synchronous read inside critical sections until S6d)"
     ],
     "layers": [
@@ -14860,7 +14860,7 @@
    "liveProofTrigger": "VM: existing Lab workflow documents and receipts readable via workflow_read after the cut-over; incompatible rows reported, not rewritten; one real apply produces a new revision and receipt.",
    "testMigration": "",
    "risks": [
-    "The *InTransaction contract is implicit today; under SqlClient an Effect run outside withTransaction autocommits per statement — make it explicit in the type or wrap internally",
+    "The *InTransaction contract is implicit today; under SqlClient an Effect run outside withTransaction autocommits per statement \u2014 make it explicit in the type or wrap internally",
     "currentOwner reads the thread-settings DB and controls inside the guidance transaction; that read must not use a forked fiber on the same SqlClient (semaphore deadlock)"
    ],
    "disposition": "port",
@@ -14874,7 +14874,7 @@
      "work": "no source change; owning suites converted mechanically"
     },
     {
-     "slice": "S4–S6c",
+     "slice": "S4\u2013S6c",
      "work": "existing synchronous API kept, exposed to ported callers only as the interim GuidanceStoreSync / PolicyStoreSync service (boundary B-02, the existing object acquired where it is today), called inside whole-block Effect.sync critical sections; no signature change, no second connection"
     },
     {
@@ -14898,7 +14898,7 @@
    "imperativeMachinery": [
     "evidence polling do/while with performance.now() budget maxEvidenceWaitMs (default 400) (L652, L1048-1128), 50 ms setTimeout pause with abort listener (L1130-1142), per-candidate single retry after 100 ms via now() (L1071-1072, L1089, L1109), detail-read cap 64 (L1052-1053)",
     "default AbortSignal.timeout(10_000) per entrypoint (L689, L707, L728, L744, L828)",
-    "pendingCandidates Map (TTL 120 s, capacity 256) written and evicted but never read — dead state (L647, L653-654, L850, L856, L863, L867, L887, L1144-1152)",
+    "pendingCandidates Map (TTL 120 s, capacity 256) written and evicted but never read \u2014 dead state (L647, L653-654, L850, L856, L863, L867, L887, L1144-1152)",
     "DDL for supervisor_workflow_write_receipts / supervisor_workflow_write_evidence in the constructor (L655-685)",
     "raw SQL on supervisors.store.db: resolveBinding json_extract lookup LIMIT 2 (L1003-1005), readOperationReceipt (L1158-1160), evidence lookup + receipt insert (L1330-1353), evidence insert (L1384-1387)",
     "GuidanceStore.transaction around read (L768-786) and commit (L1327-1357) with a catch-all mapping any throw to workflow_write_transaction_failed (L1358-1360)",
@@ -15085,7 +15085,7 @@
    "liveProofTrigger": "VM: a real Supervisor root calls workflow_write through MCPX (ensure_main, then apply): a first call may be pending, the identical retry applies once, a replay returns the same receipt; workflow_read view=context/definitions works; record actual tool arguments and native item timestamps against the 400 ms evidence budget.",
    "testMigration": "",
    "risks": [
-    "pendingCandidates is write-only dead state — remove instead of porting (owner decision)",
+    "pendingCandidates is write-only dead state \u2014 remove instead of porting (owner decision)",
     "advertised MCP tool JSON Schemas are prompt-visible and stay hand-written byte-identical; Schema decoding of arguments does not derive them",
     "66 tests construct the controller with Promise fakes (native, loadDefinitions, contextViews); all must become Layer fakes without weakening",
     "workflow-write-controller.test.ts also hosts SupervisorTeamController/guide tests (L1876-2628) that port with the team controller in S6b and keep their names here (D-22)",
@@ -15126,7 +15126,7 @@
    "role": "Pure exact native tool-evidence matching: tool alias tables, candidate selection and verification of strong own-main-run dynamic_tool items.",
    "currentEffectUsage": "none",
    "imperativeMachinery": [
-    "node:crypto createHash for workflowRequestHash (L81-82) and Buffer byte sizes (L84-85, L231) — synchronous pure helpers"
+    "node:crypto createHash for workflowRequestHash (L81-82) and Buffer byte sizes (L84-85, L231) \u2014 synchronous pure helpers"
    ],
    "behaviorsToPreserve": [
     "Limits: canonical input <=192 KiB, native detail <=256 KiB (L8-9)",
@@ -16628,7 +16628,7 @@
     "restart() closes and reopens GuidanceStore on the same directory (L379-385)",
     "t.mock.method(Date,'now') (L1015) and t.mock.method(supervisor.t3,'projection', Effect.never) with AbortSignal.timeout(25) (L1501-1505)",
     "real node:http server + Layer.build(makeT3Client) inside Effect.runPromise(Effect.scoped(...)) (L1520-1536)",
-    "in-test loops over variants (L1016, L1609, L1643, L1684) — no generated tests"
+    "in-test loops over variants (L1016, L1609, L1643, L1684) \u2014 no generated tests"
    ],
    "behaviorsToPreserve": [
     "Unknown dispatch survives restart with original identities (L770)",
@@ -18512,7 +18512,7 @@
    "slice": "S0",
    "order": 2,
    "liveProofTrigger": "none",
-   "testMigration": "S0: Vitest conversion (21 names; assert.throws -> expect().toThrow with identical regexes) | S4–S6c: unchanged synchronous store tests | S6d: store methods return Effects; Effect.flip/Effect.exit assertions on TeamStoreError.code",
+   "testMigration": "S0: Vitest conversion (21 names; assert.throws -> expect().toThrow with identical regexes) | S4\u2013S6c: unchanged synchronous store tests | S6d: store methods return Effects; Effect.flip/Effect.exit assertions on TeamStoreError.code",
    "risks": [
     "assert.throws on sync methods must become typed-failure assertions without weakening the exact code match"
    ],
@@ -18550,7 +18550,7 @@
      "work": "Vitest conversion (21 names; assert.throws -> expect().toThrow with identical regexes)"
     },
     {
-     "slice": "S4–S6c",
+     "slice": "S4\u2013S6c",
      "work": "unchanged synchronous store tests"
     },
     {
@@ -19061,7 +19061,7 @@
    "slice": "S0",
    "order": 14,
    "liveProofTrigger": "none",
-   "testMigration": "S0: Vitest conversion (1 name) | S4–S6c: unchanged synchronous store test | S6d: PolicyDb layer",
+   "testMigration": "S0: Vitest conversion (1 name) | S4\u2013S6c: unchanged synchronous store test | S6d: PolicyDb layer",
    "risks": [],
    "disposition": "port-tests",
    "testNames": [
@@ -19077,7 +19077,7 @@
      "work": "Vitest conversion (1 name)"
     },
     {
-     "slice": "S4–S6c",
+     "slice": "S4\u2013S6c",
      "work": "unchanged synchronous store test"
     },
     {
@@ -19368,7 +19368,7 @@
    "slice": "S0",
    "order": 3,
    "liveProofTrigger": "none",
-   "testMigration": "S0: Vitest `it` (19 names) | S4–S6c: unchanged synchronous store tests | S6d: it.effect with GuidanceDb on a scoped temp dir; `guidance.transaction(() => x)` becomes `withTransaction(store.x(...))`; reopen tests rebuild the layer",
+   "testMigration": "S0: Vitest `it` (19 names) | S4\u2013S6c: unchanged synchronous store tests | S6d: it.effect with GuidanceDb on a scoped temp dir; `guidance.transaction(() => x)` becomes `withTransaction(store.x(...))`; reopen tests rebuild the layer",
    "risks": [
     "Tests deliberately call *InTransaction inside an explicit transaction; the Effect API must keep that possible"
    ],
@@ -19404,7 +19404,7 @@
      "work": "Vitest `it` (19 names)"
     },
     {
-     "slice": "S4–S6c",
+     "slice": "S4\u2013S6c",
      "work": "unchanged synchronous store tests"
     },
     {
@@ -19429,7 +19429,7 @@
     "installEvidence mutates projection/detail maps (L225-279)",
     "maxEvidenceWaitMs 0/60/500 real-time budgets (L201, L488, L600)",
     "real node:http server refusing upgrades (L2417-2423), real ws WebSocketServer replying Exit frames (L2497-2518), real node:http MCP endpoint + fetch (L2934-2946)",
-    "in-test loops over variants (L509, L529) — no generated tests"
+    "in-test loops over variants (L509, L529) \u2014 no generated tests"
    ],
    "behaviorsToPreserve": [
     "Pending never reserves an operation (L343)",
@@ -19882,7 +19882,7 @@
     "dispatches window 'supervisor-auth-required' event on 401 (L31-34)"
    ],
    "behaviorsToPreserve": [
-    "session token only in localStorage key 'supervisor-session'; setItem failure surfaces the exact 'Your browser blocked saved sign-in…' message (L8)",
+    "session token only in localStorage key 'supervisor-session'; setItem failure surfaces the exact 'Your browser blocked saved sign-in\u2026' message (L8)",
     "a response for a session that changed during the request is ignored (L27, L37)",
     "401 clears only the session that made the request and raises auth-required (L31-34, L45)",
     "storage events for the session key or clear() reset csrf and notify (L13-16)",
@@ -22853,14 +22853,14 @@
    "file": "guidance.sqlite3",
    "journal": "WAL",
    "lifetime": "supervision run (as today)",
-   "slice": "S6d (interim GuidanceStoreSync S4–S6c)"
+   "slice": "S6d (interim GuidanceStoreSync S4\u2013S6c)"
   },
   {
    "name": "PolicyDb",
    "file": "thread-settings.sqlite3",
    "journal": "WAL",
    "lifetime": "process",
-   "slice": "S6d (interim PolicyStoreSync S4–S6c)"
+   "slice": "S6d (interim PolicyStoreSync S4\u2013S6c)"
   }
  ],
  "syncTransitions": [
@@ -23554,7 +23554,7 @@
    "id": "SOL-PLAN-01",
    "source": "Sol P0",
    "requirement": "complete native-authorized mutation and real helper HTTP characterizations",
-   "response": "CT-INT-01 (authenticated MCP `workflow_write` → production-wired write controller → production native adapter → loopback T3 HTTP/WS peer → real `guidance.sqlite3`: valid proof, weak/foreign/truncated/missing/lagged proof with zero rows, replay/conflict, Stop/generation/source change), CT-INT-02 (`supervision_team` through `authorizeNative`), CT-INT-03 (production team runtime + transport + global `fetch` over a real loopback socket: lost reply + restart, stalled/truncated 2xx, Stop/quarantine before and after the POST, redirect), all `s1-baseline` (5.4; registry)",
+   "response": "CT-INT-01 (authenticated MCP `workflow_write` \u2192 production-wired write controller \u2192 production native adapter \u2192 loopback T3 HTTP/WS peer \u2192 real `guidance.sqlite3`: valid proof, weak/foreign/truncated/missing/lagged proof with zero rows, replay/conflict, Stop/generation/source change), CT-INT-02 (`supervision_team` through `authorizeNative`), CT-INT-03 (production team runtime + transport + global `fetch` over a real loopback socket: lost reply + restart, stalled/truncated 2xx, Stop/quarantine before and after the POST, redirect), all `s1-baseline` (5.4; registry)",
    "status": "resolved in v2"
   },
   {
@@ -23610,7 +23610,7 @@
    "id": "SOL-PLAN-09",
    "source": "Sol P1",
    "requirement": "mandatory Schema boundaries; exact API spellings; stale labels",
-   "response": "3.10; rows name decode boundaries; `Layer.scoped`/`Schema.parseJson` removed; stale D1–D11/S3d labels mapped; API check script 0 problems",
+   "response": "3.10; rows name decode boundaries; `Layer.scoped`/`Schema.parseJson` removed; stale D1\u2013D11/S3d labels mapped; API check script 0 problems",
    "status": "resolved in v2"
   },
   {
@@ -23645,7 +23645,7 @@
    "id": "A-P05",
    "source": "Astra",
    "requirement": "finite runner and finalizer bounds after S0; self-tests; watchdog escalation; specific leak allowlist",
-   "response": "5.3 rules 2–5",
+   "response": "5.3 rules 2\u20135",
    "status": "resolved in v2"
   },
   {
@@ -23736,7 +23736,7 @@
    "id": "ANDREA-ITOOL-01",
    "source": "Andrea",
    "requirement": "typed Supervisor MCP interpretation submission validated with `Schema`, exact native identity/source/run/binding authority, no T3 change, superseded parsing removed, no fallback or duplicate store",
-   "response": "3.12 items 1–8, 11, 12; CC-INTERP-SUBMIT; CT-ISUB-01..19; slice S6e; D-27",
+   "response": "3.12 items 1\u20138, 11, 12; CC-INTERP-SUBMIT; CT-ISUB-01..19; slice S6e; D-27",
    "status": "reconciled with both design reports (v2.1); pending reviewer confirmation"
   },
   {
@@ -23770,15 +23770,15 @@
   {
    "id": "SOL-ITOOL-1",
    "source": "Sol design",
-   "requirement": "actual authenticated MCP → controller → real native proof → real SQL receipt; wrong root/helper/run/provider/source/generation, weak/forged/rolled-back, excess keys and lag rejected; raw input not stripped",
-   "response": "3.12 items 2–4; CT-ISUB-02, -03",
+   "requirement": "actual authenticated MCP \u2192 controller \u2192 real native proof \u2192 real SQL receipt; wrong root/helper/run/provider/source/generation, weak/forged/rolled-back, excess keys and lag rejected; raw input not stripped",
+   "response": "3.12 items 2\u20134; CT-ISUB-02, -03",
    "status": "resolved in v2.1"
   },
   {
    "id": "SOL-ITOOL-2",
    "source": "Sol design",
    "requirement": "prompt return with a staged receipt; finalize once on successful completion; ignore final prose and JSON",
-   "response": "3.12 items 6–7; CT-ISUB-01, -09, -10, -15",
+   "response": "3.12 items 6\u20137; CT-ISUB-01, -09, -10, -15",
    "status": "resolved in v2.1"
   },
   {
@@ -23834,7 +23834,7 @@
    "id": "A-I02",
    "source": "Astra design",
    "requirement": "non-blocking durable receipt, native-completion and replay recovery, Stop/send admission, unknown IDs",
-   "response": "3.12 items 5–7, 9; CT-ISUB-04, -08, -11, -15",
+   "response": "3.12 items 5\u20137, 9; CT-ISUB-04, -08, -11, -15",
    "status": "resolved in v2.1"
   },
   {
@@ -24000,9 +24000,9 @@
   }
  ],
  "completion": {
-  "scannedCommit": "6119157a8430d606b99c74a645beb6ff1a0fe10b",
-  "note": "the parent of the commit that writes this record; that commit changes only this file",
-  "generator": "owner helper manifest-completion.py (scans comments-stripped text of every tracked file)",
+  "scannedCommit": "30745e24eb4881aec87e874a023db17c9942557d",
+  "note": "current tracked-file inventory after SQL workers and typed monitoring; historical baseline sections remain unchanged; this record-only commit changes no executable file",
+  "generator": "retained owner scan plus explicit review of the ten added worker/outcome files and changed database boundary",
   "statuses": {
    "effect": "uses Effect services, layers or effects",
    "pure": "plain calculations, types or JSX without async machinery",
@@ -24197,11 +24197,32 @@
     "reason": null,
     "facadeImports": []
    },
+   "src/db-worker-protocol.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "pure",
+    "reason": "Schema messages and sanitized error values; no resource lifetime or runtime entry",
+    "facadeImports": []
+   },
+   "src/db-worker-serve.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": "worker-owned scoped SQLite client and Schema-validated request/reply execution",
+    "facadeImports": []
+   },
+   "src/db-worker.ts": {
+    "kind": "source",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "Node worker entry runs the scoped database server once",
+    "facadeImports": []
+   },
    "src/db.ts": {
     "kind": "source",
     "baselineDisposition": null,
     "status": "effect",
-    "reason": null,
+    "reason": "stock main-fiber SQL clients over a connection-affine worker adapter; acknowledged lease release and permanent poison on worker fault, without automatic retry/replacement",
     "facadeImports": []
    },
    "src/definition-references.ts": {
@@ -24748,6 +24769,13 @@
     "baselineDisposition": null,
     "status": "effect-test",
     "reason": null,
+    "facadeImports": []
+   },
+   "test/db-worker.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "real worker, file, HTTP, cancellation, transaction and fault cases",
     "facadeImports": []
    },
    "test/db.test.ts": {
@@ -25384,6 +25412,13 @@
     "reason": null,
     "facadeImports": []
    },
+   "test/review-outcome.test.ts": {
+    "kind": "test",
+    "baselineDisposition": null,
+    "status": "effect-test",
+    "reason": "native-authorized monitoring outcomes and mutation races",
+    "facadeImports": []
+   },
    "test/rollout-scan.test.ts": {
     "kind": "test",
     "baselineDisposition": null,
@@ -25755,6 +25790,13 @@
     "reason": "child-process entry of the SQL access suites: runs one program and exits",
     "facadeImports": []
    },
+   "test/support/access-sql-worker.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "access SQL child worker with declarative admission barrier",
+    "facadeImports": []
+   },
    "test/support/c1-conversation-fixture.ts": {
     "kind": "test-fixture",
     "baselineDisposition": null,
@@ -25833,6 +25875,13 @@
     "reason": null,
     "facadeImports": []
    },
+   "test/support/clock-sleeps.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": "observes registered TestClock sleeps before advancing modeled time",
+    "facadeImports": []
+   },
    "test/support/ctl-progress.ts": {
     "kind": "test-fixture",
     "baselineDisposition": null,
@@ -25852,6 +25901,20 @@
     "baselineDisposition": null,
     "status": "effect",
     "reason": null,
+    "facadeImports": []
+   },
+   "test/support/db-seam-worker.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "test worker server with declarative SQL observation hooks",
+    "facadeImports": []
+   },
+   "test/support/db-worker-fault.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "controlled worker fault and unknown-acknowledgement fixture",
     "facadeImports": []
    },
    "test/support/envelope-peer.ts": {
@@ -26195,6 +26258,13 @@
     "baselineDisposition": null,
     "status": "effect",
     "reason": null,
+    "facadeImports": []
+   },
+   "test/support/review-record.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": "records real controller review outcomes using native fixture evidence",
     "facadeImports": []
    },
    "test/support/s6e-prep-interpretation.ts": {
@@ -26649,11 +26719,11 @@
   "summary": {
    "config-or-asset": 20,
    "doc": 22,
-   "entry": 11,
-   "pure": 24,
-   "effect": 115,
+   "entry": 15,
+   "pure": 25,
+   "effect": 118,
    "adapter": 16,
-   "effect-test": 137,
+   "effect-test": 139,
    "pure-test": 11,
    "harness": 36,
    "test-fixture": 3,
