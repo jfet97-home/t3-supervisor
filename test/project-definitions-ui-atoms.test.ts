@@ -1,39 +1,38 @@
 import assert from "node:assert/strict";
-import { Cause, Effect, Exit } from "effect";
-import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
-import { afterAll, beforeAll, it, type TestContext } from "vitest";
-import type { ProjectConfigEditor, ProjectDefinitionLoader } from "./support/root-facades.js";
+import { beforeAll, it } from "@effect/vitest";
+import { Cause, Context, Deferred, Effect, Exit, Layer } from "effect";
+import { AsyncResult, AtomRegistry } from "effect/reactivity";
+import type { ProjectConfigEditorService } from "../src/project-config-editor.js";
+import type { ProjectDefinitions } from "../src/project-definitions.js";
 import type { ProjectConfigSave, ProjectConfigSaveOutcome, ProjectConfigurationInfo, ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
+import { SessionAccess } from "../ui/src/access.js";
 import { NotPerformed, Unconfirmed } from "../ui/src/api.js";
+import { admit } from "../ui/src/atoms.js";
 import { definitionsReadKey, projectDefinitionsAtom, resolveSave, saveProjectConfigurationAtom } from "../ui/src/project-definitions-api.js";
 import { configurationScope, freshDraft, planSave, savedDefinitions, settleSave, type ConfigurationDraft } from "../ui/src/project-configuration-editor.js";
 import { confirmDiscard, draftTarget, heldView, scopeChange, type DefinitionsSelection, type DefinitionsView } from "../ui/src/project-definitions.js";
-import { defer, deferred, signIn, within } from "./support/c3b-http.js";
-import { startUi } from "./support/c3b-ui.js";
-import { sessionAccessOf } from "./support/ui-run.js";
+import { answeredDefinitions, dashboard, signIn } from "./support/g6-dashboard.js";
+import { installGlobal, pageLayer, until, within } from "./support/g6-page.js";
 
 // target regressions of the definitions panel and configuration editor ports (WP-S7-DEFS) over a stubbed browser and the
 // real dashboard server: the held definitions read, guarded navigation, the draft target route, validation before
-// confirm, the outcome rules of an admitted save and its expectedRevision compare-and-set
+// confirm, the outcome rules of an admitted save and its expectedRevision compare-and-set. the server tests talk to the
+// dashboard over real loopback sockets, so they are it.live
 
-const originals = new Map<string, PropertyDescriptor | undefined>();
-const install = (key: string, value: unknown) => {
-  if (!originals.has(key)) originals.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
-  Object.defineProperty(globalThis, key, {configurable: true, writable: true, value});
-};
 const page = {origin: "http://127.0.0.1:9", pathname: "/"};
 const storage = new Map<string, string>();
 interface Sent {readonly method: string; readonly path: string; readonly signal: AbortSignal | null}
 const sent: Sent[] = [];
 
-// a browser fetch: page-relative urls, the page origin on every write, and a record of each request and its abort signal
-beforeAll(() => {
+// a browser fetch: page-relative urls, the page origin on every write, and a record of each request and its abort signal;
+// the globals are put back when the suite's scope closes
+beforeAll(() => Effect.gen(function* () {
   const network = globalThis.fetch;
-  install("location", page);
-  install("window", new EventTarget());
-  install("localStorage", {getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => {storage.set(key, value);},
+  yield* installGlobal("location", page);
+  yield* installGlobal("window", new EventTarget());
+  yield* installGlobal("localStorage", {getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => {storage.set(key, value);},
     removeItem: (key: string) => {storage.delete(key);}});
-  install("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+  yield* installGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input), page.origin);
     const method = init?.method ?? "GET";
     const headers = new Headers(init?.headers);
@@ -41,13 +40,7 @@ beforeAll(() => {
     sent.push({method, path: url.pathname, signal: init?.signal ?? null});
     return network(url, {...init, headers});
   });
-});
-afterAll(() => {
-  for (const [key, descriptor] of originals) {
-    if (descriptor) Object.defineProperty(globalThis, key, descriptor);
-    else Reflect.deleteProperty(globalThis, key);
-  }
-});
+}));
 
 const revisionA = "a".repeat(64);
 const revisionB = "b".repeat(64);
@@ -60,49 +53,35 @@ const snapshot = (revision: string, projectConfig: ProjectConfigurationInfo | nu
   sources: [], issues: [],
 });
 
-// the dashboard server with the given definitions and editor, signed in for the stubbed browser
-const signedIn = async (t: TestContext, options: {definitions: ProjectDefinitionLoader; editor?: ProjectConfigEditor}) => {
-  const started = await startUi(t, options);
+// the dashboard server with the given definitions and editor, signed in for the stubbed browser, and the page whose
+// registry the test reads; all in the test's scope: the session is cleared first, then the page disposed, then the server
+// closed and its directory removed
+const signedIn = (options: {definitions: ProjectDefinitions["Service"]; editor?: ProjectConfigEditorService["Service"]}) => Effect.gen(function* () {
+  const started = yield* dashboard(options);
   page.origin = started.origin;
-  storage.set("supervisor-session", await signIn(started.origin, started.directory));
-  const registry = AtomRegistry.make();
-  defer(t, () => registry.dispose());
-  assert.equal(await Effect.runPromise(sessionAccessOf(registry).load), true);
-  defer(t, () => {Effect.runSync(sessionAccessOf(registry).clear());storage.clear();});
-  return registry;
-};
-
-// resolves with the first value of the atom that satisfies the predicate
-const until = <A>(registry: AtomRegistry.AtomRegistry, atom: Atom.Atom<A>, predicate: (value: A) => boolean, label: string) =>
-  new Promise<A>((resolve, reject) => {
-    const timer = setTimeout(() => {stop();reject(new Error(`${label} not reached`));}, 5_000);
-    const stop = registry.subscribe(atom, (value) => {
-      if (!predicate(value)) return;
-      clearTimeout(timer);
-      queueMicrotask(() => stop());
-      resolve(value);
-    }, {immediate: true});
-  });
+  storage.set("supervisor-session", yield* signIn(started.origin, started.directory));
+  const services = yield* Layer.build(pageLayer);
+  const access = Context.get(services, SessionAccess);
+  assert.equal(yield* access.load, true);
+  yield* Effect.addFinalizer(() => access.clear().pipe(Effect.andThen(Effect.sync(() => storage.clear()))));
+  return Context.get(services, AtomRegistry.AtomRegistry);
+});
 
 // the admitted save of one attempt, settled as the editor's promiseExit setter observes it
-const admittedSave = (registry: AtomRegistry.AtomRegistry, draft: ConfigurationDraft, scope: string, input: ProjectConfigSave) => {
-  const attempt = saveProjectConfigurationAtom({scope, operationId: draft.operationId});
-  registry.set(attempt, input);
-  return Effect.runPromiseExit(AtomRegistry.getResult(registry, attempt, {suspendOnWaiting: true}));
-};
+const admittedSave = (registry: AtomRegistry.AtomRegistry, draft: ConfigurationDraft, scope: string, input: ProjectConfigSave) =>
+  Effect.exit(admit(registry, saveProjectConfigurationAtom({scope, operationId: draft.operationId}), input));
 
-it("no definitions reload starts while the configuration is dirty or saving, and a new view disposes and interrupts the old read", {timeout: 10_000}, async t => {
+it.live("no definitions reload starts while the configuration is dirty or saving, and a new view disposes and interrupts the old read", () => Effect.gen(function* () {
   const reads: Array<string | null> = [];
-  const hung = deferred<ProjectDefinitionSnapshot>();
-  const hungEntered = deferred();
-  const definitions = {load: (_projectId: string, threadId: string | null) => {
+  const hung = yield* Deferred.make<ProjectDefinitionSnapshot>();
+  const hungEntered = yield* Deferred.make<void>();
+  const definitions = answeredDefinitions((_projectId, threadId) => Effect.suspend(() => {
     reads.push(threadId);
-    if (reads.length !== 3) return Promise.resolve(snapshot(revisionA, indexed, threadId));
-    hungEntered.resolve();
-    return hung.promise;
-  }} as unknown as ProjectDefinitionLoader;
-  const registry = await signedIn(t, {definitions});
-  defer(t, () => hung.resolve(snapshot(revisionA)));
+    if (reads.length !== 3) return Effect.succeed(snapshot(revisionA, indexed, threadId));
+    return Deferred.succeed(hungEntered, undefined).pipe(Effect.andThen(Deferred.await(hung)));
+  }));
+  const registry = yield* signedIn({definitions});
+  yield* Effect.addFinalizer(() => Deferred.succeed(hung, snapshot(revisionA)));
 
   // the panel's render: the held view follows the live view unless the editor holds a draft or a save; the mounted
   // read is the held view's
@@ -117,7 +96,7 @@ it("no definitions reload starts while the configuration is dirty or saving, and
     return projectDefinitionsAtom(read);
   };
   const reads0 = render(0, 0, false);
-  const first = await until(registry, reads0, AsyncResult.isSuccess, "the first read");
+  const first = yield* until(registry, reads0, AsyncResult.isSuccess, "the first read");
   assert.equal(AsyncResult.isSuccess(first) && first.value.definitions.revision, revisionA);
   assert.equal(reads.length, 1);
 
@@ -125,51 +104,51 @@ it("no definitions reload starts while the configuration is dirty or saving, and
   assert.equal(render(1, 0, true), reads0);
   assert.equal(render(1, 1, true), reads0);
   assert.equal(render(2, 1, true), reads0);
-  // absence of a read can only be observed over time
-  await new Promise(resolve => setTimeout(resolve, 100));
+  // absence of a read can only be observed over time: the reads would reach the real server
+  yield* Effect.sleep("100 millis");
   assert.equal(reads.length, 1, "no reload while the configuration is dirty or saving");
   assert.ok(AsyncResult.isSuccess(registry.get(reads0)), "the held read keeps its snapshot");
 
   // a clean editor follows the live view: one new read
   const reads1 = render(2, 1, false);
-  await until(registry, reads1, AsyncResult.isSuccess, "the reload");
+  yield* until(registry, reads1, AsyncResult.isSuccess, "the reload");
   assert.equal(reads.length, 2);
 
   // a scope change while the next read is in flight disposes it and aborts its request
   const pending = render(2, 1, false, "thread-1");
-  await until(registry, pending, AsyncResult.isInitial, "the pending read");
-  await within(hungEntered.promise, 5_000, "the pending read on the server");
+  yield* until(registry, pending, AsyncResult.isInitial, "the pending read");
+  yield* Deferred.await(hungEntered).pipe(within("timed out waiting for the pending read on the server"));
   const inFlight = sent.filter(request => request.path === "/api/guidance/project-configuration").at(-1)!;
   assert.equal(inFlight.signal?.aborted, false);
   render(3, 1, false, "thread-2");
-  await until(registry, projectDefinitionsAtom(view.read!), AsyncResult.isSuccess, "the read of the new scope");
+  yield* until(registry, projectDefinitionsAtom(view.read!), AsyncResult.isSuccess, "the read of the new scope");
   assert.equal(inFlight.signal?.aborted, true, "the disposed read aborted its request");
   mounted!.stop();
-});
+}), {timeout: 10_000});
 
-it("a save compares against the loaded revision: a concurrent change answers conflict and blocks, a fresh read saves", {timeout: 10_000}, async t => {
+it.live("a save compares against the loaded revision: a concurrent change answers conflict and blocks, a fresh read saves", () => Effect.gen(function* () {
   let current = snapshot(revisionA);
   const saves: ProjectConfigSave[] = [];
-  const definitions = {load: async () => current} as unknown as ProjectDefinitionLoader;
-  const editor = {save: async (input: ProjectConfigSave): Promise<ProjectConfigSaveOutcome> => {
+  const definitions = answeredDefinitions(() => Effect.sync(() => current));
+  const editor: ProjectConfigEditorService["Service"] = {save: (input) => Effect.sync((): ProjectConfigSaveOutcome => {
     saves.push(input);
     if (input.expectedRevision !== current.revision)
       return {status: "conflict", message: "project.yaml changed since it was read. Refresh definitions before saving again.", definitions: null};
     current = snapshot(revisionC, input.config);
     return {status: "saved", message: "Saved project.yaml.", definitions: current};
-  }} as unknown as ProjectConfigEditor;
-  const registry = await signedIn(t, {definitions, editor});
-  const read = async (reload: number) => {
+  })};
+  const registry = yield* signedIn({definitions, editor});
+  // the read mounted for its own scope
+  const read = (reload: number) => Effect.scoped(Effect.gen(function* () {
     const atom = projectDefinitionsAtom(definitionsReadKey(null, "project", null, 0));
-    const stop = registry.subscribe(atom, () => undefined, {immediate: true});
+    yield* AtomRegistry.mount(registry, atom);
     if (reload > 0) registry.refresh(atom);
-    const loaded = await until(registry, atom, (result) => AsyncResult.isSuccess(result) && !result.waiting, `read ${reload}`);
-    stop();
+    const loaded = yield* until(registry, atom, (result) => AsyncResult.isSuccess(result) && !result.waiting, `read ${reload}`);
     assert.ok(AsyncResult.isSuccess(loaded));
     return loaded.value.definitions;
-  };
+  }));
 
-  const loaded = await read(0);
+  const loaded = yield* read(0);
   // another writer changes project.yaml after the read
   current = snapshot(revisionB);
   const plan = planSave(loaded, edited, () => true);
@@ -177,7 +156,7 @@ it("a save compares against the loaded revision: a concurrent change answers con
   assert.equal(plan.input.expectedRevision, revisionA, "the save carries the revision it was edited from");
   const scope = configurationScope(null, loaded);
   const draft = {...freshDraft(), editing: true, config: edited};
-  const conflict = resolveSave(plan.input)(await admittedSave(registry, draft, scope, plan.input));
+  const conflict = resolveSave(plan.input)(yield* admittedSave(registry, draft, scope, plan.input));
   const blocked = settleSave(draft, conflict, plan.normalized);
   assert.deepEqual([blocked.blocked, blocked.message, blocked.messageAlert, blocked.config], [true,
     "project.yaml changed since it was read. Refresh definitions before saving again.", true, edited], "the draft is kept and blocked");
@@ -185,22 +164,22 @@ it("a save compares against the loaded revision: a concurrent change answers con
   assert.notEqual(blocked.operationId, draft.operationId, "the settled attempt is never written again");
   assert.deepEqual([saves.map(save => save.expectedRevision), current.revision], [[revisionA], revisionB], "the concurrent change survived");
 
-  const fresh = await read(1);
+  const fresh = yield* read(1);
   const retry = planSave(fresh, edited, () => true);
   assert.ok(retry._tag === "Save");
   assert.equal(retry.input.expectedRevision, revisionB);
-  const saved = resolveSave(retry.input)(await admittedSave(registry, {...freshDraft(), editing: true, config: edited}, configurationScope(null, fresh), retry.input));
+  const saved = resolveSave(retry.input)(yield* admittedSave(registry, {...freshDraft(), editing: true, config: edited}, configurationScope(null, fresh), retry.input));
   assert.equal(savedDefinitions(saved)?.revision, revisionC);
   const cleared = settleSave({...freshDraft(), editing: true, config: edited}, saved, retry.normalized);
   assert.deepEqual([cleared.editing, cleared.blocked, cleared.config, cleared.message, cleared.messageAlert], [false, false, edited, "Saved project.yaml.", false]);
   assert.deepEqual(saves.map(save => save.expectedRevision), [revisionA, revisionB]);
-});
+}), {timeout: 10_000});
 
-it("an answered conflict, uncertain, unavailable or permission_required save blocks the editor; invalid keeps editing allowed", {timeout: 10_000}, async t => {
+it.live("an answered conflict, uncertain, unavailable or permission_required save blocks the editor; invalid keeps editing allowed", () => Effect.gen(function* () {
   let answer: ProjectConfigSaveOutcome = {status: "invalid", message: "", definitions: null};
-  const definitions = {load: async () => snapshot(revisionA)} as unknown as ProjectDefinitionLoader;
-  const editor = {save: async () => answer} as unknown as ProjectConfigEditor;
-  const registry = await signedIn(t, {definitions, editor});
+  const definitions = answeredDefinitions(() => Effect.sync(() => snapshot(revisionA)));
+  const editor: ProjectConfigEditorService["Service"] = {save: () => Effect.sync(() => answer)};
+  const registry = yield* signedIn({definitions, editor});
   const loaded = snapshot(revisionA);
   const cases: Array<[ProjectConfigSaveOutcome, boolean, string]> = [
     [{status: "conflict", message: "Conflict.", definitions: null}, true, "Conflict."],
@@ -215,11 +194,11 @@ it("an answered conflict, uncertain, unavailable or permission_required save blo
     const plan = planSave(loaded, edited, () => true);
     assert.ok(plan._tag === "Save");
     const draft = {...freshDraft(), editing: true, config: edited};
-    const outcome = resolveSave(plan.input)(await admittedSave(registry, draft, configurationScope(null, loaded), plan.input));
+    const outcome = resolveSave(plan.input)(yield* admittedSave(registry, draft, configurationScope(null, loaded), plan.input));
     const settled = settleSave(draft, outcome, plan.normalized);
     assert.deepEqual([settled.blocked, settled.message, settled.messageAlert, settled.editing, settled.config], [blocks, message, true, true, edited], reply.status);
   }
-});
+}), {timeout: 10_000});
 
 it("a refused save keeps editing allowed with its golden text; an unconfirmed, interrupted or misdirected save blocks", {timeout: 10_000}, () => {
   const input: ProjectConfigSave = {projectId: "project", threadId: null, expectedRevision: revisionA, config: edited};
