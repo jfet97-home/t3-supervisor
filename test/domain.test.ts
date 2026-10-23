@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { it } from "vitest";
 import {freshRuntimeRequestStatus, mainRunNodeReader, nativeUserMessageVisible, projectionHasOngoingWork} from "../src/domain.js";
 import type {MessageInfo, Projection, RunInfo, ThreadInfo} from "../src/types.js";
 
@@ -22,14 +22,14 @@ const request: MessageInfo = {id: "request", threadId: thread.id, runId: run.id,
   streaming: false, createdAt: run.requestedAt, updatedAt: run.requestedAt};
 const projection = (overrides: Partial<Projection> = {}): Projection => ({thread, runs: [run], messages: [request], nodes: [rootNode], ...overrides});
 
-test("native user-message evidence must match its retained root-turn node", () => {
+it("native user-message evidence must match its retained root-turn node", () => {
   assert.equal(nativeUserMessageVisible(projection(), run, request), true);
   assert.equal(nativeUserMessageVisible(projection(), run, {...request, nodeId: "child"}), false);
   assert.equal(nativeUserMessageVisible(projection(), {...run, status: "rolled_back"}, request), false);
   assert.equal(nativeUserMessageVisible(projection({nodes: [{...rootNode, parentNodeId: "parent"}]}), run, request), false);
 });
 
-test("main run reader returns only nodes in the native root graph", () => {
+it("main run reader returns only nodes in the native root graph", () => {
   const childNode = {id: "child", threadId: thread.id, runId: run.id, parentNodeId: "root", rootNodeId: "root",
     providerThreadId: "provider-main", kind: "subagent", status: "completed"};
   const childOutput = {id: "child-output", threadId: thread.id, runId: run.id, parentNodeId: "child", rootNodeId: "root",
@@ -40,7 +40,7 @@ test("main run reader returns only nodes in the native root graph", () => {
   assert.equal(reader("child-output"), undefined);
 });
 
-test("runtime request status is tied to the exact request and owning node", () => {
+it("runtime request status is tied to the exact request and owning node", () => {
   const active = projection({runtimeRequests: [{id: "question", nodeId: "root", status: "pending"}]});
   assert.equal(freshRuntimeRequestStatus(active, {requestId: "question", nodeId: "root"}), "pending");
   assert.equal(freshRuntimeRequestStatus(active, {requestId: "question", nodeId: "child"}), "unknown");
@@ -49,7 +49,7 @@ test("runtime request status is tied to the exact request and owning node", () =
   assert.equal(freshRuntimeRequestStatus(projection(), {requestId: "question", nodeId: "root"}), "unknown");
 });
 
-test("native requests and active descendants keep a conversation classified as ongoing", () => {
+it("native requests and active descendants keep a conversation classified as ongoing", () => {
   assert.equal(projectionHasOngoingWork(projection()), false);
   assert.equal(projectionHasOngoingWork(projection({runtimeRequests: [{id: "question", nodeId: "root", status: "pending"}]})), true);
   assert.equal(projectionHasOngoingWork(projection({subagents: [{status: "running"}]})), true);

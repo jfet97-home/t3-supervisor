@@ -1,10 +1,17 @@
-import type {
-  WorkflowAgreementInfo,
-  WorkflowIssueInfo,
-  WorkflowPlanGroupInfo,
-  WorkflowPlanNodeInfo,
-  WorkflowRequirementInfo,
-  WorkflowSourceBindingInfo,
+import { Effect, Schema } from "effect";
+import {
+  WorkflowAgreement,
+  WorkflowExecutionStatus as WorkflowExecutionStatusSchema,
+  WorkflowIssue,
+  WorkflowPlanGroupSchema,
+  WorkflowRequirement,
+  WorkflowSourceBinding,
+  type WorkflowAgreementInfo,
+  type WorkflowIssueInfo,
+  type WorkflowPlanGroupInfo,
+  type WorkflowPlanNodeInfo,
+  type WorkflowRequirementInfo,
+  type WorkflowSourceBindingInfo,
 } from "./project-supervisor-contract.js";
 
 export const workflowExecutionStatuses = ["planned", "underway", "completed", "needs_attention"] as const;
@@ -307,3 +314,135 @@ export const workflowMutationLimits: WorkflowMutationLimits = {
   maxOperationIdLength: 200,
   maxDocumentBytes: 524_288, // serialized JSON UTF-8 byte limit
 };
+
+// stored shapes as the types above describe them; bounds, identities and cross-field rules stay with the store validators that run after decode
+const mutableArray = <S extends Schema.Top>(item: S) => Schema.mutable(Schema.Array(item));
+const workflowEvidenceKinds = ["draft_created", "lineage_linked", "agreement_imported", "plan_updated", "status_changed", "node_removed", "note", "observation",
+  "contribution_recorded", "contribution_assessed"] as const;
+
+export const ExternalContributionReferenceSchema = Schema.Struct({
+  kind: Schema.Literals(externalContributionReferenceKinds),
+  value: Schema.String,
+});
+
+export const ExternalContributionAssessmentSchema = Schema.Struct({
+  decision: Schema.Literals(externalContributionDecisions),
+  resultRevision: Schema.Number,
+  note: Schema.String,
+  actorSupervisorThreadId: Schema.String,
+  evidenceId: Schema.String,
+  recordedAt: Schema.Number,
+});
+
+export const ExternalContributionSchema = Schema.Struct({
+  contributionId: Schema.String,
+  nodeId: Schema.String,
+  state: Schema.Literals(externalContributionStates),
+  revision: Schema.Number,
+  summary: Schema.String,
+  references: mutableArray(ExternalContributionReferenceSchema),
+  externalRef: Schema.NullOr(Schema.String),
+  sourceThreadId: Schema.String,
+  sourceRunId: Schema.String,
+  sourceMessageId: Schema.String,
+  recordedAt: Schema.Number,
+  assessment: Schema.NullOr(ExternalContributionAssessmentSchema),
+});
+
+/** One main-authored external-contribution chat record; decode it with onExcessProperty "error" for the exact key set. */
+export const ExternalContributionRecordSchema = Schema.Struct({
+  taskId: Schema.String,
+  contributionId: Schema.String,
+  nodeId: Schema.String,
+  revision: Schema.Number,
+  state: Schema.Literals(externalContributionStates),
+  summary: Schema.String,
+  references: mutableArray(ExternalContributionReferenceSchema),
+  externalRef: Schema.NullOr(Schema.String),
+});
+
+export const WorkflowStateEvidenceSchema = Schema.Struct({
+  id: Schema.String,
+  operationId: Schema.String,
+  kind: Schema.Literals(workflowEvidenceKinds),
+  recordedAt: Schema.Number,
+  actorSupervisorThreadId: Schema.String,
+  targetNodeId: Schema.NullOr(Schema.String),
+  targetNodeName: Schema.NullOr(Schema.String),
+  statusFrom: Schema.NullOr(WorkflowExecutionStatusSchema),
+  statusTo: Schema.NullOr(WorkflowExecutionStatusSchema),
+  sourceThreadId: Schema.NullOr(Schema.String),
+  sourceRunId: Schema.NullOr(Schema.String),
+  sourceMessageId: Schema.NullOr(Schema.String),
+  sourceItemId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  agreementKey: Schema.NullOr(Schema.String),
+  note: Schema.String,
+  contribution: Schema.optionalKey(Schema.Struct({
+    contributionId: Schema.String,
+    revision: Schema.Number,
+    state: Schema.NullOr(Schema.Literals(externalContributionStates)),
+    decision: Schema.NullOr(Schema.Literals(externalContributionDecisions)),
+  })),
+});
+
+export const AcceptedWorkflowAgreementRecordSchema = Schema.Struct({
+  key: Schema.String,
+  taskId: Schema.String,
+  sourceThreadId: Schema.String,
+  sourceRunId: Schema.String,
+  sourceMessageId: Schema.String,
+  sourceHash: Schema.String,
+  objective: Schema.String,
+  planHash: Schema.String,
+  sourceBinding: WorkflowSourceBinding,
+  requirements: mutableArray(WorkflowRequirement),
+  issues: mutableArray(WorkflowIssue),
+  plan: Schema.NullOr(WorkflowPlanGroupSchema),
+  agreement: WorkflowAgreement,
+});
+
+/** A stored formatVersion 2 workflow document; a row stored before contributions existed decodes with an empty list. */
+export const WorkflowStateDocumentSchema = Schema.Struct({
+  formatVersion: Schema.Literal(2),
+  workflowId: Schema.String,
+  projectId: Schema.String,
+  mainThreadId: Schema.String,
+  threadId: Schema.String,
+  parentWorkflowId: Schema.NullOr(Schema.String),
+  parentThreadId: Schema.NullOr(Schema.String),
+  revision: Schema.Number,
+  status: WorkflowExecutionStatusSchema,
+  objective: Schema.NullOr(Schema.String),
+  sourceBinding: Schema.NullOr(WorkflowSourceBinding),
+  requirements: mutableArray(WorkflowRequirement),
+  issues: mutableArray(WorkflowIssue),
+  plan: Schema.NullOr(WorkflowPlanGroupSchema),
+  currentAgreementKey: Schema.NullOr(Schema.String),
+  acceptedAgreements: mutableArray(AcceptedWorkflowAgreementRecordSchema),
+  contributions: mutableArray(ExternalContributionSchema).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
+  evidence: mutableArray(WorkflowStateEvidenceSchema),
+  createdAt: Schema.Number,
+  updatedAt: Schema.Number,
+});
+
+/** A stored operation receipt: the replay result of one workflow write. */
+export const WorkflowMutationReceiptSchema = Schema.Struct({
+  formatVersion: Schema.Literal(2),
+  status: Schema.Literals(["applied", "created"]),
+  operationId: Schema.String,
+  workflowId: Schema.String,
+  revision: Schema.Number,
+  stateHash: Schema.String,
+});
+
+// the schemas mirror the hand-written types in both directions
+type Same<A, B> = [A] extends [B] ? [B] extends [A] ? true : false : false;
+const mirrors: [
+  Same<typeof WorkflowStateDocumentSchema.Type, WorkflowStateDocument>,
+  Same<typeof WorkflowMutationReceiptSchema.Type, WorkflowMutationReceipt>,
+  Same<typeof ExternalContributionSchema.Type, ExternalContribution>,
+  Same<typeof ExternalContributionRecordSchema.Type, ExternalContributionRecord>,
+  Same<typeof WorkflowStateEvidenceSchema.Type, WorkflowStateEvidence>,
+  Same<typeof AcceptedWorkflowAgreementRecordSchema.Type, AcceptedWorkflowAgreementRecord>,
+] = [true, true, true, true, true, true];
+void mirrors;

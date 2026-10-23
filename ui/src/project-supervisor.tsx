@@ -1,10 +1,17 @@
 import {StopNotice} from "./stop-notice.js";
 import { assessmentForTask } from "../../src/workflow-assessment.js";
 import { workAttention } from "../../src/dashboard-overview.js";
-import React, { useEffect, useRef, useState, type FormEvent } from "react";
+import React, { useContext, useEffect, useState, type FormEvent } from "react";
+import { Cause, Clock, Effect, Exit, Option, Result } from "effect";
+import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
+import { RegistryContext, useAtom, useAtomMount, useAtomValue } from "@effect/atom-react";
 import { DefinitionReferences } from "./definition-references.js";
 import type {
+  ProjectSupervisorChatSupervisionInput,
   ProjectSupervisorInfo,
+  ProjectSupervisorRetryInput,
+  ProjectSupervisorSaveInput,
+  ProjectSupervisorSaveOutcome,
   TaskInterpretationInfo,
   ProjectSupervisorTeamInfo,
   DefinitionReviewInfo,
@@ -19,8 +26,9 @@ import type {
 } from "../../src/project-supervisor-contract.js";
 import type { WorkflowProgressContribution, WorkflowProgressCoverage, WorkflowProgressSnapshot, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
 import { defaultMonitoringSettings, defaultSupervisorTeamSettings } from "../../src/project-supervisor-contract.js";
-import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor, setChatSupervision } from "./project-supervisor-api.js";
-import { idleControlActivity, SupervisionControlPanel } from "./supervisor-control.js";
+import { loadProjectSupervisor, loadWorkflowProgress, type ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor, setChatSupervision } from "./project-supervisor-api.js";
+import { admit, admittedMutation, authEpochAtom, draftFamily, environmentAtom, pollWhileVisible, scopeKey, uiRuntime, type MutationKey, type MutationResult } from "./atoms.js";
+import { idleControlActivity, SupervisionControlPanel, supervisionControlKey, supervisionSetupSelection } from "./supervisor-control.js";
 
 type MonitoringDraft = {
   intervalMinutes: string;
@@ -28,7 +36,7 @@ type MonitoringDraft = {
 };
 type TeamSettingsDraft = {maxHelpersPerRoot: string};
 
-type Draft = {
+export type Draft = {
   projectId: string;
   modelValue: SupervisorModelSelection;
   modelBaseline: SupervisorModelSelection;
@@ -38,11 +46,6 @@ type Draft = {
   teamSettingsBaseline: TeamSettingsDraft;
   expectedGeneration: number;
 };
-type Drafts = Record<string, Draft>;
-
-type SnapshotState = {projectId: string; snapshot: ProjectSupervisorInfo};
-type LoadState = {key: string; status: "idle" | "loading" | "error"};
-type PanelMessage = {projectId: string; text: string; alert: boolean} | null;
 export type WorkflowProgressPanelState = {key: string; pages: WorkflowProgressSnapshot[]; loading: boolean; error: string | null};
 
 const selectionKey = (selection: SupervisorModelSelection) => JSON.stringify(selection);
@@ -135,26 +138,21 @@ const withReasoningValue = (selection: SupervisorModelSelection, model: Supervis
  * Runs one per-chat supervision change and returns the server-confirmed state to show. It returns null once the selected
  * project or chat has changed, so a late response never replaces another chat's view; the next load shows that chat's state.
  */
-export const confirmChatSupervisionChange = async (
-  change: () => Promise<{snapshot?: ProjectSupervisorInfo | null; message: string}>,
-  reload: () => Promise<ProjectSupervisorInfo>,
+export const confirmChatSupervisionChange = <R1, R2>(
+  change: Effect.Effect<{snapshot?: ProjectSupervisorInfo | null; message: string}, unknown, R1>,
+  reload: Effect.Effect<ProjectSupervisorInfo, unknown, R2>,
   isCurrent: () => boolean,
-): Promise<{snapshot: ProjectSupervisorInfo | null; message: string} | null> => {
-  try {
-    const result = await change();
-    if (!isCurrent()) return null;
-    const confirmed = result.snapshot ?? await reload();
-    return isCurrent() ? {snapshot: confirmed, message: result.message} : null;
-  } catch {
-    if (!isCurrent()) return null;
-    try {
-      const saved = await reload();
-      return isCurrent() ? {snapshot: saved, message: "The change could not be confirmed. The saved state is shown."} : null;
-    } catch {
-      return isCurrent() ? {snapshot: null, message: "The change could not be confirmed and the saved state could not be read. Refresh Supervisor status."} : null;
-    }
-  }
-};
+): Effect.Effect<{snapshot: ProjectSupervisorInfo | null; message: string} | null, never, R1 | R2> => Effect.gen(function* () {
+  const result = yield* change;
+  if (!isCurrent()) return null;
+  const confirmed = result.snapshot ?? (yield* reload);
+  return isCurrent() ? {snapshot: confirmed, message: result.message} : null;
+}).pipe(Effect.catchCause(cause => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause as Cause.Cause<never>) : Effect.gen(function* () {
+  if (!isCurrent()) return null;
+  const saved = yield* Effect.exit(reload);
+  if (Exit.isSuccess(saved)) return isCurrent() ? {snapshot: saved.value, message: "The change could not be confirmed. The saved state is shown."} : null;
+  return isCurrent() ? {snapshot: null, message: "The change could not be confirmed and the saved state could not be read. Refresh Supervisor status."} : null;
+})));
 
 export const shouldOfferNativeRetry = (snapshot: ProjectSupervisorInfo) => {
   const monitoringNeedsRetry = (snapshot.monitoringStatus?.state === "uncertain" || snapshot.monitoringStatus?.state === "unavailable") &&
@@ -345,7 +343,9 @@ function WorkflowAgreementView({agreement}: {agreement: WorkflowAgreementInfo}) 
         : "Unknown"}</p>
       <p><strong>Workspace root:</strong> {agreement.workflow.workspaceRoot === null ? "Not recorded" : <code>{agreement.workflow.workspaceRoot}</code>}</p>
       <p><strong>Definition revision:</strong> {agreement.workflow.revision === null ? "Not recorded" : <code>{agreement.workflow.revision}</code>}</p>
-      <p><strong>Supervisor message ID:</strong> <code>{agreement.supervisorMessageId}</code></p>
+      {agreement.evidence.kind === "supervisor_message"
+        ? <p><strong>Supervisor message ID:</strong> <code>{agreement.evidence.messageId}</code></p>
+        : <p><strong>Interpretation submission:</strong> attempt <code>{agreement.evidence.attemptId}</code>, item <code>{agreement.evidence.itemId}</code></p>}
       <p><strong>Agent message ID:</strong> <code>{agreement.agentMessageId}</code></p>
     </details>
   </section>;
@@ -1037,59 +1037,337 @@ export function ProjectSupervisorView({
   </div>;
 }
 
-export function ProjectSupervisorPanel({projectId, threadId, section = "all", attentionEnabled = true, connected, csrfToken = "", onDirtyChange, onSavingChange}: {
+// the settings change outcome a panel applies: a decoded result or the request error that replaced it (undefined when the
+// failure carried no request error)
+type ChangeOutcome = Result.Result<ProjectSupervisorSaveOutcome, ProjectSupervisorRequestError | undefined>;
+type SettingsState = {view: ProjectSupervisorView; draft: Draft | null};
+
+const canonicalDraft = (projectId: string, snapshot: ProjectSupervisorInfo): Draft => {
+  const canonical = copySelection(snapshot.settings.modelSelection);
+  const monitoring = readMonitoringDraft(snapshot);
+  const teamSettings = readTeamSettingsDraft(snapshot);
+  return {projectId, modelValue: canonical, modelBaseline: copySelection(canonical), monitoringValue: copyMonitoringDraft(monitoring),
+    monitoringBaseline: copyMonitoringDraft(monitoring), teamSettingsValue: copyTeamSettingsDraft(teamSettings),
+    teamSettingsBaseline: copyTeamSettingsDraft(teamSettings), expectedGeneration: snapshot.settings.generation};
+};
+
+/**
+ * Applies a read to the project's draft: every field takes the read's saved value as its baseline and the expected generation
+ * moves to the read; a dirty field keeps its value, so a reload never overwrites an unsaved edit. `keptDirty` reports
+ * whether an unsaved edit still differs from the new baseline.
+ */
+export const mergeLoadedDraft = (prior: Draft | null, projectId: string, snapshot: ProjectSupervisorInfo): {draft: Draft; keptDirty: boolean} => {
+  const modelWasDirty = Boolean(prior && selectionKey(prior.modelValue) !== selectionKey(prior.modelBaseline));
+  const monitoringWasDirty = Boolean(prior && !sameMonitoring(prior.monitoringValue, prior.monitoringBaseline));
+  const teamSettingsWereDirty = Boolean(prior && !sameTeamSettings(prior.teamSettingsValue, prior.teamSettingsBaseline));
+  const modelBaseline = copySelection(snapshot.settings.modelSelection);
+  const modelValue = modelWasDirty ? copySelection(prior!.modelValue) : copySelection(modelBaseline);
+  const monitoringBaseline = readMonitoringDraft(snapshot);
+  const monitoringValue = monitoringWasDirty ? copyMonitoringDraft(prior!.monitoringValue) : copyMonitoringDraft(monitoringBaseline);
+  const teamSettingsBaseline = readTeamSettingsDraft(snapshot);
+  const teamSettingsValue = teamSettingsWereDirty ? copyTeamSettingsDraft(prior!.teamSettingsValue) : copyTeamSettingsDraft(teamSettingsBaseline);
+  return {
+    draft: {projectId, modelValue, modelBaseline, monitoringValue, monitoringBaseline, teamSettingsValue, teamSettingsBaseline,
+      expectedGeneration: snapshot.settings.generation},
+    keptDirty: (modelWasDirty && selectionKey(modelValue) !== selectionKey(modelBaseline)) ||
+      (monitoringWasDirty && !sameMonitoring(monitoringValue, monitoringBaseline)) ||
+      (teamSettingsWereDirty && !sameTeamSettings(teamSettingsValue, teamSettingsBaseline)),
+  };
+};
+
+const withMessage = (view: ProjectSupervisorView, scope: string, text: string, alert: boolean): ProjectSupervisorView =>
+  ({...view, message: {scope, text, alert}});
+
+/**
+ * The outcome of a settings save for its own scope: a verified save resets the draft to the saved settings, a save without
+ * a read-back or an uncertain outcome blocks further changes until a refresh, a conflict keeps the draft against the latest
+ * generation, and a definite refusal keeps the draft editable.
+ */
+export const settleSave = ({view, draft}: SettingsState, scope: string, input: ProjectSupervisorSaveInput, outcome: ChangeOutcome): SettingsState => {
+  if (Result.isFailure(outcome)) {
+    const definitelyNotSaved = outcome.failure?.definitelyNotSaved ?? false;
+    return {draft, view: withMessage({...view, blocked: !definitelyNotSaved}, scope,
+      outcome.failure?.message ?? "The save outcome could not be confirmed. Refresh Supervisor status before trying again.", !definitelyNotSaved)};
+  }
+  const result = outcome.success;
+  if (result.status === "saved") {
+    if (result.snapshot) return {draft: canonicalDraft(input.projectId, result.snapshot),
+      view: withMessage({...view, snapshot: result.snapshot, blocked: false}, scope, result.message, false)};
+    return {
+      draft: draft ? {...draft, modelValue: copySelection(input.modelSelection), modelBaseline: copySelection(input.modelSelection),
+        monitoringValue: monitoringDraft(input.monitoring ?? defaultMonitoringSettings), monitoringBaseline: monitoringDraft(input.monitoring ?? defaultMonitoringSettings),
+        teamSettingsValue: teamSettingsDraft(input.teamSettings ?? defaultSupervisorTeamSettings), teamSettingsBaseline: teamSettingsDraft(input.teamSettings ?? defaultSupervisorTeamSettings)} : draft,
+      view: withMessage({...view, blocked: true}, scope, `${result.message} Refresh Supervisor status before making another change.`, false),
+    };
+  }
+  if (result.status === "uncertain") return {draft, view: withMessage({...view, blocked: true}, scope, result.message, true)};
+  if (result.snapshot) return {
+    draft: draft ? {...draft, modelBaseline: copySelection(result.snapshot.settings.modelSelection), monitoringBaseline: readMonitoringDraft(result.snapshot),
+      teamSettingsBaseline: readTeamSettingsDraft(result.snapshot), expectedGeneration: result.snapshot.settings.generation} : draft,
+    view: withMessage({...view, snapshot: result.snapshot, blocked: false}, scope, result.message, result.status === "invalid"),
+  };
+  return {draft, view: withMessage({...view, blocked: result.status === "conflict"}, scope,
+    result.status === "conflict" ? `${result.message} Refresh Supervisor status before trying again.` : result.message, result.status === "invalid")};
+};
+
+/** The outcome of an explicit native access retry or replacement for its own scope (see {@link settleSave}). */
+export const settleRetry = ({view, draft}: SettingsState, scope: string, input: ProjectSupervisorRetryInput, outcome: ChangeOutcome): SettingsState => {
+  if (Result.isFailure(outcome)) {
+    const definitelyNotSaved = outcome.failure?.definitelyNotSaved ?? false;
+    return {draft, view: withMessage({...view, blocked: !definitelyNotSaved}, scope,
+      outcome.failure?.message ?? "The native access retry outcome could not be confirmed. Refresh Supervisor status before trying again.", !definitelyNotSaved)};
+  }
+  const result = outcome.success;
+  if (result.status === "uncertain") return {draft, view: withMessage({...view, blocked: true}, scope, result.message, true)};
+  if (result.snapshot) return {draft: canonicalDraft(input.projectId, result.snapshot),
+    view: withMessage({...view, snapshot: result.snapshot, blocked: false}, scope, result.message, result.status === "invalid")};
+  const mustRefresh = result.status === "conflict" || result.status === "saved";
+  return {draft, view: withMessage({...view, blocked: mustRefresh}, scope,
+    mustRefresh ? `${result.message} Refresh Supervisor status before trying again.` : result.message, result.status === "invalid")};
+};
+
+type PanelMessage = {scope: string; text: string; alert: boolean};
+
+/**
+ * Applies a settled snapshot read to the panel: the snapshot is shown with its read time, the block after an unconfirmed
+ * outcome is lifted and the draft merges the read (see {@link mergeLoadedDraft}); an explicit refresh reports whether an
+ * unsaved draft was kept.
+ */
+export const settleRead = ({view, draft}: SettingsState, projectId: string, scope: string, read: {snapshot: ProjectSupervisorInfo; readAt: number},
+  forced: boolean): SettingsState => {
+  const merged = mergeLoadedDraft(draft, projectId, read.snapshot);
+  return {draft: merged.draft, view: {...view, snapshot: read.snapshot, readAt: read.readAt, blocked: false, message: forced ? {scope, alert: false, text: merged.keptDirty
+    ? "Supervisor status refreshed. Your unsaved draft was kept against the latest saved generation."
+    : "Supervisor status refreshed from T3."} : view.message}};
+};
+
+/**
+ * Whether the panel reads its scope now: never while a settings change is in flight, never automatically over a dirty draft
+ * of the shown snapshot (only an explicit refresh moves the draft's expected generation), and once per scope revision.
+ */
+export const snapshotReadNeeded = (panel: {projectId: string; connected: boolean; saving: boolean; forceRefresh: boolean; dirty: boolean;
+  shown: boolean; completedKey: string | null; requestKey: string}) =>
+  Boolean(panel.projectId) && panel.connected && !panel.saving && (panel.forceRefresh || !(panel.dirty && panel.shown)) && panel.completedKey !== panel.requestKey;
+
+/** The chat supervision poll of the selected chat, or null while a settings or chat change is in flight or T3 is disconnected. */
+export const chatPollScope = (view: ProjectSupervisorView, panel: {projectId: string; threadId: string | undefined; connected: boolean; epoch: number}) =>
+  panel.connected && panel.threadId && !view.operation && !view.chat ? {projectId: panel.projectId, mainThreadId: panel.threadId, epoch: panel.epoch} : null;
+
+/** A polled chat state replaces only the chat supervision of the shown snapshot, and only while nothing is in flight for it. */
+export const settlePoll = (view: ProjectSupervisorView, scope: string, polled: ProjectSupervisorInfo): ProjectSupervisorView =>
+  view.operation || view.chat || view.scope !== scope || view.snapshot?.projectId !== polled.projectId || view.snapshot.mainThreadId !== polled.mainThreadId
+    ? view : {...view, snapshot: {...view.snapshot, chatSupervision: polled.chatSupervision ?? null}};
+
+// the panel state of one project that outlives the component: the shown snapshot and its read time, the outcome message of
+// the last change for the scope it belongs to, the block after an unconfirmed outcome and the changes in flight
+export type ProjectSupervisorView = {
+  scope: string | null;
+  snapshot: ProjectSupervisorInfo | null;
+  readAt: number | null;
+  message: PanelMessage | null;
+  blocked: boolean;
+  operation: {kind: "save" | "retry"; scope: string; operationId: string} | null;
+  chat: {scope: string; operationId: string} | null;
+  chatMessage: {scope: string; text: string} | null;
+};
+const idleView: ProjectSupervisorView = {scope: null, snapshot: null, readAt: null, message: null, blocked: false, operation: null, chat: null,
+  chatMessage: null};
+
+export const projectSupervisorKey = (environmentId: string | null, projectId: string) => scopeKey("project-supervisor", environmentId, projectId);
+export const projectSupervisorView = Atom.family((_projectKey: string) => Atom.keepAlive(Atom.make(idleView)));
+export const projectSupervisorDraft = draftFamily<Draft | null>(() => null);
+
+// the confirmed discard of a project's Supervisor drafts: the settings draft is dropped, so the panel takes the saved
+// settings from its next read, and the setup checkout choice is cleared
+export const discardSupervisorDrafts = (registry: AtomRegistry.AtomRegistry, environmentId: string | null, projectId: string) => {
+  registry.set(projectSupervisorDraft(projectSupervisorKey(environmentId, projectId)), null);
+  registry.set(supervisionSetupSelection(supervisionControlKey(environmentId, projectId)), "");
+};
+
+type SnapshotScope = {readonly environmentId: string | null; readonly projectId: string; readonly mainThreadId: string | null; readonly revision: number; readonly epoch: number};
+
+// one snapshot read per scope; a scope change or unmount interrupts it, and a refresh is a new scope revision
+export const projectSupervisorRead = Atom.family((scope: SnapshotScope) => uiRuntime.atom(Effect.gen(function* () {
+  const snapshot = yield* loadProjectSupervisor(scope.projectId, scope.mainThreadId);
+  return {snapshot, readAt: yield* Clock.currentTimeMillis};
+})));
+
+type ChatPollScope = {readonly environmentId: string | null; readonly projectId: string; readonly mainThreadId: string; readonly epoch: number};
+
+// the selected chat's saved supervision state; the first evaluation reads nothing because the snapshot read has just read it,
+// every refresh reads it again
+export const chatSupervisionRead = Atom.family((scope: ChatPollScope) => uiRuntime.atom((get) => {
+  const previous = get.self<AsyncResult.AsyncResult<Option.Option<ProjectSupervisorInfo>>>();
+  return Option.isNone(previous) || AsyncResult.isInitial(previous.value)
+    ? Effect.succeed(Option.none<ProjectSupervisorInfo>())
+    : Effect.map(loadProjectSupervisor(scope.projectId, scope.mainThreadId), Option.some);
+}));
+
+// the chat supervision read refreshed on each visible 30 s tick
+export const chatSupervisionPoll = Atom.family((scope: ChatPollScope) => chatSupervisionRead(scope).pipe(pollWhileVisible(30_000)));
+
+type ProgressScope = {
+  readonly environmentId: string | null;
+  readonly projectId: string;
+  readonly mainThreadId: string;
+  readonly bindingThreadId: string | null;
+  readonly bindingGeneration: number | null;
+  readonly epoch: number;
+};
+export type WorkflowProgressPages = {readonly pages: readonly WorkflowProgressSnapshot[]; readonly error: string | null; readonly more: number};
+type ProgressPage = {workflowOffset: number; lineageOffset: number};
+
+// the next page asked for by "Load more" in one progress scope, numbered so a refresh can tell it was already appended
+export const workflowProgressMore = Atom.family((_scope: ProgressScope) => Atom.make<{seq: number; page: ProgressPage | null}>({seq: 0, page: null}));
+
+/**
+ * Live progress of one main conversation and Supervisor binding. The first read loads the first page, "Load more" appends
+ * the next page, and every refresh re-reads the loaded pages one after another; a failed or incomplete refresh keeps the
+ * pages already shown with the reason.
+ */
+export const workflowProgressRead = Atom.family((scope: ProgressScope) => uiRuntime.atom((get) => {
+  const more = get(workflowProgressMore(scope));
+  const previous = Option.flatMap(get.self<AsyncResult.AsyncResult<WorkflowProgressPages>>(), AsyncResult.value);
+  const expectedBinding = scope.bindingThreadId !== null && scope.bindingGeneration !== null
+    ? {expectedBinding: {threadId: scope.bindingThreadId, generation: scope.bindingGeneration}} : {};
+  if (Option.isSome(previous) && more.page && more.seq !== previous.value.more) {
+    const current = previous.value;
+    return loadWorkflowProgress(scope.projectId, scope.mainThreadId, {...more.page, ...expectedBinding}).pipe(Effect.match({
+      onSuccess: (result): WorkflowProgressPages => ({pages: [...current.pages, result], error: result.status === "ok" ? null : result.message, more: more.seq}),
+      onFailure: (): WorkflowProgressPages => ({...current, error: "The next progress page could not be loaded. The last successful snapshot is retained.", more: more.seq}),
+    }));
+  }
+  const loaded = Option.isSome(previous) ? previous.value.pages : [];
+  const requests = (loaded.length > 0 ? loaded.map(page => ({workflowOffset: page.workflowOffset, lineageOffset: page.lineageOffset})) : [{workflowOffset: 0, lineageOffset: 0}])
+    .map(page => ({...page, ...expectedBinding}));
+  return refreshWorkflowProgressPages(scope.projectId, scope.mainThreadId, requests).pipe(Effect.match({
+    onSuccess: (pages): WorkflowProgressPages => {
+      const failed = pages.find(page => page.status !== "ok");
+      return Option.isSome(previous) && previous.value.pages.length > 0 && failed
+        ? {...previous.value, error: failed.message ?? "Progress could not be refreshed.", more: more.seq}
+        : {pages, error: failed?.message ?? null, more: more.seq};
+    },
+    onFailure: (): WorkflowProgressPages => Option.isSome(previous)
+      ? {...previous.value, error: "Progress could not be refreshed. The last successful snapshot is retained.", more: more.seq}
+      : {pages: [], error: "Progress could not be loaded for this main conversation.", more: more.seq},
+  }));
+}));
+
+// the progress read refreshed on each visible 30 s tick; the panel mounts it only while no read is running
+export const workflowProgressPoll = Atom.family((scope: ProgressScope) => workflowProgressRead(scope).pipe(pollWhileVisible(30_000)));
+
+const idleAtom = Atom.make(AsyncResult.initial<never>());
+
+// the admitted requests; each user action is one operation that is sent once and never replayed
+const saveRequest = admittedMutation((input: ProjectSupervisorSaveInput) => Effect.result(saveProjectSupervisor(input)));
+const retryRequest = admittedMutation((input: ProjectSupervisorRetryInput) => Effect.result(retryProjectSupervisor(input)));
+const chatRequest = admittedMutation((input: ProjectSupervisorChatSupervisionInput) => Effect.result(setChatSupervision(input)));
+
+type SettingsChange<I> = {projectKey: string; key: MutationKey; input: I};
+
+// awaits an admitted change and applies its outcome to the project's draft and view, mounted or not; an outcome is shown
+// only while its own [project, chat] scope is still selected and is applied once
+const settleChange = <I,>(
+  request: (key: MutationKey) => Atom.Writable<MutationResult<Result.Result<ProjectSupervisorSaveOutcome, ProjectSupervisorRequestError>>, I>,
+  settle: (state: SettingsState, scope: string, input: I, outcome: ChangeOutcome) => SettingsState,
+) => Atom.family((_key: string) => Atom.keepAlive(uiRuntime.fn((change: SettingsChange<I>, get) => Effect.gen(function* () {
+  const registry = get.registry;
+  const outcome: ChangeOutcome = yield* admit(registry, request(change.key), change.input).pipe(
+    Effect.catch(() => Effect.succeed(Result.fail(undefined))));
+  const viewAtom = projectSupervisorView(change.projectKey);
+  const view = registry.get(viewAtom);
+  if (view.operation?.operationId !== change.key.operationId || view.operation.scope !== change.key.scope) return;
+  if (view.scope !== change.key.scope) return registry.set(viewAtom, {...view, operation: null});
+  const draftAtom = projectSupervisorDraft(change.projectKey);
+  const next = settle({view: {...view, operation: null}, draft: registry.get(draftAtom)}, change.key.scope, change.input, outcome);
+  registry.set(draftAtom, next.draft);
+  registry.set(viewAtom, next.view);
+}), {concurrent: true})));
+
+export const saveSupervisorSettings = settleChange(saveRequest, settleSave);
+export const retrySupervisorAccess = settleChange(retryRequest, settleRetry);
+
+// the read that confirms a chat supervision change without its own snapshot; after 10 s the change is reported as unconfirmed
+export const chatSupervisionConfirmRead = (projectId: string, mainThreadId: string) =>
+  loadProjectSupervisor(projectId, mainThreadId).pipe(Effect.timeout("10 seconds"));
+
+/**
+ * One explicit Stop supervision / Enable supervision change for the exact [project, chat] that started it: the change is
+ * admitted once, confirmed by its own snapshot or by a follow-up read within 10 s, and shown only while that chat is still
+ * selected.
+ */
+export const changeChatSupervision = Atom.family((_key: string) => Atom.keepAlive(uiRuntime.fn((change: SettingsChange<ProjectSupervisorChatSupervisionInput>, get) =>
+  Effect.gen(function* () {
+    const registry = get.registry;
+    const viewAtom = projectSupervisorView(change.projectKey);
+    const outcome = yield* confirmChatSupervisionChange(
+      admit(registry, chatRequest(change.key), change.input).pipe(Effect.flatMap(result => Result.isSuccess(result) ? Effect.succeed(result.success) : Effect.fail(result.failure))),
+      chatSupervisionConfirmRead(change.input.projectId, change.input.mainThreadId),
+      () => registry.get(viewAtom).scope === change.key.scope);
+    registry.update(viewAtom, view => view.chat?.operationId !== change.key.operationId ? view : {...view, chat: null,
+      ...(outcome ? {chatMessage: {scope: change.key.scope, text: outcome.message}, snapshot: outcome.snapshot ?? view.snapshot} : {})});
+  }), {concurrent: true})));
+
+// admits one settings save or native access retry for the selected scope unless a change is already in flight; the change
+// atom applies its outcome even after the panel unmounts
+export const startSettingsChange = (registry: AtomRegistry.AtomRegistry, projectKey: string, scope: string,
+  change: {kind: "save"; input: ProjectSupervisorSaveInput} | {kind: "retry"; input: ProjectSupervisorRetryInput}) => {
+  const viewAtom = projectSupervisorView(projectKey);
+  const current = registry.get(viewAtom);
+  if (current.operation) return;
+  const key = {scope, operationId: crypto.randomUUID()};
+  registry.set(viewAtom, {...current, operation: {kind: change.kind, ...key}, message: null});
+  if (change.kind === "save") registry.set(saveSupervisorSettings(scopeKey(key.scope, key.operationId)), {projectKey, key, input: change.input});
+  else registry.set(retrySupervisorAccess(scopeKey(key.scope, key.operationId)), {projectKey, key, input: change.input});
+};
+
+// admits one per-chat supervision change for the selected scope unless one is already in flight in the project
+export const startChatSupervisionChange = (registry: AtomRegistry.AtomRegistry, projectKey: string, scope: string, input: ProjectSupervisorChatSupervisionInput) => {
+  const viewAtom = projectSupervisorView(projectKey);
+  const current = registry.get(viewAtom);
+  if (current.chat) return;
+  const key = {scope, operationId: crypto.randomUUID()};
+  registry.set(viewAtom, {...current, chat: key, chatMessage: null});
+  registry.set(changeChatSupervision(scopeKey(key.scope, key.operationId)), {projectKey, key, input});
+};
+
+export function ProjectSupervisorPanel({projectId, threadId, section = "all", attentionEnabled = true, connected, onDirtyChange, onSavingChange}: {
   projectId: string;
   threadId?: string;
   section?: "all" | "progress" | "plan" | "supervision" | "definitions" | "settings";
   attentionEnabled?: boolean;
   connected: boolean;
-  csrfToken?: string;
   onDirtyChange?: (dirty: boolean) => void;
   onSavingChange?: (saving: boolean) => void;
 }) {
-  const [statusReadAt, setStatusReadAt] = useState<number | null>(null);
-  const [snapshotState, setSnapshotState] = useState<SnapshotState | null>(null);
-  const [drafts, setDrafts] = useState<Drafts>({});
-  const [loadState, setLoadState] = useState<LoadState>({key: "", status: "idle"});
-  const [panelMessage, setPanelMessage] = useState<PanelMessage>(null);
+  const registry = useContext(RegistryContext);
+  const environmentId = useAtomValue(environmentAtom);
+  const projectKey = projectSupervisorKey(environmentId, projectId);
+  const mainThreadId = threadId || null;
+  const scope = scopeKey(environmentId, projectId, mainThreadId);
+  const epoch = useAtomValue(authEpochAtom, result => Option.getOrElse(AsyncResult.value(result), () => 0));
+  const [view, setView] = useAtom(projectSupervisorView(projectKey));
+  const [activeDraft, setDraft] = useAtom(projectSupervisorDraft(projectKey));
   const [revision, setRevision] = useState(0);
   const [forceRefresh, setForceRefresh] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [blocked, setBlocked] = useState(false);
+  const [completedRead, setCompletedRead] = useState<{key: string; failed: boolean} | null>(null);
   const [controlActivity, setControlActivity] = useState(idleControlActivity);
-  const [workflowProgressState, setWorkflowProgressState] = useState<WorkflowProgressPanelState>({key: "", pages: [], loading: false, error: null});
-  const [workflowProgressRevision, setWorkflowProgressRevision] = useState(0);
-  const activeProject = useRef(projectId);
-  const activeScope = useRef(JSON.stringify([projectId, threadId || null]));
-  const draftRef = useRef(drafts);
-  const savingRef = useRef(false);
-  const chatSupervisionRef = useRef(false);
-  // the pending change and its result belong to the exact [project, chat] scope that started it
-  const [chatSupervisionPending, setChatSupervisionPending] = useState<string | null>(null);
-  const [chatSupervisionMessage, setChatSupervisionMessage] = useState<{scope: string; text: string} | null>(null);
-  const activeLoadKey = useRef("");
-  const completedLoadKey = useRef("");
-  const workflowProgressStateRef = useRef(workflowProgressState);
-  const workflowProgressRequestRef = useRef<AbortController | null>(null);
-  const workflowProgressRequestIdRef = useRef(0);
-  const activeWorkflowProgressKey = useRef("");
-  activeProject.current = projectId;
-  activeScope.current = JSON.stringify([projectId, threadId || null]);
-  draftRef.current = drafts;
-  workflowProgressStateRef.current = workflowProgressState;
 
-  const activeSnapshot = snapshotState?.projectId === projectId && snapshotState.snapshot.mainThreadId === (threadId || null) ? snapshotState.snapshot : null;
-  const workflowProgressKey = JSON.stringify([projectId, activeSnapshot?.mainThreadId ?? (threadId || null),
-    activeSnapshot?.binding?.threadId ?? null, activeSnapshot?.binding?.generation ?? null]);
-  activeWorkflowProgressKey.current = workflowProgressKey;
-  const activeDraft = drafts[projectId] ?? null;
+  const activeSnapshot = view.snapshot?.projectId === projectId && view.snapshot.mainThreadId === mainThreadId ? view.snapshot : null;
+  const saving = view.operation !== null;
+  const blocked = view.blocked;
   const modelDirty = Boolean(activeDraft && selectionKey(activeDraft.modelValue) !== selectionKey(activeDraft.modelBaseline));
   const monitoringDirty = Boolean(activeDraft && !sameMonitoring(activeDraft.monitoringValue, activeDraft.monitoringBaseline));
   const teamSettingsDirty = Boolean(activeDraft && !sameTeamSettings(activeDraft.teamSettingsValue, activeDraft.teamSettingsBaseline));
   const dirty = modelDirty || monitoringDirty || teamSettingsDirty;
-  const requestKey = JSON.stringify([projectId, threadId || null, revision]);
-  const isLoading = connected && loadState.key === requestKey && loadState.status === "loading";
-  const loadError = loadState.key === requestKey && loadState.status === "error";
+
+  // no read while saving, and no automatic read over a dirty draft of the shown snapshot: only an explicit refresh moves
+  // the draft's expected generation; each scope revision is read once
+  const requestKey = scopeKey(environmentId, projectId, mainThreadId, revision, epoch);
+  const readNeeded = snapshotReadNeeded({projectId, connected, saving, forceRefresh, dirty, shown: activeSnapshot !== null, completedKey: completedRead?.key ?? null, requestKey});
+  const read = useAtomValue(readNeeded ? projectSupervisorRead({environmentId, projectId, mainThreadId, revision, epoch}) : idleAtom);
+  const isLoading = readNeeded;
+  const loadError = completedRead?.key === requestKey && completedRead.failed;
   const fieldsBusy = saving || isLoading;
   const selectedModel = activeSnapshot && activeDraft ? findModel(activeSnapshot, activeDraft.modelValue) : undefined;
   const validMonitoring = activeDraft ? parseMonitoringDraft(activeDraft.monitoringValue) : null;
@@ -1099,130 +1377,46 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
   const retryButtonLabel = activeSnapshot?.binding?.state === "missing" ? "Replace deleted Supervisor conversation" : "Retry native access";
   const canRetry = Boolean(needsRetry && activeSnapshot?.available && activeSnapshot.binding && activeDraft && !dirty && connected && !fieldsBusy && !blocked);
 
-  useEffect(() => {setPanelMessage(null); setStatusReadAt(null);}, [projectId, threadId]);
+  // the selected [project, chat] decides which outcomes are applied and shown; a new selection clears the last message
+  useEffect(() => {setView(current => current.scope === scope ? current : {...current, scope, message: null, readAt: null});}, [scope, setView]);
   useEffect(() => {onDirtyChange?.(dirty || controlActivity.dirty);}, [dirty, controlActivity.dirty, onDirtyChange]);
   useEffect(() => {onSavingChange?.(saving || controlActivity.busy || controlActivity.uncertain);}, [saving, controlActivity.busy, controlActivity.uncertain, onSavingChange]);
 
+  // a read applies once, when it settles; a failed read keeps the shown snapshot
   useEffect(() => {
-    const mainThreadId = activeSnapshot?.mainThreadId ?? null;
-    if (!projectId || !connected || !mainThreadId) {
-      workflowProgressRequestRef.current?.abort();
-      setWorkflowProgressState({key: workflowProgressKey, pages: [], loading: false, error: null});
+    if (!readNeeded) return;
+    if (AsyncResult.isFailure(read)) {
+      setCompletedRead({key: requestKey, failed: true});
+      setForceRefresh(false);
       return;
     }
-    const previous = workflowProgressStateRef.current;
-    const expectedBinding = activeSnapshot?.binding
-      ? {threadId: activeSnapshot.binding.threadId, generation: activeSnapshot.binding.generation}
-      : undefined;
-    const pageRequests = previous.key === workflowProgressKey && previous.pages.length > 0
-      ? previous.pages.map(page => ({
-        workflowOffset: page.workflowOffset,
-        lineageOffset: page.lineageOffset,
-        ...(expectedBinding ? {expectedBinding} : {}),
-      }))
-      : [{workflowOffset: 0, lineageOffset: 0, ...(expectedBinding ? {expectedBinding} : {})}];
-    const requestId = ++workflowProgressRequestIdRef.current;
-    workflowProgressRequestRef.current?.abort();
-    const controller = new AbortController();
-    workflowProgressRequestRef.current = controller;
-    setWorkflowProgressState(current => current.key === workflowProgressKey
-      ? {...current, loading: true, error: null}
-      : {key: workflowProgressKey, pages: [], loading: true, error: null});
-    void refreshWorkflowProgressPages(projectId, mainThreadId, controller.signal, pageRequests).then(pages => {
-      if (controller.signal.aborted || requestId !== workflowProgressRequestIdRef.current || activeProject.current !== projectId ||
-        activeWorkflowProgressKey.current !== workflowProgressKey) return;
-      const failed = pages.find(page => page.status !== "ok");
-      setWorkflowProgressState(current => {
-        if (current.key === workflowProgressKey && current.pages.length > 0 && failed) return {
-          ...current, loading: false, error: failed.message ?? "Progress could not be refreshed.",
-        };
-        return {key: workflowProgressKey, pages, loading: false, error: failed?.message ?? null};
-      });
-    }, () => {
-      if (controller.signal.aborted || requestId !== workflowProgressRequestIdRef.current || activeProject.current !== projectId ||
-        activeWorkflowProgressKey.current !== workflowProgressKey) return;
-      setWorkflowProgressState(current => current.key === workflowProgressKey
-        ? {...current, loading: false, error: "Progress could not be refreshed. The last successful snapshot is retained."}
-        : {key: workflowProgressKey, pages: [], loading: false, error: "Progress could not be loaded for this main conversation."});
-    });
-    return () => {
-      controller.abort();
-      if (workflowProgressRequestRef.current === controller) workflowProgressRequestRef.current = null;
-    };
-  }, [projectId, connected, workflowProgressKey, workflowProgressRevision]);
+    if (!AsyncResult.isSuccess(read) || read.waiting) return;
+    const next = settleRead({view: registry.get(projectSupervisorView(projectKey)), draft: registry.get(projectSupervisorDraft(projectKey))}, projectId, scope,
+      read.value, forceRefresh);
+    setDraft(next.draft);
+    setView(next.view);
+    setCompletedRead({key: requestKey, failed: false});
+    setForceRefresh(false);
+  }, [read]);
 
+  // the chat supervision poll is not mounted while a change is in flight; it replaces only the chat's supervision state
+  const pollScope = chatPollScope(view, {projectId, threadId, connected, epoch});
+  const polled = useAtomValue(pollScope ? chatSupervisionPoll({...pollScope, environmentId}) : idleAtom);
+  const polledSnapshot = AsyncResult.isSuccess(polled) && !polled.waiting ? Option.getOrNull(polled.value) : null;
   useEffect(() => {
-    if (!connected || !activeSnapshot?.mainThreadId) return;
-    const timer = setInterval(() => {
-      const current = workflowProgressStateRef.current;
-      if (document.visibilityState === "visible" && current.key === workflowProgressKey && !current.loading)
-        setWorkflowProgressRevision(value => value + 1);
-    }, 30_000);
-    return () => clearInterval(timer);
-  }, [connected, workflowProgressKey]);
+    if (polledSnapshot) setView(current => settlePoll(current, scope, polledSnapshot));
+  }, [polledSnapshot]);
 
-  useEffect(() => {
-    if (!connected || !threadId) return;
-    const abort = new AbortController();let reading = false;
-    const timer = setInterval(() => {
-      if (document.hidden || reading || savingRef.current || chatSupervisionRef.current) return;
-      reading = true;
-      void loadProjectSupervisor(projectId, abort.signal, threadId).then(next => {
-        if (abort.signal.aborted || savingRef.current || chatSupervisionRef.current || activeScope.current !== JSON.stringify([projectId, threadId])) return;
-        setSnapshotState(current => current?.projectId === projectId && current.snapshot.mainThreadId === threadId
-          ? {...current, snapshot: {...current.snapshot, chatSupervision: next.chatSupervision ?? null}} : current);
-      }).catch(() => undefined).finally(() => {reading = false;});
-    }, 30_000);
-    return () => {clearInterval(timer);abort.abort();};
-  }, [projectId, threadId, connected]);
-
-  useEffect(() => {
-    if (!projectId || !connected || saving) return;
-    if (!forceRefresh && dirty && activeSnapshot) return;
-    if (!forceRefresh && completedLoadKey.current === requestKey) return;
-    const controller = new AbortController();
-    activeLoadKey.current = requestKey;
-    setLoadState({key: requestKey, status: "loading"});
-    void loadProjectSupervisor(projectId, controller.signal, threadId || null).then(snapshot => {
-      if (controller.signal.aborted || activeLoadKey.current !== requestKey || activeProject.current !== projectId) return;
-      const priorDraft = draftRef.current[projectId] ?? null;
-      const priorModelWasDirty = Boolean(priorDraft && selectionKey(priorDraft.modelValue) !== selectionKey(priorDraft.modelBaseline));
-      const priorMonitoringWasDirty = Boolean(priorDraft && !sameMonitoring(priorDraft.monitoringValue, priorDraft.monitoringBaseline));
-      const priorTeamSettingsWereDirty = Boolean(priorDraft && !sameTeamSettings(priorDraft.teamSettingsValue, priorDraft.teamSettingsBaseline));
-      const modelBaseline = copySelection(snapshot.settings.modelSelection);
-      const modelValue = priorModelWasDirty ? copySelection(priorDraft!.modelValue) : copySelection(modelBaseline);
-      const monitoringBaseline = readMonitoringDraft(snapshot);
-      const monitoringValue = priorMonitoringWasDirty ? copyMonitoringDraft(priorDraft!.monitoringValue) : copyMonitoringDraft(monitoringBaseline);
-      const teamSettingsBaseline = readTeamSettingsDraft(snapshot);
-      const teamSettingsValue = priorTeamSettingsWereDirty ? copyTeamSettingsDraft(priorDraft!.teamSettingsValue) : copyTeamSettingsDraft(teamSettingsBaseline);
-      completedLoadKey.current = requestKey;
-      setSnapshotState({projectId, snapshot});
-      setStatusReadAt(Date.now());
-      setDrafts(current => ({...current, [projectId]: {projectId, modelValue, modelBaseline, monitoringValue, monitoringBaseline,
-        teamSettingsValue, teamSettingsBaseline, expectedGeneration: snapshot.settings.generation}}));
-      setLoadState({key: requestKey, status: "idle"});
-      setBlocked(false);
-      if (forceRefresh) setPanelMessage({
-        projectId,
-        text: (priorModelWasDirty && selectionKey(modelValue) !== selectionKey(modelBaseline)) ||
-          (priorMonitoringWasDirty && !sameMonitoring(monitoringValue, monitoringBaseline)) ||
-          (priorTeamSettingsWereDirty && !sameTeamSettings(teamSettingsValue, teamSettingsBaseline))
-          ? "Supervisor status refreshed. Your unsaved draft was kept against the latest saved generation."
-          : "Supervisor status refreshed from T3.",
-        alert: false,
-      });
-      setForceRefresh(false);
-    }, () => {
-      if (controller.signal.aborted || activeLoadKey.current !== requestKey || activeProject.current !== projectId) return;
-      completedLoadKey.current = requestKey;
-      setLoadState({key: requestKey, status: "error"});
-      setForceRefresh(false);
-    });
-    return () => {
-      controller.abort();
-      if (activeLoadKey.current === requestKey) activeLoadKey.current = "";
-    };
-  }, [projectId, connected, saving, dirty, activeSnapshot, forceRefresh, requestKey]);
+  const progressMain = projectId && connected ? activeSnapshot?.mainThreadId ?? null : null;
+  const progressScope: ProgressScope | null = progressMain ? {environmentId, projectId, mainThreadId: progressMain, bindingThreadId: activeSnapshot?.binding?.threadId ?? null,
+    bindingGeneration: activeSnapshot?.binding?.generation ?? null, epoch} : null;
+  const progress = useAtomValue(progressScope ? workflowProgressRead(progressScope) : idleAtom);
+  const progressPages = Option.getOrNull(AsyncResult.value(progress));
+  const progressLoading = progressScope !== null && (AsyncResult.isInitial(progress) || progress.waiting);
+  useAtomMount(progressScope && !progressLoading ? workflowProgressPoll(progressScope) : idleAtom);
+  const workflowProgressKey = scopeKey(environmentId, projectId, activeSnapshot?.mainThreadId ?? mainThreadId, activeSnapshot?.binding?.threadId ?? null, activeSnapshot?.binding?.generation ?? null);
+  const workflowProgressState: WorkflowProgressPanelState = {key: workflowProgressKey, pages: progressScope ? [...progressPages?.pages ?? []] : [],
+    loading: progressLoading, error: progressScope ? progressPages?.error ?? null : null};
 
   const refresh = () => {
     if (!projectId || !connected || saving || isLoading) return;
@@ -1231,267 +1425,69 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
   };
 
   const refreshWorkflowProgress = () => {
-    if (!connected || !activeSnapshot?.mainThreadId || workflowProgressState.loading) return;
-    setWorkflowProgressRevision(value => value + 1);
+    if (!progressScope || progressLoading) return;
+    registry.refresh(workflowProgressRead(progressScope));
   };
 
   const loadMoreWorkflowProgress = () => {
-    const current = workflowProgressStateRef.current;
-    const latest = current.key === workflowProgressKey ? current.pages.at(-1) : undefined;
-    if (!connected || !activeSnapshot?.mainThreadId || !latest || current.loading ||
-      (!latest.workflowHasMore && !latest.lineageHasMore)) return;
+    const latest = progressPages?.pages.at(-1);
+    if (!progressScope || !latest || progressLoading || (!latest.workflowHasMore && !latest.lineageHasMore)) return;
     const page = {
       workflowOffset: latest.workflowHasMore ? latest.workflowOffset + latest.workflows.length : latest.workflowOffset,
       lineageOffset: latest.lineageHasMore ? latest.lineageOffset + (latest.scope?.threads.length ?? 0) : latest.lineageOffset,
     };
     if (page.workflowOffset === latest.workflowOffset && page.lineageOffset === latest.lineageOffset) return;
-    workflowProgressRequestRef.current?.abort();
-    const controller = new AbortController();
-    workflowProgressRequestRef.current = controller;
-    const requestId = ++workflowProgressRequestIdRef.current;
-    setWorkflowProgressState(state => state.key === workflowProgressKey ? {...state, loading: true, error: null} : state);
-    void loadWorkflowProgress(projectId, activeSnapshot.mainThreadId, controller.signal, {...page,
-      ...(activeSnapshot.binding ? {expectedBinding: {threadId: activeSnapshot.binding.threadId, generation: activeSnapshot.binding.generation}} : {})}).then(result => {
-      if (controller.signal.aborted || requestId !== workflowProgressRequestIdRef.current || activeProject.current !== projectId ||
-        activeWorkflowProgressKey.current !== workflowProgressKey) return;
-      setWorkflowProgressState(state => state.key === workflowProgressKey
-        ? {...state, pages: [...state.pages, result], loading: false, error: result.status === "ok" ? null : result.message}
-        : state);
-    }, () => {
-      if (controller.signal.aborted || requestId !== workflowProgressRequestIdRef.current || activeProject.current !== projectId ||
-        activeWorkflowProgressKey.current !== workflowProgressKey) return;
-      setWorkflowProgressState(state => state.key === workflowProgressKey
-        ? {...state, loading: false, error: "The next progress page could not be loaded. The last successful snapshot is retained."}
-        : state);
-    });
+    registry.update(workflowProgressMore(progressScope), current => ({seq: current.seq + 1, page}));
   };
 
-  const updateSelection = (selection: SupervisorModelSelection) => {
-    setDrafts(current => {
-      const currentDraft = current[projectId];
-      return currentDraft ? {...current, [projectId]: {...currentDraft, modelValue: copySelection(selection)}} : current;
-    });
-    setPanelMessage(null);
+  const editDraft = (edit: (draft: Draft) => Draft) => {
+    setDraft(current => current ? edit(current) : current);
+    setView(current => ({...current, message: null}));
   };
-
-  const updateMonitoring = (monitoring: MonitoringDraft) => {
-    setDrafts(current => {
-      const currentDraft = current[projectId];
-      return currentDraft ? {...current, [projectId]: {...currentDraft, monitoringValue: copyMonitoringDraft(monitoring)}} : current;
-    });
-    setPanelMessage(null);
-  };
-
-  const updateTeamSettings = (settings: TeamSettingsDraft) => {
-    setDrafts(current => {
-      const currentDraft = current[projectId];
-      return currentDraft ? {...current, [projectId]: {...currentDraft, teamSettingsValue: copyTeamSettingsDraft(settings)}} : current;
-    });
-    setPanelMessage(null);
-  };
-
+  const updateSelection = (selection: SupervisorModelSelection) => editDraft(current => ({...current, modelValue: copySelection(selection)}));
+  const updateMonitoring = (monitoring: MonitoringDraft) => editDraft(current => ({...current, monitoringValue: copyMonitoringDraft(monitoring)}));
+  const updateTeamSettings = (settings: TeamSettingsDraft) => editDraft(current => ({...current, teamSettingsValue: copyTeamSettingsDraft(settings)}));
   const discardDraft = () => {
     if (saving || blocked) return;
-    setDrafts(current => {
-      const currentDraft = current[projectId];
-      return currentDraft ? {...current, [projectId]: {
-        ...currentDraft,
-        modelValue: copySelection(currentDraft.modelBaseline),
-        monitoringValue: copyMonitoringDraft(currentDraft.monitoringBaseline),
-        teamSettingsValue: copyTeamSettingsDraft(currentDraft.teamSettingsBaseline),
-      }} : current;
-    });
-    setPanelMessage(null);
+    editDraft(current => ({...current, modelValue: copySelection(current.modelBaseline), monitoringValue: copyMonitoringDraft(current.monitoringBaseline),
+      teamSettingsValue: copyTeamSettingsDraft(current.teamSettingsBaseline)}));
   };
 
-  const save = async (event: FormEvent<HTMLFormElement>) => {
+  const save = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (savingRef.current || !canSave || !activeDraft || !activeSnapshot || !validMonitoring || !validTeamSettings) return;
-    const targetProject = projectId;
-    const targetScope = activeScope.current;
-    const input = {
-      projectId: targetProject,
+    if (saving || !canSave || !activeDraft || !activeSnapshot || !validMonitoring || !validTeamSettings) return;
+    startSettingsChange(registry, projectKey, scope, {kind: "save", input: {
+      projectId,
       ...(threadId ? {mainThreadId: threadId} : {}),
       expectedGeneration: activeDraft.expectedGeneration,
       modelSelection: copySelection(activeDraft.modelValue),
       monitoring: copyMonitoringSettings(validMonitoring),
       teamSettings: {...validTeamSettings},
-    };
-    savingRef.current = true;
-    setSaving(true);
-    setPanelMessage(null);
-    try {
-      const result = await saveProjectSupervisor(input, csrfToken);
-      if (activeProject.current !== targetProject || activeScope.current !== targetScope) return;
-      if (result.status === "saved") {
-        if (result.snapshot) {
-          const canonical = copySelection(result.snapshot.settings.modelSelection);
-          const canonicalMonitoring = readMonitoring(result.snapshot);
-          const canonicalMonitoringDraft = monitoringDraft(canonicalMonitoring);
-          const canonicalTeamSettings = readTeamSettingsDraft(result.snapshot);
-          setSnapshotState({projectId: targetProject, snapshot: result.snapshot});
-          setDrafts(current => ({...current, [targetProject]: {
-            projectId: targetProject,
-            modelValue: canonical,
-            modelBaseline: copySelection(canonical),
-            monitoringValue: copyMonitoringDraft(canonicalMonitoringDraft),
-            monitoringBaseline: copyMonitoringDraft(canonicalMonitoringDraft),
-            teamSettingsValue: copyTeamSettingsDraft(canonicalTeamSettings),
-            teamSettingsBaseline: copyTeamSettingsDraft(canonicalTeamSettings),
-            expectedGeneration: result.snapshot!.settings.generation,
-          }}));
-          setBlocked(false);
-          setPanelMessage({projectId: targetProject, text: result.message, alert: false});
-        } else {
-          setDrafts(current => {
-            const currentDraft = current[targetProject];
-            return currentDraft ? {...current, [targetProject]: {
-              ...currentDraft,
-              modelValue: copySelection(input.modelSelection),
-              modelBaseline: copySelection(input.modelSelection),
-              monitoringValue: monitoringDraft(input.monitoring),
-              monitoringBaseline: monitoringDraft(input.monitoring),
-              teamSettingsValue: teamSettingsDraft(input.teamSettings),
-              teamSettingsBaseline: teamSettingsDraft(input.teamSettings),
-            }} : current;
-          });
-          setBlocked(true);
-          setPanelMessage({projectId: targetProject, text: `${result.message} Refresh Supervisor status before making another change.`, alert: false});
-        }
-      } else if (result.status === "uncertain") {
-        setBlocked(true);
-        setPanelMessage({projectId: targetProject, text: result.message, alert: true});
-      } else if (result.snapshot) {
-        const modelBaseline = copySelection(result.snapshot.settings.modelSelection);
-        const monitoringBaseline = readMonitoringDraft(result.snapshot);
-        const teamSettingsBaseline = readTeamSettingsDraft(result.snapshot);
-        setSnapshotState({projectId: targetProject, snapshot: result.snapshot});
-        setDrafts(current => {
-          const currentDraft = current[targetProject];
-          return currentDraft ? {...current, [targetProject]: {
-            ...currentDraft,
-            modelBaseline,
-            monitoringBaseline,
-            teamSettingsBaseline,
-            expectedGeneration: result.snapshot!.settings.generation,
-          }} : current;
-        });
-        setBlocked(false);
-        setPanelMessage({projectId: targetProject, text: result.message, alert: result.status === "invalid"});
-      } else {
-        setBlocked(result.status === "conflict");
-        setPanelMessage({projectId: targetProject, text: result.status === "conflict" ? `${result.message} Refresh Supervisor status before trying again.` : result.message, alert: result.status === "invalid"});
-      }
-    } catch (error) {
-      if (activeProject.current !== targetProject || activeScope.current !== targetScope) return;
-      const definitelyNotSaved = error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved;
-      setBlocked(!definitelyNotSaved);
-      setPanelMessage({
-        projectId: targetProject,
-        text: error instanceof ProjectSupervisorRequestError
-          ? error.message
-          : "The save outcome could not be confirmed. Refresh Supervisor status before trying again.",
-        alert: !definitelyNotSaved,
-      });
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
-    }
+    }});
   };
 
-  // one explicit per-chat change at a time; the server-confirmed snapshot is shown afterwards, including after conflicts,
-  // but only while the same project and chat are still selected
-  const changeChatSupervision = async (enabled: boolean) => {
-    const current = activeSnapshot;
-    if (chatSupervisionRef.current || !projectId || !current?.mainThreadId || !current.chatSupervision) return;
-    const targetProject = projectId;
-    const targetThread = current.mainThreadId;
-    const targetScope = activeScope.current;
-    const isCurrent = () => activeProject.current === targetProject && activeScope.current === targetScope;
-    chatSupervisionRef.current = true;
-    setChatSupervisionPending(targetScope);
-    setChatSupervisionMessage(null);
-    try {
-      const outcome = await confirmChatSupervisionChange(
-        () => setChatSupervision({projectId: targetProject, mainThreadId: targetThread, enabled, policyGeneration: current.chatSupervision!.policyGeneration}, csrfToken),
-        () => loadProjectSupervisor(targetProject, AbortSignal.timeout(10_000), targetThread),
-        isCurrent);
-      if (!outcome) return;
-      if (outcome.snapshot) setSnapshotState({projectId: targetProject, snapshot: outcome.snapshot});
-      setChatSupervisionMessage({scope: targetScope, text: outcome.message});
-    } finally {
-      chatSupervisionRef.current = false;
-      setChatSupervisionPending(null);
-    }
-  };
-  const retryNativeAccess = async () => {
-    if (savingRef.current || !canRetry || !activeDraft) return;
+  const retryNativeAccess = () => {
     const binding = activeSnapshot?.binding;
-    if (!binding) return;
-    const targetProject = projectId;
-    const targetScope = activeScope.current;
-    const input = {
-      projectId: targetProject,
+    if (saving || !canRetry || !activeDraft || !binding) return;
+    startSettingsChange(registry, projectKey, scope, {kind: "retry", input: {
+      projectId,
       mainThreadId: binding.mainThreadId,
       expectedGeneration: activeDraft.expectedGeneration,
       threadId: binding.threadId,
       bindingGeneration: binding.generation,
-      action: binding.state === "missing" ? "replace" as const : "retry" as const,
-    };
-    savingRef.current = true;
-    setSaving(true);
-    setPanelMessage(null);
-    try {
-      const result = await retryProjectSupervisor(input, csrfToken);
-      if (activeProject.current !== targetProject || activeScope.current !== targetScope) return;
-      if (result.status === "uncertain") {
-        setBlocked(true);
-        setPanelMessage({projectId: targetProject, text: result.message, alert: true});
-      } else if (result.snapshot) {
-        const canonical = copySelection(result.snapshot.settings.modelSelection);
-        const canonicalMonitoring = readMonitoringDraft(result.snapshot);
-        const canonicalTeamSettings = readTeamSettingsDraft(result.snapshot);
-        setSnapshotState({projectId: targetProject, snapshot: result.snapshot});
-        setDrafts(current => ({...current, [targetProject]: {
-          projectId: targetProject,
-          modelValue: canonical,
-          modelBaseline: copySelection(canonical),
-          monitoringValue: copyMonitoringDraft(canonicalMonitoring),
-          monitoringBaseline: copyMonitoringDraft(canonicalMonitoring),
-          teamSettingsValue: copyTeamSettingsDraft(canonicalTeamSettings),
-          teamSettingsBaseline: copyTeamSettingsDraft(canonicalTeamSettings),
-          expectedGeneration: result.snapshot!.settings.generation,
-        }}));
-        setBlocked(false);
-        setPanelMessage({projectId: targetProject, text: result.message, alert: result.status === "invalid"});
-      } else {
-        const mustRefresh = result.status === "conflict" || result.status === "saved";
-        setBlocked(mustRefresh);
-        setPanelMessage({
-          projectId: targetProject,
-          text: mustRefresh ? `${result.message} Refresh Supervisor status before trying again.` : result.message,
-          alert: result.status === "invalid",
-        });
-      }
-    } catch (error) {
-      if (activeProject.current !== targetProject || activeScope.current !== targetScope) return;
-      const definitelyNotSaved = error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved;
-      setBlocked(!definitelyNotSaved);
-      setPanelMessage({
-        projectId: targetProject,
-        text: error instanceof ProjectSupervisorRequestError
-          ? error.message
-          : "The native access retry outcome could not be confirmed. Refresh Supervisor status before trying again.",
-        alert: !definitelyNotSaved,
-      });
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
-    }
+      action: binding.state === "missing" ? "replace" : "retry",
+    }});
   };
 
-  const visibleMessage = panelMessage?.projectId === projectId ? panelMessage : null;
-  const loadKey = requestKey;
+  // one explicit per-chat change at a time in this project; the server-confirmed snapshot is shown afterwards, including
+  // after conflicts, but only while the same project and chat are still selected
+  const changeChat = (enabled: boolean) => {
+    if (!projectId || !activeSnapshot?.mainThreadId || !activeSnapshot.chatSupervision) return;
+    startChatSupervisionChange(registry, projectKey, scope, {projectId, mainThreadId: activeSnapshot.mainThreadId, enabled,
+      policyGeneration: activeSnapshot.chatSupervision.policyGeneration});
+  };
+
+  const visibleMessage = view.message?.scope === scope ? view.message : null;
 
   return <section className="stack project-supervisor" aria-labelledby="project-supervisor-title">
     <h2 id="project-supervisor-title" className="sr-only">Project Supervisor</h2>
@@ -1500,7 +1496,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
     {projectId && !connected && <p className="panel" role="status">T3 is disconnected. Any unsaved Supervisor settings draft is kept.</p>}
     {projectId && connected && !activeSnapshot && isLoading && <p className="panel" role="status">Loading Supervisor status…</p>}
     {projectId && connected && loadError && <p className="panel" role="alert">Could not refresh Supervisor state. The previous snapshot remains visible; refresh to try again or check the T3 connection.</p>}
-    {projectId && activeSnapshot && statusReadAt && <p className="small muted">Supervisor status read at {new Date(statusReadAt).toLocaleTimeString()}. Live workflow progress has its own observation time below.</p>}
+    {projectId && activeSnapshot && view.readAt && <p className="small muted">Supervisor status read at {new Date(view.readAt).toLocaleTimeString()}. Live workflow progress has its own observation time below.</p>}
     {projectId && activeSnapshot && activeDraft && <ProjectSupervisorView
       section={section}
       attentionEnabled={attentionEnabled}
@@ -1518,26 +1514,24 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
       shouldOfferRetry={needsRetry}
       retryButtonLabel={retryButtonLabel}
       canRetry={canRetry}
-      workflowProgress={workflowProgressState.key === workflowProgressKey
-        ? workflowProgressState
-        : {key: workflowProgressKey, pages: [], loading: connected, error: null}}
+      workflowProgress={workflowProgressState}
       onWorkflowProgressRefresh={refreshWorkflowProgress}
       onWorkflowProgressLoadMore={loadMoreWorkflowProgress}
       onSelectionChange={updateSelection}
       onMonitoringChange={updateMonitoring}
       onTeamSettingsChange={updateTeamSettings}
       onDiscard={discardDraft}
-      onRetry={() => {void retryNativeAccess();}}
-      chatSupervisionBusy={chatSupervisionPending === activeScope.current}
-      chatSupervisionLocked={chatSupervisionPending !== null}
-      chatSupervisionMessage={chatSupervisionMessage?.scope === activeScope.current ? chatSupervisionMessage.text : null}
-      onChatSupervision={enabled => {void changeChatSupervision(enabled);}}
+      onRetry={retryNativeAccess}
+      chatSupervisionBusy={view.chat?.scope === scope}
+      chatSupervisionLocked={view.chat !== null}
+      chatSupervisionMessage={view.chatMessage?.scope === scope ? view.chatMessage.text : null}
+      onChatSupervision={changeChat}
       onSubmit={save}
     />}
     {projectId && connected && activeSnapshot && !activeDraft && isLoading && <p className="panel" role="status">Loading the selected project’s Supervisor status…</p>}
     {projectId && connected && !activeSnapshot && !isLoading && !loadError && <p className="panel muted">Supervisor status is not loaded yet.</p>}
     {visibleMessage && <p role={visibleMessage.alert ? "alert" : "status"}>{visibleMessage.text}</p>}
     {projectId && <div><button type="button" disabled={!connected || saving || isLoading} onClick={refresh}>{section === "progress" || section === "plan" ? "Refresh Supervisor status" : "Refresh Supervisor settings"}</button></div>}
-    {loadState.key === loadKey && loadState.status === "loading" && activeSnapshot && <p className="small muted" role="status">Refreshing Supervisor state…</p>}
+    {isLoading && activeSnapshot && <p className="small muted" role="status">Refreshing Supervisor state…</p>}
   </section>;
 }

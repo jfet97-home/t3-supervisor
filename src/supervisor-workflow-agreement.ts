@@ -1,3 +1,4 @@
+import { Exit, Schema } from "effect";
 import { fingerprint } from "./guidance-store.js";
 import { canonicalizeProposalDraft, validateWorkflowRecord, workflowRecordDiagnostic, workflowRecordDiagnosticCodes, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
 import type { WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
@@ -25,6 +26,8 @@ export const workflowProtocolDiagnosticCodes = ["record_json_invalid", "task_mis
 export type WorkflowProtocolDiagnosticCode = typeof workflowProtocolDiagnosticCodes[number];
 
 export type ExactFenceRecord = {value: unknown | null; malformedJson: boolean; lineCount: number};
+// a record body is model output: decoded as JSON here, its shape is checked by the record parsers
+const decodeRecordJson = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 // reads only top-level fences of exactly one kind; quoted, indented and nested copies are ignored. With enclosingFences, any
 // run of three or more backticks or tildes indented by at most three spaces encloses everything up to a bare run of the
 // same character at least as long, and an unclosed one leaves the rest of the message inert
@@ -61,8 +64,9 @@ export const exactFenceRecords = (text: string, kind: string, maxRecords: number
         recordLines.push(recordLine);
       }
       if (length <= maxRecordLength && lines[index] === "```") {
-        try {values.push({value: JSON.parse(recordLines.join("\n")), malformedJson: false, lineCount: recordLines.length});}
-        catch {values.push({value: null, malformedJson: true, lineCount: recordLines.length});}
+        const decoded = decodeRecordJson(recordLines.join("\n"));
+        values.push(Exit.isSuccess(decoded) ? {value: decoded.value, malformedJson: false, lineCount: recordLines.length}
+          : {value: null, malformedJson: true, lineCount: recordLines.length});
       }
       continue;
     }

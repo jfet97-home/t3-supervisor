@@ -1,26 +1,16 @@
 import { NodeRuntime } from "@effect/platform-node";
-import { Effect, Layer } from "effect";
-import { readFile } from "node:fs/promises";
-import { loadConfig } from "./config.js";
-import { makeStore } from "./store.js";
-import { createStatus, runSupervisor } from "./supervisor.js";
-import { makeT3Client } from "./t3.js";
-import { ThreadPolicyStore } from "./thread-policy.js";
-import { loadSupervisorOwnership } from "./project-supervisor-store.js";
+import { ConfigProvider, Effect, Layer, Logger } from "effect";
+import { environment } from "./config.js";
+import { jsonLogger } from "./logging.js";
+import { reportFailure, supervise, SupervisorLive } from "./supervisor.js";
 
-const config = loadConfig();
-config.supervisorOwnedThreadIds = loadSupervisorOwnership(config.dataDirectory);
-const status = createStatus(config);
+// the server program over the process environment as it is at start (the cli sets DATA_DIRECTORY before it runs this);
+// a failure prints one classified line and no stack, cause, path or token (BC-CLI-04)
+export const server = supervise(SupervisorLive.pipe(Layer.provide(ConfigProvider.layer(Effect.sync(environment))))).pipe(
+  Effect.tapCause(reportFailure),
+  Effect.provide(Logger.layer([jsonLogger])),
+);
 
-NodeRuntime.runMain(Effect.gen(function* () {
-  config.threadPolicy = yield* Effect.acquireRelease(
-    Effect.sync(() => new ThreadPolicyStore(config.dataDirectory, { excludedThreadIds: config.excludedThreadIds })),
-    (store) => Effect.sync(() => store.close()),
-  );
-  const token = yield* Effect.tryPromise(() => readFile(config.t3TokenFile, "utf8"));
-  const services = Layer.mergeAll(
-    makeStore(config.dataDirectory),
-    makeT3Client({ baseUrl: config.t3Url, token: token.trim() }),
-  );
-  yield* runSupervisor(config, status).pipe(Effect.provide(services));
-}).pipe(Effect.scoped));
+// run directly (node dist/main.js), the module is the entry: a signal interrupts the program, which releases what it
+// acquired in reverse order and exits 130; imported by the cli, it only provides the program
+if (import.meta.main) NodeRuntime.runMain(server, { disableErrorReporting: true });

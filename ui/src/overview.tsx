@@ -1,9 +1,12 @@
 import {StopNotice} from "./stop-notice.js";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Schema } from "effect";
-import { DashboardOverview, readOverviewRange, type DashboardOverviewInfo, type DashboardWorkInfo } from "../../src/dashboard-overview.js";
+import { useEffect, useState } from "react";
+import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react";
+import { Effect, Option } from "effect";
+import { AsyncResult, Atom } from "effect/reactivity";
+import { readOverviewPages, type DashboardOverviewInfo, type DashboardWorkInfo } from "../../src/dashboard-overview.js";
 import type { GuidanceSnapshot } from "../../src/guidance-contract.js";
-import { loadAccess, sessionHeaders } from "./access.js";
+import { ApiClient, classifyMutation } from "./api.js";
+import { authEpoch, environmentAtom, pollWhileVisible, uiRuntime } from "./atoms.js";
 import { directoryRoute, RouteLink, type Route } from "./navigation.js";
 import { Icon } from "./icons.js";
 
@@ -14,42 +17,56 @@ export function ReadTime({value, prefix = "Read"}: {value: number | null; prefix
   return <span className="small muted">{prefix} {value === null ? "time unavailable" : <time dateTime={new Date(value).toISOString()} title={new Date(value).toLocaleString()}>{new Date(value).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}</time>}</span>;
 }
 
-export function useOverview(active: boolean, connected: boolean) {
-  const [data, setData] = useState<DashboardOverviewInfo | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const current = useRef(data); current.current = data;
-  const request = useRef<AbortController | null>(null);
-  const load = useCallback(async (more = false) => {
-    if (!connected) return;
-    request.current?.abort();
-    const controller = new AbortController(); request.current = controller;
-    setLoading(true); setError("");
-    const previous = current.current;
-    const count = Math.max(100, (previous?.work.length ?? 0) + (more ? 100 : 0));
-    try {
-      const result = await readOverviewRange(async offset => {
-        const response = await fetch(`/api/guidance/dashboard-overview?offset=${offset}&limit=100`, {credentials: "omit", headers: sessionHeaders(), signal: controller.signal});
-        if (!response.ok) {
-          if (response.status === 401 || response.status === 403) await loadAccess();
-          throw new Error("The work overview could not be refreshed.");
-        }
-        return Schema.decodeUnknownSync(DashboardOverview)(await response.json());
-      }, count);
-      if (!controller.signal.aborted) setData(result);
-    } catch {
-      if (!controller.signal.aborted) setError("The work overview could not be refreshed. The last successful read is kept; current state may have changed.");
-    } finally {if (!controller.signal.aborted) setLoading(false);}
-  }, [connected]);
-  useEffect(() => {
-    if (!active || !connected) {request.current?.abort(); setLoading(false); return;}
-    void load();
-    const timer = setInterval(() => {if (!document.hidden) void load();}, 30_000);
-    return () => {clearInterval(timer); request.current?.abort();};
-  }, [active, connected, load]);
-  return {data, loading, error, refresh: () => {void load();}, loadMore: () => {void load(true);}};
+export const overviewRefreshMillis = 30_000;
+export const overviewFailureMessage = "The work overview could not be refreshed. The last successful read is kept; current state may have changed.";
+
+// the work overview of a dashboard: while enabled (active and connected) it reads the loaded range, at least 100
+// conversations and 100 more after a load-more request, and keeps its last successful read through refreshes and
+// failures; disabling it interrupts the read in flight and keeps the last result; the poll is mounted only while enabled.
+// it follows the auth epoch and the T3 environment, so a new session or environment reads the range again; a 401 while
+// signed out leaves the epoch as it was, so the read repeats only on its interval
+export const makeOverview = (pollMillis: number) => {
+  const enabled = Atom.make(false);
+  const more = Atom.make(false);
+  const read = uiRuntime.atom((get) => {
+    if (!get(enabled)) return Effect.never;
+    authEpoch(get);
+    get(environmentAtom);
+    const loaded = Option.match(Option.flatMap(get.self<AsyncResult.AsyncResult<DashboardOverviewInfo, unknown>>(), AsyncResult.value), {onNone: () => 0, onSome: value => value.work.length});
+    const extend = get.once(more);
+    if (extend) get.set(more, false);
+    const count = Math.max(100, loaded + (extend ? 100 : 0));
+    return Effect.flatMap(ApiClient, client => readOverviewPages(offset =>
+      classifyMutation(client.guidance.dashboardOverview({query: {offset: String(offset), limit: "100"}})), count));
+  });
+  return {enabled, more, read, polled: read.pipe(pollWhileVisible(pollMillis))};
+};
+export const overview = makeOverview(overviewRefreshMillis);
+
+export interface OverviewState {
+  readonly data: DashboardOverviewInfo | null;
+  readonly loading: boolean;
+  readonly error: string;
+  readonly refresh: () => void;
+  readonly loadMore: () => void;
 }
-export type OverviewState = ReturnType<typeof useOverview>;
+
+// what the shell shows for an overview result: a paused read is not loading, and a failure stays visible until the
+// next read starts
+export const overviewView = (result: AsyncResult.AsyncResult<DashboardOverviewInfo, unknown>, enabled: boolean) => {
+  const loading = enabled && result.waiting;
+  return {data: Option.getOrNull(AsyncResult.value(result)), loading, error: AsyncResult.isFailure(result) && !loading ? overviewFailureMessage : ""};
+};
+
+export function useOverview(active: boolean, connected: boolean): OverviewState {
+  const enabled = active && connected;
+  const setEnabled = useAtomSet(overview.enabled);
+  useEffect(() => setEnabled(enabled), [enabled, setEnabled]);
+  const result = useAtomValue(enabled ? overview.polled : overview.read);
+  const refresh = useAtomRefresh(overview.read);
+  const setMore = useAtomSet(overview.more);
+  return {...overviewView(result, enabled), refresh, loadMore: () => { setMore(true); refresh(); }};
+}
 
 export function WorkState({work}: {work: DashboardWorkInfo}) {
   return <div className="work-state"><span className={`pill ${work.attention.length ? "amber" : work.supervision === "enabled" ? "green" : ""}`}>

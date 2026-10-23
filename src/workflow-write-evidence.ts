@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { Exit, Schema } from "effect";
 import { mainRunNodeReader } from "./domain.js";
 import { canonicalJson } from "./canonical-json.js";
 import type { Projection, RunInfo } from "./types.js";
@@ -39,10 +40,14 @@ export const workflowToolNames = {
     direct: ["t3-supervisor-workflows.supervision_start", "mcp__t3-supervisor-workflows__supervision_start"],
     mcpxTarget: "t3-supervisor-workflows__supervision_start",
   },
+  interpretation: {
+    direct: ["t3-supervisor-workflows.supervision_interpretation_submit", "mcp__t3-supervisor-workflows__supervision_interpretation_submit"],
+    mcpxTarget: "t3-supervisor-workflows__supervision_interpretation_submit",
+  },
   mcpxCall: ["mcpx.mcpx_call_tool", "mcp__mcpx__mcpx_call_tool"],
 } as const;
 
-export type WorkflowEvidenceTool = "read" | "write" | "team" | "guide" | "stop" | "start";
+export type WorkflowEvidenceTool = "read" | "write" | "team" | "guide" | "stop" | "start" | "interpretation";
 
 export type WorkflowEvidenceMatch = {
   itemId: string;
@@ -91,6 +96,7 @@ const knownDirectToolNames = new Set<string>([
   ...workflowToolNames.guide.direct,
   ...workflowToolNames.stop.direct,
   ...workflowToolNames.start.direct,
+  ...workflowToolNames.interpretation.direct,
 ]);
 const knownMcpxTargets = new Set<string>([
   workflowToolNames.read.mcpxTarget,
@@ -99,6 +105,7 @@ const knownMcpxTargets = new Set<string>([
   workflowToolNames.guide.mcpxTarget,
   workflowToolNames.stop.mcpxTarget,
   workflowToolNames.start.mcpxTarget,
+  workflowToolNames.interpretation.mcpxTarget,
 ]);
 const isMcpxCall = (toolName: string): boolean => workflowToolNames.mcpxCall.includes(toolName as never);
 const maxObservedToolNameLength = 128;
@@ -111,6 +118,9 @@ type RecordedArguments = {
   recognized: boolean;
   observedToolName?: string;
 };
+
+// a string snapshot input is decoded as JSON before its arguments are compared; malformed input matches no arguments
+const decodeSnapshotJson = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 
 const isTruncatedSnapshot = (item: Record<string, unknown>): boolean =>
   item.inputTruncated === true || item.truncated === true || isRecord(item.input) && item.input.truncated === true;
@@ -154,13 +164,13 @@ export const workflowEvidenceCandidates = (
       if (!unknownToolName) {
         plausible = true;
       } else {
-        try {
-          const parsed = JSON.parse(snapshotInput) as unknown;
-          if (isRecord(parsed)) {
-            const snapshotArguments = recordedArguments({...item, input: parsed}, tool);
+        const parsed = decodeSnapshotJson(snapshotInput);
+        if (Exit.isSuccess(parsed) && isRecord(parsed.value)) {
+          try {
+            const snapshotArguments = recordedArguments({...item, input: parsed.value}, tool);
             plausible = snapshotArguments !== null && canonicalJson(snapshotArguments.arguments) === expectedCanonical;
-          }
-        } catch {plausible = false;}
+          } catch {plausible = false;}
+        }
         if (!plausible && isTruncatedSnapshot(item)) plausible = true;
       }
     }

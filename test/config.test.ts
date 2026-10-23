@@ -1,18 +1,17 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { loadConfig } from "../src/config.js";
+import { it } from "@effect/vitest";
+import { ConfigProvider, Effect, Layer } from "effect";
+import { SupervisorConfig } from "../src/config.js";
 
-test("helper provider isolation is opt-in and trims a bounded native instance ID", () => {
-  const configured = process.env.SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID;
-  try {
-    delete process.env.SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID;
-    assert.equal(loadConfig().helperProviderInstanceId, undefined);
-    process.env.SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID = " supervisor-helpers-20348 ";
-    assert.equal(loadConfig().helperProviderInstanceId, "supervisor-helpers-20348");
-    process.env.SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID = "x".repeat(257);
-    assert.throws(() => loadConfig(), /invalid_helper_provider_instance_id/u);
-  } finally {
-    if (configured === undefined) delete process.env.SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID;
-    else process.env.SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID = configured;
-  }
-});
+// the helper instance id parsed from exactly the given environment, empty values kept as the process provider keeps them
+const helperProviderInstanceId = (env: Record<string, string>) => Effect.gen(function* () {
+  return (yield* SupervisorConfig).helperProviderInstanceId;
+}).pipe(Effect.provide(SupervisorConfig.layer.pipe(
+  Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnvRecord(env, { preserveEmptyStrings: true }))))));
+
+it.effect("helper provider isolation is opt-in and trims a bounded native instance ID", () => Effect.gen(function* () {
+  assert.equal(yield* helperProviderInstanceId({}), undefined);
+  assert.equal(yield* helperProviderInstanceId({ SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: " supervisor-helpers-20348 " }), "supervisor-helpers-20348");
+  const failure = yield* Effect.flip(helperProviderInstanceId({ SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: "x".repeat(257) }));
+  assert.match(failure.message, /invalid_helper_provider_instance_id/u);
+}));

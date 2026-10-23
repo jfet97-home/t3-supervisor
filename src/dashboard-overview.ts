@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Data, Effect, Option, Schema } from "effect";
 import type { BindingRecord, TaskRecord } from "./project-supervisor-store.js";
 import type { TaskInterpretationInfo, SupervisorMonitoringStatus } from "./project-supervisor-contract.js";
 import type { SupervisionControlInfo } from "./supervisor-control-contract.js";
@@ -125,25 +125,32 @@ export function buildDashboardOverview(input: {
     hasMore: input.offset + input.limit < work.length, work: work.slice(input.offset, input.offset + input.limit)};
 }
 
-/** Reads a coherent fresh prefix, retaining the loaded range across polls and discarding reordered pages. */
-export async function readOverviewRange(read: (offset: number) => Promise<DashboardOverviewInfo>, count: number) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const first = await read(0);
-    if (first.offset !== 0) throw new Error("invalid_overview_page");
+// a page sequence that cannot form one coherent prefix of the overview; the reason is its message
+export class OverviewRangeError extends Data.TaggedError("OverviewRangeError")<{readonly reason: "invalid_overview_page" | "overview_changed_during_read"}> {
+  override get message() { return this.reason; }
+}
+
+// reads a coherent fresh prefix of at least `count` conversations in pages, retaining the loaded range across polls,
+// restarting once when the overview changes between pages and rejecting reordered or duplicate pages
+export const readOverviewPages = <E, R>(read: (offset: number) => Effect.Effect<DashboardOverviewInfo, E, R>, count: number) => {
+  const attempt = Effect.gen(function* () {
+    const first = yield* read(0);
+    if (first.offset !== 0) return yield* new OverviewRangeError({reason: "invalid_overview_page"});
     let latest = first;
     const work = [...first.work];
-    let changed = false;
     while (latest.hasMore && work.length < count) {
       const offset = latest.offset + latest.work.length;
-      if (!latest.work.length) throw new Error("invalid_overview_page");
-      const next = await read(offset);
-      if (next.revision !== first.revision) {changed = true; break;}
-      if (next.offset !== offset || next.total !== first.total) throw new Error("invalid_overview_page");
+      if (!latest.work.length) return yield* new OverviewRangeError({reason: "invalid_overview_page"});
+      const next = yield* read(offset);
+      if (next.revision !== first.revision) return Option.none<DashboardOverviewInfo>();
+      if (next.offset !== offset || next.total !== first.total) return yield* new OverviewRangeError({reason: "invalid_overview_page"});
       work.push(...next.work); latest = next;
     }
-    if (changed) continue;
-    if (new Set(work.map(item => item.mainThreadId)).size !== work.length) throw new Error("invalid_overview_page");
-    return {...first, work, hasMore: latest.hasMore};
-  }
-  throw new Error("overview_changed_during_read");
-}
+    if (new Set(work.map(item => item.mainThreadId)).size !== work.length) return yield* new OverviewRangeError({reason: "invalid_overview_page"});
+    return Option.some({...first, work, hasMore: latest.hasMore});
+  });
+  return Effect.flatMap(attempt, Option.match({
+    onSome: Effect.succeed,
+    onNone: () => Effect.flatMap(attempt, Option.match({onSome: Effect.succeed, onNone: () => Effect.fail(new OverviewRangeError({reason: "overview_changed_during_read"}))})),
+  }));
+};

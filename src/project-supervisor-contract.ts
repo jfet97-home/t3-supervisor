@@ -257,12 +257,20 @@ export const WorkflowProposal = Schema.Struct({
   plan: Schema.NullOr(WorkflowPlanGroup),
 });
 export type WorkflowProposalInfo = typeof WorkflowProposal.Type;
+// the identity of an agreed proposal's evidence, projected from InterpretationEvidence: the publishing message or the recorded tool submission
+const EvidenceId = Schema.String.check(Schema.isNonEmpty());
+export const AgreementEvidence = Schema.Union([
+  Schema.Struct({kind: Schema.Literal("supervisor_message"), messageId: EvidenceId}),
+  Schema.Struct({kind: Schema.Literal("interpretation_submission"), taskId: EvidenceId, attemptId: EvidenceId, itemId: EvidenceId, runId: EvidenceId,
+    argumentsHash: EvidenceId}),
+]);
+export type AgreementEvidence = typeof AgreementEvidence.Type;
 export const WorkflowAgreement = Schema.Struct({
   status: Schema.Literals(["agreed", "stale"]),
   message: Schema.String,
   proposalId: Schema.String,
   agreedAt: Schema.Number,
-  supervisorMessageId: Schema.String,
+  evidence: AgreementEvidence,
   agentMessageId: Schema.String,
   workflow: WorkflowProposal,
 });

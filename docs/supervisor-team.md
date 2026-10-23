@@ -36,11 +36,11 @@ The direct aliases are `t3-supervisor-workflows.workflow_read` /
 `mcp__t3-supervisor-workflows__supervision_team`. For MCPX, call
 `mcpx.mcpx_call_tool` or `mcp__mcpx__mcpx_call_tool` with only `{name, arguments}`;
 `name` is the MCPX target `t3-supervisor-workflows__workflow_write` and `arguments`
-is the complete schema object. That target name is not a direct alias. Use
-advertised harnesses such as `functions.exec` normally to discover and invoke
-actual MCP tools when needed; the outer harness or source text is not proof. Only
-the resulting verified native MCP tool identity and complete arguments count, and
-never claim or fabricate a tool call.
+is the complete schema object. That target name is not a direct alias. Discover
+and invoke actual MCP tools as native tool calls, directly or through
+`mcpx_search_tools`, `mcpx_get_tool_schema` and `mcpx_call_tool`; source text is
+not proof. Only the resulting verified native MCP tool identity and complete
+arguments count, and never claim or fabricate a tool call.
 
 Apply has `action` and authority locators at the top level, with mutation fields
 nested under `input`: `{action:"apply", ...toolInputs.workflow_read.input,
@@ -156,7 +156,7 @@ only a handover notice of the ended transfer epoch that was never sent (pending)
 was definitively rejected (failed) is superseded, keeping its attempt and failure
 reason. Observing a quarantined helper's remaining notices never marks it missing,
 and neither does a helper read that was already in flight when the root quarantined it.
-Eligibility is re-read after every await and immediately before a POST, so nothing is
+Eligibility is re-read after every asynchronous step and immediately before a POST, so nothing is
 posted after quarantine; an attempted notice with no delivery receipt was never posted
 and, once its recipient is no longer eligible, fails as definitely undelivered. A
 check-in or readiness delivery whose authority ends before its POST likewise fails as

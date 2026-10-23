@@ -88,6 +88,8 @@ export const Snapshot = Schema.Struct({
   tokensUsed: Schema.Number,
 });
 export type GuidanceSnapshot = typeof Snapshot.Type;
+// the sign-in body: any other json value signs in with an empty token, which is refused
+export const LoginRequest = Schema.Struct({ token: Text });
 export class UiError extends Schema.TaggedError<UiError>()(
   "UiError",
   { message: Text },

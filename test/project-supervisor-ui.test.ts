@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { Schema } from "effect";
+import { it } from "@effect/vitest";
+import { Deferred, Effect, Exit, Fiber, Layer, Queue, Schema } from "effect";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultMonitoringSettings, defaultSupervisorTeamSettings, ProjectSupervisorSave, ProjectSupervisorSnapshot, type DefinitionReviewInfo, type ProjectSupervisorInfo, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput, type ProjectSupervisorTeamInfo, type SupervisorModelSelection, type WorkflowAgreementInfo, type WorkflowPlanGroupInfo, type WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import type { WorkflowProgressSnapshot } from "../src/workflow-progress.js";
+import { SessionAccess } from "../ui/src/access.js";
 import { confirmChatSupervisionChange, ProjectSupervisorView, WorkflowProgressPanel, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
+import { keepFetch, locationLayer, pageLayer, rejects } from "./support/g6-page.js";
+
+// the client helpers are Effects on the page runtime of each test; they resolve request paths against the page location.
+// they run over a stubbed browser fetch without time, so these tests are it.effect
+const onPage = pageLayer.pipe(Layer.provideMerge(locationLayer()));
 
 const selection: SupervisorModelSelection = {
   instanceId: "provider-one",
@@ -72,7 +78,7 @@ const agreement = (overrides: Partial<WorkflowAgreementInfo> = {}): WorkflowAgre
   message: "The Supervisor and agent agreed on this plan.",
   proposalId: "proposal-1",
   agreedAt: 1_800_000_000_000,
-  supervisorMessageId: "supervisor-message-1",
+  evidence: {kind: "supervisor_message", messageId: "supervisor-message-1"},
   agentMessageId: "agent-message-1",
   workflow: workflow(),
   ...overrides,
@@ -147,7 +153,7 @@ const renderTaskView = (task: ProjectSupervisorInfo["tasks"][number]) => renderT
   onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
 }));
 
-test("Supervisor settings markup explains automatic conversation reuse and separates saved, current and task state", () => {
+it("Supervisor settings markup explains automatic conversation reuse and separates saved, current and task state", () => {
   const monitoringSnapshot = {
     ...snapshot,
     monitoringStatus: {state: "busy" as const, message: "A monitoring review is running.", pendingItems: 4, nextReviewAt: 1_800_000_000_000, lastNoticeAt: null},
@@ -190,7 +196,7 @@ test("Supervisor settings markup explains automatic conversation reuse and separ
   assert.doesNotMatch(html, /Create conversation/);
 });
 
-test("monitoring settings default sensibly and remain optional for legacy snapshots and saves", () => {
+it("monitoring settings default sensibly and remain optional for legacy snapshots and saves", () => {
   assert.deepEqual(defaultMonitoringSettings, {intervalMinutes: 5, activityThreshold: 10});
   assert.deepEqual(defaultSupervisorTeamSettings, {maxHelpersPerRoot: 5});
   const decodedSnapshot = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(snapshot);
@@ -202,7 +208,7 @@ test("monitoring settings default sensibly and remain optional for legacy snapsh
   assert.equal(decodedSnapshot.tasks[0]?.definitionReview, undefined);
 });
 
-test("Supervisor team stays distinct from operational workflows and shows member state, assignments and handovers", () => {
+it("Supervisor team stays distinct from operational workflows and shows member state, assignments and handovers", () => {
   const team: ProjectSupervisorTeamInfo = {
     status: "incomplete",
     message: "One helper snapshot is delayed.",
@@ -287,7 +293,7 @@ test("Supervisor team stays distinct from operational workflows and shows member
   assert.doesNotMatch(html, /reviewed by (the )?root/iu);
 });
 
-test("invalid team settings expose an associated accessible error", () => {
+it("invalid team settings expose an associated accessible error", () => {
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
     ...viewDefaults,
     snapshot, selection, monitoring, teamSettings: {maxHelpersPerRoot: "21"}, connected: true,
@@ -299,7 +305,7 @@ test("invalid team settings expose an associated accessible error", () => {
   assert.match(html, /Enter maximum helpers per root from 0 to 20/);
 });
 
-test("invalid monitoring drafts expose associated accessible errors", () => {
+it("invalid monitoring drafts expose associated accessible errors", () => {
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
   ...viewDefaults,
     snapshot, selection, monitoring: {intervalMinutes: "1.5", activityThreshold: "101"}, connected: true,
@@ -312,7 +318,7 @@ test("invalid monitoring drafts expose associated accessible errors", () => {
   assert.match(html, /Enter finalized activity threshold from 3 to 100/);
 });
 
-test("workflow proposal shows recursive requirements, nested plan groups, fixed omissions and contributors", () => {
+it("workflow proposal shows recursive requirements, nested plan groups, fixed omissions and contributors", () => {
   const task: ProjectSupervisorInfo["tasks"][number] = {
     ...snapshot.tasks[0]!,
     workflow: workflow(),
@@ -341,7 +347,7 @@ test("workflow proposal shows recursive requirements, nested plan groups, fixed 
   assert.doesNotMatch(html, /Accept workflow|Send workflow/i);
 });
 
-test("workflow protocol diagnostics explain which complete record needs correction and escape message IDs", () => {
+it("workflow protocol diagnostics explain which complete record needs correction and escape message IDs", () => {
   const supervisorHtml = renderTaskView({...snapshot.tasks[0]!, workflowProtocolDiagnostic: {
     role: "supervisor",
     proposalId: "proposal-current",
@@ -367,7 +373,7 @@ test("workflow protocol diagnostics explain which complete record needs correcti
   assert.match(operativeHtml, /Message ID:<\/strong> <code>operative-message-9<\/code>/);
 });
 
-test("invalid and incomplete definitions keep requirements unknown instead of implying an empty policy", () => {
+it("invalid and incomplete definitions keep requirements unknown instead of implying an empty policy", () => {
   const partial = workflow({
     status: "provisional",
     message: "A finite plan can proceed while a workflow cycle is fixed.",
@@ -388,7 +394,7 @@ test("invalid and incomplete definitions keep requirements unknown instead of im
   assert.doesNotMatch(html, /No required definitions are configured/);
 });
 
-test("a pending revised proposal remains separate from its prior agreed plan", () => {
+it("a pending revised proposal remains separate from its prior agreed plan", () => {
   const prior = workflow({message: "The previous plan was accepted.", workspaceRoot: "/workspace/previous", revision: "definition-revision-11"});
   const task: ProjectSupervisorInfo["tasks"][number] = {
     ...snapshot.tasks[0]!,
@@ -408,7 +414,7 @@ test("a pending revised proposal remains separate from its prior agreed plan", (
   assert.ok(html.indexOf("Agreed workflow") < html.indexOf("Current workflow draft"));
 });
 
-test("an active agreement is primary for the matching proposal and escapes all source text", () => {
+it("an active agreement is primary for the matching proposal and escapes all source text", () => {
   const unsafePlan: WorkflowPlanGroupInfo = {kind: "sequence", templatePath: "delivery.yaml/sequence", nodes: [
     {kind: "step", nodeId: "inspect", definitionId: "inspect", localId: null, templatePath: "delivery.yaml/sequence/0", name: "Inspect safely", description: "<img src=x onerror=alert(1)>", source: null, resolution: "resolved", reason: "<script>reason</script>", status: "planned", contributorThreadIds: []},
   ]};
@@ -425,7 +431,7 @@ test("an active agreement is primary for the matching proposal and escapes all s
     agreement: agreement({
       message: "<script>agreement message</script>",
       proposalId: "proposal-<1>",
-      supervisorMessageId: "supervisor-<2>",
+      evidence: {kind: "supervisor_message", messageId: "supervisor-<2>"},
       agentMessageId: "agent-&-3",
       workflow: unsafeWorkflow,
     }),
@@ -450,7 +456,14 @@ test("an active agreement is primary for the matching proposal and escapes all s
   assert.doesNotMatch(html, /compliance confirmed|compliant/i);
 });
 
-test("a stale agreement remains historical while a newer proposal stays current", () => {
+it("an agreement resting on a typed submission names its interpretation attempt and item, not a Supervisor message", () => {
+  const html = renderTaskView({...snapshot.tasks[0]!, agreement: agreement({evidence: {kind: "interpretation_submission", taskId: "task-1",
+    attemptId: "interpretation-attempt:<1>", itemId: "item-&-2", runId: "run-3", argumentsHash: "arguments-hash"}})});
+  assert.match(html, /Interpretation submission:<\/strong> attempt <code>interpretation-attempt:&lt;1&gt;<\/code>, item <code>item-&amp;-2<\/code>/);
+  assert.doesNotMatch(html, /Supervisor message ID/);
+});
+
+it("a stale agreement remains historical while a newer proposal stays current", () => {
   const task: ProjectSupervisorInfo["tasks"][number] = {
     ...snapshot.tasks[0]!,
     workflow: workflow({message: "A new proposal is ready for discussion."}),
@@ -467,7 +480,7 @@ test("a stale agreement remains historical while a newer proposal stays current"
   assert.doesNotMatch(html, /<h5>Agreed workflow<\/h5>/);
 });
 
-test("definition authorization and revert checks stay advisory beside the workflow", () => {
+it("definition authorization and revert checks stay advisory beside the workflow", () => {
   for (const [status, message, expectedText] of [
     ["checking", "Authorization evidence is being checked.", "Project definitions changed; Supervisor is checking user authorization."],
     ["revert_requested", "The observed change was not authorized.", "Unrequested changes: revert requested."],
@@ -487,7 +500,7 @@ test("definition authorization and revert checks stay advisory beside the workfl
   }
 });
 
-test("authorized and restored definition reviews expose escaped source details", () => {
+it("authorized and restored definition reviews expose escaped source details", () => {
   for (const [status, expectedText] of [
     ["authorized", "User-authorized definitions adopted."],
     ["restored", "Approved definitions restored; renegotiation needed."],
@@ -515,7 +528,7 @@ test("authorized and restored definition reviews expose escaped source details",
   }
 });
 
-test("unavailable proposals and tasks without a recorded plan preserve uncertainty", () => {
+it("unavailable proposals and tasks without a recorded plan preserve uncertainty", () => {
   const unavailable = workflow({status: "unavailable", message: "Definitions were unavailable.", definitionsStatus: "unavailable", definitionsComplete: false, requirementsKnown: false, requirements: [], plan: null});
   const unavailableHtml = renderTaskView({...snapshot.tasks[0]!, workflow: unavailable});
   assert.match(unavailableHtml, /Proposal status:<\/strong> Unavailable/);
@@ -530,7 +543,7 @@ test("unavailable proposals and tasks without a recorded plan preserve uncertain
   assert.doesNotMatch(legacyHtml, /Project definition review/);
 });
 
-test("workflow proposal status and message remain visible across every contract state", () => {
+it("workflow proposal status and message remain visible across every contract state", () => {
   for (const status of ["pending", "proposed", "provisional", "unavailable", "stale", "invalid"] as const) {
     const task: ProjectSupervisorInfo["tasks"][number] = {
       ...snapshot.tasks[0]!,
@@ -542,7 +555,7 @@ test("workflow proposal status and message remain visible across every contract 
   }
 });
 
-test("unavailable saved models remain visible and disabled while an available model can be selected", () => {
+it("unavailable saved models remain visible and disabled while an available model can be selected", () => {
   const unavailable = snapshot.models[1]!;
   const unavailableSelection: SupervisorModelSelection = {instanceId: unavailable.instanceId, model: unavailable.model, options: [{id: "thinking", value: true}]};
   const savedSnapshot = {...snapshot, settings: {...snapshot.settings, modelSelection: unavailableSelection}};
@@ -557,7 +570,7 @@ test("unavailable saved models remain visible and disabled while an available mo
   assert.match(html, /disabled=""/);
 });
 
-test("an uncertain result from another project thread exposes retry only after the draft is resolved", () => {
+it("an uncertain result from another project thread exposes retry only after the draft is resolved", () => {
   const uncertainTask = {...snapshot.tasks[0]!, threadId: "other-thread", status: "uncertain" as const};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
   ...viewDefaults,
@@ -572,7 +585,7 @@ test("an uncertain result from another project thread exposes retry only after t
   assert.match(html, /Task interpretation for the selected conversation/);
 });
 
-test("a deleted binding has a distinct explicit replacement action and no live link to the deleted thread", () => {
+it("a deleted binding has a distinct explicit replacement action and no live link to the deleted thread", () => {
   const missingSnapshot = {...snapshot, binding: {...snapshot.binding!, state: "missing" as const}};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
   ...viewDefaults,
@@ -585,7 +598,7 @@ test("a deleted binding has a distinct explicit replacement action and no live l
   assert.doesNotMatch(html, /Open in T3/);
 });
 
-test("native retries are explicit for pending ready bindings and uncertain project tasks, never for a pre-task pending default", () => {
+it("native retries are explicit for pending ready bindings and uncertain project tasks, never for a pre-task pending default", () => {
   assert.equal(shouldOfferNativeRetry(snapshot), false);
   const beforeFirstTask = {...snapshot, binding: null, settings: {...snapshot.settings, pending: true}};
   assert.equal(shouldOfferNativeRetry(beforeFirstTask), false);
@@ -593,7 +606,7 @@ test("native retries are explicit for pending ready bindings and uncertain proje
   assert.equal(shouldOfferNativeRetry({...beforeFirstTask, tasks: [uncertainTask]}), true);
 });
 
-test("monitoring retry suggestions respect saturation while preserving independent recovery actions", () => {
+it("monitoring retry suggestions respect saturation while preserving independent recovery actions", () => {
   const saturationOnly: ProjectSupervisorInfo = {
     ...snapshot,
     settings: {...snapshot.settings, pending: false},
@@ -636,7 +649,7 @@ test("monitoring retry suggestions respect saturation while preserving independe
   assert.equal(shouldOfferNativeRetry(legacyMonitoringFailure), true);
 });
 
-test("project task recovery remains visible but disabled until a bound conversation exists", () => {
+it("project task recovery remains visible but disabled until a bound conversation exists", () => {
   const unboundSnapshot = {...snapshot, binding: null};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
   ...viewDefaults,
@@ -648,201 +661,187 @@ test("project task recovery remains visible but disabled until a bound conversat
   assert.match(html, /<button type="button" disabled="">Retry native access<\/button>/);
 });
 
-test("Supervisor client encodes project targets, checks response identity and passes GET cancellation", async () => {
-  const original = globalThis.fetch;
-  const controller = new AbortController();
-  try {
-    let seen = "";
-    globalThis.fetch = async (inputValue, init) => {
-      seen = String(inputValue);
-      assert.equal(init?.signal, controller.signal);
-      assert.equal(init?.credentials, "omit");
-      return new Response(JSON.stringify({...snapshot, projectId: "project & one"}), {status: 200});
-    };
-    const loaded = await loadProjectSupervisor("project & one", controller.signal, "task-thread");
-    assert.equal(loaded.projectId, "project & one");
-    assert.equal(new URL(seen, "http://localhost").searchParams.get("projectId"), "project & one");
+it.effect("Supervisor client encodes project targets, checks response identity and passes GET cancellation", () => Effect.gen(function* () {
+  yield* keepFetch;
+  let seen = "";
+  globalThis.fetch = async (inputValue, init) => {
+    seen = String(inputValue);
+    assert.ok(init?.signal instanceof AbortSignal);
+    assert.equal(init?.credentials, "omit");
+    return new Response(JSON.stringify({...snapshot, projectId: "project & one"}), {status: 200});
+  };
+  const loaded = yield* loadProjectSupervisor("project & one", "task-thread");
+  assert.equal(loaded.projectId, "project & one");
+  assert.equal(new URL(seen, "http://localhost").searchParams.get("projectId"), "project & one");
 
-    globalThis.fetch = async () => new Response(JSON.stringify({...snapshot, projectId: "another-project"}), {status: 200});
-    await assert.rejects(loadProjectSupervisor("project", controller.signal, "task-thread"), /another project/);
-  } finally {globalThis.fetch = original;}
-});
+  globalThis.fetch = async () => new Response(JSON.stringify({...snapshot, projectId: "another-project"}), {status: 200});
+  yield* rejects(loadProjectSupervisor("project", "task-thread"), /another project/);
+}).pipe(Effect.provide(onPage)));
 
-test("a late GET cannot cross an aborted selection", async () => {
-  const original = globalThis.fetch;
-  const controller = new AbortController();
+it.effect("a late GET cannot cross an aborted selection", () => Effect.gen(function* () {
+  yield* keepFetch;
   let resolveResponse: ((response: Response) => void) | undefined;
-  try {
-    globalThis.fetch = async (_input, init) => {
-      assert.equal(init?.signal, controller.signal);
-      return await new Promise<Response>(resolve => {resolveResponse = resolve;});
-    };
-    const pending = loadProjectSupervisor("project", controller.signal, "task-thread");
-    assert.ok(resolveResponse);
-    controller.abort();
-    resolveResponse!(new Response(JSON.stringify(snapshot), {status: 200}));
-    await assert.rejects(pending, /another project/);
-  } finally {globalThis.fetch = original;}
-});
+  let requestSignal: AbortSignal | null | undefined;
+  const reached = yield* Deferred.make<void>();
+  globalThis.fetch = async (_input, init) => {
+    requestSignal = init?.signal;
+    const response = new Promise<Response>(resolve => {resolveResponse = resolve;});
+    Deferred.doneUnsafe(reached, Exit.void);
+    return await response;
+  };
+  const pending = yield* Effect.forkChild(loadProjectSupervisor("project", "task-thread"));
+  yield* Deferred.await(reached);
+  assert.ok(resolveResponse);
+  // the selection is cancelled: its read is interrupted
+  yield* Fiber.interrupt(pending);
+  resolveResponse!(new Response(JSON.stringify(snapshot), {status: 200}));
+  yield* rejects(Fiber.join(pending), /interrupted/);
+  assert.equal(requestSignal?.aborted, true, "cancelling the selection aborts the request");
+}).pipe(Effect.provide(onPage)));
 
-test("a save response for another project is treated as an unknown outcome", async () => {
-  const original = globalThis.fetch;
-  try {
-    globalThis.fetch = async (_input, init) => {
-      assert.equal(init?.method, "POST");
-      assert.equal(init?.credentials, "omit");
-      return new Response(JSON.stringify({status: "saved", message: "Saved", snapshot: {...snapshot, projectId: "another-project"}}), {status: 200});
-    };
-    await assert.rejects(saveProjectSupervisor(input, "token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
-  } finally {globalThis.fetch = original;}
-});
+it.effect("a save response for another project is treated as an unknown outcome", () => Effect.gen(function* () {
+  yield* keepFetch;
+  globalThis.fetch = async (_input, init) => {
+    assert.equal(init?.method, "POST");
+    assert.equal(init?.credentials, "omit");
+    return new Response(JSON.stringify({status: "saved", message: "Saved", snapshot: {...snapshot, projectId: "another-project"}}), {status: 200});
+  };
+  yield* rejects(saveProjectSupervisor(input), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
+}).pipe(Effect.provide(onPage)));
 
-test("Supervisor settings saves send live monitoring values with the model selection", async () => {
-  const original = globalThis.fetch;
+it.effect("Supervisor settings saves send live monitoring values with the model selection", () => Effect.gen(function* () {
+  yield* keepFetch;
   const monitoredInput: ProjectSupervisorSaveInput = {
     ...input,
     monitoring: {intervalMinutes: 12, activityThreshold: 35},
   };
-  try {
-    globalThis.fetch = async (url, init) => {
-      assert.equal(String(url), "/api/guidance/project-supervisor");
-      assert.equal(init?.method, "POST");
-      assert.deepEqual(JSON.parse(String(init?.body)), monitoredInput);
-      return new Response(JSON.stringify({status: "saved", message: "Settings saved.", snapshot}), {status: 200});
-    };
-    assert.equal((await saveProjectSupervisor(monitoredInput, "token")).status, "saved");
-  } finally {globalThis.fetch = original;}
-});
+  globalThis.fetch = async (url, init) => {
+    assert.equal(String(url), "/api/guidance/project-supervisor");
+    assert.equal(init?.method, "POST");
+    assert.deepEqual(JSON.parse(String(init?.body)), monitoredInput);
+    return new Response(JSON.stringify({status: "saved", message: "Settings saved.", snapshot}), {status: 200});
+  };
+  assert.equal((yield* saveProjectSupervisor(monitoredInput)).status, "saved");
+}).pipe(Effect.provide(onPage)));
 
-test("native access retry uses its dedicated route and blocks a foreign-project response", async () => {
-  const original = globalThis.fetch;
+it.effect("native access retry uses its dedicated route and blocks a foreign-project response", () => Effect.gen(function* () {
+  yield* keepFetch;
   const retryInput: ProjectSupervisorRetryInput = {projectId: "project", mainThreadId: "task-thread", expectedGeneration: 7, threadId: "bound-thread", bindingGeneration: 3, action: "retry"};
-  try {
-    globalThis.fetch = async (url, init) => {
-      assert.equal(String(url), "/api/guidance/project-supervisor/retry");
-      assert.equal(init?.method, "POST");
-      assert.deepEqual(JSON.parse(String(init?.body)), retryInput);
-      return new Response(JSON.stringify({status: "uncertain", message: "Retry needs refresh.", snapshot: {...snapshot, projectId: "another-project"}}), {status: 200});
-    };
-    await assert.rejects(retryProjectSupervisor(retryInput, "token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
-  } finally {globalThis.fetch = original;}
-});
+  globalThis.fetch = async (url, init) => {
+    assert.equal(String(url), "/api/guidance/project-supervisor/retry");
+    assert.equal(init?.method, "POST");
+    assert.deepEqual(JSON.parse(String(init?.body)), retryInput);
+    return new Response(JSON.stringify({status: "uncertain", message: "Retry needs refresh.", snapshot: {...snapshot, projectId: "another-project"}}), {status: 200});
+  };
+  yield* rejects(retryProjectSupervisor(retryInput), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
+}).pipe(Effect.provide(onPage)));
 
-test("deleted-conversation recovery sends an explicit replacement action and binding identity", async () => {
-  const original = globalThis.fetch;
+it.effect("deleted-conversation recovery sends an explicit replacement action and binding identity", () => Effect.gen(function* () {
+  yield* keepFetch;
   const replaceInput: ProjectSupervisorRetryInput = {projectId: "project", mainThreadId: "task-thread", expectedGeneration: 7, threadId: "deleted-thread", bindingGeneration: 4, action: "replace"};
-  try {
-    globalThis.fetch = async (url, init) => {
-      assert.equal(String(url), "/api/guidance/project-supervisor/retry");
-      assert.deepEqual(JSON.parse(String(init?.body)), replaceInput);
-      return new Response(JSON.stringify({status: "saved", message: "Replaced explicitly.", snapshot}), {status: 200});
-    };
-    assert.equal((await retryProjectSupervisor(replaceInput, "token")).status, "saved");
-  } finally {globalThis.fetch = original;}
-});
+  globalThis.fetch = async (url, init) => {
+    assert.equal(String(url), "/api/guidance/project-supervisor/retry");
+    assert.deepEqual(JSON.parse(String(init?.body)), replaceInput);
+    return new Response(JSON.stringify({status: "saved", message: "Replaced explicitly.", snapshot}), {status: 200});
+  };
+  assert.equal((yield* retryProjectSupervisor(replaceInput)).status, "saved");
+}).pipe(Effect.provide(onPage)));
 
-test("a retry 403 refreshes the latest CSRF token without automatically repeating the native request", async () => {
-  const original = globalThis.fetch;
+it.effect("a retry 403 refreshes the latest CSRF token without automatically repeating the native request", () => Effect.gen(function* () {
+  yield* keepFetch;
   const retryInput: ProjectSupervisorRetryInput = {projectId: "project", mainThreadId: "task-thread", expectedGeneration: 7, threadId: "bound-thread", bindingGeneration: 3, action: "retry"};
   let csrfReads = 0;
   let retryWrites = 0;
-  try {
-    globalThis.fetch = async (url, init) => {
-      if (String(url) === "/api/csrf") {
-        csrfReads++;
-        return new Response(JSON.stringify({csrf: csrfReads === 1 ? "retry-first-token" : "retry-current-token"}), {status: 200});
-      }
-      retryWrites++;
-      const headers = init?.headers as Record<string, string>;
-      assert.equal(headers["x-csrf-token"], retryWrites === 1 ? "retry-first-token" : "retry-current-token");
-      if (retryWrites === 1) return new Response("{}", {status: 403});
-      return new Response(JSON.stringify({status: "saved", message: "Retry accepted.", snapshot}), {status: 200});
-    };
+  globalThis.fetch = async (url, init) => {
+    if (String(url) === "/api/csrf") {
+      csrfReads++;
+      return new Response(JSON.stringify({csrf: csrfReads === 1 ? "retry-first-token" : "retry-current-token"}), {status: 200});
+    }
+    retryWrites++;
+    const headers = init?.headers as Record<string, string>;
+    assert.equal(headers["x-csrf-token"], retryWrites === 1 ? "retry-first-token" : "retry-current-token");
+    if (retryWrites === 1) return new Response("{}", {status: 403});
+    return new Response(JSON.stringify({status: "saved", message: "Retry accepted.", snapshot}), {status: 200});
+  };
 
-    const {loadAccess} = await import("../ui/src/access.js");
-    assert.equal(await loadAccess(), true);
-    await assert.rejects(retryProjectSupervisor(retryInput, "old-prop-token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved);
-    assert.equal(retryWrites, 1);
-    assert.equal(csrfReads, 2);
-    assert.equal((await retryProjectSupervisor(retryInput, "old-prop-token")).status, "saved");
-    assert.equal(retryWrites, 2);
-    assert.equal(csrfReads, 2);
-  } finally {globalThis.fetch = original;}
-});
+  const access = yield* SessionAccess;
+  assert.equal(yield* access.load, true);
+  // target change (story03): a 403 for a token the process no longer issues may answer a browser resend after the first
+  // attempt applied in the process before a restart, so the outcome is unknown; nothing is repeated automatically
+  yield* rejects(retryProjectSupervisor(retryInput), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
+  assert.equal(retryWrites, 1);
+  assert.equal(csrfReads, 2);
+  assert.equal((yield* retryProjectSupervisor(retryInput)).status, "saved");
+  assert.equal(retryWrites, 2);
+  assert.equal(csrfReads, 2);
+}).pipe(Effect.provide(onPage)));
 
-test("a 403 refreshes CSRF without retrying the POST and the next explicit save uses the latest token", async () => {
-  const original = globalThis.fetch;
+it.effect("a 403 refreshes CSRF without retrying the POST and the next explicit save uses the latest token", () => Effect.gen(function* () {
+  yield* keepFetch;
   let csrfReads = 0;
   let writes = 0;
-  try {
-    globalThis.fetch = async (url, init) => {
-      if (String(url) === "/api/csrf") {
-        csrfReads++;
-        return new Response(JSON.stringify({csrf: csrfReads === 1 ? "first-session" : "rotated-session"}), {status: 200});
-      }
-      writes++;
-      const headers = init?.headers as Record<string, string>;
-      assert.equal(headers["x-csrf-token"], writes === 1 ? "first-session" : "rotated-session");
-      if (writes === 1) return new Response("{}", {status: 403});
-      return new Response(JSON.stringify({status: "saved", message: "Saved", snapshot}), {status: 200});
-    };
+  globalThis.fetch = async (url, init) => {
+    if (String(url) === "/api/csrf") {
+      csrfReads++;
+      return new Response(JSON.stringify({csrf: csrfReads === 1 ? "first-session" : "rotated-session"}), {status: 200});
+    }
+    writes++;
+    const headers = init?.headers as Record<string, string>;
+    assert.equal(headers["x-csrf-token"], writes === 1 ? "first-session" : "rotated-session");
+    if (writes === 1) return new Response("{}", {status: 403});
+    return new Response(JSON.stringify({status: "saved", message: "Saved", snapshot}), {status: 200});
+  };
 
-    const {loadAccess} = await import("../ui/src/access.js");
-    assert.equal(await loadAccess(), true);
-    await assert.rejects(saveProjectSupervisor(input, "stale-prop-token"), (error: unknown) =>
-      error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved && /Session refreshed/.test(error.message));
-    assert.equal(writes, 1);
-    assert.equal(csrfReads, 2);
+  const access = yield* SessionAccess;
+  assert.equal(yield* access.load, true);
+  // target change (story03): the rotated token's 403 does not exclude a first attempt that applied before the restart
+  yield* rejects(saveProjectSupervisor(input), (error: unknown) =>
+    error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved && /could not be confirmed/.test(error.message));
+  assert.equal(writes, 1);
+  assert.equal(csrfReads, 2);
 
-    assert.equal((await saveProjectSupervisor(input, "stale-prop-token")).status, "saved");
-    assert.equal(writes, 2);
-    assert.equal(csrfReads, 2);
-  } finally {globalThis.fetch = original;}
-});
+  assert.equal((yield* saveProjectSupervisor(input)).status, "saved");
+  assert.equal(writes, 2);
+  assert.equal(csrfReads, 2);
+}).pipe(Effect.provide(onPage)));
 
-test("unconfirmed HTTP mutation outcomes are marked unsafe to retry without refresh", async () => {
-  const original = globalThis.fetch;
-  try {
-    globalThis.fetch = async () => new Response("{}", {status: 500});
-    await assert.rejects(saveProjectSupervisor(input, "token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
-  } finally {globalThis.fetch = original;}
-});
+it.effect("unconfirmed HTTP mutation outcomes are marked unsafe to retry without refresh", () => Effect.gen(function* () {
+  yield* keepFetch;
+  globalThis.fetch = async () => new Response("{}", {status: 500});
+  yield* rejects(saveProjectSupervisor(input), (error: unknown) => error instanceof ProjectSupervisorRequestError && !error.definitelyNotSaved);
+}).pipe(Effect.provide(onPage)));
 
-test("a response for another main in the same project is rejected by the client", async () => {
-  const original = globalThis.fetch;
-  try {
-    globalThis.fetch = async () => new Response(JSON.stringify(snapshot), {status: 200});
-    await assert.rejects(loadProjectSupervisor("project", AbortSignal.timeout(1000), "another-main"), /another project/);
-    globalThis.fetch = async () => new Response(JSON.stringify({status: "saved", message: "Read back", snapshot}), {status: 200});
-    const input: ProjectSupervisorRetryInput = {projectId: "project", mainThreadId: "another-main", expectedGeneration: 7, threadId: snapshot.binding!.threadId, bindingGeneration: 7, action: "retry"};
-    await assert.rejects(retryProjectSupervisor(input, "csrf"), /another project/);
-  } finally {globalThis.fetch = original;}
-});
+it.effect("a response for another main in the same project is rejected by the client", () => Effect.gen(function* () {
+  yield* keepFetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(snapshot), {status: 200});
+  yield* rejects(loadProjectSupervisor("project", "another-main"), /another project/);
+  globalThis.fetch = async () => new Response(JSON.stringify({status: "saved", message: "Read back", snapshot}), {status: 200});
+  const input: ProjectSupervisorRetryInput = {projectId: "project", mainThreadId: "another-main", expectedGeneration: 7, threadId: snapshot.binding!.threadId, bindingGeneration: 7, action: "retry"};
+  yield* rejects(retryProjectSupervisor(input), /another project/);
+}).pipe(Effect.provide(onPage)));
 
-test("team and coverage APIs reject mismatched roots and off-scope assignments", async () => {
-  const original = globalThis.fetch;
-  try {
-    globalThis.fetch = async () => new Response(JSON.stringify({
-      ...snapshot,
-      team: {
-        status: "ok", message: null, observedAt: 1,
-        root: {threadId: "another-root", title: null, model: null, readiness: "unknown", lifecycle: "unknown", currentState: null, lastAssessment: null},
-        members: [], issues: [],
-      },
-    }), {status: 200});
-    await assert.rejects(loadProjectSupervisor("project", AbortSignal.timeout(1000), "task-thread"), /another root conversation/);
+it.effect("team and coverage APIs reject mismatched roots and off-scope assignments", () => Effect.gen(function* () {
+  yield* keepFetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    ...snapshot,
+    team: {
+      status: "ok", message: null, observedAt: 1,
+      root: {threadId: "another-root", title: null, model: null, readiness: "unknown", lifecycle: "unknown", currentState: null, lastAssessment: null},
+      members: [], issues: [],
+    },
+  }), {status: 200});
+  yield* rejects(loadProjectSupervisor("project", "task-thread"), /another root conversation/);
 
-    globalThis.fetch = async () => new Response(JSON.stringify({...snapshot, settings: {...snapshot.settings, teamSettings: {maxHelpersPerRoot: 21}}}), {status: 200});
-    await assert.rejects(loadProjectSupervisor("project", AbortSignal.timeout(1000), "task-thread"), /outside the supported range/);
+  globalThis.fetch = async () => new Response(JSON.stringify({...snapshot, settings: {...snapshot.settings, teamSettings: {maxHelpersPerRoot: 21}}}), {status: 200});
+  yield* rejects(loadProjectSupervisor("project", "task-thread"), /outside the supported range/);
 
-    globalThis.fetch = async () => new Response(JSON.stringify({...progressSnapshot, coverage: [
-      {threadId: "foreign-child", state: "assigned", assigneeThreadId: "helper", assigneeTitle: "Helper", assignmentRootThreadId: "foreign-child"},
-    ]}), {status: 200});
-    await assert.rejects(loadWorkflowProgress("project", "task-thread", AbortSignal.timeout(1000)), /does not match its native scope page/);
-  } finally {globalThis.fetch = original;}
-});
+  globalThis.fetch = async () => new Response(JSON.stringify({...progressSnapshot, coverage: [
+    {threadId: "foreign-child", state: "assigned", assigneeThreadId: "helper", assigneeTitle: "Helper", assignmentRootThreadId: "foreign-child"},
+  ]}), {status: 200});
+  yield* rejects(loadWorkflowProgress("project", "task-thread"), /does not match its native scope page/);
+}).pipe(Effect.provide(onPage)));
 
-test("project defaults without a selection expose no conversation readback or retry", () => {
+it("project defaults without a selection expose no conversation readback or retry", () => {
   const defaults = {...snapshot, mainThreadId: null, binding: null, modelSelection: null, modelApplication: null, tasks: [], settings: {...snapshot.settings, pending: false}};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
   ...viewDefaults,
@@ -854,20 +853,18 @@ test("project defaults without a selection expose no conversation readback or re
 });
 
 
-test("an expired dashboard session is a definite rejection and never repeats the mutation", async () => {
-  const original = globalThis.fetch;
+it.effect("an expired dashboard session is a definite rejection and never repeats the mutation", () => Effect.gen(function* () {
+  yield* keepFetch;
   let writes = 0;
-  try {
-    globalThis.fetch = async (_url, init) => {
-      if (init?.method === "POST") writes++;
-      return new Response("{}", {status: 401});
-    };
-    await assert.rejects(saveProjectSupervisor(input, "token"), (error: unknown) => error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved);
-    assert.equal(writes, 1);
-  } finally {globalThis.fetch = original;}
-});
+  globalThis.fetch = async (_url, init) => {
+    if (init?.method === "POST") writes++;
+    return new Response("{}", {status: 401});
+  };
+  yield* rejects(saveProjectSupervisor(input), (error: unknown) => error instanceof ProjectSupervisorRequestError && error.definitelyNotSaved);
+  assert.equal(writes, 1);
+}).pipe(Effect.provide(onPage)));
 
-test("live progress separates the current workflow from agreement history and preserves child uncertainty", () => {
+it("live progress separates the current workflow from agreement history and preserves child uncertainty", () => {
   const html = renderToStaticMarkup(createElement(WorkflowProgressPanel, {
     mainThreadId: "task-thread",
     connected: true,
@@ -896,7 +893,7 @@ test("live progress separates the current workflow from agreement history and pr
   assert.doesNotMatch(html, /accept workflow|send workflow/i);
 });
 
-test("operational rows distinguish root, helper, observe-only, transfer, unknown and missing assignment data", () => {
+it("operational rows distinguish root, helper, observe-only, transfer, unknown and missing assignment data", () => {
   const withCoverage: WorkflowProgressSnapshot = {
     ...progressSnapshot,
     coverage: [
@@ -920,54 +917,52 @@ test("operational rows distinguish root, helper, observe-only, transfer, unknown
   assert.match(html, /Assigned to:<\/strong> Not reported in this snapshot/);
 });
 
-test("workflow progress API pages are scoped to the requested project, main, and independent offsets", async () => {
-  const original = globalThis.fetch;
+it.effect("workflow progress API pages are scoped to the requested project, main, and independent offsets", () => Effect.gen(function* () {
+  yield* keepFetch;
   const page = {...progressSnapshot, workflowOffset: 10, lineageOffset: 20};
   let requested = "";
-  try {
-    globalThis.fetch = async (url, init) => {
-      requested = String(url);
-      assert.equal(init?.method, undefined);
-      assert.equal(init?.credentials, "omit");
-      assert.ok(init?.signal);
-      return new Response(JSON.stringify(page), {status: 200});
-    };
-    const loaded = await loadWorkflowProgress("project", "task-thread", AbortSignal.timeout(1000), {
-      workflowOffset: 10,
-      lineageOffset: 20,
-      limit: 50,
-      expectedBinding: {threadId: "supervisor-thread", generation: 4},
-    });
-    const url = new URL(requested, "http://localhost");
-    assert.equal(url.pathname, "/api/guidance/workflow-progress");
-    assert.equal(url.searchParams.get("projectId"), "project");
-    assert.equal(url.searchParams.get("mainThreadId"), "task-thread");
-    assert.equal(url.searchParams.get("workflowOffset"), "10");
-    assert.equal(url.searchParams.get("lineageOffset"), "20");
-    assert.equal(url.searchParams.get("limit"), "50");
-    assert.equal(url.searchParams.has("bindingGeneration"), false);
-    assert.equal(loaded.workflowOffset, 10);
-    assert.equal(loaded.lineageOffset, 20);
+  globalThis.fetch = async (url, init) => {
+    requested = String(url);
+    assert.equal(init?.method, undefined);
+    assert.equal(init?.credentials, "omit");
+    assert.ok(init?.signal);
+    return new Response(JSON.stringify(page), {status: 200});
+  };
+  const loaded = yield* loadWorkflowProgress("project", "task-thread", {
+    workflowOffset: 10,
+    lineageOffset: 20,
+    limit: 50,
+    expectedBinding: {threadId: "supervisor-thread", generation: 4},
+  });
+  const url = new URL(requested, "http://localhost");
+  assert.equal(url.pathname, "/api/guidance/workflow-progress");
+  assert.equal(url.searchParams.get("projectId"), "project");
+  assert.equal(url.searchParams.get("mainThreadId"), "task-thread");
+  assert.equal(url.searchParams.get("workflowOffset"), "10");
+  assert.equal(url.searchParams.get("lineageOffset"), "20");
+  assert.equal(url.searchParams.get("limit"), "50");
+  assert.equal(url.searchParams.has("bindingGeneration"), false);
+  assert.equal(loaded.workflowOffset, 10);
+  assert.equal(loaded.lineageOffset, 20);
 
-    globalThis.fetch = async () => new Response(JSON.stringify({...page, mainThreadId: "another-main"}), {status: 200});
-    await assert.rejects(loadWorkflowProgress("project", "task-thread", AbortSignal.timeout(1000), {
-      workflowOffset: 10,
-      lineageOffset: 20,
-      limit: 50,
-      expectedBinding: {threadId: "supervisor-thread", generation: 4},
-    }), /another selection or page/);
-    globalThis.fetch = async () => new Response(JSON.stringify({...page, scope: {...page.scope!, bindingGeneration: 9}}), {status: 200});
-    await assert.rejects(loadWorkflowProgress("project", "task-thread", AbortSignal.timeout(1000), {
-      workflowOffset: 10,
-      lineageOffset: 20,
-      limit: 50,
-      expectedBinding: {threadId: "supervisor-thread", generation: 4},
-    }), /another Supervisor binding/);
-  } finally {globalThis.fetch = original;}
-});
+  globalThis.fetch = async () => new Response(JSON.stringify({...page, mainThreadId: "another-main"}), {status: 200});
+  yield* rejects(loadWorkflowProgress("project", "task-thread", {
+    workflowOffset: 10,
+    lineageOffset: 20,
+    limit: 50,
+    expectedBinding: {threadId: "supervisor-thread", generation: 4},
+  }), /another selection or page/);
+  globalThis.fetch = async () => new Response(JSON.stringify({...page, scope: {...page.scope!, bindingGeneration: 9}}), {status: 200});
+  yield* rejects(loadWorkflowProgress("project", "task-thread", {
+    workflowOffset: 10,
+    lineageOffset: 20,
+    limit: 50,
+    expectedBinding: {threadId: "supervisor-thread", generation: 4},
+  }), /another Supervisor binding/);
+}).pipe(Effect.provide(onPage)));
 
-test("workflow progress refresh keeps every loaded page and fetches them sequentially", async () => {
-  const original = globalThis.fetch;
+it.effect("workflow progress refresh keeps every loaded page and fetches them sequentially", () => Effect.gen(function* () {
+  yield* keepFetch;
   const requests = [
     {workflowOffset: 0, lineageOffset: 0, limit: 20, expectedBinding: {threadId: "supervisor-thread", generation: 4}},
     {workflowOffset: 20, lineageOffset: 20, limit: 20, expectedBinding: {threadId: "supervisor-thread", generation: 4}},
@@ -976,28 +971,30 @@ test("workflow progress refresh keeps every loaded page and fetches them sequent
   const order: Array<[number, number]> = [];
   let inFlight = 0;
   let maximumInFlight = 0;
-  try {
-    globalThis.fetch = async url => {
-      const parsed = new URL(String(url), "http://localhost");
-      const workflowOffset = Number(parsed.searchParams.get("workflowOffset"));
-      const lineageOffset = Number(parsed.searchParams.get("lineageOffset"));
-      inFlight++;
-      maximumInFlight = Math.max(maximumInFlight, inFlight);
-      await new Promise(resolve => setTimeout(resolve, 2));
-      order.push([workflowOffset, lineageOffset]);
-      inFlight--;
-      return new Response(JSON.stringify({...progressSnapshot, workflowOffset, lineageOffset}), {status: 200});
-    };
-    const pages = await refreshWorkflowProgressPages("project", "task-thread", AbortSignal.timeout(1000), requests);
-    assert.equal(pages.length, 3);
-    assert.deepEqual(order, [[0, 0], [20, 20], [40, 40]]);
-    assert.equal(maximumInFlight, 1);
-    assert.deepEqual(pages.map(page => [page.workflowOffset, page.lineageOffset]), [[0, 0], [20, 20], [40, 40]]);
-  } finally {globalThis.fetch = original;}
-});
+  // each response is held until the test releases it, so a page read beside it would be in flight at the same time
+  const held = yield* Queue.unbounded<() => void>();
+  globalThis.fetch = async url => {
+    const parsed = new URL(String(url), "http://localhost");
+    const workflowOffset = Number(parsed.searchParams.get("workflowOffset"));
+    const lineageOffset = Number(parsed.searchParams.get("lineageOffset"));
+    inFlight++;
+    maximumInFlight = Math.max(maximumInFlight, inFlight);
+    await new Promise<void>(release => Queue.offerUnsafe(held, release));
+    order.push([workflowOffset, lineageOffset]);
+    inFlight--;
+    return new Response(JSON.stringify({...progressSnapshot, workflowOffset, lineageOffset}), {status: 200});
+  };
+  const refreshing = yield* Effect.forkChild(refreshWorkflowProgressPages("project", "task-thread", requests));
+  for (let released = 0; released < requests.length; released++) (yield* Queue.take(held))();
+  const pages = yield* Fiber.join(refreshing);
+  assert.equal(pages.length, 3);
+  assert.deepEqual(order, [[0, 0], [20, 20], [40, 40]]);
+  assert.equal(maximumInFlight, 1);
+  assert.deepEqual(pages.map(page => [page.workflowOffset, page.lineageOffset]), [[0, 0], [20, 20], [40, 40]]);
+}).pipe(Effect.provide(onPage)));
 
 
-test("Plan retains unavailable diagnostics without claiming unreadable records are absent", () => {
+it("Plan retains unavailable diagnostics without claiming unreadable records are absent", () => {
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
     ...viewDefaults, section: "plan", snapshot: {...snapshot, available: false, tasks: [], message: "Unsupported retained scope state."}, selection, monitoring,
     threadId: "task-thread", connected: true, saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false,
@@ -1010,7 +1007,7 @@ test("Plan retains unavailable diagnostics without claiming unreadable records a
   assert.doesNotMatch(html, /No task interpretation or plan has been recorded/);
 });
 
-test("blocked supervision is visible beside Progress and Plan even when the native conversation is ready", () => {
+it("blocked supervision is visible beside Progress and Plan even when the native conversation is ready", () => {
   for (const section of ["progress", "plan"] as const) {
     const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
       ...viewDefaults, section, snapshot: {...snapshot, monitoringStatus: {state: "unavailable", pendingItems: 0, nextReviewAt: null,
@@ -1025,7 +1022,7 @@ test("blocked supervision is visible beside Progress and Plan even when the nati
   }
 });
 
-test("external contributions render read-only per node with text labels, escaped text and no unsafe links", () => {
+it("external contributions render read-only per node with text labels, escaped text and no unsafe links", () => {
   const contribution = (overrides: Partial<WorkflowProgressSnapshot["workflows"][number]["contributions"][number]>) => ({
     contributionId: "external", nodeId: "step-inspect", nodeName: "Inspect source", inCurrentPlan: true, state: "awaiting_result" as const, revision: 1,
     summary: "", references: [], externalRef: null, sourceThreadId: "task-thread", sourceMessageId: "main-message", recordedAt: 1_800_000_000_100,
@@ -1067,7 +1064,7 @@ test("external contributions render read-only per node with text labels, escaped
     assert.equal(html.match(control)?.length ?? 0, baseline.match(control)?.length ?? 0, `no new ${control.source}`);
 });
 
-test("an external contribution diagnostic explains the record without implying a status change", () => {
+it("an external contribution diagnostic explains the record without implying a status change", () => {
   const html = renderTaskView({...snapshot.tasks[0]!, workflowProtocolDiagnostic: {
     role: "operative", proposalId: null, messageId: "<b>main-message</b>", code: "contribution_revision_gap", observedAt: 1_800_000_000_400,
   }});
@@ -1079,7 +1076,7 @@ test("an external contribution diagnostic explains the record without implying a
   assert.doesNotMatch(html, /workflow acceptance was not recognized/);
 });
 
-test("the selected chat shows its saved supervision state with one native Stop supervision or Enable supervision button", () => {
+it("the selected chat shows its saved supervision state with one native Stop supervision or Enable supervision button", () => {
   const render = (stopped: boolean, busy = false, message: string | null = null) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
     ...viewDefaults, section: "progress", snapshot: {...snapshot, chatSupervision: {stopped, policyGeneration: 4, stoppedBy: stopped ? "relay" : null, stoppedAt: stopped ? 1 : null}},
     selection, monitoring, threadId: "task-thread", connected: true, saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false,
@@ -1104,42 +1101,43 @@ test("the selected chat shows its saved supervision state with one native Stop s
   assert.match(locked, /<button type="button" disabled="">Stop supervision<\/button>/u, "another chat's pending change keeps this chat's button disabled without claiming it is saving");
 });
 
-test("a late chat-supervision response never replaces the view of a chat selected afterwards", async () => {
-  const deferred = <T,>() => {let resolve!: (value: T) => void;let reject!: (error: unknown) => void;
-    const promise = new Promise<T>((ok, fail) => {resolve = ok;reject = fail;});return {promise, resolve, reject};};
+// the chat change helper is an Effect over the change and its confirming read; both are held on deferreds, no time
+it.effect("a late chat-supervision response never replaces the view of a chat selected afterwards", () => Effect.gen(function* () {
   const saved = {...snapshot, chatSupervision: {stopped: true, policyGeneration: 5, stoppedBy: "ui" as const, stoppedAt: 1}};
   let selected = "A";
   const startedFor = (scope: string) => () => selected === scope;
 
-  const lateSuccess = deferred<{snapshot?: typeof saved | null; message: string}>();let reloads = 0;
-  const pendingSuccess = confirmChatSupervisionChange(() => lateSuccess.promise, async () => {reloads++;return saved;}, startedFor("A"));
-  selected = "B";lateSuccess.resolve({snapshot: saved, message: "Supervision is stopped for this chat."});
-  assert.equal(await pendingSuccess, null, "a response that arrives after switching chats is dropped");
+  const lateSuccess = yield* Deferred.make<{snapshot?: typeof saved | null; message: string}>();let reloads = 0;
+  const pendingSuccess = yield* Effect.forkChild(confirmChatSupervisionChange(Deferred.await(lateSuccess), Effect.sync(() => {reloads++;return saved;}), startedFor("A")));
+  selected = "B";yield* Deferred.succeed(lateSuccess, {snapshot: saved, message: "Supervision is stopped for this chat."});
+  assert.equal(yield* Fiber.join(pendingSuccess), null, "a response that arrives after switching chats is dropped");
 
   selected = "A";
-  const lateReload = deferred<typeof saved>();
-  const pendingReload = confirmChatSupervisionChange(async () => ({message: "Saved."}), () => lateReload.promise, startedFor("A"));
-  await Promise.resolve();selected = "B";lateReload.resolve(saved);
-  assert.equal(await pendingReload, null, "a confirming reload that completes after switching chats is dropped");
+  const lateReload = yield* Deferred.make<typeof saved>();
+  const reloading = yield* Deferred.make<void>();
+  const pendingReload = yield* Effect.forkChild(confirmChatSupervisionChange(Effect.succeed({message: "Saved."}),
+    Deferred.succeed(reloading, undefined).pipe(Effect.andThen(Deferred.await(lateReload))), startedFor("A")));
+  yield* Deferred.await(reloading);selected = "B";yield* Deferred.succeed(lateReload, saved);
+  assert.equal(yield* Fiber.join(pendingReload), null, "a confirming reload that completes after switching chats is dropped");
 
   selected = "A";
-  const lateFailure = deferred<{message: string}>();
-  const pendingFailure = confirmChatSupervisionChange(() => lateFailure.promise, async () => {reloads++;return saved;}, startedFor("A"));
-  selected = "B";lateFailure.reject(new Error("lost response"));
-  assert.equal(await pendingFailure, null, "an unknown outcome after switching chats changes nothing");
+  const lateFailure = yield* Deferred.make<{message: string}, Error>();
+  const pendingFailure = yield* Effect.forkChild(confirmChatSupervisionChange(Deferred.await(lateFailure), Effect.sync(() => {reloads++;return saved;}), startedFor("A")));
+  selected = "B";yield* Deferred.fail(lateFailure, new Error("lost response"));
+  assert.equal(yield* Fiber.join(pendingFailure), null, "an unknown outcome after switching chats changes nothing");
   assert.equal(reloads, 0, "no stale reload is started for a chat that is no longer selected");
 
   selected = "A";
-  assert.deepEqual(await confirmChatSupervisionChange(async () => ({snapshot: saved, message: "Stopped."}), async () => saved, startedFor("A")),
+  assert.deepEqual(yield* confirmChatSupervisionChange(Effect.succeed({snapshot: saved, message: "Stopped."}), Effect.succeed(saved), startedFor("A")),
     {snapshot: saved, message: "Stopped."});
-  assert.deepEqual(await confirmChatSupervisionChange(async () => {throw new Error("conflict");}, async () => saved, startedFor("A")),
+  assert.deepEqual(yield* confirmChatSupervisionChange(Effect.fail(new Error("conflict")), Effect.succeed(saved), startedFor("A")),
     {snapshot: saved, message: "The change could not be confirmed. The saved state is shown."}, "an unknown outcome shows the server-confirmed state");
-  assert.deepEqual(await confirmChatSupervisionChange(async () => {throw new Error("lost");}, async () => {throw new Error("down");}, startedFor("A")),
+  assert.deepEqual(yield* confirmChatSupervisionChange(Effect.fail(new Error("lost")), Effect.fail(new Error("down")), startedFor("A")),
     {snapshot: null, message: "The change could not be confirmed and the saved state could not be read. Refresh Supervisor status."});
-});
+}));
 
 
-test("task-path assessments keep unknown reads distinct from absence and retain assessment attention", () => {
+it("task-path assessments keep unknown reads distinct from absence and retain assessment attention", () => {
   const task = {...snapshot.tasks[0]!, id: "task", sourceHash: "hash"};
   const page = {...progressSnapshot, workflows: progressSnapshot.workflows.map(workflow => ({...workflow,
     assessment: {taskId: "task", sourceHash: "hash", status: "needs_attention", summary: "Resolve the current review blocker.", updatedAt: 10}}))};

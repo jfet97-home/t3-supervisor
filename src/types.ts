@@ -68,13 +68,12 @@ export interface SourceItem {
   item: JsonRecord;
 }
 
-export interface SupervisorConfig {
-  supervisorOwnedThreadIds?: Set<string>;
+// the parsed process configuration, the value of the SupervisorConfig service
+export interface SupervisorSettings {
   dataDirectory: string;
   t3Url: string;
   t3TokenFile: string;
   excludedThreadIds: string[];
-  threadPolicy?: import("./thread-policy.js").ThreadPolicyStore;
   healthPort: number;
   helperProviderInstanceId?: string;
   uiPort?: number;
@@ -89,3 +88,6 @@ export interface SupervisorConfig {
   gitProbeTokenFile?: string;
   managedScratchRoot?: string;
 }
+
+// the configuration a supervision run reads: the parsed settings themselves (the thread policy and the ownership set are services)
+export type SupervisorConfig = SupervisorSettings;

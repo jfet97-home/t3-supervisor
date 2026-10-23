@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import {mkdtemp, rm} from "node:fs/promises";
-import {tmpdir} from "node:os";
-import {join} from "node:path";
-import {Effect} from "effect";
-import test from "node:test";
+import {it} from "@effect/vitest";
+import {Effect, Layer} from "effect";
 import {GuidanceRuntime} from "../src/guidance.js";
-import {GuidanceStore} from "../src/guidance-store.js";
-import {startGuidanceUi} from "../src/guidance-ui.js";
-import {forgeDashboardToken} from "../src/service-auth.js";
 import {ThreadPolicyStore} from "../src/thread-policy.js";
 import type {SupervisorConfig, ThreadInfo} from "../src/types.js";
+import {catalogRuntime, dashboard, processStores, signIn} from "./support/g11-dashboard.js";
+import {exchange} from "./support/g11-http.js";
+import {temporaryDirectory} from "./support/g11-stores.js";
+
+// the dashboard snapshot and its authenticated http flow over the production stores, runtime and listeners. it.live: the
+// stores are real database files and the dashboard listens on a loopback port
 
 const config = (directory: string): SupervisorConfig => ({
   dataDirectory: directory,
@@ -20,7 +20,6 @@ const config = (directory: string): SupervisorConfig => ({
   uiPort: 0,
   uiHost: "127.0.0.1",
   uiAssetsDirectory: directory,
-  supervisorOwnedThreadIds: new Set(),
 });
 
 const thread = (id: string, parentThreadId: string | null, relationshipToParent: string | null, rootThreadId = id): ThreadInfo => ({
@@ -30,23 +29,8 @@ const thread = (id: string, parentThreadId: string | null, relationshipToParent:
   lineage: {parentThreadId, relationshipToParent, rootThreadId},
 });
 
-const signIn = async (origin: string, directory: string): Promise<string> => {
-  const token = (await forgeDashboardToken(directory)).token;
-  const response = await fetch(origin + "/auth/login", {
-    method: "POST",
-    headers: {Origin: origin, "Content-Type": "application/json"},
-    body: JSON.stringify({token}),
-  });
-  assert.equal(response.status, 200);
-  const payload: unknown = await response.json();
-  if (typeof payload !== "object" || payload === null || !("session" in payload) || typeof payload.session !== "string")
-    throw new Error("Dashboard session response is invalid.");
-  return payload.session;
-};
-
-test("dashboard snapshot uses the native catalog and excludes owned roots and descendants", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "supervisor-snapshot-"));
-  const store = new GuidanceStore(directory);
+it.live("dashboard snapshot uses the native catalog and excludes owned roots and descendants", () => Effect.gen(function* () {
+  const directory = yield* temporaryDirectory("supervisor-snapshot-");
   const settings = config(directory);
   const nativeThreads = [
     thread("main", null, null),
@@ -54,48 +38,35 @@ test("dashboard snapshot uses the native catalog and excludes owned roots and de
     thread("helper", "supervisor-root:root-id", "subagent", "supervisor-root:root-id"),
     thread("child", "main", "subagent", "main"),
   ];
-  const runtime = new GuidanceRuntime(settings, store, {catalog: () => Effect.succeed({
+  const stores = yield* Layer.build(processStores(settings));
+  const runtime = yield* GuidanceRuntime.make(settings, {catalog: () => Effect.succeed({
     projects: [{project: {id: "project", title: "Project", workspaceRoot: "/work/project"}, available: true}],
     threads: nativeThreads,
-  })});
-  try {
-    const snapshot = await runtime.snapshot();
-    assert.deepEqual(snapshot.threads.map(value => value.id), ["main"]);
-    assert.equal("history" in snapshot, false);
-    assert.deepEqual(snapshot.threadPolicy.excludedThreadIds, []);
-  } finally {store.close(); await rm(directory, {recursive: true, force: true});}
-});
+  })}).pipe(Effect.provide(stores));
+  const snapshot = yield* runtime.snapshot;
+  assert.deepEqual(snapshot.threads.map(value => value.id), ["main"]);
+  assert.equal("history" in snapshot, false);
+  assert.deepEqual(snapshot.threadPolicy.excludedThreadIds, []);
+}));
 
-test("dashboard sessions retain authenticated snapshot and excluded-thread settings access", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "supervisor-dashboard-"));
-  const store = new GuidanceStore(directory);
-  const policy = new ThreadPolicyStore(directory, {excludedThreadIds: []});
+it.live("dashboard sessions retain authenticated snapshot and excluded-thread settings access", () => Effect.gen(function* () {
+  const directory = yield* temporaryDirectory("supervisor-dashboard-");
   const settings = config(directory);
-  settings.threadPolicy = policy;
-  const runtime = new GuidanceRuntime(settings, store, {catalog: () => Effect.succeed({projects: [], threads: []})});
-  try {
-    const ui = await startGuidanceUi(settings, runtime);
-    try {
-      const address = ui.server.address();
-      assert.ok(address && typeof address === "object");
-      const origin = `http://127.0.0.1:${address.port}`;
-      assert.equal((await fetch(origin + "/api/guidance/snapshot")).status, 401);
-      const session = await signIn(origin, directory);
-      const headers = {"x-supervisor-session": session};
-      const snapshot = await fetch(origin + "/api/guidance/snapshot", {headers});
-      assert.equal(snapshot.status, 200);
-      const csrf = (await (await fetch(origin + "/api/csrf", {headers})).json() as {csrf: string}).csrf;
-      const changed = await fetch(origin + "/api/guidance/thread-policy", {
-        method: "POST",
-        headers: {Origin: origin, ...headers, "Content-Type": "application/json", "x-csrf-token": csrf},
-        body: JSON.stringify({generation: policy.get().generation, excludedThreadIds: ["excluded-thread"]}),
-      });
-      assert.equal(changed.status, 200);
-      assert.deepEqual(policy.get().excludedThreadIds, ["excluded-thread"]);
-    } finally {await ui.close();}
-  } finally {
-    policy.close();
-    store.close();
-    await rm(directory, {recursive: true, force: true});
-  }
-});
+  // the runtime over the data directory's catalog, the process's thread-policy store and ownership set
+  const ui = yield* dashboard(settings, {runtime: catalogRuntime(settings)});
+  const policy: ThreadPolicyStore["Service"] = ui.policy;
+  const origin = ui.origin;
+  assert.equal((yield* exchange(origin + "/api/guidance/snapshot")).status, 401);
+  const session = yield* signIn(origin, directory);
+  const headers = {"x-supervisor-session": session};
+  const snapshot = yield* exchange(origin + "/api/guidance/snapshot", {headers});
+  assert.equal(snapshot.status, 200);
+  const csrf = (JSON.parse((yield* exchange(origin + "/api/csrf", {headers})).text) as {csrf: string}).csrf;
+  const changed = yield* exchange(origin + "/api/guidance/thread-policy", {
+    method: "POST",
+    headers: {Origin: origin, ...headers, "Content-Type": "application/json", "x-csrf-token": csrf},
+    body: JSON.stringify({generation: (yield* policy.get()).generation, excludedThreadIds: ["excluded-thread"]}),
+  });
+  assert.equal(changed.status, 200);
+  assert.deepEqual((yield* policy.get()).excludedThreadIds, ["excluded-thread"]);
+}));

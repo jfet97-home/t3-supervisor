@@ -398,11 +398,11 @@ const turnItemActivity = (
   });
 };
 
-/** Extracts metadata-only activity from the current main graph at or after the task run. */
+/** Extracts metadata-only activity from the current main graph at or after the task run; now is the caller's Clock time. */
 export const collectSupervisorActivity = (
   projection: Projection,
   sourceOrdinal: number,
-  now = Date.now(),
+  now: number,
   excludedIds: ReadonlySet<string> = new Set(),
   trackedIds: ReadonlySet<string> = new Set(),
   includeDetachedChildItems = false,

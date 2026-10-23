@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import {test} from "node:test";
+import { it } from "@effect/vitest";
 import {Effect} from "effect";
 import {WebSocketServer} from "ws";
-import {ProjectDefinitionLoader} from "../src/project-definitions.js";
-import {makeProjectFiles, ProjectFileError, type GitOperationState, type ProjectFiles} from "../src/project-files.js";
+import {NativeEnvelope} from "../src/native-envelope.js";
+import {ProjectDefinitions} from "../src/project-definitions.js";
+import {ProjectFileError, ProjectFiles, type FreshGitInfo, type GitOperationState} from "../src/project-files.js";
+import {cancelAfter, within} from "./support/g5a-bounds.js";
 
 function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: string | null; worktreeBranchAfterFirstWrite?: string | null;
   initialChangedPaths?: string[]; unexpectedPathAfterSecondWrite?: string; extraSetupFileAfterSecondWrite?: string;
@@ -27,13 +29,14 @@ function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: 
     if (path.startsWith(".t3-supervisor/steps/")) directories.add(`${root}/.t3-supervisor/steps`);
     if (path.startsWith(".t3-supervisor/workflows/")) directories.add(`${root}/.t3-supervisor/workflows`);
   };
-  const files: ProjectFiles = {
-    directoryExists: async path => directories.has(path),
-    list: async (root, path) => {
+  // the in-memory native file client of the checkout
+  const files = {
+    directoryExists: (path: string) => Effect.sync(() => directories.has(path)),
+    list: (root: string, path: string) => Effect.gen(function* () {
       const tree = trees.get(root) ?? new Map<string, string>();
       if (path === "") return {truncated: false, entries: directories.has(`${root}/.t3-supervisor`) ? [{path: ".t3-supervisor", kind: "directory" as const}] : []};
       if (path === ".t3-supervisor") {
-        if (!directories.has(`${root}/.t3-supervisor`)) throw new ProjectFileError("missing");
+        if (!directories.has(`${root}/.t3-supervisor`)) return yield* new ProjectFileError("missing");
         const entries: Array<{path: string; kind: "file" | "directory"}> = [];
         if (tree.has(".t3-supervisor/project.yaml")) entries.push({path: ".t3-supervisor/project.yaml", kind: "file"});
         if (directories.has(`${root}/.t3-supervisor/steps`)) entries.push({path: ".t3-supervisor/steps", kind: "directory"});
@@ -42,20 +45,20 @@ function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: 
       }
       if (path === ".t3-supervisor/steps" || path === ".t3-supervisor/workflows")
         return {truncated: false, entries: [...tree.keys()].filter(item => item.startsWith(`${path}/`)).map(item => ({path: item, kind: "file" as const}))};
-      throw new ProjectFileError("missing");
-    },
-    read: async (root, path) => {
+      return yield* new ProjectFileError("missing");
+    }),
+    read: (root: string, path: string) => Effect.gen(function* () {
       const contents = trees.get(root)?.get(path);
-      if (contents === undefined) throw new ProjectFileError("missing");
+      if (contents === undefined) return yield* new ProjectFileError("missing");
       return {contents, byteLength: Buffer.byteLength(contents), truncated: false};
-    },
-    vcsInfo: async root => {
+    }),
+    vcsInfo: (root: string) => Effect.sync(() => {
       const paths = options.isRepo === false || root === "~" ? [] : options.staleVcsSnapshot ? [...cachedChangedPaths] : [...changedPaths];
       vcsSnapshots.push(paths);
       return {isRepo: options.isRepo ?? root !== "~", branch: root === "/worktrees/feature" ? worktreeBranch : options.branch === undefined ? "main" : options.branch, changedPaths: paths};
-    },
-    gitOperationState: async () => options.gitOperationState ?? {status: "safe"},
-  };
+    }),
+    gitOperationState: () => Effect.succeed(options.gitOperationState ?? {status: "safe"}),
+  } satisfies ProjectFiles["Service"];
   const source = {catalog: () => Effect.succeed({
     projects: [{project: {id: "project", title: "Project", workspaceRoot: "/workspace"}, available: true}],
     threads: [{id: "main-thread", projectId: "project", title: "Main", lineage: {parentThreadId: null, relationshipToParent: null}}],
@@ -64,11 +67,11 @@ function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: 
     thread: {id: threadId, projectId: "project", title: "Main", lineage: {parentThreadId: null, relationshipToParent: null}, worktreePath: options.worktree ?? "/worktrees/feature"},
     runs: [], messages: [],
   }})};
-  const loader = new ProjectDefinitionLoader(source, t3, files, {
+  const layer = ProjectDefinitions.layer({source, t3, files, options: {
     globalRoot: "~",
-    useGlobalDefinitions: () => false,
-    isScratchProject: () => false,
-    ...(options.provideGitProbe === false ? {} : {gitProbe: async (targetRoot: string) => {
+    useGlobalDefinitions: () => Effect.succeed(false),
+    isScratchProject: () => Effect.succeed(false),
+    ...(options.provideGitProbe === false ? {} : {gitProbe: (targetRoot: string) => Effect.sync((): FreshGitInfo => {
       const paths = targetRoot === "~" || options.isRepo === false ? [] : [...freshChangedPaths];
       freshProbeSnapshots.push(paths);
       return {
@@ -76,12 +79,12 @@ function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: 
         branch: targetRoot === "/worktrees/feature" ? worktreeBranch : options.branch === undefined ? "main" : options.branch,
         isRepo: options.isRepo ?? targetRoot !== "~",
         changedPaths: paths,
-        operationState: options.gitOperationState ?? {status: "safe" as const},
+        operationState: options.gitOperationState ?? {status: "safe"},
       };
-    }}),
+    })}),
     setupWriter: {
-      writeFile: async (root, path, contents) => {
-        if (trees.get(root)?.has(path)) throw new ProjectFileError("unavailable", "write");
+      writeFile: (root, path, contents) => Effect.gen(function* () {
+        if (trees.get(root)?.has(path)) return yield* new ProjectFileError("unavailable", "write");
         writes.push({root, path, contents});
         addFile(root, path, contents);
         if (root !== "~" && options.isRepo !== false) {
@@ -99,19 +102,23 @@ function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: 
           addFile(root, options.extraSetupFileAfterSecondWrite, "Unexpected setup content.\n");
           freshChangedPaths.push(options.extraSetupFileAfterSecondWrite);
         }
-      },
-      commitFiles: async (root, paths, message, actionId) => {
+      }),
+      commitFiles: (root, paths, message, actionId) => Effect.sync(() => {
         commits.push({root, paths, message, actionId});
-        return {status: "committed", commitSha: "commit-123"};
-      },
+        return {status: "committed" as const, commitSha: "commit-123"};
+      }),
     },
-  });
-  return {loader, files, trees, directories, writes, commits, addFile, freshProbeSnapshots, vcsSnapshots};
+  }});
+  return {layer, files, trees, directories, writes, commits, addFile, freshProbeSnapshots, vcsSnapshots};
 }
 
-test("global opt-in initializes a server-home scaffold once and preserves existing contents", async () => {
+// one definitions operation over the fixture's in-memory checkout, Git probe and setup writer, bounded by 5 s
+const withDefinitions = <A, E>(f: ReturnType<typeof fixture>, use: (definitions: ProjectDefinitions["Service"]) => Effect.Effect<A, E>) =>
+  within(Effect.gen(function* () {return yield* use(yield* ProjectDefinitions);}).pipe(Effect.provide(f.layer)), 5_000, "the definitions call");
+
+it.effect("global opt-in initializes a server-home scaffold once and preserves existing contents", () => Effect.gen(function* () {
   const f = fixture();
-  const created = await f.loader.initializeGlobal(AbortSignal.timeout(5000));
+  const created = yield* withDefinitions(f, definitions => definitions.initializeGlobal());
   assert.equal(created.status, "created");
   assert.equal(created.workspaceRoot, "~");
   assert.equal(created.path, "~/.t3-supervisor");
@@ -119,22 +126,22 @@ test("global opt-in initializes a server-home scaffold once and preserves existi
   assert.equal(f.trees.get("~")?.get(".t3-supervisor/steps/.gitkeep"), "");
   assert.equal(f.trees.get("~")?.get(".t3-supervisor/workflows/.gitkeep"), "");
   assert.equal(f.commits.length, 0);
-  assert.ok(await f.loader.globalFingerprint(AbortSignal.timeout(5000)));
+  assert.ok(yield* withDefinitions(f, definitions => definitions.globalFingerprint()));
 
   const existing = "workflows: []\nsteps: []\n";
   f.addFile("~", ".t3-supervisor/project.yaml", existing);
   const before = f.writes.length;
-  const unchanged = await f.loader.initializeGlobal(AbortSignal.timeout(5000));
+  const unchanged = yield* withDefinitions(f, definitions => definitions.initializeGlobal());
   assert.equal(unchanged.status, "unchanged");
   assert.equal(f.writes.length, before);
   assert.equal(f.trees.get("~")?.get(".t3-supervisor/project.yaml"), existing);
-});
+}));
 
-test("project Create writes only the scaffold files and Create plus commit stages only those paths", async () => {
+it.effect("project Create writes only the scaffold files and Create plus commit stages only those paths", () => Effect.gen(function* () {
   const createFixture = fixture({isRepo: false, branch: null, worktree: null});
-  const created = await createFixture.loader.initialize("project", null, {
+  const created = yield* withDefinitions(createFixture, definitions => definitions.initialize("project", null, {
     origin: "project", action: "create", expectedWorkspaceRoot: "/workspace", expectedBranch: null,
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(created.status, "created");
   assert.deepEqual(createFixture.writes.map(write => [write.path, write.contents]), [
     [".t3-supervisor/project.yaml", "workflows: []\nsteps: []\n"],
@@ -144,154 +151,161 @@ test("project Create writes only the scaffold files and Create plus commit stage
   assert.equal(createFixture.commits.length, 0);
 
   const commitFixture = fixture({isRepo: true, branch: "feature"});
-  const committed = await commitFixture.loader.initialize("project", "main-thread", {
+  const committed = yield* withDefinitions(commitFixture, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(committed.status, "committed");
   assert.equal(commitFixture.commits.length, 1);
   assert.deepEqual(commitFixture.commits[0]?.paths, [".t3-supervisor/project.yaml", ".t3-supervisor/steps/.gitkeep", ".t3-supervisor/workflows/.gitkeep"]);
   assert.equal(commitFixture.commits[0]?.root, "/worktrees/feature");
-});
+}));
 
-test("Create plus commit verifies the exact setup tree when Git collapses untracked paths", async () => {
+it.effect("Create plus commit verifies the exact setup tree when Git collapses untracked paths", () => Effect.gen(function* () {
   const f = fixture({isRepo: true, branch: "feature", collapseSetupStatus: true});
-  const outcome = await f.loader.initialize("project", "main-thread", {
+  const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(outcome.status, "committed");
   assert.equal(f.commits.length, 1);
-});
+}));
 
-test("Create plus commit requires a fresh Git probe before writing", async () => {
+it.effect("Create plus commit requires a fresh Git probe before writing", () => Effect.gen(function* () {
   const f = fixture({isRepo: true, branch: "feature", provideGitProbe: false});
-  const outcome = await f.loader.initialize("project", "main-thread", {
+  const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(outcome.status, "unavailable");
   assert.match(outcome.message, /fresh local Git status/);
   assert.equal(f.writes.length, 0);
   assert.equal(f.commits.length, 0);
-});
+}));
 
-test("Create plus commit uses fresh Git status when the native VCS subscription snapshot stays stale", async () => {
+it.effect("Create plus commit uses fresh Git status when the native VCS subscription snapshot stays stale", () => Effect.gen(function* () {
   const f = fixture({isRepo: true, branch: "feature", staleVcsSnapshot: true});
-  const outcome = await f.loader.initialize("project", "main-thread", {
+  const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(outcome.status, "committed");
   assert.equal(f.commits.length, 1);
   assert.ok(f.vcsSnapshots.every(paths => paths.length === 0));
   assert.ok(f.freshProbeSnapshots.some(paths => paths.length === 1 && paths[0] === ".t3-supervisor/project.yaml"));
   assert.ok(f.freshProbeSnapshots.some(paths => paths.length === 2 && paths.includes(".t3-supervisor/project.yaml") && paths.includes(".t3-supervisor/steps/.gitkeep")));
   assert.ok(f.freshProbeSnapshots.some(paths => paths.length === 3 && paths.includes(".t3-supervisor/project.yaml") && paths.includes(".t3-supervisor/steps/.gitkeep") && paths.includes(".t3-supervisor/workflows/.gitkeep")));
-});
+}));
 
-test("stale cached foreign paths cannot block setup when fresh Git status is clean", async () => {
+it.effect("stale cached foreign paths cannot block setup when fresh Git status is clean", () => Effect.gen(function* () {
   const f = fixture({isRepo: true, branch: "feature", staleVcsSnapshot: true, cachedVcsPaths: ["README.md"]});
-  const outcome = await f.loader.initialize("project", "main-thread", {
+  const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(outcome.status, "committed");
   assert.equal(f.commits.length, 1);
   assert.ok(f.vcsSnapshots.length > 0 && f.vcsSnapshots.every(paths => paths[0] === "README.md"));
   assert.ok(f.freshProbeSnapshots.some(paths => paths.length === 0));
-});
+}));
 
-test("setup refuses stale branches, existing folders, and Create plus commit outside Git", async () => {
+it.effect("setup refuses stale branches, existing folders, and Create plus commit outside Git", () => Effect.gen(function* () {
   const staleFixture = fixture({isRepo: true, branch: "feature"});
-  const stale = await staleFixture.loader.initialize("project", "main-thread", {
+  const stale = yield* withDefinitions(staleFixture, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "old-branch",
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(stale.status, "stale");
   assert.equal(staleFixture.writes.length, 0);
 
   const existingFixture = fixture({isRepo: true, branch: "feature"});
   existingFixture.addFile("/worktrees/feature", ".t3-supervisor/project.yaml", "workflows: []\nsteps: []\n");
-  const conflict = await existingFixture.loader.initialize("project", "main-thread", {
+  const conflict = yield* withDefinitions(existingFixture, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(conflict.status, "conflict");
   assert.equal(existingFixture.trees.get("/worktrees/feature")?.get(".t3-supervisor/project.yaml"), "workflows: []\nsteps: []\n");
   assert.equal(existingFixture.writes.length, 0);
 
   const noGitFixture = fixture({isRepo: false, branch: null, worktree: null});
-  const unavailable = await noGitFixture.loader.initialize("project", null, {
+  const unavailable = yield* withDefinitions(noGitFixture, definitions => definitions.initialize("project", null, {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/workspace", expectedBranch: null,
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(unavailable.status, "unavailable");
   assert.match(unavailable.message, /not a Git repository/);
   assert.equal(noGitFixture.writes.length, 0);
-});
+}));
 
-test("Create plus commit refuses tracked or staged changes before creating files", async () => {
+it.effect("Create plus commit refuses tracked or staged changes before creating files", () => Effect.gen(function* () {
   const f = fixture({isRepo: true, branch: "feature", initialChangedPaths: ["README.md"]});
-  const outcome = await f.loader.initialize("project", "main-thread", {
+  const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(outcome.status, "conflict");
   assert.match(outcome.message, /clean checkout/);
   assert.equal(f.writes.length, 0);
   assert.equal(f.commits.length, 0);
-});
+}));
 
-test("Create plus commit refuses merge or rebase state before creating files", async () => {
+it.effect("Create plus commit refuses merge or rebase state before creating files", () => Effect.gen(function* () {
   for (const marker of ["MERGE_HEAD", "rebase-merge"]) {
     const f = fixture({isRepo: true, branch: "feature", gitOperationState: {status: "in_progress", marker}});
-    const outcome = await f.loader.initialize("project", "main-thread", {
+    const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
       origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-    }, AbortSignal.timeout(5000));
+    }));
     assert.equal(outcome.status, "conflict");
     assert.match(outcome.message, new RegExp(marker));
     assert.equal(f.writes.length, 0);
     assert.equal(f.commits.length, 0);
   }
-});
+}));
 
-test("Create still leaves the scaffold uncommitted in a dirty or in-progress checkout", async () => {
+it.effect("Create still leaves the scaffold uncommitted in a dirty or in-progress checkout", () => Effect.gen(function* () {
   const f = fixture({isRepo: true, branch: "feature", initialChangedPaths: ["README.md"], provideGitProbe: false,
     gitOperationState: {status: "in_progress", marker: "MERGE_HEAD"}});
-  const outcome = await f.loader.initialize("project", "main-thread", {
+  const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(outcome.status, "created");
   assert.equal(f.writes.length, 3);
   assert.equal(f.commits.length, 0);
-});
+}));
 
-test("Create plus commit stops when any extra change appears with the new setup files", async () => {
+it.effect("Create plus commit stops when any extra change appears with the new setup files", () => Effect.gen(function* () {
   const f = fixture({isRepo: true, branch: "feature", unexpectedPathAfterSecondWrite: "README.md"});
-  const outcome = await f.loader.initialize("project", "main-thread", {
+  const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(outcome.status, "conflict");
   assert.match(outcome.message, /left uncommitted/);
   assert.equal(f.writes.length, 2);
   assert.equal(f.commits.length, 0);
-});
+}));
 
-test("Create plus commit rejects extra setup content hidden by Git's collapsed untracked path", async () => {
+it.effect("Create plus commit rejects extra setup content hidden by Git's collapsed untracked path", () => Effect.gen(function* () {
   const f = fixture({isRepo: true, branch: "feature", collapseSetupStatus: true, extraSetupFileAfterSecondWrite: ".t3-supervisor/steps/extra.md"});
-  const outcome = await f.loader.initialize("project", "main-thread", {
+  const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create_and_commit", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(outcome.status, "conflict");
   assert.match(outcome.message, /other files/);
   assert.equal(f.writes.length, 2);
   assert.equal(f.commits.length, 0);
-});
+}));
 
-test("checkout choices expose the registered root and operative main-thread worktree", async () => {
+it.effect("checkout choices expose the registered root and operative main-thread worktree", () => Effect.gen(function* () {
   const f = fixture();
-  const targets = await f.loader.checkoutTargets("project", AbortSignal.timeout(5000));
+  const targets = yield* withDefinitions(f, definitions => definitions.checkoutTargets("project"));
   assert.deepEqual(targets, [
     {origin: "project", threadId: null, workspaceRoot: "/workspace", branch: "main", isGitRepository: true},
     {origin: "project", threadId: "main-thread", workspaceRoot: "/worktrees/feature", branch: "feature", isGitRepository: true},
   ]);
-});
+}));
 
-test("native Git operation inspection follows a worktree .git pointer with existing T3 read RPCs", async () => {
-  const server = new WebSocketServer({host: "127.0.0.1", port: 0});
-  await new Promise<void>(resolve => server.once("listening", resolve));
+it.live("native Git operation inspection follows a worktree .git pointer with existing T3 read RPCs", () => Effect.gen(function* () {
+  // a real loopback socket; the finalizer terminates its clients and closes it
+  const server = yield* Effect.acquireRelease(Effect.promise(async () => {
+    const listening = new WebSocketServer({host: "127.0.0.1", port: 0});
+    await new Promise<void>(resolve => listening.once("listening", resolve));
+    return listening;
+  }), listening => Effect.promise(() => {
+    for (const client of listening.clients) client.terminate();
+    return new Promise<void>(resolve => listening.close(() => resolve()));
+  }));
   const address = server.address();assert.ok(address && typeof address !== "string");
   const requests: Array<{tag: string; payload: Record<string, unknown>}> = [];
   server.on("connection", socket => socket.on("message", data => {
@@ -317,25 +331,21 @@ test("native Git operation inspection follows a worktree .git pointer with exist
     } else failure = {reasons: [{_tag: "Fail", error: {message: "Unexpected RPC"}}]};
     socket.send(JSON.stringify({_tag: "Exit", requestId: request.id, exit: failure ? {_tag: "Failure", cause: failure} : {_tag: "Success", value}}));
   }));
-  try {
-    const files = makeProjectFiles(`http://127.0.0.1:${address.port}`, "fixture");
-    assert.deepEqual(await files.gitOperationState?.("/workspace", AbortSignal.timeout(5000)), {status: "in_progress", marker: "MERGE_HEAD"});
-    assert.deepEqual(await files.gitOperationState?.("/worktrees/feature", AbortSignal.timeout(5000)), {status: "safe"});
-    assert.ok(requests.some(request => request.tag === "projects.readFile" && request.payload.relativePath === "/repo/main/.git/worktrees/feature/MERGE_HEAD"));
-  } finally {
-    for (const client of server.clients) client.terminate();
-    await new Promise<void>(resolve => server.close(() => resolve()));
-  }
-});
+  // the native file client over the peer; each inspection's cancel trigger completes after 5 s
+  const files = yield* ProjectFiles.make({baseUrl: `http://127.0.0.1:${address.port}`, token: "fixture"}).pipe(Effect.provide(NativeEnvelope.layer));
+  assert.deepEqual(yield* files.gitOperationState!("/workspace", yield* cancelAfter("5 seconds")), {status: "in_progress", marker: "MERGE_HEAD"});
+  assert.deepEqual(yield* files.gitOperationState!("/worktrees/feature", yield* cancelAfter("5 seconds")), {status: "safe"});
+  assert.ok(requests.some(request => request.tag === "projects.readFile" && request.payload.relativePath === "/repo/main/.git/worktrees/feature/MERGE_HEAD"));
+}));
 
-test("setup rechecks the operative checkout branch before each native file write", async () => {
+it.effect("setup rechecks the operative checkout branch before each native file write", () => Effect.gen(function* () {
   const f = fixture({isRepo: true, branch: "feature", worktreeBranchAfterFirstWrite: "other-branch"});
-  const outcome = await f.loader.initialize("project", "main-thread", {
+  const outcome = yield* withDefinitions(f, definitions => definitions.initialize("project", "main-thread", {
     origin: "project", action: "create", expectedWorkspaceRoot: "/worktrees/feature", expectedBranch: "feature",
-  }, AbortSignal.timeout(5000));
+  }));
   assert.equal(outcome.status, "stale");
   assert.equal(f.writes.length, 1);
   assert.equal(f.trees.get("/worktrees/feature")?.get(".t3-supervisor/project.yaml"), "workflows: []\nsteps: []\n");
   assert.equal(f.trees.get("/worktrees/feature")?.has(".t3-supervisor/steps/.gitkeep"), false);
   assert.match(outcome.message, /left uncommitted/);
-});
+}));

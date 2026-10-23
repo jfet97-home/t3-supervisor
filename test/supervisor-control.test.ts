@@ -1,39 +1,39 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { it } from "@effect/vitest";
 import { Effect } from "effect";
-import { GuidanceStore } from "../src/guidance-store.js";
-import { ProjectSupervisor } from "../src/project-supervisor.js";
+import { TestClock } from "effect/testing";
 import { workflowIntroductionText } from "../src/supervisor-conversation.js";
-import { ProjectSupervisorStore, type SupervisorBaseline, type SupervisionFolderPresence } from "../src/project-supervisor-store.js";
+import type { SupervisorBaseline, SupervisionFolderPresence } from "../src/project-supervisor-store.js";
 import type { TaskRecord } from "../src/project-supervisor-store.js";
 import { T3TransportError } from "../src/t3.js";
 import { requiredReferences, type ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import type { ProjectInfo, Projection, SupervisorConfig, ThreadInfo } from "../src/types.js";
+import type { ProjectInfo, Projection, ThreadInfo } from "../src/types.js";
 import { makeDefinitionFixture, stepSource } from "./project-definitions-fixture.js";
+import { dataDirectory, nativeClient, openStores, realTime, type ConversationStores, type ProjectionRead } from "./support/g1a-conversation.js";
+import { execute, query } from "./support/g1b-conversation.js";
+import { asRpcBaseline, ctlSupervisor, type CtlDefinitionOps } from "./support/ctl-supervisor.js";
+import type { StoreShape } from "../src/store.js";
 
 const baseline = (latestRunId: string | null = null): SupervisorBaseline => ({version: 2, snapshotSequence: 20,
   threads: latestRunId ? [{id: "main", latestRunId}] : []});
 
-const makeProjectSupervisor = (store: ProjectSupervisorStore, overrides: {
-  presence?: (projectId: string, signal: AbortSignal) => Promise<SupervisionFolderPresence>;
-  presenceGlobal?: (signal: AbortSignal) => Promise<SupervisionFolderPresence & {path?: string}>;
-  globalFingerprint?: (signal: AbortSignal) => Promise<string | null>;
-  initializeGlobal?: (signal: AbortSignal) => Promise<{status: "created" | "unchanged" | "conflict" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string; branch: null; message: string}>;
-  checkoutTargets?: (projectId: string, signal: AbortSignal) => Promise<Array<{origin: "project"; threadId: string | null; workspaceRoot: string; branch: string | null; isGitRepository: boolean}>>;
-  presenceForCheckout?: (projectId: string, threadId: string | null, signal: AbortSignal) => Promise<SupervisionFolderPresence>;
-  initialize?: (projectId: string, threadId: string | null, input: {origin: "project"; action: "create" | "create_and_commit"; expectedWorkspaceRoot: string; expectedBranch: string | null}, signal: AbortSignal) => Promise<{status: "created" | "committed" | "unchanged" | "stale" | "conflict" | "permission_required" | "unavailable" | "uncertain"; workspaceRoot: string | null; branch: string | null; message: string}>;
-  activationSnapshot?: (signal: AbortSignal) => Promise<SupervisorBaseline>;
-  now?: () => number;
+const project: ProjectInfo = {id: "project-a", title: "Project A", workspaceRoot: "/work/project-a"};
+
+const makeProjectSupervisor = (stores: ConversationStores, overrides: {
+  presence?: CtlDefinitionOps["presence"];
+  presenceGlobal?: CtlDefinitionOps["presenceGlobal"];
+  globalFingerprint?: CtlDefinitionOps["globalFingerprint"];
+  initializeGlobal?: CtlDefinitionOps["initializeGlobal"];
+  checkoutTargets?: CtlDefinitionOps["checkoutTargets"];
+  presenceForCheckout?: CtlDefinitionOps["presenceForCheckout"];
+  initialize?: CtlDefinitionOps["initialize"];
+  activation?: () => Effect.Effect<SupervisorBaseline, unknown>;
+  catalog?: StoreShape["catalog"];
+  projection?: ProjectionRead;
 } = {}) => {
-  const project: ProjectInfo = {id: "project-a", title: "Project A", workspaceRoot: "/work/project-a"};
-  const source = {catalog: () => Effect.succeed({projects: [{project, available: true}], threads: []})};
-  const t3 = {projection: () => Effect.fail(new T3TransportError("unexpected projection"))};
-  const config: SupervisorConfig = {dataDirectory: "/tmp", t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0};
-  const definitions = {
-    load: async () => {throw new Error("unexpected definition load");},
+  const definitions: CtlDefinitionOps = {
+    load: () => Effect.fail(new Error("unexpected definition load")),
+    globalDefinitionsPath: () => "~/.t3-supervisor",
     ...(overrides.presence ? {presence: overrides.presence} : {}),
     ...(overrides.presenceGlobal ? {presenceGlobal: overrides.presenceGlobal} : {}),
     ...(overrides.globalFingerprint ? {globalFingerprint: overrides.globalFingerprint} : {}),
@@ -41,449 +41,425 @@ const makeProjectSupervisor = (store: ProjectSupervisorStore, overrides: {
     ...(overrides.checkoutTargets ? {checkoutTargets: overrides.checkoutTargets} : {}),
     ...(overrides.presenceForCheckout ? {presenceForCheckout: overrides.presenceForCheckout} : {}),
     ...(overrides.initialize ? {initialize: overrides.initialize} : {}),
-    globalDefinitionsPath: () => "~/.t3-supervisor",
   };
-  return new ProjectSupervisor(config, store, source, t3, async () => {throw new Error("unexpected read");}, null,
-    overrides.activationSnapshot ?? (async () => baseline()), definitions, overrides.now);
+  return ctlSupervisor({
+    stores,
+    catalog: overrides.catalog ?? (() => Effect.succeed({projects: [{project, available: true}], threads: [] as ThreadInfo[]})),
+    projection: overrides.projection ?? (() => Effect.fail(new T3TransportError("unexpected projection"))),
+    read: nativeClient(() => {throw new Error("unexpected read");}),
+    operate: null,
+    baseline: asRpcBaseline(overrides.activation ?? (() => Effect.succeed(baseline()))),
+    definitions,
+  });
 };
 
-const withStore = async <A>(work: (store: ProjectSupervisorStore, directory: string) => Promise<A> | A): Promise<A> => {
-  const directory = await mkdtemp(join(tmpdir(), "supervisor-control-"));
-  const guidance = new GuidanceStore(directory);
-  const store = new ProjectSupervisorStore(guidance, new Set());
-  try {return await work(store, directory);}
-  finally {guidance.close();await rm(directory, {recursive: true, force: true});}
-};
+const withStores = <A, E, R>(work: (stores: ConversationStores) => Effect.Effect<A, E, R>) => Effect.gen(function* () {
+  yield* realTime;
+  const directory = yield* dataDirectory("supervisor-control-");
+  const stores = yield* openStores(directory, directory);
+  return yield* work(stores);
+});
 
-const scopedDefinitionSnapshot = async (globalEnabled: boolean, scratch = false, projectId = "project-a", root = "/work/project-a"): Promise<ProjectDefinitionSnapshot> => {
-  const fixture = makeDefinitionFixture({projectId, root, threadRoot: root, globalEnabled, scratch});
+const scopedDefinitionSnapshot = (globalEnabled: boolean, scratch = false, snapshotProjectId = "project-a", root = "/work/project-a") => Effect.gen(function* () {
+  const fixture = makeDefinitionFixture({projectId: snapshotProjectId, root, threadRoot: root, globalEnabled, scratch});
   fixture.addFile(root, ".t3-supervisor/steps/local-check.md", stepSource("local-check", "Verify local behavior."));
   fixture.addDirectory(root, ".t3-supervisor/workflows");
   fixture.writeIndex(root, {required: [{step: "local-check"}]});
   fixture.addFile(fixture.globalRoot, ".t3-supervisor/steps/global-check.md", stepSource("global-check", "Verify shared behavior."));
   fixture.addDirectory(fixture.globalRoot, ".t3-supervisor/workflows");
   fixture.writeIndex(fixture.globalRoot, {required: [{step: "global-check"}]});
-  return fixture.loader.load(projectId, "thread", AbortSignal.timeout(2000));
-};
-
-test("global master starts on while project auto-detection persists the first known folder result", async () => {
-  await withStore(async (store, directory) => {
-    assert.equal(store.control(null).enabled, true);
-    assert.equal(store.control("project-a").enabled, false);
-    assert.equal(store.control("project-a").detectionStatus, "not_checked");
-    let folderStatus: SupervisionFolderPresence = {status: "unavailable", message: "read denied"};
-    const events: string[] = [];
-    let now = 1_000_000;
-    const supervisor = makeProjectSupervisor(store, {presence: async () => folderStatus,
-      now: () => now,
-      activationSnapshot: async () => {events.push("boundary");return baseline("run-2");}});
-    await supervisor.control("project-a", AbortSignal.timeout(2000));
-    assert.equal(store.autoControlInitialized("project-a"), false);
-    assert.equal(store.control("project-a").detectionStatus, "unavailable");
-    folderStatus = {status: "present"};
-    now += 60_000;
-    const enabled = await supervisor.control("project-a", AbortSignal.timeout(2000));
-    assert.deepEqual(events, ["boundary"]);
-    assert.equal(enabled.detectionStatus, "present");
-    assert.equal(enabled.effectiveEnabled, true);
-    assert.equal(store.control("project-a").enabled, true);
-    folderStatus = {status: "missing"};
-    await supervisor.control("project-a", AbortSignal.timeout(2000));
-    assert.equal(store.control("project-a").enabled, true);
-    store.recordFolderPresence("project-empty", {status: "missing"});
-    assert.equal(store.control("project-empty").enabled, false);
-    store.recordFolderPresence("project-auto", {status: "present"}, baseline("run-3"));
-    store.saveControl("project-auto", 0, true);
-    assert.equal(store.control("project-auto").manual, true);
-    assert.equal(store.control("project-auto").enabled, true);
-    const guidance = new GuidanceStore(directory);
-    const restarted = new ProjectSupervisorStore(guidance, new Set());
-    assert.equal(restarted.control("project-a").enabled, true);
-    assert.equal(restarted.control("project-a").manual, false);
-    assert.equal(restarted.control("project-empty").enabled, false);
-    assert.equal(restarted.autoControlInitialized("project-empty"), true);
-    guidance.close();
-  });
+  return yield* (yield* fixture.makeDefinitions()).load(snapshotProjectId, "thread");
 });
 
-test("auto-enable stays unavailable and retries when the native activation boundary cannot be captured", async () => {
-  await withStore(async store => {
-    let failBoundary = true;
-    let calls = 0;
-    let now = 1_000_000;
-    const supervisor = makeProjectSupervisor(store, {
-      now: () => now,
-      presence: async () => ({status: "present"}),
-      activationSnapshot: async () => {calls += 1;if (failBoundary) throw new Error("archive snapshot unavailable");return baseline("run-2");},
-    });
-    const signal = AbortSignal.timeout(2000);
-    const first = await supervisor.control("project-a", signal);
-    assert.equal(first.enabled, false);
-    assert.equal(first.detectionStatus, "unavailable");
-    assert.match(first.detectionError ?? "", /native enable boundary/);
-    assert.equal(store.autoControlInitialized("project-a"), false);
-    failBoundary = false;
-    now += 60_000;
-    const retry = await supervisor.control("project-a", signal);
-    assert.equal(retry.enabled, true);
-    assert.equal(retry.detectionStatus, "present");
-    assert.equal(calls, 2);
-  });
+const metaValue = (stores: ConversationStores, key: string) => Effect.gen(function* () {
+  const rows = yield* query(stores.sql, "SELECT value FROM meta WHERE key=?", key);
+  return rows[0]?.value;
 });
 
-test("unavailable folder checks back off for a minute without rewriting their durable marker", async () => {
-  await withStore(async store => {
-    let now = 1_000_000;
-    let presenceCalls = 0;
-    let checkoutPresenceCalls = 0;
-    const supervisor = makeProjectSupervisor(store, {
-      now: () => now,
-      presence: async () => {presenceCalls += 1;return {status: "unavailable", message: "read denied"};},
-      checkoutTargets: async () => [{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}],
-      presenceForCheckout: async () => {checkoutPresenceCalls += 1;return {status: "present"};},
-    });
-    const signal = AbortSignal.timeout(2000);
-    await supervisor.control("project-a", signal);
-    const markerKey = `supervisor_control_presence_unavailable:${JSON.stringify("project-a")}`;
-    const markerBefore = store.store.db.prepare("SELECT value FROM meta WHERE key=?").get(markerKey)?.value;
-    assert.equal(presenceCalls, 1);
-    assert.ok(markerBefore);
+it.effect("global master starts on while project auto-detection persists the first known folder result", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  assert.equal((yield* store.control(null)).enabled, true);
+  assert.equal((yield* store.control("project-a")).enabled, false);
+  assert.equal((yield* store.control("project-a")).detectionStatus, "not_checked");
+  let folderStatus: SupervisionFolderPresence = {status: "unavailable", message: "read denied"};
+  const events: string[] = [];
+  yield* TestClock.setTime(1_000_000);
+  const supervisor = yield* makeProjectSupervisor(stores, {presence: () => Effect.succeed(folderStatus),
+    activation: () => {events.push("boundary");return Effect.succeed(baseline("run-2"));}});
+  yield* supervisor.control("project-a");
+  assert.equal(yield* store.autoControlInitialized("project-a"), false);
+  assert.equal((yield* store.control("project-a")).detectionStatus, "unavailable");
+  folderStatus = {status: "present"};
+  yield* TestClock.adjust(60_000);
+  const enabled = yield* supervisor.control("project-a");
+  assert.deepEqual(events, ["boundary"]);
+  assert.equal(enabled.detectionStatus, "present");
+  assert.equal(enabled.effectiveEnabled, true);
+  assert.equal((yield* store.control("project-a")).enabled, true);
+  folderStatus = {status: "missing"};
+  yield* supervisor.control("project-a");
+  assert.equal((yield* store.control("project-a")).enabled, true);
+  yield* store.recordFolderPresence("project-empty", {status: "missing"});
+  assert.equal((yield* store.control("project-empty")).enabled, false);
+  yield* store.recordFolderPresence("project-auto", {status: "present"}, baseline("run-3"));
+  yield* store.saveControl("project-auto", 0, true);
+  assert.equal((yield* store.control("project-auto")).manual, true);
+  assert.equal((yield* store.control("project-auto")).enabled, true);
+  const restarted = (yield* openStores(stores.directory, stores.directory)).supervisors;
+  assert.equal((yield* restarted.control("project-a")).enabled, true);
+  assert.equal((yield* restarted.control("project-a")).manual, false);
+  assert.equal((yield* restarted.control("project-empty")).enabled, false);
+  assert.equal(yield* restarted.autoControlInitialized("project-empty"), true);
+})));
 
-    now += 59_999;
-    await supervisor.control("project-a", signal);
-    assert.equal(presenceCalls, 1, "automatic retries wait the full minute");
-    now += 1;
-    await supervisor.control("project-a", signal);
-    assert.equal(presenceCalls, 2);
-    assert.equal(store.store.db.prepare("SELECT value FROM meta WHERE key=?").get(markerKey)?.value, markerBefore,
-      "the durable unavailable marker is written only once");
-
-    await supervisor.setupOptions("project-a", signal);
-    assert.equal(presenceCalls, 2, "setup checks use the checkout-specific reader");
-    assert.equal(checkoutPresenceCalls, 1, "an explicit setup check does not inherit the automatic backoff");
+it.effect("auto-enable stays unavailable and retries when the native activation boundary cannot be captured", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  let failBoundary = true;
+  let calls = 0;
+  yield* TestClock.setTime(1_000_000);
+  const supervisor = yield* makeProjectSupervisor(stores, {
+    presence: () => Effect.succeed({status: "present"}),
+    activation: () => {calls += 1;if (failBoundary) return Effect.fail(new Error("archive snapshot unavailable"));return Effect.succeed(baseline("run-2"));},
   });
-});
+  const first = yield* supervisor.control("project-a");
+  assert.equal(first.enabled, false);
+  assert.equal(first.detectionStatus, "unavailable");
+  assert.match(first.detectionError ?? "", /native enable boundary/);
+  assert.equal(yield* store.autoControlInitialized("project-a"), false);
+  failBoundary = false;
+  yield* TestClock.adjust(60_000);
+  const retry = yield* supervisor.control("project-a");
+  assert.equal(retry.enabled, true);
+  assert.equal(retry.detectionStatus, "present");
+  assert.equal(calls, 2);
+})));
 
-test("an auto-present record without a project boundary stays off until a fresh boundary is saved", async () => {
-  await withStore(async store => {
-    store.store.db.prepare("INSERT INTO meta VALUES(?,?)").run(`supervisor_control_auto:${JSON.stringify("project-a")}`, JSON.stringify({status: "present", enabled: true, checkedAt: 1}));
-    assert.equal(store.autoControlInitialized("project-a"), false);
-    assert.equal(store.control("project-a").enabled, false);
-    let captures = 0;
-    const supervisor = makeProjectSupervisor(store, {presence: async () => ({status: "present"}),
-      activationSnapshot: async () => {captures += 1;return baseline("run-4");}});
-    const control = await supervisor.control("project-a", AbortSignal.timeout(2000));
-    assert.equal(control.enabled, true);
-    assert.equal(captures, 1);
-    assert.equal(store.autoControlInitialized("project-a"), true);
+it.effect("unavailable folder checks back off for a minute without rewriting their durable marker", () => withStores((stores) => Effect.gen(function* () {
+  let presenceCalls = 0;
+  let checkoutPresenceCalls = 0;
+  yield* TestClock.setTime(1_000_000);
+  const supervisor = yield* makeProjectSupervisor(stores, {
+    presence: () => {presenceCalls += 1;return Effect.succeed({status: "unavailable", message: "read denied"});},
+    checkoutTargets: () => Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}]),
+    presenceForCheckout: () => {checkoutPresenceCalls += 1;return Effect.succeed({status: "present"});},
   });
-});
+  yield* supervisor.control("project-a");
+  const markerKey = `supervisor_control_presence_unavailable:${JSON.stringify("project-a")}`;
+  const markerBefore = yield* metaValue(stores, markerKey);
+  assert.equal(presenceCalls, 1);
+  assert.ok(markerBefore);
 
-test("manual project choice survives restart and global master off remains independent", async () => {
-  await withStore((store, directory) => {
-    store.recordFolderPresence("project-a", {status: "present"});
-    store.saveControl("project-a", 0, false);
-    store.recordFolderPresence("project-a", {status: "present"});
-    assert.equal(store.control("project-a").enabled, false);
-    assert.equal(store.control("project-a").manual, true);
-    store.saveControl(null, 0, false);
-    store.saveControl("project-a", 1, true);
-    assert.equal(store.control("project-a").enabled, true);
-    assert.equal(store.control("project-a").effectiveEnabled, false);
-    assert.equal(store.useGlobalDefinitions(), false);
-    const guidance = new GuidanceStore(directory);
-    const restarted = new ProjectSupervisorStore(guidance, new Set());
-    assert.equal(restarted.control(null).enabled, false);
-    assert.equal(restarted.control("project-a").enabled, true);
-    assert.equal(restarted.control("project-a").effectiveEnabled, false);
-    restarted.saveControl(null, 1, true, baseline("run-1"));
-    assert.equal(restarted.control("project-a").effectiveEnabled, true);
-    guidance.close();
+  yield* TestClock.adjust(59_999);
+  yield* supervisor.control("project-a");
+  assert.equal(presenceCalls, 1, "automatic retries wait the full minute");
+  yield* TestClock.adjust(1);
+  yield* supervisor.control("project-a");
+  assert.equal(presenceCalls, 2);
+  assert.equal(yield* metaValue(stores, markerKey), markerBefore,
+    "the durable unavailable marker is written only once");
+
+  yield* supervisor.setupOptions("project-a");
+  assert.equal(presenceCalls, 2, "setup checks use the checkout-specific reader");
+  assert.equal(checkoutPresenceCalls, 1, "an explicit setup check does not inherit the automatic backoff");
+})));
+
+it.effect("an auto-present record without a project boundary stays off until a fresh boundary is saved", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  yield* execute(stores.sql, "INSERT INTO meta VALUES(?,?)", `supervisor_control_auto:${JSON.stringify("project-a")}`, JSON.stringify({status: "present", enabled: true, checkedAt: 1}));
+  assert.equal(yield* store.autoControlInitialized("project-a"), false);
+  assert.equal((yield* store.control("project-a")).enabled, false);
+  let captures = 0;
+  const supervisor = yield* makeProjectSupervisor(stores, {presence: () => Effect.succeed({status: "present"}),
+    activation: () => {captures += 1;return Effect.succeed(baseline("run-4"));}});
+  const control = yield* supervisor.control("project-a");
+  assert.equal(control.enabled, true);
+  assert.equal(captures, 1);
+  assert.equal(yield* store.autoControlInitialized("project-a"), true);
+})));
+
+it.effect("manual project choice survives restart and global master off remains independent", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  yield* store.recordFolderPresence("project-a", {status: "present"});
+  yield* store.saveControl("project-a", 0, false);
+  yield* store.recordFolderPresence("project-a", {status: "present"});
+  assert.equal((yield* store.control("project-a")).enabled, false);
+  assert.equal((yield* store.control("project-a")).manual, true);
+  yield* store.saveControl(null, 0, false);
+  yield* store.saveControl("project-a", 1, true);
+  assert.equal((yield* store.control("project-a")).enabled, true);
+  assert.equal((yield* store.control("project-a")).effectiveEnabled, false);
+  assert.equal(yield* store.useGlobalDefinitions(), false);
+  const restarted = (yield* openStores(stores.directory, stores.directory)).supervisors;
+  assert.equal((yield* restarted.control(null)).enabled, false);
+  assert.equal((yield* restarted.control("project-a")).enabled, true);
+  assert.equal((yield* restarted.control("project-a")).effectiveEnabled, false);
+  yield* restarted.saveControl(null, 1, true, baseline("run-1"));
+  assert.equal((yield* restarted.control("project-a")).effectiveEnabled, true);
+})));
+
+it.effect("explicit project enable asks for checkout setup when the folder is missing", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  const supervisor = yield* makeProjectSupervisor(stores, {presence: () => Effect.succeed({status: "missing"})});
+  const current = yield* supervisor.control("project-a");
+  assert.equal(current.enabled, false);
+  const result = yield* supervisor.saveControl({projectId: "project-a", expectedGeneration: 0, enabled: true});
+  assert.equal(result.status, "setup_required");
+  assert.equal((yield* store.control("project-a")).enabled, false);
+})));
+
+it.effect("project setup captures the native enable boundary before writing and retains it", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  const events: string[] = [];
+  const supervisor = yield* makeProjectSupervisor(stores, {
+    presence: () => Effect.succeed({status: "missing"}),
+    checkoutTargets: () => Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}]),
+    presenceForCheckout: () => Effect.succeed({status: "missing"}),
+    activation: () => {events.push("boundary");return Effect.succeed(baseline("run-2"));},
+    initialize: (_projectId, _threadId, input) => {events.push(`initialize:${input.action}`);return Effect.succeed({status: "created", workspaceRoot: input.expectedWorkspaceRoot, branch: input.expectedBranch, message: "created"});},
   });
-});
+  yield* supervisor.control("project-a");
+  const result = yield* supervisor.setup({projectId: "project-a", expectedGeneration: 0, origin: "project", threadId: null,
+    expectedWorkspaceRoot: "/work/project-a", expectedBranch: "main", action: "create"});
+  assert.equal(result.status, "saved", result.message);
+  assert.deepEqual(events, ["boundary", "initialize:create"]);
+  const projection: Projection = {thread: {id: "main", projectId: "project-a", title: "Main", lineage: {parentThreadId: null, relationshipToParent: null}},
+    runs: [{id: "run-1", threadId: "main", ordinal: 1, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
+      {id: "run-2", threadId: "main", ordinal: 2, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
+      {id: "run-3", threadId: "main", ordinal: 3, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null}], messages: []};
+  assert.equal(yield* store.baselineOrdinal("main", projection), 2);
+})));
 
-test("explicit project enable asks for checkout setup when the folder is missing", async () => {
-  await withStore(async store => {
-    const supervisor = makeProjectSupervisor(store, {presence: async () => ({status: "missing"})});
-    const signal = AbortSignal.timeout(2000);
-    const current = await supervisor.control("project-a", signal);
-    assert.equal(current.enabled, false);
-    const result = await supervisor.saveControl({projectId: "project-a", expectedGeneration: 0, enabled: true}, signal);
-    assert.equal(result.status, "setup_required");
-    assert.equal(store.control("project-a").enabled, false);
+it.effect("enable_existing adopts a present checkout without running the project initializer", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  const events: string[] = [];
+  let initializeCalls = 0;
+  const supervisor = yield* makeProjectSupervisor(stores, {
+    presence: () => {events.push("auto-presence");return Effect.succeed({status: "unavailable", message: "not readable from the default scope"});},
+    checkoutTargets: () => {events.push("checkout-targets");return Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}]);},
+    presenceForCheckout: () => {events.push("checkout-presence");return Effect.succeed({status: "present"});},
+    initialize: (_projectId, _threadId, input) => {initializeCalls += 1;return Effect.succeed({status: "created", workspaceRoot: input.expectedWorkspaceRoot, branch: input.expectedBranch, message: "unexpected create"});},
+    activation: () => {events.push("boundary");return Effect.succeed(baseline("run-2"));},
   });
-});
+  const before = yield* supervisor.control("project-a");
+  assert.equal(before.enabled, false);
+  const result = yield* supervisor.setup({projectId: "project-a", expectedGeneration: before.generation, origin: "project", threadId: null,
+    expectedWorkspaceRoot: "/work/project-a", expectedBranch: "main", action: "enable_existing"});
 
-test("project setup captures the native enable boundary before writing and retains it", async () => {
-  await withStore(async store => {
-    const events: string[] = [];
-    const supervisor = makeProjectSupervisor(store, {
-      presence: async () => ({status: "missing"}),
-      checkoutTargets: async () => [{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}],
-      presenceForCheckout: async () => ({status: "missing"}),
-      activationSnapshot: async () => {events.push("boundary");return baseline("run-2");},
-      initialize: async (_projectId, _threadId, input) => {events.push(`initialize:${input.action}`);return {status: "created", workspaceRoot: input.expectedWorkspaceRoot, branch: input.expectedBranch, message: "created"};},
-    });
-    const signal = AbortSignal.timeout(2000);
-    await supervisor.control("project-a", signal);
-    const result = await supervisor.setup({projectId: "project-a", expectedGeneration: 0, origin: "project", threadId: null,
-      expectedWorkspaceRoot: "/work/project-a", expectedBranch: "main", action: "create"}, signal);
-    assert.equal(result.status, "saved", result.message);
-    assert.deepEqual(events, ["boundary", "initialize:create"]);
-    const projection: Projection = {thread: {id: "main", projectId: "project-a", title: "Main", lineage: {parentThreadId: null, relationshipToParent: null}},
-      runs: [{id: "run-1", threadId: "main", ordinal: 1, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
-        {id: "run-2", threadId: "main", ordinal: 2, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
-        {id: "run-3", threadId: "main", ordinal: 3, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null}], messages: []};
-    assert.equal(store.baselineOrdinal("main", projection), 2);
+  assert.equal(result.status, "saved", result.message);
+  assert.deepEqual(events, ["auto-presence", "checkout-targets", "checkout-presence", "boundary", "checkout-targets", "checkout-presence"]);
+  assert.equal(initializeCalls, 0);
+  assert.equal(result.control.enabled, true);
+  assert.equal(result.control.manual, true);
+  assert.equal(result.control.detectionStatus, "present");
+  assert.equal((yield* store.projectBoundary("project-a"))?.snapshotSequence, 20);
+  assert.equal(yield* store.folderPresenceNeedsBoundary("project-a"), false);
+  assert.match(result.message, /No files were written or committed/);
+})));
+
+it.effect("enable_existing rechecks folder presence after capturing its boundary", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  let checkoutPresenceChecks = 0;
+  let boundaryCaptures = 0;
+  const supervisor = yield* makeProjectSupervisor(stores, {
+    presence: () => Effect.succeed({status: "unavailable", message: "default presence unavailable"}),
+    checkoutTargets: () => Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}]),
+    presenceForCheckout: () => {checkoutPresenceChecks += 1;return Effect.succeed({status: checkoutPresenceChecks === 1 ? "present" as const : "missing" as const});},
+    activation: () => {boundaryCaptures += 1;return Effect.succeed(baseline("run-2"));},
   });
-});
+  const before = yield* supervisor.control("project-a");
+  const result = yield* supervisor.setup({projectId: "project-a", expectedGeneration: before.generation, origin: "project", threadId: null,
+    expectedWorkspaceRoot: "/work/project-a", expectedBranch: "main", action: "enable_existing"});
 
-test("enable_existing adopts a present checkout without running the project initializer", async () => {
-  await withStore(async store => {
-    const events: string[] = [];
-    let initializeCalls = 0;
-    const supervisor = makeProjectSupervisor(store, {
-      presence: async () => {events.push("auto-presence");return {status: "unavailable", message: "not readable from the default scope"};},
-      checkoutTargets: async () => {events.push("checkout-targets");return [{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}];},
-      presenceForCheckout: async () => {events.push("checkout-presence");return {status: "present"};},
-      initialize: async (_projectId, _threadId, input) => {initializeCalls += 1;return {status: "created", workspaceRoot: input.expectedWorkspaceRoot, branch: input.expectedBranch, message: "unexpected create"};},
-      activationSnapshot: async () => {events.push("boundary");return baseline("run-2");},
-    });
-    const signal = AbortSignal.timeout(2000);
-    const before = await supervisor.control("project-a", signal);
-    assert.equal(before.enabled, false);
-    const result = await supervisor.setup({projectId: "project-a", expectedGeneration: before.generation, origin: "project", threadId: null,
-      expectedWorkspaceRoot: "/work/project-a", expectedBranch: "main", action: "enable_existing"}, signal);
+  assert.equal(result.status, "conflict");
+  assert.equal(checkoutPresenceChecks, 2);
+  assert.equal(boundaryCaptures, 1);
+  assert.equal((yield* store.control("project-a")).enabled, false);
+  assert.equal((yield* store.control("project-a")).manual, false);
+  assert.equal(yield* store.projectBoundary("project-a"), null, "a failed final presence check must not save the enable boundary");
+})));
 
-    assert.equal(result.status, "saved", result.message);
-    assert.deepEqual(events, ["auto-presence", "checkout-targets", "checkout-presence", "boundary", "checkout-targets", "checkout-presence"]);
-    assert.equal(initializeCalls, 0);
-    assert.equal(result.control.enabled, true);
-    assert.equal(result.control.manual, true);
-    assert.equal(result.control.detectionStatus, "present");
-    assert.equal(store.projectBoundary("project-a")?.snapshotSequence, 20);
-    assert.equal(store.folderPresenceNeedsBoundary("project-a"), false);
-    assert.match(result.message, /No files were written or committed/);
+it.effect("enable_existing rejects a worktree whose selected branch changed during setup", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  const main: ThreadInfo = {id: "main", title: "Main", projectId: "project-a", lineage: {parentThreadId: null, relationshipToParent: null}};
+  const threadProjection: Projection = {thread: {...main, worktreePath: "/work/feature"}, runs: [], messages: [], nodes: []};
+  let targetChecks = 0;
+  let presenceChecks = 0;
+  const supervisor = yield* makeProjectSupervisor(stores, {
+    catalog: () => Effect.succeed({projects: [{project, available: true}], threads: [main]}),
+    projection: () => Effect.succeed(threadProjection),
+    activation: () => Effect.succeed(baseline("run-2")),
+    presence: () => Effect.succeed({status: "unavailable", message: "default presence unavailable"}),
+    checkoutTargets: () => {
+      targetChecks += 1;
+      return Effect.succeed([{origin: "project" as const, threadId: "main", workspaceRoot: "/work/feature", branch: targetChecks === 1 ? "feature" : "other", isGitRepository: true}]);
+    },
+    presenceForCheckout: () => {presenceChecks += 1;return Effect.succeed({status: "present" as const});},
   });
-});
+  const current = yield* supervisor.control("project-a");
+  const result = yield* supervisor.setup({projectId: "project-a", expectedGeneration: current.generation, origin: "project", threadId: "main",
+    expectedWorkspaceRoot: "/work/feature", expectedBranch: "feature", action: "enable_existing"});
 
-test("enable_existing rechecks folder presence after capturing its boundary", async () => {
-  await withStore(async store => {
-    let checkoutPresenceChecks = 0;
-    let boundaryCaptures = 0;
-    const supervisor = makeProjectSupervisor(store, {
-      presence: async () => ({status: "unavailable", message: "default presence unavailable"}),
-      checkoutTargets: async () => [{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}],
-      presenceForCheckout: async () => {checkoutPresenceChecks += 1;return {status: checkoutPresenceChecks === 1 ? "present" as const : "missing" as const};},
-      activationSnapshot: async () => {boundaryCaptures += 1;return baseline("run-2");},
-    });
-    const signal = AbortSignal.timeout(2000);
-    const before = await supervisor.control("project-a", signal);
-    const result = await supervisor.setup({projectId: "project-a", expectedGeneration: before.generation, origin: "project", threadId: null,
-      expectedWorkspaceRoot: "/work/project-a", expectedBranch: "main", action: "enable_existing"}, signal);
+  assert.equal(result.status, "conflict");
+  assert.equal(targetChecks, 2);
+  assert.equal(presenceChecks, 1, "the changed branch is rejected before the final presence confirmation");
+  assert.equal((yield* store.control("project-a")).enabled, false);
+  assert.equal(yield* store.projectBoundary("project-a"), null);
+})));
 
-    assert.equal(result.status, "conflict");
-    assert.equal(checkoutPresenceChecks, 2);
-    assert.equal(boundaryCaptures, 1);
-    assert.equal(store.control("project-a").enabled, false);
-    assert.equal(store.control("project-a").manual, false);
-    assert.equal(store.projectBoundary("project-a"), null, "a failed final presence check must not save the enable boundary");
+it.effect("enable_existing requires a present folder and create still rejects existing folders", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  let folderStatus: SupervisionFolderPresence["status"] = "missing";
+  let initialized = 0;
+  let boundaries = 0;
+  const supervisor = yield* makeProjectSupervisor(stores, {
+    presence: () => Effect.succeed({status: "unavailable", message: "default presence unavailable"}),
+    checkoutTargets: () => Effect.succeed([{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}]),
+    presenceForCheckout: () => Effect.succeed({status: folderStatus}),
+    initialize: (_projectId, _threadId, input) => {initialized += 1;return Effect.succeed({status: "created", workspaceRoot: input.expectedWorkspaceRoot, branch: input.expectedBranch, message: "created"});},
+    activation: () => {boundaries += 1;return Effect.succeed(baseline("run-2"));},
   });
-});
+  const current = yield* supervisor.control("project-a");
+  const input = {projectId: "project-a", expectedGeneration: current.generation, origin: "project" as const, threadId: null,
+    expectedWorkspaceRoot: "/work/project-a", expectedBranch: "main"};
 
-test("enable_existing rejects a worktree whose selected branch changed during setup", async () => {
-  await withStore(async store => {
-    const project: ProjectInfo = {id: "project-a", title: "Project A", workspaceRoot: "/work/project-a"};
-    const main: ThreadInfo = {id: "main", title: "Main", projectId: "project-a", lineage: {parentThreadId: null, relationshipToParent: null}};
-    const projection: Projection = {thread: {...main, worktreePath: "/work/feature"}, runs: [], messages: [], nodes: []};
-    const source = {catalog: () => Effect.succeed({projects: [{project, available: true}], threads: [main]})};
-    let targetChecks = 0;
-    let presenceChecks = 0;
-    const definitions = {
-      load: async () => {throw new Error("unexpected definition load");},
-      presence: async () => ({status: "unavailable" as const, message: "default presence unavailable"}),
-      checkoutTargets: async () => {
-        targetChecks += 1;
-        return [{origin: "project" as const, threadId: "main", workspaceRoot: "/work/feature", branch: targetChecks === 1 ? "feature" : "other", isGitRepository: true}];
-      },
-      presenceForCheckout: async () => {presenceChecks += 1;return {status: "present" as const};},
-    };
-    const supervisor = new ProjectSupervisor({dataDirectory: "/tmp", t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0}, store, source,
-      {projection: () => Effect.succeed({projection, snapshotSequence: 20})}, async () => {throw new Error("unexpected read");}, null,
-      async () => baseline("run-2"), definitions);
-    const signal = AbortSignal.timeout(2000);
-    const current = await supervisor.control("project-a", signal);
-    const result = await supervisor.setup({projectId: "project-a", expectedGeneration: current.generation, origin: "project", threadId: "main",
-      expectedWorkspaceRoot: "/work/feature", expectedBranch: "feature", action: "enable_existing"}, signal);
+  const missing = yield* supervisor.setup({...input, action: "enable_existing"});
+  assert.equal(missing.status, "conflict");
+  assert.equal((yield* store.control("project-a")).generation, current.generation);
+  assert.equal((yield* store.control("project-a")).enabled, false);
+  assert.equal(boundaries, 0);
+  assert.equal(initialized, 0);
 
-    assert.equal(result.status, "conflict");
-    assert.equal(targetChecks, 2);
-    assert.equal(presenceChecks, 1, "the changed branch is rejected before the final presence confirmation");
-    assert.equal(store.control("project-a").enabled, false);
-    assert.equal(store.projectBoundary("project-a"), null);
+  folderStatus = "present";
+  const create = yield* supervisor.setup({...input, action: "create"});
+  assert.equal(create.status, "conflict");
+  assert.equal(boundaries, 0);
+  assert.equal(initialized, 0);
+})));
+
+it.effect("unreadable project detection is not saved as an opt-out and another project can resolve", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  let failure = true;
+  const supervisor = yield* makeProjectSupervisor(stores, {presence: (checkedProjectId) => Effect.succeed(checkedProjectId === "project-a" && failure
+    ? {status: "unavailable", message: "temporarily unreadable"} : {status: "present"})});
+  const blocked = yield* supervisor.control("project-a");
+  assert.equal(blocked.enabled, false);
+  assert.equal(blocked.detectionStatus, "unavailable");
+  assert.equal(yield* store.autoControlInitialized("project-a"), false);
+  failure = false;
+  const otherProject = {id: "project-b", title: "Project B", workspaceRoot: "/work/project-b"} as ProjectInfo;
+  const other = yield* makeProjectSupervisor(stores, {
+    catalog: () => Effect.succeed({projects: [{project: otherProject, available: true}], threads: [] as ThreadInfo[]}),
+    projection: () => Effect.fail(new T3TransportError("unused")),
+    presence: () => Effect.succeed({status: "present"}),
+    activation: () => Effect.succeed(baseline()),
   });
-});
+  assert.equal((yield* other.control("project-b")).enabled, true);
+  assert.equal(yield* store.autoControlInitialized("project-b"), true);
+})));
 
-test("enable_existing requires a present folder and create still rejects existing folders", async () => {
-  await withStore(async store => {
-    let folderStatus: SupervisionFolderPresence["status"] = "missing";
-    let initialized = 0;
-    let boundaries = 0;
-    const supervisor = makeProjectSupervisor(store, {
-      presence: async () => ({status: "unavailable", message: "default presence unavailable"}),
-      checkoutTargets: async () => [{origin: "project", threadId: null, workspaceRoot: "/work/project-a", branch: "main", isGitRepository: true}],
-      presenceForCheckout: async () => ({status: folderStatus}),
-      initialize: async (_projectId, _threadId, input) => {initialized += 1;return {status: "created", workspaceRoot: input.expectedWorkspaceRoot, branch: input.expectedBranch, message: "created"};},
-      activationSnapshot: async () => {boundaries += 1;return baseline("run-2");},
-    });
-    const signal = AbortSignal.timeout(2000);
-    const current = await supervisor.control("project-a", signal);
-    const input = {projectId: "project-a", expectedGeneration: current.generation, origin: "project" as const, threadId: null,
-      expectedWorkspaceRoot: "/work/project-a", expectedBranch: "main"};
-
-    const missing = await supervisor.setup({...input, action: "enable_existing"}, signal);
-    assert.equal(missing.status, "conflict");
-    assert.equal(store.control("project-a").generation, current.generation);
-    assert.equal(store.control("project-a").enabled, false);
-    assert.equal(boundaries, 0);
-    assert.equal(initialized, 0);
-
-    folderStatus = "present";
-    const create = await supervisor.setup({...input, action: "create"}, signal);
-    assert.equal(create.status, "conflict");
-    assert.equal(boundaries, 0);
-    assert.equal(initialized, 0);
+it.effect("global definitions stay off by default until explicitly enabled, even when the folder exists", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  const events: string[] = [];
+  const supervisor = yield* makeProjectSupervisor(stores, {
+    presenceGlobal: () => Effect.succeed({status: "present", path: "~/.t3-supervisor"}),
+    initializeGlobal: () => {events.push("initializeGlobal");return Effect.succeed({status: "unchanged", workspaceRoot: "~", branch: null, message: "preserved"});},
+    globalFingerprint: () => {events.push("globalFingerprint");return Effect.succeed("global-sha");},
   });
-});
+  const before = yield* supervisor.globalDefinitionsControl;
+  assert.equal(before.detectionStatus, "present");
+  assert.equal(before.enabled, false);
+  assert.equal(yield* store.useGlobalDefinitions("project-a"), false);
+  const result = yield* supervisor.saveGlobalDefinitionsControl({expectedGeneration: 0, enabled: true});
+  assert.equal(result.status, "saved");
+  assert.equal(yield* store.useGlobalDefinitions("project-a"), true);
+  assert.equal(events[0], "initializeGlobal");
+  assert.equal(events.filter(event => event === "globalFingerprint").length, 2);
+  assert.equal((yield* store.globalDefinitionsControl()).homePath, "~/.t3-supervisor");
+  const restarted = (yield* openStores(stores.directory, stores.directory)).supervisors;
+  assert.equal(yield* restarted.useGlobalDefinitions("project-a"), true);
+})));
 
-test("unreadable project detection is not saved as an opt-out and another project can resolve", async () => {
-  await withStore(async store => {
-    let failure = true;
-    const supervisor = makeProjectSupervisor(store, {presence: async projectId => projectId === "project-a" && failure
-      ? {status: "unavailable", message: "temporarily unreadable"} : {status: "present"}});
-    const signal = AbortSignal.timeout(2000);
-    const blocked = await supervisor.control("project-a", signal);
-    assert.equal(blocked.enabled, false);
-    assert.equal(blocked.detectionStatus, "unavailable");
-    assert.equal(store.autoControlInitialized("project-a"), false);
-    failure = false;
-    const otherProject = {id: "project-b", title: "Project B", workspaceRoot: "/work/project-b"} as ProjectInfo;
-    const otherSource = {catalog: () => Effect.succeed({projects: [{project: otherProject, available: true}], threads: []})};
-    const other = new ProjectSupervisor({dataDirectory: "/tmp", t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0}, store, otherSource,
-      {projection: () => Effect.fail(new T3TransportError("unused"))}, async () => {throw new Error("unused");}, null, async () => baseline(),
-      {load: async () => {throw new Error("unused");}, presence: async () => ({status: "present"})});
-    assert.equal((await other.control("project-b", signal)).enabled, true);
-    assert.equal(store.autoControlInitialized("project-b"), true);
-  });
-});
-
-test("global definitions stay off by default until explicitly enabled, even when the folder exists", async () => {
-  await withStore(async (store, directory) => {
-    const events: string[] = [];
-    const supervisor = makeProjectSupervisor(store, {
-      presenceGlobal: async () => ({status: "present", path: "~/.t3-supervisor"}),
-      initializeGlobal: async () => {events.push("initializeGlobal");return {status: "unchanged", workspaceRoot: "~", branch: null, message: "preserved"};},
-      globalFingerprint: async () => {events.push("globalFingerprint");return "global-sha";},
-    });
-    const signal = AbortSignal.timeout(2000);
-    const before = await supervisor.globalDefinitionsControl(signal);
-    assert.equal(before.detectionStatus, "present");
-    assert.equal(before.enabled, false);
-    assert.equal(store.useGlobalDefinitions("project-a"), false);
-    const result = await supervisor.saveGlobalDefinitionsControl({expectedGeneration: 0, enabled: true}, signal);
-    assert.equal(result.status, "saved");
-    assert.equal(store.useGlobalDefinitions("project-a"), true);
-    assert.equal(events[0], "initializeGlobal");
-    assert.equal(events.filter(event => event === "globalFingerprint").length, 2);
-    assert.equal(store.globalDefinitionsControl().homePath, "~/.t3-supervisor");
-    const guidance = new GuidanceStore(directory);
-    assert.equal(new ProjectSupervisorStore(guidance, new Set()).useGlobalDefinitions("project-a"), true);
-    guidance.close();
-  });
-});
-
-test("global definitions effectiveEnabled follows the master and definitions truth table", async () => {
+it.effect("global definitions effectiveEnabled follows the master and definitions truth table", () => Effect.gen(function* () {
   const cases = [
     {master: false, definitions: false, effective: false},
     {master: false, definitions: true, effective: false},
     {master: true, definitions: false, effective: false},
     {master: true, definitions: true, effective: true},
   ];
-  for (const item of cases) await withStore(store => {
-    if (!item.master) store.saveControl(null, 0, false);
-    if (item.definitions) store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-sha");
-    const control = store.globalDefinitionsControl();
+  for (const item of cases) yield* withStores((stores) => Effect.gen(function* () {
+    const store = stores.supervisors;
+    if (!item.master) yield* store.saveControl(null, 0, false);
+    if (item.definitions) yield* store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-sha");
+    const control = yield* store.globalDefinitionsControl();
     assert.equal(control.enabled, item.definitions);
     assert.equal(control.effectiveEnabled, item.effective);
-    assert.equal(store.useGlobalDefinitions("project-a"), item.definitions, "the loader sees the saved definition preference independently of the master");
-  });
-});
+    assert.equal(yield* store.useGlobalDefinitions("project-a"), item.definitions, "the loader sees the saved definition preference independently of the master");
+  }));
+}), { timeout: 60_000 });
 
-test("first explicit global definitions enable initializes a missing server-home folder before switching on", async () => {
-  await withStore(async store => {
-    const events: string[] = [];
-    const settings = store.store.settings();
-    store.store.classify("project-a", "scratch", settings.generation);
-    store.saveControl("project-a", 0, true, baseline("run-1"));
-    const supervisor = makeProjectSupervisor(store, {
-      presenceGlobal: async () => ({status: "missing", path: "~/.t3-supervisor"}),
-      initializeGlobal: async () => {events.push("initializeGlobal");return {status: "created", workspaceRoot: "~", branch: null, message: "created"};},
-      globalFingerprint: async () => {events.push("globalFingerprint");return "created-global-sha";},
-      activationSnapshot: async () => {events.push("boundary");return baseline("run-2");},
-    });
-    const result = await supervisor.saveGlobalDefinitionsControl({expectedGeneration: 0, enabled: true}, AbortSignal.timeout(2000));
-    assert.equal(result.status, "saved");
-    assert.deepEqual(events, ["initializeGlobal", "globalFingerprint", "globalFingerprint"]);
-    assert.equal(store.useGlobalDefinitions("project-a"), true);
-    const projection: Projection = {thread: {id: "main", projectId: "project-a", title: "Main", lineage: {parentThreadId: null, relationshipToParent: null}},
-      runs: [{id: "run-1", threadId: "main", ordinal: 1, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
-        {id: "run-2", threadId: "main", ordinal: 2, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
-        {id: "run-3", threadId: "main", ordinal: 3, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null}], messages: []};
-    assert.equal(store.baselineOrdinal("main", projection), 1);
+it.effect("first explicit global definitions enable initializes a missing server-home folder before switching on", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  const events: string[] = [];
+  const settings = yield* stores.guidance.settings();
+  yield* stores.guidance.classify("project-a", "scratch", settings.generation);
+  yield* store.saveControl("project-a", 0, true, baseline("run-1"));
+  const supervisor = yield* makeProjectSupervisor(stores, {
+    presenceGlobal: () => Effect.succeed({status: "missing", path: "~/.t3-supervisor"}),
+    initializeGlobal: () => {events.push("initializeGlobal");return Effect.succeed({status: "created", workspaceRoot: "~", branch: null, message: "created"});},
+    globalFingerprint: () => {events.push("globalFingerprint");return Effect.succeed("created-global-sha");},
+    activation: () => {events.push("boundary");return Effect.succeed(baseline("run-2"));},
   });
-});
+  const result = yield* supervisor.saveGlobalDefinitionsControl({expectedGeneration: 0, enabled: true});
+  assert.equal(result.status, "saved");
+  assert.deepEqual(events, ["initializeGlobal", "globalFingerprint", "globalFingerprint"]);
+  assert.equal(yield* store.useGlobalDefinitions("project-a"), true);
+  const projection: Projection = {thread: {id: "main", projectId: "project-a", title: "Main", lineage: {parentThreadId: null, relationshipToParent: null}},
+    runs: [{id: "run-1", threadId: "main", ordinal: 1, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
+      {id: "run-2", threadId: "main", ordinal: 2, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null},
+      {id: "run-3", threadId: "main", ordinal: 3, status: "completed", requestedAt: "", startedAt: null, completedAt: null, rootNodeId: null}], messages: []};
+  assert.equal(yield* store.baselineOrdinal("main", projection), 1);
+})));
 
-test("No Project mode controls activation independently of shared definitions", async () => {
-  await withStore(async store => {
-    const settings = store.store.settings();
-    store.store.classify("project-a", "scratch", settings.generation);
-    store.saveControl("project-a", 0, true, baseline("run-1"));
-    const supervisor = makeProjectSupervisor(store, {presence: async () => ({status: "present"})});
-    const signal = AbortSignal.timeout(2000);
-    const control = await supervisor.control("project-a", signal);
-    assert.equal(control.enabled, true);
-    assert.equal(control.effectiveEnabled, false);
-    const result = await supervisor.saveControl({projectId: "project-a", expectedGeneration: control.generation, enabled: true}, signal);
-    assert.equal(result.status, "unavailable");
-    assert.match(result.message, /Use the No Project mode/);
-    store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-sha");
-    assert.equal((await supervisor.control("project-a", signal)).effectiveEnabled, false);
-    await supervisor.saveNoProjectControl({expectedGeneration: 0, mode: "automatic"}, signal);
-    assert.equal((await supervisor.control("project-a", signal)).effectiveEnabled, true);
-  });
-});
+it.effect("No Project mode controls activation independently of shared definitions", () => withStores((stores) => Effect.gen(function* () {
+  const store = stores.supervisors;
+  const settings = yield* stores.guidance.settings();
+  yield* stores.guidance.classify("project-a", "scratch", settings.generation);
+  yield* store.saveControl("project-a", 0, true, baseline("run-1"));
+  const supervisor = yield* makeProjectSupervisor(stores, {presence: () => Effect.succeed({status: "present"})});
+  const control = yield* supervisor.control("project-a");
+  assert.equal(control.enabled, true);
+  assert.equal(control.effectiveEnabled, false);
+  const result = yield* supervisor.saveControl({projectId: "project-a", expectedGeneration: control.generation, enabled: true});
+  assert.equal(result.status, "unavailable");
+  assert.match(result.message, /Use the No Project mode/);
+  yield* store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-sha");
+  assert.equal((yield* supervisor.control("project-a")).effectiveEnabled, false);
+  yield* supervisor.saveNoProjectControl({expectedGeneration: 0, mode: "automatic"});
+  assert.equal((yield* supervisor.control("project-a")).effectiveEnabled, true);
+})));
 
-test("a global-definition toggle authorizes only that input scope and unchanged local catalogs", async () => {
-  const approved = await scopedDefinitionSnapshot(true);
-  const disabled = await scopedDefinitionSnapshot(false);
+it.effect("a global-definition toggle authorizes only that input scope and unchanged local catalogs", () => Effect.gen(function* () {
+  const approved = yield* scopedDefinitionSnapshot(true);
+  const disabled = yield* scopedDefinitionSnapshot(false);
   assert.equal(approved.status, "ready");
   assert.equal(disabled.status, "ready");
   assert.ok(approved.globalRevision);
   assert.equal(approved.steps.some(step => step.origin === "global"), true);
   assert.equal(disabled.steps.some(step => step.origin === "global"), false);
-  await withStore(store => {
-    store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", approved.globalRevision!);
-    store.saveGlobalDefinitionsControl(1, false, "~/.t3-supervisor", approved.globalRevision!);
-    assert.equal(store.definitionUserGlobalToggle(disabled, approved, 0, approved.globalRevision!), true);
-    assert.equal(store.definitionUserGlobalToggle(disabled, approved, 0, "changed-global-sha"), false);
+  yield* withStores((stores) => Effect.gen(function* () {
+    const store = stores.supervisors;
+    yield* store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", approved.globalRevision!);
+    yield* store.saveGlobalDefinitionsControl(1, false, "~/.t3-supervisor", approved.globalRevision!);
+    assert.equal(yield* store.definitionUserGlobalToggle(disabled, approved, 0, approved.globalRevision!), true);
+    assert.equal(yield* store.definitionUserGlobalToggle(disabled, approved, 0, "changed-global-sha"), false);
     const editedLocal: ProjectDefinitionSnapshot = {...disabled, steps: disabled.steps.map(step => step.id === "local-check"
       ? {...step, description: "Changed local step."} : step)};
-    assert.equal(store.definitionUserGlobalToggle(editedLocal, approved, 0, approved.globalRevision!), false);
-  });
-});
+    assert.equal(yield* store.definitionUserGlobalToggle(editedLocal, approved, 0, approved.globalRevision!), false);
+  }));
+}));
 
-test("Scratch workflow introductions point to shared definitions and omit a project-local folder", async () => {
-  const definitionSnapshot = await scopedDefinitionSnapshot(true, true, "scratch-project", "/scratch");
+it.effect("Scratch workflow introductions point to shared definitions and omit a project-local folder", () => Effect.gen(function* () {
+  const definitionSnapshot = yield* scopedDefinitionSnapshot(true, true, "scratch-project", "/scratch");
   assert.equal(definitionSnapshot.globalOnly, true);
   assert.equal(definitionSnapshot.status, "ready");
   const globalReference = requiredReferences(definitionSnapshot.config)[0];
@@ -507,4 +483,4 @@ test("Scratch workflow introductions point to shared definitions and omit a proj
   assert.match(text, /\/server-home\/\.t3-supervisor\/project\.yaml/);
   assert.match(text, /\/server-home\/\.t3-supervisor\/steps\/global-check\.md/);
   assert.doesNotMatch(text, /\/scratch\/\.t3-supervisor/);
-});
+}));

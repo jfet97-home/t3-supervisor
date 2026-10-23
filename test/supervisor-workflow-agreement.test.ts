@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { Schema } from "effect";
+import { it } from "@effect/vitest";
+import { Effect, Schema } from "effect";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { WorkflowProtocolDiagnosticSchema } from "../src/project-supervisor-contract.js";
-import { parseWorkflowInterpretation, prepareWorkflowRequest, validateWorkflowPlan, workflowRecordDiagnostic, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
+import { interpretationFromFields, prepareWorkflowRequest, validateWorkflowPlan, workflowInterpretationOutcome, workflowRecordDiagnostic, type ProposalContext, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import { diagnoseWorkflowProposalRecord, extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, parseWorkflowProposalRecord, workflowAgreementPlanHash, workflowProtocolDiagnosticCodes } from "../src/supervisor-workflow-agreement.js";
 import { effectiveIndex, projectIndex, testSummary } from "./project-definitions-fixture.js";
 
@@ -107,10 +107,13 @@ const visitPlanNodes = (group: unknown, visit: (node: MutableRecord) => void): v
   }
 };
 
+// the record parsers, validators and fingerprints are pure functions with plain tests; the diagnostic metadata decode is an Effect
+// test of the schema's decoder
+
 const fence = (kind: "workflow-proposal" | "workflow-acceptance", value: unknown): string =>
   `\`\`\`${kind}\n${JSON.stringify(value)}\n\`\`\``;
 
-test("only exact named fences yield canonical plans with stable node identities", () => {
+it("only exact named fences yield canonical plans with stable node identities", () => {
   const snapshot = definitions();
   const value = proposal(snapshot);
   const text = ["A plain yes is not a record.", "", fence("workflow-proposal", value), "", fence("workflow-acceptance", value)].join("\n");
@@ -124,7 +127,7 @@ test("only exact named fences yield canonical plans with stable node identities"
   assert.deepEqual(extractWorkflowAgreementRecords("```json\n{}\n```", "workflow-acceptance"), []);
 });
 
-test("formal acceptance requires a complete current valid context and resolved requirements", () => {
+it("formal acceptance requires a complete current valid context and resolved requirements", () => {
   const snapshot = definitions();
   const context = contextFor(snapshot);
   const value = proposal(snapshot);
@@ -140,7 +143,7 @@ test("formal acceptance requires a complete current valid context and resolved r
   assert.equal(parseWorkflowAgreementRecord(proposal(snapshot, missingRequired), "task-a", context), null);
 });
 
-test("invalid and revision-null definitions can be shown provisionally but cannot be formally accepted", () => {
+it("invalid and revision-null definitions can be shown provisionally but cannot be formally accepted", () => {
   for (const snapshot of [
     definitions({status: "invalid", revision: "observed-invalid-revision", projectConfig: null, complete: true,
       issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "Repair local configuration."}]}),
@@ -161,15 +164,20 @@ test("invalid and revision-null definitions can be shown provisionally but canno
   }
 });
 
-test("an exact null-plan provisional echo is a proposal but never a formal agreement", () => {
+// the provisional plan of an interpretation without a workflow, through the value-level outcome the typed submission decodes with
+const provisionalPlan = (context: ProposalContext) => {
+  const interpretation = interpretationFromFields({objective: "Check this task.", reason: "The latest message describes a concrete task.",
+    sourceMessageIds: ["message-a"]}, "message-a");
+  assert.ok(interpretation.ok);
+  const outcome = workflowInterpretationOutcome(interpretation.value, undefined, null, context);
+  assert.ok(outcome.ok);
+  return outcome.value.workflow;
+};
+
+it("an exact null-plan provisional echo is a proposal but never a formal agreement", () => {
   const snapshot = definitions();
   const context = contextFor(snapshot);
-  const provisional = parseWorkflowInterpretation(JSON.stringify({
-    objective: "Check this task.",
-    reason: "The latest message describes a concrete task.",
-    sourceMessageIds: ["message-a"],
-    workflow: null,
-  }), "message-a", context).workflow;
+  const provisional = provisionalPlan(context);
   assert.equal(provisional.plan, null);
   assert.equal(provisional.issues.filter(item => item.code === "provisional_plan_required").length, 1);
   const echoed = proposal(snapshot, {
@@ -185,7 +193,7 @@ test("an exact null-plan provisional echo is a proposal but never a formal agree
   assert.equal(parseWorkflowAgreementRecord(echoed, "task-a", context), null);
 });
 
-test("workflow diagnostics explain captured strict-record failures without normalizing them", () => {
+it("workflow diagnostics explain captured strict-record failures without normalizing them", () => {
   const snapshot = deliveryDefinitions();
   const {context, record: canonical} = deliveryProposal(snapshot);
   assert.ok(parseWorkflowProposalRecord(canonical, "task-a", context));
@@ -227,7 +235,7 @@ test("workflow diagnostics explain captured strict-record failures without norma
   assert.equal(workflowRecordDiagnostic(badWrapperWorkflow, context), "unknown_template_path");
 });
 
-test("proposal diagnostics separate malformed envelopes, task/source mismatches, and nonformal plans", () => {
+it("proposal diagnostics separate malformed envelopes, task/source mismatches, and nonformal plans", () => {
   const readySnapshot = definitions();
   const readyContext = contextFor(readySnapshot);
   const valid = proposal(readySnapshot);
@@ -240,12 +248,7 @@ test("proposal diagnostics separate malformed envelopes, task/source mismatches,
   const invalidSnapshot = definitions({status: "invalid", revision: "observed-invalid-revision", projectConfig: null,
     issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "Repair local configuration."}]});
   const context = contextFor(invalidSnapshot);
-  const provisional = parseWorkflowInterpretation(JSON.stringify({
-    objective: "Check this task.",
-    reason: "The latest message describes a concrete task.",
-    sourceMessageIds: ["message-a"],
-    workflow: null,
-  }), "message-a", context).workflow;
+  const provisional = provisionalPlan(context);
   const provisionalValue: WorkflowPlanValue = {
     definitionsStatus: provisional.definitionsStatus,
     definitionsComplete: provisional.definitionsComplete,
@@ -259,17 +262,19 @@ test("proposal diagnostics separate malformed envelopes, task/source mismatches,
   assert.equal(diagnoseWorkflowProposalRecord(provisionalRecord, "task-a", context, true), "plan_not_formal");
 });
 
-test("workflow protocol diagnostic metadata has bounded strings and finite time", () => {
+const decodeDiagnostic = Schema.decodeUnknownEffect(WorkflowProtocolDiagnosticSchema);
+
+it.effect("workflow protocol diagnostic metadata has bounded strings and finite time", () => Effect.gen(function* () {
   assert.ok(workflowProtocolDiagnosticCodes.includes("record_json_invalid"));
   const diagnostic = {role: "operative", proposalId: "proposal-a", messageId: "message-a", code: "record_fields", observedAt: 1};
-  assert.deepEqual(Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)(diagnostic), diagnostic);
-  assert.throws(() => Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)({...diagnostic, proposalId: "x".repeat(201)}));
-  assert.throws(() => Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)({...diagnostic, messageId: "x".repeat(513)}));
-  assert.throws(() => Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)({...diagnostic, code: "x".repeat(81)}));
-  assert.throws(() => Schema.decodeUnknownSync(WorkflowProtocolDiagnosticSchema)({...diagnostic, observedAt: Number.POSITIVE_INFINITY}));
-});
+  assert.deepEqual(yield* decodeDiagnostic(diagnostic), diagnostic);
+  assert.ok(yield* Effect.flip(decodeDiagnostic({...diagnostic, proposalId: "x".repeat(201)})));
+  assert.ok(yield* Effect.flip(decodeDiagnostic({...diagnostic, messageId: "x".repeat(513)})));
+  assert.ok(yield* Effect.flip(decodeDiagnostic({...diagnostic, code: "x".repeat(81)})));
+  assert.ok(yield* Effect.flip(decodeDiagnostic({...diagnostic, observedAt: Number.POSITIVE_INFINITY})));
+}));
 
-test("plan fingerprints bind source revision, nested identity, and meaningful order", () => {
+it("plan fingerprints bind source revision, nested identity, and meaningful order", () => {
   const snapshot = definitions();
   const context = contextFor(snapshot);
   const first = proposal(snapshot);

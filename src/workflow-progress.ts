@@ -1,6 +1,4 @@
 import { Schema } from "effect";
-import type { ProjectSupervisor } from "./project-supervisor.js";
-import type { WorkflowWriteController } from "./workflow-write-controller.js";
 import { ProjectSupervisorScopeSnapshotSchema, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
 import { WorkflowExecutionStatus, WorkflowPlanGroupSchema, type WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
 import { externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
@@ -115,7 +113,7 @@ export type WorkflowProgressPagingQuery = {
   limit?: string | undefined;
 };
 
-const maxWorkflowProgressResponseBytes = 1_048_576;
+export const maxWorkflowProgressResponseBytes = 1_048_576;
 
 const parseInteger = (value: string | undefined, fallback: number, minimum: number, maximum: number): number | null => {
   if (value === undefined) return fallback;
@@ -132,8 +130,9 @@ export const parseWorkflowProgressPageQuery = (query: WorkflowProgressPagingQuer
   return {projectId: query.projectId, mainThreadId: query.mainThreadId, workflowOffset, lineageOffset, limit};
 };
 
-const emptyPage = (query: WorkflowProgressPageQuery, status: WorkflowProgressSnapshot["status"], message: string,
-  scope: ProjectSupervisorScopeSnapshot | null, observedAt = Date.now()): WorkflowProgressSnapshot => ({
+// a page without workflow content; observedAt is the scope's time, else the reader's clock
+export const emptyPage = (query: WorkflowProgressPageQuery, status: WorkflowProgressSnapshot["status"], message: string,
+  scope: ProjectSupervisorScopeSnapshot | null, observedAt: number): WorkflowProgressSnapshot => ({
   status,
   message,
   projectId: query.projectId,
@@ -149,7 +148,7 @@ const emptyPage = (query: WorkflowProgressPageQuery, status: WorkflowProgressSna
   lineageHasMore: false,
 });
 
-const scopePage = (scope: ProjectSupervisorScopeSnapshot, threadIds: readonly string[]): ProjectSupervisorScopeSnapshot => {
+export const scopePage = (scope: ProjectSupervisorScopeSnapshot, threadIds: readonly string[]): ProjectSupervisorScopeSnapshot => {
   const wanted = new Set(threadIds);
   return {...scope, threads: scope.threads.filter(thread => wanted.has(thread.threadId))};
 };
@@ -164,7 +163,7 @@ type ParentNodeReference = {
   nodeName: string;
 };
 
-// the browser bundle imports this module, so it walks the plan itself instead of loading the store
+// the browser bundle imports this module's types, so it walks the plan itself instead of loading the store
 const planNodeNames = (plan: WorkflowPlanGroupInfo | null, names = new Map<string, string>()): Map<string, string> => {
   for (const node of plan?.nodes ?? []) {
     if ("nodes" in node) planNodeNames(node, names);
@@ -200,7 +199,7 @@ const progressContributions = (document: WorkflowStateDocument): WorkflowProgres
   }));
 };
 
-const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences: readonly ParentNodeReference[]): WorkflowProgressWorkflow => ({
+export const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences: readonly ParentNodeReference[]): WorkflowProgressWorkflow => ({
   workflowId: document.workflowId,
   projectId: document.projectId,
   mainThreadId: document.mainThreadId,
@@ -230,91 +229,3 @@ const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences:
     })),
   contributions: progressContributions(document),
 });
-
-export const readWorkflowProgressPage = async (
-  supervision: ProjectSupervisor,
-  workflowReader: WorkflowWriteController,
-  query: WorkflowProgressPageQuery,
-  signal: AbortSignal,
-): Promise<WorkflowProgressSnapshot> => {
-  const bounded = (result: WorkflowProgressSnapshot): WorkflowProgressSnapshot =>
-    new TextEncoder().encode(JSON.stringify(result)).length <= maxWorkflowProgressResponseBytes
-      ? result
-      : emptyPage(query, "too_large", "The combined live snapshot exceeds the dashboard response limit; no partial status was returned.", null);
-  const locator = supervision.workflowLocator(query.projectId, query.mainThreadId);
-  const matchingLocator = (expected: NonNullable<typeof locator>) => {
-    const current = supervision.workflowLocator(query.projectId, query.mainThreadId);
-    return current?.supervisorThreadId === expected.supervisorThreadId && current.bindingGeneration === expected.bindingGeneration;
-  };
-  const pageScope = async () => supervision.scopeSnapshot(query.projectId, query.mainThreadId, signal, {
-    lineageOffset: query.lineageOffset,
-    limit: query.limit,
-  });
-
-  if (!locator) {
-    const scope = await pageScope();
-    if (scope.projectId !== query.projectId || scope.mainThreadId !== query.mainThreadId ||
-      supervision.workflowLocator(query.projectId, query.mainThreadId)) {
-      return emptyPage(query, "unavailable", "The Supervisor binding changed during this read. Refresh progress to retry.", null);
-    }
-    return bounded({...emptyPage(query, "unavailable", "No current ready Supervisor binding is available for this main conversation.",
-      scope, scope.observedAt), lineageHasMore: scope.lineageHasMore});
-  }
-
-  const read = await workflowReader.read({
-    supervisorThreadId: locator.supervisorThreadId,
-    bindingGeneration: locator.bindingGeneration,
-    workflowOffset: query.workflowOffset,
-    lineageOffset: query.lineageOffset,
-    limit: query.limit,
-  }, signal);
-  if (!matchingLocator(locator)) {
-    return emptyPage(query, "unavailable", "The Supervisor binding changed during this read. Refresh progress to retry.", null);
-  }
-  if (read.status !== "ok") {
-    const scope = await pageScope();
-    if (!matchingLocator(locator) || scope.supervisorThreadId !== locator.supervisorThreadId ||
-      scope.bindingGeneration !== locator.bindingGeneration || scope.projectId !== query.projectId || scope.mainThreadId !== query.mainThreadId) {
-      return emptyPage(query, "unavailable", "The Supervisor binding changed during this read. Refresh progress to retry.", null);
-    }
-    return bounded({...emptyPage(query, read.status, read.reason, scope, scope.observedAt),
-      lineageHasMore: scope.lineageHasMore,
-      incompatibleWorkflows: read.status === "incompatible" ? [{workflowId: read.workflowId, formatVersion: read.formatVersion}] : []});
-  }
-  if (read.owner.projectId !== query.projectId || read.owner.mainThreadId !== query.mainThreadId ||
-    read.owner.supervisorThreadId !== locator.supervisorThreadId || read.owner.bindingGeneration !== locator.bindingGeneration) {
-    return emptyPage(query, "unavailable", "The Supervisor binding changed during this read. Refresh progress to retry.", null);
-  }
-  const workflowThreadIds = read.lineage.map(thread => thread.threadId);
-  const scope = await supervision.scopeSnapshot(query.projectId, query.mainThreadId, signal, {threadIds: workflowThreadIds});
-  if (!matchingLocator(locator) || scope.projectId !== query.projectId || scope.mainThreadId !== query.mainThreadId ||
-    scope.supervisorThreadId !== locator.supervisorThreadId || scope.bindingGeneration !== locator.bindingGeneration) {
-    return emptyPage(query, "unavailable", "The Supervisor binding changed during this read. Refresh progress to retry.", null);
-  }
-  const threadScope = scopePage(scope, workflowThreadIds);
-  return bounded({
-    status: "ok",
-    message: scope.complete ? null : "Native scope observation is incomplete. Review the issues below before relying on this snapshot.",
-    projectId: query.projectId,
-    mainThreadId: query.mainThreadId,
-    observedAt: Date.now(),
-    scope: threadScope,
-    coverage: (read.coverage ?? []).map(item => {
-      const observeOnlyRoot = item.state === "unavailable" && item.actorThreadId === locator.supervisorThreadId;
-      return {
-        threadId: item.threadId,
-        state: item.state === "root" ? "root" as const : item.state === "assigned" ? "assigned" as const :
-          item.state === "transferring" ? "transfer" as const : observeOnlyRoot ? "observe_only" as const : "unknown" as const,
-        assigneeThreadId: item.state === "assigned" || observeOnlyRoot ? item.actorThreadId : null,
-        assigneeTitle: item.state === "assigned" || observeOnlyRoot ? item.actorTitle : null,
-        assignmentRootThreadId: item.assignmentRootThreadId,
-      };
-    }),
-    incompatibleWorkflows: read.incompatibleWorkflows,
-    workflows: read.workflows.map(({document, parentNodeReferences}) => progressWorkflow(document, parentNodeReferences)),
-    workflowOffset: read.workflowOffset,
-    workflowHasMore: read.workflowHasMore,
-    lineageOffset: read.lineageOffset,
-    lineageHasMore: read.lineageHasMore,
-  });
-};

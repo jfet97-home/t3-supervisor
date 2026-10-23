@@ -1,42 +1,58 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import test from "node:test";
+import { it } from "@effect/vitest";
+import { Deferred, Effect, Exit, Layer } from "effect";
+import { FetchHttpClient } from "effect/http";
 import { WebSocketServer } from "ws";
+import { NativeEnvelope } from "../src/native-envelope.js";
 import {
-  makeSupervisorRpc,
   modelSelection,
-  readSupervisorBaseline,
+  NativeRpc,
+  NativeShell,
   SupervisorRpcError,
   supervisorModels,
   validModelSelection,
 } from "../src/supervisor-native.js";
 
-const startServer = async (): Promise<{ server: WebSocketServer; url: string }> => {
+const startServer = Effect.acquireRelease(Effect.gen(function* () {
   const server = new WebSocketServer({ port: 0 });
-  await new Promise<void>((resolve) => server.once("listening", resolve));
+  yield* Effect.callback<void>((resume) => {server.once("listening", () => resume(Effect.void));});
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   return { server, url: "http://127.0.0.1:" + address.port };
-};
+}), ({ server }) => Effect.callback<void>((resume) => {server.close((error) => resume(error ? Effect.die(error) : Effect.void));}));
 
-const closeServer = async (server: WebSocketServer): Promise<void> => {
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-};
-
-const startHttpServer = async (handler: (request: IncomingMessage, response: ServerResponse) => void): Promise<{ server: Server; url: string }> => {
-  const server = createServer(handler);
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
+const startHttpServer = (handler: (request: IncomingMessage, response: ServerResponse) => void) => Effect.acquireRelease(Effect.gen(function* () {
+  const server: Server = createServer(handler);
+  yield* Effect.callback<void>((resume) => {
+    server.once("error", (error) => resume(Effect.die(error)));
+    server.listen(0, "127.0.0.1", () => resume(Effect.void));
   });
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   return { server, url: "http://127.0.0.1:" + address.port };
-};
+}), ({ server }) => Effect.callback<void>((resume) => {server.close((error) => resume(error ? Effect.die(error) : Effect.void));}));
 
-const closeHttpServer = async (server: Server): Promise<void> => {
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-};
+// one native call over the real envelope, as the read or operate client of that credential
+const rpc = (url: string, token: string, tag: string, payload: Record<string, unknown>, cancel?: Deferred.Deferred<void>) =>
+  NativeRpc.use((client) => client.call(tag, payload, cancel)).pipe(Effect.provide(NativeRpc.layer({ baseUrl: url, token })), Effect.provide(NativeEnvelope.layer));
+
+// the archived snapshot rpc a test answers itself
+// the archived shell read answered in the caller's fiber; a throw or defect is the read's failure
+const archiveWith = (call: (tag: string, payload: Record<string, unknown>) => Effect.Effect<unknown>) => Layer.succeed(NativeRpc, NativeRpc.of({
+  call: (tag, payload) => call(tag, { ...payload }),
+  initiate: () => Effect.die("the shell reads only call"),
+}));
+const archive = (answer: (tag: string, payload: Record<string, unknown>) => unknown) => archiveWith((tag, payload) => Effect.sync(() => answer(tag, payload)));
+
+const readBaseline = (url: string, token: string, archived: Layer.Layer<NativeRpc>) =>
+  NativeShell.use((shell) => shell.baseline).pipe(Effect.provide(NativeShell.layer({ baseUrl: url, token }).pipe(Layer.provide([archived, FetchHttpClient.layer]))));
+
+// assert.rejects for an effect
+const rejects = <A, E, R>(effect: Effect.Effect<A, E, R>, predicate: (cause: unknown) => boolean) => Effect.match(effect, {
+  onSuccess: () => assert.fail("the effect succeeded"),
+  onFailure: (cause) => assert.ok(predicate(cause)),
+});
 
 const validConfig = {
   providers: [{
@@ -59,9 +75,8 @@ const validConfig = {
   }],
 };
 
-test("native RPC authenticates and uses the orchestration request and response frames", async (t) => {
-  const { server, url } = await startServer();
-  t.after(() => closeServer(server));
+it.live("native RPC authenticates and uses the orchestration request and response frames", () => Effect.gen(function* () {
+  const { server, url } = yield* startServer;
   let authorization: string | undefined;
   let request: unknown;
   let pongSeen = false;
@@ -81,7 +96,7 @@ test("native RPC authenticates and uses the orchestration request and response f
     });
   });
 
-  const result = await makeSupervisorRpc(url, "test-native-token")("server.getConfig", {}, AbortSignal.timeout(2000));
+  const result = yield* rpc(url, "test-native-token", "server.getConfig", {}).pipe(Effect.timeout("2 seconds"));
   assert.deepEqual(result, { ok: true });
   assert.equal(authorization, "Bearer test-native-token");
   assert.deepEqual(request, {
@@ -92,71 +107,66 @@ test("native RPC authenticates and uses the orchestration request and response f
     headers: [],
   });
   assert.equal(pongSeen, true);
-});
+}));
 
-test("malformed native RPC responses fail closed with a credential-free error", async (t) => {
-  const { server, url } = await startServer();
-  t.after(() => closeServer(server));
+it.live("malformed native RPC responses fail closed with a credential-free error", () => Effect.gen(function* () {
+  const { server, url } = yield* startServer;
   server.on("connection", (socket) => socket.once("message", () => {
     socket.send(JSON.stringify({ _tag: "Exit", requestId: "supervisor", exit: "success" }));
   }));
 
-  await assert.rejects(
-    makeSupervisorRpc(url, "private-test-token")("server.getConfig", {}, AbortSignal.timeout(1500)),
+  yield* rejects(
+    rpc(url, "private-test-token", "server.getConfig", {}).pipe(Effect.timeout("1500 millis")),
     (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "uncertain" && !cause.message.includes("private-test-token"),
   );
-});
+}));
 
-test("native RPC marks a socket closed before open rejected without claiming a definite T3 rejection", async (t) => {
-  const {server, url} = await startHttpServer(() => undefined);
-  t.after(() => closeHttpServer(server));
+it.live("native RPC marks a socket closed before open rejected without claiming a definite T3 rejection", () => Effect.gen(function* () {
+  const {server, url} = yield* startHttpServer(() => undefined);
   let requestFrameObserved = false;
   server.on("upgrade", (_request, socket) => {
     socket.on("data", data => {if (data.toString().includes('"_tag":"Request"')) requestFrameObserved = true;});
     socket.destroy();
   });
 
-  await assert.rejects(
-    makeSupervisorRpc(url, "pre-send-close-token")("orchestration.dispatchCommand", {type: "message.dispatch"}, AbortSignal.timeout(1500)),
+  yield* rejects(
+    rpc(url, "pre-send-close-token", "orchestration.dispatchCommand", {type: "message.dispatch"}).pipe(Effect.timeout("1500 millis")),
     (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && !cause.definiteRejection && !cause.dispatchCommandFailure,
   );
   assert.equal(requestFrameObserved, false, "the socket never opened and no native request frame was sent");
-});
+}));
 
-test("native RPC rejects an already-aborted call without opening a socket or claiming a T3 rejection", async (t) => {
-  const {server, url} = await startServer();
-  t.after(() => closeServer(server));
+it.live("native RPC rejects an already-aborted call without opening a socket or claiming a T3 rejection", () => Effect.gen(function* () {
+  const {server, url} = yield* startServer;
   let connections = 0;
   server.on("connection", () => {connections += 1;});
-  const controller = new AbortController();
-  controller.abort();
+  const cancel = yield* Deferred.make<void>();
+  yield* Deferred.succeed(cancel, undefined);
 
-  await assert.rejects(
-    makeSupervisorRpc(url, "pre-aborted-token")("orchestration.dispatchCommand", {type: "message.dispatch"}, controller.signal),
+  yield* rejects(
+    rpc(url, "pre-aborted-token", "orchestration.dispatchCommand", {type: "message.dispatch"}, cancel),
     (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && !cause.definiteRejection,
   );
   assert.equal(connections, 0);
-});
+}));
 
-test("native RPC classifies a connection drop after sending as uncertain", async (t) => {
-  const {server, url} = await startServer();
-  t.after(() => closeServer(server));
+it.live("native RPC classifies a connection drop after sending as uncertain", () => Effect.gen(function* () {
+  const {server, url} = yield* startServer;
   let requestReceived = false;
   server.on("connection", socket => socket.once("message", () => {
     requestReceived = true;
     socket.terminate();
   }));
 
-  await assert.rejects(
-    makeSupervisorRpc(url, "post-send-drop-token")("orchestration.dispatchCommand", {type: "message.dispatch"}, AbortSignal.timeout(1500)),
+  yield* rejects(
+    rpc(url, "post-send-drop-token", "orchestration.dispatchCommand", {type: "message.dispatch"}).pipe(Effect.timeout("1500 millis")),
     (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "uncertain" && !cause.definiteRejection,
   );
   assert.equal(requestReceived, true);
-});
+}));
 
-test("native RPC preserves durable rejection identity through nested command failures", async (t) => {
-  const { server, url } = await startServer();
-  t.after(() => closeServer(server));
+it.live("native RPC preserves durable rejection identity through nested command failures", () => Effect.gen(function* () {
+  const { server, url } = yield* startServer;
   server.on("connection", (socket) => socket.once("message", () => {
     socket.send(JSON.stringify({
       _tag: "Exit",
@@ -165,16 +175,15 @@ test("native RPC preserves durable rejection identity through nested command fai
     }));
   }));
 
-  await assert.rejects(
-    makeSupervisorRpc(url, "durable-rejection-token")("orchestration.launchThread", { commandId: "stable-command" }, AbortSignal.timeout(1500)),
+  yield* rejects(
+    rpc(url, "durable-rejection-token", "orchestration.launchThread", { commandId: "stable-command" }).pipe(Effect.timeout("1500 millis")),
     (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && cause.definiteRejection && !cause.providerDisabled &&
       !cause.dispatchCommandFailure && !cause.message.includes("durable-rejection-token"),
   );
-});
+}));
 
-test("native RPC marks only the received dispatch-command failure for same-ID reconciliation", async (t) => {
-  const { server, url } = await startServer();
-  t.after(() => closeServer(server));
+it.live("native RPC marks only the received dispatch-command failure for same-ID reconciliation", () => Effect.gen(function* () {
+  const { server, url } = yield* startServer;
   server.on("connection", (socket) => socket.once("message", (data) => {
     const request: unknown = JSON.parse(data.toString());
     assert.ok(typeof request === "object" && request !== null);
@@ -187,19 +196,18 @@ test("native RPC marks only the received dispatch-command failure for same-ID re
     }));
   }));
 
-  await assert.rejects(
-    makeSupervisorRpc(url, "dispatch-failure-token")("orchestration.dispatchCommand", {commandId: "same-command"}, AbortSignal.timeout(1500)),
+  yield* rejects(
+    rpc(url, "dispatch-failure-token", "orchestration.dispatchCommand", {commandId: "same-command"}).pipe(Effect.timeout("1500 millis")),
     (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "uncertain" && !cause.definiteRejection && cause.dispatchCommandFailure,
   );
-  await assert.rejects(
-    makeSupervisorRpc(url, "generic-failure-token")("server.getConfig", {}, AbortSignal.timeout(1500)),
+  yield* rejects(
+    rpc(url, "generic-failure-token", "server.getConfig", {}).pipe(Effect.timeout("1500 millis")),
     (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "uncertain" && !cause.dispatchCommandFailure,
   );
-});
+}));
 
-test("native RPC identifies a provider-disabled rejection before receipt lookup", async (t) => {
-  const { server, url } = await startServer();
-  t.after(() => closeServer(server));
+it.live("native RPC identifies a provider-disabled rejection before receipt lookup", () => Effect.gen(function* () {
+  const { server, url } = yield* startServer;
   server.on("connection", (socket) => socket.once("message", () => {
     socket.send(JSON.stringify({
       _tag: "Exit",
@@ -208,13 +216,13 @@ test("native RPC identifies a provider-disabled rejection before receipt lookup"
     }));
   }));
 
-  await assert.rejects(
-    makeSupervisorRpc(url, "provider-disabled-token")("orchestration.dispatchCommand", { type: "message.dispatch" }, AbortSignal.timeout(1500)),
+  yield* rejects(
+    rpc(url, "provider-disabled-token", "orchestration.dispatchCommand", { type: "message.dispatch" }).pipe(Effect.timeout("1500 millis")),
     (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && cause.definiteRejection && cause.providerDisabled && !cause.message.includes("provider-disabled-token"),
   );
-});
+}));
 
-test("shell activation baseline includes more than 128 active threads and archived run anchors", async (t) => {
+it.live("shell activation baseline includes more than 128 active threads and archived run anchors", () => Effect.gen(function* () {
   const activeThreads = Array.from({ length: 129 }, (_, index) => ({
     id: "active-thread-" + index,
     latestRunId: index === 0 ? null : "active-run-" + index,
@@ -228,7 +236,7 @@ test("shell activation baseline includes more than 128 active threads and archiv
   let authorization: string | undefined;
   let protocol: string | undefined;
   const rpcCalls: Array<{ tag: string; payload: Record<string, unknown> }> = [];
-  const { server, url } = await startHttpServer((request, response) => {
+  const { url } = yield* startHttpServer((request, response) => {
     method = request.method;
     path = request.url;
     authorization = request.headers.authorization;
@@ -236,13 +244,12 @@ test("shell activation baseline includes more than 128 active threads and archiv
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ schemaVersion: 2, snapshotSequence: 161, threads: activeThreads, archivedThreads: [] }));
   });
-  t.after(() => closeHttpServer(server));
 
-  const archiveRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
+  const archiveRpc = (tag: string, payload: Record<string, unknown>): unknown => {
     rpcCalls.push({ tag, payload });
     return { schemaVersion: 2, snapshotSequence: 161, threads: archivedThreads };
   };
-  const baseline = await readSupervisorBaseline(url, "baseline-test-token", archiveRpc)(AbortSignal.timeout(1500));
+  const baseline = yield* readBaseline(url, "baseline-test-token", archive(archiveRpc)).pipe(Effect.timeout("1500 millis"));
   assert.equal(method, "GET");
   assert.equal(path, "/api/orchestration/shell");
   assert.equal(authorization, "Bearer baseline-test-token");
@@ -253,10 +260,10 @@ test("shell activation baseline includes more than 128 active threads and archiv
   assert.deepEqual(baseline.threads.at(-1), archivedThreads[1]);
   assert.deepEqual(baseline.threads[0], activeThreads[0]);
   assert.deepEqual(rpcCalls, [{ tag: "orchestration.getArchivedShellSnapshot", payload: {} }]);
-});
+}));
 
-test("shell baseline rejects malformed or ambiguous thread anchors", async (t) => {
-  const { server, url } = await startHttpServer((_request, response) => {
+it.live("shell baseline rejects malformed or ambiguous thread anchors", () => Effect.gen(function* () {
+  const { url } = yield* startHttpServer((_request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
       schemaVersion: 2,
@@ -265,69 +272,69 @@ test("shell baseline rejects malformed or ambiguous thread anchors", async (t) =
       archivedThreads: [{ id: "same-thread", latestRunId: "archived-run" }],
     }));
   });
-  t.after(() => closeHttpServer(server));
 
   let archiveCalls = 0;
-  await assert.rejects(
-    readSupervisorBaseline(url, "malformed-baseline-token", async () => { archiveCalls += 1; return {}; })(AbortSignal.timeout(1500)),
+  yield* rejects(
+    readBaseline(url, "malformed-baseline-token", archive(() => { archiveCalls += 1; return {}; })).pipe(Effect.timeout("1500 millis")),
     (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && !cause.message.includes("malformed-baseline-token"),
   );
   assert.equal(archiveCalls, 1, "the active and archived snapshot requests start concurrently");
-});
+}));
 
-test("active and archived shell snapshots must share a revision within three bounded reads", async (t) => {
+it.live("active and archived shell snapshots must share a revision within three bounded reads", () => Effect.gen(function* () {
   let httpCalls = 0;
-  const { server, url } = await startHttpServer((_request, response) => {
+  const { url } = yield* startHttpServer((_request, response) => {
     httpCalls += 1;
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ schemaVersion: 2, snapshotSequence: 161, threads: [], archivedThreads: [] }));
   });
-  t.after(() => closeHttpServer(server));
   let archiveCalls = 0;
-  const archiveRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
+  const archiveRpc = (tag: string, payload: Record<string, unknown>): unknown => {
     archiveCalls += 1;
     assert.equal(tag, "orchestration.getArchivedShellSnapshot");
     assert.deepEqual(payload, {});
     return { schemaVersion: 2, snapshotSequence: 160, threads: [{ id: "archived-thread", latestRunId: "archived-run" }] };
   };
 
-  await assert.rejects(
-    readSupervisorBaseline(url, "revision-test-token", archiveRpc)(AbortSignal.timeout(2500)),
+  yield* rejects(
+    readBaseline(url, "revision-test-token", archive(archiveRpc)).pipe(Effect.timeout("2500 millis")),
     (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected",
   );
   assert.equal(httpCalls, 3);
   assert.equal(archiveCalls, 3);
-});
+}));
 
-test("active and archived baseline reads start concurrently for each revision pair", async (t) => {
-  let noteHttpStarted!: () => void;
-  let noteRpcStarted!: () => void;
-  const httpStarted = new Promise<void>((resolve) => { noteHttpStarted = resolve; });
-  const rpcStarted = new Promise<void>((resolve) => { noteRpcStarted = resolve; });
-  const { server, url } = await startHttpServer((_request, response) => {
-    noteHttpStarted();
-    void rpcStarted.then(() => {
+it.live("active and archived baseline reads start concurrently for each revision pair", () => Effect.gen(function* () {
+  // the archived read waits until the active read reached the server, and the server answers only once the archived read started
+  const httpStarted = yield* Deferred.make<void>();
+  let rpcStarted = false;
+  const held: Array<() => void> = [];
+  const { url } = yield* startHttpServer((_request, response) => {
+    Deferred.doneUnsafe(httpStarted, Exit.void);
+    const answer = () => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ schemaVersion: 2, snapshotSequence: 161, threads: [], archivedThreads: [] }));
-    });
+    };
+    if (rpcStarted) answer();
+    else held.push(answer);
   });
-  t.after(() => closeHttpServer(server));
-  const archiveRpc = async (tag: string, payload: Record<string, unknown>): Promise<unknown> => {
-    noteRpcStarted();
-    await httpStarted;
+  const archiveRpc = (tag: string, payload: Record<string, unknown>) => Effect.gen(function* () {
+    rpcStarted = true;
+    for (const answer of held.splice(0)) answer();
+    yield* Deferred.await(httpStarted);
     assert.equal(tag, "orchestration.getArchivedShellSnapshot");
     assert.deepEqual(payload, {});
     return { schemaVersion: 2, snapshotSequence: 161, threads: [] };
-  };
+  });
 
-  const baseline = await readSupervisorBaseline(url, "concurrent-baseline-token", archiveRpc)(AbortSignal.timeout(1500));
+  const baseline = yield* readBaseline(url, "concurrent-baseline-token", archiveWith(archiveRpc)).pipe(Effect.timeout("1500 millis"));
   assert.equal(baseline.snapshotSequence, 161);
   assert.deepEqual(baseline.threads, []);
-});
+}));
 
-test("overlapping active and archived thread identities fail closed after three pairs", async (t) => {
+it.live("overlapping active and archived thread identities fail closed after three pairs", () => Effect.gen(function* () {
   let httpCalls = 0;
-  const { server, url } = await startHttpServer((_request, response) => {
+  const { url } = yield* startHttpServer((_request, response) => {
     httpCalls += 1;
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
@@ -337,22 +344,21 @@ test("overlapping active and archived thread identities fail closed after three 
       archivedThreads: [],
     }));
   });
-  t.after(() => closeHttpServer(server));
   let archiveCalls = 0;
-  const archiveRpc = async (): Promise<unknown> => {
+  const archiveRpc = (): unknown => {
     archiveCalls += 1;
     return { schemaVersion: 2, snapshotSequence: 161, threads: [{ id: "overlapping-thread", latestRunId: "archived-run" }] };
   };
 
-  await assert.rejects(
-    readSupervisorBaseline(url, "overlap-baseline-token", archiveRpc)(AbortSignal.timeout(2500)),
+  yield* rejects(
+    readBaseline(url, "overlap-baseline-token", archive(archiveRpc)).pipe(Effect.timeout("2500 millis")),
     (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected" && !cause.message.includes("overlap-baseline-token"),
   );
   assert.equal(httpCalls, 3);
   assert.equal(archiveCalls, 3);
-});
+}));
 
-test("native configuration rejects malformed or excessive input and enforces advertised model choices", () => {
+it("native configuration rejects malformed or excessive input and enforces advertised model choices", () => {
   const models = supervisorModels(validConfig);
   const valid = { instanceId: "codex", model: "gpt-6-luna", options: [{ id: "reasoningEffort", value: "high" }] };
   assert.equal(validModelSelection(valid, models), true);
@@ -361,4 +367,3 @@ test("native configuration rejects malformed or excessive input and enforces adv
   assert.throws(() => supervisorModels({ providers: new Array(201).fill({}) }), (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected");
   assert.throws(() => supervisorModels({ providers: "not-an-array" }), (cause: unknown) => cause instanceof SupervisorRpcError && cause.outcome === "rejected");
 });
-
