@@ -1,6 +1,6 @@
 import { Cause, Clock, Console, Context, Deferred, Effect, FiberMap, HashMap, Layer, Option, Ref } from "effect";
 import { mainRunNodeReader, nativeUserMessageVisible, timestampMs } from "./domain.js";
-import { isCurrentMainGraphRun, SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch, type SupervisorNativeChildLifecycleEvidence } from "./supervisor-monitor.js";
+import { isCurrentMainGraphRun, SUPERVISOR_MONITOR_AGE_MS, SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch, type SupervisorNativeChildLifecycleEvidence } from "./supervisor-monitor.js";
 import { SupervisorConversationStore, type ConversationRequest, type RequestInflight, type WorkflowAgreementCandidate, type WorkflowIntroduction } from "./supervisor-conversation-store.js";
 import { NativeOperateRpc, NativeRpc, record, SupervisorRpcError, type NativeRpcInFlight } from "./supervisor-native.js";
 import { fixedOccurrencesPreserved, readerWorkflowInstruction, manifestMembers, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, workflowTemplatesFor, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
@@ -602,7 +602,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     const oldestAt = pending.length ? Math.min(...pending.map(item => item.detectedAt)) : null;
     const earlyDue = pendingByTask.some(items =>
       items.some(item => item.priority !== null) || items.filter(item => !item.type.startsWith("run_")).length >= settings.activityThreshold);
-    const nextReviewAt = oldestAt === null ? null : Math.max(earlyDue ? yield* clock.currentTimeMillis : oldestAt + settings.intervalMinutes * 60_000, (lastNoticeAt ?? 0) + SUPERVISOR_MONITOR_COOLDOWN_MS);
+    const nextReviewAt = oldestAt === null ? null : Math.max(earlyDue ? yield* clock.currentTimeMillis : oldestAt + Math.min(settings.intervalMinutes * 60_000, SUPERVISOR_MONITOR_AGE_MS), (lastNoticeAt ?? 0) + SUPERVISOR_MONITOR_COOLDOWN_MS);
     const introductions = (yield* requests.introductions(projectId)).filter(intro => tasks.some(task => task.id === intro.taskId));
     const blocked = introductions.find(intro => ["blocked", "uncertain"].includes(intro.state));
     const starting = introductions.some(intro => ["context", "ready", "sending", "accepted"].includes(intro.state));

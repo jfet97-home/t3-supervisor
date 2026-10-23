@@ -306,7 +306,7 @@ describe("CT-UI-FIXTURE-01 ui baseline fixture", () => {
       assert.equal(decodeSaved(GlobalDefinitionsControlResult, yield* c.post("/api/guidance/global-definitions-control", {expectedGeneration: 1, enabled: true})), "saved");
       assert.equal(decodeSaved(ProjectSupervisorSaveResult, yield* c.post("/api/guidance/project-supervisor", {projectId: A, mainThreadId: fixtureIds.threadA1, expectedGeneration: 1,
         modelSelection: {instanceId: "fixture-provider", model: "fixture-model-quick", options: [{id: "reasoningEffort", value: "high"}]},
-        monitoring: {intervalMinutes: 7, activityThreshold: 12}, teamSettings: {maxHelpersPerRoot: 3}})), "saved");
+        monitoring: {intervalMinutes: 2, activityThreshold: 12}, teamSettings: {maxHelpersPerRoot: 3}})), "saved");
       assert.equal(decodeSaved(ProjectSupervisorSaveResult, yield* c.post("/api/guidance/project-supervisor/retry", {projectId: A, mainThreadId: fixtureIds.threadA2,
         expectedGeneration: 2, threadId: "fixture-supervisor-a2", bindingGeneration: 1, action: "retry"})), "saved");
       const chat = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)((yield* c.get(`/api/guidance/project-supervisor?projectId=${A}&mainThreadId=${fixtureIds.threadA1}`)).json());

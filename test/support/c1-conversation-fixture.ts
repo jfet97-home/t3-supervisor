@@ -348,7 +348,7 @@ export const makeFixture = (clock: FixtureClock, options: FixtureOptions = {}) =
   yield* projectStore.setBinding({ ...binding, state: "ready" });
   const settings = yield* projectStore.settings(projectId);
   yield* projectStore.saveSettings(projectId, settings.generation, settings.modelSelection, options.settings ?? {
-    intervalMinutes: 5,
+    intervalMinutes: 2,
     activityThreshold: 3,
   });
 

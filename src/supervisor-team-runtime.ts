@@ -2,7 +2,7 @@ import { Cause, Clock, Context, Data, Deferred, Effect, Exit, HashMap, HashSet, 
 import { GuidanceDb } from "./db.js";
 import { guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
 import { ProjectSupervisorStore, type BindingRecord } from "./project-supervisor-store.js";
-import { SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorBatch, type SupervisorMonitorThreadBatch } from "./supervisor-monitor.js";
+import { SUPERVISOR_MONITOR_COOLDOWN_MS, SUPERVISOR_TEAM_ATTENTION_MS, type SupervisorMonitorBatch, type SupervisorMonitorThreadBatch } from "./supervisor-monitor.js";
 import { ProjectSupervisorMonitorStore, type InvalidMonitorObservation } from "./supervisor-monitor-store.js";
 import { conversationRequestMessageId, SupervisorConversationStore, type ConversationRequest, type RequestInflight } from "./supervisor-conversation-store.js";
 import { endedWithoutCompletion, notificationClosed, SupervisorTeamStore, type HandoverAttempt, type SupervisorTeamSnapshot, type TeamEvent, type TeamMember, type TeamNotification, type TeamRequest, type TeamRequestTarget } from "./supervisor-team-store.js";
@@ -221,7 +221,7 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) =
     const repeatedBusy = request.state === "prepared" && request.error !== null;
     const startedAt = request.sentAt ?? (repeatedBusy ? request.createdAt : null);
     return (hasDeliveryIdentity && ["waiting", "uncertain"].includes(request.state) || repeatedBusy) && startedAt !== null &&
-      now - startedAt >= SUPERVISOR_MONITOR_COOLDOWN_MS;
+      now - startedAt >= SUPERVISOR_TEAM_ATTENTION_MS;
   });
 
   // a replaced binding owns its own service events: any failure of the event write is ignored, as the baseline catch did
@@ -644,7 +644,7 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) =
   });
 
   const notificationNeedsAttention = (notification: TeamNotification) =>
-    Effect.map(Clock.currentTimeMillis, (now) => now - notification.createdAt >= SUPERVISOR_MONITOR_COOLDOWN_MS);
+    Effect.map(Clock.currentTimeMillis, (now) => now - notification.createdAt >= SUPERVISOR_TEAM_ATTENTION_MS);
 
   const updateNotificationDelivery = (binding: BindingRecord, notification: TeamNotification, state: "sending" | "delivered" | "uncertain") =>
     Effect.flatMap(Clock.currentTimeMillis, (now) =>

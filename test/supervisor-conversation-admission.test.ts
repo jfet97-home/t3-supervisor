@@ -21,7 +21,7 @@ const isCheckIn = (fixture: Fixture) => (call: RpcCall) => call.payload.type ===
 // supervisor's own scope predicates
 const dueCheckIn = (clock: FixtureClock) => Effect.gen(function* () {
   yield* setNow(clock, clock.now);
-  const fixture = yield* makeFixture(clock, {settings: {intervalMinutes: 5, activityThreshold: 3}});
+  const fixture = yield* makeFixture(clock, {settings: {intervalMinutes: 2, activityThreshold: 3}});
   yield* appendNoticeToOperative(fixture);
   for (let index = 1; index <= 3; index++) addCommandActivity(fixture.operative, `command-${index}`, `PRIVATE_COMMAND_BODY_${index}`, clock.now - index * 1_000);
   yield* fixture.conversation.observe(fixture.threadList).pipe(atWallTime(clock.now));

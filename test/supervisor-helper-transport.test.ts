@@ -6,7 +6,7 @@ import {defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {attributesHelperDelivery, helperDeliveryBody, helperDeliveryBudget, publishedRendering, renderedLengthBound} from "../src/supervisor-helper-transport.js";
 import {teamNotificationText, type SupervisorTeamRuntimeShape} from "../src/supervisor-team-runtime.js";
 import type {SupervisorConversationStoreShape} from "../src/supervisor-conversation-store.js";
-import {SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorBatch, type SupervisorMonitorThreadBatch} from "../src/supervisor-monitor.js";
+import {SUPERVISOR_TEAM_ATTENTION_MS, type SupervisorMonitorBatch, type SupervisorMonitorThreadBatch} from "../src/supervisor-monitor.js";
 import {T3TransportError} from "../src/t3.js";
 import type {Projection, ThreadInfo} from "../src/types.js";
 import {rows} from "./support/guidance-store-services.js";
@@ -955,14 +955,14 @@ it.effect("team runtime retains a lost webhook reply as uncertain and raises bou
   const originalTeamRequest = (yield* f.team.unresolvedRequests(f.binding)).find(item => item.requestId === original!.id);
   assert.equal(originalTeamRequest?.state, "uncertain");
 
-  yield* TestClock.setTime(original!.sentAt! + SUPERVISOR_MONITOR_COOLDOWN_MS - 1);
+  yield* TestClock.setTime(original!.sentAt! + SUPERVISOR_TEAM_ATTENTION_MS - 1);
   for (let cycle = 0; cycle < 15; cycle++) {
     yield* team.requests.noticeSent("helper", 0);
     yield* cycleOf(f, team.runtime, team.threads);
   }
   assert.equal((yield* f.team.snapshot(f.binding)).events.some(event => event.kind === "service_attention" && event.summary.includes("no visible terminal native run")), false);
 
-  yield* TestClock.setTime(original!.sentAt! + SUPERVISOR_MONITOR_COOLDOWN_MS + 1);
+  yield* TestClock.setTime(original!.sentAt! + SUPERVISOR_TEAM_ATTENTION_MS + 1);
   for (let cycle = 0; cycle < 15; cycle++) {
     yield* team.requests.noticeSent("helper", 0);
     yield* cycleOf(f, team.runtime, team.threads);
@@ -994,7 +994,7 @@ it.effect("a disabled channel before first POST stays retry-blocked with bounded
   assert.equal(original?.sentAt, null);
   assert.equal(f.state.posts, 0);
 
-  yield* TestClock.setTime(original!.createdAt + SUPERVISOR_MONITOR_COOLDOWN_MS + 1);
+  yield* TestClock.setTime(original!.createdAt + SUPERVISOR_TEAM_ATTENTION_MS + 1);
   yield* cycleOf(f, team.runtime, team.threads);
   const current = yield* team.requests.pending("p", "helper");
   assert.equal(current?.id, original?.id);
@@ -1018,7 +1018,7 @@ it.effect("a missing channel after an accepted POST cannot prove non-delivery or
   assert.equal(f.state.posts, 1);
   f.tasks.splice(0);
 
-  yield* TestClock.setTime(original!.sentAt! + SUPERVISOR_MONITOR_COOLDOWN_MS + 1);
+  yield* TestClock.setTime(original!.sentAt! + SUPERVISOR_TEAM_ATTENTION_MS + 1);
   yield* cycleOf(f, team.runtime, team.threads);
   const current = yield* team.requests.pending("p", "helper");
   assert.equal(current?.id, original?.id);

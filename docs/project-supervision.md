@@ -251,9 +251,12 @@ advisory conversation, not filesystem prevention or a dashboard approval gate.
 ## Monitoring, recovery and lifecycle
 
 Ongoing checks observe the main and its verified native and delegated descendants,
-using the project age/count thresholds (initially five minutes or ten finalized
-activities), one shared per-main cooldown and one service check-in in flight per
-Supervisor. Forks remain separate scopes. Native child lifecycle comes from its
+using the project age/count thresholds (ten finalized activities by default, or the
+oldest finished activity after at most two minutes: one or two minutes can be chosen,
+two is the default and the upper bound), one shared 30-second per-main cooldown and
+one service check-in in flight per Supervisor. These bound when a check-in becomes
+due, not when the model answers: a check-in still in flight, a busy root, Stop or
+unavailable native access still defers the wake. Forks remain separate scopes. Native child lifecycle comes from its
 direct parent's child record; an idle child mirror with no AppRun is not completion.
 Bounded activity batches identify their source and show incomplete reads explicitly.
 Completed, failed, interrupted and cancelled runs have terminal priority. Verified

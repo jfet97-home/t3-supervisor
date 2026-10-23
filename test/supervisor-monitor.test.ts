@@ -268,7 +268,7 @@ it.effect("ten finalized activities or one priority event wakes a chat, while co
     assert.ok(batch);
     assert.equal(batch.trigger, "activity_threshold");
     assert.equal(batch.finalizedActivityCount, 10);
-    assert.equal(yield* monitor.select(projectId, defaultMonitoringSettings, now, now - 30_000), null);
+    assert.equal(yield* monitor.select(projectId, defaultMonitoringSettings, now, now - SUPERVISOR_MONITOR_COOLDOWN_MS + 1), null);
     assert.ok(yield* monitor.select(projectId, defaultMonitoringSettings, now, now - SUPERVISOR_MONITOR_COOLDOWN_MS));
 
     yield* monitor.acknowledge(batch, now);
@@ -285,20 +285,16 @@ it.effect("ten finalized activities or one priority event wakes a chat, while co
     assert.deepEqual(priority.threads[0]?.priorityKinds, ["user_instruction"]);
   })));
 
-it("a sparse finalized activity becomes due after five minutes, and waiting input coalesces as priority", () => {
-  const sparse = collect([event("sparse", now - SUPERVISOR_MONITOR_AGE_MS - 1)]);
-  const age = evaluateSupervisorMonitoring(sparse, { ...defaultMonitoringSettings, activityThreshold: 10 }, now, null);
-  assert.equal(age.due, true);
-  assert.equal(age.trigger, "activity_age");
-  assert.equal(
-    evaluateSupervisorMonitoring(
-      sparse,
-      { ...defaultMonitoringSettings, intervalMinutes: 10, activityThreshold: 10 },
-      now,
-      null,
-    ).due,
-    false,
-  );
+it("a sparse finalized activity is due after at most two minutes, and waiting input coalesces as priority", () => {
+  // one finished ordinary activity of the given age, against a chosen age bound and the default count of ten
+  const decide = (ageMs: number, intervalMinutes: number) =>
+    evaluateSupervisorMonitoring(collect([event("sparse", now - ageMs)]), {intervalMinutes, activityThreshold: 10}, now, null);
+  assert.equal(SUPERVISOR_MONITOR_AGE_MS, 120_000);
+  assert.deepEqual(defaultMonitoringSettings, {intervalMinutes: 2, activityThreshold: 10});
+  assert.deepEqual([decide(119_999, 2).due, decide(120_000, 2).due, decide(120_000, 2).trigger], [false, true, "activity_age"]);
+  assert.deepEqual([decide(59_999, 1).due, decide(60_000, 1).due], [false, true], "a one-minute choice is due at 60 s");
+  // a longer age saved before the bound existed still applies at 120 s
+  assert.deepEqual([decide(119_999, 5).due, decide(120_000, 5).due, decide(120_000, 60).due], [false, true, true]);
 
   const coalesced = collect([
     event("ordinary"),
@@ -314,6 +310,19 @@ it("a sparse finalized activity becomes due after five minutes, and waiting inpu
   const decision = evaluateSupervisorMonitoring(coalesced, defaultMonitoringSettings, now, null);
   assert.equal(decision.trigger, "priority");
   assert.deepEqual(decision.priorityKinds.sort(), ["user_instruction", "waiting_input"]);
+});
+
+it("the per-Supervisor cooldown is 30 seconds from the last send, also for priority", () => {
+  const ordinary = collect([event("aged", now - 120_000)]);
+  const priority = collect([{ id: "instruction", type: "user_message", status: "completed", inputIntent: "queued_turn" }]);
+  const decide = (pending: readonly SupervisorMonitorActivity[], sinceLastSendMs: number) =>
+    evaluateSupervisorMonitoring(pending, defaultMonitoringSettings, now, now - sinceLastSendMs);
+  assert.equal(SUPERVISOR_MONITOR_COOLDOWN_MS, 30_000);
+  for (const pending of [ordinary, priority]) {
+    assert.equal(decide(pending, 29_999).due, false);
+    assert.equal(decide(pending, 29_999).cooldownUntil, now + 1);
+    assert.equal(decide(pending, 30_000).due, true);
+  }
 });
 
 it("completed, failed, interrupted and cancelled runs are immediate priorities while rolled-back roots are ignored", () => {

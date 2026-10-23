@@ -116,7 +116,7 @@ const task = (projectId: string, threadId: string, objective: string): TaskInter
   objective, reason: "Fixture: synthetic interpretation for UI recordings.", updatedAt: fixtureEpoch + 3 * minute,
 });
 const projectSettings = (): ProjectSupervisorInfo["settings"] =>
-  ({generation: 1, modelSelection: steadyModel, pending: false, monitoring: {intervalMinutes: 5, activityThreshold: 10}, teamSettings: {maxHelpersPerRoot: 5}});
+  ({generation: 1, modelSelection: steadyModel, pending: false, monitoring: {intervalMinutes: 2, activityThreshold: 10}, teamSettings: {maxHelpersPerRoot: 5}});
 
 const environmentA = (): FixtureData => ({
   global: {generation: 1, enabled: true, manual: false},
@@ -426,10 +426,10 @@ export class FixtureModel {
     return withForced<ProjectSupervisorSaveOutcome>(forced, () => {
       if (input.expectedGeneration !== project.settings.generation) return conflict();
       const model = models.find(item => item.instanceId === input.modelSelection.instanceId && item.model === input.modelSelection.model);
-      const monitoring = input.monitoring ?? project.settings.monitoring ?? {intervalMinutes: 5, activityThreshold: 10};
+      const monitoring = input.monitoring ?? project.settings.monitoring ?? {intervalMinutes: 2, activityThreshold: 10};
       const team = input.teamSettings ?? project.settings.teamSettings ?? {maxHelpersPerRoot: 5};
       const integer = (value: number, minimum: number, maximum: number) => Number.isInteger(value) && value >= minimum && value <= maximum;
-      if (!model?.available || !integer(monitoring.intervalMinutes, 1, 60) || !integer(monitoring.activityThreshold, 3, 100) || !integer(team.maxHelpersPerRoot, 0, 20))
+      if (!model?.available || !integer(monitoring.intervalMinutes, 1, 2) || !integer(monitoring.activityThreshold, 3, 100) || !integer(team.maxHelpersPerRoot, 0, 20))
         return {status: "invalid" as const, message: "Fixture: the model, monitoring or team settings are invalid.", snapshot: snapshot()};
       project.settings = {generation: project.settings.generation + 1, modelSelection: input.modelSelection, pending: false, monitoring, teamSettings: team};
       return {status: "saved" as const, message: "Fixture: Supervisor settings saved in memory.", snapshot: snapshot()};

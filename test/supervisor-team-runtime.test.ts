@@ -788,7 +788,7 @@ it.effect("a stale completed helper check-in settles its request without acknowl
   op.runtimeRequests = [{id: "request%253Aopaque", nodeId: "tool-node", kind: "user_input", status: "pending",
     createdAt: iso(time + 1), resolvedAt: null}];
   yield* f.monitor.observe({projectId, threadId: opThread.id, sourceOrdinal: 0, projection: op, now: time + 2, includeDetachedChildItems: true});
-  const selected = yield* f.monitor.select(projectId, {intervalMinutes: 5, activityThreshold: 1}, time + 3, null, {eligibleThreadIds: new Set([opThread.id])});
+  const selected = yield* f.monitor.select(projectId, {intervalMinutes: 2, activityThreshold: 1}, time + 3, null, {eligibleThreadIds: new Set([opThread.id])});
   assert.ok(selected);
   const archivedTarget = f.threadList.find(thread => thread.id === "leaf")!;
   archivedTarget.archivedAt = iso(time + 2);
@@ -960,7 +960,7 @@ const largeHelperTeam = (count: number,
     f.projections.set(operationalThread.id, projection);
     yield* f.monitor.observe({projectId, threadId: operationalThread.id, sourceOrdinal: 0, projection, now: time + 10});
   }
-  const settings = {intervalMinutes: 5, activityThreshold: 1};
+  const settings = {intervalMinutes: 2, activityThreshold: 1};
   const allTargetSet = new Set(targetThreadIds);
   const transport = webhookTransport();
   const runtime = yield* f.runtime(transport.transport);
@@ -1292,7 +1292,7 @@ it.effect("a parent-record native terminal event routes to its assigned helper a
   yield* f.monitor.observe({projectId, threadId: child.thread.id, sourceOrdinal: 1, projection: child, now: time,
     includeDetachedChildItems: true, nativeChildLifecycle: {parentThreadId: parent.thread.id, parentRunId: lifecycle.parentRunId,
       recordId: lifecycle.recordId, status: lifecycle.status, completedAt: lifecycle.completedAt, updatedAt: lifecycle.updatedAt}});
-  const selected = yield* f.monitor.select(projectId, {intervalMinutes: 60, activityThreshold: 10}, time, null,
+  const selected = yield* f.monitor.select(projectId, {intervalMinutes: 2, activityThreshold: 10}, time, null,
     {eligibleThreadIds: new Set([child.thread.id])});
   assert.ok(selected);
   assert.equal(selected.trigger, "priority");

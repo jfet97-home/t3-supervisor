@@ -25,7 +25,7 @@ import type {
   WorkflowProposalInfo,
 } from "../../src/project-supervisor-contract.js";
 import type { WorkflowProgressContribution, WorkflowProgressCoverage, WorkflowProgressSnapshot, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
-import { defaultMonitoringSettings, defaultSupervisorTeamSettings } from "../../src/project-supervisor-contract.js";
+import { defaultMonitoringSettings, defaultSupervisorTeamSettings, monitoringIntervalMinutes } from "../../src/project-supervisor-contract.js";
 import { loadProjectSupervisor, loadWorkflowProgress, type ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor, setChatSupervision } from "./project-supervisor-api.js";
 import { admit, admittedMutation, authEpochAtom, draftFamily, environmentAtom, pollWhileVisible, scopeKey, uiRuntime, type MutationKey, type MutationResult } from "./atoms.js";
 import { idleControlActivity, SupervisionControlPanel, supervisionControlKey, supervisionSetupSelection } from "./supervisor-control.js";
@@ -78,7 +78,7 @@ const monitoringError = (value: string, minimum: number, maximum: number, field:
   return "";
 };
 const parseMonitoringDraft = (value: MonitoringDraft): SupervisorMonitoringSettings | null => {
-  if (monitoringError(value.intervalMinutes, 1, 60, "maximum pending activity age in minutes") ||
+  if (monitoringError(value.intervalMinutes, monitoringIntervalMinutes.min, monitoringIntervalMinutes.max, "maximum pending activity age in minutes") ||
     monitoringError(value.activityThreshold, 3, 100, "finalized activity threshold")) return null;
   return {intervalMinutes: Number(value.intervalMinutes), activityThreshold: Number(value.activityThreshold)};
 };
@@ -874,7 +874,7 @@ export function ProjectSupervisorView({
     settlementState: snapshot.binding?.settlementState ?? null, monitoring: snapshot.monitoringStatus, task: selectedTask, assessment: currentAssessment});
   const taskLabels: Record<string, string> = {inferred: "Interpreted", needs_context: "Needs clarification", not_supervised: "Supervision not needed", queued: "Queued", dispatching: "Contacting Supervisor", waiting: "Awaiting interpretation", uncertain: "Outcome uncertain", unavailable: "Unavailable", expired: "Earlier request expired"};
   const fieldsDisabled = !connected || !snapshot.available || fieldsBusy || blocked;
-  const intervalError = monitoringError(monitoring.intervalMinutes, 1, 60, "maximum pending activity age in minutes");
+  const intervalError = monitoringError(monitoring.intervalMinutes, monitoringIntervalMinutes.min, monitoringIntervalMinutes.max, "maximum pending activity age in minutes");
   const thresholdError = monitoringError(monitoring.activityThreshold, 3, 100, "finalized activity threshold");
   const teamSettingsError = monitoringError(teamSettings.maxHelpersPerRoot, 0, 20, "maximum helpers per root");
   const modelCanChange = !fieldsDisabled;
@@ -978,11 +978,11 @@ export function ProjectSupervisorView({
         <p className="muted">Monitoring wakes each main conversation’s own Supervisor chat when pending activity reaches its maximum age or the finalized activity threshold. Defaults apply to new task workflows; existing objective-only tasks are not reprocessed.</p>
         <div className="stack">
           <label htmlFor="supervisor-monitoring-interval">Maximum pending activity age (minutes)</label>
-          <input id="supervisor-monitoring-interval" name="intervalMinutes" type="number" min={1} max={60} step={1} required
+          <input id="supervisor-monitoring-interval" name="intervalMinutes" type="number" min={monitoringIntervalMinutes.min} max={monitoringIntervalMinutes.max} step={1} required
             value={monitoring.intervalMinutes} aria-invalid={intervalError ? true : undefined}
             aria-describedby="supervisor-monitoring-interval-help supervisor-monitoring-interval-error"
             onChange={event => onMonitoringChange({...monitoring, intervalMinutes: event.target.value})} />
-          <span id="supervisor-monitoring-interval-help" className="small muted">Enter a whole number from 1 to 60 minutes.</span>
+          <span id="supervisor-monitoring-interval-help" className="small muted">Enter 1 or 2 minutes; 2 is the default and the upper bound. A check-in also waits for the cooldown and any check-in still in flight.</span>
           <span id="supervisor-monitoring-interval-error" className="small" aria-live="polite">{intervalError}</span>
         </div>
         <div className="stack">
@@ -994,7 +994,7 @@ export function ProjectSupervisorView({
           <span id="supervisor-monitoring-threshold-help" className="small muted">Enter a whole number from 3 to 100 finalized activities.</span>
           <span id="supervisor-monitoring-threshold-error" className="small" aria-live="polite">{thresholdError}</span>
         </div>
-        <p><strong>Supervisor cooldown:</strong> 60 seconds between monitoring sends.</p>
+        <p><strong>Supervisor cooldown:</strong> 30 seconds between monitoring sends.</p>
         <p><strong>Model review limit:</strong> one in-flight review per Supervisor.</p>
       </fieldset>
       <fieldset disabled={fieldsDisabled} className="stack">

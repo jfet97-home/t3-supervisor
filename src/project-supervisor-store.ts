@@ -6,7 +6,7 @@ import { decodeRow, documentRow, documentRows, type GuidanceStoreError, mapSqlEr
 import { fingerprint } from "./guidance-store.js";
 import { SupervisorIds } from "./ids.js";
 import { SupervisorStateReset } from "./supervisor-state-reset.js";
-import { defaultMonitoringSettings, type DefinitionReviewInfo, type SupervisorBinding, type SupervisorModelSelection, type SupervisorMonitoringSettings, type TaskInterpretationInfo, type WorkflowProtocolDiagnostic } from "./project-supervisor-contract.js";
+import { defaultMonitoringSettings, monitoringIntervalMinutes, type DefinitionReviewInfo, type SupervisorBinding, type SupervisorModelSelection, type SupervisorMonitoringSettings, type TaskInterpretationInfo, type WorkflowProtocolDiagnostic } from "./project-supervisor-contract.js";
 import type { Projection } from "./types.js";
 import { sameModel } from "./supervisor-native.js";
 import type { NoProjectModeValue } from "./supervisor-control-contract.js";
@@ -58,9 +58,15 @@ export const isSupervisorThread = (owned: ReadonlySet<string>, thread: {id: stri
 const normalizeMonitoringSettings = (value: SupervisorMonitoringSettings | undefined): SupervisorMonitoringSettings => value
   ? {intervalMinutes: value.intervalMinutes, activityThreshold: value.activityThreshold}
   : {...defaultMonitoringSettings};
+// the settings in effect: a stored age above the two-minute bound (saved before it existed) reads as the bound, so no reader
+// waits longer and the dashboard shows what is applied; a save above it is refused
+const effectiveMonitoringSettings = (value: SupervisorMonitoringSettings | undefined): SupervisorMonitoringSettings => {
+  const settings = normalizeMonitoringSettings(value);
+  return {...settings, intervalMinutes: Math.min(settings.intervalMinutes, monitoringIntervalMinutes.max)};
+};
 
 const validMonitoringSettings = (value: SupervisorMonitoringSettings): boolean =>
-  Number.isInteger(value.intervalMinutes) && value.intervalMinutes >= 1 && value.intervalMinutes <= 60 &&
+  Number.isInteger(value.intervalMinutes) && value.intervalMinutes >= monitoringIntervalMinutes.min && value.intervalMinutes <= monitoringIntervalMinutes.max &&
   Number.isInteger(value.activityThreshold) && value.activityThreshold >= 3 && value.activityThreshold <= 100;
 
 export type ProjectSupervisorStoreReason = "no_project_control_conflict" | "global_definitions_control_conflict" | "supervision_control_conflict" |
@@ -238,7 +244,7 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     const [row] = yield* sql`SELECT document FROM supervisor_project_settings WHERE project_id=${projectId}`;
     const stored = row === undefined ? null : yield* documentRow<Omit<ProjectModelSettings, "monitoring" | "modelMutationGeneration"> & {monitoring?: SupervisorMonitoringSettings; modelMutationGeneration?: number}, ProjectSupervisorStoreError>(
       row, isStoredSettings, rowInvalid("project_settings"));
-    return stored ? {...stored, modelMutationGeneration: stored.modelMutationGeneration ?? stored.generation, monitoring: normalizeMonitoringSettings(stored.monitoring), teamSettings: stored.teamSettings ?? {maxHelpersPerRoot: 5}} : {
+    return stored ? {...stored, modelMutationGeneration: stored.modelMutationGeneration ?? stored.generation, monitoring: effectiveMonitoringSettings(stored.monitoring), teamSettings: stored.teamSettings ?? {maxHelpersPerRoot: 5}} : {
       projectId, generation: 0, modelMutationGeneration: 0, modelSelection: defaultSupervisorModel, pending: false, monitoring: {...defaultMonitoringSettings}, teamSettings: {maxHelpersPerRoot: 5},
     } satisfies ProjectModelSettings;
   });

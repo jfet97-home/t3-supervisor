@@ -18,7 +18,7 @@ const setStoredSettings = (db: SqlClient.SqlClient, value: Record<string, unknow
 
 it.effect("new and legacy project settings receive the monitoring defaults", () =>
   withStore((supervisor, db) => Effect.gen(function* () {
-    assert.deepEqual((yield* supervisor.settings("new-project")).monitoring, {intervalMinutes: 5, activityThreshold: 10});
+    assert.deepEqual((yield* supervisor.settings("new-project")).monitoring, {intervalMinutes: 2, activityThreshold: 10});
     assert.equal((yield* supervisor.settings("new-project")).modelMutationGeneration, 0);
     yield* setStoredSettings(db, {
       projectId: "legacy-project",
@@ -37,7 +37,7 @@ it.effect("new and legacy project settings receive the monitoring defaults", () 
 
 it.effect("monitoring-only saves preserve model attempts and legacy saves keep current monitoring", () =>
   withStore((supervisor, db) => Effect.gen(function* () {
-    const currentMonitoring: SupervisorMonitoringSettings = {intervalMinutes: 8, activityThreshold: 24};
+    const currentMonitoring: SupervisorMonitoringSettings = {intervalMinutes: 1, activityThreshold: 24};
     yield* setStoredSettings(db, {
       projectId: "project",
       generation: 4,
@@ -48,7 +48,7 @@ it.effect("monitoring-only saves preserve model attempts and legacy saves keep c
       applicationMessage: "The native model update is still being reconciled.",
     });
 
-    const changedMonitoring: SupervisorMonitoringSettings = {intervalMinutes: 12, activityThreshold: 35};
+    const changedMonitoring: SupervisorMonitoringSettings = {intervalMinutes: 2, activityThreshold: 35};
     const savedMonitoring = yield* supervisor.saveSettings("project", 4, defaultSupervisorModel, changedMonitoring);
     assert.equal(savedMonitoring.generation, 5);
     assert.equal(savedMonitoring.modelMutationGeneration, 4);
@@ -72,7 +72,7 @@ it.effect("only a changed model selection starts a new native model mutation", (
       generation: 3,
       modelSelection: defaultSupervisorModel,
       pending: false,
-      monitoring: {...defaultMonitoringSettings, intervalMinutes: 9},
+      monitoring: {...defaultMonitoringSettings, intervalMinutes: 1},
       applyAttempts: 4,
       applicationMessage: "A previous model operation was recorded.",
     });
@@ -84,7 +84,7 @@ it.effect("only a changed model selection starts a new native model mutation", (
     assert.equal(changed.modelMutationGeneration, 4, "a legacy generation 3 advances when the model target changes");
     assert.equal(changed.applyAttempts, 0);
     assert.equal(changed.applicationMessage, null);
-    assert.deepEqual(changed.monitoring, {...defaultMonitoringSettings, intervalMinutes: 9});
+    assert.deepEqual(changed.monitoring, {...defaultMonitoringSettings, intervalMinutes: 1});
   })));
 
 it.effect("a project without saved settings uses the GPT-6.1 Sol LOW default, while saved settings and existing bindings keep their selection", () =>
@@ -115,8 +115,9 @@ it.effect("monitoring intervals and thresholds are range checked as integers", (
   withStore((supervisor) => Effect.gen(function* () {
     const invalidValues: SupervisorMonitoringSettings[] = [
       {...defaultMonitoringSettings, intervalMinutes: 0},
-      {...defaultMonitoringSettings, intervalMinutes: 61},
-      {...defaultMonitoringSettings, intervalMinutes: 5.5},
+      {...defaultMonitoringSettings, intervalMinutes: 3},
+      {...defaultMonitoringSettings, intervalMinutes: 60},
+      {...defaultMonitoringSettings, intervalMinutes: 1.5},
       {...defaultMonitoringSettings, activityThreshold: 2},
       {...defaultMonitoringSettings, activityThreshold: 101},
       {...defaultMonitoringSettings, activityThreshold: 10.5},
@@ -125,4 +126,26 @@ it.effect("monitoring intervals and thresholds are range checked as integers", (
       yield* failsWith(supervisor.saveSettings("project", 0, defaultSupervisorModel, monitoring), /invalid_monitoring_settings/);
       assert.equal((yield* supervisor.settings("project")).generation, 0);
     }
+  })));
+
+it.effect("the pending activity age is one or two minutes: both save, and a longer stored age reads as two until a save writes two", () =>
+  withStore((supervisor, db) => Effect.gen(function* () {
+    const one = yield* supervisor.saveSettings("chosen", 0, defaultSupervisorModel, {intervalMinutes: 1, activityThreshold: 10});
+    assert.deepEqual(one.monitoring, {intervalMinutes: 1, activityThreshold: 10});
+    const two = yield* supervisor.saveSettings("chosen", 1, defaultSupervisorModel, {intervalMinutes: 2, activityThreshold: 10});
+    assert.deepEqual(two.monitoring, {intervalMinutes: 2, activityThreshold: 10});
+
+    // a five-minute age saved before the bound existed
+    yield* setStoredSettings(db, {projectId: "saved-earlier", generation: 3, modelSelection: defaultSupervisorModel, pending: false,
+      monitoring: {intervalMinutes: 5, activityThreshold: 24}, teamSettings: {maxHelpersPerRoot: 4}});
+    const effective = yield* supervisor.settings("saved-earlier");
+    assert.deepEqual(effective.monitoring, {intervalMinutes: 2, activityThreshold: 24}, "the stored age reads as the bound");
+    assert.equal(effective.generation, 3);
+    yield* failsWith(supervisor.saveSettings("saved-earlier", 3, defaultSupervisorModel, {intervalMinutes: 5, activityThreshold: 24}),
+      /invalid_monitoring_settings/);
+    const saved = yield* supervisor.saveSettings("saved-earlier", 3, defaultSupervisorModel);
+    assert.deepEqual(saved.monitoring, {intervalMinutes: 2, activityThreshold: 24});
+    assert.deepEqual(saved.teamSettings, {maxHelpersPerRoot: 4});
+    const [row] = yield* db<{document: string}>`SELECT document FROM supervisor_project_settings WHERE project_id='saved-earlier'`;
+    assert.deepEqual((JSON.parse(String(row?.document)) as {monitoring: unknown}).monitoring, {intervalMinutes: 2, activityThreshold: 24});
   })));

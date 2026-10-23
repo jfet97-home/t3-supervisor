@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
 import { freshRuntimeRequestStatus, mainRunNodeReader, timestampMs } from "./domain.js";
-import type { SupervisorMonitoringSettings } from "./project-supervisor-contract.js";
+import { monitoringIntervalMinutes, type SupervisorMonitoringSettings } from "./project-supervisor-contract.js";
 import type { Projection, RunInfo } from "./types.js";
 
-export const SUPERVISOR_MONITOR_AGE_MS = 5 * 60_000;
-export const SUPERVISOR_MONITOR_COOLDOWN_MS = 60_000;
+// the oldest finished ordinary activity is due after at most two minutes, and a Supervisor gets its next check-in no sooner
+// than 30 seconds after the last one was sent
+export const SUPERVISOR_MONITOR_AGE_MS = monitoringIntervalMinutes.max * 60_000;
+export const SUPERVISOR_MONITOR_COOLDOWN_MS = 30_000;
+// how long a helper delivery or team notification may stay unresolved before it is raised for attention
+export const SUPERVISOR_TEAM_ATTENTION_MS = 60_000;
 export const SUPERVISOR_MONITOR_MAX_ITEMS_PER_THREAD = 1000;
 export const SUPERVISOR_MONITOR_MAX_BATCH_ITEMS = 100;
 export const SUPERVISOR_MONITOR_MAX_ITEMS_PER_CHAT = 20;
@@ -633,7 +637,7 @@ export const evaluateSupervisorMonitoring = (
   const finalized = reviewable.filter(finalizedActivity);
   const ageThresholdMs =
     Number.isFinite(settings.intervalMinutes) && settings.intervalMinutes > 0
-      ? settings.intervalMinutes * 60_000
+      ? Math.min(settings.intervalMinutes * 60_000, SUPERVISOR_MONITOR_AGE_MS)
       : SUPERVISOR_MONITOR_AGE_MS;
   const oldestAt = finalized.length
     ? Math.min(...finalized.map((item) => item.detectedAt))

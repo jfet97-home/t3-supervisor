@@ -289,7 +289,7 @@ const observedBranchBatch = (f: Effect.Success<typeof teamFixture>) => Effect.ge
   op.turnItems = [{id: "turn-item:command", threadId: "branch", runId: "operational-run", nodeId: "tool-node", type: "command_execution", status: "completed",
     ordinal: 1, completedAt: iso(time + 1), updatedAt: iso(time + 1)}];
   yield* f.monitor.observe({projectId, threadId: "branch", sourceOrdinal: 0, projection: op, now: time + 2, includeDetachedChildItems: true});
-  const selected = yield* f.monitor.select(projectId, {intervalMinutes: 5, activityThreshold: 1}, time + 3, null, {eligibleThreadIds: new Set(["branch"])});
+  const selected = yield* f.monitor.select(projectId, {intervalMinutes: 2, activityThreshold: 1}, time + 3, null, {eligibleThreadIds: new Set(["branch"])});
   assert.ok(selected);
   return selected;
 });
@@ -347,7 +347,7 @@ it.effect("CT-TRUN-03: a failure inside the completion transaction rolls back re
     {request: "completed", teamRequest: "settled", note: "acknowledged", acknowledged: batch.threads[0]!.items.length});
 }), {timeout: 10_000});
 
-it.effect("CT-TRUN-04: a helper check-in is withheld at lastNotice+59999 ms and prepared at +60000 ms", () => Effect.gen(function* () {
+it.effect("CT-TRUN-04: a helper check-in is withheld at lastNotice+29999 ms and prepared at +30000 ms", () => Effect.gen(function* () {
   const f = yield* teamFixture;
   yield* TestClock.setTime(time);
   const member = yield* readyMember(f.teamStore, f.binding, "helper-cooldown");
@@ -363,19 +363,19 @@ it.effect("CT-TRUN-04: a helper check-in is withheld at lastNotice+59999 ms and 
       items: [{id: "run:branch", readItemId: null, type: "run_finished", status: "completed", ordinal: 1, detectedAt: time, version: "v1", priority: "run_finished" as const}],
       previewItems: [{id: "run:branch", readItemId: null, type: "run_finished", status: "completed", ordinal: 1, detectedAt: time, version: "v1", priority: "run_finished" as const}]}]};
   const helperBatches = (yield* runtime.partition(f.binding, f.threadList, batch)).helperBatches;
-  yield* TestClock.setTime(lastNotice + 59_999);
+  yield* TestClock.setTime(lastNotice + 29_999);
   yield* runtime.startCycle(f.binding);
   yield* runtime.runHelperBatch(f.binding, f.threadList, helperBatches);
   assert.equal(yield* f.requests.pending(projectId, member.threadId), null);
   assert.deepEqual(transport.calls.filter(call => call.startsWith("send:")), []);
-  yield* TestClock.setTime(lastNotice + 60_000);
+  yield* TestClock.setTime(lastNotice + 30_000);
   yield* runtime.startCycle(f.binding);
   yield* runtime.runHelperBatch(f.binding, f.threadList, helperBatches);
   assert.equal((yield* f.requests.pending(projectId, member.threadId))?.state, "waiting");
   assert.equal(transport.calls.filter(call => call.startsWith("send:")).length, 1);
 }), {timeout: 10_000});
 
-it.effect("CT-TRUN-04: a registering helper's readiness check-in starts exactly at lastNotice+60000 ms", () => Effect.gen(function* () {
+it.effect("CT-TRUN-04: a registering helper's readiness check-in starts exactly at lastNotice+30000 ms", () => Effect.gen(function* () {
   const f = yield* teamFixture;
   yield* TestClock.setTime(time);
   const registered = yield* f.teamStore.registerMember(f.binding, {threadId: "helper-ready", taskId: "task-helper-ready", bootstrapRunId: "bootstrap-helper-ready", now: time});
@@ -384,11 +384,11 @@ it.effect("CT-TRUN-04: a registering helper's readiness check-in starts exactly 
   yield* f.requests.noticeSent(registered.threadId, lastNotice);
   const transport = webhookTransport();
   const runtime = yield* f.runtime(transport.transport);
-  yield* TestClock.setTime(lastNotice + 59_999);
+  yield* TestClock.setTime(lastNotice + 29_999);
   yield* runtime.startCycle(f.binding);
   yield* runtime.reconcile(f.binding, f.threadList);
   assert.equal(yield* f.requests.pending(projectId, registered.threadId), null);
-  yield* TestClock.setTime(lastNotice + 60_000);
+  yield* TestClock.setTime(lastNotice + 30_000);
   yield* runtime.startCycle(f.binding);
   yield* runtime.reconcile(f.binding, f.threadList);
   assert.ok((yield* f.requests.pending(projectId, registered.threadId))?.id.startsWith("team-ready:"));

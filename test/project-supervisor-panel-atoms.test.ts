@@ -56,7 +56,7 @@ const snapshot: ProjectSupervisorInfo = supervisorSnapshot;
 const scopeA = () => core.scopeKey("project", "task-thread");
 const projectKey = () => ps.projectSupervisorKey(null, "project");
 const saveInput = (expectedGeneration: number): ProjectSupervisorSaveInput => ({projectId: "project", mainThreadId: "task-thread", expectedGeneration,
-  modelSelection: snapshot.settings.modelSelection, monitoring: {intervalMinutes: 12, activityThreshold: 10}, teamSettings: {maxHelpersPerRoot: 3}});
+  modelSelection: snapshot.settings.modelSelection, monitoring: {intervalMinutes: 2, activityThreshold: 10}, teamSettings: {maxHelpersPerRoot: 3}});
 // a panel showing the snapshot for chat A with a dirty monitoring draft
 const showSnapshot = (registry: AtomRegistry.AtomRegistry) => {
   const shown = ps.settleRead({view: registry.get(ps.projectSupervisorView(projectKey())), draft: null}, "project", scopeA(), {snapshot, readAt: 1}, false);
@@ -71,10 +71,10 @@ it("a read keeps every dirty draft field, moves only clean fields and the expect
   assert.equal(first.draft.expectedGeneration, 7);
   const edited = {...first.draft, monitoringValue: {intervalMinutes: "12", activityThreshold: "10"}};
   const newer = {...snapshot, settings: {...snapshot.settings, generation: 8, modelSelection: {instanceId: "provider-one", model: "steady-model", options: []},
-    monitoring: {intervalMinutes: 9, activityThreshold: 20}}};
+    monitoring: {intervalMinutes: 2, activityThreshold: 20}}};
   const merged = ps.mergeLoadedDraft(edited, "project", newer);
   assert.deepEqual(merged.draft.monitoringValue, {intervalMinutes: "12", activityThreshold: "10"}, "the dirty field keeps the user's value");
-  assert.deepEqual(merged.draft.monitoringBaseline, {intervalMinutes: "9", activityThreshold: "20"});
+  assert.deepEqual(merged.draft.monitoringBaseline, {intervalMinutes: "2", activityThreshold: "20"});
   assert.deepEqual(merged.draft.modelValue, newer.settings.modelSelection, "a clean field takes the new saved value");
   assert.equal(merged.draft.expectedGeneration, 8);
   assert.equal(merged.keptDirty, true);
@@ -110,7 +110,7 @@ it.effect("a save is admitted once against the draft's expected generation and a
   yield* post.reached;
   const operation = registry.get(ps.projectSupervisorView(projectKey())).operation;
   assert.equal(operation?.kind, "save", "the panel is saving");
-  const saved = {...snapshot, settings: {...snapshot.settings, generation: 8, monitoring: {intervalMinutes: 12, activityThreshold: 10}}};
+  const saved = {...snapshot, settings: {...snapshot.settings, generation: 8, monitoring: {intervalMinutes: 2, activityThreshold: 10}}};
   post.release(json({status: "saved", message: "Supervisor settings saved.", snapshot: saved}));
   const view = yield* until(registry, ps.projectSupervisorView(projectKey()), value => value.operation === null, "saved");
   const posts = sent.filter(isPost("/api/guidance/project-supervisor"));
@@ -196,7 +196,7 @@ for (const [route, end] of Object.entries(endSession)) for (const applied of [fa
     sent.length = 0;
     showSnapshot(registry);
     const before = registry.get(ps.projectSupervisorDraft(projectKey()));
-    const saved = {...snapshot, settings: {...snapshot.settings, generation: 8, monitoring: {intervalMinutes: 12, activityThreshold: 10}}};
+    const saved = {...snapshot, settings: {...snapshot.settings, generation: 8, monitoring: {intervalMinutes: 2, activityThreshold: 10}}};
     let server: ProjectSupervisorInfo = snapshot;
     const post = yield* heldResponse;
     reply = async request => {
@@ -273,7 +273,7 @@ for (const [route, {status, end}] of Object.entries(serverEnds)) for (const appl
     yield* post.reached;
     const sentSave = sent.find(isPost("/api/guidance/project-supervisor"))!;
     assert.deepEqual([sentSave.session, sentSave.csrf], ["session-1", "csrf-before-restart"], "the save went out with a valid session and token");
-    if (applied) server.snapshot = {...snapshot, settings: {...snapshot.settings, generation: 8, monitoring: {intervalMinutes: 12, activityThreshold: 10}}};
+    if (applied) server.snapshot = {...snapshot, settings: {...snapshot.settings, generation: 8, monitoring: {intervalMinutes: 2, activityThreshold: 10}}};
     end(server);
     assert.equal(storage.get("supervisor-session"), "session-1", "the tab saw no change before the refusal");
     post.release(json({message: "refused"}, status));

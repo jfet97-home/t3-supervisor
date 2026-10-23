@@ -23,7 +23,7 @@ const isCheckIn = (fixture: Fixture) => (call: RpcCall) => call.payload.type ===
 // a fixture with a sent introduction and three due command activities, observed into the monitor
 const dueCheckIn = (clock: FixtureClock) => Effect.gen(function* () {
   yield* setNow(clock, clock.now);
-  const fixture = yield* makeFixture(clock, {settings: {intervalMinutes: 5, activityThreshold: 3}});
+  const fixture = yield* makeFixture(clock, {settings: {intervalMinutes: 2, activityThreshold: 3}});
   yield* appendNoticeToOperative(fixture);
   for (let index = 1; index <= 3; index++) addCommandActivity(fixture.operative, `command-${index}`, `PRIVATE_COMMAND_BODY_${index}`, clock.now - index * 1_000);
   yield* fixture.conversation.observe(fixture.threadList).pipe(atWallTime(clock.now));
@@ -306,7 +306,7 @@ it.effect("CT-CONV-06: interleaved cycles of two bindings keep request identitie
   const start = baseTime;
   const clock = {now: start};
   yield* setNow(clock, clock.now);
-  const fixture = yield* makeFixture(clock, {settings: {intervalMinutes: 5, activityThreshold: 3}});
+  const fixture = yield* makeFixture(clock, {settings: {intervalMinutes: 2, activityThreshold: 3}});
   const second = yield* fixture.addBoundOperative("operative-b", "proposal-b");
   yield* appendNoticeToOperative(fixture);
   yield* introduceBound(fixture, second);
@@ -381,11 +381,11 @@ it.effect("CT-CONV-06: interleaved cycles of two bindings keep request identitie
   yield* fixture.conversation.observe(fixture.threadList).pipe(atWallTime(clock.now));
   fixture.intercept(null);
   const checkIns = (supervisorThreadId: string) => fixture.calls.filter(call => call.payload.threadId === supervisorThreadId).length;
-  yield* setNow(clock, start + 60_000);
+  yield* setNow(clock, start + 30_000);
   yield* fixture.run;
   yield* second.run;
   assert.deepEqual([checkIns(fixture.binding.threadId), checkIns(second.binding.threadId)], [2, 1]);
-  yield* setNow(clock, start + 70_000);
+  yield* setNow(clock, start + 40_000);
   yield* second.run;
   assert.deepEqual([checkIns(fixture.binding.threadId), checkIns(second.binding.threadId)], [2, 2]);
 }), {timeout: 10_000});
@@ -416,7 +416,7 @@ it.effect("CT-CONV-07: an enabled binding without an inferred task or activity m
   assert.equal(yield* tableDigest(fixture.sql), digest);
 }), {timeout: 10_000});
 
-it.effect("CT-CONV-08: a check-in is withheld at lastNotice+59999 ms and dispatched at lastNotice+60000 ms", () => Effect.gen(function* () {
+it.effect("CT-CONV-08: a check-in is withheld at lastNotice+29999 ms and dispatched at lastNotice+30000 ms", () => Effect.gen(function* () {
   const start = baseTime;
   const clock = {now: start};
   const fixture = yield* dueCheckIn(clock);
@@ -433,14 +433,14 @@ it.effect("CT-CONV-08: a check-in is withheld at lastNotice+59999 ms and dispatc
   for (let index = 4; index <= 6; index++) addCommandActivity(fixture.operative, `command-${index}`, `PRIVATE_COMMAND_BODY_${index}`, start + 2);
   yield* fixture.conversation.observe(fixture.threadList).pipe(atWallTime(start + 5_001));
   const checkIns = () => fixture.calls.filter(isCheckIn(fixture)).length;
-  yield* setNow(clock, start + 59_999);
+  yield* setNow(clock, start + 29_999);
   yield* fixture.run;
   assert.equal(checkIns(), 1);
   assert.equal(yield* fixture.requests.pending(projectId, fixture.binding.threadId), null);
-  yield* setNow(clock, start + 60_000);
+  yield* setNow(clock, start + 30_000);
   yield* fixture.run;
   assert.equal(checkIns(), 2);
-  assert.equal((yield* fixture.requests.pending(projectId, fixture.binding.threadId))?.sentAt, start + 60_000);
+  assert.equal((yield* fixture.requests.pending(projectId, fixture.binding.threadId))?.sentAt, start + 30_000);
 }), {timeout: 10_000});
 
 it.effect("CT-CONV-08: an unseen uncertain Stop notice is next observed exactly 60000 ms after its deferral", () => Effect.gen(function* () {

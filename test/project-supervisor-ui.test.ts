@@ -180,12 +180,13 @@ it("Supervisor settings markup explains automatic conversation reuse and separat
   assert.match(html, /<label for="supervisor-reasoning">Reasoning/);
   assert.doesNotMatch(html, /<label>Temperature/);
   assert.doesNotMatch(html, /supervisor-monitoring-enabled|monitoringEnabled|pause monitoring/i);
-  assert.match(html, /id="supervisor-monitoring-interval" type="number" min="1" max="60" step="1" required=""/);
+  assert.match(html, /id="supervisor-monitoring-interval" type="number" min="1" max="2" step="1" required=""/);
   assert.match(html, /name="intervalMinutes"/);
   assert.match(html, /id="supervisor-monitoring-threshold" type="number" min="3" max="100" step="1" required=""/);
   assert.match(html, /name="activityThreshold"/);
   assert.match(html, /aria-describedby="supervisor-monitoring-interval-help supervisor-monitoring-interval-error"/);
-  assert.match(html, /Supervisor cooldown:<\/strong> 60 seconds between monitoring sends/);
+  assert.match(html, /Supervisor cooldown:<\/strong> 30 seconds between monitoring sends/);
+  assert.match(html, /Enter 1 or 2 minutes; 2 is the default and the upper bound/);
   assert.match(html, /Current monitoring status/);
   assert.match(html, /Status:<\/strong> busy/);
   assert.match(html, /Pending activities:<\/strong> 4/);
@@ -197,7 +198,7 @@ it("Supervisor settings markup explains automatic conversation reuse and separat
 });
 
 it("monitoring settings default sensibly and remain optional for legacy snapshots and saves", () => {
-  assert.deepEqual(defaultMonitoringSettings, {intervalMinutes: 5, activityThreshold: 10});
+  assert.deepEqual(defaultMonitoringSettings, {intervalMinutes: 2, activityThreshold: 10});
   assert.deepEqual(defaultSupervisorTeamSettings, {maxHelpersPerRoot: 5});
   const decodedSnapshot = Schema.decodeUnknownSync(ProjectSupervisorSnapshot)(snapshot);
   const decodedInput = Schema.decodeUnknownSync(ProjectSupervisorSave)(input);
@@ -713,7 +714,7 @@ it.effect("Supervisor settings saves send live monitoring values with the model 
   yield* keepFetch;
   const monitoredInput: ProjectSupervisorSaveInput = {
     ...input,
-    monitoring: {intervalMinutes: 12, activityThreshold: 35},
+    monitoring: {intervalMinutes: 2, activityThreshold: 35},
   };
   globalThis.fetch = async (url, init) => {
     assert.equal(String(url), "/api/guidance/project-supervisor");
