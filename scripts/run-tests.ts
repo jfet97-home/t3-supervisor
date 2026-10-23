@@ -192,7 +192,6 @@ const program = Effect.gen(function* () {
   yield* listenForSignals(signal);
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const fs = yield* FileSystem.FileSystem;
-  const scratch = yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-run-" });
   const startedAt = yield* Clock.monotonicTimeNanos;
   const run: { group: number | undefined; active: number | undefined; records: PhaseRecord[]; combined: string | undefined } =
     { group: undefined, active: undefined, records: [], combined: undefined };
@@ -225,7 +224,7 @@ const program = Effect.gen(function* () {
   }).pipe(Effect.catch((error) => Effect.succeed<Outcome>({ _tag: "Crashed", message: error.message }))));
 
   // the files each phase selects, by vitest's own filter matching (`vitest list --filesOnly`)
-  const listFiles = (phase: Phase, filters: ReadonlyArray<string>, selection: ReadonlyArray<string>) => Effect.gen(function* () {
+  const listFiles = (scratch: string, phase: Phase, filters: ReadonlyArray<string>, selection: ReadonlyArray<string>) => Effect.gen(function* () {
     const listing = join(scratch, `${phase.name}.files.json`);
     const outcome = yield* runVitest(`phase ${phase.name} files: `,
       ["list", "--filesOnly", `--json=${listing}`, "--config", resolve(phase.config), ...selection, ...new Set(filters.map(filterFile))], "ignore");
@@ -256,18 +255,24 @@ const program = Effect.gen(function* () {
     }
     const selected: Array<{ readonly phase: Phase; readonly filters: ReadonlyArray<string> }> = [];
     const owned = new Set<string>();
-    for (const phase of phases) {
+    if (filters.length === 0 && selection.length === 0) {
       // without any caller selection every phase runs, so a phase that lost all its files still fails as vitest does
-      if (filters.length === 0 && selection.length === 0) {
-        selected.push({ phase, filters });
-        continue;
-      }
-      const files = yield* listFiles(phase, filters, selection);
-      if (!(files instanceof Set)) return files;
-      if (files.size === 0) continue;
-      for (const file of files) owned.add(file);
-      // a location filter goes only to the phase that owns its file; vitest rejects it anywhere else
-      selected.push({ phase, filters: filters.filter((filter) => !locationFilter.test(filter) || files.has(resolve(filterFile(filter)))) });
+      for (const phase of phases) selected.push({ phase, filters });
+    } else {
+      // only file discovery writes listings: its scratch directory exists for the discovery alone, so no refusal touches the filesystem
+      const stopped = yield* Effect.scoped(Effect.gen(function* () {
+        const scratch = yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-run-" }).pipe(Effect.orDie);
+        for (const phase of phases) {
+          const files = yield* listFiles(scratch, phase, filters, selection);
+          if (!(files instanceof Set)) return files;
+          if (files.size === 0) continue;
+          for (const file of files) owned.add(file);
+          // a location filter goes only to the phase that owns its file; vitest rejects it anywhere else
+          selected.push({ phase, filters: filters.filter((filter) => !locationFilter.test(filter) || files.has(resolve(filterFile(filter)))) });
+        }
+        return undefined;
+      }));
+      if (stopped !== undefined) return stopped;
     }
     const [first] = phases;
     // nothing selected anywhere, or a location no selected phase owns: vitest reports it itself

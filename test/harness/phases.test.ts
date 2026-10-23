@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,8 +30,8 @@ interface CombinedReport {
   readonly phases: ReadonlyArray<PhaseRecord>;
 }
 
-const run = async (args: (markers: string) => ReadonlyArray<string>) => {
-  const started = await startWatchdog(args);
+const run = async (args: (markers: string) => ReadonlyArray<string>, environment?: NodeJS.ProcessEnv) => {
+  const started = await startWatchdog(args, environment);
   return { markers: started.markers, run: await started.result };
 };
 
@@ -122,6 +122,28 @@ describe("watchdog phases", () => {
     expect(project.run.code).toBe(2);
     expect(project.run.output).toContain("watchdog: --project selects within one configuration; add --config <file>");
     expect(project.run.groups).toEqual([]);
+  });
+
+  it("refuses a usage error without creating a scratch directory, which only file discovery creates", async () => {
+    const temporary = mkdtempSync(join(tmpdir(), "t3-supervisor-usage-tmp-"));
+    onTestFinished(() => rmSync(temporary, { recursive: true, force: true }));
+    const scratch: string[] = [];
+    const watcher = watch(temporary, (_event, name) => { if (name?.startsWith("t3-supervisor-run-") && !scratch.includes(name)) scratch.push(name); });
+    onTestFinished(() => watcher.close());
+    const environment = { TMPDIR: temporary };
+    const project = await run(() => [...phases, "--project", "x"], environment);
+    expect(project.run.code).toBe(2);
+    expect(project.run.output).toContain("watchdog: --project selects within one configuration; add --config <file>");
+    const json = await run(() => [...phases, "--reporter=json"], environment);
+    expect(json.run.code).toBe(2);
+    expect(json.run.output).toContain("watchdog: --reporter=json over several phases needs --outputFile=<path>");
+    expect([...project.run.groups, ...json.run.groups]).toEqual([]);
+    expect(scratch).toEqual([]);
+    // the refusal that needs file discovery first does create (and remove) one, so the watcher sees what it should
+    const discovered = await run(() => [...phases, "phase-a.fixture", "phase-b.fixture", "--reporter=json"], environment);
+    expect(discovered.run.code).toBe(2);
+    expect(scratch).toHaveLength(1);
+    expect(existsSync(join(temporary, scratch[0] ?? ""))).toBe(false);
   });
 
   it("stops at a failure in the first phase and records the second as not run", async () => {
