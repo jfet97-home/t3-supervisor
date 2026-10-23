@@ -3,9 +3,9 @@ import {createServer, request as httpRequest, type ClientRequest} from "node:htt
 import { NodeHttpServer } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
 import { Context, Deferred, Effect, Exit, Fiber, Layer } from "effect";
-import { HttpRouter, HttpServer } from "effect/http";
+import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { TestClock } from "effect/testing";
-import {WorkflowMcp} from "../src/workflow-mcp.js";
+import {WorkflowMcp, type WorkflowMcpShape} from "../src/workflow-mcp.js";
 import type {WorkflowWriteController} from "../src/workflow-write-controller.js";
 
 // target regressions of the effect MCP route (plan 3.7, CC-MCP): request fiber interruption aborts the in-flight call,
@@ -14,6 +14,13 @@ import type {WorkflowWriteController} from "../src/workflow-write-controller.js"
 
 const headers = {"Content-Type": "application/json", Accept: "application/json, text/event-stream"};
 const callBody = JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
+
+// one request through the endpoint's /mcp/workflows route handler in the caller's fiber; its answer body is read there
+// and returned as a web response
+const respond = (mcp: WorkflowMcpShape, request: Request) => mcp.route.pipe(
+  Effect.provideService(HttpServerRequest.HttpServerRequest, HttpServerRequest.fromWeb(request)),
+  Effect.flatMap(response => HttpServerResponse.toClientResponse(response).text.pipe(Effect.orDie,
+    Effect.map(text => new Response(text, {status: response.status, headers: new Headers(response.headers)})))));
 
 type Gate = {
   entered: Promise<AbortSignal>;
@@ -123,7 +130,7 @@ describe("workflow MCP route", () => {
   it.effect("MCP-ROUTE-03: the 9 s call deadline on the effect clock aborts the controller signal with a TimeoutError and the call answers the controller's result", () => Effect.gen(function* () {
     const gate = abortWaitingTool();
     const mcp = yield* WorkflowMcp.make({readTool: gate.tool} as unknown as WorkflowWriteController);
-    const answer = yield* Effect.forkChild(mcp.respond(new Request("http://127.0.0.1/mcp/workflows", {method: "POST", headers, body: callBody})));
+    const answer = yield* Effect.forkChild(respond(mcp, new Request("http://127.0.0.1/mcp/workflows", {method: "POST", headers, body: callBody})));
     const signal = yield* Effect.promise(() => gate.entered);
     yield* TestClock.adjust("8999 millis");
     assert.equal(signal.aborted, false);
@@ -138,11 +145,13 @@ describe("workflow MCP route", () => {
 
   it.effect("MCP-ROUTE-04: a transport failure before the answer is a 500 workflow_mcp_unavailable answer", () => Effect.gen(function* () {
     const mcp = yield* WorkflowMcp.make({} as unknown as WorkflowWriteController);
-    // the sdk transport reads the method first; a request that cannot report it makes the transport reject
+    // the sdk transport reads the method first; a request that cannot report it makes the transport reject. the route's
+    // request conversion reads only its url
     const broken = Object.create(new Request("http://127.0.0.1/mcp/workflows", {method: "POST", headers, body: callBody}), {
       method: {get: () => {throw new Error("unreadable request");}},
+      url: {value: "http://127.0.0.1/mcp/workflows"},
     }) as Request;
-    const response = yield* mcp.respond(broken);
+    const response = yield* respond(mcp, broken);
     assert.equal(response.status, 500);
     assert.equal(response.headers.get("cache-control"), "no-store");
     assert.deepEqual(yield* Effect.promise(() => response.json()), {error: "workflow_mcp_unavailable"});

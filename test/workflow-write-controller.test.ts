@@ -20,7 +20,10 @@ import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contr
 import { effectiveIndex, projectIndex, testSummary } from "./project-definitions-fixture.js";
 import { parseWorkflowInterpretation, proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
 import { WebSocketServer } from "ws";
-import { createWorkflowMcpEndpoint } from "../src/workflow-mcp.js";
+import { NodeHttpServer } from "@effect/platform-node";
+import { Effect, Exit, Layer, Scope } from "effect";
+import { HttpRouter } from "effect/http";
+import { WorkflowMcp, WorkflowMcpRoute } from "../src/workflow-mcp.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { makeSupervisorRpc } from "./support/supervisor-native-client.js";
 
@@ -2932,9 +2935,13 @@ it("workflow_read view definitions accepts nonempty definitionIds through the re
     assert.deepEqual(await controller.readTool(selected), {status: "ok", view: "definitions"}, "nonempty definitionIds are valid arguments");
     assert.deepEqual(received.at(-1), {view: "definitions", definitionIds: ["check", "change"]});
     assert.deepEqual(await controller.readTool({...locator(fixture), view: "definitions", definitionIds: [""]}), {status: "invalid", reason: "invalid_read_arguments"});
-    const endpoint = createWorkflowMcpEndpoint(controller);
-    const server = createServer((request, response) => {void endpoint.handle(request, response);});
-    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    // the endpoint's route served through effect's node server; closing its scope releases the server and the endpoint
+    const endpoint = Effect.runSync(Scope.make());
+    const server = createServer();
+    await Effect.runPromise(Layer.buildWithScope(HttpRouter.serve(WorkflowMcpRoute, {disableLogger: true, disableListenLog: true}).pipe(
+      Layer.provide(WorkflowMcp.layer(controller)),
+      Layer.provide(NodeHttpServer.layer(() => server, {port: 0, host: "127.0.0.1"})),
+    ), endpoint));
     try {
       const address = server.address();
       assert.ok(address && typeof address !== "string");
@@ -2944,6 +2951,6 @@ it("workflow_read view definitions accepts nonempty definitionIds through the re
       const body = await response.json() as {result?: {isError?: boolean; content?: Array<{text?: string}>}};
       assert.notEqual(body.result?.isError, true);
       assert.deepEqual(JSON.parse(body.result?.content?.[0]?.text ?? "null"), {status: "ok", view: "definitions"});
-    } finally {await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));endpoint.close?.();}
+    } finally {await Effect.runPromise(Scope.close(endpoint, Exit.void));}
   } finally {await closeFixture(fixture);}
 });

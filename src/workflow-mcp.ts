@@ -1,5 +1,4 @@
 import {SupervisorTeamController, supervisionTeamToolDefinition, supervisionGuideToolDefinition} from "./supervisor-team-controller.js";
-import type { IncomingMessage, ServerResponse } from "node:http";
 import { Cause, Context, Data, Deferred, Effect, Exit, Fiber, FiberSet, Layer, MutableRef, Option, Scope } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -60,10 +59,9 @@ const outcomeUnknown = (args: unknown) => {
 type ToolCall = (signal: AbortSignal) => Promise<unknown>;
 
 export interface WorkflowMcpShape {
-  // answers one web request through a fresh stateless sdk server and transport; a closed endpoint answers 503, a failed
-  // server 500, and a request interrupted by close() or by its caller ends without an answer
-  readonly respond: (request: Request) => Effect.Effect<Response>;
-  // the /mcp/workflows handler: interrupting its request fiber (client disconnect) interrupts the admitted request
+  // the /mcp/workflows handler: answers each request through a fresh stateless sdk server and transport; a closed
+  // endpoint answers 503, a failed server 500, and a request interrupted by close() or by its request fiber (client
+  // disconnect) ends without an mcp answer
   readonly route: Effect.Effect<HttpServerResponse.HttpServerResponse, never, HttpServerRequest.HttpServerRequest>;
   // closes admission, interrupts every admitted request (releasing its sdk server and body read) and every running
   // controller call; no controller call starts after it returns
@@ -168,7 +166,6 @@ const make = Effect.fnUntraced(function* (controller: WorkflowWriteController, t
   });
 
   return {
-    respond,
     route: Effect.gen(function* () {
       const request = yield* HttpServerRequest.HttpServerRequest;
       const answer = yield* HttpServerRequest.toWeb(request).pipe(
@@ -193,79 +190,3 @@ export const WorkflowMcpRoute = HttpRouter.use(router => Effect.gen(function* ()
   yield* router.add("*", "/mcp/workflows", mcp.route);
 }));
 
-export type WorkflowMcpEndpoint = {
-  handle(request: IncomingMessage, response: ServerResponse): Promise<void>;
-  close(): Promise<void>;
-};
-
-// reads the node body up to one byte past the bound, so the sdk itself answers an oversized body 413; a declared oversized
-// length stays unread for the sdk to refuse, the rest of an oversized body is drained, and interruption destroys the request
-const nodeRequest = (request: IncomingMessage) => Effect.tryPromise({
-  try: async signal => {
-    const headers = new Headers();
-    for (const [name, value] of Object.entries(request.headers))
-      for (const item of Array.isArray(value) ? value : value === undefined ? [] : [value]) headers.append(name, item);
-    const method = request.method ?? "GET";
-    const init: RequestInit = {method, headers};
-    if (method !== "GET" && method !== "HEAD" && !(Number(request.headers["content-length"]) > maxMcpRequestBodyBytes)) {
-      const destroy = () => request.destroy();
-      signal.addEventListener("abort", destroy, {once: true});
-      const chunks: Buffer[] = [];
-      let size = 0;
-      try {
-        for await (const chunk of request.iterator({destroyOnReturn: false})) {
-          const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
-          chunks.push(part);
-          size += part.length;
-          if (size > maxMcpRequestBodyBytes) break;
-        }
-      } finally {
-        signal.removeEventListener("abort", destroy);
-      }
-      if (size > maxMcpRequestBodyBytes) request.resume();
-      init.body = Buffer.concat(chunks);
-    }
-    return new Request(new URL(request.url ?? "/", "http://127.0.0.1"), init);
-  },
-  catch: () => new McpUnavailable(),
-});
-
-const writeAnswer = async (response: ServerResponse, answer: Response): Promise<void> => {
-  const body = Buffer.from(await answer.arrayBuffer());
-  if (response.headersSent || response.writableEnded || response.destroyed) return;
-  response.writeHead(answer.status, Object.fromEntries(answer.headers));
-  response.end(body);
-};
-
-// temporary node adapter (plan 3.9) for the unported ui server and its suites until the routers mount WorkflowMcpRoute.
-// a client disconnect interrupts the request; close() interrupts every adapter request, and one that close() ended writes
-// nothing and leaves its handle() unsettled, the baseline observation (CT-MCP-04 in-flight) kept until the adapter goes
-export const createWorkflowMcpEndpoint = (controller: WorkflowWriteController, team?: SupervisorTeamController): WorkflowMcpEndpoint => {
-  // the adapter lives as long as its callers; close() ends its requests while later ones are still answered 503
-  const {mcp, handles, run} = Effect.runSync(Effect.gen(function* () {
-    const mcp = yield* make(controller, team);
-    const handles = yield* FiberSet.make<Response, never>();
-    return {mcp, handles, run: yield* FiberSet.runtime(handles)()};
-  }).pipe(Scope.provide(Scope.makeUnsafe())));
-  // the requests in flight when close() ran
-  const endedByClose = new WeakSet<Fiber.Fiber<Response>>();
-  return {
-    handle: (request, response) => new Promise<void>(resolve => {
-      const fiber = run(Effect.flatMap(nodeRequest(request), mcp.respond).pipe(Effect.catch(error => Effect.succeed(errorResponse(error)))));
-      const disconnect = () => {
-        if (!response.writableEnded) fiber.interruptUnsafe();
-      };
-      response.once("close", disconnect);
-      fiber.addObserver(exit => {
-        response.removeListener("close", disconnect);
-        if (Exit.isSuccess(exit)) void writeAnswer(response, exit.value).finally(resolve);
-        else if (!Cause.hasInterruptsOnly(exit.cause)) void writeAnswer(response, errorResponse(new McpUnavailable())).finally(resolve);
-        else if (!endedByClose.has(fiber)) resolve();
-      });
-    }),
-    close: () => Effect.runPromise(Effect.suspend(() => {
-      for (const fiber of handles) endedByClose.add(fiber);
-      return Effect.andThen(mcp.close, FiberSet.clear(handles));
-    })),
-  };
-};

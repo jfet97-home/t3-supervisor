@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
 import { Effect, Exit, Fiber, Scope } from "effect";
+import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import { TestClock } from "effect/testing";
 import { vi } from "vitest";
-import {WorkflowMcp} from "../src/workflow-mcp.js";
+import {WorkflowMcp, type WorkflowMcpShape} from "../src/workflow-mcp.js";
 import type {WorkflowWriteController} from "../src/workflow-write-controller.js";
 
 // request and call ownership at the sdk boundary (plan 3.7, CC-MCP): every admitted request, its sdk server and its body
@@ -16,6 +17,13 @@ const message = (method: string, params: unknown = {}) => JSON.stringify({jsonrp
 const writeCall = (args: unknown) => message("tools/call", {name: "workflow_write", arguments: args});
 const initialize = message("initialize", {protocolVersion: "2025-06-18", capabilities: {}, clientInfo: {name: "lifecycle", version: "1"}});
 const post = (body: string) => new Request(url, {method: "POST", headers, body});
+
+// one request through the endpoint's /mcp/workflows route handler in the caller's fiber; its answer body is read there
+// and returned as a web response
+const respond = (mcp: WorkflowMcpShape, request: Request) => mcp.route.pipe(
+  Effect.provideService(HttpServerRequest.HttpServerRequest, HttpServerRequest.fromWeb(request)),
+  Effect.flatMap(response => HttpServerResponse.toClientResponse(response).text.pipe(Effect.orDie,
+    Effect.map(text => new Response(text, {status: response.status, headers: new Headers(response.headers)})))));
 
 // a request body the test releases: `reading` settles once the sdk pulls it, `cancelled` once the endpoint cancels it
 const heldBody = () => {
@@ -65,7 +73,7 @@ describe("workflow MCP request and call ownership", () => {
     let calls = 0;
     const mcp = yield* WorkflowMcp.make({write: async () => {calls++;return {status: "created"};}} as unknown as WorkflowWriteController);
     const body = heldBody();
-    const request = yield* Effect.forkChild(mcp.respond(body.request));
+    const request = yield* Effect.forkChild(respond(mcp, body.request));
     yield* Effect.promise(() => body.reading);
 
     yield* mcp.close;
@@ -73,7 +81,7 @@ describe("workflow MCP request and call ownership", () => {
     assert.equal(Exit.hasInterrupts(yield* Fiber.await(request)), true, "the admitted request ends without an answer");
     assert.equal(body.cancelled(), true);
     body.finish(writeCall({input: {operationId: "op-held"}}));
-    const later = yield* mcp.respond(post(writeCall({input: {operationId: "op-later"}})));
+    const later = yield* respond(mcp, post(writeCall({input: {operationId: "op-later"}})));
     assert.equal(later.status, 503);
     assert.deepEqual(yield* Effect.promise(() => later.json()), {error: "workflow_mcp_closed"});
     assert.equal(calls, 0);
@@ -82,7 +90,7 @@ describe("workflow MCP request and call ownership", () => {
   it.live("MCP-LIFE-02: close() ends tools/list, initialize and slow-body requests that have no call yet, cancelling their body reads", () => Effect.gen(function* () {
     const mcp = yield* WorkflowMcp.make({} as unknown as WorkflowWriteController);
     const bodies = [heldBody(), heldBody(), heldBody()];
-    const requests = yield* Effect.forEach(bodies, body => Effect.forkChild(mcp.respond(body.request)));
+    const requests = yield* Effect.forEach(bodies, body => Effect.forkChild(respond(mcp, body.request)));
     yield* Effect.forEach(bodies, body => Effect.promise(() => body.reading));
 
     yield* mcp.close;
@@ -93,14 +101,14 @@ describe("workflow MCP request and call ownership", () => {
     bodies[1]!.finish(initialize);
     // a repeated close() is harmless and the endpoint stays closed
     yield* mcp.close;
-    assert.equal((yield* mcp.respond(post(message("tools/list")))).status, 503);
+    assert.equal((yield* respond(mcp, post(message("tools/list")))).status, 503);
   }), { timeout: 10_000 });
 
   it.live("MCP-LIFE-03: layer release ends a pending tools/list request and its body read, and later requests get 503", () => Effect.gen(function* () {
     const scope = yield* Scope.make();
     const mcp = yield* WorkflowMcp.make({} as unknown as WorkflowWriteController).pipe(Scope.provide(scope));
     const body = heldBody();
-    const request = yield* Effect.forkChild(mcp.respond(body.request));
+    const request = yield* Effect.forkChild(respond(mcp, body.request));
     yield* Effect.promise(() => body.reading);
 
     yield* Scope.close(scope, Exit.void);
@@ -108,7 +116,7 @@ describe("workflow MCP request and call ownership", () => {
     assert.equal(Exit.hasInterrupts(yield* Fiber.await(request)), true);
     assert.equal(body.cancelled(), true);
     body.finish(message("tools/list"));
-    const later = yield* mcp.respond(post(message("tools/list")));
+    const later = yield* respond(mcp, post(message("tools/list")));
     assert.equal(later.status, 503);
     assert.deepEqual(yield* Effect.promise(() => later.json()), {error: "workflow_mcp_closed"});
   }), { timeout: 10_000 });
@@ -118,7 +126,7 @@ describe("workflow MCP request and call ownership", () => {
     const mcp = yield* WorkflowMcp.make({write: async () => {calls++;return {status: "created"};}} as unknown as WorkflowWriteController);
     yield* mcp.close;
     const body = heldBody();
-    const response = yield* mcp.respond(body.request);
+    const response = yield* respond(mcp, body.request);
     assert.equal(response.status, 503);
     assert.equal(response.headers.get("cache-control"), "no-store");
     assert.deepEqual(yield* Effect.promise(() => response.json()), {error: "workflow_mcp_closed"});
@@ -132,14 +140,14 @@ describe("workflow MCP request and call ownership", () => {
     let calls = 0;
     const mcp = yield* WorkflowMcp.make({write: async () => {calls++;return {status: "created"};}} as unknown as WorkflowWriteController);
     const body = heldBody();
-    const request = yield* Effect.forkChild(mcp.respond(body.request));
+    const request = yield* Effect.forkChild(respond(mcp, body.request));
     yield* Effect.promise(() => body.reading);
 
     yield* Fiber.interrupt(request);
     assert.equal(body.cancelled(), true);
     body.finish(writeCall({input: {operationId: "op-gone"}}));
     // the endpoint stays open for others
-    assert.equal((yield* mcp.respond(post(message("tools/list")))).status, 200);
+    assert.equal((yield* respond(mcp, post(message("tools/list")))).status, 200);
     assert.equal(calls, 0);
   }), { timeout: 10_000 });
 
@@ -147,7 +155,7 @@ describe("workflow MCP request and call ownership", () => {
     const tool = noncooperative();
     const mcp = yield* WorkflowMcp.make(tool.controller);
     const args = {supervisorThreadId: "sx", bindingGeneration: 1, input: {operationId: "op-write-1"}};
-    const answer = yield* Effect.forkChild(mcp.respond(post(writeCall(args))));
+    const answer = yield* Effect.forkChild(respond(mcp, post(writeCall(args))));
     yield* Effect.promise(() => tool.entry);
     const [first] = tool.invocations;
     yield* TestClock.adjust("9 seconds");
@@ -164,7 +172,7 @@ describe("workflow MCP request and call ownership", () => {
     // the call is still owned: its late result is its receipt, which the caller's own retry gets unchanged
     const receipt = {status: "created", operationId: "op-write-1", revision: 4};
     first!.settle(receipt);
-    const retry = yield* mcp.respond(post(writeCall(args)));
+    const retry = yield* respond(mcp, post(writeCall(args)));
     assert.deepEqual(callResult((yield* Effect.promise(() => retry.json())) as CallBody), receipt);
     assert.equal(tool.invocations.length, 1, "nothing replays the call");
   }), { timeout: 10_000 });
@@ -172,7 +180,7 @@ describe("workflow MCP request and call ownership", () => {
   it.effect("MCP-LIFE-07: close() ends the request of a controller that ignores its abort, stops owning the call and answers nothing", () => Effect.gen(function* () {
     const tool = noncooperative();
     const mcp = yield* WorkflowMcp.make(tool.controller);
-    const answer = yield* Effect.forkChild(mcp.respond(post(writeCall({input: {operationId: "op-write-2"}}))));
+    const answer = yield* Effect.forkChild(respond(mcp, post(writeCall({input: {operationId: "op-write-2"}}))));
     yield* Effect.promise(() => tool.entry);
     const [first] = tool.invocations;
 
@@ -202,7 +210,7 @@ describe("workflow MCP request and call ownership", () => {
       vi.spyOn(process.stderr, "write").mockImplementation(capture),
     ];
     const texts = yield* Effect.forEach(["workflow_write", "workflow_read", "supervision_stop"], name =>
-      Effect.flatMap(mcp.respond(post(message("tools/call", {name, arguments: {operationId: "op"}}))), response => Effect.promise(() => response.text())),
+      Effect.flatMap(respond(mcp, post(message("tools/call", {name, arguments: {operationId: "op"}}))), response => Effect.promise(() => response.text())),
     ).pipe(Effect.ensuring(Effect.sync(() => spies.forEach(spy => spy.mockRestore()))));
 
     const [thrown, rejected, typed] = texts.map(text => JSON.parse(text) as CallBody);

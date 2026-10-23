@@ -1,9 +1,13 @@
 import {createServer} from "node:http";
 import {createInterface} from "node:readline";
-import {createWorkflowMcpEndpoint} from "../../src/workflow-mcp.js";
+import { NodeHttpServer } from "@effect/platform-node";
+import { Context, Effect, Layer, Scope } from "effect";
+import { HttpRouter } from "effect/http";
+import {WorkflowMcp, WorkflowMcpRoute} from "../../src/workflow-mcp.js";
 import type {WorkflowWriteController} from "../../src/workflow-write-controller.js";
 
-// isolated runner for the in-flight half of CT-MCP-04: the unsettled handle() promise ends with this process.
+// isolated runner for the in-flight half of CT-MCP-04: the endpoint's route is served through effect's node server on
+// this process's own node:http server, and a request is handled until its server chain, answer write included, ends.
 // stdout carries one json event per line; stdin carries "close-endpoint" and "close-server" commands.
 
 const emit = (event: Record<string, unknown>): void => {
@@ -22,17 +26,22 @@ const controller = {
   },
 } as unknown as WorkflowWriteController;
 
-const endpoint = createWorkflowMcpEndpoint(controller);
 let handleSettled = false;
 let handles = 0;
-const server = createServer((request, response) => {
+const server = createServer();
+const handle = <A, E, R>(request: Effect.Effect<A, E, R>) => Effect.suspend(() => {
   handles++;
-  void endpoint.handle(request, response).finally(() => {handleSettled = true;});
+  return Effect.ensuring(request, Effect.sync(() => {handleSettled = true;}));
 });
-server.listen(0, "127.0.0.1", () => {
-  const address = server.address();
-  emit({event: "listening", port: typeof address === "object" && address !== null ? address.port : 0});
-});
+// the layer scope lives as long as this process; close-server closes the node server underneath it
+const context = await Effect.runPromise(Layer.buildWithScope(HttpRouter.serve(WorkflowMcpRoute, {disableLogger: true, disableListenLog: true, middleware: handle}).pipe(
+  Layer.provideMerge(WorkflowMcp.layer(controller)),
+  Layer.provideMerge(NodeHttpServer.layerServer(() => server, {port: 0, host: "127.0.0.1", disablePreemptiveShutdown: true})),
+), Scope.makeUnsafe()));
+const mcp = Context.get(context, WorkflowMcp);
+const endpoint = {close: () => Effect.runPromise(mcp.close)};
+const address = server.address();
+emit({event: "listening", port: typeof address === "object" && address !== null ? address.port : 0});
 
 const nextTurn = () => new Promise<void>(resolve => setImmediate(resolve));
 

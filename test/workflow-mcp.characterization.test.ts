@@ -1,33 +1,44 @@
 import assert from "node:assert/strict";
-import {createServer, request as httpRequest, type IncomingMessage, type ServerResponse} from "node:http";
+import {createServer, request as httpRequest, type IncomingMessage} from "node:http";
 import {fileURLToPath} from "node:url";
+import { NodeHttpServer } from "@effect/platform-node";
+import { Context, Effect, Exit, Layer, Scope } from "effect";
+import { HttpRouter, HttpServer } from "effect/http";
 import {it, type TestContext} from "vitest";
-import {createWorkflowMcpEndpoint, type WorkflowMcpEndpoint} from "../src/workflow-mcp.js";
+import {WorkflowMcp, WorkflowMcpRoute} from "../src/workflow-mcp.js";
 import type {SupervisorTeamController} from "../src/supervisor-team-controller.js";
 import type {WorkflowWriteController} from "../src/workflow-write-controller.js";
 import {nodePath, repositoryRoot, startProcess} from "./support/cli-process.js";
 import {after} from "./support/node-test.js";
 
-type Served = {url: string; port: number; handled: Set<Promise<void>>};
+type Served = {url: string; port: number; handled: Set<Promise<void>>; endpoint: {close: () => Promise<void>}};
 
-// serves the endpoint on its own loopback server; cleanup closes the endpoint, waits for every handle() and closes the server
-const serve = async (t: TestContext, endpoint: WorkflowMcpEndpoint): Promise<Served> => {
+// serves the endpoint's route through effect's node server on its own loopback port; each request is handled until its
+// server chain, answer write included, ends; cleanup closes the endpoint, waits for every handling and releases the server
+const serve = async (t: TestContext, controller: WorkflowWriteController, team?: SupervisorTeamController): Promise<Served> => {
   const handled = new Set<Promise<void>>();
-  const server = createServer((request: IncomingMessage, response: ServerResponse) => {
-    const pending = endpoint.handle(request, response);
+  const track = <A, E, R>(request: Effect.Effect<A, E, R>) => Effect.suspend(() => {
+    let settle!: () => void;
+    const pending = new Promise<void>(resolve => {settle = resolve;});
     handled.add(pending);
     void pending.finally(() => handled.delete(pending));
+    return Effect.ensuring(request, Effect.sync(settle));
   });
-  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
+  const scope = Effect.runSync(Scope.make());
+  const context = await Effect.runPromise(Layer.buildWithScope(HttpRouter.serve(WorkflowMcpRoute, {disableLogger: true, disableListenLog: true, middleware: track}).pipe(
+    Layer.provideMerge(WorkflowMcp.layer(controller, team)),
+    Layer.provideMerge(NodeHttpServer.layer(createServer, {port: 0, host: "127.0.0.1"})),
+  ), scope));
+  const address = Context.get(context, HttpServer.HttpServer).address;
+  assert.ok(address._tag === "InetAddressV4");
+  const mcp = Context.get(context, WorkflowMcp);
+  const endpoint = {close: () => Effect.runPromise(mcp.close)};
   after(t, async () => {
     await endpoint.close();
     await Promise.all([...handled]);
-    server.closeAllConnections();
-    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    await Effect.runPromise(Scope.close(scope, Exit.void));
   });
-  return {url: `http://127.0.0.1:${address.port}/mcp/workflows`, port: address.port, handled};
+  return {url: `http://127.0.0.1:${address.port}/mcp/workflows`, port: address.port, handled, endpoint};
 };
 
 const postJson = async (url: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> => fetch(url, {
@@ -82,7 +93,7 @@ const abortWaitingTool = (): Gate & {tool: (args: unknown, signal: AbortSignal) 
 
 it("CT-MCP-02: tools/list without initialize or session header succeeds statelessly and no response carries Mcp-Session-Id", {timeout: 10_000}, async t => {
   const controller = {readTool: async (args: unknown) => ({status: "ok", received: args})} as unknown as WorkflowWriteController;
-  const {url} = await serve(t, createWorkflowMcpEndpoint(controller));
+  const {url} = await serve(t, controller);
 
   const listed = await postJson(url, {jsonrpc: "2.0", id: 1, method: "tools/list", params: {}});
   assert.equal(listed.status, 200);
@@ -115,7 +126,7 @@ it("CT-MCP-02: tools/list without initialize or session header succeeds stateles
 it("CT-MCP-03: a client disconnect during a slow tool call aborts the controller signal", {timeout: 10_000}, async t => {
   const gate = abortWaitingTool();
   const controller = {readTool: gate.tool} as unknown as WorkflowWriteController;
-  const {port, handled} = await serve(t, createWorkflowMcpEndpoint(controller));
+  const {port, handled} = await serve(t, controller);
 
   const body = JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
   const client = httpRequest({host: "127.0.0.1", port, path: "/mcp/workflows", method: "POST", headers: {
@@ -141,7 +152,7 @@ it("CT-MCP-03: a client disconnect during a slow tool call aborts the controller
 it("CT-MCP-03: the hard-coded 9 s call deadline aborts the controller signal and the call returns its result", {timeout: 60_000}, async t => {
   const gate = abortWaitingTool();
   const controller = {readTool: gate.tool} as unknown as WorkflowWriteController;
-  const {url} = await serve(t, createWorkflowMcpEndpoint(controller));
+  const {url} = await serve(t, controller);
 
   const response = postJson(url, {jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
   await deadline(gate.entered, 5_000, "tool call entry");
@@ -160,8 +171,7 @@ it("CT-MCP-03: the hard-coded 9 s call deadline aborts the controller signal and
 it("CT-MCP-04: after endpoint.close() every POST is answered 503 workflow_mcp_closed without reaching the controller", {timeout: 10_000}, async t => {
   let calls = 0;
   const controller = {readTool: async () => {calls++;return {status: "ok"};}} as unknown as WorkflowWriteController;
-  const endpoint = createWorkflowMcpEndpoint(controller);
-  const {url, handled} = await serve(t, endpoint);
+  const {url, handled, endpoint} = await serve(t, controller);
 
   const open = await postJson(url, {jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
   assert.equal(open.status, 200);
@@ -190,8 +200,8 @@ it("CT-MCP-04: after endpoint.close() every POST is answered 503 workflow_mcp_cl
 
 type RunnerEvent = {event: string} & Record<string, unknown>;
 
-// real-process case: the never-settling handle() is confined to the runner process, which must still exit by itself
-it("CT-MCP-04 (in-flight, baseline): close() aborts the controller signal but the pending call gets no response until the server drops the connection", {timeout: 60_000}, async t => {
+// real-process case: the runner process serves the route on its own node server and must still exit by itself
+it("CT-MCP-04 (in-flight, route): close() aborts the controller signal and the pending call gets only an empty 503 answer, never the controller's result", {timeout: 60_000}, async t => {
   const runnerPath = fileURLToPath(new URL("./support/gaps-mcp-inflight-close.ts", import.meta.url));
   const runner = startProcess(process.execPath, ["--import", "tsx", runnerPath], {cwd: repositoryRoot, env: {PATH: nodePath()}, stdin: "pipe"});
   after(t, () => runner.dispose());
@@ -210,8 +220,9 @@ it("CT-MCP-04 (in-flight, baseline): close() aborts the controller signal but th
   }});
   after(t, () => client.destroy());
   let responded = false;
+  let answer: IncomingMessage | undefined;
   let connectionEnded = false;
-  client.once("response", () => {responded = true;});
+  client.once("response", response => {responded = true;answer = response;});
   const clientClosed = new Promise<string | undefined>(resolve => {
     let code: string | undefined;
     client.on("error", (error: NodeJS.ErrnoException) => {code = error.code;});
@@ -225,19 +236,34 @@ it("CT-MCP-04 (in-flight, baseline): close() aborts the controller signal but th
   const entered = await event("entered", 5_000);
   assert.equal(entered.aborted, false);
   runner.child.stdin!.write("close-endpoint\n");
-  // the abort reaches the tool, which returns its result, yet handle() stays pending
+  // the abort reaches the tool, which returns its result. target change (route): the route's interrupted request
+  // completes, so its handling has settled (was handleSettled: false, the node adapter's handle() stayed pending)
   assert.deepEqual(await event("endpoint-closed", 5_000),
-    {event: "endpoint-closed", aborted: true, reason: "AbortError", toolReturned: true, handleSettled: false});
+    {event: "endpoint-closed", aborted: true, reason: "AbortError", toolReturned: true, handleSettled: true});
 
-  // a bounded absence window: the sdk transport close discarded the pending json response
+  // a bounded window: the sdk transport close discarded the pending json response, and the connection stays open
   await new Promise<void>(resolve => setTimeout(resolve, 1_000));
-  assert.equal(responded, false);
+  // target change (route): was responded false (unanswered); the client now has the platform's whole interrupted
+  // answer, a 503 without content type or content, so no json-rpc content, tool result or outcome claim
+  assert.equal(responded, true);
+  assert.deepEqual({status: answer?.statusCode, type: answer?.headers["content-type"] ?? null, complete: answer?.complete},
+    {status: 503, type: null, complete: true});
   assert.equal(connectionEnded, false);
 
   runner.child.stdin!.end("close-server\n");
-  assert.deepEqual(await event("server-closed", 5_000), {event: "server-closed", error: null, handles: 1, handleSettled: false});
-  assert.equal(await deadline(clientClosed, 5_000, "connection end"), "ECONNRESET");
-  assert.equal(responded, false);
+  // target change (route): was handleSettled: false, see endpoint-closed
+  assert.deepEqual(await event("server-closed", 5_000), {event: "server-closed", error: null, handles: 1, handleSettled: true});
+  // target change (route): was ECONNRESET; dropping a connection whose request was answered ends it without an error
+  assert.equal(await deadline(clientClosed, 5_000, "connection end"), undefined);
+  // target change (route): was responded false (never answered); the one answer stays the empty 503 and its body, read
+  // to the end after the drop, never carries the controller's late result
+  const answered = answer!;
+  const text = await deadline(new Promise<string>(resolve => {
+    const chunks: Buffer[] = [];
+    answered.on("data", (chunk: Buffer) => chunks.push(chunk));
+    answered.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+  }), 5_000, "answer body end");
+  assert.equal(text, "");
   const exit = await runner.closed(10_000);
   assert.deepEqual({code: exit.code, signal: exit.signal, stderr: exit.stderr}, {code: 0, signal: null, stderr: ""});
 });
@@ -249,7 +275,7 @@ it("CT-MCP-05: with a team the tool list has six tools in fixed order and an unk
     call: async (args: unknown) => {teamCalls.push(["call", args]);return {status: "ok", tool: "team"};},
     guide: async (args: unknown) => {teamCalls.push(["guide", args]);return {status: "ok", tool: "guide"};},
   } as unknown as SupervisorTeamController;
-  const {url} = await serve(t, createWorkflowMcpEndpoint(controller, team));
+  const {url} = await serve(t, controller, team);
 
   const listed = await postJson(url, {jsonrpc: "2.0", id: 1, method: "tools/list", params: {}});
   assert.equal(listed.status, 200);
@@ -267,7 +293,7 @@ it("CT-MCP-05: with a team the tool list has six tools in fixed order and an unk
   assert.deepEqual(teamCalls, [["guide", {x: 1}]]);
 
   // without a team the team tools are neither listed nor routed
-  const {url: teamless} = await serve(t, createWorkflowMcpEndpoint(controller));
+  const {url: teamless} = await serve(t, controller);
   const teamlessCall = await postJson(teamless, {jsonrpc: "2.0", id: 4, method: "tools/call", params: {name: "supervision_team", arguments: {}}});
   const teamlessBody = await teamlessCall.json() as {result?: {isError?: boolean; content?: Array<{text?: string}>}};
   assert.equal(teamlessBody.result?.isError, true);
