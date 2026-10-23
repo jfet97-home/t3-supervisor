@@ -1,8 +1,8 @@
 import { writeSync } from "node:fs";
 import { join } from "node:path";
-import { DatabaseSync, StatementSync } from "node:sqlite";
 import { NodeFileSystem, NodeRuntime, NodeStdio } from "@effect/platform-node";
-import { Cause, Effect, Layer, type PlatformError, Predicate, Queue, Stdio, Stream } from "effect";
+import { Cause, Effect, Layer, type PlatformError, Queue, Stdio, Stream } from "effect";
+import { DatabaseWorker, type DatabaseWorkerEntry } from "../../src/db.js";
 import { ServiceAuth } from "../../src/service-auth.js";
 
 // the second process of CT-SQL-04 (access): its own service auth on the same login database; stdout answers one json
@@ -12,70 +12,26 @@ import { ServiceAuth } from "../../src/service-auth.js";
 //   issued
 // args: <data directory> <race|expiry>
 
-// every message is one synchronous write: the barrier writes from inside a native call that then blocks this thread, so
-// all lines take the same unbuffered path and reach the parent in order
+// every message is one synchronous write: the barrier writes from the database worker thread while that thread blocks in a
+// native call, so all lines take the same unbuffered path and reach the parent in order
 const send = (message: object): void => {
   writeSync(1, `${JSON.stringify(message)}\n`);
 };
 
-const SQLITE_BUSY = 5;
-const sqliteCode = (error: unknown): unknown => Predicate.hasProperty(error, "errcode") ? error.errcode : undefined;
-
-// the barrier at the real client/transaction boundary. the service client opens every transaction with one native
-// BEGIN IMMEDIATE step on its own connection and offers no callback inside it, so this test-only adapter wraps that
-// native call. once armed, the next such step first tries BEGIN IMMEDIATE on a separate connection that never waits
-// (busy: another process holds the write lock right now), reports "waiting" and only then enters the service's own step,
-// which cannot return before that holder releases; "begun" reports how the service's step ended and, when it failed,
-// the sqlite error code and the busy_timeout read back from the very connection that ran it (read, never set). the probe
-// proves the lock before the call only: the step may still begin after a release
-const installBarrier = (path: string) => Effect.acquireRelease(Effect.sync(() => {
-  const probe = new DatabaseSync(path, { timeout: 0 });
-  const all = StatementSync.prototype.all;
-  const prepare = DatabaseSync.prototype.prepare;
-  // node:sqlite statements do not expose their connection, so each BEGIN IMMEDIATE statement is mapped to it here
-  const connections = new WeakMap<StatementSync, DatabaseSync>();
-  const state: { armed: number | undefined } = { armed: undefined };
-  const probeWriteLock = (): "busy" | "free" | "failed" => {
-    try {
-      probe.exec("BEGIN IMMEDIATE");
-    } catch (error) {
-      return sqliteCode(error) === SQLITE_BUSY ? "busy" : "failed";
-    }
-    probe.exec("ROLLBACK");
-    return "free";
+// the BEGIN IMMEDIATE barrier lives in the database worker (test/support/access-sql-worker.ts), where the service
+// client's statements run; this process arms it through a cell of shared memory, -1 while disarmed
+const barrierWorker = (path: string) => {
+  const armed = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)).fill(-1);
+  const entry: DatabaseWorkerEntry = {
+    url: new URL("./access-sql-worker.ts", import.meta.url),
+    execArgv: ["--import", import.meta.resolve("tsx")],
+    workerData: { path, armed },
   };
-  DatabaseSync.prototype.prepare = function (this: DatabaseSync, ...parameters: Parameters<typeof prepare>) {
-    const statement = Reflect.apply(prepare, this, parameters);
-    if (statement.sourceSQL === "BEGIN IMMEDIATE") connections.set(statement, this);
-    return statement;
-  } as typeof prepare;
-  StatementSync.prototype.all = function (this: StatementSync, ...parameters: Parameters<typeof all>) {
-    const grant = state.armed;
-    if (grant === undefined || this.sourceSQL !== "BEGIN IMMEDIATE") return Reflect.apply(all, this, parameters);
-    state.armed = undefined;
-    send({ step: "waiting", grant, probe: probeWriteLock() });
-    try {
-      const rows = Reflect.apply(all, this, parameters);
-      send({ step: "begun", grant, ok: true });
-      return rows;
-    } catch (error) {
-      const busyTimeout = connections.get(this)?.prepare("PRAGMA busy_timeout").get()?.timeout;
-      send({ step: "begun", grant, ok: false, code: sqliteCode(error), busyTimeout });
-      throw error;
-    }
-  } as typeof all;
-  return {
-    arm: (grant: number) => Effect.sync(() => { state.armed = grant; }),
-    remove: () => {
-      StatementSync.prototype.all = all;
-      DatabaseSync.prototype.prepare = prepare;
-      probe.close();
-    },
-  };
-}), (barrier) => Effect.sync(barrier.remove));
+  return { entry, barrier: { arm: (grant: number) => Effect.sync(() => { Atomics.store(armed, 0, grant); }) } };
+};
 
 type Commands = Queue.Dequeue<string, Cause.Done | PlatformError.PlatformError>;
-type Barrier = Effect.Success<ReturnType<typeof installBarrier>>;
+type Barrier = ReturnType<typeof barrierWorker>["barrier"];
 
 const race = (commands: Commands, barrier: Barrier) => Effect.gen(function* () {
   const auth = yield* ServiceAuth;
@@ -104,13 +60,12 @@ const expire = (commands: Commands, barrier: Barrier) => Effect.gen(function* ()
   }
 }).pipe(Effect.catchIf(Cause.isDone, () => Effect.void));
 
-// ready once the service auth is open and the barrier installed
-const serve = (directory: string, mode: "race" | "expiry", commands: Commands) => Effect.gen(function* () {
+// ready once the service auth is open over the barrier worker
+const serve = (mode: "race" | "expiry", commands: Commands, barrier: Barrier) => Effect.gen(function* () {
   yield* ServiceAuth;
-  const barrier = yield* installBarrier(join(directory, "access", "login.sqlite3"));
   yield* Effect.sync(() => send({ step: "ready" }));
   yield* (mode === "race" ? race : expire)(commands, barrier);
-}).pipe(Effect.scoped);
+});
 
 NodeRuntime.runMain(Effect.gen(function* () {
   const stdio = yield* Stdio.Stdio;
@@ -118,5 +73,6 @@ NodeRuntime.runMain(Effect.gen(function* () {
   if (directory === undefined || (mode !== "race" && mode !== "expiry")) return yield* Effect.fail(new Error("usage"));
   const commands = yield* Queue.unbounded<string, Cause.Done | PlatformError.PlatformError>();
   yield* Effect.forkChild(stdio.stdin.pipe(Stream.decodeText(), Stream.splitLines, Stream.runIntoQueue(commands)));
-  yield* serve(directory, mode, commands).pipe(Effect.provide(ServiceAuth.layer(directory)));
+  const { entry, barrier } = barrierWorker(join(directory, "access", "login.sqlite3"));
+  yield* serve(mode, commands, barrier).pipe(Effect.provide(ServiceAuth.layer(directory)), Effect.provideService(DatabaseWorker, entry));
 }).pipe(Effect.provide(Layer.mergeAll(NodeFileSystem.layer, NodeStdio.layer))));

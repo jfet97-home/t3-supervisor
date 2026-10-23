@@ -126,9 +126,9 @@ const authRows = (path: string) => Effect.gen(function* () {
 const contendedRun = Effect.gen(function* () {
   const { directory, path } = yield* loginDatabase;
   const contested = contendedGrants - 1;
-  // forged one after another, each over its own short-lived client, before this process opens its service client
-  const tokens: string[] = [];
-  for (let index = 0; index < contendedGrants; index += 1) tokens.push(Redacted.value((yield* forgeDashboardToken(directory)).token));
+  // forged four at a time, each over its own short-lived client, before this process opens its service client
+  const tokens = yield* Effect.forEach(Array.from({ length: contendedGrants }), () =>
+    Effect.map(forgeDashboardToken(directory), (forged) => Redacted.value(forged.token)), { concurrency: 4 });
 
   const observed = yield* Effect.gen(function* () {
     const auth = yield* ServiceAuth;
@@ -174,8 +174,10 @@ const contendedRun = Effect.gen(function* () {
 // then the child's login of that grant under the holder, then its retry and replay after the release
 const expiryRun = Effect.gen(function* () {
   const { directory, path } = yield* loginDatabase;
-  const seeded: string[] = [];
-  for (let index = 0; index < maxSessions; index += 1) seeded.push(Redacted.value((yield* forgeDashboardToken(directory)).token));
+  // forged four at a time, each over its own short-lived client as concurrent cli runs would be, so that the start of
+  // each client's database worker does not add up across the whole seeding
+  const seeded = yield* Effect.forEach(Array.from({ length: maxSessions }), () =>
+    Effect.map(forgeDashboardToken(directory), (forged) => Redacted.value(forged.token)), { concurrency: 4 });
   yield* Effect.gen(function* () {
     const auth = yield* ServiceAuth;
     for (const token of seeded) if ((yield* auth.login(token)) === null) return yield* Effect.die(new Error("a seeding login failed"));

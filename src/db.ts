@@ -79,10 +79,16 @@ export interface DatabaseWorkerEntry {
   readonly workerData?: unknown;
 }
 
-// the worker entry beside this module: the built file in dist, the source file through tsx when running from source
-const workerEntry = (): DatabaseWorkerEntry => import.meta.url.endsWith(".ts")
-  ? {url: new URL("./db-worker.ts", import.meta.url), execArgv: ["--import", "tsx"]}
-  : {url: new URL("./db-worker.js", import.meta.url), execArgv: undefined};
+/**
+ * The worker entry every database client starts: the one beside this module, the built file in dist or the source file
+ * through tsx when running from source (the loader is resolved from this module, since a bare specifier in execArgv
+ * resolves from the working directory). Only tests provide another entry, one that serves through `serveDatabase`.
+ */
+export const DatabaseWorker = Context.Reference<DatabaseWorkerEntry>("t3-supervisor/DatabaseWorker", {
+  defaultValue: () => import.meta.url.endsWith(".ts")
+    ? {url: new URL("./db-worker.ts", import.meta.url), execArgv: ["--import", import.meta.resolve("tsx")]}
+    : {url: new URL("./db-worker.js", import.meta.url), execArgv: undefined},
+});
 
 const decodeReply = Schema.decodeUnknownExit(WorkerReply);
 
@@ -98,10 +104,15 @@ type WorkerConnection = Connection & {readonly isTransaction: () => boolean};
  * synchronous statement cannot be stopped and may still take effect. The worker is never replaced: if it exits, errors,
  * breaks the protocol or cannot be reached, the client is poisoned for good, every waiting statement fails with an unknown
  * outcome and every later one fails without being sent, so nothing is replayed and no transaction continues on another
- * connection. A new client (a rebuilt layer) opens a new worker; SQLite rolls back what the old one left uncommitted.
+ * connection. The worker is stopped at once, which closes its connection: SQLite rolls back what it left uncommitted and
+ * the file's lock is released without waiting for the client to close. From then on the client has no transaction, so the
+ * stock rollback after the failure sends nothing and the caller sees the unknown outcome as a typed `SqlError`. A new
+ * client (a rebuilt layer) opens a new worker.
  */
-export const workerClient = (config: WorkerDatabaseConfig, entry: DatabaseWorkerEntry = workerEntry()): Effect.Effect<SqlClient.SqlClient, SqlError, Scope.Scope> => Effect.gen(function* () {
-  const spawn = () => new WorkerThread(entry.url, {...(entry.execArgv ? {execArgv: entry.execArgv} : {}), ...(entry.workerData === undefined ? {} : {workerData: entry.workerData})});
+const workerClient = (config: WorkerDatabaseConfig): Effect.Effect<SqlClient.SqlClient, SqlError, Scope.Scope> => Effect.gen(function* () {
+  const entry = yield* DatabaseWorker;
+  let thread: WorkerThread | undefined;
+  const spawn = () => thread = new WorkerThread(entry.url, {...(entry.execArgv ? {execArgv: entry.execArgv} : {}), ...(entry.workerData === undefined ? {} : {workerData: entry.workerData})});
   const worker = yield* Effect.flatMap(Worker.WorkerPlatform, (platform) => platform.spawn<unknown, WorkerRequest>(0)).pipe(
     Effect.provideService(Worker.Spawner, spawn), Effect.provide(NodeWorker.layerPlatform), Effect.orDie);
   const pending = new Map<number, Deferred.Deferred<unknown, SqlError>>();
@@ -113,18 +124,22 @@ export const workerClient = (config: WorkerDatabaseConfig, entry: DatabaseWorker
     for (const done of pending.values()) Deferred.doneUnsafe(done, Exit.fail(fault));
     pending.clear();
   };
-  const settle = (message: unknown) => Effect.sync(() => {
+  // a fault: poisoned, and the worker stopped so that its connection closes now
+  const abandon = (error: SqlError) => Effect.andThen(Effect.sync(() => poison(error)),
+    Effect.promise(() => thread?.terminate() ?? Promise.resolve(0)));
+  const settle = (message: unknown) => Effect.suspend(() => {
     const decoded = decodeReply(message);
-    if (Exit.isFailure(decoded)) return poison(connectionLost("The database worker sent a malformed reply"));
+    if (Exit.isFailure(decoded)) return abandon(connectionLost("The database worker sent a malformed reply"));
     const reply = decoded.value;
     const done = pending.get(reply.id);
-    if (done === undefined) return poison(connectionLost("The database worker answered a request it was not sent"));
+    if (done === undefined) return abandon(connectionLost("The database worker answered a request it was not sent"));
     pending.delete(reply.id);
     inTransaction = reply.inTransaction;
     Deferred.doneUnsafe(done, reply.ok ? Exit.succeed(reply.value) : Exit.fail(sqlErrorOf(reply.failure)));
+    return Effect.void;
   });
   yield* worker.run(settle).pipe(
-    Effect.catchCause(() => Effect.sync(() => poison(connectionLost("The database worker stopped; a statement in flight has an unknown outcome")))),
+    Effect.catchCause(() => abandon(connectionLost("The database worker stopped; a statement in flight has an unknown outcome"))),
     Effect.forkScoped);
   // runs before the worker is closed: nothing is sent once teardown begins, and a waiting statement fails as unknown
   yield* Effect.addFinalizer(() => Effect.sync(() => poison(connectionLost("The database client is closed"))));
@@ -134,7 +149,7 @@ export const workerClient = (config: WorkerDatabaseConfig, entry: DatabaseWorker
     const done = Deferred.makeUnsafe<unknown, SqlError>();
     pending.set(request.id, done);
     return worker.send(request).pipe(
-      Effect.catchCause(() => Effect.sync(() => poison(connectionLost("The database worker could not be reached")))),
+      Effect.catchCause(() => abandon(connectionLost("The database worker could not be reached"))),
       Effect.andThen(Deferred.await(done)));
   }));
   const statement = (op: StatementOperation, sql: string, params: ReadonlyArray<unknown>) =>
@@ -143,7 +158,7 @@ export const workerClient = (config: WorkerDatabaseConfig, entry: DatabaseWorker
   const rows = (op: StatementOperation, sql: string, params: ReadonlyArray<unknown>) =>
     Effect.map(statement(op, sql, params), (value) => value as ReadonlyArray<object>);
   const connection: WorkerConnection = {
-    isTransaction: () => inTransaction,
+    isTransaction: () => fault === undefined && inTransaction,
     execute: (sql, params, transformRows) => Effect.map(rows("execute", sql, params), (all) => transformRows ? transformRows(all) : all),
     executeRaw: (sql, params) => statement("executeRaw", sql, params),
     executeValues: (sql, params) => Effect.map(rows("executeValues", sql, params), (all) => all as ReadonlyArray<ReadonlyArray<unknown>>),
