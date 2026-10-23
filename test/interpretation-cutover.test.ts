@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -15,6 +17,7 @@ import { InterpretationEvidence, interpretationPlanDigest } from "../src/interpr
 import { interpretationSourcePin } from "../src/interpretation-submission.js";
 import type { WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import { SupervisorOwnership, type SupervisionStartRecord, type TaskRecord } from "../src/project-supervisor-store.js";
+import { renderRolloutScan, rolloutScan } from "../src/rollout-scan.js";
 import { SupervisionStoresLive } from "../src/supervision-live.js";
 import { createStatus, reportFailure, supervise } from "../src/supervisor.js";
 import { prepareWorkflowRequest, workflowInterpretationOutcome } from "../src/supervisor-workflow.js";
@@ -188,6 +191,7 @@ const rows = (directory: string): Record<string, Array<Record<string, unknown>>>
     return Object.fromEntries(tables.map((table) => [table, db.prepare(`SELECT rowid AS _rowid, * FROM "${table}" ORDER BY rowid`).all().map((row) => ({...row}))]));
   } finally {db.close();}
 };
+const files = (directory: string) => readdirSync(directory).sort().map((name) => [name, createHash("sha256").update(readFileSync(join(directory, name))).digest("hex")]);
 const documentOf = (dump: ReturnType<typeof rows>, table: string, column: string, key: Record<string, string>) => {
   const row = dump[table]!.find((item) => Object.entries(key).every(([name, value]) => item[name] === value));
   return row === undefined ? undefined : row[column] as string;
@@ -462,4 +466,31 @@ it.live("conflict: rows that change between the plan and the commit refuse with 
     JSON.stringify(item.threadId === "main-settled" ? {...item, reason: "Changed meanwhile."} : item), "only the other writer's change is stored");
   for (const item of value.candidates) assert.equal(documentOf(after, "supervisor_workflow_agreement_candidates", "document",
     {task_id: item.taskId as string, proposal_id: item.proposalId as string}), JSON.stringify(item));
+}), {timeout: 60_000});
+
+it.live("scan: the cut-over section prints the startup plan by identities, counts and reasons, reads the root only when given the read client, and changes no file byte", () => Effect.gen(function* () {
+  const value = scenario("completed");
+  const directory = yield* seeded("cutover-scan-", value);
+  const peer = yield* nativePeer(value.projection);
+  const t3 = yield* client(peer);
+  const before = files(directory);
+  const scan = yield* rolloutScan(directory, t3);
+  assert.deepEqual(files(directory), before, "no file was written, created or touched");
+  const plan = yield* planOf(directory, value.projection, at);
+  assert.deepEqual(scan.cutover, {...cutoverReport(plan), nativeReads: true}, "the scan prints the plan the startup step applies");
+  const report = renderRolloutScan(directory, scan);
+  assert.ok(report.includes("cut-over verdict: the s6e startup step would apply 11 row write(s) in one transaction"), report);
+  for (const secret of [promptBody, introductionBody, objective, readToken, "PRIVATE"]) assert.equal(report.includes(secret), false, "identities, counts and reasons only");
+  assert.equal(JSON.stringify(scan).includes("PRIVATE"), false);
+  nativeReadsOnly(peer);
+
+  // without the read client nothing native is read and every native-dependent entry blocks as unread
+  const requests = peer.requests.length;
+  const unread = yield* rolloutScan(directory);
+  assert.deepEqual(files(directory), before);
+  assert.equal(peer.requests.length, requests, "no native read without the read client");
+  assert.ok(unread.cutover && unread.cutover.blockers.length > 0 && unread.cutover.blockers.every((blocker) => blocker.code === "native_not_read"));
+  assert.equal(unread.cutover.nativeReads, false);
+  const text = renderRolloutScan(directory, unread);
+  assert.ok(text.includes("native reads not performed") && text.includes("the s6e startup step would refuse now and change nothing"), text);
 }), {timeout: 60_000});
