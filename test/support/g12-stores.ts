@@ -1,11 +1,15 @@
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, Exit, FileSystem, Layer, Scope } from "effect";
 import type { SqlClient } from "effect/sql";
-import { GuidanceDb, guidanceDbLayer } from "../../src/db.js";
+import { SupervisorConfig } from "../../src/config.js";
+import { GuidanceDb, guidanceDbLayer, type PolicyDb, policyDbLayer } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
 import { ProjectSupervisorStore, SupervisorOwnership } from "../../src/project-supervisor-store.js";
+import { SupervisionGate, SupervisionScopeService } from "../../src/supervision-gate.js";
 import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
+import { ThreadPolicyStore } from "../../src/thread-policy.js";
+import type { SupervisorSettings } from "../../src/types.js";
 import { WorkflowStateStore, type WorkflowEditingEnabled } from "../../src/workflow-state-store.js";
 
 // the g12 suites' guidance stores on a temporary data directory, each built through its production layer over the production
@@ -39,6 +43,20 @@ export const guidanceClient = (directory: string, observe?: StatementObserver): 
   const production = guidanceDbLayer(directory).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie);
   return observe ? Layer.effect(GuidanceDb, Effect.map(Effect.service(GuidanceDb), (sql) => observed(sql, observe))).pipe(Layer.provide(production)) : production;
 };
+
+/** The production thread-settings.sqlite3 client of `directory`. */
+export const policyClient = (directory: string): Layer.Layer<PolicyDb> => policyDbLayer(directory).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie);
+
+/** The configuration of a supervision run over `directory`; nothing reaches T3 through it. */
+export const runConfig = (directory: string): Layer.Layer<SupervisorConfig> => Layer.succeed(SupervisorConfig, {
+  dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0,
+} satisfies SupervisorSettings);
+
+/** The run's thread-policy store, its scope predicates over the stores and the admission gate that guards with them. */
+export const admissionLayer = (operateRpcAvailable: boolean) => SupervisionGate.layer.pipe(
+  Layer.provideMerge(SupervisionScopeService.layer(operateRpcAvailable)),
+  Layer.provideMerge(ThreadPolicyStore.layer),
+);
 
 /** The production identity source over the platform crypto. */
 export const supervisorIds: Layer.Layer<SupervisorIds> = SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer));
