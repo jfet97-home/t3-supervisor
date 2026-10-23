@@ -692,14 +692,20 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
       const record = guideRecord(payload, binding);
       const search = yield* findGuideRoute(binding, payload, true, cancel);
       if (!search.route) {
-        if (search.reason === "no_contactable_ancestor_in_assignment" || search.reason === "ancestor_outside_current_assignment")
+        if (search.reason !== "no_contactable_ancestor_in_assignment" && search.reason !== "ancestor_outside_current_assignment")
+          return {_tag: "Done" as const, value: fail(search.reason ?? "no_contactable_ancestor_in_assignment_escalated") as unknown};
+        // the escalation of a walk without a route (plan 3.11): the actor's binding, scope and per-chat stop rechecked with the
+        // admission guard, as the reservation does, and the escalation event with the helper's last assessment in one section;
+        // a scope stopped or disabled during the walk writes nothing and refuses as the walk's own recheck does
+        const escalated = yield* gate.admit((guard) => Effect.sync(() => {
+          if (!current(payload, binding, false, guard)) return false;
           team.escalate(binding, {eventId: `guide-escalation:${workflowRequestHash(payload)}`, actorThreadId: payload.supervisorThreadId,
             memberEpoch: payload.memberEpoch!, targets: [{targetThreadId: String(payload.targetThreadId),
               assignmentRootThreadId: payload.assignmentRootThreadId!, assignmentEpoch: payload.assignmentEpoch!}], parentById: search.parents,
             summary: `Guidance needs root attention for ${String(payload.targetThreadId)}: ${String(payload.text).slice(0, 3000)}`});
-        if (search.reason === "no_contactable_ancestor_in_assignment" || search.reason === "ancestor_outside_current_assignment")
-          return {_tag: "Done" as const, value: fail("no_contactable_ancestor_in_assignment_escalated") as unknown};
-        return {_tag: "Done" as const, value: fail(search.reason ?? "no_contactable_ancestor_in_assignment_escalated") as unknown};
+          return true;
+        }));
+        return {_tag: "Done" as const, value: fail(escalated ? "no_contactable_ancestor_in_assignment_escalated" : "guidance_assignment_changed") as unknown};
       }
       if (!current(payload, binding) || !team.authorizeWrite(binding, payload.supervisorThreadId, record.targetThreadId, search.parents, payload) ||
         !team.authorizeWrite(binding, payload.supervisorThreadId, search.route.thread.id, search.parents, payload)) {
