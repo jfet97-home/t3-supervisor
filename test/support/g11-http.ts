@@ -23,7 +23,7 @@ export const onLiveClock = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Eff
 
 const liveSleep = (duration: Duration.Input) => onLiveClock(Effect.sleep(duration));
 
-// the baseline helper's bound of each raw request (test/support/c3b-http.ts AbortSignal.timeout(5_000)), on the live clock
+// the bound of each raw request (the baseline helper's 5 s), on the live clock
 const rawRequestBound = "5 seconds";
 
 /** A request with the exact path and headers, Host included; interrupting it destroys its socket. */

@@ -6,7 +6,7 @@ import { describe, it } from "@effect/vitest";
 import { Context, Effect, Exit, FileSystem, Layer, Redacted, Scope } from "effect";
 import { TestClock } from "effect/testing";
 import { forgeDashboardToken, ServiceAuth } from "../src/service-auth.js";
-import { openDescriptors } from "./support/c3b-http.js";
+import { openDescriptors } from "./support/g11-http.js";
 import { privately } from "./support/private-assert.js";
 
 // target regressions of the Effect service auth: the wall clock comes from Clock, the layer's scope bounds its one

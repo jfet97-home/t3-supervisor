@@ -13,12 +13,12 @@ import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-co
 import { ProjectDefinitions } from "../../src/project-definitions.js";
 import { forgeDashboardToken, ServiceAuth } from "../../src/service-auth.js";
 import type { WorkflowWriteController } from "../../src/workflow-write-controller.js";
-import { uiConfig } from "./c3b-ui.js";
+import { uiConfig } from "./g11-dashboard.js";
 import { workflowMcpLayer } from "./mcp-controllers.js";
 
-// the dashboard server of guidance-ui.ts on a temp data directory in the caller's scope, built as c3b-ui.ts startUi builds
-// it (the interim guidance store and runtime, its own service auth, a workflow MCP endpoint without controller tools, the
-// node file system and crypto), and sign-in over loopback; requests go through the current globalThis.fetch
+// the dashboard server of guidance-ui.ts on a temp data directory in the caller's scope (the interim guidance store and runtime,
+// its own service auth, a workflow MCP endpoint without controller tools, the node file system and crypto), and sign-in over
+// loopback; requests go through the current globalThis.fetch
 
 // the listeners close before the store, and the directory is removed last
 export const dashboard = (options: GuidanceUiOptions = {}) => Effect.gen(function* () {
