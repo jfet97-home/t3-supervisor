@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
-import {mkdtemp, rm} from "node:fs/promises";
-import {tmpdir} from "node:os";
-import {join} from "node:path";
+import { NodeFileSystem } from "@effect/platform-node";
 import { it } from "@effect/vitest";
-import {Context, Effect, Layer, Ref} from "effect";
+import {Context, Effect, FileSystem, Layer, Redacted, Ref} from "effect";
 import {WebSocketServer} from "ws";
-import {ProjectConfigEditorService} from "../src/project-config-editor.js";
+import {NativeEnvelope} from "../src/native-envelope.js";
+import {ProjectConfigEditorService, type ProjectConfigWriter} from "../src/project-config-editor.js";
 import {ProjectDefinitions} from "../src/project-definitions.js";
 import {released} from "./support/http.js";
 import type {ProjectConfigSave} from "../src/project-definitions-contract.js";
-import {ProjectFileError} from "../src/project-files.js";
-import {makeProjectWriter, type ProjectWriter} from "./support/native-files-promise.js";
-import {forgeDashboardToken, startGuidanceUi} from "./support/service-auth-harness.js";
+import {ProjectFileError, ProjectWriter} from "../src/project-files.js";
+import {forgeDashboardToken} from "../src/service-auth.js";
+import {cancelAfter} from "./support/g5a-bounds.js";
+import {guidanceUi} from "./support/service-auth-harness.js";
 import type {GuidanceRuntime} from "../src/guidance.js";
 import type {SupervisorConfig} from "../src/types.js";
 import {requiredReferences, type DefinitionReference} from "../src/project-definitions-contract.js";
@@ -28,6 +28,10 @@ const seedProject = (f: ReturnType<typeof makeDefinitionFixture>, config = index
 // the definitions and the config editor over the fixture's in-memory checkout, built for the test's scope
 const services = (layer: Layer.Layer<ProjectDefinitions | ProjectConfigEditorService>) => Effect.map(Layer.build(layer),
   context => ({definitions: Context.get(context, ProjectDefinitions), editor: Context.get(context, ProjectConfigEditorService)}));
+// the dashboard's http boundary: one fetch from the suite, its json body, or the response with its body released
+const request = (url: string, init?: RequestInit) => Effect.promise(() => fetch(url, init));
+const json = <A>(response: Response) => Effect.promise(() => response.json() as Promise<A>);
+const release = (response: Response) => Effect.promise(() => released(response));
 // a real loopback socket; the finalizer terminates its clients and closes it
 const loopbackServer = Effect.acquireRelease(Effect.promise(async () => {
   const listening = new WebSocketServer({host: "127.0.0.1", port: 0});
@@ -38,7 +42,7 @@ const loopbackServer = Effect.acquireRelease(Effect.promise(async () => {
   return new Promise<void>(resolve => listening.close(() => resolve()));
 }));
 
-it.live("saves only local project.yaml, preserves valid YAML comments and retains global policy", () => Effect.gen(function* () {
+it.effect("saves only local project.yaml, preserves valid YAML comments and retains global policy", () => Effect.gen(function* () {
   const f = makeDefinitionFixture({globalEnabled: true});
   const globalIndex = indexSource({steps: ["shared-step"], workflows: ["shared-flow"], required: [{step: "shared-step"}], default_workflow: "shared-flow"});
   f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", globalIndex);
@@ -61,7 +65,7 @@ default_workflow: local-flow # keep this default comment
 `;
   seedProject(f, oldConfig);
   let savedSnapshotRevision: string | undefined;
-  const {definitions, editor} = yield* services(f.editorLayer(f.writer, definitions => {savedSnapshotRevision = definitions.revision ?? undefined;}));
+  const {definitions, editor} = yield* services(f.configEditorLayer(f.projectWriter, definitions => {savedSnapshotRevision = definitions.revision ?? undefined;}));
   const observed = yield* definitions.load(f.projectId);
   assert.equal(observed.status, "ready");
   assert.deepEqual(requiredReferences(observed.projectConfig!), [{step: "local-step"}]);
@@ -108,13 +112,13 @@ default_workflow: local-flow # keep this default comment
   assert.deepEqual(reloaded.projectConfig?.workflows.map(row => row.required), [false]);
 }));
 
-it.live("indexes an existing unlisted file and rejects stale, missing-file, global, malformed or old-format indexes before writing", () => Effect.gen(function* () {
+it.effect("indexes an existing unlisted file and rejects stale, missing-file, global, malformed or old-format indexes before writing", () => Effect.gen(function* () {
   const f = makeDefinitionFixture({globalEnabled: true});
   seedProject(f);
   f.addFile(f.globalRoot, ".t3-supervisor/project.yaml", indexSource({steps: ["shared"]}));
   f.addFile(f.globalRoot, ".t3-supervisor/steps/shared.md", stepSource("shared"));
   f.addDirectory(f.globalRoot, ".t3-supervisor/workflows");
-  const {definitions, editor} = yield* services(f.editorLayer());
+  const {definitions, editor} = yield* services(f.configEditorLayer());
   const initial = yield* definitions.load(f.projectId);
   f.addFile(f.root, ".t3-supervisor/steps/new-step.md", stepSource("new-step"));
   const stale = yield* editor.save({projectId: f.projectId, threadId: null, expectedRevision: initial.revision!, config: localIndex()});
@@ -156,19 +160,20 @@ it.live("indexes an existing unlisted file and rejects stale, missing-file, glob
   assert.deepEqual(requiredReferences(indexed.definitions!.projectConfig!), [{step: "new-step"}]);
 }));
 
-it.live("reports definite permission and uncertain native write outcomes without retrying", () => Effect.gen(function* () {
+it.effect("reports definite permission and uncertain native write outcomes without retrying", () => Effect.gen(function* () {
   const f = makeDefinitionFixture();
   seedProject(f);
-  // the native write outcome is injected through a Ref: a definite refusal, a lost connection, or an accepted write that changed nothing
+  // the native write outcome is injected through a Ref: a definite refusal, a lost connection (which the native writer reports as
+  // its unconfirmed unavailable failure), or an accepted write that changed nothing
   const outcome = yield* Ref.make<"refused" | "disconnected" | "unapplied">("refused");
   let attempts = 0;
-  const writer: ProjectWriter = {checkProjectConfigFile: f.writer.checkProjectConfigFile, writeProjectConfig: async () => {
-    const injected = Ref.getUnsafe(outcome);
-    if (injected === "refused") throw new ProjectFileError("permission_required", "write");
+  const writer: ProjectConfigWriter = {checkProjectConfigFile: f.projectWriter.checkProjectConfigFile, writeProjectConfig: () => Effect.gen(function* () {
+    const injected = yield* Ref.get(outcome);
+    if (injected === "refused") return yield* new ProjectFileError("permission_required", "write");
     attempts++;
-    if (injected === "disconnected") throw new Error("connection closed");
-  }};
-  const {definitions: loader, editor} = yield* services(f.editorLayer(writer));
+    if (injected === "disconnected") return yield* new ProjectFileError("unavailable", "write");
+  })};
+  const {definitions: loader, editor} = yield* services(f.configEditorLayer(writer));
   const definitions = yield* loader.load(f.projectId);
   const input: ProjectConfigSave = {projectId: f.projectId, threadId: null, expectedRevision: definitions.revision!, config: localIndex([{step: "local-step"}])};
   assert.equal((yield* editor.save(input)).status, "permission_required");
@@ -198,85 +203,84 @@ it.live("native project writer checks the regular project.yaml target and writes
     else value = null;
     socket.send(JSON.stringify({_tag: "Exit", requestId: request.id, exit: {_tag: "Success", value}}));
   }));
-  const writer = makeProjectWriter(`http://127.0.0.1:${address.port}`, "fixture");
-  const signal = AbortSignal.timeout(5000);
-  assert.equal(yield* Effect.promise(() => writer.checkProjectConfigFile("/workspace", signal)), true);
-  yield* Effect.promise(() => writer.writeProjectConfig("/workspace", "workflows: []\nsteps: []\n", signal));
+  const writer = yield* ProjectWriter.make({baseUrl: `http://127.0.0.1:${address.port}`, token: "fixture"}).pipe(Effect.provide(NativeEnvelope.layer));
+  // the calls share one cancel trigger that completes after 5 s
+  const cancel = yield* cancelAfter("5 seconds");
+  assert.equal(yield* writer.checkProjectConfigFile("/workspace", cancel), true);
+  yield* writer.writeProjectConfig("/workspace", "workflows: []\nsteps: []\n", cancel);
   assert.equal(calls.filter(call => call.tag === "projects.writeFile").length, 1);
   assert.equal(calls.find(call => call.tag === "projects.writeFile")?.payload.relativePath, ".t3-supervisor/project.yaml");
   targetKind = "directory";
-  assert.equal(yield* Effect.promise(() => writer.checkProjectConfigFile("/workspace", signal)), false);
+  assert.equal(yield* writer.checkProjectConfigFile("/workspace", cancel), false);
   targetKind = "missing";
-  assert.equal(yield* Effect.promise(() => writer.checkProjectConfigFile("/workspace", signal)), false);
+  assert.equal(yield* writer.checkProjectConfigFile("/workspace", cancel), false);
 }));
 
 it.live("project-configuration endpoint keeps session, origin and CSRF checks", () => Effect.gen(function* () {
-  const directory = yield* Effect.acquireRelease(Effect.promise(() => mkdtemp(join(tmpdir(), "project-config-api-"))),
-    created => Effect.promise(() => rm(created, {recursive: true, force: true})));
+  const directory = yield* FileSystem.FileSystem.pipe(Effect.flatMap(fs => fs.makeTempDirectoryScoped({prefix: "project-config-api-"})), Effect.provide(NodeFileSystem.layer));
   const f = makeDefinitionFixture();
   seedProject(f);
-  // the dashboard harness takes the loader and the editor in their promise shapes and serves them as the handlers' services
-  const editor = f.editor(f.writer);
+  // the dashboard's api handlers yield the definitions and the editor over the in-memory checkout
+  const definitions = yield* f.makeDefinitions();
+  const editor = yield* f.makeConfigEditor(definitions);
   const config: SupervisorConfig = {
     dataDirectory: directory, t3Url: "unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0,
     uiPort: 0, uiHost: "127.0.0.1", uiAssetsDirectory: directory,
   };
-  const ui = yield* Effect.acquireRelease(Effect.promise(() => startGuidanceUi(config, {} as GuidanceRuntime["Service"], f.loader, editor)), started => Effect.promise(() => started.close()));
-  yield* Effect.promise(async () => {
-    const address = ui.server.address();assert.ok(address && typeof address !== "string");
-    const origin = `http://127.0.0.1:${address.port}`;
-    const grant = await forgeDashboardToken(directory);
-    const login = await fetch(origin + "/auth/login", {
-      method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify({token: grant.token}),
-    });
-    assert.equal(login.status, 200);
-    const session = (await login.json() as {session: string}).session;
-    const headers = {"x-supervisor-session": session};
-    const path = "/api/guidance/project-configuration?projectId=project";
-    assert.equal((await fetch(origin + path).then(released)).status, 401);
-    assert.equal((await fetch(origin + path, {headers: {...headers, Origin: "https://foreign.invalid"}}).then(released)).status, 403);
-    const observedResponse = await fetch(origin + path, {headers});
-    assert.equal(observedResponse.status, 200);
-    const observed = await observedResponse.json() as {status: string; revision: string; projectConfig: unknown};
-    assert.equal(observed.status, "ready");
-    assert.ok(observed.revision);
-    // the dashboard may omit a false required flag; only the required row carries it
-    const compactRows = (rows: ReadonlyArray<{path: string; summary: string; required: boolean}>) =>
-      rows.map(({required, ...row}) => required ? {...row, required} : row);
-    const index = localIndex([{step: "local-step"}]);
-    const payload = {projectId: "project", threadId: null, expectedRevision: observed.revision,
-      config: {workflows: compactRows(index.workflows), steps: compactRows(index.steps)}};
-    const rejected = await fetch(origin + "/api/guidance/project-configuration", {
-      method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify(payload),
-    });
-    assert.equal(rejected.status, 403);
-    await released(rejected);
-    assert.equal(f.writes.length, 0);
-    const csrf = await fetch(origin + "/api/csrf", {headers}).then(response => response.json()) as {csrf: string};
-    // legacy or unknown fields are rejected while decoding the request, before any normalization or write
-    for (const config of [{...localIndex(), required: [{step: "local-step"}]}, {...localIndex(), steps: [{...localIndex().steps[0]!, extra: true}, localIndex().steps[1]!]},
-      {...localIndex(), steps: [{id: "local-step", ...localIndex().steps[0]!}, localIndex().steps[1]!]}]) {
-      const strict = await fetch(origin + "/api/guidance/project-configuration", {
-        method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf.csrf},
-        body: JSON.stringify({...payload, config}),
-      });
-      assert.notEqual(strict.status, 200, JSON.stringify(config));
-      await released(strict);
-      assert.equal(f.writes.length, 0, "nothing is written for a request with an unknown field");
-    }
-    const saved = await fetch(origin + "/api/guidance/project-configuration", {
-      method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf.csrf}, body: JSON.stringify(payload),
-    });
-    assert.equal(saved.status, 200);
-    const savedBody = await saved.json() as {status: string; definitions: {projectConfig: {steps: Array<{path: string; required: boolean}>; workflows: Array<{required: boolean}>}}};
-    assert.equal(savedBody.status, "saved");
-    assert.deepEqual(f.writes.map(write => write.path), [".t3-supervisor/project.yaml"]);
-    assert.deepEqual(savedBody.definitions.projectConfig.steps.map(row => [row.path, row.required]), [["steps/local-step.md", true], ["steps/second-step.md", false]],
-      "an omitted flag is saved and read back as false");
-    assert.deepEqual(savedBody.definitions.projectConfig.workflows.map(row => row.required), [false]);
-    const writtenIndex = f.writes[0]!.contents;
-    assert.doesNotMatch(writtenIndex, /required: false/u);
-    assert.equal(writtenIndex.match(/required: true/gu)?.length, 1);
-    assert.doesNotMatch(writtenIndex, /\bid:/u, "the saved index is path-only");
+  const ui = yield* guidanceUi(config, {} as GuidanceRuntime["Service"], {definitions, editor});
+  assert.ok(ui.port > 0);
+  const origin = `http://127.0.0.1:${ui.port}`;
+  const grant = yield* forgeDashboardToken(directory).pipe(Effect.provide(NodeFileSystem.layer));
+  const login = yield* request(origin + "/auth/login", {
+    method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify({token: Redacted.value(grant.token)}),
   });
+  assert.equal(login.status, 200);
+  const session = (yield* json<{session: string}>(login)).session;
+  const headers = {"x-supervisor-session": session};
+  const path = "/api/guidance/project-configuration?projectId=project";
+  assert.equal((yield* request(origin + path).pipe(Effect.flatMap(release))).status, 401);
+  assert.equal((yield* request(origin + path, {headers: {...headers, Origin: "https://foreign.invalid"}}).pipe(Effect.flatMap(release))).status, 403);
+  const observedResponse = yield* request(origin + path, {headers});
+  assert.equal(observedResponse.status, 200);
+  const observed = yield* json<{status: string; revision: string; projectConfig: unknown}>(observedResponse);
+  assert.equal(observed.status, "ready");
+  assert.ok(observed.revision);
+  // the dashboard may omit a false required flag; only the required row carries it
+  const compactRows = (rows: ReadonlyArray<{path: string; summary: string; required: boolean}>) =>
+    rows.map(({required, ...row}) => required ? {...row, required} : row);
+  const index = localIndex([{step: "local-step"}]);
+  const payload = {projectId: "project", threadId: null, expectedRevision: observed.revision,
+    config: {workflows: compactRows(index.workflows), steps: compactRows(index.steps)}};
+  const rejected = yield* request(origin + "/api/guidance/project-configuration", {
+    method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify(payload),
+  });
+  assert.equal(rejected.status, 403);
+  yield* release(rejected);
+  assert.equal(f.writes.length, 0);
+  const csrf = yield* request(origin + "/api/csrf", {headers}).pipe(Effect.flatMap(json<{csrf: string}>));
+  // legacy or unknown fields are rejected while decoding the request, before any normalization or write
+  for (const config of [{...localIndex(), required: [{step: "local-step"}]}, {...localIndex(), steps: [{...localIndex().steps[0]!, extra: true}, localIndex().steps[1]!]},
+    {...localIndex(), steps: [{id: "local-step", ...localIndex().steps[0]!}, localIndex().steps[1]!]}]) {
+    const strict = yield* request(origin + "/api/guidance/project-configuration", {
+      method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf.csrf},
+      body: JSON.stringify({...payload, config}),
+    });
+    assert.notEqual(strict.status, 200, JSON.stringify(config));
+    yield* release(strict);
+    assert.equal(f.writes.length, 0, "nothing is written for a request with an unknown field");
+  }
+  const saved = yield* request(origin + "/api/guidance/project-configuration", {
+    method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf.csrf}, body: JSON.stringify(payload),
+  });
+  assert.equal(saved.status, 200);
+  const savedBody = yield* json<{status: string; definitions: {projectConfig: {steps: Array<{path: string; required: boolean}>; workflows: Array<{required: boolean}>}}}>(saved);
+  assert.equal(savedBody.status, "saved");
+  assert.deepEqual(f.writes.map(write => write.path), [".t3-supervisor/project.yaml"]);
+  assert.deepEqual(savedBody.definitions.projectConfig.steps.map(row => [row.path, row.required]), [["steps/local-step.md", true], ["steps/second-step.md", false]],
+    "an omitted flag is saved and read back as false");
+  assert.deepEqual(savedBody.definitions.projectConfig.workflows.map(row => row.required), [false]);
+  const writtenIndex = f.writes[0]!.contents;
+  assert.doesNotMatch(writtenIndex, /required: false/u);
+  assert.equal(writtenIndex.match(/required: true/gu)?.length, 1);
+  assert.doesNotMatch(writtenIndex, /\bid:/u, "the saved index is path-only");
 }));

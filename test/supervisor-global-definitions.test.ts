@@ -5,11 +5,12 @@ import {ProjectDefinitions} from "../src/project-definitions.js";
 import {ProjectFileError} from "../src/project-files.js";
 import {proposalContextFromDefinitions} from "../src/supervisor-workflow.js";
 import {requiredReferences} from "../src/project-definitions-contract.js";
+import {within} from "./support/g5a-bounds.js";
 import {indexSource, makeDefinitionFixture, projectIndex, stepSource, workflowSource} from "./project-definitions-fixture.js";
 
 // one definitions operation over the fixture's in-memory sources
 const withDefinitions = <A>(f: ReturnType<typeof makeDefinitionFixture>, use: (definitions: ProjectDefinitions["Service"]) => Effect.Effect<A>) =>
-  Effect.gen(function* () {return yield* use(yield* ProjectDefinitions);}).pipe(Effect.provide(f.layer));
+  Effect.gen(function* () {return yield* use(yield* ProjectDefinitions);}).pipe(Effect.provide(f.definitionsLayer));
 
 it.effect("merges global and project definitions with separate identities and editable local configuration", () => Effect.gen(function* () {
   const f = makeDefinitionFixture({globalEnabled: true});
@@ -55,7 +56,7 @@ it.effect("merges global and project definitions with separate identities and ed
   assert.deepEqual(globalDelivery.sequence, [{workflow: snapshot.workflows.find(workflow => workflow.origin === "global" && workflow.sourceId === "reviewer")!.id}]);
   assert.deepEqual(projectDelivery.sequence, [{workflow: "reviewer"}]);
   assert.deepEqual(snapshot.sources.map(source => source.origin), ["global", "global", "global", "global", "project", "project", "project", "project"]);
-  assert.equal(snapshot.globalRevision, yield* withDefinitions(f, definitions => definitions.globalFingerprint(AbortSignal.timeout(5000))));
+  assert.equal(snapshot.globalRevision, yield* within(withDefinitions(f, definitions => definitions.globalFingerprint()), 5_000, "global fingerprint"));
 }));
 
 it.effect("uses enabled global definitions alone for Scratch and never reads the scratch checkout", () => Effect.gen(function* () {

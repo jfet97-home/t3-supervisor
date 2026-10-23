@@ -71,21 +71,24 @@ export const forgeDashboardToken = (dataDirectory: string, options: ServiceAuthO
     Effect.provide(NodeFileSystem.layer),
   ));
 
-// the dashboard server in its own scope over its own service auth, runtime and workflow MCP endpoint, with the node file
-// system and crypto the supervisor root provides; a failed start releases them and rejects with its typed failure.
-// without a workflow MCP layer the endpoint has no controller tools, which these suites never call. The definitions and the
-// editor are the suites' baseline promise shapes, which the api handlers yield as services
+// the dashboard server over its own service auth, the given runtime and services and a workflow MCP endpoint, with the node file
+// system and crypto the supervisor root provides, for the caller's scope. Without a workflow MCP layer the endpoint has no
+// controller tools, which these suites never call
+export const guidanceUi = (config: SupervisorConfig, runtime: GuidanceRuntime["Service"], options: GuidanceUiOptions = {},
+  workflows?: Layer.Layer<WorkflowMcp>) => {
+  const services = Layer.mergeAll(ServiceAuthService.layer(config.dataDirectory), Layer.succeed(GuidanceRuntime, runtime),
+    workflows ?? workflowMcpLayer({} as WorkflowWriteController["Service"])).pipe(Layer.provideMerge(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer)));
+  return Effect.map(Layer.build(GuidanceUi.layer(config, options).pipe(Layer.provide(services))), context => Context.get(context, GuidanceUi));
+};
+
+// the same dashboard server in its own scope; a failed start releases it and rejects with its typed failure. The definitions and
+// the editor are the suites' baseline promise shapes, which the api handlers yield as services
 export const startGuidanceUi = async (config: SupervisorConfig, runtime: GuidanceRuntime["Service"],
   definitions?: DefinitionsLoader, editor?: ProjectConfigEditor, supervision?: GuidanceUiOptions["supervision"],
   workflows?: Layer.Layer<WorkflowMcp>, workflowReader?: GuidanceUiOptions["workflowReader"]) => {
   const scope = Effect.runSync(Scope.make());
-  const services = Layer.mergeAll(ServiceAuthService.layer(config.dataDirectory), Layer.succeed(GuidanceRuntime, runtime),
-    workflows ?? workflowMcpLayer({} as WorkflowWriteController["Service"])).pipe(Layer.provideMerge(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer)));
-  const ui = await Effect.runPromise(Layer.buildWithScope(GuidanceUi.layer(config, {definitions: definitions && definitionsService(definitions),
-    editor: editor && promiseEditorService(editor), supervision, workflowReader}).pipe(
-    Layer.provide(services)), scope).pipe(
-    Effect.map(context => Context.get(context, GuidanceUi)),
-  )).catch(async (error: unknown) => {
+  const ui = await Effect.runPromise(Scope.provide(scope)(guidanceUi(config, runtime, {definitions: definitions && definitionsService(definitions),
+    editor: editor && promiseEditorService(editor), supervision, workflowReader}, workflows))).catch(async (error: unknown) => {
     await Effect.runPromise(Scope.close(scope, Exit.void));
     throw error;
   });
