@@ -1,21 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { NodeCrypto } from "@effect/platform-node";
 import { it } from "@effect/vitest";
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect";
 import { TestClock } from "effect/testing";
 import { WebSocketServer, type WebSocket } from "ws";
 import { GitProbe, GitProbeError } from "../src/git-probe.js";
-import { GuidanceStore } from "../src/guidance-store.js";
 import { NativeEnvelope } from "../src/native-envelope.js";
 import { ProjectCommitter, ProjectFileError, ProjectFiles, ProjectWriter } from "../src/project-files.js";
-import { startFakeTerminalT3, type ProbeStatus } from "./support/c3a-fake-terminal-t3.js";
+import { type ProbeStatus } from "./support/c3a-fake-terminal-t3.js";
+import { fakeTerminalT3, probeGuidance } from "./support/g10-probe-guidance.js";
 
 // target regressions of the ported native file clients and git probe: native values pass through unchanged, deadlines run on
 // the Effect clock, cancel triggers end calls with their baseline outcome, an interrupted probe still closes its terminal, and
-// the envelope's 2 MiB maxPayload gives the outcome the probe's own frame-size check never reached
+// the envelope's 2 MiB maxPayload gives the outcome the probe's own frame-size check never reached.
+// every peer is a real loopback websocket server and every probe keeps its pending sessions in a guidance file; it.live
+// where the test waits on that i/o only, it.effect where it steps a client deadline on the TestClock over the same peers
 
 type Frame = {_tag?: string; id?: string; tag?: string; payload?: Record<string, unknown>};
 
@@ -48,12 +47,7 @@ const peer = (answer: (socket: WebSocket, frame: Frame) => void = () => undefine
 const success = (socket: WebSocket, frame: Frame, value: unknown) => socket.send(JSON.stringify({_tag: "Exit", requestId: frame.id, exit: {_tag: "Success", value}}));
 const native = NativeEnvelope.layer;
 const probeClients = Layer.merge(NativeEnvelope.layer, NodeCrypto.layer);
-const guidanceStore = Effect.acquireRelease(Effect.sync(() => {
-  const directory = mkdtempSync(join(tmpdir(), "t3-native-files-service-"));
-  return {directory, store: new GuidanceStore(directory)};
-}), ({directory, store}) => Effect.sync(() => {store.close();rmSync(directory, {recursive: true, force: true});}));
-const pendingSessions = (store: GuidanceStore): unknown =>
-  JSON.parse(String(store.db.prepare("SELECT value FROM meta WHERE key='native_git_probe_sessions'").get()?.value));
+const guidanceStore = probeGuidance("t3-native-files-service-");
 const root = "/workspace";
 const status: ProbeStatus = {workspaceRoot: root, branch: "main", isRepo: true, changedPaths: [], operationState: {status: "safe"}};
 
@@ -113,24 +107,24 @@ it.live("TR-FILES-03: a cancel trigger ends an in-flight read and write as unava
 }), {timeout: 10_000});
 
 it.live("TR-PROBE-01: interrupting a probe fiber mid-stream still closes the terminal with deleteHistory, drops the pending entry and stays interrupted", () => Effect.gen(function* () {
-  const t3 = yield* Effect.acquireRelease(Effect.promise(() => startFakeTerminalT3(status, () => true)), fake => Effect.promise(() => fake.close()));
-  const {store} = yield* guidanceStore;
-  const probe = yield* Effect.provide(GitProbe.make({baseUrl: t3.url, token: "terminal-operate-test-token"}, store), probeClients);
+  const t3 = yield* fakeTerminalT3(status, () => true);
+  const state = yield* guidanceStore;
+  const probe = yield* state.gitProbe(t3.url);
   const probing = yield* Effect.forkChild(probe.probe(root));
   const session = yield* Effect.promise(() => t3.helperWritten);
   assert.ok(session);
-  assert.deepEqual(pendingSessions(store), [session]);
+  assert.deepEqual(yield* state.pendingSessions, [session]);
   yield* Fiber.interrupt(probing);
   assert.ok(Exit.hasInterrupts(yield* Fiber.await(probing)));
   yield* Effect.promise(() => t3.attachGone(session.threadId));
   assert.deepEqual(t3.requests.filter(request => request.tag === "terminal.close").map(request => request.payload), [{...session, deleteHistory: true}]);
-  assert.deepEqual(pendingSessions(store), []);
+  assert.deepEqual(yield* state.pendingSessions, []);
 }), {timeout: 10_000});
 
 it.effect("TR-PROBE-02: the 15 s probe deadline runs on the Effect clock; a withheld result ends the probe with the stream's message and the terminal is closed", () => Effect.gen(function* () {
-  const t3 = yield* Effect.acquireRelease(Effect.promise(() => startFakeTerminalT3(status, () => true)), fake => Effect.promise(() => fake.close()));
-  const {store} = yield* guidanceStore;
-  const probe = yield* Effect.provide(GitProbe.make({baseUrl: t3.url, token: "terminal-operate-test-token"}, store), probeClients);
+  const t3 = yield* fakeTerminalT3(status, () => true);
+  const state = yield* guidanceStore;
+  const probe = yield* state.gitProbe(t3.url);
   const probing = yield* Effect.forkChild(Effect.flip(probe.probe(root)));
   const session = yield* Effect.promise(() => t3.helperWritten);
   assert.ok(session);
@@ -141,7 +135,7 @@ it.effect("TR-PROBE-02: the 15 s probe deadline runs on the Effect clock; a with
   assert.ok(error instanceof GitProbeError);
   assert.equal(error.message, "The terminal Git probe was canceled or disconnected.");
   assert.deepEqual(t3.requests.filter(request => request.tag === "terminal.close").map(request => request.payload), [{...session, deleteHistory: true}]);
-  assert.deepEqual(pendingSessions(store), []);
+  assert.deepEqual(yield* state.pendingSessions, []);
 }), {timeout: 10_000});
 
 it.live("TR-PROBE-03: a terminal frame one byte above 2 MiB closes the socket and fails the request with the canceled-or-timed-out message", () => Effect.gen(function* () {
@@ -151,13 +145,13 @@ it.live("TR-PROBE-03: a terminal frame one byte above 2 MiB closes the socket an
     const exit = JSON.stringify({_tag: "Exit", requestId: frame.id, exit: {_tag: "Success", value: {padding: ""}}});
     socket.send(exit.replace('"padding":""', `"padding":"${"x".repeat(2 * 1024 * 1024 + 1 - exit.length)}"`));
   });
-  const {store} = yield* guidanceStore;
-  const probe = yield* Effect.provide(GitProbe.make({baseUrl: t3.url, token: "terminal-operate-test-token"}, store), probeClients);
+  const state = yield* guidanceStore;
+  const probe = yield* state.gitProbe(t3.url);
   const error = yield* Effect.flip(probe.probe(root));
   assert.ok(error instanceof GitProbeError);
   assert.equal(error.message, "The Git probe RPC was canceled or timed out.");
   assert.deepEqual(t3.requests.map(request => request.tag), ["terminal.open", "terminal.close"]);
-  assert.deepEqual(pendingSessions(store), []);
+  assert.deepEqual(yield* state.pendingSessions, []);
 }), {timeout: 10_000});
 
 it.live("TR-PROBE-04: a non-record attach event fails the probe with its own message; nothing after it in the message is answered or acknowledged and the terminal is closed", () => Effect.gen(function* () {
@@ -175,31 +169,31 @@ it.live("TR-PROBE-04: a non-record attach event fails the probe with its own mes
       {_tag: "Ping"},
     ]));
   });
-  const {store} = yield* guidanceStore;
-  const probe = yield* Effect.provide(GitProbe.make({baseUrl: t3.url, token: "terminal-operate-test-token"}, store), probeClients);
+  const state = yield* guidanceStore;
+  const probe = yield* state.gitProbe(t3.url);
   const error = yield* Effect.flip(probe.probe(root));
   assert.ok(error instanceof GitProbeError);
   assert.equal(error.message, "The terminal Git probe was canceled or disconnected.");
   assert.deepEqual(after, [], "nothing after the invalid event was answered or acknowledged");
   assert.deepEqual(t3.requests.map(request => request.tag), ["terminal.open", "terminal.attach", "terminal.close"]);
-  assert.deepEqual(pendingSessions(store), []);
+  assert.deepEqual(yield* state.pendingSessions, []);
 }), {timeout: 10_000});
 
 it.live("TR-PROBE-05: a defect in the attach consumer ends the probe with that cause at once, closes the terminal, drops the pending entry and releases the probe lock", () => Effect.gen(function* () {
   // the reviewers' fault: the envelope's attach consumer dies on its first chunk, below every typed failure path
-  const t3 = yield* Effect.acquireRelease(Effect.promise(() => startFakeTerminalT3(status, () => true)), fake => Effect.promise(() => fake.close()));
-  const {store} = yield* guidanceStore;
+  const t3 = yield* fakeTerminalT3(status, () => true);
+  const state = yield* guidanceStore;
   const original = yield* NativeEnvelope;
   const defect = new Error("attach-consumer-defect");
   const faulty = NativeEnvelope.of({...original, call: spec => original.call(spec.request.tag === "terminal.attach" ? {...spec, onChunk: () => Effect.die(defect)} : spec)});
-  const probe = yield* GitProbe.make({baseUrl: t3.url, token: "terminal-operate-test-token"}, store).pipe(Effect.provideService(NativeEnvelope, faulty));
+  const probe = yield* GitProbe.make({baseUrl: t3.url, token: "terminal-operate-test-token"}).pipe(Effect.provideService(NativeEnvelope, faulty), Effect.provide(state.guidance));
   // well inside the 15 s probe deadline: the probe settles on the defect itself, not on its deadline
   const exit = yield* Effect.exit(probe.probe(root)).pipe(Effect.timeout("5 seconds"));
   assert.ok(Exit.isFailure(exit) && Cause.hasDies(exit.cause) && Cause.squash(exit.cause) === defect, "the probe ends with the consumer's defect");
   assert.deepEqual(t3.requests.map(request => request.tag), ["terminal.open", "terminal.attach", "terminal.close"]);
-  assert.deepEqual(pendingSessions(store), []);
+  assert.deepEqual(yield* state.pendingSessions, []);
   // the probe lock was released: the next probe opens a terminal of its own
   yield* Effect.exit(probe.probe(root)).pipe(Effect.timeout("5 seconds"));
   assert.equal(t3.requests.filter(request => request.tag === "terminal.open").length, 2);
-  assert.deepEqual(pendingSessions(store), []);
+  assert.deepEqual(yield* state.pendingSessions, []);
 }).pipe(Effect.provide(probeClients)), {timeout: 20_000});

@@ -1,14 +1,11 @@
 import assert from "node:assert/strict";
-import {mkdtempSync, rmSync} from "node:fs";
-import {tmpdir} from "node:os";
-import {join} from "node:path";
-import {NodeCrypto} from "@effect/platform-node";
 import {it} from "@effect/vitest";
-import {Effect, Fiber, Layer} from "effect";
+import {Effect, Fiber} from "effect";
 import {WebSocketServer} from "ws";
-import {GuidanceStore} from "../src/guidance-store.js";
-import {GitProbe, GitProbeError} from "../src/git-probe.js";
-import {cancelOnAbort, NativeEnvelope} from "../src/native-envelope.js";
+import {GitProbeError} from "../src/git-probe.js";
+import {probeGuidance} from "./support/g10-probe-guidance.js";
+
+// it.live: the probe runs over a real loopback T3 websocket peer and keeps its pending sessions in a guidance file
 
 type Request = {id: string; tag: string; payload: Record<string, unknown>};
 type ProbeStatus = {workspaceRoot: string; branch: string | null; isRepo: boolean; changedPaths: string[]; operationState: {status: "safe" | "in_progress"; marker?: string}};
@@ -152,29 +149,18 @@ async function fakeT3(statusForCall: (index: number) => ProbeStatus, exitCode = 
   };
 }
 
-const storeFixture = () => {
-  const directory = mkdtempSync(join(tmpdir(), "t3-git-probe-test-"));
-  const store = new GuidanceStore(directory);
-  return {directory, store, close: () => {store.close();rmSync(directory, {recursive: true, force: true});}};
-};
-
-// the fake T3 and the interim guidance store for the test's scope: the store closes first, then the fake, as before
+// the fake T3 and the run's guidance client and store for the test's scope: the guidance closes first, then the fake, as before
 const fakeAndStore = (statusForCall: (index: number) => ProbeStatus, exitCode = 0, options: FakeOptions = {}) => Effect.gen(function* () {
   const t3 = yield* Effect.acquireRelease(Effect.promise(() => fakeT3(statusForCall, exitCode, options)), fake => Effect.promise(() => fake.close()));
-  const state = yield* Effect.acquireRelease(Effect.sync(storeFixture), fixture => Effect.sync(() => fixture.close()));
+  const state = yield* probeGuidance("t3-git-probe-test-");
   return {t3, state};
 });
-// the ported GitProbe service over the fake, on the shared native envelope and the platform crypto
-const gitProbe = (url: string, store: GuidanceStore) =>
-  Effect.provide(GitProbe.make({baseUrl: url, token: "terminal-operate-test-token"}, store), Layer.merge(NativeEnvelope.layer, NodeCrypto.layer));
-// one probe bounded by the same 5 s cancel signal as before
-const probeWithin = (probe: GitProbe["Service"], root: string) => Effect.scoped(Effect.flatMap(cancelOnAbort(AbortSignal.timeout(5000)), cancel => probe.probe(root, cancel)));
 
 it.live("native Git probe uses a short bootstrap, canonical Python input, a framed result, and deletes terminal history", () => Effect.gen(function* () {
   const root = "/tmp/repo'$(do-not-run)";
   const {t3, state} = yield* fakeAndStore(() => ({workspaceRoot: root, branch: "feature", isRepo: true, changedPaths: ["README.md"], operationState: {status: "safe"}}));
-  const probe = yield* gitProbe(t3.url, state.store);
-  const result = yield* probeWithin(probe, root);
+  const probe = yield* state.gitProbe(t3.url);
+  const result = yield* probe.probe(root);
   assert.deepEqual(result, {workspaceRoot: root, branch: "feature", isRepo: true, changedPaths: ["README.md"], operationState: {status: "safe"}});
   const open = t3.requests.find(request => request.tag === "terminal.open");
   const writes = t3.requests.filter(request => request.tag === "terminal.write");
@@ -184,7 +170,7 @@ it.live("native Git probe uses a short bootstrap, canonical Python input, a fram
   assert.deepEqual(open.payload.env, {HISTFILE: "/dev/null", TERM: "dumb", ZDOTDIR: "/nonexistent"});
   assert.deepEqual(t3.closes.map(payload => payload.deleteHistory), [true]);
   assert.deepEqual(t3.streamAckCounts, [5], "snapshot, bootstrap echo, ready, output, and exit chunks each receive one ACK");
-  assert.deepEqual(JSON.parse(String(state.store.db.prepare("SELECT value FROM meta WHERE key='native_git_probe_sessions'").get()?.value)), []);
+  assert.deepEqual(yield* state.pendingSessions, []);
 }));
 
 it.live("each Git probe returns a fresh status instead of reusing the previous result", () => Effect.gen(function* () {
@@ -196,9 +182,9 @@ it.live("each Git probe returns a fresh status instead of reusing the previous r
     changedPaths: index === 0 ? [] : ["README.md"],
     operationState: {status: "safe"},
   }));
-  const probe = yield* gitProbe(t3.url, state.store);
-  const first = yield* probeWithin(probe, root);
-  const second = yield* probeWithin(probe, root);
+  const probe = yield* state.gitProbe(t3.url);
+  const first = yield* probe.probe(root);
+  const second = yield* probe.probe(root);
   assert.deepEqual(first.changedPaths, []);
   assert.deepEqual(second.changedPaths, ["README.md"]);
   assert.equal(t3.requests.filter(request => request.tag === "terminal.open").length, 2);
@@ -209,12 +195,13 @@ it.live("each Git probe returns a fresh status instead of reusing the previous r
 it.live("an echoed bootstrap command cannot satisfy the standalone readiness handshake", () => Effect.gen(function* () {
   const root = "/workspace";
   const {t3, state} = yield* fakeAndStore(() => ({workspaceRoot: root, branch: "main", isRepo: true, changedPaths: [], operationState: {status: "safe"}}), 0, {holdReadyMarker: true});
-  const probe = yield* gitProbe(t3.url, state.store);
-  const completion = yield* Effect.forkChild(probeWithin(probe, root).pipe(Effect.match({
+  const probe = yield* state.gitProbe(t3.url);
+  const completion = yield* Effect.forkChild(probe.probe(root).pipe(Effect.match({
     onSuccess: result => ({result}),
     onFailure: error => ({error}),
   })));
   yield* Effect.promise(() => t3.echoAcked);
+  // a real-time window for socket i/o: a helper written on the echo alone would reach the peer within it
   yield* Effect.sleep("50 millis");
   const writesBeforeReady = t3.requests.filter(request => request.tag === "terminal.write").length;
   t3.releaseReadyMarker();
@@ -229,9 +216,9 @@ it.live("native zero signal means normal exit while a positive termination signa
   const root = "/workspace";
   for (const exitSignal of [0, 2]) yield* Effect.scoped(Effect.gen(function* () {
     const {t3, state} = yield* fakeAndStore(() => ({workspaceRoot: root, branch: "main", isRepo: true, changedPaths: [], operationState: {status: "safe"}}), 0, {exitSignal});
-    const probe = yield* gitProbe(t3.url, state.store);
-    if (exitSignal === 0) assert.equal((yield* probeWithin(probe, root)).branch, "main");
-    else assert.ok((yield* Effect.flip(probeWithin(probe, root))) instanceof GitProbeError);
+    const probe = yield* state.gitProbe(t3.url);
+    if (exitSignal === 0) assert.equal((yield* probe.probe(root)).branch, "main");
+    else assert.ok((yield* Effect.flip(probe.probe(root))) instanceof GitProbeError);
     assert.deepEqual(t3.closes.map(payload => payload.deleteHistory), [true]);
   }));
 }));
@@ -239,29 +226,27 @@ it.live("native zero signal means normal exit while a positive termination signa
 it.live("probe rejects nonzero native exit and still closes the persistent terminal session", () => Effect.gen(function* () {
   const root = "/workspace";
   const {t3, state} = yield* fakeAndStore(() => ({workspaceRoot: root, branch: "main", isRepo: true, changedPaths: [], operationState: {status: "safe"}}), 2);
-  const probe = yield* gitProbe(t3.url, state.store);
-  assert.ok((yield* Effect.flip(probeWithin(probe, root))) instanceof GitProbeError);
+  const probe = yield* state.gitProbe(t3.url);
+  assert.ok((yield* Effect.flip(probe.probe(root))) instanceof GitProbeError);
   assert.deepEqual(t3.closes.map(payload => payload.deleteHistory), [true]);
-  assert.deepEqual(JSON.parse(String(state.store.db.prepare("SELECT value FROM meta WHERE key='native_git_probe_sessions'").get()?.value)), []);
+  assert.deepEqual(yield* state.pendingSessions, []);
 }));
 
 it.live("startup cleanup closes pending probe sessions from the private metadata table", () => Effect.gen(function* () {
   const {t3, state} = yield* fakeAndStore(() => ({workspaceRoot: "/workspace", branch: "main", isRepo: true, changedPaths: [], operationState: {status: "safe"}}));
   const threadId = "t3-supervisor-git-probe-123e4567-e89b-42d3-a456-426614174000";
   const terminalId = "t3-supervisor-git-probe-123e4567-e89b-42d3-a456-426614174001";
-  state.store.db.prepare("INSERT INTO meta(key,value) VALUES('native_git_probe_sessions',?)")
-    .run(JSON.stringify([{threadId, terminalId}]));
-  const probe = yield* gitProbe(t3.url, state.store);
+  yield* state.insertPending(JSON.stringify([{threadId, terminalId}]));
+  const probe = yield* state.gitProbe(t3.url);
   yield* probe.cleanup;
   assert.deepEqual(t3.closes, [{threadId, terminalId, deleteHistory: true}]);
-  assert.deepEqual(JSON.parse(String(state.store.db.prepare("SELECT value FROM meta WHERE key='native_git_probe_sessions'").get()?.value)), []);
+  assert.deepEqual(yield* state.pendingSessions, []);
 }));
 
 it.live("corrupted pending metadata cannot close a user-owned terminal", () => Effect.gen(function* () {
   const {t3, state} = yield* fakeAndStore(() => ({workspaceRoot: "/workspace", branch: "main", isRepo: true, changedPaths: [], operationState: {status: "safe"}}));
-  state.store.db.prepare("INSERT INTO meta(key,value) VALUES('native_git_probe_sessions',?)")
-    .run(JSON.stringify([{threadId: "user-conversation", terminalId: "interactive-terminal"}]));
-  const probe = yield* gitProbe(t3.url, state.store);
+  yield* state.insertPending(JSON.stringify([{threadId: "user-conversation", terminalId: "interactive-terminal"}]));
+  const probe = yield* state.gitProbe(t3.url);
   assert.ok((yield* Effect.flip(probe.cleanup)) instanceof GitProbeError);
   assert.deepEqual(t3.closes, []);
   assert.equal(t3.requests.length, 0);
