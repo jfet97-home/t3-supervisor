@@ -140,7 +140,8 @@ it("D3 signed-out 401s leave the auth epoch as it was, so the epoch-keyed reads 
   const signedOut = epochOf(registry);
   assert.equal(signedOut, 1, "the sign-out removed a present session");
 
-  browser.state.reply = () => json({ message: "Sign in to Supervisor." }, 401);
+  // answers arrive on a later turn of the event loop, as network answers do, so a read loop cannot starve the timers
+  browser.state.reply = () => new Promise<Response>((resolve) => setImmediate(() => resolve(json({ message: "Sign in to Supervisor." }, 401))));
   await settled(registry, atoms.snapshotAtom, "the signed-out snapshot");
   browser.sent.length = 0;
   const model = overview.makeOverview(40);
