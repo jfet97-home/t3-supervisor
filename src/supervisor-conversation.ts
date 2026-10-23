@@ -298,7 +298,10 @@ const cancelSignal = (cancel: Deferred.Deferred<void> | undefined): Effect.Effec
     yield* Effect.forkScoped(Effect.andThen(Deferred.await(cancel), Effect.sync(() => controller.abort())), {startImmediately: true});
     return controller.signal;
   });
-
+// whether the durable introduction is still exactly the prepared unsent attempt a caller holds (the store keeps its exact JSON):
+// any send recorded since (sending, accepted, uncertain, sent, blocked, a fallback or retry reservation) changes it
+const unchangedUnsentIntroduction = (stored: WorkflowIntroduction | null, held: WorkflowIntroduction): boolean =>
+  stored !== null && stored.state === "ready" && JSON.stringify(stored) === JSON.stringify(held);
 
 export interface SupervisorConversationShape {
   // one supervision pass of a bound main: introductions, the in-flight check-in and the next due check-in
@@ -1651,6 +1654,9 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       const decisionNow = yield* Clock.currentTimeMillis;
       const prepared = yield* admitted((guard) => {
         if (!guard.scopeEnabled(binding.projectId, binding.mainThreadId)) return "stop" as const;
+        // the durable receipt decides: a send another caller recorded for this task since this caller found none is never
+        // replaced by a fresh reservation
+        if (!introductionUnsent(task.id)) return "skip" as const;
         if (!dialogue) {
           requests.saveIntroduction({...introduction, state: "blocked", error: "Project definitions changed or are unavailable; the draft was not sent."});
           return "review" as const;
@@ -1977,7 +1983,11 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       prepare: (guard) => Effect.sync((): SendPreparation<unknown> => {
         const prepared = prepare(guard, now);
         const request = prepared.request;
-        if (!request || !guard.scopeEnabled(request.projectId, store.bindingForSupervisor(request.supervisorThreadId)?.mainThreadId))
+        if (!request) return {_tag: "Answer", value: prepared.value};
+        // the durable receipt decides: a check-in recorded as sent after the caller read it is only reconciled, never sent again
+        const recorded = requests.pending(request.projectId, request.supervisorThreadId);
+        if (recorded?.id !== request.id || recorded.state !== "prepared" || recorded.sentAt !== null) return {_tag: "Answer", value: prepared.value};
+        if (!guard.scopeEnabled(request.projectId, store.bindingForSupervisor(request.supervisorThreadId)?.mainThreadId))
           return {_tag: "Answer", value: prepared.value};
         const owner = store.bindingForSupervisor(request.supervisorThreadId);
         if (owner && guard.supervisionStopped(owner.mainThreadId)) {fenceStoppedSupervision(owner);return {_tag: "Answer", value: prepared.value};}
@@ -2189,6 +2199,9 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       identity: task.id,
       inFlight: introductionSends,
       prepare: (guard) => Effect.sync((): SendPreparation<void> => {
+        // the durable receipt decides: once a send of this task was recorded after this caller read its introduction, that
+        // receipt is only reconciled by later observation and nothing is initiated from the stale copy
+        if (!unchangedUnsentIntroduction(requests.introduction(task.id), introduction)) return {_tag: "Answer", value: undefined};
         if (!guard.scopeEnabled(task.projectId, task.threadId)) return {_tag: "Answer", value: undefined};
         if (!interpretationEvidenceCurrent(task, supervisor, defined)) {
           blockIntroduction(task.id, "The Supervisor's interpretation answer changed or is no longer complete; the draft was not sent.");return {_tag: "Answer", value: undefined};
