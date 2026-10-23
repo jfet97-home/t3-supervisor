@@ -24,14 +24,6 @@ export const privately = <A>(label: string, secrets: ReadonlyArray<string>, chec
   }
 };
 
-export const privatelyAsync = async <A>(label: string, secrets: ReadonlyArray<string>, check: () => Promise<A>): Promise<A> => {
-  try {
-    return await check();
-  } catch (error) {
-    return rethrow(label, secrets, error);
-  }
-};
-
 // a failed child process reported by exit status and output sizes only: its captured output may hold a token
 export const childFailure = (label: string, error: unknown): Error => {
   const failed = (typeof error === "object" && error !== null ? error : {}) as { code?: unknown; signal?: unknown; stdout?: unknown; stderr?: unknown };
