@@ -3,11 +3,12 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { NodeFileSystem } from "@effect/platform-node";
 import { it } from "@effect/vitest";
-import { Effect, FileSystem } from "effect";
-import { openServiceAuth, temporaryDirectory } from "./support/g8-auth.js";
+import { Cause, Effect, Exit, FileSystem } from "effect";
+import { forge, openServiceAuth, temporaryDirectory } from "./support/g8-auth.js";
 import { leakedSecrets, nodePath, repositoryRoot, tokenLineShape, tsxLoader, type ProcessResult } from "./support/cli-process.js";
 import { runProcess } from "./support/g8-process.js";
-import { privately } from "./support/private-assert.js";
+import { privately, redact } from "./support/private-assert.js";
+import { privatelyEffect } from "./support/g8-private.js";
 import { forgeHelp, relativeDataDirectory, rootHelp, startHelp, usageError } from "./support/cli-help.js";
 
 // the cli on its tsx source path in a real child process: exact help bytes, exit codes and forge output. live (it.live)
@@ -63,8 +64,8 @@ it.live("CT-CLI-03: forge succeeds with an invalid helper instance id and a miss
     privately("forge output", [issued.stdout.trim()], () =>
       assert.deepEqual({ code: issued.code, signal: issued.signal, stderr: issued.stderr, stdout: tokenLineShape(issued.stdout) },
         { code: 0, signal: null, stderr: "", stdout: tokenLine }));
-    const session = yield* auth.login(issued.stdout.trim());
-    privately("the forged token signs in", [issued.stdout.trim()], () => assert.equal(typeof session, "string"));
+    yield* privatelyEffect("the forged token signs in", [issued.stdout.trim()],
+      Effect.map(auth.login(issued.stdout.trim()), (session) => assert.equal(typeof session, "string")));
   }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
 it.live("CT-CLI-04: forge failure prints exactly the fixed sentence without path, stack or token; a successful token never reaches stderr",
@@ -97,3 +98,39 @@ it.live("CT-CLI-04: forge failure prints exactly the fixed sentence without path
     }
     assert.deepEqual(leakedSecrets(success.stderr, [token, workflowToken]), []);
   }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
+
+// negative control of privatelyEffect, the wrapper of CT-CLI-03's login check: the same failures unwrapped render their
+// private values, wrapped they leave only the label and the redacted message in what the runner logs and reports
+it.live("G8-PRIVATE-01 (control): a failing login inside privatelyEffect reports only its label and the redacted message", () => Effect.gen(function* () {
+  const cwd = yield* home;
+  const state = join(cwd, "state");
+  const auth = yield* openServiceAuth(state);
+  // what @effect/vitest logs (Cause.prettyErrors) and fails the test with for a failed test effect
+  const rendered = (exit: Exit.Exit<unknown, unknown>): string => Exit.isSuccess(exit) ? "" : [
+    ...Cause.prettyErrors(exit.cause).map((error) => `${error.message}\n${error.stack ?? ""}`), Cause.pretty(exit.cause)].join("\n");
+  // failing logins on fresh grants: one dies with its grant in the message, one fails typed with it, and one check fails
+  // on the session the login issued, which is recorded here so the control can look for it
+  const sessions: string[] = [];
+  const attempts = [
+    ["dying login", (grant: string) => Effect.flatMap(auth.login(grant), () => Effect.die(new Error(`login of ${grant} failed`)))],
+    ["failed login", (grant: string) => Effect.flatMap(auth.login(grant), () => Effect.fail(new Error(`grant ${grant} was refused`)))],
+    ["login check", (grant: string) => Effect.map(auth.login(grant), (session) => {
+      if (session !== null) sessions.push(session);
+      assert.equal(session, "not the issued session");
+    })],
+  ] as const;
+  for (const [label, attempt] of attempts) {
+    const bare = (yield* forge(state)).token;
+    const unwrapped = yield* Effect.exit(attempt(bare));
+    const grant = (yield* forge(state)).token;
+    const wrapped = yield* Effect.exit(privatelyEffect(label, [grant], attempt(grant)));
+    const values = [bare, grant, ...sessions];
+    assert.equal(Exit.isFailure(unwrapped) && Exit.isFailure(wrapped), true, `${label}: both attempts fail`);
+    assert.equal(values.some((value) => rendered(unwrapped).includes(value)), true, `${label}: unwrapped, the failure renders a private value`);
+    assert.equal(values.some((value) => rendered(wrapped).includes(value)), false, `${label}: wrapped, the failure renders none`);
+    const error = Exit.isFailure(wrapped) ? Cause.squash(wrapped.cause) : undefined;
+    assert.equal(error instanceof Error && error.message.startsWith(`${label}: `) && error.message === redact(error.message, values), true,
+      `${label}: only the label and the redacted message`);
+  }
+  assert.equal(sessions.length, 2, "both login checks failed on an issued session");
+}).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });

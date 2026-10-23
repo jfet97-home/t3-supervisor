@@ -10,6 +10,7 @@ import { groupAlive, leakedSecrets, nodePath, repositoryRoot, tokenLineShape, ts
   type ProcessResult } from "./support/cli-process.js";
 import { runProcess, startProcess, type RunningProcess } from "./support/g8-process.js";
 import { privately } from "./support/private-assert.js";
+import { privatelyEffect } from "./support/g8-private.js";
 import { dataFiles, InstalledBin, installedBinLayer, listenerStates, quickChecks, supervisorHarness, waitUntilDescriptorRetry,
   waitUntilReady, type SupervisorHarness } from "./support/g8-cli.js";
 import { forgeHelp, relativeDataDirectory, rootHelp, usageError } from "./support/cli-help.js";
@@ -169,8 +170,7 @@ layer(installedBinLayer.pipe(Layer.provideMerge(NodeFileSystem.layer)), { timeou
       // compared as a boolean, so a repeated token never appears in the failure
       assert.equal(issued[0] === issued[1], false, "every forge issues a new token");
       for (const token of issued) {
-        const session = yield* auth.login(token);
-        privately(`${variant} token signs in`, issued, () => assert.equal(typeof session, "string"));
+        yield* privatelyEffect(`${variant} token signs in`, issued, Effect.map(auth.login(token), (session) => assert.equal(typeof session, "string")));
       }
       assert.deepEqual(leakedSecrets(outputs.join("\n"), [workflowToken, ...issued]), [], "no output other than the forge stdout carries a token");
     }), { timeout: 60_000 });
