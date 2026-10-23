@@ -33,6 +33,11 @@ export const withGuidanceDb = <A, E, R>(directory: string, use: (db: SqlClient.S
   return Effect.provide(open, NodeFileSystem.layer);
 };
 
+/** `use` on the guidance store of `directory` alone and its client. */
+export const withGuidanceStore = <A, E, R>(directory: string, use: (guidance: GuidanceStore["Service"], db: SqlClient.SqlClient) => Effect.Effect<A, E, R>) =>
+  withGuidanceDb(directory, (db) => Effect.flatMap(Effect.service(GuidanceStore), (guidance) => use(guidance, db)).pipe(
+    Effect.provide(Layer.fresh(GuidanceStore.layer.pipe(Layer.provide(ids))))));
+
 // the guidance store and the monitor store, as a guidance store and its monitor were opened on the file
 const monitorStores = (capacity: number | undefined) => (capacity === undefined ? ProjectSupervisorMonitorStore.layer :
   Layer.effect(ProjectSupervisorMonitorStore, makeProjectSupervisorMonitorStore(capacity))).pipe(
