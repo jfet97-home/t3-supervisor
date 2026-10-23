@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { get } from "node:http";
 import { connect, createServer } from "node:net";
 import { Clock, Deferred, Duration, Effect, Exit, type Scope } from "effect";
@@ -30,8 +31,8 @@ export interface RunningProcess {
 
 const outputLimit = 1024 * 1024;
 
-// with `maxBuffer`, as node's execFile, a stdout or stderr beyond that many characters terminates the child and its result
-// dies
+// with `maxBuffer`, as node's execFile, a stdout or stderr beyond that many bytes terminates the child and its result dies;
+// each stream counts the raw bytes it received, before decoding, against its own limit
 export interface ProcessOptions extends StartOptions {
   readonly maxBuffer?: number;
 }
@@ -45,40 +46,47 @@ export const startProcess = (command: string, args: ReadonlyArray<string>, optio
     const pid = child.pid;
     if (pid === undefined) return yield* Effect.die(new Error(`could not start ${command}`));
     const done = Deferred.makeUnsafe<ProcessResult>();
-    let stdout = "";
-    let stderr = "";
     let result: ProcessResult | undefined;
     const watchers = new Set<() => void>();
-    let exceeded = false;
-    const limit = () => {
-      if (options.maxBuffer === undefined || exceeded || (stdout.length <= options.maxBuffer && stderr.length <= options.maxBuffer)) return;
-      exceeded = true;
-      child.kill("SIGTERM");
+    let exceeded: "stdout" | "stderr" | undefined;
+    // one stream's raw byte count and its text, decoded across chunk boundaries
+    const collect = (name: "stdout" | "stderr") => {
+      const decoder = new StringDecoder("utf8");
+      const stream = { bytes: 0, text: "", end: () => { stream.text += decoder.end(); } };
+      const take = (chunk: Buffer) => {
+        stream.bytes += chunk.length;
+        if (stream.bytes - chunk.length < outputLimit) stream.text += decoder.write(chunk);
+        if (options.maxBuffer !== undefined && exceeded === undefined && stream.bytes > options.maxBuffer) {
+          exceeded = name;
+          child.kill("SIGTERM");
+        }
+      };
+      return { stream, take };
     };
-    child.stdout?.setEncoding("utf8").on("data", (chunk: string) => {
-      if (stdout.length < outputLimit) stdout += chunk;
-      limit();
+    const out = collect("stdout");
+    const err = collect("stderr");
+    child.stdout?.on("data", (chunk: Buffer) => {
+      out.take(chunk);
       for (const watcher of [...watchers]) watcher();
     });
-    child.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
-      if (stderr.length < outputLimit) stderr += chunk;
-      limit();
-    });
+    child.stderr?.on("data", (chunk: Buffer) => err.take(chunk));
     child.once("close", (code, signal) => {
-      result = { code, signal, stdout, stderr };
+      out.stream.end();
+      err.stream.end();
+      result = { code, signal, stdout: out.stream.text, stderr: err.stream.text };
       Deferred.doneUnsafe(done, Exit.succeed(result));
       for (const watcher of [...watchers]) watcher();
     });
     const exited = (timeoutMs?: number) => bounded(Deferred.await(done), timeoutMs, () => `process ${pid} did not exit within ${timeoutMs} ms`);
     const closed = (timeoutMs?: number) => Effect.tap(exited(timeoutMs), () =>
-      exceeded ? Effect.die(new Error(`process ${pid} exceeded its ${options.maxBuffer} character output limit`)) : Effect.void);
+      exceeded ? Effect.die(new Error(`process ${pid} exceeded its ${options.maxBuffer} byte ${exceeded} limit`)) : Effect.void);
     const running: RunningProcess = {
       child, pid, startedAt,
-      stdout: () => stdout,
-      stderr: () => stderr,
+      stdout: () => out.stream.text,
+      stderr: () => err.stream.text,
       waitForStdout: (predicate, timeoutMs, label) => bounded(Effect.callback<void>((resume) => {
         const check = () => {
-          if (predicate(stdout)) {
+          if (predicate(out.stream.text)) {
             watchers.delete(check);
             resume(Effect.void);
           } else if (result !== undefined) {
