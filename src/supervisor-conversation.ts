@@ -619,8 +619,10 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
   // the status reads are one snapshot
   const status = (projectId: string, supervisorThreadId: string | null): Effect.Effect<SupervisorMonitoringStatus, SupervisionStoreError> => transaction(Effect.gen(function* () {
     const stoppedBinding = supervisorThreadId ? yield* store.bindingForSupervisor(supervisorThreadId) : null;
+    // a stopped chat keeps showing its review history
+    const stoppedReview = stoppedBinding ? reviewView((yield* requests.requests(projectId, stoppedBinding.threadId)).filter(item => item.kind === "review" && item.reviewPins)) : null;
     if (stoppedBinding && (yield* supervisionStopped(stoppedBinding.mainThreadId))) return {state: "idle", pendingItems: 0, nextReviewAt: null,
-      lastNoticeAt: yield* requests.lastNotice(stoppedBinding.threadId), retryable: false,
+      lastNoticeAt: yield* requests.lastNotice(stoppedBinding.threadId), retryable: false, ...(stoppedReview ? {review: stoppedReview} : {}),
       message: "Supervision is stopped for this chat. Its Supervisor conversation and history are kept; enable supervision to resume with the same Supervisor."} satisfies SupervisorMonitoringStatus;
     if (!supervisorThreadId) return {state: "idle", pendingItems: 0, nextReviewAt: null, lastNoticeAt: null, retryable: false, message: "Select a main conversation to inspect its supervision. Monitoring defaults are shared by the project."} satisfies SupervisorMonitoringStatus;
     const settings = (yield* store.settings(projectId)).monitoring;
@@ -2330,6 +2332,8 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     const outcome = request.reviewOutcome;
     if (!pins) return null;
     if (!outcome) return "review_outcome_missing";
+    // an outcome a later write of the root's run already unconfirmed keeps its problem
+    if (outcome.state === "unconfirmed" && outcome.problem) return outcome.problem;
     if (outcome.runId !== runId) return "review_outcome_other_run";
     const item = (supervisor.turnItems ?? []).find(candidate => candidate.id === outcome.itemId && candidate.threadId === request.supervisorThreadId);
     if (!item || item.runId !== runId || item.status !== "completed") return "review_outcome_proof_incomplete";

@@ -3,7 +3,7 @@ import { it } from "@effect/vitest";
 import { Effect } from "effect";
 import type { ConversationRequest, ReviewOutcomeKind } from "../src/supervisor-conversation-store.js";
 import { sqlGet } from "./support/wwc-stores.js";
-import { applyArgs, ensureArgs, installEvidence, localStep, locator, makeFixture, openWrite, sequencePlan, type WwcFixture } from "./support/wwc-fixture.js";
+import { applyArgs, ensureArgs, installEvidence, localStep, locator, makeFixture, openWrite, sequencePlan, thread, type WwcFixture } from "./support/wwc-fixture.js";
 
 // workflow_write record_review through the production controller and its native proof: the root records the outcome of its own
 // pending monitoring review, bound to its native call; progress cites apply edits of that same run; no outcome sends anything
@@ -109,7 +109,7 @@ it.effect("progress_updated cites only apply edits of the same run, and no_chang
     const noChange = recordArgs(fixture, request.id, "no_change", "review-claims-no-change");
     installEvidence(fixture, noChange);
     assert.deepEqual(yield* fixture.controller.write(noChange),
-      {status: "denied", operationId: "review-claims-no-change", reason: "review_no_change_after_apply"});
+      {status: "denied", operationId: "review-claims-no-change", reason: "review_no_change_after_edit"});
     const older = recordArgs(fixture, request.id, "progress_updated", "review-cites-older", {applyOperationIds: ["review-plan"]});
     installEvidence(fixture, older);
     assert.deepEqual(yield* fixture.controller.write(older),
@@ -144,5 +144,40 @@ it.effect("without its native call the outcome stays unrecorded and the write is
     const result = yield* fixture.controller.write(recordArgs(fixture, request.id, "insufficient_evidence", "unproven", {reason: "The test log is missing."}));
     assert.equal(result.status, "pending");
     assert.equal((yield* storedRequest(fixture, request.id))?.reviewOutcome, undefined);
+  } finally {yield* fixture.close;}
+}));
+
+it.effect("no_change is refused after any workflow write of the run, including a linked child, and confirmed edits stay citable only as applies", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture();
+  try {
+    // an older run created the main workflow
+    const ensure = ensureArgs(fixture, "older-create", "Create the main workflow.");
+    installEvidence(fixture, ensure, {runId: "supervisor-run-older"});
+    assert.equal((yield* fixture.controller.write(ensure)).status, "created");
+    const request = yield* pendingReview(fixture);
+
+    // nothing written yet in this review's run: no_change is accepted
+    const first = recordArgs(fixture, request.id, "no_change", "no-change-before-link");
+    installEvidence(fixture, first);
+    assert.equal((yield* fixture.controller.write(first)).status, "recorded");
+
+    // this run then links a live child: a write that changes no main revision
+    const child = thread("review-child", fixture.projectId, fixture.mainThreadId, "subagent", fixture.mainThreadId);
+    fixture.threads.push(child);
+    const link = {action: "link_child", ...locator(fixture), operationId: "review-link-child", childThreadId: child.id, note: "Link the reviewed child."};
+    installEvidence(fixture, link);
+    assert.equal((yield* fixture.controller.write(link)).status, "created", "linking creates the child workflow");
+    const afterLink = recordArgs(fixture, request.id, "no_change", "no-change-after-link");
+    installEvidence(fixture, afterLink);
+    assert.deepEqual(yield* fixture.controller.write(afterLink),
+      {status: "denied", operationId: "no-change-after-link", reason: "review_no_change_after_edit"});
+    // a link is no apply edit, so it is no citable progress either
+    const citesLink = recordArgs(fixture, request.id, "progress_updated", "progress-cites-link", {applyOperationIds: ["review-link-child"]});
+    installEvidence(fixture, citesLink);
+    assert.deepEqual(yield* fixture.controller.write(citesLink),
+      {status: "denied", operationId: "progress-cites-link", reason: "review_progress_apply_unverified"});
+    // the no_change recorded before the link is no longer confirmable: the root edited a workflow later in the same run
+    const stored = (yield* storedRequest(fixture, request.id))?.reviewOutcome;
+    assert.deepEqual([stored?.operationId, stored?.state, stored?.problem], ["no-change-before-link", "unconfirmed", "review_no_change_after_edit"]);
   } finally {yield* fixture.close;}
 }));

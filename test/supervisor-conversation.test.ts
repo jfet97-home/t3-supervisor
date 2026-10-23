@@ -1938,6 +1938,12 @@ it.effect("a confirmed no_change acknowledges the frozen batch, sends the operat
   assert.equal(operativeCalls(), callsBefore, "the service sends the operative nothing for no change");
   assert.deepEqual((yield* fixture.conversation.status(projectId, fixture.binding.threadId)).review,
     {lastConfirmed: {outcome: "no_change", reason: null, at: closed.reviewOutcome!.recordedAt}, current: null});
+  // a stopped chat keeps showing its review history
+  const policy = yield* fixture.threadPolicy.get();
+  yield* fixture.threadPolicy.save({...policy, excludedThreadIds: [...policy.excludedThreadIds, operativeThreadId]});
+  const stopped = yield* fixture.conversation.status(projectId, fixture.binding.threadId);
+  assert.match(stopped.message, /Supervision is stopped for this chat/u);
+  assert.deepEqual(stopped.review, {lastConfirmed: {outcome: "no_change", reason: null, at: closed.reviewOutcome!.recordedAt}, current: null});
 }));
 
 it.effect("a demonstrated deviation keeps the root's own corrective guidance beside a confirmed needs_attention, which proves no correction", () => Effect.gen(function* () {

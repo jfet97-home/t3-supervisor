@@ -241,8 +241,8 @@ at their first and their final authority check.
   the root's own native call in the check-in's run, and refused for an unknown, settled
   or other-run check-in (`review_request_unknown`, `review_request_not_pending`,
   `review_outcome_other_run`), for progress citing another run's edits
-  (`review_progress_apply_unverified`) and for `no_change` after an edit in the run
-  (`review_no_change_after_apply`). A later call of the same run replaces the outcome
+  (`review_progress_apply_unverified`) and for `no_change` after any workflow write in
+  the run that created or changed a workflow (`review_no_change_after_edit`). A later call of the same run replaces the outcome
   until the check-in completes. It sends nothing: messaging the operative is a separate
   decision, and neither the record nor delivered guidance shows that the operative
   corrected anything.

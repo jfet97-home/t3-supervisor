@@ -549,7 +549,8 @@ it.effect("the interpretation request carries the concise standing role once, pe
   const submission = text.slice(text.indexOf("SUBMISSION: "), text.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE\n"));
   assert.match(submission, /supervision_interpretation_submit/u);
   assert.ok(submission.length < 1000, `submission block ${submission.length} characters`);
-  assert.ok(text.length - submission.length < 5000, `interpretation request ${text.length - submission.length} characters without the submission block`);
+  // the standing role it carries once per instructions version includes the monitoring review duty and outcome rules (about 0.9 KB)
+  assert.ok(text.length - submission.length < 5500, `interpretation request ${text.length - submission.length} characters without the submission block`);
   yield* submitAndComplete(fixture, supervisor, task, workflowFields(sourceMessageId));
   yield* supervisor.cycle;
   assert.equal((yield* fixture.binding())!.deliveredRoleVersion, task.roleVersion, "the completed interpretation delivered the standing role");

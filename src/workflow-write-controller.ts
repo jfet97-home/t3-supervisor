@@ -1130,6 +1130,9 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
         yield* sql`INSERT INTO supervisor_workflow_write_receipts(operation_id,operation_namespace,request_hash,project_id,main_thread_id,supervisor_thread_id,binding_generation,result,created_at) VALUES(${operationId},${operationNamespace(owner, payload)},${requestHash},${owner.projectId},${owner.mainThreadId},${owner.supervisorThreadId},${owner.bindingGeneration},${JSON.stringify(result)},${now})`;
       }
       yield* recordEvidence(owner, payload, evidence, requestHash, result, successful, now);
+      // the root's own later write in a run makes the no_change it recorded earlier in that run unconfirmable
+      if ((result.status === "applied" || result.status === "created") && payload.action !== "record_review" &&
+        payload.supervisorThreadId === owner.supervisorThreadId) yield* invalidateNoChange(owner, evidence.runId);
       return result;
     })).pipe(Effect.catchCause((cause) => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause as Cause.Cause<never>) : Effect.succeed(denied)));
   };
@@ -1138,20 +1141,35 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     requestHash: string, reason: string): Effect.Effect<WorkflowWriteResult> =>
     commit(guard, now, owner, payload, evidence, requestHash, () => Effect.succeed({status: "denied", operationId: operationIdOf(payload), reason}));
 
-  // the apply edits this owner's root committed in one native run: operationId to the revision each produced
-  const runApplies = (owner: WorkflowOwner, runId: string) => guidanceSql(Effect.map(
+  // the workflow writes this owner's root committed in one native run: its apply edits (operationId to the revision each
+  // produced) and whether any write created or changed a workflow (an apply, a created main or a linked child, an assessment)
+  const runWrites = (owner: WorkflowOwner, runId: string) => guidanceSql(Effect.map(
     sql`SELECT operation_id,native_evidence,result FROM supervisor_workflow_write_evidence WHERE supervisor_thread_id=${owner.supervisorThreadId} AND project_id=${owner.projectId} AND main_thread_id=${owner.mainThreadId} AND binding_generation=${owner.bindingGeneration} AND operation_namespace=${writeOperationNamespace} AND successful=1`,
     (rows) => {
       const applies = new Map<string, {workflowId: string; revision: number}>();
+      let changed = false;
       for (const row of rows) {
         const decoded = decodeAppliedRow(row);
         if (Exit.isFailure(decoded)) continue;
         const {operation_id, native_evidence, result} = decoded.value;
-        if (native_evidence.runId !== runId || result.status !== "applied" || appliedAction(native_evidence.nativeInputCanonical) !== "apply") continue;
-        applies.set(operation_id, {workflowId: result.workflowId, revision: result.revision});
+        if (native_evidence.runId !== runId || (result.status !== "applied" && result.status !== "created")) continue;
+        changed = true;
+        if (result.status === "applied" && appliedAction(native_evidence.nativeInputCanonical) === "apply")
+          applies.set(operation_id, {workflowId: result.workflowId, revision: result.revision});
       }
-      return applies;
+      return {applies, changed};
     }));
+
+  // a no_change the root recorded in this run for a still pending review, unconfirmed by the root's later write in the same run
+  const invalidateNoChange = (owner: WorkflowOwner, runId: string): Effect.Effect<void, SupervisionStoreError> => conversationRequests
+    ? Effect.gen(function* () {
+      for (const request of yield* conversationRequests.requests(owner.projectId, owner.supervisorThreadId)) {
+        const outcome = request.reviewOutcome;
+        if (!outcome || outcome.outcome !== "no_change" || outcome.runId !== runId || outcome.state !== "recorded") continue;
+        yield* conversationRequests.saveRequest({...request, reviewOutcome: {...outcome, state: "unconfirmed", problem: "review_no_change_after_edit"}});
+      }
+    })
+    : Effect.void;
 
   // record_review inside the write's transaction: the outcome of this root's own pending monitoring check-in, bound to this
   // native call; reconciling the check-in's completion confirms it or leaves it unconfirmed
@@ -1168,14 +1186,15 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     // the latest call of the run decides; an earlier call arriving later never replaces it
     if (request.reviewOutcome && request.reviewOutcome.runId === evidence.runId && request.reviewOutcome.ordinal > evidence.ordinal)
       return denied("review_outcome_superseded");
-    const applied = yield* runApplies(owner, evidence.runId);
+    const written = yield* runWrites(owner, evidence.runId);
     const applies: Array<{operationId: string; workflowId: string; revision: number}> = [];
     for (const operationId of payload.applyOperationIds ?? []) {
-      const found = applied.get(operationId);
+      const found = written.applies.get(operationId);
       if (!found) return denied("review_progress_apply_unverified");
       applies.push({operationId, ...found});
     }
-    if (payload.outcome === "no_change" && applied.size > 0) return denied("review_no_change_after_apply");
+    // no change means no workflow was created or changed in the run, by any action
+    if (payload.outcome === "no_change" && written.changed) return denied("review_no_change_after_edit");
     yield* conversationRequests.saveRequest({...request, reviewOutcome: {outcome: payload.outcome, reason: payload.reason ?? null, applies,
       itemId: evidence.itemId, runId: evidence.runId, ordinal: evidence.ordinal, operationId: payload.operationId, recordedAt: now,
       state: "recorded", problem: null}});
