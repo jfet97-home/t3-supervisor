@@ -1227,10 +1227,13 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         job = {...job, workflow: staleWorkflow};
         source = yield* projection(job.threadId);
         const revalidated = job, revalidatedSource = source;
-        // after the source read, the source check and its closure run as one admission section
-        const changed = yield* admitted(() => Effect.gen(function* () {
+        // after the source read, the source check and its closure run as one admission section; a Stop admitted after the last
+        // read closes the result unapplied with the result section's own reason
+        const changed = yield* admitted((guard) => Effect.gen(function* () {
           if (yield* currentSource(revalidated, revalidatedSource)) return false;
-          yield* complete(revalidated, "unavailable", null, "The task source changed while the workflow was being revalidated.");return true;
+          const stopped = (yield* guard.supervisionStopped(revalidated.threadId)) && !(yield* scope.validPendingStartFor(revalidated.threadId));
+          yield* complete(revalidated, "unavailable", null, stopped ? "Supervision was stopped for this chat; the interpretation result was not applied."
+            : "The task source changed while the workflow was being revalidated.");return true;
         }));
         if (changed) return;
       }
