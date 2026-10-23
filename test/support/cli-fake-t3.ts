@@ -38,7 +38,12 @@ export interface FakeT3 {
   until(predicate: (traffic: FakeT3Traffic) => boolean, timeoutMs: number, label: string): Promise<void>;
   // calls the listener after every recorded request; the returned function removes it
   subscribe(listener: () => void): () => void;
-  // closing also ends every pending `until`: its timer is cleared and its promise rejects
+  // calls the listener once when the fake closes (at once when it already has); the returned function removes it
+  whenClosed(listener: () => void): () => void;
+  // the traffic listeners attached now: every pending wait holds exactly one
+  waits(): number;
+  // closing ends every pending wait, promise or effect: its timer is cleared, its listener removed and it fails as closed;
+  // a second close does nothing
   close(): Promise<void>;
 }
 
@@ -62,6 +67,8 @@ export const startFakeT3 = async (options: FakeT3Options): Promise<FakeT3> => {
   const traffic = { http: [] as string[], requests: [] as string[], acks: [] as string[], frames: [] as string[], unauthorized: 0, upgrades: 0 };
   const events = new EventEmitter();
   const pending = new Set<() => void>();
+  const closeListeners = new Set<() => void>();
+  let closing: Promise<void> | undefined;
   const record = () => events.emit("traffic");
   const authorized = (request: IncomingMessage) => request.headers.authorization === `Bearer ${options.token}`;
   const activeThreads = Array.from({ length: options.activeThreads ?? 0 }, (_, index) => thread(`active-${index + 1}`));
@@ -174,28 +181,57 @@ export const startFakeT3 = async (options: FakeT3Options): Promise<FakeT3> => {
         events.off("traffic", listener);
       };
     },
-    close: async () => {
+    whenClosed: (listener) => {
+      if (closing) {
+        listener();
+        return () => {};
+      }
+      closeListeners.add(listener);
+      return () => {
+        closeListeners.delete(listener);
+      };
+    },
+    waits: () => events.listenerCount("traffic"),
+    close: () => closing ??= (async () => {
       for (const cancel of [...pending]) cancel();
+      for (const listener of [...closeListeners]) listener();
+      closeListeners.clear();
       for (const socket of webSockets.clients) socket.terminate();
       await new Promise<void>((resolve, reject) => webSockets.close((error) => error ? reject(error) : resolve()));
       http.closeAllConnections();
       await new Promise<void>((resolve, reject) => http.close((error) => error ? reject(error) : resolve()));
-    },
+    })(),
   };
 };
 
-// a wait for the fake's traffic as an effect: the predicate, an interruption or the bound ends it and removes its listener;
-// the bound runs on the live clock, also inside a TestClock suite, and its timer ends with the wait
+// a wait for the fake's traffic as an effect: the predicate, the fake's close, an interruption or the bound ends it and
+// removes its listeners; a close fails it as closed; the bound runs on the live clock, also inside a TestClock suite, and its
+// timer ends with the wait
 export const untilTraffic = (fake: FakeT3, predicate: (traffic: FakeT3Traffic) => boolean, timeoutMs: number, label: string): Effect.Effect<void> =>
   Effect.callback<void>((resume) => {
-    const check = () => {
-      if (!predicate(fake.traffic)) return;
-      stop();
-      resume(Effect.void);
+    let ended = false;
+    let unsubscribe = () => {};
+    let unclosed = () => {};
+    const end = (outcome: Effect.Effect<void>) => {
+      if (ended) return;
+      ended = true;
+      unsubscribe();
+      unclosed();
+      resume(outcome);
     };
-    const stop = fake.subscribe(check);
+    const check = () => {
+      if (predicate(fake.traffic)) end(Effect.void);
+    };
+    unsubscribe = fake.subscribe(check);
+    // a fake that already closed ends the wait at once
+    unclosed = fake.whenClosed(() => end(Effect.die(new Error(`fake T3 closed before it observed ${label}`))));
+    if (ended) unclosed();
     check();
-    return Effect.sync(stop);
+    return Effect.sync(() => {
+      ended = true;
+      unsubscribe();
+      unclosed();
+    });
   }).pipe(
     Effect.timeoutOrElse({duration: Duration.millis(timeoutMs),
       orElse: () => Effect.die(new Error(`fake T3 did not observe ${label} within ${timeoutMs} ms`))}),
