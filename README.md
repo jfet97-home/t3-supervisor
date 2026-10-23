@@ -62,14 +62,19 @@ npm test
 npm run build
 ```
 
+`npm test` runs the [Vitest](https://vitest.dev) suites; Effect code is tested with `@effect/vitest`.
+
 Read [AGENTS.md](AGENTS.md) and the local knowledge base before changing the project.
 
 ## Node security runtime
 
 The Dockerfile pins official Node 24.22.1 images by immutable digest in both
 build and runtime stages, applying the October 2026 Node security release.
-This is a runtime rebuild of the existing application with the same dependency
-lock, not an application or protocol migration. Preserve the existing private
+That October rebuild was a runtime rebuild of the existing application with the
+same dependency lock, not an application or protocol migration. The Effect v4
+migration is a separate application change with its own dependency lock change:
+`effect` and every `@effect/*` package move to an exact 4.0.6 pin and the suites
+move to Vitest, on the same Node image digests. Preserve the existing private
 state, credentials, mounts and lifecycle settings when replacing the container.
 Verify the actual runtime and a bounded service read after deployment; updating
 host Node or running nix-darwin activation does not update this container.
