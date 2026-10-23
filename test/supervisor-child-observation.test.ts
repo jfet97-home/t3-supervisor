@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
-import { it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { GuidanceStore } from "../src/guidance-store.js";
+import { it } from "@effect/vitest";
+import { Effect } from "effect";
+import type { SqlClient } from "effect/sql";
 import { defaultMonitoringSettings } from "../src/project-supervisor-contract.js";
 import { directParentChildLifecycle, monitorActivityReference, observeScopeThread } from "../src/supervisor-observation.js";
-import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.js";
+import type { ProjectSupervisorMonitorStoreShape } from "../src/supervisor-monitor-store.js";
 import { collectSupervisorActivity } from "../src/supervisor-monitor.js";
 import { resolveSupervisorScope } from "../src/supervisor-scope.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
+import { rows } from "./support/guidance-store-services.js";
+import { dataDirectory, withMonitor as withMonitorAt } from "./support/g9-stores.js";
+
+// the pure lineage cases stay plain tests; the monitor cases run as Effect tests on the ProjectSupervisorMonitorStore
+// service over a temporary guidance.sqlite3 (its production client and layers), every time given explicitly
 
 const projectId = "project-3145";
 const now = Date.parse("2026-10-15T09:00:00.000Z");
@@ -142,21 +145,13 @@ const parentProjection: Projection = {
     providerThreadId: "provider-native", status: "completed"}],
 };
 
-const withMonitor = async <A>(
-  work: (monitor: ProjectSupervisorMonitorStore, store: GuidanceStore, directory: string) => Promise<A> | A,
+const withMonitor = <A, E, R>(
+  work: (monitor: ProjectSupervisorMonitorStoreShape, db: SqlClient.SqlClient, directory: string) => Effect.Effect<A, E, R>,
   capacity = 1000,
-): Promise<A> => {
-  const directory = await mkdtemp(join(tmpdir(), "supervisor-child-observation-"));
-  const store = new GuidanceStore(directory);
-  try {
-    return await work(new ProjectSupervisorMonitorStore(store, capacity), store, directory);
-  } finally {
-    store.close();
-    await rm(directory, {recursive: true, force: true});
-  }
-};
+) => Effect.flatMap(dataDirectory("supervisor-child-observation-"), (directory) =>
+  withMonitorAt(directory, (monitor, db) => work(monitor, db, directory), capacity));
 
-it("Mac3145 native child activity stays detached, child-scoped, and traceable under the main scope", async () => {
+it.effect("Mac3145 native child activity stays detached, child-scoped, and traceable under the main scope", () => Effect.gen(function* () {
   const childProjection = makeDetachedChildProjection(nativeChild, [
     {id: "native-command", type: "command_execution"},
     {id: "native-answer", type: "assistant_message", messageId: "native-answer-message"},
@@ -190,17 +185,17 @@ it("Mac3145 native child activity stays detached, child-scoped, and traceable un
   assert.equal(observed.lifecycle, "completed");
   assert.equal(observed.activityRefs.length, 2);
 
-  await withMonitor(monitor => {
-    monitor.observe({projectId, threadId: nativeChild.id, sourceOrdinal: 1, projection: childProjection, now});
-    assert.equal(monitor.pending(projectId, nativeChild.id).length, 0);
-    monitor.observe({projectId, threadId: nativeChild.id, sourceOrdinal: 1, projection: childProjection, now, includeDetachedChildItems: true});
-    assert.equal(monitor.pending(projectId, nativeChild.id).length, 2);
-    const batch = monitor.select(projectId, {...defaultMonitoringSettings, activityThreshold: 1}, now, null,
+  yield* withMonitor(monitor => Effect.gen(function* () {
+    yield* monitor.observe({projectId, threadId: nativeChild.id, sourceOrdinal: 1, projection: childProjection, now});
+    assert.equal((yield* monitor.pending(projectId, nativeChild.id)).length, 0);
+    yield* monitor.observe({projectId, threadId: nativeChild.id, sourceOrdinal: 1, projection: childProjection, now, includeDetachedChildItems: true});
+    assert.equal((yield* monitor.pending(projectId, nativeChild.id)).length, 2);
+    const batch = yield* monitor.select(projectId, {...defaultMonitoringSettings, activityThreshold: 1}, now, null,
       {eligibleThreadIds: scope.allowedIds});
     assert.deepEqual(batch?.threads.map(item => item.threadId), [nativeChild.id]);
     assert.equal(batch?.threads[0]?.items.some(item => item.id.includes("supervisor-peer:")), false);
-  });
-});
+  }));
+}));
 
 it("a 3190-style duplicated parent lifecycle record resolves to one exact deterministic record", () => {
   const childThreadId = "native-child-3190-shape";
@@ -246,8 +241,8 @@ it("a 3190-style duplicated parent lifecycle record resolves to one exact determ
   assert.equal(directParentChildLifecycle(ambiguous, childThreadId), null);
 });
 
-it("native and delegated child activity joins one main-scoped batch", async () => {
-  await withMonitor(monitor => {
+it.effect("native and delegated child activity joins one main-scoped batch", () =>
+  withMonitor(monitor => Effect.gen(function* () {
     const threads = [mainThread, nativeChild, delegatedChild];
     const scope = resolveSupervisorScope(threads, projectId, mainThread.id);
     assert.equal(scope.complete, true);
@@ -257,68 +252,60 @@ it("native and delegated child activity joins one main-scoped batch", async () =
     assert.equal(Object.hasOwn(delegatedChild, "kind"), false);
     assert.equal(Object.hasOwn(delegatedChild, "delegated"), false);
 
-    monitor.observe({projectId, threadId: nativeChild.id, sourceOrdinal: 1,
+    yield* monitor.observe({projectId, threadId: nativeChild.id, sourceOrdinal: 1,
       projection: makeDetachedChildProjection(nativeChild, [{id: "native-command"}]), now, includeDetachedChildItems: true});
-    monitor.observe({projectId, threadId: delegatedChild.id, sourceOrdinal: 1,
+    yield* monitor.observe({projectId, threadId: delegatedChild.id, sourceOrdinal: 1,
       projection: makeRunChildProjection(delegatedChild, ["delegated-command"]), now});
-    const batch = monitor.select(projectId, {...defaultMonitoringSettings, activityThreshold: 1}, now, null,
+    const batch = yield* monitor.select(projectId, {...defaultMonitoringSettings, activityThreshold: 1}, now, null,
       {eligibleThreadIds: scope.allowedIds});
     assert.deepEqual(batch?.threads.map(item => item.threadId).sort(), [delegatedChild.id, nativeChild.id].sort());
     assert.equal(batch?.pendingItemCount, 3);
-  });
-});
+  })));
 
-it("a saturated child is skipped by the frozen batch bound so a sibling remains visible", async () => {
-  await withMonitor(async monitor => {
+it.effect("a saturated child is skipped by the frozen batch bound so a sibling remains visible", () =>
+  withMonitor(monitor => Effect.gen(function* () {
     const noisy = makeThread("noisy-child", mainThread.id, "subagent", null, {creationSource: "provider"});
     const sibling = makeThread("sibling-child", mainThread.id, "subagent", null, {creationSource: "provider"});
     const scope = resolveSupervisorScope([mainThread, noisy, sibling], projectId, mainThread.id);
     const noisyProjection = makeDetachedChildProjection(noisy, [
       {id: "noise-1"}, {id: "noise-2"}, {id: "noise-3"}, {id: "noise-4"},
     ]);
-    monitor.observe({projectId, threadId: noisy.id, sourceOrdinal: 1, projection: noisyProjection, now, includeDetachedChildItems: true});
-    monitor.observe({projectId, threadId: sibling.id, sourceOrdinal: 1,
+    yield* monitor.observe({projectId, threadId: noisy.id, sourceOrdinal: 1, projection: noisyProjection, now, includeDetachedChildItems: true});
+    yield* monitor.observe({projectId, threadId: sibling.id, sourceOrdinal: 1,
       projection: makeDetachedChildProjection(sibling, [{id: "sibling-work"}]), now, includeDetachedChildItems: true});
-    assert.equal(monitor.state(projectId, noisy.id).saturated, true);
-    assert.ok(monitor.state(projectId, noisy.id).untrackedCount > 0);
+    assert.equal((yield* monitor.state(projectId, noisy.id)).saturated, true);
+    assert.ok((yield* monitor.state(projectId, noisy.id)).untrackedCount > 0);
 
-    const batch = monitor.select(projectId, {...defaultMonitoringSettings, activityThreshold: 1}, now, null,
+    const batch = yield* monitor.select(projectId, {...defaultMonitoringSettings, activityThreshold: 1}, now, null,
       {eligibleThreadIds: scope.allowedIds, maxFrozenItems: 1});
     assert.deepEqual(batch?.threads.map(item => item.threadId), [sibling.id]);
     assert.equal(batch?.truncated, true);
-  }, 2);
-});
+  }), 2));
 
-it("acknowledged detached child history survives restart without waking or duplicating", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "supervisor-child-observation-restart-"));
-  let store = new GuidanceStore(directory);
-  try {
-    let monitor = new ProjectSupervisorMonitorStore(store);
-    const projection = makeDetachedChildProjection(nativeChild, [{id: "durable-native-command"}]);
-    monitor.observe({projectId, threadId: nativeChild.id, sourceOrdinal: 1, projection, now, includeDetachedChildItems: true});
-    const batch = monitor.select(projectId, {...defaultMonitoringSettings, activityThreshold: 1}, now, null,
+it.effect("acknowledged detached child history survives restart without waking or duplicating", () => Effect.gen(function* () {
+  const directory = yield* dataDirectory("supervisor-child-observation-restart-");
+  const projection = makeDetachedChildProjection(nativeChild, [{id: "durable-native-command"}]);
+  yield* withMonitorAt(directory, (monitor) => Effect.gen(function* () {
+    yield* monitor.observe({projectId, threadId: nativeChild.id, sourceOrdinal: 1, projection, now, includeDetachedChildItems: true});
+    const batch = yield* monitor.select(projectId, {...defaultMonitoringSettings, activityThreshold: 1}, now, null,
       {eligibleThreadIds: new Set([mainThread.id, nativeChild.id])});
     assert.deepEqual(batch?.threads.map(item => item.threadId), [nativeChild.id]);
-    assert.equal(monitor.acknowledge(batch!, now + 1).acknowledged, 1);
-    store.close();
+    assert.equal((yield* monitor.acknowledge(batch!, now + 1)).acknowledged, 1);
+  }));
 
-    store = new GuidanceStore(directory);
-    monitor = new ProjectSupervisorMonitorStore(store);
-    assert.equal(monitor.state(projectId, nativeChild.id).sourceOrdinal, 1);
-    monitor.observe({projectId, threadId: nativeChild.id, sourceOrdinal: monitor.state(projectId, nativeChild.id).sourceOrdinal,
+  // the first client closed; the store reopens on the same file
+  yield* withMonitorAt(directory, (monitor, db) => Effect.gen(function* () {
+    assert.equal((yield* monitor.state(projectId, nativeChild.id)).sourceOrdinal, 1);
+    yield* monitor.observe({projectId, threadId: nativeChild.id, sourceOrdinal: (yield* monitor.state(projectId, nativeChild.id)).sourceOrdinal,
       projection, now: now + 2, includeDetachedChildItems: true});
-    assert.equal(monitor.state(projectId, nativeChild.id).sourceOrdinal, 2);
-    assert.deepEqual(monitor.pending(projectId, nativeChild.id), []);
-    monitor.observe({projectId, threadId: nativeChild.id, sourceOrdinal: monitor.state(projectId, nativeChild.id).sourceOrdinal,
+    assert.equal((yield* monitor.state(projectId, nativeChild.id)).sourceOrdinal, 2);
+    assert.deepEqual(yield* monitor.pending(projectId, nativeChild.id), []);
+    yield* monitor.observe({projectId, threadId: nativeChild.id, sourceOrdinal: (yield* monitor.state(projectId, nativeChild.id)).sourceOrdinal,
       projection, now: now + 3, includeDetachedChildItems: true});
-    assert.deepEqual(monitor.pending(projectId, nativeChild.id), []);
-    assert.equal(monitor.select(projectId, {...defaultMonitoringSettings, activityThreshold: 1}, now + 3, null,
+    assert.deepEqual(yield* monitor.pending(projectId, nativeChild.id), []);
+    assert.equal(yield* monitor.select(projectId, {...defaultMonitoringSettings, activityThreshold: 1}, now + 3, null,
       {eligibleThreadIds: new Set([mainThread.id, nativeChild.id])}), null);
-    const rows = store.db.prepare("SELECT item_id FROM supervisor_monitor_items WHERE project_id=? AND thread_id=?")
-      .all(projectId, nativeChild.id);
-    assert.deepEqual(rows, []);
-  } finally {
-    store.close();
-    await rm(directory, {recursive: true, force: true});
-  }
-});
+    const stored = yield* rows(db, "SELECT item_id FROM supervisor_monitor_items WHERE project_id=? AND thread_id=?", projectId, nativeChild.id);
+    assert.deepEqual(stored, []);
+  }));
+}));
