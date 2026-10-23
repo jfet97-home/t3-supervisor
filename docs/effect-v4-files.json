@@ -4234,7 +4234,8 @@
     "A-I03",
     "A-I04"
    ],
-   "suite": "test/project-supervisor.test.ts"
+   "suite": "test/project-supervisor.test.ts",
+   "retired": "2026-10-23: removed with the one-off interpretation cut-over after it was applied on both canonical hosts (plan 3.12 item 11); the converted evidence it produced stays covered by the conversation and conversation-store suites"
   },
   "CT-ISUB-18": {
    "kind": "characterization",

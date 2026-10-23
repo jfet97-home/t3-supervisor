@@ -260,7 +260,7 @@ const interpretationProposal = (candidate: WorkflowAgreementCandidate): boolean 
 type EvidenceView = {readonly supervisor: Projection; readonly messages: readonly CompletedMessage[]; readonly details: ReadonlyMap<string, unknown>};
 
 // the task's own interpretation evidence, which stands for a candidate-free interpretation: the current attempt's recorded tool
-// submission, or the answer message the cut-over validated once, for the task's current source revision and exactly its plan
+// submission, or the answer message validated once at the s6e deployment, for the task's current source revision and exactly its plan
 const taskEvidenceState = (task: TaskRecord, view: EvidenceView): EvidenceState => {
   const evidence = task.interpretationEvidence;
   if (!evidence || view.supervisor.thread.id !== task.supervisorThreadId || !evidence.sourcePin || !samePin(evidence.sourcePin, interpretationSourcePin(task)) ||

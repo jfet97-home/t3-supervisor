@@ -869,7 +869,9 @@ inside the tool call: those would be different features and are rejected.
     interpretation and proposal evidence only. Agreement still needs the operative main's
     own completed exact acceptance of the current task, proposal and digest after the real
     introduction.
-11. **Cut-over (one-off, evidence-preserving).** At the S6e deployment, in one logged
+11. **Cut-over (one-off, evidence-preserving; applied on both canonical hosts on 2026-10-23,
+    then removed from the source; the converted evidence shapes and their currency checks
+    stay).** At the S6e deployment, in one logged
     startup step that reads native evidence and never sends:
     - **In-flight old-prompt requests** (`dispatching`/`waiting`/`uncertain` with a JSON-only
       request): never rewritten or re-sent under their native IDs, and no typed receipt is
@@ -1506,7 +1508,9 @@ historical closed requests, and the no-contact Stop behaviour stays unchanged.
   limitation remains), pragmas unchanged, team/monitor/receipt rows intact, definitions
   revision identical.
 - **After S6e:** run the one-off cut-over (3.12 item 11) when no interpretation is in
-  flight where possible and confirm retained agreements stay valid. Then the first positive
+  flight where possible and confirm retained agreements stay valid. (Done 2026-10-23 on the
+  Mac and the VM: post-apply scans 0 blocking rows, 0 cut-over writes, no blockers; the
+  startup step, its refusal error and the scan's cut-over section were then removed.) Then the first positive
   live proofs, uncoached, through the typed submission tool:
   - an operative request reaching introduction and, if it happens naturally, exact
     operative acceptance, with first edit, introduction and acceptance recorded separately;

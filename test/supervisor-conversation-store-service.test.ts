@@ -203,7 +203,7 @@ describe("SupervisorConversationStore", () => {
   it.live("a candidate decodes either evidence as the typed submission and the cut-over write it, while a pre-conversion row is invalid", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     const observed = yield* withStore(directory, (store, db) => Effect.gen(function* () {
-      // a retained initial candidate the cut-over converted in place: the old provenance fields replaced by the message evidence
+      // a retained initial candidate converted in place at the s6e deployment: the old provenance fields replaced by the message evidence
       const converted = {...candidate("task-a", "p-a", 1), interpretation: true, retainedKey: "kept",
         evidence: {kind: "supervisor_message", messageId: "answer", runId: "run", runOrdinal: 0, textHash: "hash", stale: true}};
       const submitted = {...candidate("task-a", "p-b", 2), interpretation: true, evidence: {kind: "interpretation_submission", taskId: "task-a",

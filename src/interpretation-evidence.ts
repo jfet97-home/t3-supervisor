@@ -5,7 +5,7 @@ import { AgreementEvidence } from "./project-supervisor-contract.js";
 import type { WorkflowPlanValue } from "./supervisor-workflow.js";
 
 // the evidence an interpretation or a proposal rests on (plan 3.12 item 8). a new interpretation rests on its attempt's
-// recorded tool submission; a later negotiated proposal, and an interpretation converted once by the cut-over (item 11),
+// recorded tool submission; a later negotiated proposal, and an interpretation converted once at the s6e deployment (item 11),
 // rest on a supervisor message. evidence is current only while its native item or message still matches
 const Text = Schema.String.check(Schema.isNonEmpty());
 const Hash = Schema.String.check(Schema.isNonEmpty());
@@ -29,10 +29,10 @@ export const SupervisorMessageEvidence = Schema.Struct({
   runId: Text,
   runOrdinal: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
   textHash: Hash,
-  // set by the cut-over for a candidate-free interpretation: the plan digest and the source it interpreted
+  // set at the s6e conversion for a candidate-free interpretation: the plan digest and the source it interpreted
   planDigest: Schema.optional(Schema.NullOr(Hash)),
   sourcePin: Schema.optional(InterpretationSourcePin),
-  // recorded by the cut-over when no valid native message exists; stale evidence is never current
+  // recorded at the s6e conversion when no valid native message existed; stale evidence is never current
   stale: Schema.optional(Schema.Boolean),
 });
 export type SupervisorMessageEvidence = typeof SupervisorMessageEvidence.Type;
@@ -58,7 +58,7 @@ export const TaskInterpretationFields = Schema.Struct({
 });
 export type TaskInterpretationFields = typeof TaskInterpretationFields.Type;
 
-// the one digest of an interpretation's plan, for interpretation_submission.planDigest, the cut-over's
+// the one digest of an interpretation's plan, for interpretation_submission.planDigest, the converted
 // supervisor_message.planDigest and every digest comparison: sha256 of the JSON of the plan fields in this order with every
 // nodeId omitted (node ids are minted per attempt and never part of the plan's identity, as today's interpretation match
 // compares shapes); null without a workflow

@@ -60,7 +60,7 @@ export type WorkflowAgreementCandidate = {
   /** True when the Supervisor published the compact protocol; planHash is then the compact digest over the task revision. */
   compact?: boolean;
   /**
-   * The service-prepared interpretation proposal: its evidence is the attempt's tool submission or, converted once by the cut-over,
+   * The service-prepared interpretation proposal: its evidence is the attempt's tool submission or, converted once at the s6e deployment,
    * the final answer message it was derived from, which stays current by its unchanged hash alone.
    */
   interpretation?: boolean;

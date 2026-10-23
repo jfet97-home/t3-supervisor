@@ -25,7 +25,6 @@ import { GitProbe } from "./git-probe.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
 import { WorkflowMcp } from "./workflow-mcp.js";
 import { ServiceAuth } from "./service-auth.js";
-import { interpretationCutover } from "./interpretation-cutover.js";
 
 export const runGuidanceApplication = (
   config: SupervisorSettings,
@@ -64,9 +63,6 @@ export const runGuidanceApplication = (
     // into the process's set here, before the run reads or filters the catalog (cc-ownership)
     const stores = yield* Layer.build(SupervisionStoresLive.pipe(Layer.provideMerge(Layer.succeedContext(guidance)), Layer.provide(SupervisorIds.layer)));
     const supervisionStore = Context.get(stores, ProjectSupervisorStore);
-    // the one-off interpretation cut-over (plan 3.12 item 11; deleted after the s6e deployment), before the run serves or cycles:
-    // it reads the stored rows and the roots' projections, never sends, and applies its plan in one logged transaction or refuses
-    yield* interpretationCutover(t3).pipe(Effect.provide(stores));
     const projectWriter = writeToken.trim() ? yield* Effect.provide(ProjectWriter.make(endpoint(writeToken.trim())), nativeClients) : undefined;
     const commitWriter = commitToken.trim() ? yield* Effect.provide(ProjectCommitter.make(endpoint(commitToken.trim())), nativeClients) : undefined;
     const setupWriter = projectWriter ? {

@@ -3,7 +3,7 @@ import { Cause, Clock, Context, Crypto, Deferred, Effect, Fiber, FileSystem, Lay
 import { FetchHttpClient, HttpClient, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { createServer } from "node:http";
 import { SupervisorConfig } from "./config.js";
-import { failureReason, InterpretationCutoverRefused, T3TokenUnavailable } from "./errors.js";
+import { failureReason, T3TokenUnavailable } from "./errors.js";
 import { runGuidanceApplication } from "./guidance-application.js";
 import { logEvent } from "./logging.js";
 import { SupervisorOwnership } from "./project-supervisor-store.js";
@@ -122,9 +122,6 @@ export const runSupervisor = Effect.gen(function* () {
       Effect.scoped,
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
-        // a refused interpretation cut-over ends the program with its reason instead of starting again (deleted with it)
-        const refused = Cause.squash(cause);
-        if (refused instanceof InterpretationCutoverRefused) return Effect.fail(refused);
         return update(() => ({ supervisionState: "degraded", lastErrorPhase: "supervision" })).pipe(
           Effect.andThen(logEvent("supervision_unavailable")), Effect.andThen(Effect.sleep("10 seconds")));
       }),

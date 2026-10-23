@@ -5308,7 +5308,7 @@ it.effect("cut-over evidence: a converted answer message stays current by its un
     const fixture = yield* makeFixture(clock);
     const stored = (yield* fixture.projectStore.task(fixture.task.threadId))!;
     const {run} = recordedSubmission(fixture);
-    // the request run's final answer the cut-over validated once; it is never parsed again, so prose is as current as the JSON
+    // the request run's final answer validated once at the s6e deployment; it is never parsed again, so prose is as current as the JSON
     const text = variant === "prose" ? "A legacy interpretation answer in prose." : JSON.stringify({objective: stored.objective, reason: stored.reason,
       sourceMessageIds: [stored.sourceMessageId], supervision: "needed", workflow: requiredRawPlan()});
     const answer = appendMessageToRun(fixture.supervisor, run, {id: "legacy-interpretation-answer", role: "assistant", text, now: baseTime - 59_000});

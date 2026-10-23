@@ -21,18 +21,9 @@ export class ListenerUnavailable extends Data.TaggedError("ListenerUnavailable")
   override readonly message: string = this.reason;
 }
 
-// the one-off interpretation cut-over refused to apply at start (src/interpretation-cutover.ts; deleted with it): the process
-// exits with this reason and changes no row
-export class InterpretationCutoverRefused extends Data.TaggedError("InterpretationCutoverRefused")<{
-  readonly reason: "interpretation_cutover_blocked" | "interpretation_cutover_conflict";
-}> {
-  override readonly message: string = this.reason;
-}
-
 // the fixed reason a failed supervisor program is reported with; typed failures name their own, nothing else is rendered
 export const failureReason = (cause: Cause.Cause<unknown>): string => {
   const failure = Cause.squash(cause);
-  if (failure instanceof InvalidConfiguration || failure instanceof T3TokenUnavailable || failure instanceof ListenerUnavailable ||
-    failure instanceof InterpretationCutoverRefused) return failure.reason;
+  if (failure instanceof InvalidConfiguration || failure instanceof T3TokenUnavailable || failure instanceof ListenerUnavailable) return failure.reason;
   return Predicate.isTagged(failure, "ServeError") ? "health_listener_unavailable" : "supervisor_failed";
 };
