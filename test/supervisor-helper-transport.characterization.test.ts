@@ -8,7 +8,8 @@ import {join} from "node:path";
 import {GuidanceStore} from "../src/guidance-store.js";
 import {ProjectSupervisorStore, defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {SupervisorTeamStore} from "../src/supervisor-team-store.js";
-import {SupervisorHelperTransport, helperDeliveryBody} from "../src/supervisor-helper-transport.js";
+import {helperDeliveryBody} from "../src/supervisor-helper-transport.js";
+import {helperTransportUnit} from "./support/team-units.js";
 import type {Projection} from "../src/types.js";
 import {withDeadline} from "./support/c1-loopback.js";
 
@@ -75,7 +76,7 @@ it("CT-HTX-01: aborting the POST leaves the receipt 'posting' with its exact tex
     });
   };
   const input = message("aborted");
-  const transport = new SupervisorHelperTransport({...f.options, fetch: abortingFetch});
+  const transport = helperTransportUnit({...f.options, fetch: abortingFetch});
   const controller = new AbortController();
   const sending = transport.send(f.binding, input, controller.signal);
   await withDeadline(reached.promise, 3_000, "POST");
@@ -91,7 +92,7 @@ it("CT-HTX-01: aborting the POST leaves the receipt 'posting' with its exact tex
   assert.equal(await transport.reconcileDelivery(f.binding, input, signal), "uncertain");
   assert.equal(await transport.send(f.binding, input, signal), "uncertain");
   const reopened = f.reopen();
-  const restarted = new SupervisorHelperTransport({...f.options, store: reopened.store, fetch: abortingFetch});
+  const restarted = helperTransportUnit({...f.options, store: reopened.store, fetch: abortingFetch});
   assert.equal(await restarted.reconcileDelivery(f.binding, input, signal), "uncertain");
   assert.equal(await restarted.send(f.binding, input, signal), "uncertain");
   assert.equal(posts.length, 1);
@@ -130,7 +131,7 @@ it("CT-HTX-03: global fetch issues one POST for 2xx, 4xx and 5xx replies, with n
     const input = message(`status-${status}`);
     // the real global fetch, with each response kept so a body the transport leaves unread is released afterwards
     const responses: Response[] = [];
-    const transport = new SupervisorHelperTransport({...f.options, fetch: async (url, init) => {
+    const transport = helperTransportUnit({...f.options, fetch: async (url, init) => {
       const response = await fetch(url, init);
       responses.push(response);
       return response;
@@ -154,7 +155,7 @@ it("CT-HTX-03: a 2xx whose body read fails is still recorded as posted after one
   });
   const f = await fixture(t, baseUrl);
   const input = message("cut-body");
-  assert.equal(await new SupervisorHelperTransport(f.options).send(f.binding, input, AbortSignal.timeout(3_000)), "uncertain");
+  assert.equal(await helperTransportUnit(f.options).send(f.binding, input, AbortSignal.timeout(3_000)), "uncertain");
   const receipt = f.receipt(f.db, input.messageId);
   assert.equal(receipt?.state, "posted");
   assert.equal(receipt?.nativeDeliveryId, undefined);
@@ -177,7 +178,7 @@ it("CT-HTX-03: fetch follows redirects: 307 re-POSTs the body to Location, also 
     const f = await fixture(t, baseUrl);
     const input = message(`redirect-${status}-${expected}`);
     const body = helperDeliveryBody(input.messageId, input.text);
-    assert.equal(await new SupervisorHelperTransport(f.options).send(f.binding, input, AbortSignal.timeout(3_000)), "waiting", expected);
+    assert.equal(await helperTransportUnit(f.options).send(f.binding, input, AbortSignal.timeout(3_000)), "waiting", expected);
     const followed = [...seen, ...otherSeen].map(request => [request.origin === baseUrl ? "base" : "other", request.method, request.path, request.body]);
     if (expected === "same") assert.deepEqual(followed, [["base", "POST", webhookPath, body], ["base", "POST", "/redirected", body]]);
     if (expected === "other") assert.deepEqual(followed, [["base", "POST", webhookPath, body], ["other", "POST", "/elsewhere", body]]);
@@ -190,7 +191,7 @@ it("CT-HTX-04: the webhook path and token never reach the channel or delivery do
   const seen: Seen[] = [];
   const baseUrl = await loopback(t, seen, (_request, response) => accepted(response));
   const f = await fixture(t, baseUrl);
-  const transport = new SupervisorHelperTransport(f.options);
+  const transport = helperTransportUnit(f.options);
   for (const name of ["first", "second"]) assert.equal(await transport.send(f.binding, message(name), AbortSignal.timeout(3_000)), "waiting");
   assert.equal(await transport.reconcileDelivery(f.binding, message("first"), AbortSignal.timeout(3_000)), "uncertain");
   assert.equal(seen.length, 2);

@@ -1,14 +1,15 @@
-import { randomUUID } from "node:crypto";
+import { Cause, Clock, Context, Data, Deferred, Effect, Exit, HashMap, HashSet, Layer, Option, Ref } from "effect";
 import type { BindingRecord, ProjectSupervisorStore } from "./project-supervisor-store.js";
 import { SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorBatch, type SupervisorMonitorThreadBatch } from "./supervisor-monitor.js";
-import { ProjectSupervisorMonitorStore } from "./supervisor-monitor-store.js";
+import type { ProjectSupervisorMonitorStore } from "./supervisor-monitor-store.js";
 import { conversationRequestMessageId, type ConversationRequest, type SupervisorConversationStore } from "./supervisor-conversation-store.js";
-import { SupervisorTeamStore, endedWithoutCompletion, notificationClosed, type HandoverAttempt, type SupervisorTeamSnapshot, type TeamEvent, type TeamMember, type TeamNotification, type TeamRequest, type TeamRequestTarget } from "./supervisor-team-store.js";
-import { type SupervisorRpc } from "./supervisor-native.js";
-import { T3TransportError } from "./t3.js";
-import { helperDeliveryBudget, type SupervisorHelperDeliveryTransport, type SupervisorHelperSendResult } from "./supervisor-helper-transport.js";
+import { endedWithoutCompletion, notificationClosed, type HandoverAttempt, type SupervisorTeamSnapshot, type SupervisorTeamStore, type TeamEvent, type TeamMember, type TeamNotification, type TeamRequest, type TeamRequestTarget } from "./supervisor-team-store.js";
+import { T3Client } from "./t3.js";
+import { helperDeliveryBudget, HelperTransport, type HelperTransportShape, type SupervisorHelperMessage, type SupervisorHelperSendResult } from "./supervisor-helper-transport.js";
+import { SupervisionGate, type GateGuard } from "./supervision-gate.js";
+import { SupervisorIds } from "./ids.js";
 import { fingerprint } from "./guidance-store.js";
-import type { Projection, ThreadInfo } from "./types.js";
+import type { MessageInfo, Projection, ThreadInfo } from "./types.js";
 import { resolveSupervisorScope } from "./supervisor-scope.js";
 import { workflowMutationLimits } from "./workflow-state-contract.js";
 
@@ -28,17 +29,14 @@ export type SupervisorTeamPartition = {
 
 type SupervisorTeamRootCoverage = "root" | "transferring" | "unavailable";
 
-type SupervisorTeamRuntimeOptions = {
+export type SupervisorTeamRuntimeOptions = {
   store: ProjectSupervisorStore;
   teamStore: SupervisorTeamStore;
   requests: SupervisorConversationStore;
   monitor: ProjectSupervisorMonitorStore;
-  rpc: SupervisorRpc | null;
-  helperTransport?: SupervisorHelperDeliveryTransport;
-  now?: () => number;
-  projection: (threadId: string, signal: AbortSignal) => Promise<Projection>;
-  /** The durable per-chat stop of the owning main, rechecked immediately before every fresh helper delivery. */
-  supervisionStopped?: (mainThreadId: string) => boolean;
+  // whether supervision of the owning main is stopped, read with the admission guard right before every fresh helper
+  // delivery; by default the per-chat stop or a disabled scope of that main
+  stopped?: (guard: GateGuard, mainThreadId: string) => boolean;
 };
 
 const terminal = new Set(["completed", "failed", "interrupted", "cancelled", "rolled_back"]);
@@ -139,147 +137,227 @@ const helperTargetToolGuidance = (binding: BindingRecord, member: TeamMember, ta
 const helperReviewText = (envelope: unknown, completionMarker: string): string =>
   `${helperCore}\nAssess only the included target/thread records in this bounded envelope. Counts cover every pending item for each included thread; other pending targets remain for later reviews. IDs are a bounded preview. Target activityRefs contain ready-to-use links only for records in that target's preview. When adding workflow_write evidence, copy a supplied {sourceThreadId,sourceItemId} pair unchanged, or a message-only {sourceThreadId,sourceMessageId} pair unchanged when no item reference is supplied; add only your own evidence kind and note. Omit sourceRunId. Never decode, re-encode, normalize or reconstruct opaque IDs. For additional paged items, use exact native item or message IDs returned by T3. References are optional navigation evidence and do not prove semantic completion or write authority. Read further only where needed with bounded pagination, and do not infer completion from status alone. Each target carries its own complete toolInputs: use a target's workflow_read input, link input and targetThreadId only for that target, never for another. Use its link input only when that target has no document and is unarchived, undeleted and still assigned to you; a retry after uncertainty reuses the complete identical arguments. Do not guide or write for archived/deleted targets or coverage that is transferring, unavailable or uncertain; escalate if target_thread_unavailable is reported. If a listed notification applies, consider it in this turn. End with this exact marker: ${completionMarker}.\nUNTRUSTED_TEAM_MONITOR_ENVELOPE\n${JSON.stringify(envelope)}\nEND_UNTRUSTED_TEAM_MONITOR_ENVELOPE`;
 
-export class SupervisorTeamRuntime {
-  private helperOffset = new Map<string, number>();
-  private notificationOffset = new Map<string, number>();
-  private transferOffset = new Map<string, number>();
-  private readBudget = new Map<string, number>();
-  private retiredHelpers = new Set<string>();
 
-  constructor(readonly options: SupervisorTeamRuntimeOptions) {}
+// the baseline promise shapes of the team runtime its unported callers use (b-03): the synchronous reads and in-memory
+// cycle start stay synchronous, the reconciliations take the caller's AbortSignal; guidance-application.ts builds them
+export interface SupervisorTeamRuntimeFacade {
+  startCycle(binding: BindingRecord): void;
+  rootOwnedBatch(binding: BindingRecord, batch: SupervisorMonitorBatch, threads: readonly ThreadInfo[]): SupervisorMonitorBatch | null;
+  partition(binding: BindingRecord, threads: readonly ThreadInfo[], batch: SupervisorMonitorBatch | null): SupervisorTeamPartition;
+  hasMembers(binding: BindingRecord): boolean;
+  coordinatorPolicy(binding: BindingRecord): {maxHelpersPerRoot: number; readyHelpers: number; registeringHelpers: number};
+  acknowledgeRootEvents(binding: BindingRecord, eventIds: readonly string[]): void;
+  hasInflightEffects(binding: BindingRecord): boolean;
+  hasBlockingWork(binding: BindingRecord): boolean;
+  reconcileStopped(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void>;
+  reconcile(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void>;
+  runHelperBatch(binding: BindingRecord, threads: readonly ThreadInfo[], batches: readonly SupervisorTeamHelperBatch[], signal: AbortSignal): Promise<void>;
+}
 
-  startCycle(binding: BindingRecord): void {this.readBudget.set(binding.threadId, 5);}
-  private stopped(binding: BindingRecord): boolean {return this.options.supervisionStopped?.(binding.mainThreadId) === true;}
+type Cancel = Deferred.Deferred<void> | undefined;
 
-  private consumeReadBudget(binding: BindingRecord): boolean {
-    const remaining = this.readBudget.get(binding.threadId) ?? 5;
-    if (remaining <= 0) return false;
-    this.readBudget.set(binding.threadId, remaining - 1);
-    return true;
-  }
+export interface SupervisorTeamRuntimeShape {
+  // a fresh bounded read budget for one supervision cycle of this root
+  readonly startCycle: (binding: BindingRecord) => Effect.Effect<void>;
+  readonly rootOwnedBatch: (binding: BindingRecord, batch: SupervisorMonitorBatch, threads: readonly ThreadInfo[]) => Effect.Effect<SupervisorMonitorBatch | null>;
+  readonly partition: (binding: BindingRecord, threads: readonly ThreadInfo[], batch: SupervisorMonitorBatch | null) => Effect.Effect<SupervisorTeamPartition>;
+  readonly hasMembers: (binding: BindingRecord) => Effect.Effect<boolean>;
+  readonly coordinatorPolicy: (binding: BindingRecord) => Effect.Effect<{maxHelpersPerRoot: number; readyHelpers: number; registeringHelpers: number}>;
+  readonly acknowledgeRootEvents: (binding: BindingRecord, eventIds: readonly string[]) => Effect.Effect<void>;
+  /**
+   * Team effects that are still in flight: an unresolved team request, a notification being delivered and any helper request.
+   * A human stop waits only for these. A transfer is bookkeeping whose native effects are exactly its notices and requests,
+   * and review-only events and undelivered notices are superseded by the stop.
+   */
+  readonly hasInflightEffects: (binding: BindingRecord) => Effect.Effect<boolean>;
+  readonly hasBlockingWork: (binding: BindingRecord) => Effect.Effect<boolean>;
+  /**
+   * Observation-only reconciliation while a human has stopped supervision of this chat, also while supervision is disabled.
+   * Nothing is sent, retried or retired: requests and notices that were never posted are fenced, accepted helper check-ins
+   * and notices are matched to their native outcome, lost members close their work and finished transfers complete, so stop
+   * settlement never waits only because ordinary processing is skipped. An effect whose delivery cannot be proven either way
+   * keeps its identity and remains unresolved.
+   */
+  readonly reconcileStopped: (binding: BindingRecord, threads: readonly ThreadInfo[], cancel?: Cancel) => Effect.Effect<void>;
+  readonly reconcile: (binding: BindingRecord, threads: readonly ThreadInfo[], cancel?: Cancel) => Effect.Effect<void>;
+  readonly runHelperBatch: (binding: BindingRecord, threads: readonly ThreadInfo[], batches: readonly SupervisorTeamHelperBatch[], cancel?: Cancel) => Effect.Effect<void>;
+}
 
-  private unresolvedDeliveryTooLong(request: ConversationRequest): boolean {
+// a caller's cancel completed during an awaited read: it ends like the aborted read it replaces
+class Cancelled extends Data.TaggedError("Cancelled") {}
+// whether the caller gave up, as the baseline signal.aborted checks
+const cancelled = (cancel: Cancel): Effect.Effect<boolean> => cancel === undefined ? Effect.succeed(false) : Deferred.isDone(cancel);
+// the baseline catch-all around a call: any failure or defect gives the fallback; an interruption stays an interruption
+const otherwise = <B>(fallback: B) => <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A | B, never, R> =>
+  Effect.catchCauseIf(effect, (cause) => !Cause.hasInterruptsOnly(cause), () => Effect.succeed(fallback)) as Effect.Effect<A | B, never, R>;
+const lastAssistantText = (projection: Projection, runId: string): string | undefined =>
+  projection.messages.filter(item => item.runId === runId && item.role === "assistant" && item.streaming !== true && typeof item.text === "string")
+    .sort((left, right) => Number(left.ordinal ?? 0) - Number(right.ordinal ?? 0)).at(-1)?.text;
+
+const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Effect.gen(function* () {
+  const gate = yield* SupervisionGate;
+  const t3 = yield* T3Client;
+  const ids = yield* SupervisorIds;
+  const transport: HelperTransportShape | null = Option.getOrNull(yield* Effect.serviceOption(HelperTransport));
+  const helperOffset = yield* Ref.make(HashMap.empty<string, number>());
+  const notificationOffset = yield* Ref.make(HashMap.empty<string, number>());
+  const transferOffset = yield* Ref.make(HashMap.empty<string, number>());
+  const readBudget = yield* Ref.make(HashMap.empty<string, number>());
+  const retiredHelpers = yield* Ref.make(HashSet.empty<string>());
+  const {store, teamStore, requests, monitor} = options;
+  const projectOf = (mainThreadId: string) => store.bindings().find(item => item.mainThreadId === mainThreadId)?.projectId ?? "";
+  const stoppedWith = options.stopped ?? ((guard: GateGuard, mainThreadId: string) =>
+    guard.supervisionStopped(mainThreadId) || !guard.scopeEnabled(projectOf(mainThreadId), mainThreadId));
+  const offsetOf = (ref: Ref.Ref<HashMap.HashMap<string, number>>, key: string) =>
+    Effect.map(Ref.get(ref), (offsets) => Option.getOrElse(HashMap.get(offsets, key), () => 0));
+  const setOffset = (ref: Ref.Ref<HashMap.HashMap<string, number>>, key: string, value: number) => Ref.update(ref, HashMap.set(key, value));
+
+  const startCycle = (binding: BindingRecord) => Ref.update(readBudget, HashMap.set(binding.threadId, 5));
+  // the per-chat stop and scope of the owning main, read with the admission guard
+  const stopped = (binding: BindingRecord) => gate.admit((guard) => Effect.sync(() => stoppedWith(guard, binding.mainThreadId)));
+  const memberUnchanged = (binding: BindingRecord, member: TeamMember) => {
+    const current = teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
+    return current?.state === member.state && current.epoch === member.epoch;
+  };
+
+  const consumeReadBudget = (binding: BindingRecord) => Ref.modify(readBudget, (budgets): [boolean, HashMap.HashMap<string, number>] => {
+    const remaining = Option.getOrElse(HashMap.get(budgets, binding.threadId), () => 5);
+    if (remaining <= 0) return [false, budgets];
+    return [true, HashMap.set(budgets, binding.threadId, remaining - 1)];
+  });
+
+  const unresolvedDeliveryTooLong = (request: ConversationRequest) => Effect.map(Clock.currentTimeMillis, (now) => {
     const hasDeliveryIdentity = request.sentAt !== null;
     const repeatedBusy = request.state === "prepared" && request.error !== null;
     const startedAt = request.sentAt ?? (repeatedBusy ? request.createdAt : null);
     return (hasDeliveryIdentity && ["waiting", "uncertain"].includes(request.state) || repeatedBusy) && startedAt !== null &&
-      (this.options.now?.() ?? Date.now()) - startedAt >= SUPERVISOR_MONITOR_COOLDOWN_MS;
-  }
+      now - startedAt >= SUPERVISOR_MONITOR_COOLDOWN_MS;
+  });
 
-  private emitServiceAttention(binding: BindingRecord, eventId: string, memberThreadId: string, targetThreadId: string | undefined, summary: string): void {
+  const emitServiceAttention = (binding: BindingRecord, eventId: string, memberThreadId: string, targetThreadId: string | undefined, summary: string): void => {
     try {
-      this.options.teamStore.serviceAttention(binding, {eventId, memberThreadId, ...(targetThreadId ? {targetThreadId} : {}), summary});
+      teamStore.serviceAttention(binding, {eventId, memberThreadId, ...(targetThreadId ? {targetThreadId} : {}), summary});
     } catch { /* a replaced binding owns its own service events */ }
-  }
+  };
 
-  private serviceUnresolvedDelivery(binding: BindingRecord, memberThreadId: string, request: ConversationRequest): void {
+  const serviceUnresolvedDelivery = (binding: BindingRecord, memberThreadId: string, request: ConversationRequest): void => {
     const targetThreadId = request.batch?.threads[0]?.threadId;
-    this.emitServiceAttention(binding, `helper-checkin-unresolved:${fingerprint([binding.threadId, binding.generation, memberThreadId, request.id]).slice(0, 32)}`,
+    emitServiceAttention(binding, `helper-checkin-unresolved:${fingerprint([binding.threadId, binding.generation, memberThreadId, request.id]).slice(0, 32)}`,
       memberThreadId, targetThreadId,
       `Helper check-in ${request.id} has no visible terminal native run after bounded reconciliation. No success or rejection is confirmed; preserve its original request and delivery identities, do not retry or acknowledge it as failed, and keep assigned activity fenced.`);
-  }
+  };
 
-  private hasUnacknowledgedFailure(binding: BindingRecord, memberThreadId: string): boolean {
-    return this.options.requests.requests(binding.projectId, memberThreadId).some(request => request.kind === "review" &&
+  const hasUnacknowledgedFailure = (binding: BindingRecord, memberThreadId: string): boolean =>
+    requests.requests(binding.projectId, memberThreadId).some(request => request.kind === "review" &&
       (request.id.startsWith("team-review:") || request.id.startsWith("team-ready:")) && request.state === "failed" && !request.failureAcknowledged);
-  }
 
-  private serviceAttention(binding: BindingRecord, memberThreadId: string, request: ConversationRequest, summary: string): void {
+  const serviceAttention = (binding: BindingRecord, memberThreadId: string, request: ConversationRequest, summary: string): void => {
     const targetThreadId = request.batch?.threads[0]?.threadId;
-    this.emitServiceAttention(binding, `helper-checkin-failed:${fingerprint([binding.threadId, binding.generation, memberThreadId, request.id]).slice(0, 32)}`,
+    emitServiceAttention(binding, `helper-checkin-failed:${fingerprint([binding.threadId, binding.generation, memberThreadId, request.id]).slice(0, 32)}`,
       memberThreadId, targetThreadId, `Helper check-in failed: ${request.error ?? summary}`);
-  }
+  };
 
-  private async retireHelper(binding: BindingRecord, memberThreadId: string, signal: AbortSignal): Promise<void> {
-    if (!this.options.helperTransport) return;
+  // the messages of `messages` whose receipt attribution the transport confirms for this logical delivery
+  const matchedMessages = (binding: BindingRecord, logicalMessageId: string, text: string, messages: readonly MessageInfo[],
+    candidate: (message: MessageInfo) => boolean) => Effect.gen(function* () {
+    const matched = new Set<MessageInfo>();
+    if (!transport) return matched;
+    for (const message of messages)
+      if (candidate(message) && (yield* transport.matchesMessage(binding, logicalMessageId, text, message, messages))) matched.add(message);
+    return matched;
+  });
+  const firstMatch = (binding: BindingRecord, logicalMessageId: string, text: string, projection: Projection, threadId: string) =>
+    Effect.map(matchedMessages(binding, logicalMessageId, text, projection.messages, item => item.threadId === threadId),
+      (matched) => projection.messages.find(item => matched.has(item)));
+
+  const retireHelper = (binding: BindingRecord, memberThreadId: string, cancel: Cancel) => Effect.gen(function* () {
+    if (!transport) return;
     const key = `${binding.threadId}:${binding.generation}:${memberThreadId}`;
-    if (this.retiredHelpers.has(key)) return;
-    try {
-      if (await this.options.helperTransport.retire(binding, memberThreadId, signal)) this.retiredHelpers.add(key);
-    } catch { /* retry a failed native channel retirement on a later cycle */ }
-  }
+    if (HashSet.has(yield* Ref.get(retiredHelpers), key)) return;
+    // retry a failed native channel retirement on a later cycle
+    if (yield* transport.retire(binding, memberThreadId, cancel).pipe(otherwise(false))) yield* Ref.update(retiredHelpers, HashSet.add(key));
+  });
 
-  private async loseMember(binding: BindingRecord, member: TeamMember, signal: AbortSignal, reason: string, retire = true): Promise<void> {
-    const current = this.options.teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
+  const loseMember = (binding: BindingRecord, member: TeamMember, cancel: Cancel, reason: string, retire = true) => Effect.gen(function* () {
+    const current = teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
     // quarantine is terminal for service handling: its requests and notices stay fenced and it never becomes missing
     if (current?.state === "quarantined") return;
-    if (current && current.state !== "missing" && current.state !== "retired") this.options.teamStore.markMissing(binding, member.threadId);
-    const owned = this.options.requests.requests(binding.projectId, member.threadId).filter(request => request.kind === "review" &&
+    if (current && current.state !== "missing" && current.state !== "retired") teamStore.markMissing(binding, member.threadId);
+    const owned = requests.requests(binding.projectId, member.threadId).filter(request => request.kind === "review" &&
       (request.id.startsWith("team-review:") || request.id.startsWith("team-ready:")) &&
       (["prepared", "sending", "waiting", "uncertain"].includes(request.state) || request.state === "failed" && !request.failureAcknowledged));
     for (const request of owned) {
       const failed = request.state === "failed" ? {...request, error: request.error ?? reason} : {...request, state: "failed" as const, error: reason};
-      if (request.state !== "failed" || !request.error) this.options.requests.saveRequest(failed);
-      this.serviceAttention(binding, member.threadId, failed, reason);
+      if (request.state !== "failed" || !request.error) requests.saveRequest(failed);
+      serviceAttention(binding, member.threadId, failed, reason);
     }
-    for (const request of this.options.teamStore.unresolvedRequests(binding).filter(value => value.memberThreadId === member.threadId &&
+    for (const request of teamStore.unresolvedRequests(binding).filter(value => value.memberThreadId === member.threadId &&
       (value.requestId.startsWith("team-review:") || value.requestId.startsWith("team-ready:"))))
-      this.options.teamStore.settleRequest(binding, request.requestId);
-    if (retire) await this.retireHelper(binding, member.threadId, signal);
-  }
+      teamStore.settleRequest(binding, request.requestId);
+    if (retire) yield* retireHelper(binding, member.threadId, cancel);
+  });
 
-  private async readMemberProjection(binding: BindingRecord, member: TeamMember, signal: AbortSignal, observeOnly = false): Promise<Projection | null> {
-    if (signal.aborted || !this.consumeReadBudget(binding)) return null;
+  const readMemberProjection = (binding: BindingRecord, member: TeamMember, cancel: Cancel, observeOnly = false) => Effect.gen(function* () {
+    if ((yield* cancelled(cancel)) || !(yield* consumeReadBudget(binding))) return null;
     // the member can change during the awaited read (for example a root quarantine); a lost conversation
     // only applies to the exact member state and epoch that was read
-    const unchanged = () => {
-      const current = this.options.teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
-      return current?.state === member.state && current.epoch === member.epoch;
-    };
-    try {
-      const value = await this.options.projection(member.threadId, signal);
+    const unchanged = () => memberUnchanged(binding, member);
+    const read = yield* Effect.exit(Effect.gen(function* () {
+      const snapshot = yield* (cancel === undefined ? t3.projection(member.threadId)
+        : Effect.raceFirst(t3.projection(member.threadId), Effect.andThen(Deferred.await(cancel), Effect.fail(new Cancelled()))));
+      const value = snapshot.projection;
       if (value.thread.id !== member.threadId) return null;
       if (value.thread.archivedAt != null || value.thread.deletedAt != null) {
-        if (!observeOnly && unchanged()) await this.loseMember(binding, member, signal, "The helper conversation is archived or deleted; its check-in was closed and pending operational effects remain fenced.");
+        if (!observeOnly && unchanged()) yield* loseMember(binding, member, cancel, "The helper conversation is archived or deleted; its check-in was closed and pending operational effects remain fenced.");
         return null;
       }
       return value;
-    } catch (cause) {
-      if (!observeOnly && cause instanceof T3TransportError && cause.httpStatus === 404 && unchanged()) {
-        await this.loseMember(binding, member, signal, "The helper conversation returned native 404; its check-in was closed and pending operational effects remain fenced.");
-      }
-      return null;
+    }));
+    if (Exit.isSuccess(read)) return read.value;
+    if (Cause.hasInterruptsOnly(read.cause)) return yield* Effect.failCause(read.cause as Cause.Cause<never>);
+    const error = Option.getOrNull(Cause.findErrorOption(read.cause));
+    if (!observeOnly && error !== null && error._tag === "T3TransportError" && error.httpStatus === 404 && unchanged()) {
+      yield* loseMember(binding, member, cancel, "The helper conversation returned native 404; its check-in was closed and pending operational effects remain fenced.");
     }
-  }
+    return null;
+  });
 
-  private parentById(binding: BindingRecord, threads: readonly ThreadInfo[]): Map<string, string | null> | null {
-    const scope = resolveSupervisorScope(threads, binding.projectId, binding.mainThreadId, this.options.store.ownedIds);
+  const parentById = (binding: BindingRecord, threads: readonly ThreadInfo[]): Map<string, string | null> | null => {
+    const scope = resolveSupervisorScope(threads, binding.projectId, binding.mainThreadId, store.ownedIds);
     if (!scope.complete || !scope.main || !scope.allowedIds.has(binding.mainThreadId)) return null;
     return new Map([...scope.byId].filter(([id]) => scope.allowedIds.has(id)).map(([id, thread]) => [id, thread.lineage.parentThreadId]));
-  }
+  };
 
-  private subset(binding: BindingRecord, batch: SupervisorMonitorBatch, threads: SupervisorMonitorThreadBatch[]): SupervisorMonitorBatch | null {
-    return scopedBatch({...batch, projectId: binding.projectId}, threads);
-  }
+  const subset = (binding: BindingRecord, batch: SupervisorMonitorBatch, threads: SupervisorMonitorThreadBatch[]): SupervisorMonitorBatch | null =>
+    scopedBatch({...batch, projectId: binding.projectId}, threads);
 
-  private hasOutstandingHelperCheckin(binding: BindingRecord, targetThreadId: string): boolean {
-    return this.options.teamStore.unresolvedRequests(binding).some(request => request.requestId.startsWith("team-review:") &&
+  const hasOutstandingHelperCheckin = (binding: BindingRecord, targetThreadId: string): boolean =>
+    teamStore.unresolvedRequests(binding).some(request => request.requestId.startsWith("team-review:") &&
       request.targets.some(target => target.targetThreadId === targetThreadId));
-  }
 
-  rootOwnedBatch(binding: BindingRecord, batch: SupervisorMonitorBatch, threads: readonly ThreadInfo[]): SupervisorMonitorBatch | null {
-    const parents = this.parentById(binding, threads);
+  const rootOwnedBatch = (binding: BindingRecord, batch: SupervisorMonitorBatch, threads: readonly ThreadInfo[]): SupervisorMonitorBatch | null => {
+    const parents = parentById(binding, threads);
     if (!parents) return null;
-    return this.subset(binding, batch, batch.threads.filter(monitored =>
-      this.options.teamStore.coverage(binding, monitored.threadId, parents).state === "root"));
-  }
+    return subset(binding, batch, batch.threads.filter(monitored =>
+      teamStore.coverage(binding, monitored.threadId, parents).state === "root"));
+  };
 
-  partition(binding: BindingRecord, threads: readonly ThreadInfo[], batch: SupervisorMonitorBatch | null): SupervisorTeamPartition {
-    const snapshot = this.options.teamStore.snapshot(binding);
+  const partition = (binding: BindingRecord, threads: readonly ThreadInfo[], batch: SupervisorMonitorBatch | null): SupervisorTeamPartition => {
+    const snapshot = teamStore.snapshot(binding);
     const rootEvents = snapshot.events.filter(event => event.acknowledgedAt === null && event.kind !== "assignment_handover_completed" &&
       (event.severity === "attention" || event.severity === "result")).slice(-50);
     if (!batch) return {rootBatch: null, helperBatches: [], rootEvents};
-    const parents = this.parentById(binding, threads);
+    const parents = parentById(binding, threads);
     if (!parents) return {rootBatch: rootEvents.length ? scopedBatch({...batch, projectId: binding.projectId}, batch.threads.map(thread =>
       ({...thread, teamCoverageState: "unavailable" as const}))) : null, helperBatches: [], rootEvents};
     const rootThreads: Array<SupervisorMonitorThreadBatch & {teamCoverageState?: SupervisorTeamRootCoverage}> = [];
     const helpers = new Map<string, {memberEpoch: number; targets: TeamRequestTarget[]; threads: SupervisorMonitorThreadBatch[]}>();
     for (const monitored of batch.threads) {
       if (!parents.has(monitored.threadId)) {rootThreads.push({...monitored, teamCoverageState: "unavailable"});continue;}
-      const coverage = this.options.teamStore.coverage(binding, monitored.threadId, parents);
-      const actor = coverage.state === "assigned" ? this.options.teamStore.resolveActor(binding, coverage.actorThreadId, coverage.memberEpoch ?? undefined) : null;
+      const coverage = teamStore.coverage(binding, monitored.threadId, parents);
+      const actor = coverage.state === "assigned" ? teamStore.resolveActor(binding, coverage.actorThreadId, coverage.memberEpoch ?? undefined) : null;
       if (coverage.state === "root") {rootThreads.push({...monitored, teamCoverageState: "root"});continue;}
-      if ((coverage.state === "transferring" || coverage.state === "unavailable") && !this.hasOutstandingHelperCheckin(binding, monitored.threadId)) {
+      if ((coverage.state === "transferring" || coverage.state === "unavailable") && !hasOutstandingHelperCheckin(binding, monitored.threadId)) {
         rootThreads.push({...monitored, teamCoverageState: coverage.state});continue;
       }
       if (coverage.state !== "assigned" || !actor || actor.role !== "helper" || coverage.memberEpoch === null || coverage.assignmentRootThreadId === null || coverage.assignmentEpoch === null) continue;
@@ -289,43 +367,23 @@ export class SupervisorTeamRuntime {
       helpers.set(actor.actorThreadId, group);
     }
     const helperBatches = [...helpers].map(([actorThreadId, group]) => ({actorThreadId, memberEpoch: group.memberEpoch,
-      targets: group.targets, batch: this.subset(binding, batch, group.threads)!}));
+      targets: group.targets, batch: subset(binding, batch, group.threads)!}));
     const hasRootOwnedActivity = rootThreads.some(thread => thread.teamCoverageState === "root");
-    const rootBatch = hasRootOwnedActivity || rootEvents.length ? this.subset(binding, batch, rootThreads) : null;
+    const rootBatch = hasRootOwnedActivity || rootEvents.length ? subset(binding, batch, rootThreads) : null;
     return {rootBatch, helperBatches, rootEvents};
-  }
+  };
 
-  hasMembers(binding: BindingRecord): boolean {
-    return this.options.teamStore.snapshot(binding).members.some(member => member.state !== "retired");
-  }
-
-  coordinatorPolicy(binding: BindingRecord): {maxHelpersPerRoot: number; readyHelpers: number; registeringHelpers: number} {
-    const snapshot = this.options.teamStore.snapshot(binding);
-    return {maxHelpersPerRoot: snapshot.settings.maxHelpersPerRoot,
-      readyHelpers: snapshot.members.filter(member => member.state === "ready").length,
-      registeringHelpers: snapshot.members.filter(member => member.state === "registering").length};
-  }
-
-  acknowledgeRootEvents(binding: BindingRecord, eventIds: readonly string[]): void {
-    for (const eventId of eventIds) this.options.teamStore.acknowledgeEvent(binding, binding.threadId, eventId);
-  }
-
-  /**
-   * Team effects that are still in flight: an unresolved team request, a notification being delivered and any helper request.
-   * A human stop waits only for these. A transfer is bookkeeping whose native effects are exactly its notices and requests,
-   * and review-only events and undelivered notices are superseded by the stop.
-   */
-  hasInflightEffects(binding: BindingRecord): boolean {
-    const snapshot = this.options.teamStore.snapshot(binding);
-    return this.options.teamStore.unresolvedRequests(binding).length > 0 ||
+  const hasInflightEffects = (binding: BindingRecord): boolean => {
+    const snapshot = teamStore.snapshot(binding);
+    return teamStore.unresolvedRequests(binding).length > 0 ||
       snapshot.notifications.some(notification => !notificationClosed(notification) && ["sending", "uncertain"].includes(notification.state)) ||
-      snapshot.members.some(member => this.options.requests.pending(binding.projectId, member.threadId) !== null);
-  }
-  hasBlockingWork(binding: BindingRecord): boolean {
-    const snapshot = this.options.teamStore.snapshot(binding);
+      snapshot.members.some(member => requests.pending(binding.projectId, member.threadId) !== null);
+  };
+  const hasBlockingWork = (binding: BindingRecord): boolean => {
+    const snapshot = teamStore.snapshot(binding);
     const members = new Map(snapshot.members.map(member => [member.threadId, member]));
     const hasUnsettledTransfer = snapshot.assignments.some(assignment => assignment.state === "transferring");
-    const hasUnresolvedEffect = this.options.teamStore.unresolvedRequests(binding).length > 0;
+    const hasUnresolvedEffect = teamStore.unresolvedRequests(binding).length > 0;
     const hasPendingNotification = snapshot.notifications.some(notification => !notificationClosed(notification) &&
       (["sending", "uncertain", "delivered"].includes(notification.state) || members.get(notification.recipientThreadId)?.state === "ready" &&
         members.get(notification.recipientThreadId)?.epoch === notification.memberEpoch));
@@ -333,482 +391,474 @@ export class SupervisorTeamRuntime {
       (event.severity === "attention" || event.severity === "result"));
     if (hasUnsettledTransfer || hasUnresolvedEffect || hasPendingNotification || hasUnreviewedEvent) return true;
     return snapshot.members.some(member => member.state === "registering" ||
-      this.options.requests.pending(binding.projectId, member.threadId) !== null);
-  }
+      requests.pending(binding.projectId, member.threadId) !== null);
+  };
 
-  private validHelper(member: TeamMember, binding: BindingRecord, projection: Projection): boolean {
-    return projection.thread.id === member.threadId && projection.thread.projectId === binding.projectId &&
+  const validHelper = (member: TeamMember, binding: BindingRecord, projection: Projection): boolean =>
+    projection.thread.id === member.threadId && projection.thread.projectId === binding.projectId &&
       projection.thread.lineage.relationshipToParent === "subagent" && projection.thread.lineage.parentThreadId === binding.threadId &&
       !projection.thread.archivedAt && !projection.thread.deletedAt;
-  }
 
-  private helperRequest(binding: BindingRecord, member: TeamMember): ConversationRequest | null {
-    return this.options.requests.pending(binding.projectId, member.threadId);
-  }
+  const helperRequest = (binding: BindingRecord, member: TeamMember): ConversationRequest | null => requests.pending(binding.projectId, member.threadId);
 
-  private currentRequest(binding: BindingRecord, requestId: string): TeamRequest | null {
-    return this.options.teamStore.unresolvedRequests(binding).find(request => request.requestId === requestId && request.requestId.startsWith("team-review:")) ?? null;
-  }
+  const currentRequest = (binding: BindingRecord, requestId: string): TeamRequest | null =>
+    teamStore.unresolvedRequests(binding).find(request => request.requestId === requestId && request.requestId.startsWith("team-review:")) ?? null;
 
-  private currentTargets(binding: BindingRecord, member: TeamMember, request: TeamRequest, threads: readonly ThreadInfo[]): boolean {
-    const parents = this.parentById(binding, threads);
+  const currentTargets = (binding: BindingRecord, member: TeamMember, request: TeamRequest, threads: readonly ThreadInfo[]): boolean => {
+    const parents = parentById(binding, threads);
     if (!parents || request.memberThreadId !== member.threadId || request.memberEpoch !== member.epoch) return false;
     if (!request.targets.length) return false;
     const targetIds = request.targets.map(target => target.targetThreadId).sort();
-    const pending = this.options.requests.pending(binding.projectId, member.threadId);
+    const pending = requests.pending(binding.projectId, member.threadId);
     if (!pending?.batch || JSON.stringify([...pending.batch.threads.map(thread => thread.threadId)].sort()) !== JSON.stringify(targetIds)) return false;
     return request.targets.every(target => {
-      const coverage = this.options.teamStore.coverage(binding, target.targetThreadId, parents);
+      const coverage = teamStore.coverage(binding, target.targetThreadId, parents);
       return coverage.state === "assigned" && coverage.actorThreadId === member.threadId && coverage.memberEpoch === member.epoch &&
         coverage.assignmentRootThreadId === target.assignmentRootThreadId && coverage.assignmentEpoch === target.assignmentEpoch;
     });
-  }
+  };
 
-  private async reconcileRequest(binding: BindingRecord, member: TeamMember, threads: readonly ThreadInfo[], signal: AbortSignal, observeOnly = false): Promise<void> {
-    const request = this.helperRequest(binding, member);
+  // a helper delivery admitted by the transport only while the main is not stopped and the member keeps the exact
+  // state and epoch read before; the transport evaluates it with the admission guard right before its receipt and POST
+  const deliveryAuthority = (binding: BindingRecord, member: TeamMember) => (guard: GateGuard) =>
+    !stoppedWith(guard, binding.mainThreadId) && memberUnchanged(binding, member);
+
+  const reconcileRequest = (binding: BindingRecord, member: TeamMember, threads: readonly ThreadInfo[], cancel: Cancel, observeOnly = false): Effect.Effect<void> => Effect.gen(function* () {
+    const request = helperRequest(binding, member);
     if (!request || request.id.startsWith("team-note:") || !request.id.startsWith("team-review:")) return;
-    const teamRequest = this.currentRequest(binding, request.id);
+    const teamRequest = currentRequest(binding, request.id);
     if (!teamRequest || teamRequest.memberThreadId !== member.threadId) return;
-    const projection = await this.readMemberProjection(binding, member, signal, observeOnly);
+    const projection = yield* readMemberProjection(binding, member, cancel, observeOnly);
     if (!projection) return;
-    if (!this.validHelper(member, binding, projection) || !this.options.teamStore.resolveActor(binding, member.threadId, teamRequest.memberEpoch)) return;
-    const message = projection.messages.find(item => item.threadId === member.threadId && this.options.helperTransport?.matchesMessage(binding, request.messageId, request.text, item, projection.messages));
+    if (!validHelper(member, binding, projection) || !teamStore.resolveActor(binding, member.threadId, teamRequest.memberEpoch)) return;
+    const message = yield* firstMatch(binding, request.messageId, request.text, projection, member.threadId);
     const run = projection.runs.find(item => item.threadId === member.threadId && (item.id === message?.runId || item.id === request.runId || item.userMessageId === message?.id));
     if (!run) {
-      if (this.unresolvedDeliveryTooLong(request)) this.serviceUnresolvedDelivery(binding, member.threadId, request);
-      if (observeOnly) {await this.observeUndeliveredRequest(binding, member, request, teamRequest.requestId, signal);return;}
-      if (["prepared", "uncertain", "waiting"].includes(request.state)) await this.dispatchHelperRequest(binding, member, request, teamRequest, threads, signal);
-      else if (request.state === "sending") this.options.requests.saveRequest({...request, state: "uncertain", error: "The helper request may have been accepted; its original native identity is retained."});
+      if (yield* unresolvedDeliveryTooLong(request)) serviceUnresolvedDelivery(binding, member.threadId, request);
+      if (observeOnly) {yield* observeUndeliveredRequest(binding, member, request, teamRequest.requestId, cancel);return;}
+      if (["prepared", "uncertain", "waiting"].includes(request.state)) yield* dispatchHelperRequest(binding, member, request, teamRequest, threads, cancel);
+      else if (request.state === "sending") requests.saveRequest({...request, state: "uncertain", error: "The helper request may have been accepted; its original native identity is retained."});
       return;
     }
-    if (request.runId !== run.id) {request.runId = run.id;this.options.requests.saveRequest(request);}
+    if (request.runId !== run.id) {request.runId = run.id;requests.saveRequest(request);}
     if (!terminal.has(run.status)) return;
     // the message was matched against the receipt's proven native rendering, so its text is not compared again
     const completed = run.status === "completed" && message !== undefined && run.userMessageId === message.id &&
       !projection.messages.some(item => item.runId === run.id && item.role === "user" && item.id !== message.id && typeof item.senderThreadId !== "string") &&
-      projection.messages.filter(item => item.runId === run.id && item.role === "assistant" && item.streaming !== true && typeof item.text === "string")
-        .sort((left, right) => Number(left.ordinal ?? 0) - Number(right.ordinal ?? 0)).at(-1)?.text?.includes(request.completionMarker) === true &&
-      hasCompletionMarker(projection.messages.filter(item => item.runId === run.id && item.role === "assistant" && item.streaming !== true && typeof item.text === "string")
-        .sort((left, right) => Number(left.ordinal ?? 0) - Number(right.ordinal ?? 0)).at(-1)?.text ?? "", request.completionMarker);
-    const current = completed && this.currentTargets(binding, member, teamRequest, threads);
+      lastAssistantText(projection, run.id)?.includes(request.completionMarker) === true &&
+      hasCompletionMarker(lastAssistantText(projection, run.id) ?? "", request.completionMarker);
+    const current = completed && currentTargets(binding, member, teamRequest, threads);
     const state = completed ? "completed" as const : "failed" as const;
     const error = current ? null : completed ? "Coverage changed during this check-in; pending activity remains for its current owner." : "The helper check-in ended without its exact completion marker; pending activity is retained.";
     const resultRequest = {...request, state, error};
-    this.options.store.store.transaction(() => {
-      if (current && request.batch) this.options.monitor.acknowledgeInTransaction(request.batch);
-      this.options.requests.saveRequest(resultRequest);
-      this.options.teamStore.settleRequest(binding, teamRequest.requestId);
+    store.store.transaction(() => {
+      if (current && request.batch) monitor.acknowledgeInTransaction(request.batch);
+      requests.saveRequest(resultRequest);
+      teamStore.settleRequest(binding, teamRequest.requestId);
       if (current && request.teamNotificationIds) for (const notificationId of request.teamNotificationIds) {
-        const notice = this.options.teamStore.snapshot(binding).notifications.find(value => value.id === notificationId);
-        if (notice?.kind === "note") this.options.teamStore.acknowledgeNotification(binding, member.threadId, notificationId, member.epoch);
+        const notice = teamStore.snapshot(binding).notifications.find(value => value.id === notificationId);
+        if (notice?.kind === "note") teamStore.acknowledgeNotification(binding, member.threadId, notificationId, member.epoch);
       }
     });
-    if (!current && !completed) this.serviceAttention(binding, member.threadId, resultRequest,
+    if (!current && !completed) serviceAttention(binding, member.threadId, resultRequest,
       "The helper check-in failed without an exact native completion marker. Review the failed request and use the team retry action before another check-in.");
-  }
+  });
 
   // a quarantined helper's check-in or readiness request without a delivery receipt never reached a POST (the
   // transport records a receipt first), including one interrupted between a revoked send and its failure. It fails
   // and settles only its own fence; anything with a receipt keeps its fence and nothing is resent.
-  private failNeverPostedRequests(binding: BindingRecord, member: TeamMember): void {
-    const unresolved = new Set(this.options.teamStore.unresolvedRequests(binding).map(value => value.requestId));
-    for (const request of this.options.requests.requests(binding.projectId, member.threadId)) {
+  const failNeverPostedRequests = (binding: BindingRecord, member: TeamMember) => Effect.gen(function* () {
+    const unresolved = new Set(teamStore.unresolvedRequests(binding).map(value => value.requestId));
+    for (const request of requests.requests(binding.projectId, member.threadId)) {
       if (request.kind !== "review" || !(request.id.startsWith("team-review:") || request.id.startsWith("team-ready:")) ||
-        this.options.helperTransport?.receiptText(binding, request.messageId) !== null) continue;
+        (transport ? yield* transport.receiptText(binding, request.messageId) : undefined) !== null) continue;
       const open = ["prepared", "sending", "waiting", "uncertain"].includes(request.state);
       if (!open && !(request.state === "failed" && unresolved.has(request.id))) continue;
       const failed = open ? {...request, state: "failed" as const,
         error: "The helper lost its authority before this request was posted; nothing was posted and pending activity is retained."} : request;
-      this.options.store.store.transaction(() => {
-        if (open) this.options.requests.saveRequest(failed);
-        if (unresolved.has(request.id)) this.options.teamStore.settleRequest(binding, request.id);
+      store.store.transaction(() => {
+        if (open) requests.saveRequest(failed);
+        if (unresolved.has(request.id)) teamStore.settleRequest(binding, request.id);
       });
-      if (open) this.serviceAttention(binding, member.threadId, failed, "A quarantined helper's request was never posted. Pending activity is retained; its other fences remain.");
+      if (open) serviceAttention(binding, member.threadId, failed, "A quarantined helper's request was never posted. Pending activity is retained; its other fences remain.");
     }
-  }
+  });
 
   /**
    * A helper request with no matching native run during stopped reconciliation: nothing is resent. A durable or native rejection
    * of its receipt proves it was not delivered, so it fails and releases its fence; otherwise its identity stays unresolved.
    */
-  private async observeUndeliveredRequest(binding: BindingRecord, member: TeamMember, request: ConversationRequest, teamRequestId: string, signal: AbortSignal): Promise<void> {
+  const observeUndeliveredRequest = (binding: BindingRecord, member: TeamMember, initial: ConversationRequest, teamRequestId: string, cancel: Cancel) => Effect.gen(function* () {
+    let request = initial;
     if (request.state === "sending") {
       request = {...request, state: "uncertain", error: "The helper request may have been accepted; its original native identity is retained."};
-      this.options.requests.saveRequest(request);
+      requests.saveRequest(request);
     }
-    if (!this.options.helperTransport || !this.consumeReadBudget(binding)) return;
+    if (!transport || !(yield* consumeReadBudget(binding))) return;
     const input = {threadId: member.threadId, commandId: `supervisor-review:${request.id}`, messageId: request.messageId, text: request.text};
-    if (await this.options.helperTransport.reconcileDelivery(binding, input, signal) !== "rejected") return;
+    if ((yield* transport.reconcileDelivery(binding, input, cancel)) !== "rejected") return;
     const failed = {...request, state: "failed" as const, failureAcknowledged: true,
       error: "Supervision was stopped for this chat; the native delivery of this helper request was rejected, so it was not delivered."};
-    this.options.store.store.transaction(() => {
-      this.options.requests.saveRequest(failed);
-      if (this.options.teamStore.unresolvedRequests(binding).some(value => value.requestId === teamRequestId)) this.options.teamStore.settleRequest(binding, teamRequestId);
+    store.store.transaction(() => {
+      requests.saveRequest(failed);
+      if (teamStore.unresolvedRequests(binding).some(value => value.requestId === teamRequestId)) teamStore.settleRequest(binding, teamRequestId);
     });
-  }
+  });
 
-  /**
-   * Observation-only reconciliation while a human has stopped supervision of this chat, also while supervision is disabled.
-   * Nothing is sent, retried or retired: requests and notices that were never posted are fenced, accepted helper check-ins
-   * and notices are matched to their native outcome, lost members close their work and finished transfers complete, so stop
-   * settlement never waits only because ordinary processing is skipped. An effect whose delivery cannot be proven either way
-   * keeps its identity and remains unresolved.
-   */
-  async reconcileStopped(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
+  const reconcileStopped = (binding: BindingRecord, threads: readonly ThreadInfo[], cancel?: Cancel) => Effect.gen(function* () {
     // each stopped cycle observes with its own bounded read budget, so a delayed native outcome is still seen later
-    this.startCycle(binding);
-    let snapshot = this.options.teamStore.snapshot(binding);
-    for (const member of snapshot.members) this.failNeverPostedRequests(binding, member);
+    yield* startCycle(binding);
+    let snapshot = teamStore.snapshot(binding);
+    for (const member of snapshot.members) yield* failNeverPostedRequests(binding, member);
     for (const member of snapshot.members.filter(value => value.state === "missing" || value.state === "retired"))
-      await this.loseMember(binding, member, signal, `The helper is already ${member.state}; its check-in was closed and pending operational effects remain fenced.`, false);
-    snapshot = this.options.teamStore.snapshot(binding);
-    for (let index = 0; index < snapshot.notifications.length && !signal.aborted; index++) await this.reconcileNotifications(binding, this.options.teamStore.snapshot(binding), signal, true);
-    for (const member of this.options.teamStore.snapshot(binding).members.filter(value => value.state === "ready" || value.state === "registering")) {
-      if (signal.aborted) return;
-      const request = this.helperRequest(binding, member);
+      yield* loseMember(binding, member, cancel, `The helper is already ${member.state}; its check-in was closed and pending operational effects remain fenced.`, false);
+    snapshot = teamStore.snapshot(binding);
+    for (let index = 0; index < snapshot.notifications.length && !(yield* cancelled(cancel)); index++) yield* reconcileNotifications(binding, teamStore.snapshot(binding), cancel, true);
+    for (const member of teamStore.snapshot(binding).members.filter(value => value.state === "ready" || value.state === "registering")) {
+      if (yield* cancelled(cancel)) return;
+      const request = helperRequest(binding, member);
       if (!request) continue;
-      if (request.id.startsWith("team-ready:")) await this.reconcileReadiness(binding, member, request, signal, true);
-      else if (member.state === "ready") await this.reconcileRequest(binding, member, threads, signal, true);
+      if (request.id.startsWith("team-ready:")) yield* reconcileReadiness(binding, member, request, cancel, true);
+      else if (member.state === "ready") yield* reconcileRequest(binding, member, threads, cancel, true);
     }
-    const transfers = this.options.teamStore.snapshot(binding).assignments.filter(assignment => assignment.state === "transferring").length;
-    for (let index = 0; index < transfers; index++) this.completeTransfer(binding);
-  }
+    const transfers = teamStore.snapshot(binding).assignments.filter(assignment => assignment.state === "transferring").length;
+    for (let index = 0; index < transfers; index++) yield* completeTransfer(binding);
+  });
 
-  async reconcile(binding: BindingRecord, threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
-    let snapshot = this.options.teamStore.snapshot(binding);
+  const reconcile = (binding: BindingRecord, threads: readonly ThreadInfo[], cancel?: Cancel) => Effect.gen(function* () {
+    let snapshot = teamStore.snapshot(binding);
     for (const member of snapshot.members.filter(value => value.state === "missing" || value.state === "retired"))
-      await this.loseMember(binding, member, signal, `The helper is already ${member.state}; its check-in was closed and pending operational effects remain fenced.`);
+      yield* loseMember(binding, member, cancel, `The helper is already ${member.state}; its check-in was closed and pending operational effects remain fenced.`);
     for (const member of snapshot.members.filter(value => value.state === "quarantined")) {
-      this.failNeverPostedRequests(binding, member);
-      await this.retireHelper(binding, member.threadId, signal);
+      yield* failNeverPostedRequests(binding, member);
+      yield* retireHelper(binding, member.threadId, cancel);
     }
-    await this.reconcileNotifications(binding, snapshot, signal);
-    snapshot = this.options.teamStore.snapshot(binding);
+    yield* reconcileNotifications(binding, snapshot, cancel);
+    snapshot = teamStore.snapshot(binding);
     const members = snapshot.members.filter(member => member.state === "ready" || member.state === "registering");
-    if (!members.length) {this.completeTransfer(binding);return;}
-    const offset = this.helperOffset.get(binding.threadId) ?? 0;
+    if (!members.length) {yield* completeTransfer(binding);return;}
+    const offset = yield* offsetOf(helperOffset, binding.threadId);
     const ordered = [...members.slice(offset % members.length), ...members.slice(0, offset % members.length)];
     for (const member of ordered) {
-      if (signal.aborted) return;
-      const request = this.helperRequest(binding, member);
+      if (yield* cancelled(cancel)) return;
+      const request = helperRequest(binding, member);
       if (request) {
-        if (request.id.startsWith("team-ready:")) await this.reconcileReadiness(binding, member, request, signal);
-        else if (member.state === "ready") await this.reconcileRequest(binding, member, threads, signal);
-      } else if (member.state === "registering" && !this.hasUnacknowledgedFailure(binding, member.threadId)) await this.startReadiness(binding, member, signal);
-      this.helperOffset.set(binding.threadId, (members.indexOf(member) + 1) % members.length);
-      this.completeTransfer(binding);
+        if (request.id.startsWith("team-ready:")) yield* reconcileReadiness(binding, member, request, cancel);
+        else if (member.state === "ready") yield* reconcileRequest(binding, member, threads, cancel);
+      } else if (member.state === "registering" && !hasUnacknowledgedFailure(binding, member.threadId)) yield* startReadiness(binding, member, cancel);
+      yield* setOffset(helperOffset, binding.threadId, (members.indexOf(member) + 1) % members.length);
+      yield* completeTransfer(binding);
       return;
     }
-    this.completeTransfer(binding);
-  }
+    yield* completeTransfer(binding);
+  });
 
-  private async startReadiness(binding: BindingRecord, member: TeamMember, signal: AbortSignal): Promise<void> {
-    if (!this.options.helperTransport) return;
-    const now = Date.now();
-    if (now - (this.options.requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
+  const startReadiness = (binding: BindingRecord, member: TeamMember, cancel: Cancel) => Effect.gen(function* () {
+    if (!transport) return;
+    const now = yield* Clock.currentTimeMillis;
+    if (now - (requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
     const readinessKey = fingerprint([binding.threadId, member.threadId, member.epoch]).slice(0, 24);
-    const requestId = `team-ready:${readinessKey}:${randomUUID()}`;
+    const requestId = `team-ready:${readinessKey}:${yield* ids.uuid}`;
     const completionMarker = `Supervisor team readiness ${requestId} completed`;
     const operationId = `team-ready:${readinessKey}`;
     const text = `${helperRole}\nThis is the bounded service readiness check. Confirm that you understand the helper role and current root binding; do not inspect or guide operational children in this turn. Call direct alias t3-supervisor-workflows.supervision_team (or direct MCPX alias mcpx.mcpx_call_tool / mcp__mcpx__mcpx_call_tool with name "t3-supervisor-workflows__supervision_team" and arguments equal to the complete schema object) using action "ready" and exactly these arguments: supervisorThreadId=${JSON.stringify(member.threadId)}, bindingGeneration=${binding.generation}, memberEpoch=${member.epoch}, operationId=${JSON.stringify(operationId)}. Then finish with this exact marker: ${completionMarker}.`;
-    const request = this.options.requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: member.threadId,
+    const request = requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: member.threadId,
       kind: "review", taskId: null, text, batch: null, completionMarker, teamMemberEpoch: member.epoch}, now);
-    await this.dispatchReadiness(binding, member, request, signal);
-  }
+    yield* dispatchReadiness(binding, member, request, cancel);
+  });
 
-  private async dispatchReadiness(binding: BindingRecord, member: TeamMember, request: ConversationRequest, signal: AbortSignal): Promise<void> {
-    if (!this.options.helperTransport || !["prepared", "uncertain", "waiting"].includes(request.state)) return;
-    if (request.state === "prepared" && Date.now() - (this.options.requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
-    if (!this.consumeReadBudget(binding)) return;
-    const attemptedAt = Date.now();
+  const dispatchReadiness = (binding: BindingRecord, member: TeamMember, request: ConversationRequest, cancel: Cancel) => Effect.gen(function* () {
+    if (!transport || !["prepared", "uncertain", "waiting"].includes(request.state)) return;
+    if (request.state === "prepared" && (yield* Clock.currentTimeMillis) - (requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
+    if (!(yield* consumeReadBudget(binding))) return;
+    const attemptedAt = yield* Clock.currentTimeMillis;
     const sentAt = request.sentAt ?? attemptedAt;
-    this.options.store.store.transaction(() => {
-      this.options.requests.saveRequest({...request, state: "sending", sentAt});
-      if (request.sentAt === null) this.options.requests.noticeSent(member.threadId, attemptedAt);
+    store.store.transaction(() => {
+      requests.saveRequest({...request, state: "sending", sentAt});
+      if (request.sentAt === null) requests.noticeSent(member.threadId, attemptedAt);
     });
-    const result: SupervisorHelperSendResult = await this.options.helperTransport.send(binding, {threadId: member.threadId, commandId: `supervisor-review:${request.id}`,
-      messageId: request.messageId, text: request.text}, signal, () => {
-      const current = this.options.teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
-      return !this.stopped(binding) && current?.state === member.state && current.epoch === member.epoch;
-    });
+    const result: SupervisorHelperSendResult = yield* transport.send(binding, {threadId: member.threadId, commandId: `supervisor-review:${request.id}`,
+      messageId: request.messageId, text: request.text}, {cancel, authorized: deliveryAuthority(binding, member)});
     if (result === "waiting") {
       const waiting = {...request, state: "waiting" as const, sentAt, error: null};
-      this.options.requests.saveRequest(waiting);
-      if (this.unresolvedDeliveryTooLong(waiting)) this.serviceUnresolvedDelivery(binding, member.threadId, waiting);
+      requests.saveRequest(waiting);
+      if (yield* unresolvedDeliveryTooLong(waiting)) serviceUnresolvedDelivery(binding, member.threadId, waiting);
     }
-    else if (result === "busy") this.options.requests.saveRequest({...request, state: request.sentAt === null ? "prepared" : "uncertain",
+    else if (result === "busy") requests.saveRequest({...request, state: request.sentAt === null ? "prepared" : "uncertain",
       sentAt: request.sentAt, error: "The helper is busy or its delivery transport is unavailable; readiness keeps its identity and will wait."});
     else if (result === "rejected" || result === "revoked") {
       const failed = {...request, state: "failed" as const, sentAt, error: result === "revoked"
         ? "The helper lost its authority before the readiness delivery was posted; nothing was posted." : "T3 rejected the exact helper readiness delivery."};
-      this.options.requests.saveRequest(failed);
-      this.serviceAttention(binding, member.threadId, failed, "The helper readiness delivery was rejected. Review the failed request and use the team retry action before another readiness attempt.");
+      requests.saveRequest(failed);
+      serviceAttention(binding, member.threadId, failed, "The helper readiness delivery was rejected. Review the failed request and use the team retry action before another readiness attempt.");
     }
     else {
       const uncertain = {...request, state: "uncertain" as const, sentAt, error: "Helper readiness delivery is uncertain; its original native identity is retained."};
-      this.options.requests.saveRequest(uncertain);
-      if (this.unresolvedDeliveryTooLong(uncertain)) this.serviceUnresolvedDelivery(binding, member.threadId, uncertain);
+      requests.saveRequest(uncertain);
+      if (yield* unresolvedDeliveryTooLong(uncertain)) serviceUnresolvedDelivery(binding, member.threadId, uncertain);
     }
-  }
+  });
 
-  private async reconcileReadiness(binding: BindingRecord, member: TeamMember, request: ConversationRequest, signal: AbortSignal, observeOnly = false): Promise<void> {
-    const projection = await this.readMemberProjection(binding, member, signal, observeOnly);
-    if (!projection || !this.validHelper(member, binding, projection)) return;
-    const message = projection.messages.find(item => item.threadId === member.threadId && this.options.helperTransport?.matchesMessage(binding, request.messageId, request.text, item, projection.messages));
+  const reconcileReadiness = (binding: BindingRecord, member: TeamMember, request: ConversationRequest, cancel: Cancel, observeOnly = false) => Effect.gen(function* () {
+    const projection = yield* readMemberProjection(binding, member, cancel, observeOnly);
+    if (!projection || !validHelper(member, binding, projection)) return;
+    const message = yield* firstMatch(binding, request.messageId, request.text, projection, member.threadId);
     const run = projection.runs.find(item => item.threadId === member.threadId && (item.id === message?.runId || item.id === request.runId || item.userMessageId === message?.id));
     if (!run) {
-      if (this.unresolvedDeliveryTooLong(request)) this.serviceUnresolvedDelivery(binding, member.threadId, request);
-      if (observeOnly) {await this.observeUndeliveredRequest(binding, member, request, request.id, signal);return;}
-      if (["prepared", "uncertain", "waiting"].includes(request.state)) await this.dispatchReadiness(binding, member, request, signal);
-      else if (request.state === "sending") this.options.requests.saveRequest({...request, state: "uncertain", error: "Helper readiness may have been accepted; its original native identity is retained."});
+      if (yield* unresolvedDeliveryTooLong(request)) serviceUnresolvedDelivery(binding, member.threadId, request);
+      if (observeOnly) {yield* observeUndeliveredRequest(binding, member, request, request.id, cancel);return;}
+      if (["prepared", "uncertain", "waiting"].includes(request.state)) yield* dispatchReadiness(binding, member, request, cancel);
+      else if (request.state === "sending") requests.saveRequest({...request, state: "uncertain", error: "Helper readiness may have been accepted; its original native identity is retained."});
       return;
     }
-    if (request.runId !== run.id) {request.runId = run.id;this.options.requests.saveRequest(request);}
+    if (request.runId !== run.id) {request.runId = run.id;requests.saveRequest(request);}
     if (!terminal.has(run.status)) return;
-    const finalText = projection.messages.filter(item => item.runId === run.id && item.role === "assistant" && item.streaming !== true && typeof item.text === "string")
-      .sort((left, right) => Number(left.ordinal ?? 0) - Number(right.ordinal ?? 0)).at(-1)?.text ?? "";
+    const finalText = lastAssistantText(projection, run.id) ?? "";
     const nativeComplete = run.status === "completed" && message !== undefined && run.userMessageId === message.id &&
       !projection.messages.some(item => item.runId === run.id && item.role === "user" && item.id !== message.id && typeof item.senderThreadId !== "string") &&
       hasCompletionMarker(finalText, request.completionMarker);
-    const current = this.options.teamStore.snapshot(binding).members.find(item => item.threadId === member.threadId);
+    const current = teamStore.snapshot(binding).members.find(item => item.threadId === member.threadId);
     const ready = Boolean(nativeComplete && request.teamMemberEpoch !== undefined && current?.state === "ready" && current.epoch === request.teamMemberEpoch + 1);
     const failed = {...request, state: ready ? "completed" as const : "failed" as const,
       error: ready ? null : "The readiness check-in ended without a confirmed native ready call and completion marker."};
-    this.options.requests.saveRequest(failed);
-    if (!ready) this.serviceAttention(binding, member.threadId, failed,
+    requests.saveRequest(failed);
+    if (!ready) serviceAttention(binding, member.threadId, failed,
       "The helper readiness check-in ended without its exact native ready evidence and completion marker. Review the failed request and use the team retry action before another readiness attempt.");
-  }
+  });
 
-  private completeTransfer(binding: BindingRecord): void {
-    const transfers = this.options.teamStore.snapshot(binding).assignments.filter(assignment => assignment.state === "transferring");
+  const completeTransfer = (binding: BindingRecord) => Effect.gen(function* () {
+    const transfers = teamStore.snapshot(binding).assignments.filter(assignment => assignment.state === "transferring");
     if (!transfers.length) return;
-    const offset = (this.transferOffset.get(binding.threadId) ?? 0) % transfers.length;
+    const offset = (yield* offsetOf(transferOffset, binding.threadId)) % transfers.length;
     const assignment = transfers[offset]!;
-    try {this.options.teamStore.completeTransfer(binding, assignment.subtreeRootThreadId, assignment.epoch);}
+    try {teamStore.completeTransfer(binding, assignment.subtreeRootThreadId, assignment.epoch);}
     catch { /* unresolved notifications or requests keep this transfer pending */ }
-    this.transferOffset.set(binding.threadId, (offset + 1) % transfers.length);
-  }
+    yield* setOffset(transferOffset, binding.threadId, (offset + 1) % transfers.length);
+  });
 
-  private notificationNeedsAttention(notification: TeamNotification): boolean {
-    return (this.options.now?.() ?? Date.now()) - notification.createdAt >= SUPERVISOR_MONITOR_COOLDOWN_MS;
-  }
+  const notificationNeedsAttention = (notification: TeamNotification) =>
+    Effect.map(Clock.currentTimeMillis, (now) => now - notification.createdAt >= SUPERVISOR_MONITOR_COOLDOWN_MS);
 
-  private updateNotificationDelivery(binding: BindingRecord, notification: TeamNotification, state: "sending" | "delivered" | "uncertain"): boolean {
+  const updateNotificationDelivery = (binding: BindingRecord, notification: TeamNotification, state: "sending" | "delivered" | "uncertain") =>
+    Effect.map(Clock.currentTimeMillis, (now) => {
+      try {
+        teamStore.updateNotificationDelivery(binding, binding.threadId, notification.id, state, now, notification.deliveryAttempt ?? 0);
+        return true;
+      } catch { return false; }
+    });
+
+  const markNotificationRejected = (binding: BindingRecord, notification: TeamNotification,
+    reason = "The native webhook delivery was definitively rejected."): boolean => {
     try {
-      this.options.teamStore.updateNotificationDelivery(binding, binding.threadId, notification.id, state, Date.now(), notification.deliveryAttempt ?? 0);
+      teamStore.markNotificationRejected(binding, binding.threadId, notification.id, reason, notification.deliveryAttempt ?? 0);
       return true;
     } catch { return false; }
-  }
+  };
 
-  private markNotificationRejected(binding: BindingRecord, notification: TeamNotification,
-    reason = "The native webhook delivery was definitively rejected."): boolean {
-    try {
-      this.options.teamStore.markNotificationRejected(binding, binding.threadId, notification.id, reason, notification.deliveryAttempt ?? 0);
-      return true;
-    } catch { return false; }
-  }
-
-  private serviceNotificationAttention(binding: BindingRecord, notification: TeamNotification): void {
+  const serviceNotificationAttention = (binding: BindingRecord, notification: TeamNotification): void => {
     const attempt = notification.deliveryAttempt ?? 0;
     const summary = "A helper handover notice has no visible completion marker after bounded reconciliation. Preserve its identity and handover fence; do not infer acknowledgment or retry with a new ID. The team read lists its exact notification and attempt.";
-    this.emitServiceAttention(binding,
+    emitServiceAttention(binding,
       `helper-notification-unresolved:${fingerprint([binding.threadId, binding.generation, notification.id, attempt]).slice(0, 32)}`,
       notification.recipientThreadId, notification.assignmentRootThreadId ?? undefined, summary);
-  }
+  };
 
   // an attempt with a delivery receipt is identified by the exact bytes it sent, so a later wording change
   // cannot orphan it; generated text only applies to an attempt that has never been posted.
-  private noticeText(binding: BindingRecord, notification: TeamNotification): {text: string; marker: string; messageId: string} {
+  const noticeText = (binding: BindingRecord, notification: TeamNotification) => Effect.gen(function* () {
     const messageId = `supervisor-team-notice:${notification.id}:attempt:${notification.deliveryAttempt}`;
     const generated = teamNotificationText(binding, notification);
-    return {text: this.options.helperTransport?.receiptText(binding, messageId) ?? generated.text, marker: generated.marker, messageId};
-  }
+    return {text: (transport ? yield* transport.receiptText(binding, messageId) : null) ?? generated.text, marker: generated.marker, messageId};
+  });
 
-  private noticeEvidence(binding: BindingRecord, projection: Projection, notification: TeamNotification) {
-    const {text, marker, messageId} = this.noticeText(binding, notification);
-    return teamNotificationEvidence(projection, notification, marker,
-      message => this.options.helperTransport?.matchesMessage(binding, messageId, text, message, projection.messages) === true);
-  }
-
-  private notificationRunCompleted(projection: Projection, notification: TeamNotification, binding: BindingRecord): string | null {
-    return this.noticeEvidence(binding, projection, notification).completedRun?.id ?? null;
-  }
+  const noticeEvidence = (binding: BindingRecord, projection: Projection, notification: TeamNotification) => Effect.gen(function* () {
+    const {text, marker, messageId} = yield* noticeText(binding, notification);
+    const matched = yield* matchedMessages(binding, messageId, text, projection.messages,
+      message => message.threadId === notification.recipientThreadId && message.role === "user");
+    return teamNotificationEvidence(projection, notification, marker, message => matched.has(message));
+  });
 
   // closure repeats the creation-time native check on the current projection: an attempt whose message has a
   // running, missing or marker-completed run is not closed by the review and keeps its own fence.
-  private nativelyClosable(binding: BindingRecord, projection: Projection, review: TeamNotification): HandoverAttempt[] {
-    const notifications = this.options.teamStore.snapshot(binding).notifications;
-    return (review.reviewChain ?? []).filter(entry => {
+  const nativelyClosable = (binding: BindingRecord, projection: Projection, review: TeamNotification) => Effect.gen(function* () {
+    const notifications = teamStore.snapshot(binding).notifications;
+    const closable: HandoverAttempt[] = [];
+    for (const entry of review.reviewChain ?? []) {
       const member = notifications.find(value => value.id === entry.notificationId && value.deliveryAttempt === entry.deliveryAttempt);
-      if (!member) return false;
-      const evidence = this.noticeEvidence(binding, projection, member);
-      return Boolean(evidence.message) && !evidence.completedRun && evidence.runs.some(run => run.id === entry.runId) &&
-        evidence.runs.every(run => endedWithoutCompletion.has(run.status));
-    });
-  }
+      if (!member) continue;
+      const evidence = yield* noticeEvidence(binding, projection, member);
+      if (Boolean(evidence.message) && !evidence.completedRun && evidence.runs.some(run => run.id === entry.runId) &&
+        evidence.runs.every(run => endedWithoutCompletion.has(run.status))) closable.push(entry);
+    }
+    return closable;
+  });
 
   // a delivered attempt whose native run ended without its marker is recorded and surfaced once; it is never resent or relabelled
-  private notificationRunEnded(binding: BindingRecord, projection: Projection, notification: TeamNotification): boolean {
-    const evidence = this.noticeEvidence(binding, projection, notification);
+  const notificationRunEnded = (binding: BindingRecord, projection: Projection, notification: TeamNotification) => Effect.gen(function* () {
+    const evidence = yield* noticeEvidence(binding, projection, notification);
     if (evidence.completedRun || !evidence.runs.length || evidence.runs.some(item => !endedWithoutCompletion.has(item.status))) return false;
     const run = evidence.runs.find(item => item.id === notification.observedRun?.runId) ??
       [...evidence.runs].sort((left, right) => right.ordinal - left.ordinal)[0]!;
     try {
-      this.options.teamStore.recordNotificationRun(binding, binding.threadId, notification.id, notification.deliveryAttempt ?? 0, {runId: run.id, status: run.status});
+      teamStore.recordNotificationRun(binding, binding.threadId, notification.id, notification.deliveryAttempt ?? 0, {runId: run.id, status: run.status});
     } catch { return false; }
     const attempt = notification.deliveryAttempt ?? 0;
-    this.emitServiceAttention(binding,
+    emitServiceAttention(binding,
       `helper-notification-interrupted:${fingerprint([binding.threadId, binding.generation, notification.id, attempt, run.id]).slice(0, 32)}`,
       notification.recipientThreadId, notification.assignmentRootThreadId ?? undefined,
       `A delivered helper handover notice's native run ended ${run.status} before confirming. Its effects are unknown: the handover stays fenced, the root keeps responsibility, and nothing was resent. Read the team for its exact notification, attempt and observed run, then use the root review_handover action to inspect all unresolved attempts, or consider reassignment or quarantine.`);
     return true;
-  }
+  });
 
-  private async reconcileNotifications(binding: BindingRecord, snapshot: SupervisorTeamSnapshot, signal: AbortSignal, observeOnly = false): Promise<void> {
-    if (!this.options.helperTransport) return;
+  const reconcileNotifications = (binding: BindingRecord, snapshot: SupervisorTeamSnapshot, cancel: Cancel, observeOnly = false): Effect.Effect<void> => Effect.gen(function* () {
+    if (!transport) return;
     // while stopped only notices already being delivered are observed; a notice not yet attempted is never sent
     const candidates = snapshot.notifications.filter(notification => notification.state !== "acknowledged" && notification.state !== "superseded" && notification.state !== "failed" &&
       snapshot.members.some(member => member.threadId === notification.recipientThreadId &&
         (["sending", "uncertain", "delivered"].includes(notification.state) || !observeOnly && member.state === "ready" && member.epoch === notification.memberEpoch)));
     if (!candidates.length) return;
-    const offset = (this.notificationOffset.get(binding.threadId) ?? 0) % candidates.length;
+    const offset = (yield* offsetOf(notificationOffset, binding.threadId)) % candidates.length;
     const notification = candidates[offset]!;
-    this.notificationOffset.set(binding.threadId, (offset + 1) % candidates.length);
+    yield* setOffset(notificationOffset, binding.threadId, (offset + 1) % candidates.length);
     const member = snapshot.members.find(value => value.threadId === notification.recipientThreadId);
     if (!member) return;
-    const {text, messageId} = this.noticeText(binding, notification);
-    const message = {threadId: member.threadId, commandId: messageId, messageId, text};
-    const attempted = ["sending", "uncertain"].includes(notification.state) && this.options.helperTransport.hasDelivery(binding, message);
+    const {text, messageId} = yield* noticeText(binding, notification);
+    const message: SupervisorHelperMessage = {threadId: member.threadId, commandId: messageId, messageId, text};
+    const attempted = ["sending", "uncertain"].includes(notification.state) && (yield* transport.hasDelivery(binding, message));
     // membership can change during any await (for example a root quarantine), so eligibility is always re-read
     const eligible = () => {
-      const current = this.options.teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
+      const current = teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
       return current?.state === "ready" && current.epoch === notification.memberEpoch;
     };
     // the transport records a receipt before any POST, so an attempted notice without one was never posted
-    const neverPosted = () => ["sending", "uncertain"].includes(notification.state) && this.options.helperTransport?.receiptText(binding, messageId) === null;
+    const neverPosted = () => Effect.gen(function* () {
+      return ["sending", "uncertain"].includes(notification.state) && (yield* transport.receiptText(binding, messageId)) === null;
+    });
     const neverPostedReason = "The notice was never posted: no delivery receipt exists and its recipient is no longer eligible.";
     // a non-ready member is only observed here: a lost conversation must not turn quarantine into missing
-    const projection = await this.readMemberProjection(binding, member, signal, observeOnly || member.state !== "ready");
-    if (!projection || !this.validHelper(member, binding, projection)) {
+    const projection = yield* readMemberProjection(binding, member, cancel, observeOnly || member.state !== "ready");
+    if (!projection || !validHelper(member, binding, projection)) {
       // a durable or native rejection of an attempted POST needs no helper read; reconcile it read-only so an
       // archived, deleted or no longer eligible helper cannot strand a definitely undelivered notice
-      if (attempted && this.consumeReadBudget(binding) &&
-        await this.options.helperTransport.reconcileDelivery(binding, message, signal) === "rejected") this.markNotificationRejected(binding, notification);
-      else if (!eligible() && neverPosted()) this.markNotificationRejected(binding, notification, neverPostedReason);
+      if (attempted && (yield* consumeReadBudget(binding)) &&
+        (yield* transport.reconcileDelivery(binding, message, cancel)) === "rejected") markNotificationRejected(binding, notification);
+      else if (!eligible() && (yield* neverPosted())) markNotificationRejected(binding, notification, neverPostedReason);
       return;
     }
-    const visible = projection.messages.some(item => item.threadId === member.threadId && this.options.helperTransport?.matchesMessage(binding, messageId, text, item, projection.messages));
+    const visible = (yield* firstMatch(binding, messageId, text, projection, member.threadId)) !== undefined;
     if (visible) {
-      if (notification.state === "pending" && !this.updateNotificationDelivery(binding, notification, "sending")) return;
+      if (notification.state === "pending" && !(yield* updateNotificationDelivery(binding, notification, "sending"))) return;
       if (["pending", "sending", "uncertain"].includes(notification.state))
-        if (!this.updateNotificationDelivery(binding, notification, "delivered")) return;
-      const completedRunId = this.notificationRunCompleted(projection, notification, binding);
+        if (!(yield* updateNotificationDelivery(binding, notification, "delivered"))) return;
+      const completedRunId = (yield* noticeEvidence(binding, projection, notification)).completedRun?.id ?? null;
       if (completedRunId) {
-        try {
-          this.options.teamStore.acknowledgeNotificationRun(binding, binding.threadId, notification.id, notification.deliveryAttempt, completedRunId, Date.now(),
-            notification.reviewOf ? this.nativelyClosable(binding, projection, notification) : []);
-        } catch { /* a retried or reassigned notification keeps its current attempt */ }
+        // a retried or reassigned notification keeps its current attempt
+        yield* Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
+          const closable = notification.reviewOf ? yield* nativelyClosable(binding, projection, notification) : [];
+          teamStore.acknowledgeNotificationRun(binding, binding.threadId, notification.id, notification.deliveryAttempt, completedRunId, now, closable);
+        }).pipe(otherwise(undefined));
       }
       else if (notification.resolvedByReview) return;
-      else if (this.notificationRunEnded(binding, projection, notification)) return;
-      else if (this.notificationNeedsAttention(notification)) this.serviceNotificationAttention(binding, notification);
+      else if (yield* notificationRunEnded(binding, projection, notification)) return;
+      else if (yield* notificationNeedsAttention(notification)) serviceNotificationAttention(binding, notification);
       return;
     }
     if (notification.state === "delivered") {
-      if (this.notificationNeedsAttention(notification)) this.serviceNotificationAttention(binding, notification);
+      if (yield* notificationNeedsAttention(notification)) serviceNotificationAttention(binding, notification);
       return;
     }
     // the transport durably records an attempt before POST. With a receipt, a review is never sent again:
     // it only reconciles that receipt read-only, so durable or native rejection evidence still fails it
     // after a crash. Without one, a busy/pre-send crash has not posted anything and ordinary delivery runs.
     if (notification.kind === "handover_review" && attempted) {
-      if (!this.consumeReadBudget(binding)) return;
-      const receipt = await this.options.helperTransport.reconcileDelivery(binding, message, signal);
-      if (receipt === "rejected") this.markNotificationRejected(binding, notification);
-      else if (this.notificationNeedsAttention(notification)) this.serviceNotificationAttention(binding, notification);
+      if (!(yield* consumeReadBudget(binding))) return;
+      const outcome = yield* transport.reconcileDelivery(binding, message, cancel);
+      if (outcome === "rejected") markNotificationRejected(binding, notification);
+      else if (yield* notificationNeedsAttention(notification)) serviceNotificationAttention(binding, notification);
       return;
     }
     if (!eligible()) {
-      if (neverPosted()) this.markNotificationRejected(binding, notification, neverPostedReason);
+      if (yield* neverPosted()) markNotificationRejected(binding, notification, neverPostedReason);
       return;
     }
     if (observeOnly) {
       // a stop supersedes a notice that was never posted; an attempted one is only reconciled read-only from its receipt
-      if (neverPosted()) this.markNotificationRejected(binding, notification, "Supervision was stopped for this chat before this notice was posted; it was not posted.");
-      else if (attempted && this.consumeReadBudget(binding) &&
-        await this.options.helperTransport.reconcileDelivery(binding, message, signal) === "rejected") this.markNotificationRejected(binding, notification);
+      if (yield* neverPosted()) markNotificationRejected(binding, notification, "Supervision was stopped for this chat before this notice was posted; it was not posted.");
+      else if (attempted && (yield* consumeReadBudget(binding)) &&
+        (yield* transport.reconcileDelivery(binding, message, cancel)) === "rejected") markNotificationRejected(binding, notification);
       return;
     }
-    if (!this.consumeReadBudget(binding)) return;
-    if (notification.state === "sending" && !this.updateNotificationDelivery(binding, notification, "uncertain")) return;
-    if (!this.updateNotificationDelivery(binding, notification, "sending")) return;
-    const result = await this.options.helperTransport.send(binding, {threadId: member.threadId,
+    if (!(yield* consumeReadBudget(binding))) return;
+    if (notification.state === "sending" && !(yield* updateNotificationDelivery(binding, notification, "uncertain"))) return;
+    if (!(yield* updateNotificationDelivery(binding, notification, "sending"))) return;
+    const result = yield* transport.send(binding, {threadId: member.threadId,
       commandId: `supervisor-team-notice:${notification.id}:attempt:${notification.deliveryAttempt ?? 0}`,
-      messageId, text}, signal, () => !this.stopped(binding) && eligible());
-    this.options.requests.noticeSent(member.threadId, Date.now());
+      messageId, text}, {cancel, authorized: (guard) => !stoppedWith(guard, binding.mainThreadId) && eligible()});
+    requests.noticeSent(member.threadId, yield* Clock.currentTimeMillis);
     if (result !== "waiting") {
       if (result === "rejected") {
-        this.markNotificationRejected(binding, notification);
+        markNotificationRejected(binding, notification);
       } else if (result === "revoked") {
-        this.markNotificationRejected(binding, notification, this.stopped(binding)
+        markNotificationRejected(binding, notification, (yield* stopped(binding))
           ? "Supervision was stopped for this chat before this notice was posted; it was not posted." : neverPostedReason);
       } else {
-        if (!this.updateNotificationDelivery(binding, notification, "uncertain")) return;
-        if (this.notificationNeedsAttention(notification)) this.serviceNotificationAttention(binding, notification);
+        if (!(yield* updateNotificationDelivery(binding, notification, "uncertain"))) return;
+        if (yield* notificationNeedsAttention(notification)) serviceNotificationAttention(binding, notification);
       }
       return;
     }
-    const fresh = await this.readMemberProjection(binding, member, signal);
+    const fresh = yield* readMemberProjection(binding, member, cancel);
     if (!fresh) {
-      if (!this.updateNotificationDelivery(binding, notification, "uncertain")) return;
-      if (this.notificationNeedsAttention(notification)) this.serviceNotificationAttention(binding, notification);
+      if (!(yield* updateNotificationDelivery(binding, notification, "uncertain"))) return;
+      if (yield* notificationNeedsAttention(notification)) serviceNotificationAttention(binding, notification);
       return;
     }
-    if (fresh.messages.some(item => item.threadId === member.threadId && this.options.helperTransport?.matchesMessage(binding, messageId, text, item, fresh.messages)))
-      this.updateNotificationDelivery(binding, notification, "delivered");
+    if ((yield* firstMatch(binding, messageId, text, fresh, member.threadId)) !== undefined)
+      yield* updateNotificationDelivery(binding, notification, "delivered");
     else {
-      if (!this.updateNotificationDelivery(binding, notification, "uncertain")) return;
-      if (this.notificationNeedsAttention(notification)) this.serviceNotificationAttention(binding, notification);
+      if (!(yield* updateNotificationDelivery(binding, notification, "uncertain"))) return;
+      if (yield* notificationNeedsAttention(notification)) serviceNotificationAttention(binding, notification);
     }
-  }
+  });
 
-  async runHelperBatch(binding: BindingRecord, threads: readonly ThreadInfo[], batches: readonly SupervisorTeamHelperBatch[], signal: AbortSignal): Promise<void> {
-    if (!this.options.helperTransport || !batches.length || this.stopped(binding)) return;
-    const offset = this.helperOffset.get(binding.threadId) ?? 0;
+  const runHelperBatch = (binding: BindingRecord, threads: readonly ThreadInfo[], batches: readonly SupervisorTeamHelperBatch[], cancel?: Cancel) => Effect.gen(function* () {
+    if (!transport || !batches.length || (yield* stopped(binding))) return;
+    const offset = yield* offsetOf(helperOffset, binding.threadId);
     const ordered = [...batches.slice(offset % batches.length), ...batches.slice(0, offset % batches.length)];
-    const eligible = ordered.filter(candidate => !this.hasUnacknowledgedFailure(binding, candidate.actorThreadId) &&
-      !this.options.requests.pending(binding.projectId, candidate.actorThreadId) &&
-      !this.options.teamStore.unresolvedRequests(binding).some(request => request.memberThreadId === candidate.actorThreadId));
+    const eligible = ordered.filter(candidate => !hasUnacknowledgedFailure(binding, candidate.actorThreadId) &&
+      !requests.pending(binding.projectId, candidate.actorThreadId) &&
+      !teamStore.unresolvedRequests(binding).some(request => request.memberThreadId === candidate.actorThreadId));
     // a helper none of whose targets fits a check-in yields this call to the next eligible helper; any other stop ends it
-    for (const batch of eligible) if (await this.runSelectedHelperBatch(binding, threads, batches, batch, signal) !== "unfittable") return;
-  }
+    for (const batch of eligible) if ((yield* runSelectedHelperBatch(binding, threads, batches, batch, cancel)) !== "unfittable") return;
+  });
 
-  private async runSelectedHelperBatch(binding: BindingRecord, threads: readonly ThreadInfo[], batches: readonly SupervisorTeamHelperBatch[],
-    batch: SupervisorTeamHelperBatch, signal: AbortSignal): Promise<"prepared" | "unfittable" | "stopped"> {
-    const parents = this.parentById(binding, threads);
+  const runSelectedHelperBatch = (binding: BindingRecord, threads: readonly ThreadInfo[], batches: readonly SupervisorTeamHelperBatch[],
+    batch: SupervisorTeamHelperBatch, cancel: Cancel) => Effect.gen(function* (): Effect.fn.Return<"prepared" | "unfittable" | "stopped"> {
+    const parents = parentById(binding, threads);
     if (!parents) return "stopped";
-    const member = this.options.teamStore.snapshot(binding).members.find(value => value.threadId === batch.actorThreadId && value.state === "ready" && value.epoch === batch.memberEpoch);
-    if (!member || this.options.teamStore.resolveActor(binding, member.threadId, member.epoch)?.role !== "helper") return "stopped";
-    const now = Date.now();
-    if (now - (this.options.requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return "stopped";
+    const member = teamStore.snapshot(binding).members.find(value => value.threadId === batch.actorThreadId && value.state === "ready" && value.epoch === batch.memberEpoch);
+    if (!member || teamStore.resolveActor(binding, member.threadId, member.epoch)?.role !== "helper") return "stopped";
+    const now = yield* Clock.currentTimeMillis;
+    if (now - (requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return "stopped";
     for (const target of batch.targets) {
-      const coverage = this.options.teamStore.coverage(binding, target.targetThreadId, parents);
+      const coverage = teamStore.coverage(binding, target.targetThreadId, parents);
       if (coverage.state !== "assigned" || coverage.actorThreadId !== member.threadId || coverage.memberEpoch !== member.epoch ||
         coverage.assignmentRootThreadId !== target.assignmentRootThreadId || coverage.assignmentEpoch !== target.assignmentEpoch) return "stopped";
     }
-    const projection = await this.readMemberProjection(binding, member, signal);
+    const projection = yield* readMemberProjection(binding, member, cancel);
     if (!projection) return "stopped";
-    if (!this.validHelper(member, binding, projection)) return "stopped";
-    const currentParents = this.parentById(binding, threads);
+    if (!validHelper(member, binding, projection)) return "stopped";
+    const currentParents = parentById(binding, threads);
     if (!currentParents || batch.targets.some(target => {
-      const coverage = this.options.teamStore.coverage(binding, target.targetThreadId, currentParents);
+      const coverage = teamStore.coverage(binding, target.targetThreadId, currentParents);
       return coverage.state !== "assigned" || coverage.actorThreadId !== member.threadId || coverage.memberEpoch !== member.epoch ||
         coverage.assignmentRootThreadId !== target.assignmentRootThreadId || coverage.assignmentEpoch !== target.assignmentEpoch;
     })) return "stopped";
-    const requestId = `team-review:${randomUUID()}`;
+    const requestId = `team-review:${yield* ids.uuid}`;
     const completionMarker = `Supervisor team check-in ${requestId} completed`;
     // a notice closed by a completed review is history; re-presenting it would replay its instruction
-    const deliveredNotifications = this.options.teamStore.snapshot(binding).notifications.filter(value => value.recipientThreadId === member.threadId &&
+    const deliveredNotifications = teamStore.snapshot(binding).notifications.filter(value => value.recipientThreadId === member.threadId &&
       value.memberEpoch === member.epoch && value.state === "delivered" && !notificationClosed(value));
     const threadsById = new Map(threads.map(thread => [thread.id, thread]));
     const monitorThreadsById = new Map(batch.batch.threads.map(thread => [thread.threadId, thread]));
@@ -870,49 +920,48 @@ export class SupervisorTeamRuntime {
       const bodyCount = unprocessableTargets.filter(value => value.reason === "body_too_large").length;
       const missingThreadCount = unprocessableTargets.length - renderedCount - bodyCount;
       const targetIds = unprocessableTargets.slice(0, 4).map(value => value.target.targetThreadId).join(", ");
-      this.emitServiceAttention(binding, eventId, member.threadId, unprocessableTargets[0]?.target.targetThreadId,
+      emitServiceAttention(binding, eventId, member.threadId, unprocessableTargets[0]?.target.targetThreadId,
         `A one-target check-in, including the applicable notifications, exceeds the ${maxHelperCheckinRenderedLength}-code-unit rendered bound for ${renderedCount} assigned target(s) and the 64 KiB delivery body T3 records for proof for ${bodyCount}; ${missingThreadCount} target(s) lack a matching frozen monitor thread. No request was prepared for them, and their recorded monitor activity remains pending and unacknowledged. Root review is needed for: ${targetIds}${unprocessableTargets.length > 4 ? ", and others" : ""}.`);
     }
-    if (!selectedReview) return unprocessableTargets.length ? "unfittable" : "stopped";
-    // a stop saved during the awaited helper read prepares no check-in
-    if (this.stopped(binding)) return "stopped";
-    const request = this.options.store.store.transaction(() => {
-      const value = this.options.requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: member.threadId,
-        kind: "review", taskId: null, text: selectedReview!.text, batch: selectedReview!.batch, completionMarker,
-        teamNotificationIds: selectedReview!.notifications.map(item => item.id)}, now);
-      this.options.teamStore.recordRequest(binding, {requestId: value.id, memberThreadId: member.threadId, memberEpoch: member.epoch,
-        targets: selectedReview!.targets, parentById: parents, now});
+    const review = selectedReview;
+    if (!review) return unprocessableTargets.length ? "unfittable" : "stopped";
+    // a stop saved during the awaited helper read prepares no check-in: the stop check and the preparation are one
+    // policy-dependent write in the admission section (plan 3.11)
+    const request = yield* gate.admit((guard) => Effect.sync(() => stoppedWith(guard, binding.mainThreadId) ? null : store.store.transaction(() => {
+      const value = requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: member.threadId,
+        kind: "review", taskId: null, text: review.text, batch: review.batch, completionMarker,
+        teamNotificationIds: review.notifications.map(item => item.id)}, now);
+      teamStore.recordRequest(binding, {requestId: value.id, memberThreadId: member.threadId, memberEpoch: member.epoch,
+        targets: review.targets, parentById: parents, now});
       return value;
-    });
-    this.helperOffset.set(binding.threadId, (batches.indexOf(batch) + 1) % batches.length);
-    await this.dispatchHelperRequest(binding, member, request, this.currentRequest(binding, request.id)!, threads, signal);
+    })));
+    if (!request) return "stopped";
+    yield* setOffset(helperOffset, binding.threadId, (batches.indexOf(batch) + 1) % batches.length);
+    yield* dispatchHelperRequest(binding, member, request, currentRequest(binding, request.id)!, threads, cancel);
     return "prepared";
-  }
+  });
 
-  private async dispatchHelperRequest(binding: BindingRecord, member: TeamMember, request: ConversationRequest, teamRequest: TeamRequest,
-    threads: readonly ThreadInfo[], signal: AbortSignal): Promise<void> {
-    if (!this.options.helperTransport || !["prepared", "uncertain", "waiting"].includes(request.state)) return;
-    if (request.state === "prepared" && Date.now() - (this.options.requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
+  const dispatchHelperRequest = (binding: BindingRecord, member: TeamMember, request: ConversationRequest, teamRequest: TeamRequest,
+    threads: readonly ThreadInfo[], cancel: Cancel) => Effect.gen(function* () {
+    if (!transport || !["prepared", "uncertain", "waiting"].includes(request.state)) return;
+    if (request.state === "prepared" && (yield* Clock.currentTimeMillis) - (requests.lastNotice(member.threadId) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return;
     const input = {threadId: member.threadId, commandId: `supervisor-review:${request.id}`, messageId: request.messageId, text: request.text};
-    const current = this.currentTargets(binding, member, teamRequest, threads);
-    if (!current && !this.options.helperTransport.hasDelivery(binding, input)) return;
-    if (!this.consumeReadBudget(binding)) return;
-    const attemptedAt = Date.now();
+    const current = currentTargets(binding, member, teamRequest, threads);
+    if (!current && !(yield* transport.hasDelivery(binding, input))) return;
+    if (!(yield* consumeReadBudget(binding))) return;
+    const attemptedAt = yield* Clock.currentTimeMillis;
     const sentAt = request.sentAt ?? attemptedAt;
-    this.options.store.store.transaction(() => {
-      this.options.requests.saveRequest({...request, state: "sending", sentAt});
-      if (request.sentAt === null) this.options.requests.noticeSent(member.threadId, attemptedAt);
+    store.store.transaction(() => {
+      requests.saveRequest({...request, state: "sending", sentAt});
+      if (request.sentAt === null) requests.noticeSent(member.threadId, attemptedAt);
     });
-    const result = await this.options.helperTransport.send(binding, input, signal, () => {
-      const current = this.options.teamStore.snapshot(binding).members.find(value => value.threadId === member.threadId);
-      return !this.stopped(binding) && current?.state === member.state && current.epoch === member.epoch;
-    });
+    const result = yield* transport.send(binding, input, {cancel, authorized: deliveryAuthority(binding, member)});
     if (result === "waiting") {
       const waiting = {...request, state: "waiting" as const, sentAt, error: null};
-      this.options.requests.saveRequest(waiting);
-      if (this.unresolvedDeliveryTooLong(waiting)) this.serviceUnresolvedDelivery(binding, member.threadId, waiting);
+      requests.saveRequest(waiting);
+      if (yield* unresolvedDeliveryTooLong(waiting)) serviceUnresolvedDelivery(binding, member.threadId, waiting);
     }
-    else if (result === "busy") this.options.requests.saveRequest({...request, state: request.sentAt === null ? "prepared" : "uncertain",
+    else if (result === "busy") requests.saveRequest({...request, state: request.sentAt === null ? "prepared" : "uncertain",
       sentAt: request.sentAt, error: "The helper is busy or its delivery transport is unavailable; this request keeps its identity and will wait."});
     else if (result === "rejected" || result === "revoked") {
       // both prove this exact check-in was never delivered, so only its own request fence settles
@@ -920,17 +969,44 @@ export class SupervisorTeamRuntime {
         ? "The helper lost its authority before this check-in was posted; nothing was posted and pending activity is retained."
         : "T3 rejected this exact helper delivery; pending activity is retained."};
       // failure and its own fence settle together, so a restart cannot leave one without the other
-      this.options.store.store.transaction(() => {
-        this.options.requests.saveRequest(failed);
-        this.options.teamStore.settleRequest(binding, teamRequest.requestId);
+      store.store.transaction(() => {
+        requests.saveRequest(failed);
+        teamStore.settleRequest(binding, teamRequest.requestId);
       });
-      this.serviceAttention(binding, member.threadId, failed,
+      serviceAttention(binding, member.threadId, failed,
         "T3 rejected the helper check-in delivery. Pending activity is retained; review the failed request and use the team retry action before another check-in.");
     } else {
       const uncertain = {...request, state: "uncertain" as const, sentAt, error: "Helper delivery is uncertain; its original native identity is retained."};
-      this.options.requests.saveRequest(uncertain);
-      this.options.teamStore.setRequestState(binding, binding.threadId, teamRequest.requestId, 0, "uncertain");
-      if (this.unresolvedDeliveryTooLong(uncertain)) this.serviceUnresolvedDelivery(binding, member.threadId, uncertain);
+      requests.saveRequest(uncertain);
+      teamStore.setRequestState(binding, binding.threadId, teamRequest.requestId, 0, "uncertain");
+      if (yield* unresolvedDeliveryTooLong(uncertain)) serviceUnresolvedDelivery(binding, member.threadId, uncertain);
     }
-  }
+  });
+
+  return SupervisorTeamRuntime.of({
+    startCycle,
+    rootOwnedBatch: (binding, batch, threads) => Effect.sync(() => rootOwnedBatch(binding, batch, threads)),
+    partition: (binding, threads, batch) => Effect.sync(() => partition(binding, threads, batch)),
+    hasMembers: (binding) => Effect.sync(() => teamStore.snapshot(binding).members.some(member => member.state !== "retired")),
+    coordinatorPolicy: (binding) => Effect.sync(() => {
+      const snapshot = teamStore.snapshot(binding);
+      return {maxHelpersPerRoot: snapshot.settings.maxHelpersPerRoot,
+        readyHelpers: snapshot.members.filter(member => member.state === "ready").length,
+        registeringHelpers: snapshot.members.filter(member => member.state === "registering").length};
+    }),
+    acknowledgeRootEvents: (binding, eventIds) => Effect.sync(() => {
+      for (const eventId of eventIds) teamStore.acknowledgeEvent(binding, binding.threadId, eventId);
+    }),
+    hasInflightEffects: (binding) => Effect.sync(() => hasInflightEffects(binding)),
+    hasBlockingWork: (binding) => Effect.sync(() => hasBlockingWork(binding)),
+    reconcileStopped,
+    reconcile,
+    runHelperBatch,
+  });
+});
+
+// the bounded helper team of each root: membership, check-ins, readiness, notices and transfers over the helper transport
+export class SupervisorTeamRuntime extends Context.Service<SupervisorTeamRuntime, SupervisorTeamRuntimeShape>()("t3-supervisor/SupervisorTeamRuntime") {
+  static readonly make = makeSupervisorTeamRuntime;
+  static readonly layer = (options: SupervisorTeamRuntimeOptions) => Layer.effect(SupervisorTeamRuntime, makeSupervisorTeamRuntime(options));
 }

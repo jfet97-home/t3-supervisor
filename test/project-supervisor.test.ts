@@ -10,6 +10,7 @@ import { Context, Effect, Layer, Schema } from "effect";
 import { createServer } from "node:http";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { parseInterpretation, ProjectSupervisor } from "../src/project-supervisor.js";
+import { projectSupervisorUnit } from "./support/team-units.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../src/project-supervisor-contract.js";
 import { ProjectSupervisorSnapshot } from "../src/project-supervisor-contract.js";
@@ -375,8 +376,8 @@ const makeFixture = async (initial: Array<{ threadId: string; projectId: string;
     const workspaceRoot = registeredProjects.find(project => project.id === projectId)?.workspaceRoot ?? "";
     return missingDefinitions(projectId, threadId, workspaceRoot);
   }};
-  const makeSupervisor = (definitions: ConstructorParameters<typeof ProjectSupervisor>[7] | null = defaultDefinitions) =>
-    new ProjectSupervisor(config, supervisorStore, source, t3, readRpc, operateRpc, activationSnapshot, definitions ?? undefined);
+  const makeSupervisor = (definitions: ConstructorParameters<typeof ProjectSupervisor>[8] | null = defaultDefinitions) =>
+    projectSupervisorUnit(config, supervisorStore, source, t3, readRpc, operateRpc, activationSnapshot, definitions ?? undefined);
   const restart = (): void => {
     guidance.close();
     guidance = new GuidanceStore(directory);

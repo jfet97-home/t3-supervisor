@@ -8,7 +8,7 @@ import { GuidanceStore, fingerprint } from "../../src/guidance-store.js";
 import type { ProjectDefinitionLoader } from "../../src/project-definitions.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import { ProjectSupervisorStore, defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../../src/project-supervisor-store.js";
-import { ProjectSupervisor } from "../../src/project-supervisor.js";
+import { projectSupervisorUnit } from "./team-units.js";
 import { SupervisorConversation, workflowIntroductionText } from "../../src/supervisor-conversation.js";
 import { prepareWorkflowRequest, validateWorkflowPlan, type WorkflowPlanValue } from "../../src/supervisor-workflow.js";
 import type { ConversationRequest, WorkflowIntroduction } from "../../src/supervisor-conversation-store.js";
@@ -515,7 +515,7 @@ export const makeFixture = async (clock: Clock, options: FixtureOptions = {}) =>
     excludedThreadIds: [],
     healthPort: 0,
   } satisfies SupervisorConfig;
-  const makeProjectSupervisor = () => new ProjectSupervisor(
+  const makeProjectSupervisor = () => projectSupervisorUnit(
     apiConfig,
     projectStore,
     { catalog: () => Effect.succeed({ projects: [{ project: { id: projectId, title: "Project A", workspaceRoot }, available: true }], threads: threadList }) },

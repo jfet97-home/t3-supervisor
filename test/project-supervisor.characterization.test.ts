@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Effect } from "effect";
 import { it } from "vitest";
 import { GuidanceStore } from "../src/guidance-store.js";
-import { ProjectSupervisor } from "../src/project-supervisor.js";
+import { projectSupervisorUnit } from "./support/team-units.js";
 import { defaultSupervisorModel, loadSupervisorOwnership, prepareStopNotice, type BindingRecord, type SupervisionFolderPresence, type TaskRecord } from "../src/project-supervisor-store.js";
 import { SupervisorRpcError, type SupervisorRpc } from "../src/supervisor-native.js";
 import type { SupervisorConfig } from "../src/types.js";
@@ -607,7 +607,7 @@ it("CT-PSS-01: a Start operation left preparing by a crash is rejected on reopen
   let releaseCatalog!: () => void;
   const catalogGate = new Promise<void>(resolve => {releaseCatalog = resolve;});
   const config: SupervisorConfig = {dataDirectory: fixture.directory, t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0};
-  const crashing = new ProjectSupervisor(config, first.store,
+  const crashing = projectSupervisorUnit(config, first.store,
     {catalog: () => Effect.promise(() => catalogGate.then(() => ({projects: [], threads: []})))},
     {projection: () => {throw new Error("unused");}}, {} as SupervisorRpc, {} as SupervisorRpc, async () => {throw new Error("unused");});
   const crashed = crashing.dashboardStart("main-a", "op-crash", new AbortController().signal);
@@ -632,7 +632,7 @@ it("CT-PSS-01: a Start operation left preparing by a crash is rejected on reopen
   ]);
   assert.deepEqual(metaRows(second.guidance.db).filter(([key]) => key !== 'supervisor_start_operation:["main-a","op-crash"]'), untouched, "other Start rows are unchanged");
   const rpc = new Proxy({}, {get: (_target, key) => counted(`rpc.${String(key)}`)}) as SupervisorRpc;
-  const supervisor = new ProjectSupervisor(config, second.store, {catalog: counted("catalog") as never}, {projection: counted("projection") as never},
+  const supervisor = projectSupervisorUnit(config, second.store, {catalog: counted("catalog") as never}, {projection: counted("projection") as never},
     rpc, rpc, async () => counted("activationSnapshot")());
   assert.deepEqual(supervisor.startStatus("main-a", "op-crash"), {threadId: "main-a", operationId: "op-crash", status: "rejected", reason: interruptedStartReason});
   assert.deepEqual(supervisor.startStatus("main-a", "op-pending"), {threadId: "main-a", operationId: "op-pending", status: "pending", reason: "Waiting."});

@@ -1,6 +1,6 @@
 import {SupervisorTeamController} from "./supervisor-team-controller.js";
 import { NodeFileSystem } from "@effect/platform-node";
-import { Cause, Context, Effect, Layer } from "effect";
+import { Cause, Context, type Deferred, Effect, Layer } from "effect";
 import { GuidanceStore } from "./guidance-store.js";
 import { GuidanceRuntime, type GuidanceRuntimeReader } from "./guidance.js";
 import { startGuidanceUi } from "./guidance-ui.js";
@@ -17,7 +17,15 @@ import { ProjectConfigEditorService, type ProjectConfigEditor } from "./project-
 import { existsSync } from "node:fs";
 import { ProjectSupervisorStore, loadSupervisorOwnership } from "./project-supervisor-store.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
-import { NativeRpc, NativeShell, record, type NativeRpcShape, type SupervisorRpc } from "./supervisor-native.js";
+import { NativeOperateRpc, NativeRpc, NativeShell, record, type NativeRpcShape, type SupervisorRpc } from "./supervisor-native.js";
+import { HelperTransport, type SupervisorHelperDeliveryTransport } from "./supervisor-helper-transport.js";
+import { SupervisorTeamRuntime, type SupervisorTeamRuntimeFacade } from "./supervisor-team-runtime.js";
+import { SupervisorTeamStore } from "./supervisor-team-store.js";
+import { SupervisorConversationStore } from "./supervisor-conversation-store.js";
+import { ProjectSupervisorMonitorStore } from "./supervisor-monitor-store.js";
+import { makeSupervisionGate, SupervisionGate, type SupervisionScope } from "./supervision-gate.js";
+import { SupervisorIds } from "./ids.js";
+import { T3Client } from "./t3.js";
 import { GitProbe } from "./git-probe.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
 import { createWorkflowMcpEndpoint } from "./workflow-mcp.js";
@@ -53,6 +61,42 @@ export const projectConfigEditorFacade = (run: RootRun, editor: ProjectConfigEdi
 export const guidanceRuntimeFacade = (run: RootRun, runtime: GuidanceRuntime["Service"], config: SupervisorConfig): GuidanceRuntimeReader => ({
   config,
   snapshot: () => run(runtime.snapshot),
+});
+
+// a call's AbortSignal is the service's cancel trigger for the lifetime of that call, as for the native rpc facade
+const cancelled = <A>(run: RootRun, signal: AbortSignal, call: (cancel: Deferred.Deferred<void>) => Effect.Effect<A>): Promise<A> =>
+  run(Effect.scoped(Effect.flatMap(cancelOnAbort(signal), call)));
+// b-03 (plan 3.9): the baseline promise shapes of the helper transport; its receipt reads stay synchronous b-02 reads
+export const helperTransportFacade = (run: RootRun, transport: HelperTransport["Service"]): SupervisorHelperDeliveryTransport => ({
+  send: (binding, input, signal, authorized) =>
+    cancelled(run, signal, (cancel) => transport.send(binding, input, {cancel, ...(authorized ? {authorized: () => authorized()} : {})})),
+  hasDelivery: (binding, input) => Effect.runSync(transport.hasDelivery(binding, input)),
+  reconcileDelivery: (binding, input, signal) => cancelled(run, signal, (cancel) => transport.reconcileDelivery(binding, input, cancel)),
+  receiptText: (binding, logicalMessageId) => Effect.runSync(transport.receiptText(binding, logicalMessageId)),
+  matchesMessage: (binding, logicalMessageId, text, message, messages) => Effect.runSync(transport.matchesMessage(binding, logicalMessageId, text, message, messages)),
+  retire: (binding, helperThreadId, signal) => cancelled(run, signal, (cancel) => transport.retire(binding, helperThreadId, cancel)),
+});
+// b-03 (plan 3.9): the baseline promise shapes of the team runtime; t-04 keeps its cycle start and b-02 reads synchronous
+export const teamRuntimeFacade = (run: RootRun, runtime: SupervisorTeamRuntime["Service"]): SupervisorTeamRuntimeFacade => ({
+  startCycle: (binding) => Effect.runSync(runtime.startCycle(binding)),
+  rootOwnedBatch: (binding, batch, threads) => Effect.runSync(runtime.rootOwnedBatch(binding, batch, threads)),
+  partition: (binding, threads, batch) => Effect.runSync(runtime.partition(binding, threads, batch)),
+  hasMembers: (binding) => Effect.runSync(runtime.hasMembers(binding)),
+  coordinatorPolicy: (binding) => Effect.runSync(runtime.coordinatorPolicy(binding)),
+  acknowledgeRootEvents: (binding, eventIds) => Effect.runSync(runtime.acknowledgeRootEvents(binding, eventIds)),
+  hasInflightEffects: (binding) => Effect.runSync(runtime.hasInflightEffects(binding)),
+  hasBlockingWork: (binding) => Effect.runSync(runtime.hasBlockingWork(binding)),
+  reconcileStopped: (binding, threads, signal) => cancelled(run, signal, (cancel) => runtime.reconcileStopped(binding, threads, cancel)),
+  reconcile: (binding, threads, signal) => cancelled(run, signal, (cancel) => runtime.reconcile(binding, threads, cancel)),
+  runHelperBatch: (binding, threads, batches, signal) => cancelled(run, signal, (cancel) => runtime.runHelperBatch(binding, threads, batches, cancel)),
+});
+// i-01/i-02 (plan 3.9): the helper transport and the team runtime, built once in the supervision run from its context and
+// handed to ProjectSupervisor in the promise shapes of their unported callers
+export const supervisorTeamServices = (run: RootRun, store: ProjectSupervisorStore, baseUrl: string) => Effect.gen(function* () {
+  const transport = yield* HelperTransport.make({store, baseUrl});
+  const runtime = yield* SupervisorTeamRuntime.make({store, teamStore: new SupervisorTeamStore(store), requests: new SupervisorConversationStore(store.store),
+    monitor: new ProjectSupervisorMonitorStore(store.store)}).pipe(Effect.provideService(HelperTransport, transport));
+  return {helperTransport: helperTransportFacade(run, transport), teamRuntime: teamRuntimeFacade(run, runtime)};
 });
 
 export const runGuidanceApplication = (
@@ -123,8 +167,24 @@ export const runGuidanceApplication = (
     const nativeShell = yield* NativeShell.make({baseUrl: config.t3Url, token: readToken.trim()}).pipe(
       Effect.provideService(NativeRpc, nativeRead), Effect.provide(nativeClients));
     const readRpc = rpcFacade(nativeRead);
+    const nativeOperate = operateToken.trim() ? yield* nativeClient(operateToken.trim()) : null;
+    // stand-in until the root builds SupervisionGate and the ids in the supervision scope: the gate guards with the
+    // supervisor's own scope predicates once it exists, and refuses before
+    let supervisorScope: SupervisionScope | null = null;
+    const teamServices = yield* supervisorTeamServices(run, supervisionStore, config.t3Url).pipe(
+      (services) => nativeOperate ? Effect.provideService(services, NativeOperateRpc, nativeOperate) : services,
+      Effect.provideServiceEffect(SupervisionGate, makeSupervisionGate({
+        scopeEnabled: (projectId, mainThreadId, purpose) => supervisorScope?.scopeEnabled(projectId, mainThreadId, purpose) ?? false,
+        supervisionStopped: (threadId) => supervisorScope?.supervisionStopped(threadId) ?? true,
+        workflowEditingEnabled: (projectId, mainThreadId, purpose) => supervisorScope?.workflowEditingEnabled(projectId, mainThreadId, purpose) ?? false,
+      })),
+      Effect.provideService(T3Client, t3),
+      Effect.provide(SupervisorIds.layer),
+      Effect.provide(nativeClients),
+    );
     const supervision = new ProjectSupervisor(config, supervisionStore, source, t3, readRpc,
-      operateToken.trim() ? rpcFacade(yield* nativeClient(operateToken.trim())) : null, signal => run(nativeShell.baseline, {signal}), definitions);
+      nativeOperate ? rpcFacade(nativeOperate) : null, signal => run(nativeShell.baseline, {signal}), teamServices, definitions);
+    supervisorScope = supervision.gate;
     const workflowReader = new WorkflowWriteController({
       supervisors: supervisionStore,
       ...(config.helperProviderInstanceId ? {helperProviderInstanceId: config.helperProviderInstanceId} : {}),

@@ -12,8 +12,8 @@ import type { SupervisorMonitorBatch, SupervisorMonitorThreadBatch } from "../sr
 import { SupervisorConversationStore } from "../src/supervisor-conversation-store.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord } from "../src/project-supervisor-store.js";
 import { SupervisorTeamStore, type TeamBinding, type TeamMember, type TeamNotification } from "../src/supervisor-team-store.js";
-import { SupervisorTeamRuntime } from "../src/supervisor-team-runtime.js";
-import { SupervisorHelperTransport, type SupervisorHelperDeliveryTransport } from "../src/supervisor-helper-transport.js";
+import type { SupervisorHelperDeliveryTransport } from "../src/supervisor-helper-transport.js";
+import { helperTransportUnit, teamRuntimeUnit } from "./support/team-units.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
 import { withDeadline } from "./support/c1-loopback.js";
 
@@ -81,8 +81,8 @@ const transportTeam = async (t: TestContext) => {
     transportProjection: (threadId: string, signal: AbortSignal) => Promise<Projection> = async () => helper, supervisionStopped?: () => boolean) => {
     const requests = new SupervisorConversationStore(guidance);
     const monitor = new ProjectSupervisorMonitorStore(guidance);
-    const transport = new SupervisorHelperTransport({store: projectStore, rpc, baseUrl: "http://127.0.0.1:3773", projection: transportProjection, fetch});
-    const runtime = new SupervisorTeamRuntime({store: projectStore, teamStore, requests, monitor, rpc, helperTransport: transport, projection: async () => helper,
+    const transport = helperTransportUnit({store: projectStore, rpc, baseUrl: "http://127.0.0.1:3773", projection: transportProjection, fetch});
+    const runtime = teamRuntimeUnit({store: projectStore, teamStore, requests, monitor, rpc, helperTransport: transport, projection: async () => helper,
       ...(supervisionStopped ? {supervisionStopped} : {})});
     return {requests, monitor, transport, runtime};
   };
@@ -255,7 +255,7 @@ const teamFixture = async (t: TestContext) => {
   const projections = new Map<string, Projection>(threadList.map(thread => [thread.id, emptyProjection(thread)]));
   const reads: string[] = [];
   const runtime = (helperTransport?: SupervisorHelperDeliveryTransport, now?: () => number, stores = {store, teamStore, requests, monitor}) =>
-    new SupervisorTeamRuntime({...stores, rpc: null, projection: async threadId => {reads.push(threadId);return projections.get(threadId) ?? emptyProjection(makeThread(threadId));},
+    teamRuntimeUnit({...stores, rpc: null, projection: async threadId => {reads.push(threadId);return projections.get(threadId) ?? emptyProjection(makeThread(threadId));},
       ...(helperTransport ? {helperTransport} : {}), ...(now ? {now} : {})});
   after(t, async () => {
     for (const db of opened) try {db.close();} catch { /* already closed */ }

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { GuidanceStore } from "../src/guidance-store.js";
-import { ProjectSupervisor } from "../src/project-supervisor.js";
+import { projectSupervisorUnit } from "./support/team-units.js";
 import { workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { ProjectSupervisorStore, type SupervisorBaseline, type SupervisionFolderPresence } from "../src/project-supervisor-store.js";
 import type { TaskRecord } from "../src/project-supervisor-store.js";
@@ -43,7 +43,7 @@ const makeProjectSupervisor = (store: ProjectSupervisorStore, overrides: {
     ...(overrides.initialize ? {initialize: overrides.initialize} : {}),
     globalDefinitionsPath: () => "~/.t3-supervisor",
   };
-  return new ProjectSupervisor(config, store, source, t3, async () => {throw new Error("unexpected read");}, null,
+  return projectSupervisorUnit(config, store, source, t3, async () => {throw new Error("unexpected read");}, null,
     overrides.activationSnapshot ?? (async () => baseline()), definitions, overrides.now);
 };
 
@@ -308,7 +308,7 @@ it("enable_existing rejects a worktree whose selected branch changed during setu
       },
       presenceForCheckout: async () => {presenceChecks += 1;return {status: "present" as const};},
     };
-    const supervisor = new ProjectSupervisor({dataDirectory: "/tmp", t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0}, store, source,
+    const supervisor = projectSupervisorUnit({dataDirectory: "/tmp", t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0}, store, source,
       {projection: () => Effect.succeed({projection, snapshotSequence: 20})}, async () => {throw new Error("unexpected read");}, null,
       async () => baseline("run-2"), definitions);
     const signal = AbortSignal.timeout(2000);
@@ -369,7 +369,7 @@ it("unreadable project detection is not saved as an opt-out and another project 
     failure = false;
     const otherProject = {id: "project-b", title: "Project B", workspaceRoot: "/work/project-b"} as ProjectInfo;
     const otherSource = {catalog: () => Effect.succeed({projects: [{project: otherProject, available: true}], threads: []})};
-    const other = new ProjectSupervisor({dataDirectory: "/tmp", t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0}, store, otherSource,
+    const other = projectSupervisorUnit({dataDirectory: "/tmp", t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0}, store, otherSource,
       {projection: () => Effect.fail(new T3TransportError("unused"))}, async () => {throw new Error("unused");}, null, async () => baseline(),
       {load: async () => {throw new Error("unused");}, presence: async () => ({status: "present"})});
     assert.equal((await other.control("project-b", signal)).enabled, true);

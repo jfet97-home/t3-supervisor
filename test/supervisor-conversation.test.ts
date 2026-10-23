@@ -12,6 +12,7 @@ import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { ProjectSupervisorStore, defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { ProjectSupervisor } from "../src/project-supervisor.js";
+import { projectSupervisorUnit, supervisorConversationUnit } from "./support/team-units.js";
 import { supervisionStopToolDefinition } from "../src/workflow-write-controller.js";
 import { SupervisorConversation, externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
@@ -550,7 +551,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
   };
   const threadList = [supervisor.thread, operative.thread];
   const workflows = new WorkflowStateStore(projectStore, () => true);
-  const conversation = new SupervisorConversation(
+  const conversation = supervisorConversationUnit(
     projectStore,
     rpc,
     async threadId => {
@@ -601,7 +602,7 @@ const makeFixture = async (clock: Clock, options: FixtureOptions = {}) => {
       }],
     }],
   };
-  const projectSupervisor = new ProjectSupervisor(
+  const projectSupervisor = projectSupervisorUnit(
     apiConfig,
     projectStore,
     { catalog: () => Effect.succeed({ projects: [{ project: { id: projectId, title: "Project A", workspaceRoot }, available: true }], threads: threadList }) },

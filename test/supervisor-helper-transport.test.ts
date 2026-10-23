@@ -7,8 +7,9 @@ import {join} from "node:path";
 import {GuidanceStore} from "../src/guidance-store.js";
 import {ProjectSupervisorStore, defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {SupervisorTeamStore} from "../src/supervisor-team-store.js";
-import {SupervisorHelperTransport, attributesHelperDelivery, helperDeliveryBody, helperDeliveryBudget, publishedRendering, renderedLengthBound} from "../src/supervisor-helper-transport.js";
-import {SupervisorTeamRuntime, teamNotificationText} from "../src/supervisor-team-runtime.js";
+import {attributesHelperDelivery, helperDeliveryBody, helperDeliveryBudget, publishedRendering, renderedLengthBound} from "../src/supervisor-helper-transport.js";
+import {teamNotificationText, type SupervisorTeamRuntimeFacade} from "../src/supervisor-team-runtime.js";
+import {helperTransportUnit, teamRuntimeUnit} from "./support/team-units.js";
 import {SupervisorConversationStore} from "../src/supervisor-conversation-store.js";
 import {ProjectSupervisorMonitorStore} from "../src/supervisor-monitor-store.js";
 import {SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorBatch, type SupervisorMonitorThreadBatch} from "../src/supervisor-monitor.js";
@@ -102,7 +103,7 @@ const helperBatch = (threadId: string): SupervisorMonitorBatch => {
   return {projectId: "p", createdAt: detectedAt, trigger: "priority", finalizedActivityCount: 1, pendingItemCount: 1, truncated: false, threads: [thread]};
 };
 
-const teamRuntime = (f: Awaited<ReturnType<typeof fixture>>, transport: SupervisorHelperTransport, now?: () => number) => {
+const teamRuntime = (f: Awaited<ReturnType<typeof fixture>>, transport: ReturnType<typeof helperTransportUnit>, now?: () => number) => {
   const main = f.binding.mainThreadId;
   const helper = f.team.snapshot(f.binding).members.find(member => member.threadId === "helper")!;
   const ready = helper.state === "ready" ? helper : f.team.markReady(f.binding, helper.threadId, helper.epoch);
@@ -120,7 +121,7 @@ const teamRuntime = (f: Awaited<ReturnType<typeof fixture>>, transport: Supervis
     lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: main}} as ThreadInfo];
   const requests = new SupervisorConversationStore(f.db);
   const monitor = new ProjectSupervisorMonitorStore(f.db);
-  const runtime = new SupervisorTeamRuntime({store: f.store, teamStore: f.team, requests, monitor, rpc: f.options.rpc,
+  const runtime = teamRuntimeUnit({store: f.store, teamStore: f.team, requests, monitor, rpc: f.options.rpc,
     helperTransport: transport, projection: f.options.projection, ...(now ? {now} : {})});
   const batch = helperBatch(operational.id);
   const partition = runtime.partition(f.binding, threads, batch);
@@ -177,7 +178,7 @@ it("the helper delivery budget uses the exact posted body bytes and the rendered
 it("native webhook check-ins have real schedule identity and no root follow-up dispatch", async () => {
   const f = await fixture();
   try {
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const input = {threadId: "helper", commandId: "check-in", messageId: "logical-message", text: "Bounded check-in marker-1"};
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "waiting");
     assert.deepEqual(f.tasks[0]!.schedule, {type: "webhook"});
@@ -203,10 +204,10 @@ it("the published webhook wrapper is matched through the proven rendered prompt 
   try {
     f.state.renderWrapper = publishedWrapper;
     const input = {threadId: "helper", commandId: "wrapped", messageId: "wrapped-message", text: "Bounded check-in wrapped-1"};
-    assert.equal(await new SupervisorHelperTransport(f.options).send(f.binding, input, AbortSignal.timeout(1000)), "waiting");
+    assert.equal(await helperTransportUnit(f.options).send(f.binding, input, AbortSignal.timeout(1000)), "waiting");
     const native = f.helper.messages[0]!;
     assert.equal(native.text, publishedWrapper(input.text));
-    const restarted = new SupervisorHelperTransport(f.options);
+    const restarted = helperTransportUnit(f.options);
     assert.equal(restarted.matchesMessage(f.binding, input.messageId, input.text, native, f.helper.messages), true, "an exact frame attributes before native detail is read");
     addNativeWebhookDelivery(f, {id: "native-delivery", body: f.state.lastPostedBody!, renderedPrompt: "different later rendering", outcome: "accepted"});
     assert.equal(await restarted.send(f.binding, input, AbortSignal.timeout(1000)), "waiting");
@@ -245,7 +246,7 @@ it("hostile or incomplete native delivery detail never binds a rendering nor cha
     const f = await fixture();
     try {
       // hostile detail is isolated from chat recovery: a raw message is not an exact frame
-      const transport = new SupervisorHelperTransport(f.options);
+      const transport = helperTransportUnit(f.options);
       const input = {threadId: "helper", commandId: "hostile", messageId: "hostile-message", text: "Check-in hostile-1"};
       assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "waiting");
       addNativeWebhookDelivery(f, {id: "native-delivery", body: f.state.lastPostedBody!, renderedPrompt: publishedWrapper(input.text), outcome: "accepted"});
@@ -266,7 +267,7 @@ const postedWrapped = async (f: Awaited<ReturnType<typeof fixture>>, options = f
   // withhold the chat frame so this receipt's rendering is still unbound and the detail read is what binds it
   f.state.emitMessage = false;
   const input = {threadId: "helper", commandId: "write-once", messageId: "write-once-message", text: "Check-in write-once"};
-  const transport = new SupervisorHelperTransport(options);
+  const transport = helperTransportUnit(options);
   assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "waiting");
   addNativeWebhookDelivery(f, {id: "native-delivery", body: f.state.lastPostedBody!, renderedPrompt: publishedWrapper(input.text), outcome: "accepted"});
   return {input, transport};
@@ -277,7 +278,7 @@ it("native detail without a delivery timestamp binds no rendering", async () => 
   try {
     f.state.emitMessage = false;
     const input = {threadId: "helper", commandId: "write-once", messageId: "write-once-message", text: "Check-in write-once"};
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "waiting");
     addNativeWebhookDelivery(f, {id: "native-delivery", body: f.state.lastPostedBody!, renderedPrompt: publishedWrapper(input.text), outcome: "accepted"});
     delete f.state.webhookDeliveries[0]!.receivedAt;
@@ -296,7 +297,7 @@ it("an overlapping reconciliation can neither replace nor erase a proven renderi
       let detailCalls = 0;
       const rpc = f.options.rpc;
       const {input} = await postedWrapped(f);
-      const transport = new SupervisorHelperTransport({...f.options, rpc: async (tag, args) => {
+      const transport = helperTransportUnit({...f.options, rpc: async (tag, args) => {
         if (tag === "scheduledTasks.getWebhookDelivery" && ++detailCalls === 1) {
           entered.resolve();await release.promise;
           if (late === "detail_failure") throw new Error("temporary_detail_failure");
@@ -325,7 +326,7 @@ it("a late POST reply keeps a rendering proven while the POST was in flight", as
     f.state.renderWrapper = publishedWrapper;
     const input = {threadId: "helper", commandId: "in-flight", messageId: "in-flight-message", text: "Check-in in flight"};
     const fetch = f.options.fetch;
-    const transport = new SupervisorHelperTransport({...f.options, fetch: async (url, options) => {
+    const transport = helperTransportUnit({...f.options, fetch: async (url, options) => {
       const response = await fetch(url, options);
       entered.resolve();await release.promise;return response;
     }});
@@ -348,7 +349,7 @@ it("a lost-reply delivery is recovered by its exact body and binds its published
     const f = await fixture();
     try {
       f.state.renderWrapper = publishedWrapper;f.state.loseReply = true;
-      const transport = new SupervisorHelperTransport(f.options);
+      const transport = helperTransportUnit(f.options);
       const input = {threadId: "helper", commandId: "lost-" + outcome, messageId: "lost-" + outcome + "-message", text: "Check-in lost " + outcome};
       assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
       const native = f.helper.messages[0]!;
@@ -378,7 +379,7 @@ it("a rendering at T3's 64 Ki character prompt log cap never binds, because T3 m
     const f = await fixture();
     try {
       f.state.renderWrapper = publishedWrapper;f.state.loseReply = true;
-      const transport = new SupervisorHelperTransport(f.options);
+      const transport = helperTransportUnit(f.options);
       const input = {threadId: "helper", commandId: "cap", messageId: "cap-message", text: "x".repeat(length - publishedWrapper("").length)};
       assert.equal(publishedWrapper(input.text).length, length);
       assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
@@ -401,7 +402,7 @@ it("a wrapped check-in completes through its own native run once its rendering i
   const f = await fixture();
   try {
     f.state.renderWrapper = publishedWrapper;
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const team = teamRuntime(f, transport);
     team.runtime.startCycle(f.binding);
     await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
@@ -424,10 +425,10 @@ it("an uncertain wrapped handover notice with a posted receipt is delivered and 
   const f = await fixture();
   try {
     f.state.renderWrapper = publishedWrapper;
-    const team = teamRuntime(f, new SupervisorHelperTransport(f.options));
+    const team = teamRuntime(f, helperTransportUnit(f.options));
     const transfer = f.team.release(f.binding, "branch", new Map([[f.binding.mainThreadId, null], ["branch", f.binding.mainThreadId]]));
     const notice = f.team.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch)!;
-    const cycle = async (runtime: SupervisorTeamRuntime) => {runtime.startCycle(f.binding);await runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));};
+    const cycle = async (runtime: SupervisorTeamRuntimeFacade) => {runtime.startCycle(f.binding);await runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));};
     await cycle(team.runtime);
     const current = () => f.team.snapshot(f.binding).notifications.find(value => value.id === notice.id)!;
     assert.equal(current().state, "delivered", "an exact published frame is delivered without native delivery detail");
@@ -437,8 +438,8 @@ it("an uncertain wrapped handover notice with a posted receipt is delivered and 
     assert.equal(sent.batchId, messageId);
     addNativeWebhookDelivery(f, {id: "native-delivery", body: f.state.lastPostedBody!, renderedPrompt: publishedWrapper(sent.text), outcome: "accepted"});
     // restart: a fresh transport and runtime reconcile the existing posted receipt
-    const restarted = new SupervisorTeamRuntime({store: f.store, teamStore: f.team, requests: team.requests, monitor: team.monitor, rpc: f.options.rpc,
-      helperTransport: new SupervisorHelperTransport(f.options), projection: f.options.projection});
+    const restarted = teamRuntimeUnit({store: f.store, teamStore: f.team, requests: team.requests, monitor: team.monitor, rpc: f.options.rpc,
+      helperTransport: helperTransportUnit(f.options), projection: f.options.projection});
     await cycle(restarted);
     assert.equal(current().state, "delivered");
     const native = f.helper.messages[0]!;
@@ -457,8 +458,8 @@ it("a wrapped readiness check-in completes through its own native run once its r
   try {
     f.state.renderWrapper = publishedWrapper;
     const requests = new SupervisorConversationStore(f.db);
-    const runtime = new SupervisorTeamRuntime({store: f.store, teamStore: f.team, requests, monitor: new ProjectSupervisorMonitorStore(f.db),
-      rpc: f.options.rpc, helperTransport: new SupervisorHelperTransport(f.options), projection: f.options.projection});
+    const runtime = teamRuntimeUnit({store: f.store, teamStore: f.team, requests, monitor: new ProjectSupervisorMonitorStore(f.db),
+      rpc: f.options.rpc, helperTransport: helperTransportUnit(f.options), projection: f.options.projection});
     const threads = [f.helper.thread, {id: f.binding.mainThreadId, title: "main", projectId: "p",
       lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: f.binding.mainThreadId}} as ThreadInfo];
     runtime.startCycle(f.binding);await runtime.reconcile(f.binding, threads, AbortSignal.timeout(1000));
@@ -484,8 +485,8 @@ it("uncertain webhook POST never repeats across restart, and native evidence can
   try {
     f.state.loseReply = true;f.state.emitMessage = false;
     const input = {threadId: "helper", commandId: "lost", messageId: "lost-message", text: "Unique durable marker-2"};
-    assert.equal(await new SupervisorHelperTransport(f.options).send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
-    const restarted = new SupervisorHelperTransport(f.options);
+    assert.equal(await helperTransportUnit(f.options).send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    const restarted = helperTransportUnit(f.options);
     assert.equal(await restarted.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     assert.equal(f.state.posts, 1);
     assert.equal(await restarted.send(f.binding, {...input, text: "changed"}, AbortSignal.timeout(1000)), "uncertain",
@@ -504,7 +505,7 @@ it("a refusal after an unknown POST never reports the original identity as rejec
     try {
       f.state.loseReply = true;f.state.emitMessage = false;
       const input = {threadId: "helper", commandId: "unknown", messageId: "unknown-message", text: "Unknown outcome marker"};
-      const transport = new SupervisorHelperTransport(f.options);
+      const transport = helperTransportUnit(f.options);
       assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
       if (refusal === "helper_archived") f.helper.thread.archivedAt = "2026-10-16T11:00:00Z";
       else f.store.setBinding({...f.binding, state: "missing"});
@@ -521,7 +522,7 @@ it("authority revoked during the transport's own reads posts nothing and leaves 
   const f = await fixture();
   try {
     let revoked = false;
-    const transport = new SupervisorHelperTransport({...f.options, projection: async () => {revoked = true;return f.helper;}});
+    const transport = helperTransportUnit({...f.options, projection: async () => {revoked = true;return f.helper;}});
     const input = {threadId: "helper", commandId: "revoked", messageId: "revoked-message", text: "Revoked before POST"};
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000), () => !revoked), "revoked");
     assert.equal(f.state.posts, 0);
@@ -533,7 +534,7 @@ it("a check-in revoked before its POST fails and settles only its own request fe
   const f = await fixture();
   try {
     let revoked = false;
-    const transport = new SupervisorHelperTransport({...f.options, projection: async () => {
+    const transport = helperTransportUnit({...f.options, projection: async () => {
       if (!revoked) {revoked = true;f.team.quarantineMember(f.binding, "helper");}
       return f.helper;
     }});
@@ -555,7 +556,7 @@ describe("a revoked check-in recovers its own fence across restart boundaries wi
     const f = await fixture();let openDb = f.db;
     after(t, async () => {openDb.close();await rm(f.directory, {recursive: true, force: true});});
     let revoked = false;
-    const transport = new SupervisorHelperTransport({...f.options, projection: async () => {
+    const transport = helperTransportUnit({...f.options, projection: async () => {
       if (!revoked) {
         revoked = true;
         const member = f.team.snapshot(f.binding).members.find(value => value.threadId === "helper")!;
@@ -586,8 +587,8 @@ describe("a revoked check-in recovers its own fence across restart boundaries wi
     const store = new ProjectSupervisorStore(openDb, new Set());
     const team = new SupervisorTeamStore(store);
     const requests = new SupervisorConversationStore(openDb);
-    const runtime = new SupervisorTeamRuntime({store, teamStore: team, requests, monitor: new ProjectSupervisorMonitorStore(openDb),
-      rpc: f.options.rpc, helperTransport: new SupervisorHelperTransport({...f.options, store}), projection: f.options.projection});
+    const runtime = teamRuntimeUnit({store, teamStore: team, requests, monitor: new ProjectSupervisorMonitorStore(openDb),
+      rpc: f.options.rpc, helperTransport: helperTransportUnit({...f.options, store}), projection: f.options.projection});
     for (let cycle = 0; cycle < 6; cycle++) {runtime.startCycle(f.binding);await runtime.reconcile(f.binding, r.threads, AbortSignal.timeout(5000));}
     const pending = team.unresolvedRequests(f.binding);
     assert.equal(f.state.posts, 0);
@@ -600,7 +601,7 @@ describe("a revoked check-in recovers its own fence across restart boundaries wi
 it("a durably rejected review reconciles read-only after its helper becomes unavailable", async () => {
   const f = await fixture();
   try {
-    const transport = new SupervisorHelperTransport({...f.options, fetch: async () => {f.state.posts++;return new Response("Rejected", {status: 400});}});
+    const transport = helperTransportUnit({...f.options, fetch: async () => {f.state.posts++;return new Response("Rejected", {status: 400});}});
     const r = teamRuntime(f, transport);
     const transfer = f.team.release(f.binding, "branch", new Map([["main", null], ["branch", "main"]]));
     const original = f.team.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch)!;
@@ -629,7 +630,7 @@ it("accepted webhook without a native delivery identity remains uncertain withou
   try {
     f.state.emitMessage = false;f.state.omitDeliveryId = true;
     const input = {threadId: "helper", commandId: "missing-receipt", messageId: "missing-receipt-message", text: "Retain this uncertain check-in"};
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     assert.equal(f.state.posts, 1);
@@ -641,7 +642,7 @@ it("a known native dispatch failure without a visible message keeps the check-in
   const f = await fixture();
   try {
     f.state.emitMessage = false;
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const team = teamRuntime(f, transport);
     team.runtime.startCycle(f.binding);
     await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
@@ -677,7 +678,7 @@ it("a known native dispatch failure whose wrapped message is visible binds its r
   const f = await fixture();
   try {
     f.state.renderWrapper = publishedWrapper;
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const team = teamRuntime(f, transport);
     team.runtime.startCycle(f.binding);
     await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
@@ -716,7 +717,7 @@ it("a posted receipt without current native evidence stays uncertain across rest
     try {
       f.state.emitMessage = false;f.state.loseReply = variant === "recovered dispatch failure";
       const input = {threadId: "helper", commandId: "trimmed", messageId: "trimmed-message", text: "Check-in trimmed"};
-      const transport = new SupervisorHelperTransport(f.options);
+      const transport = helperTransportUnit(f.options);
       assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), f.state.loseReply ? "uncertain" : "waiting", variant);
       if (f.state.loseReply) {
         addNativeWebhookDelivery(f, {id: "trimmed-delivery", body: f.state.lastPostedBody!, renderedPrompt: input.text, outcome: "dispatch_failed"});
@@ -728,7 +729,7 @@ it("a posted receipt without current native evidence stays uncertain across rest
       const before = receiptDocument(f, input.messageId);
 
       f.state.webhookDeliveries.splice(0);f.state.webhookDeliveryDetails.clear();
-      const restarted = new SupervisorHelperTransport(f.options);
+      const restarted = helperTransportUnit(f.options);
       assert.equal(await restarted.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain", variant);
       assert.equal(await restarted.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain", variant);
       assert.equal(receiptDocument(f, input.messageId), before, `${variant}: the receipt is unchanged`);
@@ -750,7 +751,7 @@ it("a lost-reply check-in with a native dispatch failure stays uncertain after i
   const f = await fixture();let openDb = f.db;
   try {
     f.state.emitMessage = false;f.state.loseReply = true;
-    const team = teamRuntime(f, new SupervisorHelperTransport(f.options));
+    const team = teamRuntime(f, helperTransportUnit(f.options));
     team.runtime.startCycle(f.binding);
     await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
     const original = team.requests.pending("p", "helper")!;
@@ -768,8 +769,8 @@ it("a lost-reply check-in with a native dispatch failure stays uncertain after i
     const store = new ProjectSupervisorStore(openDb, new Set());
     const teamStore = new SupervisorTeamStore(store);
     const requests = new SupervisorConversationStore(openDb);
-    const runtime = new SupervisorTeamRuntime({store, teamStore, requests, monitor: new ProjectSupervisorMonitorStore(openDb),
-      rpc: f.options.rpc, helperTransport: new SupervisorHelperTransport({...f.options, store}), projection: f.options.projection});
+    const runtime = teamRuntimeUnit({store, teamStore, requests, monitor: new ProjectSupervisorMonitorStore(openDb),
+      rpc: f.options.rpc, helperTransport: helperTransportUnit({...f.options, store}), projection: f.options.projection});
     const lookups = f.state.webhookDeliveryLookups;
     for (let cycle = 0; cycle < 3; cycle++) {runtime.startCycle(f.binding);await runtime.reconcile(f.binding, team.threads, AbortSignal.timeout(1000));}
     assert.ok(f.state.webhookDeliveryLookups > lookups, "the restarted runtime reconciles the receipt natively");
@@ -783,7 +784,7 @@ it("team runtime recovers an exact accepted delivery receipt after the POST repl
   const f = await fixture();
   try {
     f.state.emitMessage = false;f.state.loseReply = true;
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const team = teamRuntime(f, transport);
     team.runtime.startCycle(f.binding);
     await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
@@ -818,7 +819,7 @@ it("a lost-reply check-in with a recovered native dispatch failure stays uncerta
   const f = await fixture();
   try {
     f.state.emitMessage = false;f.state.loseReply = true;
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const team = teamRuntime(f, transport);
     team.runtime.startCycle(f.binding);
     await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
@@ -865,7 +866,7 @@ it("a released check-in with a native dispatch failure keeps the handover open w
   const f = await fixture();
   try {
     f.state.emitMessage = false;
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const team = teamRuntime(f, transport);
     team.runtime.startCycle(f.binding);
     await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
@@ -936,7 +937,7 @@ it("a pre-render native rejection is recoverable from its exact body receipt", {
     const f = await fixture();
     try {
       f.state.emitMessage = false;f.state.loseReply = true;
-      const transport = new SupervisorHelperTransport(f.options);
+      const transport = helperTransportUnit(f.options);
       const input = {threadId: "helper", commandId: "lost-" + outcome, messageId: "lost-" + outcome + "-message", text: "Exact " + outcome + " delivery body"};
       assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
       const body = f.state.lastPostedBody;
@@ -958,7 +959,7 @@ it("wrong or ambiguous webhook bodies do not recover an unknown delivery identit
     const f = await fixture();
     try {
       f.state.emitMessage = false;f.state.loseReply = true;
-      const transport = new SupervisorHelperTransport(f.options);
+      const transport = helperTransportUnit(f.options);
       const input = {threadId: "helper", commandId: "unknown-" + mode, messageId: "unknown-" + mode + "-message", text: "Check-in " + mode};
       assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
       const body = f.state.lastPostedBody;
@@ -998,7 +999,7 @@ it("team runtime retains a lost webhook reply as uncertain and raises bounded ro
   try {
     f.state.emitMessage = false;f.state.loseReply = true;
     let now = Date.now();
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const team = teamRuntime(f, transport, () => now);
     team.runtime.startCycle(f.binding);
     await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
@@ -1044,7 +1045,7 @@ it("a disabled channel before first POST stays retry-blocked with bounded root a
   try {
     f.state.emitMessage = false;f.state.disableChannel = true;
     let now = Date.now();
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const team = teamRuntime(f, transport, () => now);
     team.runtime.startCycle(f.binding);
     await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
@@ -1072,7 +1073,7 @@ it("a missing channel after an accepted POST cannot prove non-delivery or unlock
   try {
     f.state.emitMessage = false;
     let now = Date.now();
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const team = teamRuntime(f, transport, () => now);
     team.runtime.startCycle(f.binding);
     await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
@@ -1103,7 +1104,7 @@ it("a missing channel after an accepted POST cannot prove non-delivery or unlock
 it("a manually changed native channel cannot redirect helper work or be silently overwritten", async () => {
   const f = await fixture();
   try {
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const input = {threadId: "helper", commandId: "first", messageId: "first-message", text: "First check-in"};
     await transport.send(f.binding, input, AbortSignal.timeout(1000));
     f.tasks[0]!.threadId = "foreign-thread";
@@ -1147,7 +1148,7 @@ it("a known delivery whose detail RPC throws binds the exact frame and completes
   try {
     f.state.renderWrapper = publishedWrapper;
     const rpc = f.options.rpc;
-    const transport = new SupervisorHelperTransport({...f.options, rpc: async (tag, input) => {
+    const transport = helperTransportUnit({...f.options, rpc: async (tag, input) => {
       if (tag === "scheduledTasks.getWebhookDelivery") throw new Error("detail_unavailable");
       return rpc(tag, input);
     }});
@@ -1184,7 +1185,7 @@ it("a known delivery whose detail RPC throws binds the exact frame and completes
     assert.equal(after.renderedText, native.text, "a later detail rendering does not replace the chat binding");
     assert.equal(after.nativeMessageId, native.id);
     assert.equal(f.state.posts, 1);
-    const restarted = new SupervisorHelperTransport({...f.options, rpc: transport.options.rpc});
+    const restarted = helperTransportUnit({...f.options, rpc: transport.options.rpc});
     assert.equal(restarted.matchesMessage(f.binding, request.messageId, request.text, native, f.helper.messages), true, "a restart keeps the binding");
     assert.equal(await restarted.send(f.binding, {threadId: "helper", commandId: `supervisor-review:${request.id}`, messageId: request.messageId, text: request.text}, AbortSignal.timeout(1000)), "waiting");
     assert.equal(f.state.posts, 1, "a receipt never posts again");
@@ -1195,7 +1196,7 @@ it("a lost reply with one exact frame binds and waits, and two copies stay unres
   const f = await fixture();
   try {
     f.state.loseReply = true;f.state.renderWrapper = publishedWrapper;
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const input = {threadId: "helper", commandId: "lost-unique", messageId: "lost-unique-message", text: "Check-in lost unique"};
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "waiting");
@@ -1211,7 +1212,7 @@ it("a lost reply with one exact frame binds and waits, and two copies stay unres
     f.helper.messages.push(copy);
     const ambiguous = {threadId: "helper", commandId: "lost-ambiguous", messageId: "lost-ambiguous-message", text: "Check-in lost ambiguous"};
     f.state.posts = 0;
-    const second = new SupervisorHelperTransport({...f.options, fetch: async (_url, options) => {
+    const second = helperTransportUnit({...f.options, fetch: async (_url, options) => {
       f.state.posts++;
       const body = JSON.parse(String(options?.body)) as {text: string};
       const message = {id: "ambiguous-one", threadId: "helper", scheduledTaskId: f.tasks[0]!.id, runId: "ambiguous-run", nodeId: "root",
@@ -1234,7 +1235,7 @@ it("two unbound copies of a lost reply do not acknowledge a check-in", async () 
   const f = await fixture();
   try {
     f.state.loseReply = true;f.state.renderWrapper = publishedWrapper;
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const team = teamRuntime(f, transport);
     team.runtime.startCycle(f.binding);
     await team.runtime.runHelperBatch(f.binding, team.threads, team.batch, AbortSignal.timeout(1000));
@@ -1261,7 +1262,7 @@ it("dispatch_failed with an attributed frame waits, and provenance or rejection 
   const f = await fixture();
   try {
     f.state.loseReply = true;f.state.renderWrapper = publishedWrapper;
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const input = {threadId: "helper", commandId: "failed-visible", messageId: "failed-visible-message", text: "Check-in dispatch failed"};
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     addNativeWebhookDelivery(f, {id: "failed-visible-delivery", body: f.state.lastPostedBody!, renderedPrompt: publishedWrapper(input.text), outcome: "dispatch_failed"});
@@ -1290,7 +1291,7 @@ it("a durable rejected receipt plus an exact message stays unresolved and is not
   const f = await fixture();
   try {
     f.state.renderWrapper = publishedWrapper;
-    const transport = new SupervisorHelperTransport({...f.options, fetch: async (_url, options) => {
+    const transport = helperTransportUnit({...f.options, fetch: async (_url, options) => {
       f.state.posts++;
       const body = JSON.parse(String(options?.body)) as {text: string};
       f.helper.messages.push({id: "rejected-visible", threadId: "helper", scheduledTaskId: f.tasks[0]!.id, runId: "rejected-run", nodeId: "root",
@@ -1328,7 +1329,7 @@ it("overlapping reconciliations bind one chat frame and a later detail does not 
   const f = await fixture();
   try {
     f.state.loseReply = true;f.state.renderWrapper = publishedWrapper;
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const input = {threadId: "helper", commandId: "overlap", messageId: "overlap-message", text: "Check-in overlap"};
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     const native = f.helper.messages[0]!;
@@ -1343,7 +1344,7 @@ it("overlapping reconciliations bind one chat frame and a later detail does not 
     assert.equal(after.renderedText, native.text);
     assert.equal(after.nativeMessageId, native.id);
     assert.equal(f.state.posts, 1);
-    const restarted = new SupervisorHelperTransport(f.options);
+    const restarted = helperTransportUnit(f.options);
     assert.equal(restarted.matchesMessage(f.binding, input.messageId, input.text, native, f.helper.messages), true);
     assert.equal(await restarted.send(f.binding, input, AbortSignal.timeout(1000)), "waiting");
     assert.equal(f.state.posts, 1);
@@ -1354,7 +1355,7 @@ it("an exact frame at the rendered-prompt log cap binds from chat when the log c
   const f = await fixture();
   try {
     f.state.loseReply = true;f.state.renderWrapper = publishedWrapper;
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const input = {threadId: "helper", commandId: "cap-chat", messageId: "cap-chat-message", text: "x".repeat(64 * 1024 - publishedWrapper("").length)};
     assert.equal(publishedWrapper(input.text).length, 64 * 1024);
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
@@ -1379,7 +1380,7 @@ it("a clean 4xx stays rejected until an exact frame appears, and reconcileDelive
   const release = Promise.withResolvers<void>();
   try {
     let reads = 0;
-    const transport = new SupervisorHelperTransport({...f.options, projection: async () => {
+    const transport = helperTransportUnit({...f.options, projection: async () => {
       if (++reads === 2) {entered.resolve();await release.promise;throw new Error("unreadable");}
       return f.helper;
     }, fetch: async () => {f.state.posts++;return new Response("no", {status: 400});}});
@@ -1389,7 +1390,7 @@ it("a clean 4xx stays rejected until an exact frame appears, and reconcileDelive
     const reading = transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(5000));
     await entered.promise;
     f.helper.messages.push(frameMessage(String(f.tasks[0]!.id), input.text, "later-reconcile-frame"));
-    const other = new SupervisorHelperTransport(f.options);
+    const other = helperTransportUnit(f.options);
     assert.equal(await other.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true; state?: string}).contradicted, true);
     release.resolve();
@@ -1407,7 +1408,7 @@ it("a later exact frame keeps a rejected notice unresolved, unretried and unpost
   try {
     let unreadable = false;
     f.options.projection = async () => {if (unreadable) throw new Error("unreadable");return f.helper;};
-    const transport = new SupervisorHelperTransport({...f.options, fetch: async () => {f.state.posts++;return new Response("no", {status: 409});}});
+    const transport = helperTransportUnit({...f.options, fetch: async () => {f.state.posts++;return new Response("no", {status: 409});}});
     const team = teamRuntime(f, transport);
     const transfer = f.team.release(f.binding, "branch", new Map([[f.binding.mainThreadId, null], ["branch", f.binding.mainThreadId]]));
     const notice = f.team.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch && value.kind === "handover_release")!;
@@ -1439,7 +1440,7 @@ it("a pre-render rejection contradicted by a visible frame stays uncertain after
   const f = await fixture();
   try {
     f.state.emitMessage = false;f.state.loseReply = true;
-    const transport = new SupervisorHelperTransport(f.options);
+    const transport = helperTransportUnit(f.options);
     const input = {threadId: "helper", commandId: "pre-render-contradiction", messageId: "pre-render-contradiction-message", text: "Pre-render contradiction body"};
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     const taskId = String(f.tasks[0]!.id);
@@ -1455,11 +1456,11 @@ it("a pre-render rejection contradicted by a visible frame stays uncertain after
     assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain", "a readable projection without the frame is still unresolved");
     assert.equal(await transport.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     let reads = 0;
-    const unreadable = new SupervisorHelperTransport({...f.options, projection: async () => {reads += 1;throw new Error("unreadable");}});
+    const unreadable = helperTransportUnit({...f.options, projection: async () => {reads += 1;throw new Error("unreadable");}});
     assert.equal(await unreadable.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     assert.equal(await unreadable.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     assert.equal(reads, 0, "a contradicted receipt needs no projection read");
-    const restarted = new SupervisorHelperTransport(f.options);
+    const restarted = helperTransportUnit(f.options);
     assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true}).contradicted, true);
     assert.equal(await restarted.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     assert.equal(f.state.posts, 1);
@@ -1475,7 +1476,7 @@ it("a stored contradiction survives a late save that omits the flag and a restar
     f.state.emitMessage = false;f.state.loseReply = true;
     let lookups = 0;
     const rpc = f.options.rpc;
-    const transport = new SupervisorHelperTransport({...f.options, rpc: async (tag, args) => {
+    const transport = helperTransportUnit({...f.options, rpc: async (tag, args) => {
       if (tag === "scheduledTasks.listWebhookDeliveries" && ++lookups === 1) {entered.resolve();await release.promise;}
       return rpc(tag, args);
     }});
@@ -1489,7 +1490,7 @@ it("a stored contradiction survives a late save that omits the flag and a restar
     const summary = f.state.webhookDeliveries[0]!;
     const detail = f.state.webhookDeliveryDetails.get("sticky-delivery")!.delivery as {outcome: string; renderedPrompt: string | null};
     summary.outcome = "rejected_signature";detail.outcome = "rejected_signature";detail.renderedPrompt = null;
-    assert.equal(await new SupervisorHelperTransport(f.options).reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+    assert.equal(await helperTransportUnit(f.options).reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true}).contradicted, true);
     summary.outcome = "accepted";detail.outcome = "accepted";detail.renderedPrompt = publishedWrapper(input.text);
     f.helper.messages.splice(0);
@@ -1499,7 +1500,7 @@ it("a stored contradiction survives a late save that omits the flag and a restar
     assert.equal(after.contradicted, true, "a late posted save does not clear the flag");
     assert.equal(after.state, "rejected", "a late posted save does not leave the rejected state");
     assert.equal(after.text, input.text);
-    const restarted = new SupervisorHelperTransport({...f.options, projection: async () => {throw new Error("unreadable");}});
+    const restarted = helperTransportUnit({...f.options, projection: async () => {throw new Error("unreadable");}});
     assert.equal(await restarted.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true; state?: string}).state, "rejected");
     assert.equal(f.state.posts, 1);
@@ -1513,15 +1514,15 @@ it("a send that read a rejected receipt before an overlap stored its contradicti
   let late: Promise<unknown> = Promise.resolve();
   try {
     const input = {threadId: "helper", commandId: "local-overlap", messageId: "local-overlap", text: "one exact local overlap request"};
-    const clean = new SupervisorHelperTransport({...f.options, fetch: async () => {f.state.posts++;return new Response("rejected", {status: 400});}});
+    const clean = helperTransportUnit({...f.options, fetch: async () => {f.state.posts++;return new Response("rejected", {status: 400});}});
     assert.equal(await clean.send(f.binding, input, AbortSignal.timeout(1000)), "rejected");
     const taskId = (JSON.parse(receiptDocument(f, input.messageId)) as {taskId: string}).taskId;
     const stale = {...f.helper, messages: []};
-    late = new SupervisorHelperTransport({...f.options, projection: async () => {entered.resolve();await release.promise;return stale;}})
+    late = helperTransportUnit({...f.options, projection: async () => {entered.resolve();await release.promise;return stale;}})
       .send(f.binding, input, AbortSignal.timeout(5000));
     await entered.promise;
     const frame = frameMessage(taskId, input.text, `scheduled-task-message:${taskId}:webhook:local-observed-copy`);
-    const observer = new SupervisorHelperTransport({...f.options, projection: async () => ({...f.helper, messages: [frame]})});
+    const observer = helperTransportUnit({...f.options, projection: async () => ({...f.helper, messages: [frame]})});
     assert.equal(await observer.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
     assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true}).contradicted, true);
     release.resolve();
@@ -1542,7 +1543,7 @@ it("a contradiction stored while the POST is in flight wins over its late 4xx or
     let sending: Promise<unknown> = Promise.resolve();
     try {
       // the sender's projection is a copy, so a frame that appears later is not in its pre-POST snapshot
-      const transport = new SupervisorHelperTransport({...f.options, projection: async () => ({...f.helper, messages: [...f.helper.messages]}),
+      const transport = helperTransportUnit({...f.options, projection: async () => ({...f.helper, messages: [...f.helper.messages]}),
         fetch: async () => {f.state.posts++;entered.resolve();await release.promise;return reply();}});
       const input = {threadId: "helper", commandId: "in-flight", messageId: "in-flight-message", text: "In-flight contradiction"};
       sending = transport.send(f.binding, input, AbortSignal.timeout(5000));
@@ -1550,7 +1551,7 @@ it("a contradiction stored while the POST is in flight wins over its late 4xx or
       const taskId = String(f.tasks[0]!.id);
       addNativeWebhookDelivery(f, {id: "in-flight-delivery", body: helperDeliveryBody(input.messageId, input.text), renderedPrompt: null, outcome: "rejected_signature"});
       f.helper.messages.push(frameMessage(taskId, input.text, `scheduled-task-message:${taskId}:webhook:in-flight-delivery`));
-      assert.equal(await new SupervisorHelperTransport(f.options).reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
+      assert.equal(await helperTransportUnit(f.options).reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
       assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true}).contradicted, true);
       release.resolve();
       assert.equal(await sending, "uncertain", "a late reply cannot report the contradicted attempt as rejected or delivered");
@@ -1570,7 +1571,7 @@ it("a message bound earlier contradicts a later pre-render rejection when its fr
     try {
       f.state.emitMessage = false;
       let unreadable = false;
-      const transport = new SupervisorHelperTransport({...f.options, projection: async () => {if (unreadable) throw new Error("unreadable");return f.helper;}});
+      const transport = helperTransportUnit({...f.options, projection: async () => {if (unreadable) throw new Error("unreadable");return f.helper;}});
       const input = {threadId: "helper", commandId: `bound-${outcome}`, messageId: `bound-${outcome}-message`, text: `Bound ${outcome} body`};
       assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "waiting", outcome);
       const taskId = String(f.tasks[0]!.id);
@@ -1600,7 +1601,7 @@ it("a bound message keeps a notice's later pre-render rejection unfailed, unretr
     let unreadable = false;
     // the runtime's own reads miss the frame that the transport's read binds
     f.options.projection = async () => {if (unreadable) throw new Error("unreadable");return {...f.helper, messages: []};};
-    const transport = new SupervisorHelperTransport({...f.options, projection: async () => {if (unreadable) throw new Error("unreadable");return f.helper;}});
+    const transport = helperTransportUnit({...f.options, projection: async () => {if (unreadable) throw new Error("unreadable");return f.helper;}});
     const team = teamRuntime(f, transport);
     const transfer = f.team.release(f.binding, "branch", new Map([[f.binding.mainThreadId, null], ["branch", f.binding.mainThreadId]]));
     const notice = f.team.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch && value.kind === "handover_release")!;
@@ -1641,7 +1642,7 @@ it("an accepted POST later logged as a pre-render rejection keeps its notice unf
       f.state.emitMessage = false;f.state.loseReply = !accepted;
       let unreadable = false;
       f.options.projection = async () => {if (unreadable) throw new Error("unreadable");return f.helper;};
-      const transport = new SupervisorHelperTransport(f.options);
+      const transport = helperTransportUnit(f.options);
       const team = teamRuntime(f, transport);
       const transfer = f.team.release(f.binding, "branch", new Map([[f.binding.mainThreadId, null], ["branch", f.binding.mainThreadId]]));
       const notice = f.team.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch && value.kind === "handover_release")!;
@@ -1689,7 +1690,7 @@ it("an accepted POST later logged as a pre-render rejection is unresolved throug
     try {
       f.state.emitMessage = false;
       let unreadable = false;
-      const transport = new SupervisorHelperTransport({...f.options, projection: async () => {if (unreadable) throw new Error("unreadable");return f.helper;}});
+      const transport = helperTransportUnit({...f.options, projection: async () => {if (unreadable) throw new Error("unreadable");return f.helper;}});
       const input = {threadId: "helper", commandId: `accepted-${entry}`, messageId: `accepted-${entry}-message`, text: `Accepted ${entry} body`};
       assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "waiting", entry);
       addNativeWebhookDelivery(f, {id: "native-delivery", body: f.state.lastPostedBody!, renderedPrompt: null, outcome: "rate_limited"});
@@ -1715,12 +1716,12 @@ it("a 2xx whose body cannot be read is still recorded acceptance, so a later pre
   for (const [name, reply] of Object.entries(replies)) {
     const f = await fixture();
     try {
-      const transport = new SupervisorHelperTransport({...f.options, fetch: async () => {f.state.posts++;return reply();}});
+      const transport = helperTransportUnit({...f.options, fetch: async () => {f.state.posts++;return reply();}});
       const input = {threadId: "helper", commandId: `unread-${name}`, messageId: `unread-${name}-message`, text: `Unread ${name} body`};
       assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain", name);
       assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {state?: string}).state, "posted", name);
       addNativeWebhookDelivery(f, {id: "unread-delivery", body: helperDeliveryBody(input.messageId, input.text), renderedPrompt: null, outcome: "rejected_signature"});
-      const unreadable = new SupervisorHelperTransport({...f.options, projection: async () => {throw new Error("unreadable");}});
+      const unreadable = helperTransportUnit({...f.options, projection: async () => {throw new Error("unreadable");}});
       assert.equal(await unreadable.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "uncertain", name);
       const receipt = JSON.parse(receiptDocument(f, input.messageId)) as {state?: string; contradicted?: true};
       assert.equal(receipt.contradicted, true, name);
@@ -1735,7 +1736,7 @@ it("a rejected receipt an earlier version left with a bound rendering stays unre
     const f = await fixture();
     try {
       f.state.emitMessage = false;f.state.loseReply = true;
-      const transport = new SupervisorHelperTransport(f.options);
+      const transport = helperTransportUnit(f.options);
       const input = {threadId: "helper", commandId: `legacy-${rendered}`, messageId: `legacy-${rendered}-message`, text: `Legacy ${rendered} body`};
       assert.equal(await transport.send(f.binding, input, AbortSignal.timeout(1000)), "uncertain");
       // an earlier version saved a pre-render rejection over a receipt whose rendering native detail had already bound
@@ -1743,7 +1744,7 @@ it("a rejected receipt an earlier version left with a bound rendering stays unre
         ...(rendered ? {renderedText: publishedWrapper(input.text)} : {})};
       f.db.db.prepare("UPDATE supervisor_helper_deliveries SET document=? WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
         .run(JSON.stringify(legacy), f.binding.threadId, f.binding.generation, input.messageId);
-      const unreadable = new SupervisorHelperTransport({...f.options, projection: async () => {throw new Error("unreadable");}});
+      const unreadable = helperTransportUnit({...f.options, projection: async () => {throw new Error("unreadable");}});
       assert.equal(await unreadable.reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), rendered ? "uncertain" : "rejected");
       assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {contradicted?: true}).contradicted, rendered ? true : undefined);
       assert.equal(f.state.posts, 1);
@@ -1758,7 +1759,7 @@ it("a frame bound by an overlap while the POST is in flight contradicts its late
   let sending: Promise<unknown> = Promise.resolve();
   try {
     f.state.emitMessage = false;
-    const transport = new SupervisorHelperTransport({...f.options, projection: async () => ({...f.helper, messages: [...f.helper.messages]}),
+    const transport = helperTransportUnit({...f.options, projection: async () => ({...f.helper, messages: [...f.helper.messages]}),
       fetch: async () => {f.state.posts++;entered.resolve();await release.promise;return new Response("conflict", {status: 409});}});
     const input = {threadId: "helper", commandId: "overlap-bound", messageId: "overlap-bound-message", text: "Overlap bound frame"};
     sending = transport.send(f.binding, input, AbortSignal.timeout(5000));
@@ -1766,7 +1767,7 @@ it("a frame bound by an overlap while the POST is in flight contradicts its late
     const taskId = String(f.tasks[0]!.id);
     const nativeMessageId = `scheduled-task-message:${taskId}:webhook:overlap-delivery`;
     f.helper.messages.push(frameMessage(taskId, input.text, nativeMessageId));
-    assert.equal(await new SupervisorHelperTransport(f.options).reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "waiting");
+    assert.equal(await helperTransportUnit(f.options).reconcileDelivery(f.binding, input, AbortSignal.timeout(1000)), "waiting");
     assert.equal((JSON.parse(receiptDocument(f, input.messageId)) as {nativeMessageId?: string}).nativeMessageId, nativeMessageId);
     release.resolve();
     assert.equal(await sending, "uncertain", "a 4xx reply cannot reject an attempt whose message is already bound");
@@ -1783,7 +1784,7 @@ it("a frame bound by an overlap while the POST is in flight contradicts its late
 it("a refused send of a contradicted receipt is uncertain and posts nothing", async () => {
   const f = await fixture();
   try {
-    const transport = new SupervisorHelperTransport({...f.options, fetch: async (_url, options) => {
+    const transport = helperTransportUnit({...f.options, fetch: async (_url, options) => {
       f.state.posts++;
       const body = JSON.parse(String(options?.body)) as {text: string};
       f.helper.messages.push(frameMessage(String(f.tasks[0]!.id), body.text, "refused-frame"));
@@ -1805,7 +1806,7 @@ it("a refused send of a contradicted receipt is uncertain and posts nothing", as
 it("the matcher refuses a contradicted receipt, so a check-in and a readiness request are never failed or completed", { timeout: 60_000 }, async () => {
   const direct = await fixture();
   try {
-    const transport = new SupervisorHelperTransport({...direct.options, fetch: async (_url, options) => {
+    const transport = helperTransportUnit({...direct.options, fetch: async (_url, options) => {
       direct.state.posts++;
       const body = JSON.parse(String(options?.body)) as {text: string};
       direct.helper.messages.push(frameMessage(String(direct.tasks[0]!.id), body.text, "matcher-frame"));
@@ -1824,7 +1825,7 @@ it("the matcher refuses a contradicted receipt, so a check-in and a readiness re
 
   const checkIn = await fixture();
   try {
-    const transport = new SupervisorHelperTransport({...checkIn.options, fetch: async (_url, options) => {
+    const transport = helperTransportUnit({...checkIn.options, fetch: async (_url, options) => {
       checkIn.state.posts++;
       const body = JSON.parse(String(options?.body)) as {text: string};
       checkIn.helper.messages.push(frameMessage(String(checkIn.tasks[0]!.id), body.text, "check-in-frame"));
@@ -1848,14 +1849,14 @@ it("the matcher refuses a contradicted receipt, so a check-in and a readiness re
 
   const readiness = await fixture();
   try {
-    const transport = new SupervisorHelperTransport({...readiness.options, fetch: async (_url, options) => {
+    const transport = helperTransportUnit({...readiness.options, fetch: async (_url, options) => {
       readiness.state.posts++;
       const body = JSON.parse(String(options?.body)) as {text: string};
       readiness.helper.messages.push(frameMessage(String(readiness.tasks[0]!.id), body.text, "ready-frame"));
       return new Response("conflict", {status: 409});
     }});
     const requests = new SupervisorConversationStore(readiness.db);
-    const runtime = new SupervisorTeamRuntime({store: readiness.store, teamStore: readiness.team, requests, monitor: new ProjectSupervisorMonitorStore(readiness.db),
+    const runtime = teamRuntimeUnit({store: readiness.store, teamStore: readiness.team, requests, monitor: new ProjectSupervisorMonitorStore(readiness.db),
       rpc: readiness.options.rpc, helperTransport: transport, projection: readiness.options.projection});
     const threads = [readiness.helper.thread, {id: readiness.binding.mainThreadId, title: "main", projectId: "p",
       lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: readiness.binding.mainThreadId}} as ThreadInfo];
@@ -1879,7 +1880,7 @@ it("the matcher refuses a contradicted receipt, so a check-in and a readiness re
 it("a clean no-frame 4xx notice still fails on the first readable cycle and can be retried", async () => {
   const f = await fixture();
   try {
-    const transport = new SupervisorHelperTransport({...f.options, fetch: async () => {f.state.posts++;return new Response("no", {status: 409});}});
+    const transport = helperTransportUnit({...f.options, fetch: async () => {f.state.posts++;return new Response("no", {status: 409});}});
     const team = teamRuntime(f, transport);
     const transfer = f.team.release(f.binding, "branch", new Map([[f.binding.mainThreadId, null], ["branch", f.binding.mainThreadId]]));
     const notice = f.team.snapshot(f.binding).notifications.find(value => value.assignmentEpoch === transfer.epoch && value.kind === "handover_release")!;
@@ -1898,7 +1899,7 @@ it("a clean no-frame 4xx notice still fails on the first readable cycle and can 
 it("a project disabled during the transport's own reads posts nothing and keeps the identity waiting", async () => {
   const f = await fixture();
   try {
-    const transport = new SupervisorHelperTransport({...f.options, projection: async () => {
+    const transport = helperTransportUnit({...f.options, projection: async () => {
       f.db.db.prepare("UPDATE meta SET value=? WHERE key=?").run(JSON.stringify({enabled: false, manual: true, generation: 2}), 'supervisor_control:"p"');
       return f.helper;
     }});

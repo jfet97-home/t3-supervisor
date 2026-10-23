@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { defaultSupervisorModel, type BindingRecord } from "../../src/project-supervisor-store.js";
 import type { ConversationRequest } from "../../src/supervisor-conversation-store.js";
 import type { SupervisorMonitorBatch, SupervisorMonitorThreadBatch } from "../../src/supervisor-monitor.js";
-import type { SupervisorTeamRuntime } from "../../src/supervisor-team-runtime.js";
+import type { SupervisorTeamRuntimeFacade } from "../../src/supervisor-team-runtime.js";
 import type { TeamRequest } from "../../src/supervisor-team-store.js";
 import type { Projection, ThreadInfo } from "../../src/types.js";
 import { httpRequests, sendJson, startIntPeer, type IntNativePeer, type PeerHttpEntry } from "./int-native-peer.js";
@@ -52,8 +52,8 @@ export type HelperFixture = {
   threads: ThreadInfo[];
   core: IntSupervision;
   binding: BindingRecord;
-  runtime: SupervisorTeamRuntime;
-  batches: ReturnType<SupervisorTeamRuntime["partition"]>["helperBatches"];
+  runtime: SupervisorTeamRuntimeFacade;
+  batches: ReturnType<SupervisorTeamRuntimeFacade["partition"]>["helperBatches"];
   // requests that reached a hook path with POST
   posts(): PeerHttpEntry[];
   request(): ConversationRequest;

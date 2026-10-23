@@ -1,8 +1,13 @@
-import { Context, Effect, Layer } from "effect";
+import { NodeCrypto } from "@effect/platform-node";
+import { Context, Effect, Exit, Layer, Scope } from "effect";
+import { FetchHttpClient } from "effect/http";
 import { request as httpRequest } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { supervisorTeamServices } from "../../src/guidance-application.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
+import { SupervisorIds } from "../../src/ids.js";
+import { NativeEnvelope } from "../../src/native-envelope.js";
 import { GuidanceRuntime } from "../../src/guidance.js";
 import { guidanceRuntimeFacade } from "../../src/guidance-application.js";
 import { startGuidanceUi } from "./service-auth-harness.js";
@@ -10,7 +15,8 @@ import { ProjectSupervisorStore, loadSupervisorOwnership } from "../../src/proje
 import { ProjectSupervisor } from "../../src/project-supervisor.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import type { StoreShape } from "../../src/store.js";
-import { record, type SupervisorRpc } from "../../src/supervisor-native.js";
+import { makeSupervisionGate, SupervisionGate, type SupervisionScope } from "../../src/supervision-gate.js";
+import { NativeOperateRpc, NativeRpc, record, type SupervisorRpc } from "../../src/supervisor-native.js";
 import { makeSupervisorRpc, readSupervisorBaseline, readSupervisorThreads } from "./supervisor-native-client.js";
 import { SupervisorTeamController } from "../../src/supervisor-team-controller.js";
 import { makeT3Client, T3Client, type T3ClientShape } from "../../src/t3.js";
@@ -63,10 +69,27 @@ export const openIntSupervision = async (input: {directory: string; peerUrl: str
   const t3 = await buildT3Client(config.t3Url, readToken);
   const readRpc = makeSupervisorRpc(config.t3Url, readToken);
   const operateRpc = makeSupervisorRpc(config.t3Url, operateToken);
+  // the helper transport and team runtime as guidance-application.ts builds them: the operate client, the T3 client and
+  // global fetch in the supervision scope, with the admission gate guarding through the supervisor's scope predicates
+  const scope = Effect.runSync(Scope.make());
+  let supervisorScope: SupervisionScope | null = null;
+  const team = await Effect.runPromise(supervisorTeamServices((effect) => Effect.runPromise(effect), store, config.t3Url).pipe(
+    Effect.provideServiceEffect(NativeOperateRpc, NativeRpc.make({baseUrl: config.t3Url, token: operateToken}).pipe(Effect.provide(NativeEnvelope.layer))),
+    Effect.provideServiceEffect(SupervisionGate, makeSupervisionGate({
+      scopeEnabled: (projectId, mainThreadId, purpose) => supervisorScope?.scopeEnabled(projectId, mainThreadId, purpose) ?? false,
+      supervisionStopped: (threadId) => supervisorScope?.supervisionStopped(threadId) ?? true,
+      workflowEditingEnabled: (projectId, mainThreadId, purpose) => supervisorScope?.workflowEditingEnabled(projectId, mainThreadId, purpose) ?? false,
+    })),
+    Effect.provideService(T3Client, t3),
+    Effect.provide(Layer.mergeAll(FetchHttpClient.layer, SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer)))),
+    Scope.provide(scope),
+  ));
   const supervision = new ProjectSupervisor(config, store, source, t3, readRpc, operateRpc, readSupervisorBaseline(config.t3Url, readToken),
-    input.definitions);
+    team, input.definitions);
+  supervisorScope = supervision.gate;
   return {directory: input.directory, config, policy, guidance, store, source, t3, readRpc, operateRpc, supervision,
-    close: () => {guidance.close();policy.close();}};
+    // a process exit also ends the supervision scope, which aborts any webhook POST still in flight
+    close: () => {Effect.runFork(Scope.close(scope, Exit.void));guidance.close();policy.close();}};
 };
 
 export type IntEndpoint = {

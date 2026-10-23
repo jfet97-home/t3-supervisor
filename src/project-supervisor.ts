@@ -1,4 +1,5 @@
-import {SupervisorHelperTransport} from "./supervisor-helper-transport.js";
+import type {SupervisorHelperDeliveryTransport} from "./supervisor-helper-transport.js";
+import type {SupervisorTeamRuntimeFacade} from "./supervisor-team-runtime.js";
 import { assessmentForTask, workflowAssessment } from "./workflow-assessment.js";
 import { buildDashboardOverview } from "./dashboard-overview.js";
 import {supervisorTeamView} from "./supervisor-team-view.js";
@@ -96,7 +97,7 @@ export class ProjectSupervisor {
   // the scope predicates every guard reads (plan 3.9 dependency extraction)
   readonly gate: SupervisionScope;
   readonly team: SupervisorTeamStore;
-  readonly helperTransport: SupervisorHelperTransport;
+  readonly helperTransport: SupervisorHelperDeliveryTransport;
   readonly conversation: SupervisorConversation;
   readonly lifecycle: SupervisorLifecycle;
   readonly workflowStates: WorkflowStateStore;
@@ -104,16 +105,17 @@ export class ProjectSupervisor {
   constructor(readonly config: SupervisorConfig, readonly store: ProjectSupervisorStore, readonly source: Pick<StoreShape, "catalog">,
     readonly t3: Pick<T3ClientShape, "projection">, readonly readRpc: SupervisorRpc, readonly operateRpc: SupervisorRpc | null,
     readonly activationSnapshot: (signal: AbortSignal) => Promise<SupervisorBaseline>,
+    // i-01/i-02 (plan 3.9): the helper transport and the team runtime, built once at the root
+    team: {helperTransport: SupervisorHelperDeliveryTransport; teamRuntime: SupervisorTeamRuntimeFacade},
     readonly definitions?: ProjectSupervisorDefinitions, private readonly now: () => number = Date.now) {
       this.gate = new SupervisionScope(config, store, Boolean(operateRpc));
       this.team = new SupervisorTeamStore(store);
-      this.helperTransport = new SupervisorHelperTransport({store, enabled: (projectId, mainThreadId) => this.gate.scopeEnabled(projectId, mainThreadId), rpc: operateRpc, baseUrl: config.t3Url,
-        projection: (threadId, signal) => this.projection(threadId, signal)});
+      this.helperTransport = team.helperTransport;
       this.workflowStates = new WorkflowStateStore(store, (projectId, mainThreadId) => this.gate.workflowEditingEnabled(projectId, mainThreadId));
       this.conversation = new SupervisorConversation(store, operateRpc, (threadId, signal) => this.projection(threadId, signal), definitions,
         (thread, threads) => this.gate.eligible(thread, threads), (projectId, mainThreadId, purpose) => this.gate.scopeEnabled(projectId, mainThreadId, purpose), this.workflowStates,
-        thread => !isSupervisorThread(config, thread) && !thread.archivedAt && !thread.deletedAt, this.team,
-        this.helperTransport, config.helperProviderInstanceId);
+        thread => !isSupervisorThread(config, thread) && !thread.archivedAt && !thread.deletedAt, team.teamRuntime,
+        config.helperProviderInstanceId);
       this.conversation.supervisionStopped = threadId => this.gate.supervisionStopped(threadId);
       this.lifecycle = new SupervisorLifecycle(store, this.conversation, (id, signal) => this.projection(id, signal), operateRpc, this.workflowStates);
       this.supervisionControl = new SupervisionControl(config, store, this.gate, source, t3, this.conversation, Boolean(operateRpc), now);

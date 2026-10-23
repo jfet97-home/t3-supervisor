@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { ProjectSupervisor } from "../../src/project-supervisor.js";
+import { projectSupervisorUnit } from "./team-units.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../../src/project-supervisor-contract.js";
 import { T3TransportError, type T3ClientShape } from "../../src/t3.js";
@@ -225,9 +226,9 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
     const workspaceRoot = registeredProjects.find(project => project.id === projectId)?.workspaceRoot ?? "";
     return missingDefinitions(projectId, threadId, workspaceRoot);
   }};
-  const makeSupervisor = (overrides: {activationSnapshot?: typeof activationSnapshot; definitions?: ConstructorParameters<typeof ProjectSupervisor>[7];
+  const makeSupervisor = (overrides: {activationSnapshot?: typeof activationSnapshot; definitions?: ConstructorParameters<typeof ProjectSupervisor>[8];
     now?: () => number} = {}) =>
-    new ProjectSupervisor(config, supervisorStore, source, t3, readRpc, operateRpc, overrides.activationSnapshot ?? activationSnapshot,
+    projectSupervisorUnit(config, supervisorStore, source, t3, readRpc, operateRpc, overrides.activationSnapshot ?? activationSnapshot,
       overrides.definitions ?? defaultDefinitions, overrides.now);
   // a process restart: the old connection is closed and a new store opens the same guidance.sqlite3
   const restart = (): void => {

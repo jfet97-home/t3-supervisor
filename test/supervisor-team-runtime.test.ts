@@ -8,16 +8,16 @@ import { fingerprint, GuidanceStore } from "../src/guidance-store.js";
 import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.js";
 import { SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorBatch, type SupervisorMonitorThreadBatch } from "../src/supervisor-monitor.js";
 import { SupervisorConversationStore } from "../src/supervisor-conversation-store.js";
-import { SupervisorConversation } from "../src/supervisor-conversation.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { SupervisorTeamStore, type TeamBinding, type TeamMember, type TeamNotification } from "../src/supervisor-team-store.js";
-import { SupervisorTeamRuntime, teamNotificationText } from "../src/supervisor-team-runtime.js";
+import { teamNotificationText } from "../src/supervisor-team-runtime.js";
 import { supervisorTeamView } from "../src/supervisor-team-view.js";
 import { supervisionGuideToolDefinition, supervisionTeamToolDefinition } from "../src/supervisor-team-controller.js";
 import { workflowReadToolDefinition, workflowWriteToolDefinition } from "../src/workflow-write-controller.js";
 import { directParentChildLifecycle } from "../src/supervisor-observation.js";
 import { T3TransportError } from "../src/t3.js";
-import { SupervisorHelperTransport, type SupervisorHelperDeliveryTransport } from "../src/supervisor-helper-transport.js";
+import type { SupervisorHelperDeliveryTransport } from "../src/supervisor-helper-transport.js";
+import { helperTransportUnit, supervisorConversationUnit, teamRuntimeUnit } from "./support/team-units.js";
 import { workflowRequestHash } from "../src/workflow-write-evidence.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
 
@@ -80,7 +80,7 @@ const fixture = async () => {
   const projections = new Map<string, Projection>(threadList.map(thread => [thread.id, emptyProjection(thread)]));
   const runtime = (helperTransport?: SupervisorHelperDeliveryTransport,
     projection: (threadId: string) => Promise<Projection> = async threadId => projections.get(threadId) ?? emptyProjection(makeThread(threadId))) =>
-    new SupervisorTeamRuntime({store, teamStore, requests, monitor, rpc: null, projection: async threadId => projection(threadId),
+    teamRuntimeUnit({store, teamStore, requests, monitor, rpc: null, projection: async threadId => projection(threadId),
       ...(helperTransport ? {helperTransport} : {})});
   return {directory, guidance, store, binding, root, teamStore, requests, monitor, threadList, projections, runtime,
     cleanup: async () => {guidance.close();await rm(directory, {recursive: true, force: true});}};
@@ -232,7 +232,7 @@ it("helper observations run while a root-native check-in remains unresolved", as
 
   const transport = webhookTransport();
   const rootProjection = emptyProjection(makeThread(f.binding.threadId, "main", "subagent"));
-  const conversation = new SupervisorConversation(f.store, null, async threadId =>
+  const conversation = supervisorConversationUnit(f.store, null, async threadId =>
     threadId === f.binding.threadId ? rootProjection : f.projections.get(threadId) ?? emptyProjection(makeThread(threadId)),
   undefined, thread => thread.id === "main", () => true, undefined, undefined, f.teamStore, transport.transport);
   const task = {id: "root-task", threadId: "main", projectId, sourceRunId: "source-run", sourceMessageId: "source-message",
@@ -280,7 +280,7 @@ it("root observes fenced coverage explicitly and does not acknowledge its activi
   const transport = webhookTransport();
   const calls: Array<{payload: Record<string, unknown>}> = [];
   const rpc = async (_tag: string, payload: Record<string, unknown>) => {calls.push({payload});return {sequence: calls.length};};
-  const conversation = new SupervisorConversation(f.store, rpc, async threadId =>
+  const conversation = supervisorConversationUnit(f.store, rpc, async threadId =>
     threadId === f.binding.threadId ? rootProjection : f.projections.get(threadId) ?? emptyProjection(makeThread(threadId)),
   undefined, thread => thread.id === "main", () => true, undefined, undefined, f.teamStore, transport.transport);
   const task = {id: "observe-only-task", threadId: "main", projectId, sourceRunId: "source-run", sourceMessageId: "source-message",
@@ -1314,7 +1314,7 @@ it("a successful helper result creates an event-only root wake and is acknowledg
   const rootProjection = emptyProjection({...makeThread(f.binding.threadId), projectId, lineage: {parentThreadId: "main", relationshipToParent: "subagent", rootThreadId: "main"}});
   let sequence = 0;
   const rpc = async (_tag: string, _payload: Record<string, unknown>, _signal: AbortSignal) => ({sequence: ++sequence});
-  const conversation = new SupervisorConversation(f.store, rpc, async threadId => threadId === f.binding.threadId ? rootProjection : emptyProjection(makeThread(threadId)),
+  const conversation = supervisorConversationUnit(f.store, rpc, async threadId => threadId === f.binding.threadId ? rootProjection : emptyProjection(makeThread(threadId)),
     undefined, thread => thread.id === "main", () => true, undefined, undefined, f.teamStore);
   await conversation.run(f.binding as BindingRecord, rootProjection, f.threadList, AbortSignal.timeout(5000));
   const request = conversation.requests.pending(projectId, f.binding.threadId);
@@ -1848,9 +1848,9 @@ it("a handover_release contradicted by a pre-existing frame is never failed, ret
     if (unreadable && threadId === member.threadId) throw new Error("projection_unreadable");
     return f.projections.get(threadId) ?? emptyProjection(makeThread(threadId));
   };
-  const transport = new SupervisorHelperTransport({store: f.store, rpc, baseUrl: "http://127.0.0.1:3773", projection: readProjection,
+  const transport = helperTransportUnit({store: f.store, rpc, baseUrl: "http://127.0.0.1:3773", projection: readProjection,
     fetch: async () => {posts += 1;return new Response("conflict", {status: 409});}});
-  const runtime = new SupervisorTeamRuntime({store: f.store, teamStore: f.teamStore, requests: f.requests, monitor: f.monitor, rpc,
+  const runtime = teamRuntimeUnit({store: f.store, teamStore: f.teamStore, requests: f.requests, monitor: f.monitor, rpc,
     helperTransport: transport, projection: readProjection});
   const cycle = async () => {runtime.startCycle(f.binding);await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5000));};
   const current = () => f.teamStore.snapshot(f.binding).notifications.find(item => item.id === notice.id);
@@ -1938,7 +1938,7 @@ it("a stop saved while a helper is read posts no fresh team notice and closes it
     if (!finalAllowed) return 'revoked';
     return send(owner, input, signal, authorized);
   };
-  const conversation = new SupervisorConversation(f.store, null, async id => {
+  const conversation = supervisorConversationUnit(f.store, null, async id => {
     if (id === member.threadId) stopped = true;
     return f.projections.get(id)!;
   }, undefined, () => !stopped, () => true, undefined, undefined, f.teamStore, transport.transport);

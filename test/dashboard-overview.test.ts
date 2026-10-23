@@ -7,7 +7,7 @@ import {Effect, Schema} from "effect";
 import {DashboardOverview, overviewPage, workAttention, readOverviewPages, type DashboardOverviewInfo} from "../src/dashboard-overview.js";
 import {GuidanceStore} from "../src/guidance-store.js";
 import {ProjectSupervisorStore, defaultSupervisorModel, type TaskRecord} from "../src/project-supervisor-store.js";
-import {ProjectSupervisor} from "../src/project-supervisor.js";
+import {projectSupervisorUnit} from "./support/team-units.js";
 import type {ThreadInfo, SupervisorConfig} from "../src/types.js";
 
 // the range cases call the Effect range reader with the promise page reads they were written for
@@ -24,7 +24,7 @@ it("the overview reads retained supervision state without native calls, writes, 
   const threads = [nativeThread("active"), nativeThread("blocked"), nativeThread("stopped"), nativeThread("quiet")];
   const config: SupervisorConfig = {dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: ["stopped"], healthPort: 0};
   const forbidden = () => {assert.fail("a read-only overview must not call native tools");};
-  const supervisor = new ProjectSupervisor(config, store, {catalog: () => Effect.succeed({projects: [{project: {id: "project", title: "Project", workspaceRoot: "/work/project"}, available: true}], threads})},
+  const supervisor = projectSupervisorUnit(config, store, {catalog: () => Effect.succeed({projects: [{project: {id: "project", title: "Project", workspaceRoot: "/work/project"}, available: true}], threads})},
     {projection: forbidden}, forbidden, forbidden, async () => {throw new Error("must not initialize a boundary");});
   store.saveControl(null, 0, true, {snapshotSequence: 1, threads: []});
   store.saveControl("project", store.control("project").generation, true, {snapshotSequence: 1, threads: []});

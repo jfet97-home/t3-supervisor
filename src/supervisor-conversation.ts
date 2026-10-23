@@ -18,9 +18,7 @@ import { childOrigin, directParentChildLifecycle, hasDirectParentChildLifecycleE
 import { randomUUID } from "node:crypto";
 import { contributionImportDecision, parseExternalContributionRecord, workflowPlanEntities, type WorkflowStateStore } from "./workflow-state-store.js";
 import { externalContributionDiagnosticCodes, externalContributionLimits, type ExternalContributionDiagnosticCode, type WorkflowOwner } from "./workflow-state-contract.js";
-import { SupervisorTeamStore } from "./supervisor-team-store.js";
-import { SupervisorTeamRuntime } from "./supervisor-team-runtime.js";
-import type { SupervisorHelperDeliveryTransport } from "./supervisor-helper-transport.js";
+import type { SupervisorTeamRuntimeFacade } from "./supervisor-team-runtime.js";
 
 const busy = (projection: Projection) => projection.runs.some(run => ["preparing", "queued", "starting", "running", "waiting"].includes(run.status));
 const failedRunStates = new Set(["failed", "interrupted", "cancelled", "rolled_back"]);
@@ -284,7 +282,7 @@ export const workflowIntroductionText = (task: TaskRecord, currentDefinitionRead
 export class SupervisorConversation {
   readonly requests: SupervisorConversationStore;
   readonly monitor: ProjectSupervisorMonitorStore;
-  readonly teamRuntime: SupervisorTeamRuntime | null;
+  readonly teamRuntime: SupervisorTeamRuntimeFacade | null;
   /** The durable per-chat stop: once true for a main, no check-in, introduction or contact is sent for it until a human enables it again. */
   supervisionStopped: (mainThreadId: string) => boolean = () => false;
   private observedAt = new Map<string, number>();
@@ -298,13 +296,12 @@ export class SupervisorConversation {
     readonly enabled: (projectId: string, mainThreadId?: string, purpose?: "effect" | "reconcile") => boolean = () => true,
     readonly workflows?: WorkflowStateStore,
     readonly descendantContactable: (thread: ThreadInfo, threads: readonly ThreadInfo[]) => boolean = thread => !thread.archivedAt && !thread.deletedAt,
-    teamStore?: SupervisorTeamStore,
-    helperTransport?: SupervisorHelperDeliveryTransport,
+    // i-02 (plan 3.9): the team runtime built once at the root, when this root coordinates a helper team
+    teamRuntime?: SupervisorTeamRuntimeFacade | null,
     readonly helperProviderInstanceId?: string) {
     this.requests = new SupervisorConversationStore(store.store);
     this.monitor = new ProjectSupervisorMonitorStore(store.store);
-    this.teamRuntime = teamStore ? new SupervisorTeamRuntime({store, teamStore, requests: this.requests, monitor: this.monitor, rpc, projection,
-      supervisionStopped: mainThreadId => this.supervisionStopped(mainThreadId) || !this.enabled(this.store.bindings().find(item => item.mainThreadId === mainThreadId)?.projectId ?? "", mainThreadId), ...(helperTransport ? {helperTransport} : {})}) : null;
+    this.teamRuntime = teamRuntime ?? null;
   }
   private roleFor(binding: BindingRecord): string {
     const teamPolicy = this.teamRuntime?.coordinatorPolicy(binding);

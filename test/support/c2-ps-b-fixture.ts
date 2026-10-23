@@ -7,6 +7,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { Effect } from "effect";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { ProjectSupervisor } from "../../src/project-supervisor.js";
+import { projectSupervisorUnit } from "./team-units.js";
 import { defaultSupervisorModel, ProjectSupervisorStore, type SupervisorBaseline } from "../../src/project-supervisor-store.js";
 import type { SupervisorModelSelection } from "../../src/project-supervisor-contract.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
@@ -73,7 +74,7 @@ const addSupervisorRequest = (projection: Projection, payload: Record<string, un
   nodes.push({id: rootId, threadId, runId, parentNodeId: null, rootNodeId: rootId, kind: "root_turn", status: "running", providerThreadId: "supervisor-provider"});
 };
 
-export type Definitions = ConstructorParameters<typeof ProjectSupervisor>[7];
+export type Definitions = ConstructorParameters<typeof ProjectSupervisor>[8];
 
 // a real temp-file guidance database with counting native fakes; `now` is the constructor clock seam
 export const makeFixture = async (initial: Array<{threadId: string; projectId: string; turns: Turn[]}>) => {
@@ -138,7 +139,7 @@ export const makeFixture = async (initial: Array<{threadId: string; projectId: s
     editingAvailable: false, status: "missing" as const, steps: [], workflows: [], config: {steps: [], workflows: []}, projectConfig: null,
     definitionFiles: [], complete: false, sources: [], issues: []})};
   const makeSupervisor = (options: {definitions?: Definitions; now?: () => number} = {}) =>
-    new ProjectSupervisor(config, supervisorStore, source, t3, readRpc, operateRpc, activationSnapshot, options.definitions ?? missingDefinitions, options.now);
+    projectSupervisorUnit(config, supervisorStore, source, t3, readRpc, operateRpc, activationSnapshot, options.definitions ?? missingDefinitions, options.now);
   const addTurn = (threadId: string, projectId: string, turn: Turn): void => {
     const turns = [...(turnsByThread.get(threadId) ?? []), turn];
     turnsByThread.set(threadId, turns);

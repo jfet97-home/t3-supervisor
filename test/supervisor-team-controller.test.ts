@@ -9,7 +9,8 @@ import {ProjectSupervisorStore, defaultSupervisorModel} from "../src/project-sup
 import {SupervisorTeamStore} from "../src/supervisor-team-store.js";
 import {SupervisorTeamController, supervisionTeamToolDefinition} from "../src/supervisor-team-controller.js";
 import {teamNotificationEvidence, teamNotificationText} from "../src/supervisor-team-runtime.js";
-import {attributesHelperDelivery, SupervisorHelperTransport} from "../src/supervisor-helper-transport.js";
+import {attributesHelperDelivery} from "../src/supervisor-helper-transport.js";
+import {helperTransportUnit} from "./support/team-units.js";
 import {WorkflowWriteController} from "../src/workflow-write-controller.js";
 import {WorkflowStateStore} from "../src/workflow-state-store.js";
 import {workflowToolNames} from "../src/workflow-write-evidence.js";
@@ -45,7 +46,7 @@ const fixture = async () => {
     native, isEnabled: () => true, isChatStopped: threadId => threadId === stoppedMain, maxEvidenceWaitMs: 0});
   const controller = new SupervisorTeamController(workflows, team, null);
   // create only the local durable receipt table. No native RPC/POST is used by this fixture.
-  new SupervisorHelperTransport({store: supervisors, rpc: null, baseUrl: "http://unused.invalid", projection: native.projection});
+  helperTransportUnit({store: supervisors, rpc: null, baseUrl: "http://unused.invalid", projection: native.projection});
   const assignment = team.assign(binding, "branch", member.threadId, new Map([["branch", "main"]]));
   const pending = team.snapshot(binding).notifications.find(value => value.assignmentEpoch === assignment.epoch)!;
   team.updateNotificationDelivery(binding, binding.threadId, pending.id, "sending");

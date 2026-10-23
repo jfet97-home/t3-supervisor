@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { GuidanceStore } from "../src/guidance-store.js";
-import { ProjectSupervisor } from "../src/project-supervisor.js";
+import { projectSupervisorUnit } from "./support/team-units.js";
 import { ProjectSupervisorStore } from "../src/project-supervisor-store.js";
 import type { ProjectDefinitionLoader } from "../src/project-definitions.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
@@ -303,7 +303,7 @@ const makeFixture = async (initialDefinitions: ProjectDefinitionSnapshot = defin
       return currentDefinitions;
     },
   };
-  const makeSupervisor = (withDefinitions = true) => new ProjectSupervisor(
+  const makeSupervisor = (withDefinitions = true) => projectSupervisorUnit(
     config,
     store,
     sourceStore,
