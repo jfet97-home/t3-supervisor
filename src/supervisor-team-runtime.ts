@@ -668,7 +668,9 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions) => Eff
   const noticeText = (binding: BindingRecord, notification: TeamNotification) => Effect.gen(function* () {
     const messageId = `supervisor-team-notice:${notification.id}:attempt:${notification.deliveryAttempt}`;
     const generated = teamNotificationText(binding, notification);
-    return {text: (transport ? yield* transport.receiptText(binding, messageId) : null) ?? generated.text, marker: generated.marker, messageId};
+    // an unreadable receipt has no text to reuse; the transport keeps that attempt unresolved and posts nothing for it
+    const sentText = transport ? yield* transport.receiptText(binding, messageId) : null;
+    return {text: typeof sentText === "string" ? sentText : generated.text, marker: generated.marker, messageId};
   });
 
   const noticeEvidence = (binding: BindingRecord, projection: Projection, notification: TeamNotification) => Effect.gen(function* () {

@@ -9,11 +9,12 @@ import { FetchHttpClient, HttpClient, type HttpClientResponse } from "effect/htt
 import { GuidanceStore } from "../src/guidance-store.js";
 import { defaultSupervisorModel, ProjectSupervisorStore } from "../src/project-supervisor-store.js";
 import { makeSupervisionGate, SupervisionGate, type GateGuard, type SupervisionGateShape } from "../src/supervision-gate.js";
-import { helperDeliveryBody, HelperTransport, type SupervisorHelperMessage } from "../src/supervisor-helper-transport.js";
+import { helperDeliveryBody, HelperTransport, invalidReceipt, type SupervisorHelperMessage } from "../src/supervisor-helper-transport.js";
 import { NativeOperateRpc } from "../src/supervisor-native.js";
 import { SupervisorTeamStore } from "../src/supervisor-team-store.js";
 import { T3Client } from "../src/t3.js";
-import type { Projection } from "../src/types.js";
+import { workflowRequestHash } from "../src/workflow-write-evidence.js";
+import type { MessageInfo, Projection } from "../src/types.js";
 import { operateClient, projectionClient } from "./support/team-units.js";
 
 // CT-LIN-05 on the real helper transport (plan 3.11): the webhook POST is the admitted send. Its final guard, its
@@ -152,8 +153,24 @@ const fixtureWith = (mode: "held" | number) => Effect.gen(function* () {
       .get(binding.threadId, binding.generation, input.messageId);
     return row ? JSON.parse(String(row.document)) as Record<string, unknown> : null;
   };
+  // the stored rows as bytes, and a row replaced by bytes this transport did not write
+  const row = (table: "deliveries" | "channels") => () => {
+    const found = table === "deliveries"
+      ? guidance.db.prepare("SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?")
+        .get(binding.threadId, binding.generation, input.messageId)
+      : guidance.db.prepare("SELECT document FROM supervisor_helper_channels WHERE owner_thread_id=? AND owner_generation=? AND helper_thread_id=?")
+        .get(binding.threadId, binding.generation, input.threadId);
+    return found ? String(found.document) : null;
+  };
+  const overwrite = (table: "deliveries" | "channels") => (document: string) => {
+    if (table === "deliveries") guidance.db.prepare("INSERT INTO supervisor_helper_deliveries VALUES(?,?,?,?) ON CONFLICT(owner_thread_id,owner_generation,message_id) DO UPDATE SET document=excluded.document")
+      .run(binding.threadId, binding.generation, input.messageId, document);
+    else guidance.db.prepare("UPDATE supervisor_helper_channels SET document=? WHERE owner_thread_id=? AND owner_generation=? AND helper_thread_id=?")
+      .run(document, binding.threadId, binding.generation, input.threadId);
+  };
   const until = (condition: () => boolean) => Effect.gen(function* () {while (!condition()) yield* Effect.yieldNow;});
   return { binding, http, log, rpcs, policy, gate, stop, transport, receipt, until,
+    rawReceipt: row("deliveries"), writeReceipt: overwrite("deliveries"), rawChannel: row("channels"), writeChannel: overwrite("channels"),
     aborts: () => aborts, sections: () => sections, projectionReads: () => projectionReads,
     onGuard: (action: (read: number) => void) => {onGuard = action;},
     holdProjection: (gateOn: Promise<void>) => {projectionGate = gateOn;} };
@@ -256,6 +273,42 @@ describe("CT-LIN-05 on the helper webhook transport", () => {
     assert.equal(f.rpcs.includes("scheduledTasks.listWebhookDeliveries"), false, "the duplicate joined instead of reconciling a receipt");
     assert.equal(f.receipt()?.state, "posted");
   }), { timeout: 10_000 });
+
+  // a-r19-send-01: the live POST belongs to one exact request; a different request under the same identity that finds
+  // it in flight is answered by the durable receipt, as the same send arriving after the POST is, never by its outcome
+  for (const [label, conflicting] of [
+    ["its text", { ...input, text: "Check the other branch." }],
+    ["its command id", { ...input, commandId: "other-command" }],
+  ] as const) {
+    it.live(`e: a send that differs in ${label} under a live identity is not given that POST's outcome, and nothing is posted again`, () => Effect.gen(function* () {
+      const f = yield* fixture;
+      const transport = yield* f.transport(yield* Effect.scope);
+      const projected = Promise.withResolvers<void>();
+      f.holdProjection(projected.promise);
+      const requests = [input, conflicting] as const;
+      const first = yield* Effect.forkChild(transport.send(f.binding, requests[0]));
+      const second = yield* Effect.forkChild(transport.send(f.binding, requests[1]));
+      // both sends passed their entry guard and read no receipt before either reaches its admission
+      yield* f.until(() => f.projectionReads() === 2);
+      projected.resolve();
+      yield* Deferred.await(f.http.arrived);
+      // each send ran its entry and admission sections while the POST was in flight: the later one found it live
+      yield* f.until(() => f.sections() === 4);
+      yield* Deferred.succeed(f.http.reply, undefined);
+      const results = [yield* Fiber.join(first), yield* Fiber.join(second)];
+      // the posted request is the one whose receipt was stored, whichever the scheduler admitted first
+      const winner = f.receipt()?.hash === workflowRequestHash(requests[0]) ? 0 : 1;
+      const loser = requests[1 - winner]!;
+      assert.equal(f.receipt()?.hash, workflowRequestHash(requests[winner]!));
+      assert.equal(results[winner], "waiting");
+      assert.equal(results[1 - winner], "uncertain", "the other request is not given the posted request's outcome");
+      assert.equal(yield* transport.hasDelivery(f.binding, loser), false, "the other request has no delivery");
+      assert.equal(yield* transport.send(f.binding, loser), "uncertain", "and a later send of it stays uncertain");
+      assert.deepEqual(f.http.posts, [helperDeliveryBody(requests[winner]!.messageId, requests[winner]!.text)]);
+      assert.equal(f.log.filter((entry) => entry === "initiate").length, 1);
+      assert.equal(f.receipt()?.state, "posted");
+    }), { timeout: 10_000 });
+  }
 });
 
 // the webhook POST's response belongs to the admitted operation: whatever ends it (the caller giving up, the transport
@@ -301,4 +354,65 @@ describe("webhook POST release", () => {
     assert.equal(yield* transport.send(f.binding, input), "rejected");
     assert.deepEqual(f.http.posts, [helperDeliveryBody(input.messageId, input.text)]);
   }), { timeout: 10_000 });
+});
+
+// sol-r19-01: a stored row this transport did not write (unparsable, or a document of the wrong shape) is proof that
+// something was recorded, with unreadable content: every operation on the identity stays unresolved, posts nothing,
+// never reads it as absent or retired, and leaves the row's bytes as they are
+describe("an invalid stored receipt or channel", () => {
+  const corruptions = [
+    ["an unparsable", (_valid: string) => "{\"threadId\":"],
+    ["a wrong-shape", (valid: string) => JSON.stringify({ ...JSON.parse(valid) as object, state: "delivered" })],
+  ] as const;
+
+  for (const [label, corrupt] of corruptions) {
+    it.live(`${label} receipt after an accepted POST: send and reconciliation stay uncertain, the reads report an attempt, nothing is posted or rewritten`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const transport = yield* f.transport(yield* Effect.scope);
+        yield* Deferred.succeed(f.http.reply, undefined);
+        assert.equal(yield* transport.send(f.binding, input), "waiting");
+        f.writeReceipt(corrupt(f.rawReceipt()!));
+        const invalid = f.rawReceipt();
+        const reads = f.rpcs.length;
+
+        assert.equal(yield* transport.send(f.binding, input), "uncertain");
+        assert.equal(yield* transport.reconcileDelivery(f.binding, input), "uncertain", "never absent");
+        assert.equal(yield* transport.hasDelivery(f.binding, input), true, "an attempt exists");
+        assert.equal(yield* transport.receiptText(f.binding, input.messageId), invalidReceipt, "no text, and not absent");
+        assert.equal(yield* transport.receiptDocument(f.binding, input.messageId), invalidReceipt);
+        const message: MessageInfo = { id: "m", runId: null, nodeId: null, role: "user", text: input.text, streaming: false,
+          createdAt: "2026-10-16T10:00:01Z", updatedAt: "2026-10-16T10:00:01Z", threadId: input.threadId };
+        assert.equal(yield* transport.matchesMessage(f.binding, input.messageId, input.text, message, [message]), false, "never attributes");
+        assert.equal(f.http.posts.length, 1, "nothing is posted again");
+        assert.equal(f.rpcs.length, reads, "no native read acts on the invalid receipt");
+        assert.equal(f.rawReceipt(), invalid, "the row keeps its bytes");
+      }), { timeout: 10_000 });
+
+    it.live(`${label} receipt with no POST of this transport: the send posts nothing and stays uncertain`, () => Effect.gen(function* () {
+      const f = yield* fixture;
+      const transport = yield* f.transport(yield* Effect.scope);
+      const valid = JSON.stringify({ ...input, hash: workflowRequestHash(input), taskId: "task", state: "posting" });
+      f.writeReceipt(corrupt(valid));
+      const invalid = f.rawReceipt();
+      assert.equal(yield* transport.send(f.binding, input), "uncertain");
+      assert.equal(yield* transport.reconcileDelivery(f.binding, input), "uncertain");
+      assert.deepEqual(f.http.posts, []);
+      assert.equal(f.log.includes("initiate"), false);
+      assert.equal(f.rawReceipt(), invalid);
+    }), { timeout: 10_000 });
+
+    it.live(`${label} channel is never reported retired and keeps its bytes`, () => Effect.gen(function* () {
+      const f = yield* fixture;
+      const transport = yield* f.transport(yield* Effect.scope);
+      yield* Deferred.succeed(f.http.reply, undefined);
+      assert.equal(yield* transport.send(f.binding, input), "waiting");
+      f.writeChannel(corrupt(f.rawChannel()!));
+      const invalid = f.rawChannel();
+      const calls = f.rpcs.length;
+      assert.equal(yield* transport.retire(f.binding, input.threadId), false);
+      assert.equal(f.rpcs.length, calls, "no native task is listed or deleted");
+      assert.equal(f.rawChannel(), invalid);
+    }), { timeout: 10_000 });
+  }
 });

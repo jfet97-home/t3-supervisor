@@ -219,3 +219,41 @@ it("CT-INT-03: H6 a 307 reply makes Node fetch re-POST the same body to the redi
   assert.equal(f.request().state, "waiting");
   assertCredentials(f);
 });
+
+// sol-r19-01 on the real caller: the receipt of an accepted check-in replaced by bytes the transport did not write. The
+// team runtime's reconciliation reaches the send, which stays uncertain on the unreadable receipt; the request keeps
+// its identity, its fence stays unresolved, nothing is posted again and the row keeps its bytes, active or stopped
+const rawReceipt = (f: HelperFixture): string => String(f.core.guidance.db.prepare("SELECT document FROM supervisor_helper_deliveries").get()!.document);
+for (const [label, corrupt] of [
+  ["an unparsable", (_valid: string) => "{\"threadId\":"],
+  ["a wrong-shape", (valid: string) => JSON.stringify({...JSON.parse(valid) as object, state: "delivered"})],
+] as const) {
+  it(`SOL-R19-01: ${label} receipt of an accepted check-in stays unresolved through active and stopped reconciliation and is never posted again`, {timeout: 60_000}, async (t) => {
+    const f = await fixture(t);
+    await runBatch(f);
+    assert.equal(f.posts().length, 1);
+    const request = f.request();
+    const fence = f.teamRequest();
+    assert.equal(request.state, "waiting");
+    f.core.guidance.db.prepare("UPDATE supervisor_helper_deliveries SET document=?").run(corrupt(rawReceipt(f)));
+    const invalid = rawReceipt(f);
+
+    const binding = f.core.store.binding("p", "main")!;
+    f.runtime.startCycle(binding);
+    await f.runtime.reconcile(binding, f.threads, AbortSignal.timeout(20_000));
+    const reconciled = f.request();
+    assert.deepEqual([reconciled.id, reconciled.messageId, reconciled.text, reconciled.state], [request.id, request.messageId, request.text, "uncertain"]);
+    assert.deepEqual([f.teamRequest().requestId, f.teamRequest().state], [fence.requestId, "uncertain"], "its fence stays unresolved");
+    assert.equal(f.posts().length, 1, "nothing is posted again");
+    assert.equal(rawReceipt(f), invalid, "the receipt keeps its bytes");
+
+    f.stopMain();
+    f.runtime.startCycle(binding);
+    await f.runtime.reconcileStopped(binding, f.threads, AbortSignal.timeout(20_000));
+    assert.deepEqual([f.request().id, f.request().state], [request.id, "uncertain"], "the stopped reconciliation neither fails nor releases it");
+    assert.deepEqual([f.teamRequest().requestId, f.teamRequest().state], [fence.requestId, "uncertain"]);
+    assert.equal(f.posts().length, 1);
+    assert.equal(rawReceipt(f), invalid);
+    assertCredentials(f);
+  });
+}
