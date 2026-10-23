@@ -10,10 +10,13 @@ require rebuilding or restarting the application.
 
 ## Development discipline
 
-- Define the requested behavior and a small set of observable acceptance cases before
-  editing. Keep one owner and one findings ledger; distinguish blockers from optional
-  ideas. Fix demonstrated failures in the existing path. Remove superseded code and
-  instructions instead of layering workarounds, stores, parsers or compatibility on them.
+For authorized multi-agent work, use the global `orchestrate-agents` skill for
+ownership, delegation, provider recovery, bounded review and completion evidence.
+Keep the procedure there; the requirements below are specific to this product.
+
+- Define the requested behavior and observable acceptance cases before editing.
+  Fix demonstrated failures in the existing path. Remove superseded code and
+  instructions instead of layering workarounds, stores, parsers or compatibility.
 - Test the riskiest user journey early on the VM, before a long implementation or
   review campaign. For negotiation and flooding, inspect actual rendered prompts,
   total traffic, repeated messages, tool arguments and native event timestamps.
@@ -24,25 +27,9 @@ require rebuilding or restarting the application.
   operative, or teach the test agent the expected protocol to manufacture success.
   Record the first edit, introduction and completed acceptance separately. Report
   advisory timing honestly; unmodified T3 provides no pre-first-tool barrier.
-- When iterative review is requested, retain one ordinary conversation per reviewer
-  through supported, authorized APIs and reuse it for later rounds of the same work.
-  Pass the exact revision, delta, evidence and unresolved objections. A delegated
-  task's backing child thread is not a resumable ordinary reviewer conversation.
-  Replace reviewers only for a material scope/context change, explaining why.
-- When review is requested, review a frozen candidate and assign one primary reviewer
-  per risky scope. Give additional reviewers distinct concerns unless the user requests
-  broader coverage. Recheck a fix with the reviewer who raised the finding; involve
-  another reviewer only when the delta changes a boundary they reviewed. Include the
-  exact delta and relevant callers, plus real message output where messages changed.
-  Unrelated fixes do not require every reviewer to approve again. Do not restart
-  broad reviews or full campaigns for every small delta. Track every requested
-  review to a terminal result. Approval is an assessment, not proof that a
-  behavioral acceptance case passed.
-- Discover the exact local/native tool and schema before live calls; a remote tool
-  with the same name may address another environment. Preserve unknown effect IDs
-  and reconcile them; Retry must not turn an unknown send into a fresh send.
-- Keep updates and maintained instructions concise. Give evidence-based estimates;
-  when a blocker invalidates an ETA, say so promptly rather than rolling it forward.
+- Iterative reviewers retain one ordinary conversation through supported authorized
+  APIs. Recheck the exact changed boundary and actual message output; a delegated
+  task's backing thread is not an ordinary resumable reviewer conversation.
 
 ## Effect v4 throughout
 
