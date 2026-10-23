@@ -272,7 +272,9 @@ workflow, records verified status changes, and sends the operative concise corre
 guidance when evidence demonstrates a concrete, actionable mistake or deviation; it
 stays silent on routine progress and never invents a correction from uncertainty.
 Before its marker it records exactly one outcome with `workflow_write` `record_review`
-(progress updated, no change, needs attention or insufficient evidence). The outcome
+(progress updated, no change, needs attention or insufficient evidence), decided from a
+fresh read of the relevant finished messages, results and current workflow: the change
+index is navigation, not proof, and no change is never a default. The outcome
 is confirmed only when the check-in completed with its marker, the recording call
 completed in that check-in's own run and the pins are still current (for no change,
 each main workflow unchanged; for progress, each cited edit still in place). Only a

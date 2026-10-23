@@ -1908,6 +1908,7 @@ it.effect("a review that records no outcome stays visibly unconfirmed: nothing i
   // the check-in names its request and carries the review duty with the standing instructions
   assert.ok(request.text.includes(`record_review, requestId ${JSON.stringify(request.id)}`));
   assert.ok(request.text.includes("send the operative concise corrective guidance"));
+  assert.ok(request.text.includes("decided from a fresh read of the relevant finished messages, results and current workflow"));
   assert.ok(request.text.includes(`"reviewRequestId":${JSON.stringify(request.id)}`));
   completeRun(fixture.supervisor, run, `No intervention is needed. ${request.completionMarker}`, clock.now + 1);
   yield* clock.advance(1);
