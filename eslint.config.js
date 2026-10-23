@@ -11,7 +11,8 @@ const timerRules = {
     ...["globalThis", "window"].flatMap((object) => timerNames.map((property) => ({ object, property, message: timerMessage })))],
 };
 
-// only src/db.ts opens SQLite clients (plan 3.2) and, as the SQL layer and private files adapter, imports node:sqlite in
+// only src/db.ts and its database worker src/db-worker-serve.ts open SQLite clients (plan 3.2); src/db.ts, as the SQL layer
+// and private files adapter, is the only module that imports node:sqlite in
 // src and ui/src (plan section 11); only src/native-envelope.ts opens native T3 websockets in src (D-08); suites run on
 // vitest; the package barrel and every subpath (for example @effect/sql-sqlite-node/SqliteClient)
 const restrictedImports = ({ sqlite, ws, nodeSqlite = false, timers = false }) => ["error", {
@@ -21,7 +22,7 @@ const restrictedImports = ({ sqlite, ws, nodeSqlite = false, timers = false }) =
     ...(nodeSqlite ? [{ name: "node:sqlite", message: "node:sqlite stays in the SQL layer and private files adapter src/db.ts (plan 3.2)" }] : []),
     ...(timers ? timerModules.map((name) => ({ name, message: timerMessage })) : []),
   ],
-  patterns: sqlite ? [{ group: ["@effect/sql-sqlite-node", "@effect/sql-sqlite-node/*"], message: "only src/db.ts opens SQLite clients (plan 3.2)" }] : [],
+  patterns: sqlite ? [{ group: ["@effect/sql-sqlite-node", "@effect/sql-sqlite-node/*"], message: "only src/db.ts and its database worker open SQLite clients (plan 3.2)" }] : [],
 }];
 
 // business code in src and ui/src runs no effect outside its caller's fiber (AGENTS.md "Effect v4 throughout", plan 3.9):
@@ -67,9 +68,10 @@ export default tseslint.config(
     "no-restricted-syntax": runSyntax({ runMain: false, fiberRuntimes: false }), ...timerRules } },
   { files: ["ui/src/**/*.ts", "ui/src/**/*.tsx"], rules: { "no-restricted-imports": restrictedImports({ sqlite: true, ws: false, nodeSqlite: true, timers: true }),
     "no-restricted-syntax": runSyntax({ runMain: false, fiberRuntimes: false }), ...timerRules } },
-  { files: ["src/main.ts", "src/cli.ts"], rules: { "no-restricted-syntax": runSyntax({ runMain: true, fiberRuntimes: false }) } },
+  { files: ["src/main.ts", "src/cli.ts", "src/db-worker.ts"], rules: { "no-restricted-syntax": runSyntax({ runMain: true, fiberRuntimes: false }) } },
   { files: ["src/workflow-mcp.ts"], rules: { "no-restricted-syntax": runSyntax({ runMain: false, fiberRuntimes: true }) } },
   { files: ["src/db.ts"], rules: { "no-restricted-imports": restrictedImports({ sqlite: false, ws: true, timers: true }) } },
+  { files: ["src/db-worker-serve.ts"], rules: { "no-restricted-imports": restrictedImports({ sqlite: false, ws: true, nodeSqlite: true, timers: true }) } },
   { files: ["src/native-envelope.ts"], rules: { "no-restricted-imports": restrictedImports({ sqlite: true, ws: false, nodeSqlite: true, timers: true }) } },
   { files: ["test/**/*.ts", "test/**/*.tsx"], ignores: ["test/harness/**", ...testEntries], rules: { "no-restricted-syntax": testRunSyntax } },
 );

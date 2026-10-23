@@ -288,7 +288,9 @@ describe("AccessDb sql semantics", () => {
       yield* db.withTransaction(insertGrant(db, 2));
 
       assert.equal(failure._tag, "SqlError");
-      assert.match(String(failure.reason.cause), /FOREIGN KEY constraint failed/);
+      // the cause crosses the worker boundary as the sqlite result code only: SQLITE_CONSTRAINT_FOREIGNKEY
+      assert.equal(failure.reason._tag, "ConstraintError");
+      assert.deepEqual(failure.reason.cause, { code: "constraint failed", errcode: 787 });
       assert.deepEqual(afterFailure, []);
       assert.deepEqual(yield* grantHashes(db), [hash(2)]);
     })).pipe(Effect.provide(NodeServices.layer)), { timeout: 10_000 });

@@ -1,7 +1,7 @@
 import { ESLint } from "eslint";
 import { describe, expect, it } from "vitest";
 
-// the migration lint guards of eslint.config.js on virtual files: only src/db.ts may import the SQLite driver
+// the migration lint guards of eslint.config.js on virtual files: only src/db.ts and its database worker may import the SQLite driver
 // (barrel or any subpath), only src/native-envelope.ts may import ws in src, src runs no Effect.run* outside the process
 // entries and the workflow MCP adapter, the suites run no Effect.run* outside the child, worker and fixture-server entries
 // and the runner harness, extension loading stays banned, the suites never import node:test, and src and ui/src start no
@@ -13,7 +13,7 @@ const lint = async (filePath: string, code: string): Promise<string> => {
   return (result?.messages ?? []).map((message) => message.message).join("\n");
 };
 
-const sqliteOwner = "only src/db.ts opens SQLite clients (plan 3.2)";
+const sqliteOwner = "only src/db.ts and its database worker open SQLite clients (plan 3.2)";
 const wsOwner = "native T3 websockets go through src/native-envelope.ts (D-08)";
 
 describe("lint guards", () => {
@@ -25,6 +25,7 @@ describe("lint guards", () => {
     expect(await lint("src/lint-guard-probe.ts", code)).toContain(sqliteOwner);
     expect(await lint("test/lint-guard-probe.test.ts", code)).toContain(sqliteOwner);
     expect(await lint("src/db.ts", code)).not.toContain(sqliteOwner);
+    expect(await lint("src/db-worker-serve.ts", code)).not.toContain(sqliteOwner);
   });
 
   it("rejects ws in src outside the native envelope and the test peers", { timeout: 30_000 }, async () => {
@@ -56,7 +57,7 @@ describe("lint guards", () => {
     const runMain = `import { NodeRuntime } from "@effect/platform-node";\nimport { Effect } from "effect";\nNodeRuntime.runMain(Effect.void);\n`;
     expect(await lint("src/lint-guard-probe.ts", runMain)).toContain(runOwner);
     expect(await lint("src/workflow-mcp.ts", runMain)).toContain(runOwner);
-    for (const entry of ["src/main.ts", "src/cli.ts"]) expect(await lint(entry, runMain)).not.toContain(runOwner);
+    for (const entry of ["src/main.ts", "src/cli.ts", "src/db-worker.ts"]) expect(await lint(entry, runMain)).not.toContain(runOwner);
     const fiberRuntime = `import { Effect, FiberSet } from "effect";\nexport const make = Effect.flatMap(FiberSet.make(), (set) => FiberSet.runtimePromise(set)());\n`;
     expect(await lint("src/lint-guard-probe.ts", fiberRuntime)).toContain(runOwner);
     expect(await lint("src/main.ts", fiberRuntime)).toContain(runOwner);
