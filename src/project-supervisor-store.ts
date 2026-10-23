@@ -508,7 +508,7 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     return yield* controlOf(projectId);
   }));
   const settings = (projectId: string) => run(settingsOf(projectId));
-  // the settings generation CAS with range checks: monitoring 1..60 minutes and 3..100 activities, helpers 0..20
+  // the settings generation CAS with range checks: monitoring 1..2 minutes and 3..100 activities, helpers 0..20
   const saveSettings = (projectId: string, expected: number, selection: SupervisorModelSelection, monitoring?: SupervisorMonitoringSettings, teamSettings?: {maxHelpersPerRoot: number}) => write(Effect.gen(function* () {
     const old = yield* settingsOf(projectId);
     if (old.generation !== expected) return yield* refuse("project_settings_conflict");

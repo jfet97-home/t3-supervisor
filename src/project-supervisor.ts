@@ -1025,7 +1025,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       const commit = Effect.map(attempt(store.saveSettings(input.projectId, input.expectedGeneration, input.modelSelection, input.monitoring, input.teamSettings)), (saved): ProjectSupervisorSaveOutcome | null => {
         if (saved.ok) return null;
         const cause = saved.cause;
-        if (cause instanceof Error && cause.message === "invalid_team_settings") return {status: "invalid", message: "Choose a whole-number helper limit from 0 to 20.", snapshot: null};return cause instanceof Error && cause.message === "invalid_monitoring_settings" ? {status: "invalid", message: "Use an interval of 1–60 minutes and an activity threshold of 3–100, both whole numbers.", snapshot: null} : {status: "conflict", message: "Project Supervisor settings changed. Refresh before saving again.", snapshot: null};
+        if (cause instanceof Error && cause.message === "invalid_team_settings") return {status: "invalid", message: "Choose a whole-number helper limit from 0 to 20.", snapshot: null};return cause instanceof Error && cause.message === "invalid_monitoring_settings" ? {status: "invalid", message: "Use an interval of 1–2 minutes and an activity threshold of 3–100, both whole numbers.", snapshot: null} : {status: "conflict", message: "Project Supervisor settings changed. Refresh before saving again.", snapshot: null};
       });
       // after the last read, the model check and the save run as one admission section; a changed model reads the advertised
       // models first and then checks and saves in its own section

@@ -11,7 +11,7 @@ export const MonitoringSettings = Schema.Struct({
   activityThreshold: Schema.Number,
 });
 export type SupervisorMonitoringSettings = typeof MonitoringSettings.Type;
-/** The age bound of pending ordinary activity, in whole minutes: the oldest finished item is reviewed after at most two minutes. */
+/** The age bound of pending ordinary activity, in whole minutes: the oldest finished item becomes due after at most two minutes. */
 export const monitoringIntervalMinutes = {min: 1, max: 2} as const;
 export const defaultMonitoringSettings: SupervisorMonitoringSettings = {intervalMinutes: monitoringIntervalMinutes.max, activityThreshold: 10};
 export const SupervisorTeamSettings = Schema.Struct({maxHelpersPerRoot: Schema.Number});
