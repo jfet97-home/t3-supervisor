@@ -310,17 +310,17 @@ it("A-R18-03 the chat settings draft, status and save belong to their environmen
 
   await switchTo("environment-b");
   assert.equal(registry.get(shell.chatSettingsDraft), null, "b has no draft of a");
-  assert.deepEqual(registry.get(shell.chatSettingsStatus), { saving: false, message: "" }, "b does not show a's save");
+  assert.deepEqual(registry.get(shell.chatSettingsStatus), { saving: false, uncertain: false, message: "" }, "b does not show a's save");
   const draftB = { generation: 1, excludedThreadIds: ["environment-b-thread"] };
   registry.set(shell.chatSettingsDraft, draftB);
   releases[0]!(json({ generation: 2, excludedThreadIds: ["environment-a-thread"] }));
   // the late outcome of a is recorded for a; absence in b can only be observed over time
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.deepEqual(registry.get(shell.chatSettingsDraft), draftB, "b keeps its draft");
-  assert.deepEqual(registry.get(shell.chatSettingsStatus), { saving: false, message: "" }, "b shows no outcome of a");
+  assert.deepEqual(registry.get(shell.chatSettingsStatus), { saving: false, uncertain: false, message: "" }, "b shows no outcome of a");
 
   await switchTo("environment-a");
-  assert.deepEqual(registry.get(shell.chatSettingsStatus), { saving: false, message: "Chat settings saved and applied." }, "a records its outcome");
+  assert.deepEqual(registry.get(shell.chatSettingsStatus), { saving: false, uncertain: false, message: "Chat settings saved and applied." }, "a records its outcome");
   assert.equal(registry.get(shell.chatSettingsDraft), null, "a's verified save cleared a's draft");
   await switchTo("environment-b");
   assert.deepEqual(registry.get(shell.chatSettingsDraft), draftB, "b's draft is kept separately");

@@ -282,42 +282,65 @@ function History({
   );
 }
 // the chat settings of each T3 environment: the draft, null while the form follows the saved policy, and the outcome of
-// the last save; the shown ones are those of the current environment
-type ChatSettingsStatus = {readonly saving: boolean; readonly message: string};
+// the last save; the shown ones are those of the current environment. uncertain: the last save's outcome is unknown, so
+// nothing is saved again until a verified read of the settings
+type ChatSettingsStatus = {readonly saving: boolean; readonly uncertain: boolean; readonly message: string};
 const chatSettingsKey = (environmentId: string | null) => scopeKey("chat-settings", environmentId);
 const chatSettingsDrafts = draftFamily<ThreadPolicySettings | null>(() => null);
-const chatSettingsStatuses = Atom.family((_key: string) => Atom.keepAlive(Atom.make<ChatSettingsStatus>({saving: false, message: ""})));
+const chatSettingsStatuses = Atom.family((_key: string) => Atom.keepAlive(Atom.make<ChatSettingsStatus>({saving: false, uncertain: false, message: ""})));
+const chatSettingsRefused = "Chat settings invalid or changed in another tab. Reload first.";
 export const chatSettingsDraft = Atom.keepAlive(Atom.writable((get) => get(chatSettingsDrafts(chatSettingsKey(get(environmentAtom)))),
   (context, value: ThreadPolicySettings | null) => context.set(chatSettingsDrafts(chatSettingsKey(context.get(environmentAtom))), value)));
 export const chatSettingsStatus = Atom.keepAlive(Atom.writable((get) => get(chatSettingsStatuses(chatSettingsKey(get(environmentAtom)))),
   (context, value: ChatSettingsStatus) => context.set(chatSettingsStatuses(chatSettingsKey(context.get(environmentAtom))), value)));
 const saveThreadPolicy = admittedMutation((payload: ThreadPolicySettings) => Effect.flatMap(ApiClient, (client) => client.guidance.threadPolicy({payload})));
 // saves the draft of the current environment; a verified save clears it and refreshes the snapshot, a failed or
-// unconfirmed save keeps it. the outcome goes to the environment the save started in, never to the one shown when it
-// settles; the request and every wait stay interruptible, so disposing the page runtime ends them
+// unconfirmed save keeps it, and an unconfirmed one also fences the settings until a verified read. the outcome goes to
+// the environment the save started in, never to the one shown when it settles; the request and every wait stay
+// interruptible, so disposing the page runtime ends them
 export const saveChatSettings = Atom.keepAlive(uiRuntime.fn((payload: ThreadPolicySettings, {registry}) => Effect.gen(function* () {
   const key = chatSettingsKey(registry.get(environmentAtom));
   const status = chatSettingsStatuses(key);
-  if (registry.get(status).saving) return;
+  if (registry.get(status).saving || registry.get(status).uncertain) return;
   registry.set(status, {...registry.get(status), saving: true});
   const exit = yield* Effect.exit(admit(registry, saveThreadPolicy({scope: key, operationId: yield* newOperationId}), payload));
   if (Exit.isSuccess(exit)) {
     registry.set(chatSettingsDrafts(key), null);
-    registry.set(status, {saving: false, message: "Chat settings saved and applied."});
+    registry.set(status, {saving: false, uncertain: false, message: "Chat settings saved and applied."});
     registry.refresh(snapshotAtom);
-  } else registry.set(status, {saving: false, message: "Chat settings invalid or changed in another tab. Reload first."});
+  } else {
+    const failure = Exit.findErrorOption(exit);
+    const uncertain = Option.isSome(failure) && failure.value._tag === "Unconfirmed";
+    registry.set(status, {saving: false, uncertain, message: chatSettingsRefused});
+  }
 }), {concurrent: true}));
+const sameExclusions = (left: ReadonlyArray<string>, right: ReadonlyArray<string>) =>
+  left.length === right.length && [...left].sort().every((id, index) => id === [...right].sort()[index]);
+// reads the settings of the current environment again; only a verified read of that environment lifts the fence of an
+// unconfirmed save. a draft the saved settings already match was applied and is cleared; any other draft is kept
+export const reloadChatSettings = Atom.keepAlive(uiRuntime.fn((_: void, {registry}) => Effect.gen(function* () {
+  const key = chatSettingsKey(registry.get(environmentAtom));
+  const status = chatSettingsStatuses(key);
+  registry.refresh(snapshotAtom);
+  const read = yield* AtomRegistry.getResult(registry, snapshotAtom, {suspendOnWaiting: true});
+  if (chatSettingsKey(read.environmentId) !== key) return;
+  const draft = registry.get(chatSettingsDrafts(key));
+  const applied = draft !== null && sameExclusions(draft.excludedThreadIds, read.threadPolicy.excludedThreadIds);
+  if (applied) registry.set(chatSettingsDrafts(key), null);
+  registry.set(status, {saving: false, uncertain: false, message: applied ? "Chat settings saved and applied." : ""});
+}).pipe(Effect.catch(() => Effect.void))));
 function ChatSettings({ data, onDirtyChange }: { data: GuidanceSnapshot; onDirtyChange: (dirty: boolean) => void }) {
   const draft = useAtomValue(chatSettingsDraft);
   const setDraft = useAtomSet(chatSettingsDraft);
-  const {saving, message} = useAtomValue(chatSettingsStatus);
+  const {saving, uncertain, message} = useAtomValue(chatSettingsStatus);
   const setStatus = useAtomSet(chatSettingsStatus);
   const save = useAtomSet(saveChatSettings);
+  const reload = useAtomSet(reloadChatSettings);
   const form = draft ?? data.threadPolicy;
   const dirty = draft !== null;
   const [query, setQuery] = useState("");
   const setMessage = (value: string) => setStatus(status => ({...status, message: value}));
-  useEffect(() => onDirtyChange(dirty || saving), [dirty, saving, onDirtyChange]);
+  useEffect(() => onDirtyChange(dirty || saving || uncertain), [dirty, saving, uncertain, onDirtyChange]);
   const candidates = useChatCandidates(query, "exclude");
   const searchRef = useRef<HTMLInputElement>(null);
   const chats = form.excludedThreadIds.filter(id => (candidates.data?.exceptions.includes(id) || !data.threadPolicy.excludedThreadIds.includes(id))).map(id => data.threads.find(thread => thread.id === id) ?? {id, title: "Unavailable chat", available: false});
@@ -338,7 +361,7 @@ function ChatSettings({ data, onDirtyChange }: { data: GuidanceSnapshot; onDirty
       {query && <ul className="candidate-list">{candidates.data?.candidates.filter(chat => !form.excludedThreadIds.includes(chat.id)).map(chat => <li key={chat.id} className="row between"><div><strong>{chat.title}</strong><p className="small muted">{chat.id}</p></div><button type="button" disabled={saving} aria-label={`Add exclusion for ${chat.title}`} onClick={() => {change({excludedThreadIds: [...form.excludedThreadIds, chat.id]});setQuery("");searchRef.current?.focus();}}>Add exclusion</button></li>)}</ul>}
       <small>{form.excludedThreadIds.length} exclusions retained in total.</small>
     </fieldset>
-    <div className="save-bar">{dirty && <span>Unsaved chat exclusions</span>}<button className="primary" disabled={saving || !dirty} type="submit">{saving ? "Saving…" : "Save chat settings"}</button>{dirty && <button type="button" disabled={saving} onClick={() => {setDraft(null);setMessage("");}}>Discard draft</button>}</div><p role="status">{message}</p>
+    <div className="save-bar">{dirty && <span>Unsaved chat exclusions</span>}<button className="primary" disabled={saving || uncertain || !dirty} type="submit">{saving ? "Saving…" : "Save chat settings"}</button>{uncertain && <button type="button" onClick={() => reload()}>Reload chat settings</button>}{dirty && <button type="button" disabled={saving} onClick={() => {setDraft(null);setMessage("");}}>Discard draft</button>}</div><p role="status">{message}</p>
   </form>;
 }
 function Settings({data, active, onDirtyChange}: {data: GuidanceSnapshot; active: boolean; onDirtyChange: (dirty: boolean) => void}) {

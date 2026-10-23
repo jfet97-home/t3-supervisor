@@ -86,7 +86,7 @@ it("D1 an action written again while its admitted save runs still records the sa
   registry.set(shell.saveChatSettings, policy);
   releases[0]!(json(policy));
   const status = await until(registry, shell.chatSettingsStatus, (value) => !value.saving, "the recorded outcome");
-  assert.deepEqual(status, { saving: false, message: "Chat settings saved and applied." });
+  assert.deepEqual(status, { saving: false, uncertain: false, message: "Chat settings saved and applied." });
   assert.equal(sentTo("/api/guidance/thread-policy").length, 1);
   stop();
   registry.dispose();
@@ -94,6 +94,78 @@ it("D1 an action written again while its admitted save runs still records the sa
   const files = sources();
   assert.deepEqual(files.filter((file) => /export const admit\b/u.test(file.text)).map((file) => file.name), ["atoms.ts"], "one admit helper");
   assert.deepEqual(files.filter((file) => /\.setResult\(/u.test(file.text)).map((file) => file.name), [], "no action awaits a mutation through its own context");
+});
+
+// sol-r22: an unconfirmed chat settings save fences Save until a verified read of the settings in its environment; a
+// definite refusal does not
+for (const [label, refusal] of [["a 500", 500], ["a 401 for the sent session", 401]] as const) {
+  it(`R22 a chat settings save answered ${label} is unknown: nothing is saved again until a verified read, which clears an applied draft and keeps another`, { timeout: 10_000 }, async () => {
+    for (const applied of [true, false]) {
+      browser.local.set("supervisor-session", "session-1");
+      browser.sent.length = 0;
+      const draft = { generation: 1, excludedThreadIds: ["chat-1"] };
+      let saved = { generation: 1, excludedThreadIds: [] as string[] };
+      let readFails = false;
+      browser.state.reply = (request) => {
+        if (request.path === "/api/csrf") return json({ csrf: "token" });
+        if (request.path === "/api/guidance/thread-policy") {
+          if (applied) saved = { generation: 2, excludedThreadIds: ["chat-1"] };
+          return json({ message: "unavailable" }, refusal);
+        }
+        if (request.path === "/api/guidance/snapshot") return readFails ? json({ message: "unavailable" }, 500) : json({ ...snapshot(), threadPolicy: saved });
+        return json({});
+      };
+      const registry = AtomRegistry.make();
+      const stops = [atoms.snapshotAtom, shell.chatSettingsDraft, shell.chatSettingsStatus].map((atom) => registry.mount(atom as Atom.Atom<unknown>));
+      await settled(registry, atoms.snapshotAtom, "the first snapshot");
+      registry.set(shell.chatSettingsDraft, draft);
+      registry.set(shell.saveChatSettings, draft);
+      const status = await until(registry, shell.chatSettingsStatus, (value) => !value.saving && value.message !== "", "the unknown outcome");
+      assert.deepEqual(status, { saving: false, uncertain: true, message: "Chat settings invalid or changed in another tab. Reload first." }, `${label} applied=${applied}`);
+      assert.deepEqual(registry.get(shell.chatSettingsDraft), draft, "the draft is kept");
+      registry.set(shell.saveChatSettings, draft);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(sentTo("/api/guidance/thread-policy").length, 1, "no second save before a verified read");
+
+      // a failed read keeps the fence
+      readFails = true;
+      registry.set(shell.reloadChatSettings, undefined);
+      await settled(registry, atoms.snapshotAtom, "the failed read");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(registry.get(shell.chatSettingsStatus).uncertain, true, "a failed read lifts nothing");
+
+      readFails = false;
+      registry.set(shell.reloadChatSettings, undefined);
+      const reloaded = await until(registry, shell.chatSettingsStatus, (value) => !value.uncertain, "the verified read");
+      assert.deepEqual([reloaded.message, registry.get(shell.chatSettingsDraft)], applied
+        ? ["Chat settings saved and applied.", null] : ["", draft], `applied=${applied}: the verified read reconciles the draft`);
+      if (!applied) {
+        browser.state.reply = (request) => request.path === "/api/guidance/thread-policy" ? json(draft) : json({ ...snapshot(), threadPolicy: saved });
+        registry.set(shell.saveChatSettings, draft);
+        await until(registry, shell.chatSettingsStatus, (value) => value.message === "Chat settings saved and applied.", "the explicit save after the read");
+        assert.equal(sentTo("/api/guidance/thread-policy").length, 2);
+      }
+      for (const stop of stops) stop();
+      registry.dispose();
+    }
+  });
+}
+
+it("R22 a chat settings save refused definitely (sent without a CSRF token) keeps Save open", { timeout: 10_000 }, async () => {
+  browser.local.set("supervisor-session", "session-1");
+  browser.sent.length = 0;
+  browser.state.reply = (request) => request.path === "/api/csrf" ? json({ csrf: "token" })
+    : request.path === "/api/guidance/thread-policy" ? json({ message: "Refresh the local dashboard before changing settings." }, 403) : json(snapshot());
+  const registry = AtomRegistry.make();
+  const stops = [atoms.snapshotAtom, shell.chatSettingsStatus].map((atom) => registry.mount(atom as Atom.Atom<unknown>));
+  await settled(registry, atoms.snapshotAtom, "the first snapshot");
+  registry.set(shell.saveChatSettings, policy);
+  const status = await until(registry, shell.chatSettingsStatus, (value) => !value.saving && value.message !== "", "the refusal");
+  assert.deepEqual(status, { saving: false, uncertain: false, message: "Chat settings invalid or changed in another tab. Reload first." });
+  registry.set(shell.saveChatSettings, policy);
+  await browser.request((request) => request.path === "/api/guidance/thread-policy" && sentTo("/api/guidance/thread-policy").length === 2, "the second save");
+  for (const stop of stops) stop();
+  registry.dispose();
 });
 
 it("D2 an admitted operation is claimed per registry: repeated writes in one registry join its request, another registry sends its own", { timeout: 10_000 }, async () => {
