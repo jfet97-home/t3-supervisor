@@ -6,7 +6,8 @@ import { TestClock } from "effect/testing";
 import { makeT3Client, T3Client, T3TransportError, type T3ClientOptions } from "../src/t3.js";
 import { ProjectionStreamError, readProjectionSnapshot } from "../src/t3-projection-stream.js";
 import type { JsonRecord, SourceItem } from "../src/types.js";
-import { deferred, startMockT3, within } from "./support/c3a-fake-t3.js";
+import { loopTurn, within } from "./support/g8-process.js";
+import { mockT3 as loopbackT3 } from "./support/g8-peers.js";
 import { barrier, envelopePeer, hungPeer, type PeerFrame } from "./support/envelope-peer.js";
 
 // target regressions of the effect port of src/t3.ts and src/t3-projection-stream.ts: exact watch wire frames, the
@@ -40,9 +41,7 @@ const projectionBody = (threadId: string, padding: number): string => JSON.strin
   },
 });
 
-const mockT3 = (onHttp: (url: string, response: ServerResponse) => void) =>
-  Effect.acquireRelease(Effect.promise(() => startMockT3((request, response) => onHttp(request.url ?? "", response))),
-    (server) => Effect.promise(() => server.close()));
+const mockT3 = (onHttp: (url: string, response: ServerResponse) => void) => loopbackT3((request, response) => onHttp(request.url ?? "", response));
 
 // the live clock, except that every wall-clock reading jumps an hour forward or back; monotonic time and sleeps are live
 const wallJumping = Clock.clockWith((live) => Effect.sync((): Clock.Clock => {
@@ -216,19 +215,20 @@ describe("monotonic deadlines (CT-CLOCK-01)", () => {
   it.live("T3-PORT-07: the stream's own monotonic deadline maps to the request timeout while the HTTP timeout is still far away", () => Effect.gen(function*() {
     const { clock, shift } = yield* shiftedMonotonic;
     const text = projectionBody("thread-1", 200_000);
-    const firstPart = deferred<void>();
-    const proceed = deferred<void>();
+    const firstPart = Deferred.makeUnsafe<void>();
+    // ends the held response once the test has shifted the clock
+    let finish = () => {};
     const server = yield* mockT3((_url, response) => {
       response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
-      response.write(text.slice(0, 40_000), () => firstPart.resolve());
-      void proceed.promise.then(() => response.end(text.slice(40_000)));
+      response.write(text.slice(0, 40_000), () => Deferred.doneUnsafe(firstPart, Exit.void));
+      finish = () => {response.end(text.slice(40_000));};
     });
     const client = yield* clientOf(server.baseUrl);
     const started = performance.now();
     const pending = yield* Effect.forkChild(failureOf(client.projection("thread-1").pipe(Effect.provideService(Clock.Clock, clock))));
-    yield* Effect.promise(() => firstPart.promise);
+    yield* Deferred.await(firstPart);
     shift(60_000);
-    proceed.resolve();
+    finish();
     const failure = yield* Fiber.join(pending);
     assert.ok(failure instanceof T3TransportError);
     assert.equal(failure.code, undefined);
@@ -266,7 +266,7 @@ describe("read interruption (CT-T3-06, effect form)", () => {
     const exit = yield* Fiber.await(fiber);
     assert.ok(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause), "the interrupted read yields no value");
     assert.equal(pullsAtCancel, pulls, "the reader cancelled the source");
-    yield* Effect.callback<void>((resume) => {setImmediate(() => resume(Effect.void));});
+    yield* loopTurn;
     assert.equal(pulls, pullsAtCancel, "nothing pulls after the cancel");
   }), { timeout: 10_000 });
 });
@@ -327,20 +327,20 @@ describe("watch and read cleanup under the full detector", () => {
   }), { timeout: 10_000 });
 
   it.live("T3-PORT-13: a descriptor request past its timeout fails and aborts the request", () => Effect.gen(function*() {
-    const ended = deferred<boolean>();
+    const ended = Deferred.makeUnsafe<boolean>();
     // never answered: only the client's abort ends the response
-    const server = yield* mockT3((_url, response) => {response.once("close", () => ended.resolve(response.writableEnded));});
+    const server = yield* mockT3((_url, response) => {response.once("close", () => Deferred.doneUnsafe(ended, Exit.succeed(response.writableEnded)));});
     const client = yield* clientOf(server.baseUrl, { httpTimeoutMs: 25 });
     const failure = yield* failureOf(client.descriptor());
     assert.ok(failure instanceof T3TransportError);
     assert.match(failure.message, /timed out/);
-    assert.equal(yield* Effect.promise(() => within(ended.promise, 2500, "the aborted request")), false, "the request was aborted, not answered");
+    assert.equal(yield* within(Deferred.await(ended), 2500, "the aborted request"), false, "the request was aborted, not answered");
   }), { timeout: 10_000 });
 
   it.live("T3-PORT-14: a read that stalls mid-body times out, aborts its response and is not memoized", () => Effect.gen(function*() {
     let reads = 0;
     const text = projectionBody("thread-1", 10_000);
-    const stalled = deferred<boolean>();
+    const stalled = Deferred.makeUnsafe<boolean>();
     const server = yield* mockT3((_url, response) => {
       reads++;
       response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
@@ -348,14 +348,14 @@ describe("watch and read cleanup under the full detector", () => {
         response.end(text);
         return;
       }
-      response.once("close", () => stalled.resolve(response.writableEnded));
+      response.once("close", () => Deferred.doneUnsafe(stalled, Exit.succeed(response.writableEnded)));
       response.write(text.slice(0, 200));
     });
     const client = yield* clientOf(server.baseUrl, { httpTimeoutMs: 100 });
     const failure = yield* failureOf(client.projection("thread-1"));
     assert.ok(failure instanceof T3TransportError && failure.code === undefined);
     assert.match(failure.message, /timed out/);
-    assert.equal(yield* Effect.promise(() => within(stalled.promise, 2500, "the stalled response")), false, "the stalled body was aborted");
+    assert.equal(yield* within(Deferred.await(stalled), 2500, "the stalled response"), false, "the stalled body was aborted");
     assert.equal((yield* client.projection("thread-1")).projection.thread.id, "thread-1");
     assert.equal(reads, 2, "a timeout is not remembered as an oversized snapshot");
   }), { timeout: 10_000 });

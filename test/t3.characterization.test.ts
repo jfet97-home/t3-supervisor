@@ -6,7 +6,7 @@ import { FetchHttpClient, HttpClient } from "effect/http";
 import type { WebSocket } from "ws";
 import { makeT3Client, T3Client, T3TransportError, type T3ClientOptions } from "../src/t3.js";
 import type { JsonRecord, SourceItem } from "../src/types.js";
-import { frameHeader, textFrame } from "./support/c3a-fake-t3.js";
+import { frameHeader, textFrame } from "./support/g8-peers.js";
 import { hungHandshakeT3, mockT3, rawWebSocketT3 } from "./support/g8-peers.js";
 import { loopTurn, within } from "./support/g8-process.js";
 

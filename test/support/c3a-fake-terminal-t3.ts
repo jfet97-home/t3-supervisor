@@ -1,7 +1,17 @@
 import { WebSocketServer, type WebSocket } from "ws";
-import { deferred } from "./c3a-fake-t3.js";
 
 // a loopback T3 serving the terminal RPCs of the native Git probe, adapted from the fake in test/git-probe.test.ts
+
+// a promise with its settle functions, completed from the peer's node callbacks
+const deferred = <A = void>() => {
+  let resolve!: (value: A) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<A>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+};
 
 export interface ProbeStatus {
   workspaceRoot: string;

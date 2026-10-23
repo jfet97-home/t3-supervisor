@@ -2,7 +2,7 @@ import { createServer, request, type Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { Deferred, Effect, type Scope } from "effect";
 import { WebSocketServer, type WebSocket } from "ws";
-import { startRawWebSocketT3, type RawConnection } from "./c3a-fake-t3.js";
+import { rawWebSocketT3, type RawWebSocketT3 } from "./g8-peers.js";
 
 // loopback T3 peers for the native envelope tests, as scoped resources whose events are Deferreds
 
@@ -135,10 +135,8 @@ export const hungPeer: Effect.Effect<HungPeer, never, Scope.Scope> = Effect.gen(
   return { baseUrl, accepted: Deferred.await(accepted), gone: Deferred.await(gone), received: () => received };
 });
 
-// completes the handshake by hand so a test chooses every byte the client reads (c3a raw peer)
-export const rawPeer: Effect.Effect<{ readonly baseUrl: string; readonly connection: Effect.Effect<RawConnection> }, never, Scope.Scope> =
-  Effect.acquireRelease(Effect.promise(() => startRawWebSocketT3()), (peer) => Effect.promise(() => peer.close())).pipe(
-    Effect.map((peer) => ({ baseUrl: peer.baseUrl, connection: Effect.promise(() => peer.connection) })));
+// completes the handshake by hand so a test chooses every byte the client reads
+export const rawPeer: Effect.Effect<RawWebSocketT3, never, Scope.Scope> = rawWebSocketT3;
 
 // one plain http round trip to the peer on its own connection: what the client wrote before it has been read by then
 export const barrier = (baseUrl: string): Effect.Effect<number> => Effect.callback<number>((resume) => {

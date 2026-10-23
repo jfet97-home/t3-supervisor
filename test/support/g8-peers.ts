@@ -4,10 +4,36 @@ import type { Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import { Deferred, Effect, Exit, type Scope } from "effect";
 import { WebSocketServer } from "ws";
-import type { ClientFrame } from "./c3a-fake-t3.js";
 
 // loopback peers standing in for T3 in the t3 client characterizations, as scoped effects: each peer is a node http
 // server (a native boundary) whose events complete deferreds, and the caller's scope closes it
+
+export interface ClientFrame {
+  opcode: number;
+  payload: Buffer;
+}
+
+// an unmasked server-to-client frame with the given payload length
+export const frameHeader = (length: number, opcode = 0x1): Buffer => {
+  if (length < 126) return Buffer.from([0x80 | opcode, length]);
+  if (length < 65_536) {
+    const header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(length, 2);
+    return header;
+  }
+  const header = Buffer.alloc(10);
+  header[0] = 0x80 | opcode;
+  header[1] = 127;
+  header.writeBigUInt64BE(BigInt(length), 2);
+  return header;
+};
+
+export const textFrame = (text: string): Buffer => {
+  const payload = Buffer.from(text, "utf8");
+  return Buffer.concat([frameHeader(payload.length), payload]);
+};
 
 type Http = ReturnType<typeof createServer>;
 

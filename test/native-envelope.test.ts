@@ -6,8 +6,8 @@ import {
   NativeEnvelope, NativeEnvelopeError, NativeFraming, nativeMaxPayload, NativeStep,
   type NativeCall, type NativeExit, type NativeOpenOptions, type NativeServerFrame,
 } from "../src/native-envelope.js";
-import { freePort } from "./support/c1-loopback.js";
-import { frameHeader, textFrame } from "./support/c3a-fake-t3.js";
+import { freePort } from "./support/g8-process.js";
+import { frameHeader, textFrame } from "./support/g8-peers.js";
 import { barrier, envelopePeer, hungPeer, rawPeer, type PeerFrame } from "./support/envelope-peer.js";
 
 // the shared native envelope (D-08) against real ws loopback peers
@@ -291,7 +291,7 @@ describe("NativeEnvelope frames and consumers", () => {
 
 describe("NativeEnvelope sent boundary and limits", () => {
   it.live("ENV-11: failures before the Request left are rejected, failures after it are uncertain, and nothing is retried", () => Effect.gen(function*() {
-    const port = yield* Effect.promise(() => freePort());
+    const port = yield* freePort;
     assert.deepEqual(yield* failure(call(unary(`http://127.0.0.1:${port}`))), ["connect_failed", "rejected"]);
 
     const refusing = yield* envelopePeer(() => undefined, { verifyClient: () => false });
@@ -327,7 +327,7 @@ describe("NativeEnvelope sent boundary and limits", () => {
       const atLimit = yield* rawPeer;
       const read = yield* Effect.forkChild(limitCall(atLimit.baseUrl, limit));
       const accepted = yield* atLimit.connection;
-      yield* Effect.promise(() => accepted.frame((frame) => frame.opcode === 0x1));
+      yield* accepted.frame((frame) => frame.opcode === 0x1);
       const body = exitText("limit", success("x".repeat(limit - empty)));
       assert.equal(Buffer.byteLength(body), limit, client);
       accepted.socket.write(textFrame(body));
@@ -337,12 +337,12 @@ describe("NativeEnvelope sent boundary and limits", () => {
       const over = yield* rawPeer;
       const rejected = yield* Effect.forkChild(failure(limitCall(over.baseUrl, limit)));
       const connection = yield* over.connection;
-      yield* Effect.promise(() => connection.frame((frame) => frame.opcode === 0x1));
+      yield* connection.frame((frame) => frame.opcode === 0x1);
       connection.socket.write(Buffer.concat([frameHeader(limit + 1), Buffer.alloc(64 * 1024, 0x20)]));
       assert.deepEqual(yield* Fiber.join(rejected), ["socket_failed", "uncertain"], client);
-      const close = yield* Effect.promise(() => connection.frame((frame) => frame.opcode === 0x8));
+      const close = yield* connection.frame((frame) => frame.opcode === 0x8);
       assert.equal(close.payload.readUInt16BE(0), 1009, client);
-      yield* Effect.promise(() => connection.gone);
+      yield* connection.gone;
     }
   }).pipe(provided), { timeout: 10_000 });
 
@@ -435,7 +435,7 @@ describe("NativeEnvelope connection", () => {
     const outcome = yield* Effect.scoped(Effect.gen(function*() {
       const connection = yield* envelope.open(t3Options(peer.baseUrl));
       const raw = yield* peer.connection;
-      yield* Effect.promise(() => raw.frame((frame) => frame.payload.toString("utf8").includes("subscribeArchivedShell")));
+      yield* raw.frame((frame) => frame.payload.toString("utf8").includes("subscribeArchivedShell"));
       const holding = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       const handled: unknown[] = [];
@@ -446,7 +446,7 @@ describe("NativeEnvelope connection", () => {
       })));
       raw.socket.write(nine);
       yield* Deferred.await(holding);
-      yield* Effect.promise(() => raw.gone);
+      yield* raw.gone;
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(first);
       const next = yield* Effect.flip(connection.receive(() => Effect.void));
@@ -464,7 +464,7 @@ describe("NativeEnvelope connection", () => {
     const binary = yield* Effect.scoped(envelope.open(t3Options(peer.baseUrl)).pipe(
       Effect.flatMap((connection) => Effect.flip(connection.receive(() => Effect.void)))));
     assert.deepEqual([binary.reason, binary.outcome], ["binary_frame", "uncertain"]);
-    const port = yield* Effect.promise(() => freePort());
+    const port = yield* freePort;
     const refused = yield* Effect.flip(Effect.scoped(envelope.open(t3Options(`http://127.0.0.1:${port}`))));
     assert.deepEqual([refused.reason, refused.outcome], ["connect_failed", "rejected"]);
   }).pipe(provided), { timeout: 10_000 });

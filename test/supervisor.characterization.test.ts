@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import {request} from "node:http";
+import {connect} from "node:net";
 import {join} from "node:path";
 import {it} from "@effect/vitest";
 import {Clock, Console, Deferred, Effect, Exit, Fiber, Queue, SubscriptionRef} from "effect";
@@ -6,7 +8,8 @@ import {TestClock} from "effect/testing";
 import {createStatus, supervise, type SupervisorStatus} from "../src/supervisor.js";
 import {T3TransportError, type T3ClientShape, type T3EnvironmentDescriptor} from "../src/t3.js";
 import type {ProjectInfo, SupervisorConfig} from "../src/types.js";
-import {connectionError, freePort, httpGet} from "./support/c1-loopback.js";
+import {freePort} from "./support/g8-process.js";
+import {onLiveClock} from "./support/g11-http.js";
 import {dataDirectory} from "./support/g9-stores.js";
 import {eventConsole, pinnableClock, rootServices, statusView} from "./support/g9-supervisor.js";
 
@@ -49,16 +52,35 @@ const parse = (body: string): Record<string, unknown> => JSON.parse(body) as Rec
 const withDeadline = <A, E, R>(effect: Effect.Effect<A, E, R>, milliseconds: number, label: string) =>
   Effect.timeoutOrElse(effect, {duration: milliseconds, orElse: () => Effect.die(new Error(`${label}: no outcome within ${milliseconds} ms`))});
 
-// one request or connection probe of the loopback adapter (each bounded at 3 s on the live clock)
-const get = (port: number, path: string) => Effect.promise(() => httpGet(port, path));
-const connectFails = (port: number) => Effect.promise(() => connectionError(port));
+// one request or connection probe of the loopback adapter (each bounded at 3 s on the live clock): a GET on its own connection
+// (no keep-alive agent), so nothing outlives the response, and the error code of a fresh tcp connect, null when it was accepted
+const liveBound = <A>(effect: Effect.Effect<A, Error>, label: string) => onLiveClock(effect.pipe(Effect.orDie,
+  Effect.timeoutOrElse({duration: "3 seconds", orElse: () => Effect.die(new Error(`${label}: no outcome within 3000 ms`))})));
+const get = (port: number, path: string) => liveBound(Effect.callback<{status: number; contentType: string | undefined; body: string}, Error>((resume) => {
+  const outgoing = request({host: "127.0.0.1", port, path, method: "GET", agent: false}, (response) => {
+    const chunks: Buffer[] = [];
+    response.on("data", (chunk: Buffer) => chunks.push(chunk));
+    response.once("error", (error) => resume(Effect.fail(error)));
+    response.once("end", () => resume(Effect.succeed({status: response.statusCode ?? 0, contentType: response.headers["content-type"],
+      body: Buffer.concat(chunks).toString("utf8")})));
+  });
+  outgoing.once("error", (error) => resume(Effect.fail(error)));
+  outgoing.end();
+  return Effect.sync(() => outgoing.destroy());
+}), `GET ${path}`);
+const connectFails = (port: number) => liveBound(Effect.callback<string | null, Error>((resume) => {
+  const socket = connect({host: "127.0.0.1", port});
+  socket.once("connect", () => {socket.destroy();resume(Effect.succeed(null));});
+  socket.once("error", (error: NodeJS.ErrnoException) => resume(Effect.succeed(error.code ?? error.message)));
+  return Effect.sync(() => socket.destroy());
+}), `connect ${port}`);
 
 // a test clock wait for an in-process signal, bounded on the live clock
 const within = <A, E, R>(effect: Effect.Effect<A, E, R>) => TestClock.withLive(effect.pipe(Effect.timeout("3 seconds")));
 
 it.live("CT-HEALTH-01: /health and /live answer over real HTTP with the exact status matrix, body keys and empty 404 bodies", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory;
-  const port = yield* Effect.promise(freePort);
+  const port = yield* freePort;
   const settings = config(directory, port);
   const {ref, status} = yield* liveStatus(settings);
   const descriptorCalled = yield* Deferred.make<void>();
@@ -147,7 +169,7 @@ it.live("CT-HEALTH-01: /health and /live answer over real HTTP with the exact st
 
 it.live("CT-HEALTH-01: enabled supervision that is not ready keeps /health at 503 while /live stays 200", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory;
-  const port = yield* Effect.promise(freePort);
+  const port = yield* freePort;
   const settings = {...config(directory, port), uiPort: 0, uiHost: "127.0.0.1"};
   const {ref, status} = yield* liveStatus(settings);
   const supervisionFailed = yield* Deferred.make<void>();
@@ -300,7 +322,7 @@ it.effect("CT-MAIN-04: a watch failure clears t3Connected and restarts the watch
 
 it.live("CT-MAIN-05: interrupting runSupervisor closes the health listener and logs no operation_deferred", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory;
-  const port = yield* Effect.promise(freePort);
+  const port = yield* freePort;
   const settings = config(directory, port);
   const {ref, status} = yield* liveStatus(settings);
   const watching = yield* Deferred.make<void>();
@@ -325,7 +347,7 @@ it.live("CT-MAIN-05: interrupting runSupervisor closes the health listener and l
 
 it.live("CT-MAIN-05: interruption inside the deferred-retry sleep logs no further operation_deferred", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory;
-  const port = yield* Effect.promise(freePort);
+  const port = yield* freePort;
   const settings = config(directory, port);
   const {ref, status} = yield* liveStatus(settings);
   const deferredLogged = yield* Deferred.make<void>();
