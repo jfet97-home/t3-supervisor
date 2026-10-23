@@ -258,4 +258,51 @@ layer(installedBinLayer.pipe(Layer.provideMerge(NodeFileSystem.layer)), { timeou
       }
       assert.deepEqual(leakedSecrets(interrupted.stdout + interrupted.stderr, [workflowToken]), []);
     }), { timeout: 60_000 });
+
+  it.effect("a forge interrupted half a second into its wait for the login lock exits 130 when the wait ends, prints nothing and writes no grant",
+    () => Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { home, state, workflowToken, env } = yield* forgeState("cli-bin-lock-wait-");
+      const database = join(state, "access", "login.sqlite3");
+      const holderHash = createHash("sha256").update(randomBytes(32)).digest("hex");
+      // a second process holds BEGIN IMMEDIATE until told to insert its own grant and commit
+      const holder = yield* startProcess(process.execPath, ["-e", [
+        "const {DatabaseSync} = require('node:sqlite');",
+        "const database = new DatabaseSync(process.argv[1]);",
+        "database.exec('PRAGMA busy_timeout=0; BEGIN IMMEDIATE');",
+        "process.stdout.write('locked\\n');",
+        "process.stdin.setEncoding('utf8').once('data', () => {",
+        "  database.prepare('INSERT INTO dashboard_login_grants(token_hash, issued_at, expires_at) VALUES(?,?,?)').run(process.argv[2], Date.now(), Date.now() + 60000);",
+        "  database.exec('COMMIT'); database.close(); process.stdout.write('committed\\n'); process.stdin.destroy();",
+        "});",
+      ].join("\n"), database, holderHash], { env, cwd: home, stdin: "pipe" });
+      yield* holder.waitForStdout((stdout) => stdout === "locked\n", 15_000, "the held lock");
+      yield* fs.chmod(database, 0o640);
+      const forge = yield* startProcess((yield* InstalledBin).installedBin, ["auth", "forge", "--data-dir", state], { env, cwd: home });
+      const deadline = (yield* Clock.currentTimeMillis) + 15_000;
+      while (((yield* fs.stat(database)).mode & 0o777) !== 0o600) {
+        if ((yield* Clock.currentTimeMillis) > deadline || forge.child.exitCode !== null) return yield* Effect.die(new Error("forge did not reach the login database"));
+        yield* Effect.sleep("2 millis");
+      }
+      // half a second later the forge is inside its synchronous wait for the lock, well within the 5 s busy_timeout
+      yield* Effect.sleep("500 millis");
+      assert.equal(forge.child.exitCode, null, "the forge is still waiting for the lock");
+      const signalledAt = yield* Clock.currentTimeMillis;
+      process.kill(forge.pid, "SIGINT");
+      const interrupted = yield* forge.closed(exitTimeoutMs);
+      const exitMs = (yield* Clock.currentTimeMillis) - signalledAt;
+      // the signal lands inside the synchronous busy wait: it takes effect when the wait ends, before any failure is reported
+      privately("forge interrupted in its lock wait", [], () => assert.deepEqual(interrupted, { code: 130, signal: null, stdout: "", stderr: "" }));
+      assert.ok(exitMs < 5_000 + 2_000, `exit took ${Math.round(exitMs)} ms after the signal`);
+
+      holder.child.stdin?.write("commit\n");
+      yield* holder.waitForStdout((stdout) => stdout === "locked\ncommitted\n", 15_000, "the holder commit");
+      const check = new DatabaseSync(database);
+      try {
+        assert.deepEqual(check.prepare("SELECT token_hash FROM dashboard_login_grants").all().map((row) => ({ ...row })), [{ token_hash: holderHash }]);
+      } finally {
+        check.close();
+      }
+      assert.deepEqual(leakedSecrets(interrupted.stdout + interrupted.stderr, [workflowToken]), []);
+    }), { timeout: 60_000 });
 });

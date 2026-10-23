@@ -31,12 +31,18 @@ const start = Command.make("start", { dataDirectory }, ({ dataDirectory }) => Ef
   yield* server;
 })).pipe(Command.withDescription("Run the supervisor service"));
 
+// two event loop turns through the timers phase (a zero sleep would only yield the fiber): the second timer runs a turn after
+// the first, so a poll phase that read every signal delivered before the first lies between them
+const pendingSignals = Effect.andThen(Effect.sleep("1 millis"), Effect.sleep("1 millis"));
+
 const forge = Command.make("forge", { dataDirectory }, ({ dataDirectory }) => Effect.gen(function* () {
   // the data directory alone: no service configuration and no T3 credential is loaded
   const directory = Option.isSome(dataDirectory) ? dataDirectory.value : yield* Effect.sync(loadDataDirectory);
   const issued = yield* forgeDashboardToken(directory).pipe(
-    // one fixed sentence for any failure; the cause is never printed and an interruption prints nothing
-    Effect.tapCause((cause) => Cause.hasInterruptsOnly(cause) ? Effect.void : Console.error(forgeFailure)),
+    // one fixed sentence for any failure; the cause is never printed and an interruption prints nothing. the login lock wait
+    // is synchronous (busy_timeout), so a signal that arrived during it is dispatched only once the event loop runs again:
+    // two loop turns guarantee a poll phase, so that signal interrupts before a failure is reported
+    Effect.tapCause((cause) => Cause.hasInterruptsOnly(cause) ? Effect.void : Effect.andThen(pendingSignals, Console.error(forgeFailure))),
   );
   yield* Console.log(Redacted.value(issued.token));
 })).pipe(Command.withDescription("Issue a single-use dashboard sign-in token"));
