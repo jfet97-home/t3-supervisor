@@ -1,211 +1,202 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { it, type TestContext } from "vitest";
-import { after, mockMethod } from "./support/node-test.js";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
-import { GuidanceStore } from "../src/guidance-store.js";
-import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.js";
+import { it } from "@effect/vitest";
+import { Clock, Deferred, Effect, Fiber } from "effect";
+import { TestClock } from "effect/testing";
 import type { SupervisorMonitorBatch, SupervisorMonitorThreadBatch } from "../src/supervisor-monitor.js";
-import { SupervisorConversationStore } from "../src/supervisor-conversation-store.js";
-import { defaultSupervisorModel, ProjectSupervisorStore, type BindingRecord } from "../src/project-supervisor-store.js";
-import { SupervisorTeamStore, type TeamBinding, type TeamMember, type TeamNotification } from "../src/supervisor-team-store.js";
-import type { SupervisorHelperDeliveryTransport } from "./support/root-facades.js";
-import { helperTransportUnit, teamRuntimeUnit } from "./support/team-units.js";
+import { defaultSupervisorModel, type BindingRecord } from "../src/project-supervisor-store.js";
+import type { HelperTransportShape } from "../src/supervisor-helper-transport.js";
+import type { SupervisorTeamStoreShape, TeamBinding, TeamMember } from "../src/supervisor-team-store.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
-import { withDeadline } from "./support/c1-loopback.js";
+import { failsWith, rows } from "./support/guidance-store-services.js";
+import {
+  execute, helperTransportUnit, reopenTeamStores, rpcUncertain, teamRuntimeUnit, teamStoresFixture, wallClock, type ProjectionRead, type RpcHandler,
+  type TeamStores,
+} from "./support/g3-team.js";
+
+// the team-runtime characterizations on the production SupervisorTeamRuntime and HelperTransport layers over the store
+// services of a temporary guidance database, under the test clock: the native side is a fake scheduler, a stubbed fetch
+// and the T3 projection reads, and a crash or restart closes the file's client and opens the stores again
 
 const time = Date.parse("2026-10-16T10:00:00.000Z");
 const iso = (value: number) => new Date(value).toISOString();
 const uncertainError = "Helper delivery is uncertain; its original native identity is retained.";
 
 // real SupervisorHelperTransport over a fake native scheduler, copied from the baseline transport suite; fetch is held per test
-const transportTeam = async (t: TestContext) => {
-  const directory = await mkdtemp(join(tmpdir(), "c1-team-transport-"));
-  const opened: GuidanceStore[] = [];
-  const db = new GuidanceStore(directory);opened.push(db);
-  const store = new ProjectSupervisorStore(db, new Set());
-  db.db.prepare("INSERT INTO meta VALUES(?,?)").run('supervisor_control:"p"', JSON.stringify({enabled: true, manual: true, generation: 1}));
-  const binding = {...store.reserve("p", "main", "main", defaultSupervisorModel, 1, 1), state: "ready" as const};store.setBinding(binding);
-  const team = new SupervisorTeamStore(store);
-  team.registerMember(binding, {threadId: "helper", taskId: "bootstrap", bootstrapRunId: "boot"});
+const transportTeam = Effect.gen(function* () {
+  yield* TestClock.setTime(wallClock);
+  const db = yield* teamStoresFixture("c1-team-transport-");
+  const store = db.store;
+  yield* execute(db, "INSERT INTO meta VALUES(?,?)", 'supervisor_control:"p"', JSON.stringify({enabled: true, manual: true, generation: 1}));
+  const binding = {...yield* store.reserve("p", "main", "main", defaultSupervisorModel, 1, 1), state: "ready" as const};yield* store.setBinding(binding);
+  const team = db.teamStore;
+  yield* team.registerMember(binding, {threadId: "helper", taskId: "bootstrap", bootstrapRunId: "boot"});
   const helper: Projection = {thread: {id: "helper", projectId: "p", title: "helper", modelSelection: defaultSupervisorModel,
     runtimeMode: "full-access", interactionMode: "default", lineage: {parentThreadId: binding.threadId, relationshipToParent: "subagent"}},
   runs: [], messages: [], runtimeRequests: []};
   const tasks: Record<string, unknown>[] = [];
-  let holdList: (() => Promise<void> | null) | null = null;
-  const rpc = async (tag: string, input: Record<string, unknown>) => {
-    if (tag === "scheduledTasks.list") {const held = holdList?.() ?? null;if (held) await held;return {tasks};}
+  let holdList: (() => Effect.Effect<void> | null) | null = null;
+  const rpc: RpcHandler = (tag, input) => {
+    if (tag === "scheduledTasks.list") return Effect.gen(function* () {const held = holdList?.() ?? null;if (held) yield* held;return {tasks};});
     if (tag === "scheduledTasks.upsert") {
       const task = {...input, createdAt: "2026-10-16T10:00:00Z", webhook: {path: "/api/hooks/fixture/fixture-only-token", url: null}};
-      tasks.splice(0, tasks.length, task);return {task};
+      tasks.splice(0, tasks.length, task);return Effect.succeed({task});
     }
-    if (tag === "scheduledTasks.listWebhookDeliveries") return {deliveries: []};
-    throw new Error("unexpected_rpc");
+    if (tag === "scheduledTasks.listWebhookDeliveries") return Effect.succeed({deliveries: []});
+    return Effect.fail(rpcUncertain());
   };
   const posts: string[] = [];
   const pending: Array<PromiseWithResolvers<Response>> = [];
   let mode: "abort" | "crash" | "accept" = "accept";
-  const reached = Promise.withResolvers<void>();
+  const reached = yield* Deferred.make<void>();
   const fetch: typeof globalThis.fetch = async (_url, init) => {
     posts.push(String(init?.body));
-    reached.resolve();
+    Deferred.doneUnsafe(reached, Effect.void);
     if (mode === "accept") return Response.json({deliveryId: `delivery-${posts.length}`}, {status: 202});
     if (mode === "crash") {const never = Promise.withResolvers<Response>();pending.push(never);return never.promise;}
     const signal = init?.signal;
     return new Promise<Response>((_resolve, reject) => signal?.addEventListener("abort", () => reject(signal.reason), {once: true}));
   };
-  after(t, async () => {
-    reached.resolve();
-    for (const never of pending) never.reject(new Error("abandoned POST"));
-    for (const guidance of opened) try {guidance.close();} catch { /* closed by a simulated crash */ }
-    await rm(directory, {recursive: true, force: true});
-  });
+  // an abandoned POST ends with the test
+  const endPosts = Effect.sync(() => {for (const never of pending) never.reject(new Error("abandoned POST"));});
+  yield* Effect.addFinalizer(() => endPosts);
   // the baseline transport suite's team composition: a ready helper assigned the operational branch
   const main = binding.mainThreadId;
-  const member = team.snapshot(binding).members.find(value => value.threadId === "helper")!;
-  const ready = team.markReady(binding, member.threadId, member.epoch);
+  const member = (yield* team.snapshot(binding)).members.find(value => value.threadId === "helper")!;
+  const ready = yield* team.markReady(binding, member.threadId, member.epoch);
   const operational: ThreadInfo = {id: "branch", title: "branch", projectId: "p", lineage: {parentThreadId: main, relationshipToParent: "subagent", rootThreadId: main}};
   const parents = new Map<string, string | null>([[main, null], [operational.id, main], [ready.threadId, main]]);
-  const assignment = team.assign(binding, operational.id, ready.threadId, parents);
-  for (const notice of team.snapshot(binding).notifications.filter(value => value.assignmentEpoch === assignment.epoch)) {
-    team.updateNotificationDelivery(binding, binding.threadId, notice.id, "sending");
-    team.updateNotificationDelivery(binding, binding.threadId, notice.id, "delivered");
-    team.acknowledgeNotification(binding, notice.recipientThreadId, notice.id, notice.memberEpoch);
+  const assignment = yield* team.assign(binding, operational.id, ready.threadId, parents);
+  for (const notice of (yield* team.snapshot(binding)).notifications.filter(value => value.assignmentEpoch === assignment.epoch)) {
+    yield* team.updateNotificationDelivery(binding, binding.threadId, notice.id, "sending");
+    yield* team.updateNotificationDelivery(binding, binding.threadId, notice.id, "delivered");
+    yield* team.acknowledgeNotification(binding, notice.recipientThreadId, notice.id, notice.memberEpoch);
   }
-  team.completeTransfer(binding, operational.id, assignment.epoch);
+  yield* team.completeTransfer(binding, operational.id, assignment.epoch);
   const threads = [helper.thread, operational, {id: main, title: main, projectId: "p", lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: main}} as ThreadInfo];
-  const compose = (guidance: GuidanceStore, projectStore: ProjectSupervisorStore, teamStore: SupervisorTeamStore,
-    transportProjection: (threadId: string, signal: AbortSignal) => Promise<Projection> = async () => helper, supervisionStopped?: () => boolean) => {
-    const requests = new SupervisorConversationStore(guidance);
-    const monitor = new ProjectSupervisorMonitorStore(guidance);
-    const transport = helperTransportUnit({store: projectStore, rpc, baseUrl: "http://127.0.0.1:3773", projection: transportProjection, fetch});
-    const runtime = teamRuntimeUnit({store: projectStore, teamStore, requests, monitor, rpc, helperTransport: transport, projection: async () => helper,
+  const compose = (guidance: TeamStores, transportProjection: ProjectionRead = () => Effect.succeed(helper), supervisionStopped?: () => boolean) => Effect.gen(function* () {
+    const transport = yield* helperTransportUnit({stores: guidance, rpc, baseUrl: "http://127.0.0.1:3773", projection: transportProjection, fetch});
+    const runtime = yield* teamRuntimeUnit({stores: guidance, transport, projection: () => Effect.succeed(helper),
       ...(supervisionStopped ? {supervisionStopped} : {})});
-    return {requests, monitor, transport, runtime};
-  };
-  const detectedAt = Date.now();
+    return {requests: guidance.requests, monitor: guidance.monitor, transport, runtime};
+  });
+  const detectedAt = yield* Clock.currentTimeMillis;
   const item = {id: "run:branch", readItemId: null, type: "run_finished", status: "completed", ordinal: 1, detectedAt, version: "branch-v1", priority: "run_finished" as const};
   const thread: SupervisorMonitorThreadBatch = {threadId: "branch", trigger: "priority", finalizedActivityCount: 1, pendingItemCount: 1, oldestAt: detectedAt,
     priority: true, priorityKinds: ["run_finished"], saturated: false, untrackedCount: 0, items: [item], previewItems: [item]};
   const batch: SupervisorMonitorBatch = {projectId: "p", createdAt: detectedAt, trigger: "priority", finalizedActivityCount: 1, pendingItemCount: 1, truncated: false, threads: [thread]};
-  const first = compose(db, store, team);
-  const helperBatches = first.runtime.partition(binding, threads, batch).helperBatches;
+  const first = yield* compose(db);
+  const helperBatches = (yield* first.runtime.partition(binding, threads, batch)).helperBatches;
   assert.equal(helperBatches.length, 1);
-  const receipts = (guidance: GuidanceStore) => guidance.db.prepare("SELECT document FROM supervisor_helper_deliveries").all()
-    .map(row => JSON.parse(String(row.document)) as Record<string, unknown>);
-  return {db, store, team, binding, helper, threads, helperBatches, posts, reached: reached.promise, compose, receipts, ...first,
+  const receipts = (guidance: TeamStores) => Effect.map(rows(guidance.sql, "SELECT document FROM supervisor_helper_deliveries"),
+    (documents) => documents.map(row => JSON.parse(String(row.document)) as Record<string, unknown>));
+  return {db, store, team, binding, helper, threads, helperBatches, posts, reached, compose, receipts, endPosts, ...first,
     setMode: (next: typeof mode) => {mode = next;},
-    holdList: (gate: Promise<void>) => {
-      const listed = Promise.withResolvers<void>();
-      holdList = () => {holdList = null;listed.resolve();return gate;};
-      return withDeadline(listed.promise, 3_000, "held channel read");
-    },
-    reopen: () => {
-      const guidance = new GuidanceStore(directory);opened.push(guidance);
-      const projectStore = new ProjectSupervisorStore(guidance, new Set());
-      const teamStore = new SupervisorTeamStore(projectStore);
-      return {guidance, store: projectStore, team: teamStore, ...compose(guidance, projectStore, teamStore)};
-    }};
-};
+    holdList: (gate: Deferred.Deferred<void>) => Effect.gen(function* () {
+      const listed = yield* Deferred.make<void>();
+      holdList = () => {holdList = null;Deferred.doneUnsafe(listed, Effect.void);return Deferred.await(gate);};
+      return Deferred.await(listed);
+    }),
+    reopen: Effect.gen(function* () {
+      const guidance = yield* reopenTeamStores(db.directory);
+      return {guidance, store: guidance.store, team: guidance.teamStore, ...yield* compose(guidance)};
+    })};
+});
 
-it("CT-TRUN-01: aborting the helper POST after the 'sending' commit makes the request 'uncertain', keeps the receipt 'posting' and never posts again", {timeout: 10_000}, async t => {
-  const f = await transportTeam(t);
+it.effect("CT-TRUN-01: aborting the helper POST after the 'sending' commit makes the request 'uncertain', keeps the receipt 'posting' and never posts again", () => Effect.gen(function* () {
+  const f = yield* transportTeam;
   f.setMode("abort");
-  const controller = new AbortController();
-  f.runtime.startCycle(f.binding);
-  const running = f.runtime.runHelperBatch(f.binding, f.threads, f.helperBatches, controller.signal);
-  await withDeadline(f.reached, 3_000, "POST");
-  const sending = f.requests.pending("p", "helper");
+  const controller = yield* Deferred.make<void>();
+  yield* f.runtime.startCycle(f.binding);
+  const running = yield* Effect.forkChild(f.runtime.runHelperBatch(f.binding, f.threads, f.helperBatches, controller));
+  yield* Deferred.await(f.reached);
+  const sending = yield* f.requests.pending("p", "helper");
   assert.ok(sending);
   assert.equal(sending.state, "sending");
-  assert.deepEqual(f.receipts(f.db).map(receipt => [receipt.messageId, receipt.state, receipt.text]), [[sending.messageId, "posting", sending.text]]);
-  controller.abort();
-  await withDeadline(running, 3_000, "aborted batch");
-  assert.deepEqual(f.requests.pending("p", "helper"), {...sending, state: "uncertain", error: uncertainError});
-  assert.equal(f.team.unresolvedRequests(f.binding).find(request => request.requestId === sending.id)?.state, "uncertain");
-  assert.equal(f.receipts(f.db)[0]?.state, "posting");
+  assert.deepEqual((yield* f.receipts(f.db)).map(receipt => [receipt.messageId, receipt.state, receipt.text]), [[sending.messageId, "posting", sending.text]]);
+  yield* Deferred.succeed(controller, undefined);
+  yield* Fiber.join(running);
+  assert.deepEqual(yield* f.requests.pending("p", "helper"), {...sending, state: "uncertain", error: uncertainError});
+  assert.equal((yield* f.team.unresolvedRequests(f.binding)).find(request => request.requestId === sending.id)?.state, "uncertain");
+  assert.equal((yield* f.receipts(f.db))[0]?.state, "posting");
 
   f.setMode("accept");
-  f.runtime.startCycle(f.binding);
-  await f.runtime.reconcile(f.binding, f.threads, AbortSignal.timeout(3_000));
-  const restarted = f.reopen();
-  restarted.runtime.startCycle(f.binding);
-  await restarted.runtime.reconcile(f.binding, f.threads, AbortSignal.timeout(3_000));
-  assert.equal(restarted.requests.pending("p", "helper")?.state, "uncertain");
-  assert.equal(f.receipts(restarted.guidance)[0]?.state, "posting");
+  yield* f.runtime.startCycle(f.binding);
+  yield* f.runtime.reconcile(f.binding, f.threads);
+  const restarted = yield* f.reopen;
+  yield* restarted.runtime.startCycle(f.binding);
+  yield* restarted.runtime.reconcile(f.binding, f.threads);
+  assert.equal((yield* restarted.requests.pending("p", "helper"))?.state, "uncertain");
+  assert.equal((yield* f.receipts(restarted.guidance))[0]?.state, "posting");
   assert.equal(f.posts.length, 1);
-});
+}), {timeout: 10_000});
 
-it("CT-TRUN-01: a crash during the helper POST keeps the request 'sending'; a new process marks it 'uncertain' and never posts again", {timeout: 10_000}, async t => {
-  const f = await transportTeam(t);
+it.effect("CT-TRUN-01: a crash during the helper POST keeps the request 'sending'; a new process marks it 'uncertain' and never posts again", () => Effect.gen(function* () {
+  const f = yield* transportTeam;
   f.setMode("crash");
-  f.runtime.startCycle(f.binding);
-  const abandoned = f.runtime.runHelperBatch(f.binding, f.threads, f.helperBatches, AbortSignal.timeout(5_000)).then(() => "settled", () => "failed");
-  after(t, () => withDeadline(abandoned, 3_000, "abandoned batch"));
-  await withDeadline(f.reached, 3_000, "POST");
-  const sending = f.requests.pending("p", "helper");
+  yield* f.runtime.startCycle(f.binding);
+  const abandoned = yield* Effect.forkChild(f.runtime.runHelperBatch(f.binding, f.threads, f.helperBatches).pipe(Effect.as("settled"), Effect.orElseSucceed(() => "failed")));
+  // the abandoned run settles once the test ends its POST
+  yield* Effect.addFinalizer(() => f.endPosts.pipe(Effect.andThen(Fiber.await(abandoned)), Effect.asVoid));
+  yield* Deferred.await(f.reached);
+  const sending = yield* f.requests.pending("p", "helper");
   assert.ok(sending?.state === "sending");
-  f.db.close();
+  yield* f.db.close;
 
   f.setMode("accept");
-  const restarted = f.reopen();
-  assert.deepEqual(restarted.requests.pending("p", "helper"), sending, "reopening performs no recovery");
-  restarted.runtime.startCycle(f.binding);
-  await restarted.runtime.reconcile(f.binding, f.threads, AbortSignal.timeout(3_000));
-  assert.deepEqual(restarted.requests.pending("p", "helper"), {...sending, state: "uncertain",
+  const restarted = yield* f.reopen;
+  assert.deepEqual(yield* restarted.requests.pending("p", "helper"), sending, "reopening performs no recovery");
+  yield* restarted.runtime.startCycle(f.binding);
+  yield* restarted.runtime.reconcile(f.binding, f.threads);
+  assert.deepEqual(yield* restarted.requests.pending("p", "helper"), {...sending, state: "uncertain",
     error: "The helper request may have been accepted; its original native identity is retained."});
-  restarted.runtime.startCycle(f.binding);
-  await restarted.runtime.reconcile(f.binding, f.threads, AbortSignal.timeout(3_000));
-  assert.equal(restarted.requests.pending("p", "helper")?.state, "uncertain");
-  assert.deepEqual(f.receipts(restarted.guidance).map(receipt => receipt.state), ["posting"]);
+  yield* restarted.runtime.startCycle(f.binding);
+  yield* restarted.runtime.reconcile(f.binding, f.threads);
+  assert.equal((yield* restarted.requests.pending("p", "helper"))?.state, "uncertain");
+  assert.deepEqual((yield* f.receipts(restarted.guidance)).map(receipt => receipt.state), ["posting"]);
   assert.equal(f.posts.length, 1);
-});
+}), {timeout: 10_000});
 
-it("CT-TRUN-02: a quarantine committed during the transport's helper read leaves no receipt and no POST and fails only its own request", {timeout: 10_000}, async t => {
-  const f = await transportTeam(t);
-  const gate = Promise.withResolvers<void>();
-  const held = Promise.withResolvers<void>();
-  after(t, () => {gate.resolve();held.resolve();});
-  const composed = f.compose(f.db, f.store, f.team, async () => {held.resolve();await gate.promise;return f.helper;});
-  composed.runtime.startCycle(f.binding);
-  const running = composed.runtime.runHelperBatch(f.binding, f.threads, f.helperBatches, AbortSignal.timeout(5_000));
-  await withDeadline(held.promise, 3_000, "transport helper read");
-  const request = composed.requests.pending("p", "helper");
+it.effect("CT-TRUN-02: a quarantine committed during the transport's helper read leaves no receipt and no POST and fails only its own request", () => Effect.gen(function* () {
+  const f = yield* transportTeam;
+  const gate = yield* Deferred.make<void>();
+  const held = yield* Deferred.make<void>();
+  const composed = yield* f.compose(f.db, () => Effect.gen(function* () {yield* Deferred.succeed(held, undefined);yield* Deferred.await(gate);return f.helper;}));
+  yield* composed.runtime.startCycle(f.binding);
+  const running = yield* Effect.forkChild(composed.runtime.runHelperBatch(f.binding, f.threads, f.helperBatches));
+  yield* Deferred.await(held);
+  const request = yield* composed.requests.pending("p", "helper");
   assert.ok(request?.state === "sending");
-  f.team.quarantineMember(f.binding, "helper");
-  gate.resolve();
-  await withDeadline(running, 3_000, "batch");
-  assert.deepEqual(f.receipts(f.db), []);
+  yield* f.team.quarantineMember(f.binding, "helper");
+  yield* Deferred.succeed(gate, undefined);
+  yield* Fiber.join(running);
+  assert.deepEqual(yield* f.receipts(f.db), []);
   assert.equal(f.posts.length, 0);
-  const failed = composed.requests.requests("p", "helper").find(value => value.id === request.id);
+  const failed = (yield* composed.requests.requests("p", "helper")).find(value => value.id === request.id);
   assert.equal(failed?.state, "failed");
   assert.equal(failed?.error, "The helper lost its authority before this check-in was posted; nothing was posted and pending activity is retained.");
-  assert.equal(f.team.unresolvedRequests(f.binding).some(value => value.requestId === request.id), false);
-});
+  assert.equal((yield* f.team.unresolvedRequests(f.binding)).some(value => value.requestId === request.id), false);
+}), {timeout: 10_000});
 
-it("CT-TRUN-02: a stop committed during the transport's channel read leaves no receipt and no POST", {timeout: 10_000}, async t => {
-  const f = await transportTeam(t);
+it.effect("CT-TRUN-02: a stop committed during the transport's channel read leaves no receipt and no POST", () => Effect.gen(function* () {
+  const f = yield* transportTeam;
   let stopped = false;
-  const gate = Promise.withResolvers<void>();
-  after(t, () => gate.resolve());
-  const composed = f.compose(f.db, f.store, f.team, undefined, () => stopped);
-  const listed = f.holdList(gate.promise);
-  composed.runtime.startCycle(f.binding);
-  const running = composed.runtime.runHelperBatch(f.binding, f.threads, f.helperBatches, AbortSignal.timeout(5_000));
-  await listed;
-  const request = composed.requests.pending("p", "helper");
+  const gate = yield* Deferred.make<void>();
+  const composed = yield* f.compose(f.db, undefined, () => stopped);
+  const listed = yield* f.holdList(gate);
+  yield* composed.runtime.startCycle(f.binding);
+  const running = yield* Effect.forkChild(composed.runtime.runHelperBatch(f.binding, f.threads, f.helperBatches));
+  yield* listed;
+  const request = yield* composed.requests.pending("p", "helper");
   assert.ok(request?.state === "sending");
   stopped = true;
-  gate.resolve();
-  await withDeadline(running, 3_000, "batch");
-  assert.deepEqual(f.receipts(f.db), []);
+  yield* Deferred.succeed(gate, undefined);
+  yield* Fiber.join(running);
+  assert.deepEqual(yield* f.receipts(f.db), []);
   assert.equal(f.posts.length, 0);
-  assert.equal(composed.requests.requests("p", "helper").find(value => value.id === request.id)?.state, "failed");
-  assert.equal(f.team.unresolvedRequests(f.binding).some(value => value.requestId === request.id), false);
-});
+  assert.equal((yield* composed.requests.requests("p", "helper")).find(value => value.id === request.id)?.state, "failed");
+  assert.equal((yield* f.team.unresolvedRequests(f.binding)).some(value => value.requestId === request.id), false);
+}), {timeout: 10_000});
 
 // the baseline team-runtime suite's fixture and fake webhook transport
 const projectId = "project-team";
@@ -218,85 +209,76 @@ const emptyProjection = (thread: ThreadInfo): Projection => ({thread, runs: [], 
 const webhookTransport = () => {
   const sent = new Map<string, {threadId: string; commandId: string; text: string; taskId: string}>();
   const calls: string[] = [];
-  const transport: SupervisorHelperDeliveryTransport = {
-    send: async (_binding, message) => {
+  const transport: HelperTransportShape = {
+    send: (_binding, message) => Effect.sync(() => {
       calls.push(`send:${message.messageId}`);
       sent.set(message.messageId, {threadId: message.threadId, commandId: message.commandId, text: message.text, taskId: `scheduled-${message.threadId}`});
-      return "waiting";
-    },
-    hasDelivery: (_binding, message) => {
+      return "waiting" as const;
+    }),
+    hasDelivery: (_binding, message) => Effect.sync(() => {
       calls.push(`hasDelivery:${message.messageId}`);
       const delivery = sent.get(message.messageId);
       return Boolean(delivery && delivery.threadId === message.threadId && delivery.commandId === message.commandId && delivery.text === message.text);
-    },
-    reconcileDelivery: async (_binding, message) => {calls.push(`reconcile:${message.messageId}`);return sent.has(message.messageId) ? "uncertain" : "absent";},
-    receiptText: (_binding, messageId) => {calls.push(`receiptText:${messageId}`);return sent.get(messageId)?.text ?? null;},
-    matchesMessage: (_binding, logicalId, text, native) => {
+    }),
+    reconcileDelivery: (_binding, message) => Effect.sync(() => {calls.push(`reconcile:${message.messageId}`);return sent.has(message.messageId) ? "uncertain" as const : "absent" as const;}),
+    receiptText: (_binding, messageId) => Effect.sync(() => {calls.push(`receiptText:${messageId}`);return sent.get(messageId)?.text ?? null;}),
+    matchesMessage: (_binding, logicalId, text, native) => Effect.sync(() => {
       const delivery = sent.get(logicalId);
       return Boolean(delivery && delivery.text === text && native.threadId === delivery.threadId && native.text === text &&
         native.scheduledTaskId === delivery.taskId && native.creationSource === "server");
-    },
-    retire: async (_binding, threadId) => {calls.push(`retire:${threadId}`);return true;},
+    }),
+    receiptDocument: () => Effect.die(new Error("a fake transport keeps no receipt documents")),
+    retire: (_binding, threadId) => Effect.sync(() => {calls.push(`retire:${threadId}`);return true;}),
   };
   return {transport, sent, calls};
 };
 
-const teamFixture = async (t: TestContext) => {
-  const directory = await mkdtemp(join(tmpdir(), "c1-team-runtime-"));
-  const opened: GuidanceStore[] = [];
-  const guidance = new GuidanceStore(directory);opened.push(guidance);
-  const store = new ProjectSupervisorStore(guidance, new Set());
-  store.reserve(projectId, "main", "main", defaultSupervisorModel, 0, 1);
-  const binding = store.binding(projectId, "main")!;
-  const teamStore = new SupervisorTeamStore(store);
-  const requests = new SupervisorConversationStore(guidance);
-  const monitor = new ProjectSupervisorMonitorStore(guidance);
+const teamFixture = Effect.gen(function* () {
+  yield* TestClock.setTime(wallClock);
+  const guidance = yield* teamStoresFixture("c1-team-runtime-");
+  const store = guidance.store;
+  yield* store.reserve(projectId, "main", "main", defaultSupervisorModel, 0, 1);
+  const binding = (yield* store.binding(projectId, "main"))!;
+  const teamStore = guidance.teamStore;
+  const requests = guidance.requests;
+  const monitor = guidance.monitor;
   const threadList = [makeThread("main"), makeThread("branch", "main", "subagent"), makeThread("leaf", "branch", "subagent"), makeThread("other", "main", "subagent")];
   const projections = new Map<string, Projection>(threadList.map(thread => [thread.id, emptyProjection(thread)]));
   const reads: string[] = [];
-  const runtime = (helperTransport?: SupervisorHelperDeliveryTransport, now?: () => number, stores = {store, teamStore, requests, monitor}) =>
-    teamRuntimeUnit({...stores, rpc: null, projection: async threadId => {reads.push(threadId);return projections.get(threadId) ?? emptyProjection(makeThread(threadId));},
-      ...(helperTransport ? {helperTransport} : {}), ...(now ? {now} : {})});
-  after(t, async () => {
-    for (const db of opened) try {db.close();} catch { /* already closed */ }
-    await rm(directory, {recursive: true, force: true});
-  });
+  const runtime = (helperTransport?: HelperTransportShape, stores: TeamStores = guidance) =>
+    teamRuntimeUnit({stores, projection: (threadId) => Effect.sync(() => {reads.push(threadId);return projections.get(threadId) ?? emptyProjection(makeThread(threadId));}),
+      ...(helperTransport ? {transport: helperTransport} : {})});
   return {guidance, store, binding, teamStore, requests, monitor, threadList, projections, runtime, reads,
-    reopen: () => {
-      const reopened = new GuidanceStore(directory);opened.push(reopened);
-      const reopenedStore = new ProjectSupervisorStore(reopened, new Set());
-      return {guidance: reopened, store: reopenedStore, teamStore: new SupervisorTeamStore(reopenedStore),
-        requests: new SupervisorConversationStore(reopened), monitor: new ProjectSupervisorMonitorStore(reopened)};
-    }};
-};
+    reopen: reopenTeamStores(guidance.directory)};
+});
 
-const readyMember = (team: SupervisorTeamStore, binding: TeamBinding, threadId: string, now = time): TeamMember => {
-  const registered = team.registerMember(binding, {threadId, taskId: `task-${threadId}`, bootstrapRunId: `bootstrap-${threadId}`, now});
-  return team.markReady(binding, threadId, registered.epoch, now + 1);
-};
+const readyMember = (team: SupervisorTeamStoreShape, binding: TeamBinding, threadId: string, now = time) => Effect.gen(function* () {
+  const registered = yield* team.registerMember(binding, {threadId, taskId: `task-${threadId}`, bootstrapRunId: `bootstrap-${threadId}`, now});
+  return yield* team.markReady(binding, threadId, registered.epoch, now + 1);
+});
 
-const activate = (team: SupervisorTeamStore, binding: TeamBinding, member: TeamMember, subtreeRoot: string, now = time): void => {
-  const assignment = team.assign(binding, subtreeRoot, member.threadId, parents, now);
-  for (const notice of team.snapshot(binding).notifications.filter(item => item.assignmentRootThreadId === subtreeRoot && item.assignmentEpoch === assignment.epoch)) {
-    team.updateNotificationDelivery(binding, binding.threadId, notice.id, "sending", now + 1);
-    team.updateNotificationDelivery(binding, binding.threadId, notice.id, "delivered", now + 2);
-    team.acknowledgeNotification(binding, notice.recipientThreadId, notice.id, notice.memberEpoch, now + 3);
+const activate = (team: SupervisorTeamStoreShape, binding: TeamBinding, member: TeamMember, subtreeRoot: string, now = time) => Effect.gen(function* () {
+  const assignment = yield* team.assign(binding, subtreeRoot, member.threadId, parents, now);
+  for (const notice of (yield* team.snapshot(binding)).notifications.filter(item => item.assignmentRootThreadId === subtreeRoot && item.assignmentEpoch === assignment.epoch)) {
+    yield* team.updateNotificationDelivery(binding, binding.threadId, notice.id, "sending", now + 1);
+    yield* team.updateNotificationDelivery(binding, binding.threadId, notice.id, "delivered", now + 2);
+    yield* team.acknowledgeNotification(binding, notice.recipientThreadId, notice.id, notice.memberEpoch, now + 3);
   }
-  team.completeTransfer(binding, subtreeRoot, assignment.epoch, now + 4);
-};
+  yield* team.completeTransfer(binding, subtreeRoot, assignment.epoch, now + 4);
+});
 
-const deliverNote = (teamStore: SupervisorTeamStore, binding: TeamBinding, member: TeamMember, id: string, message: string, at: number): TeamNotification => {
-  const note = teamStore.note(binding, {eventId: `${id}-event`, notificationId: id, memberThreadId: member.threadId, memberEpoch: member.epoch, message, now: at});
-  teamStore.updateNotificationDelivery(binding, binding.threadId, note.id, "sending", at + 1);
-  return teamStore.updateNotificationDelivery(binding, binding.threadId, note.id, "delivered", at + 2);
-};
+const deliverNote = (teamStore: SupervisorTeamStoreShape, binding: TeamBinding, member: TeamMember, id: string, message: string, at: number) => Effect.gen(function* () {
+  const note = yield* teamStore.note(binding, {eventId: `${id}-event`, notificationId: id, memberThreadId: member.threadId, memberEpoch: member.epoch, message, now: at});
+  yield* teamStore.updateNotificationDelivery(binding, binding.threadId, note.id, "sending", at + 1);
+  return yield* teamStore.updateNotificationDelivery(binding, binding.threadId, note.id, "delivered", at + 2);
+});
 
 const helperProjection = (member: TeamMember, rootThreadId: string): Projection => emptyProjection({
   ...makeThread(member.threadId, rootThreadId, "subagent"), lineage: {parentThreadId: rootThreadId, relationshipToParent: "subagent", rootThreadId},
 });
 
 // one completed command in the operational branch, observed into the real monitor tables and selected as a batch
-const observedBranchBatch = (f: Awaited<ReturnType<typeof teamFixture>>): SupervisorMonitorBatch => {
+const observedBranchBatch = (f: Effect.Success<typeof teamFixture>) => Effect.gen(function* () {
   const op = emptyProjection(makeThread("branch", "main", "subagent"));
   op.runs.push({id: "operational-run", threadId: "branch", ordinal: 1, status: "completed", requestedAt: iso(time), startedAt: iso(time),
     completedAt: iso(time + 1), rootNodeId: "root-node", providerThreadId: "provider-branch"});
@@ -306,33 +288,38 @@ const observedBranchBatch = (f: Awaited<ReturnType<typeof teamFixture>>): Superv
   ];
   op.turnItems = [{id: "turn-item:command", threadId: "branch", runId: "operational-run", nodeId: "tool-node", type: "command_execution", status: "completed",
     ordinal: 1, completedAt: iso(time + 1), updatedAt: iso(time + 1)}];
-  f.monitor.observe({projectId, threadId: "branch", sourceOrdinal: 0, projection: op, now: time + 2, includeDetachedChildItems: true});
-  const selected = f.monitor.select(projectId, {intervalMinutes: 5, activityThreshold: 1}, time + 3, null, {eligibleThreadIds: new Set(["branch"])});
+  yield* f.monitor.observe({projectId, threadId: "branch", sourceOrdinal: 0, projection: op, now: time + 2, includeDetachedChildItems: true});
+  const selected = yield* f.monitor.select(projectId, {intervalMinutes: 5, activityThreshold: 1}, time + 3, null, {eligibleThreadIds: new Set(["branch"])});
   assert.ok(selected);
   return selected;
-};
-
-const teamState = (db: DatabaseSync, requestId: string, noteId: string) => ({
-  request: (JSON.parse(String(db.prepare("SELECT document FROM supervisor_conversation_requests WHERE id=?").get(requestId)?.document)) as {state: string}).state,
-  teamRequest: String(db.prepare("SELECT state FROM supervisor_team_requests WHERE request_id=?").get(requestId)?.state),
-  note: (JSON.parse(String(db.prepare("SELECT document FROM supervisor_team_notifications WHERE id=?").get(noteId)?.document)) as {state: string}).state,
-  acknowledged: db.prepare("SELECT item_id FROM supervisor_monitor_items WHERE project_id=? AND thread_id='branch' AND reviewed_version=version").all(projectId).length,
 });
 
-it("CT-TRUN-03: a failure inside the completion transaction rolls back request completion, monitor and note acknowledgements, retryable after reopen", {timeout: 10_000}, async t => {
-  const f = await teamFixture(t);
-  mockMethod(t, Date, "now", () => time + 10);
-  const member = readyMember(f.teamStore, f.binding, "helper-rollback");
-  activate(f.teamStore, f.binding, member, "branch");
-  const note = deliverNote(f.teamStore, f.binding, member, "rollback-note", "Keep the parent informed.", time + 5);
-  const batch = observedBranchBatch(f);
+const teamState = (db: TeamStores, requestId: string, noteId: string) => Effect.gen(function* () {
+  const [request] = yield* rows(db.sql, "SELECT document FROM supervisor_conversation_requests WHERE id=?", requestId);
+  const [teamRequest] = yield* rows(db.sql, "SELECT state FROM supervisor_team_requests WHERE request_id=?", requestId);
+  const [note] = yield* rows(db.sql, "SELECT document FROM supervisor_team_notifications WHERE id=?", noteId);
+  return {
+    request: (JSON.parse(String(request?.document)) as {state: string}).state,
+    teamRequest: String(teamRequest?.state),
+    note: (JSON.parse(String(note?.document)) as {state: string}).state,
+    acknowledged: (yield* rows(db.sql, "SELECT item_id FROM supervisor_monitor_items WHERE project_id=? AND thread_id='branch' AND reviewed_version=version", projectId)).length,
+  };
+});
+
+it.effect("CT-TRUN-03: a failure inside the completion transaction rolls back request completion, monitor and note acknowledgements, retryable after reopen", () => Effect.gen(function* () {
+  const f = yield* teamFixture;
+  yield* TestClock.setTime(time + 10);
+  const member = yield* readyMember(f.teamStore, f.binding, "helper-rollback");
+  yield* activate(f.teamStore, f.binding, member, "branch");
+  const note = yield* deliverNote(f.teamStore, f.binding, member, "rollback-note", "Keep the parent informed.", time + 5);
+  const batch = yield* observedBranchBatch(f);
   const projection = helperProjection(member, f.binding.threadId);
   f.projections.set(member.threadId, projection);
   const transport = webhookTransport();
-  const runtime = f.runtime(transport.transport);
-  runtime.startCycle(f.binding);
-  await runtime.runHelperBatch(f.binding, f.threadList, runtime.partition(f.binding, f.threadList, batch).helperBatches, AbortSignal.timeout(5_000));
-  const request = f.requests.pending(projectId, member.threadId);
+  const runtime = yield* f.runtime(transport.transport);
+  yield* runtime.startCycle(f.binding);
+  yield* runtime.runHelperBatch(f.binding, f.threadList, (yield* runtime.partition(f.binding, f.threadList, batch)).helperBatches);
+  const request = yield* f.requests.pending(projectId, member.threadId);
   assert.ok(request?.state === "waiting" && request.batch && request.teamNotificationIds?.includes(note.id));
   // the helper's native run delivers the exact check-in and ends with its marker
   projection.runs.push({id: "checkin-run", threadId: member.threadId, ordinal: 1, status: "completed", userMessageId: request.messageId,
@@ -342,125 +329,123 @@ it("CT-TRUN-03: a failure inside the completion transaction rolls back request c
   projection.messages.push({id: "checkin-final", threadId: member.threadId, runId: "checkin-run", nodeId: null, role: "assistant", text: request.completionMarker,
     ordinal: 1, streaming: false, createdAt: iso(time), updatedAt: iso(time)});
   const before = {request: "waiting", teamRequest: "pending", note: "delivered", acknowledged: 0};
-  assert.deepEqual(teamState(f.guidance.db, request.id, note.id), before);
-  f.guidance.db.exec(`CREATE TEMP TRIGGER c1_fail_settle BEFORE UPDATE ON supervisor_team_requests WHEN NEW.state='settled'
+  assert.deepEqual(yield* teamState(f.guidance, request.id, note.id), before);
+  yield* execute(f.guidance, `CREATE TEMP TRIGGER c1_fail_settle BEFORE UPDATE ON supervisor_team_requests WHEN NEW.state='settled'
     BEGIN SELECT RAISE(ABORT, 'c1 injected settle failure'); END`);
-  runtime.startCycle(f.binding);
-  await assert.rejects(runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5_000)), /c1 injected settle failure/u);
-  assert.deepEqual(teamState(f.guidance.db, request.id, note.id), before);
-  const reopened = f.reopen();
-  assert.deepEqual(teamState(reopened.guidance.db, request.id, note.id), before);
+  yield* runtime.startCycle(f.binding);
+  // the team store reports the injected driver failure as its typed store error, without the driver's text (s6d step 1)
+  yield* failsWith(runtime.reconcile(f.binding, f.threadList), /supervisor_team_store_unavailable/u);
+  assert.deepEqual(yield* teamState(f.guidance, request.id, note.id), before);
+  const reopened = yield* f.reopen;
+  assert.deepEqual(yield* teamState(reopened, request.id, note.id), before);
 
   // the same completion succeeds from the reopened files once the failure is gone
-  const retried = f.runtime(transport.transport, undefined, reopened);
-  retried.startCycle(f.binding);
-  await retried.reconcile(f.binding, f.threadList, AbortSignal.timeout(5_000));
-  assert.deepEqual(teamState(reopened.guidance.db, request.id, note.id),
+  const retried = yield* f.runtime(transport.transport, reopened);
+  yield* retried.startCycle(f.binding);
+  yield* retried.reconcile(f.binding, f.threadList);
+  assert.deepEqual(yield* teamState(reopened, request.id, note.id),
     {request: "completed", teamRequest: "settled", note: "acknowledged", acknowledged: batch.threads[0]!.items.length});
-});
+}), {timeout: 10_000});
 
-it("CT-TRUN-04: a helper check-in is withheld at lastNotice+59999 ms and prepared at +60000 ms", {timeout: 10_000}, async t => {
-  const f = await teamFixture(t);
-  const clock = {now: time};
-  mockMethod(t, Date, "now", () => clock.now);
-  const member = readyMember(f.teamStore, f.binding, "helper-cooldown");
-  activate(f.teamStore, f.binding, member, "branch");
+it.effect("CT-TRUN-04: a helper check-in is withheld at lastNotice+59999 ms and prepared at +60000 ms", () => Effect.gen(function* () {
+  const f = yield* teamFixture;
+  yield* TestClock.setTime(time);
+  const member = yield* readyMember(f.teamStore, f.binding, "helper-cooldown");
+  yield* activate(f.teamStore, f.binding, member, "branch");
   f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
   const lastNotice = time + 1_000;
-  f.requests.noticeSent(member.threadId, lastNotice);
+  yield* f.requests.noticeSent(member.threadId, lastNotice);
   const transport = webhookTransport();
-  const runtime = f.runtime(transport.transport);
+  const runtime = yield* f.runtime(transport.transport);
   const batch = {projectId, createdAt: time, trigger: "priority" as const, finalizedActivityCount: 1, pendingItemCount: 1, truncated: false,
     threads: [{threadId: "branch", trigger: "priority" as const, finalizedActivityCount: 1, pendingItemCount: 1, oldestAt: time, priority: true,
       priorityKinds: ["run_finished" as const], saturated: false, untrackedCount: 0,
       items: [{id: "run:branch", readItemId: null, type: "run_finished", status: "completed", ordinal: 1, detectedAt: time, version: "v1", priority: "run_finished" as const}],
       previewItems: [{id: "run:branch", readItemId: null, type: "run_finished", status: "completed", ordinal: 1, detectedAt: time, version: "v1", priority: "run_finished" as const}]}]};
-  const helperBatches = runtime.partition(f.binding, f.threadList, batch).helperBatches;
-  clock.now = lastNotice + 59_999;
-  runtime.startCycle(f.binding);
-  await runtime.runHelperBatch(f.binding, f.threadList, helperBatches, AbortSignal.timeout(5_000));
-  assert.equal(f.requests.pending(projectId, member.threadId), null);
+  const helperBatches = (yield* runtime.partition(f.binding, f.threadList, batch)).helperBatches;
+  yield* TestClock.setTime(lastNotice + 59_999);
+  yield* runtime.startCycle(f.binding);
+  yield* runtime.runHelperBatch(f.binding, f.threadList, helperBatches);
+  assert.equal(yield* f.requests.pending(projectId, member.threadId), null);
   assert.deepEqual(transport.calls.filter(call => call.startsWith("send:")), []);
-  clock.now = lastNotice + 60_000;
-  runtime.startCycle(f.binding);
-  await runtime.runHelperBatch(f.binding, f.threadList, helperBatches, AbortSignal.timeout(5_000));
-  assert.equal(f.requests.pending(projectId, member.threadId)?.state, "waiting");
+  yield* TestClock.setTime(lastNotice + 60_000);
+  yield* runtime.startCycle(f.binding);
+  yield* runtime.runHelperBatch(f.binding, f.threadList, helperBatches);
+  assert.equal((yield* f.requests.pending(projectId, member.threadId))?.state, "waiting");
   assert.equal(transport.calls.filter(call => call.startsWith("send:")).length, 1);
-});
+}), {timeout: 10_000});
 
-it("CT-TRUN-04: a registering helper's readiness check-in starts exactly at lastNotice+60000 ms", {timeout: 10_000}, async t => {
-  const f = await teamFixture(t);
-  const clock = {now: time};
-  mockMethod(t, Date, "now", () => clock.now);
-  const registered = f.teamStore.registerMember(f.binding, {threadId: "helper-ready", taskId: "task-helper-ready", bootstrapRunId: "bootstrap-helper-ready", now: time});
+it.effect("CT-TRUN-04: a registering helper's readiness check-in starts exactly at lastNotice+60000 ms", () => Effect.gen(function* () {
+  const f = yield* teamFixture;
+  yield* TestClock.setTime(time);
+  const registered = yield* f.teamStore.registerMember(f.binding, {threadId: "helper-ready", taskId: "task-helper-ready", bootstrapRunId: "bootstrap-helper-ready", now: time});
   f.projections.set(registered.threadId, helperProjection(registered, f.binding.threadId));
   const lastNotice = time + 1_000;
-  f.requests.noticeSent(registered.threadId, lastNotice);
+  yield* f.requests.noticeSent(registered.threadId, lastNotice);
   const transport = webhookTransport();
-  const runtime = f.runtime(transport.transport);
-  clock.now = lastNotice + 59_999;
-  runtime.startCycle(f.binding);
-  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5_000));
-  assert.equal(f.requests.pending(projectId, registered.threadId), null);
-  clock.now = lastNotice + 60_000;
-  runtime.startCycle(f.binding);
-  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5_000));
-  assert.ok(f.requests.pending(projectId, registered.threadId)?.id.startsWith("team-ready:"));
-});
+  const runtime = yield* f.runtime(transport.transport);
+  yield* TestClock.setTime(lastNotice + 59_999);
+  yield* runtime.startCycle(f.binding);
+  yield* runtime.reconcile(f.binding, f.threadList);
+  assert.equal(yield* f.requests.pending(projectId, registered.threadId), null);
+  yield* TestClock.setTime(lastNotice + 60_000);
+  yield* runtime.startCycle(f.binding);
+  yield* runtime.reconcile(f.binding, f.threadList);
+  assert.ok((yield* f.requests.pending(projectId, registered.threadId))?.id.startsWith("team-ready:"));
+}), {timeout: 10_000});
 
-it("CT-TRUN-04: an unresolved helper delivery raises root attention exactly 60000 ms after it was sent, not before", {timeout: 10_000}, async t => {
-  const f = await teamFixture(t);
-  const clock = {now: time};
-  mockMethod(t, Date, "now", () => clock.now);
-  const member = readyMember(f.teamStore, f.binding, "helper-unresolved");
-  activate(f.teamStore, f.binding, member, "branch");
+it.effect("CT-TRUN-04: an unresolved helper delivery raises root attention exactly 60000 ms after it was sent, not before", () => Effect.gen(function* () {
+  const f = yield* teamFixture;
+  yield* TestClock.setTime(time);
+  const member = yield* readyMember(f.teamStore, f.binding, "helper-unresolved");
+  yield* activate(f.teamStore, f.binding, member, "branch");
   f.projections.set(member.threadId, helperProjection(member, f.binding.threadId));
   const transport = webhookTransport();
-  const runtime = f.runtime(transport.transport, () => clock.now);
-  const batch = observedBranchBatch(f);
-  clock.now = time + 100_000;
-  runtime.startCycle(f.binding);
-  await runtime.runHelperBatch(f.binding, f.threadList, runtime.partition(f.binding, f.threadList, batch).helperBatches, AbortSignal.timeout(5_000));
-  const request = f.requests.pending(projectId, member.threadId);
+  const runtime = yield* f.runtime(transport.transport);
+  const batch = yield* observedBranchBatch(f);
+  yield* TestClock.setTime(time + 100_000);
+  yield* runtime.startCycle(f.binding);
+  yield* runtime.runHelperBatch(f.binding, f.threadList, (yield* runtime.partition(f.binding, f.threadList, batch)).helperBatches);
+  const request = yield* f.requests.pending(projectId, member.threadId);
   assert.ok(request?.state === "waiting" && request.sentAt === time + 100_000);
-  const attention = () => f.teamStore.snapshot(f.binding).events.filter(event => event.id.startsWith("helper-checkin-unresolved:")).length;
-  clock.now = request.sentAt + 59_999;
-  runtime.startCycle(f.binding);
-  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5_000));
-  assert.equal(attention(), 0);
-  clock.now = request.sentAt + 60_000;
-  runtime.startCycle(f.binding);
-  await runtime.reconcile(f.binding, f.threadList, AbortSignal.timeout(5_000));
-  assert.equal(attention(), 1);
+  const attention = Effect.map(f.teamStore.snapshot(f.binding), (snapshot) => snapshot.events.filter(event => event.id.startsWith("helper-checkin-unresolved:")).length);
+  yield* TestClock.setTime(request.sentAt + 59_999);
+  yield* runtime.startCycle(f.binding);
+  yield* runtime.reconcile(f.binding, f.threadList);
+  assert.equal(yield* attention, 0);
+  yield* TestClock.setTime(request.sentAt + 60_000);
+  yield* runtime.startCycle(f.binding);
+  yield* runtime.reconcile(f.binding, f.threadList);
+  assert.equal(yield* attention, 1);
   assert.equal(transport.calls.filter(call => call.startsWith("send:")).length, 3, "each cycle only re-observes the same identity");
   assert.equal(new Set(transport.calls.filter(call => call.startsWith("send:"))).size, 1);
-});
+}), {timeout: 10_000});
 
-const tableDigest = (db: DatabaseSync): string => {
+const tableDigest = (db: TeamStores) => Effect.gen(function* () {
   const hash = createHash("sha256");
-  for (const {name} of db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as Array<{name: string}>)
-    hash.update(`${name}\0${JSON.stringify(db.prepare(`SELECT * FROM "${name}" ORDER BY rowid`).all())}\0`);
+  for (const {name} of (yield* rows(db.sql, "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")) as Array<{name: string}>)
+    hash.update(`${name}\0${JSON.stringify(yield* rows(db.sql, `SELECT * FROM "${name}" ORDER BY rowid`))}\0`);
   return hash.digest("hex");
-};
-const totalChanges = (db: DatabaseSync): number => Number(db.prepare("SELECT total_changes() AS n").get()?.n);
+});
+const totalChanges = (db: TeamStores) => Effect.map(rows(db.sql, "SELECT total_changes() AS n"), ([row]) => Number(row?.n));
 
-it("CT-TRUN-05: a root without members, notices or transfers makes no projection read, no transport call and no write", {timeout: 10_000}, async t => {
-  const f = await teamFixture(t);
+it.effect("CT-TRUN-05: a root without members, notices or transfers makes no projection read, no transport call and no write", () => Effect.gen(function* () {
+  const f = yield* teamFixture;
   const transport = webhookTransport();
-  const runtime = f.runtime(transport.transport);
+  const runtime = yield* f.runtime(transport.transport);
   const binding = f.binding as BindingRecord;
-  const batch = observedBranchBatch(f);
-  const digest = tableDigest(f.guidance.db);
-  const changes = totalChanges(f.guidance.db);
+  const batch = yield* observedBranchBatch(f);
+  const digest = yield* tableDigest(f.guidance);
+  const changes = yield* totalChanges(f.guidance);
   for (let cycle = 0; cycle < 3; cycle++) {
-    runtime.startCycle(binding);
-    await runtime.reconcile(binding, f.threadList, AbortSignal.timeout(5_000));
-    const partition = runtime.partition(binding, f.threadList, batch);
+    yield* runtime.startCycle(binding);
+    yield* runtime.reconcile(binding, f.threadList);
+    const partition = yield* runtime.partition(binding, f.threadList, batch);
     assert.deepEqual(partition.helperBatches, []);
-    await runtime.runHelperBatch(binding, f.threadList, partition.helperBatches, AbortSignal.timeout(5_000));
+    yield* runtime.runHelperBatch(binding, f.threadList, partition.helperBatches);
   }
   assert.deepEqual(f.reads, []);
   assert.deepEqual(transport.calls, []);
-  assert.equal(totalChanges(f.guidance.db), changes);
-  assert.equal(tableDigest(f.guidance.db), digest);
-});
+  assert.equal(yield* totalChanges(f.guidance), changes);
+  assert.equal(yield* tableDigest(f.guidance), digest);
+}), {timeout: 10_000});

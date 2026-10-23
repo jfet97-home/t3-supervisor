@@ -4,11 +4,12 @@ import {join} from "node:path";
 import {NodeFileSystem} from "@effect/platform-node";
 import {it} from "@effect/vitest";
 import {Deferred, Effect, Fiber, FileSystem} from "effect";
+import {TestClock} from "effect/testing";
 import {defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {helperDeliveryBody} from "../src/supervisor-helper-transport.js";
 import type {Projection} from "../src/types.js";
 import {rows} from "./support/guidance-store-services.js";
-import {execute, helperTransportUnit, reopenTeamStores, rpcUncertain, teamStoresFixture, type RpcHandler, type TeamStores} from "./support/g3-team.js";
+import {execute, helperTransportUnit, reopenTeamStores, rpcUncertain, teamStoresFixture, wallClock, type RpcHandler, type TeamStores} from "./support/g3-team.js";
 
 // the transport characterizations on the production HelperTransport layer over the store services of a temporary guidance
 // database. CT-HTX-01 runs under the test clock over a stubbed fetch; CT-HTX-03 and CT-HTX-04 are live, because their peer is a
@@ -50,6 +51,7 @@ const fixture = (baseUrl = "http://127.0.0.1:3773") => Effect.gen(function* () {
 const message = (name: string) => ({threadId: "helper", commandId: `${name}-command`, messageId: `${name}-message`, text: `Durable check-in text for ${name}`});
 
 it.effect("CT-HTX-01: aborting the POST leaves the receipt 'posting' with its exact text; reconcile and send stay 'uncertain' without a second POST, also after reopen", () => Effect.gen(function* () {
+  yield* TestClock.setTime(wallClock);
   const f = yield* fixture();
   const posts: string[] = [];
   const reached = yield* Deferred.make<void>();
