@@ -1397,7 +1397,7 @@ it("agreement snapshots preserve mixed plans through restart and mark replaced o
   const task = (await fixture.supervisorStore.task("agreement-source"))!;
   const workflow = workflowSnapshot();
   const agreement = {status: "agreed" as const, message: "Both conversations confirmed the plan", proposalId: "csv-1", agreedAt: Date.now(),
-    supervisorMessageId: "supervisor-proof", agentMessageId: "operative-proof", workflow};
+    evidence: {kind: "supervisor_message" as const, messageId: "supervisor-proof"}, agentMessageId: "operative-proof", workflow};
   const diagnostic = {role: "operative" as const, proposalId: "csv-2", messageId: "compact-acceptance", code: "record_fields", observedAt: Date.now()};
   await fixture.supervisorStore.saveTask({...task, status: "inferred", objective: "Add CSV export", workflow, workflowProposalId: "csv-2", agreement,
     workflowProtocolDiagnostic: diagnostic});
@@ -1415,7 +1415,7 @@ it("agreement snapshots preserve mixed plans through restart and mark replaced o
   assert.equal(replaced.deliveredRoleVersion, undefined, "a replacement conversation receives the full standing instructions again");
   const stale = (await fixture.supervisorStore.task("agreement-source"))?.agreement;
   assert.equal(stale?.status, "stale");
-  assert.equal(stale?.supervisorMessageId, "supervisor-proof");
+  assert.deepEqual(stale?.evidence, {kind: "supervisor_message", messageId: "supervisor-proof"});
   assert.deepEqual(stale?.workflow, workflow);
 });
 
@@ -1426,7 +1426,7 @@ it("task payload expiry clears retained agreement plans and current proposal ide
   const task = (await fixture.supervisorStore.task("expiry-source"))!;
   const workflow = workflowSnapshot(false);
   await fixture.supervisorStore.saveTask({...task, status: "inferred", workflow, workflowProposalId: "csv-1", updatedAt: 1,
-    agreement: {status: "agreed", message: "Accepted", proposalId: "csv-1", agreedAt: 1, supervisorMessageId: "supervisor-proof", agentMessageId: "operative-proof", workflow}});
+    agreement: {status: "agreed", message: "Accepted", proposalId: "csv-1", agreedAt: 1, evidence: {kind: "supervisor_message", messageId: "supervisor-proof"}, agentMessageId: "operative-proof", workflow}});
   await fixture.supervisorStore.prune(32 * day);
   assert.equal((await fixture.supervisorStore.task("expiry-source"))?.agreement?.status, "agreed", "a retained ready scope survives long idle periods");
   const binding = (await fixture.supervisorStore.binding("project-a", "expiry-source"))!;

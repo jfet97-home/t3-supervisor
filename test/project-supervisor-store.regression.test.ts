@@ -27,7 +27,7 @@ const proposedWorkflow = {status: "proposed" as const, message: "Current draft",
 const inferredTask = (supervisorThreadId: string): TaskRecord => ({id: "task-inferred", threadId: "main-inferred", projectId: "project-a", sourceRunId: "run-1", sourceMessageId: "message-1",
   sourceHash: "hash-1", status: "inferred", objective: "Export CSV", reason: "Interpreted.", updatedAt: 100, requestText: "Add CSV export", supervisorThreadId,
   messageId: "notice-1", dispatchedAt: 50, replayCount: 0, supervisorRunId: "supervisor-run-1", sourceOrdinal: 1, workflow: proposedWorkflow,
-  agreement: {status: "agreed", message: "Agreed.", proposalId: "proposal-1", agreedAt: 90, supervisorMessageId: "supervisor-message-1", agentMessageId: "agent-message-1", workflow: proposedWorkflow}});
+  agreement: {status: "agreed", message: "Agreed.", proposalId: "proposal-1", agreedAt: 90, evidence: {kind: "supervisor_message", messageId: "supervisor-message-1"}, agentMessageId: "agent-message-1", workflow: proposedWorkflow}});
 const queuedTask = (threadId: string, supervisorThreadId: string, dispatchedAt: number | null): TaskRecord => ({id: `task-${threadId}`, threadId, projectId: "project-a",
   sourceRunId: "run-2", sourceMessageId: "message-2", sourceHash: "hash-2", status: "queued", objective: null, reason: "Queued for interpretation.", updatedAt: 110,
   requestText: "Interpret this request", supervisorThreadId, messageId: `notice-${threadId}`, dispatchedAt, replayCount: 0, supervisorRunId: null, sourceOrdinal: 2,

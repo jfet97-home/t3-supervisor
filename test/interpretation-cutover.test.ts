@@ -15,7 +15,7 @@ import { cutoverNativeThreads, cutoverReport, type CutoverNatives, type CutoverP
   interpretationCutoverReason, readCutoverRows, renderCutoverPlan } from "../src/interpretation-cutover.js";
 import { InterpretationEvidence, interpretationPlanDigest } from "../src/interpretation-evidence.js";
 import { interpretationSourcePin } from "../src/interpretation-submission.js";
-import type { WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
+import type { WorkflowAgreementInfo, WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import { SupervisorOwnership, type SupervisionStartRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { renderRolloutScan, rolloutScan } from "../src/rollout-scan.js";
 import { SupervisionStoresLive } from "../src/supervision-live.js";
@@ -66,6 +66,11 @@ const provisionalRaw = {requirements: [{kind: "step", id: "test-plan", applies: 
   plan: {kind: "sequence", nodes: [{kind: "step", definitionId: null, localId: "bounded-review", name: "Review available context",
     description: "State unknown obligations.", reason: "Continue with finite planning."}]}};
 
+// the pre-s6e agreement of a task record: its proposal evidence one flat message id
+const legacyAgreement = (proposalId: string, messageId: string, agentMessageId: string, workflow: WorkflowProposalInfo) =>
+  ({status: "agreed", message: "Agreed.", proposalId, agreedAt: baseTime + 500, supervisorMessageId: messageId, agentMessageId,
+    workflow: {...workflow, status: "proposed"}}) as unknown as WorkflowAgreementInfo;
+
 const introduction = (base: TaskRecord, state: string, extra: Record<string, unknown> = {}) => ({taskId: base.id, projectId, threadId: base.threadId,
   supervisorThreadId: root, state, text: introductionBody, messageId: `supervisor-introduction:${base.id}`, targetRunId: null, error: null, ...extra});
 const legacyCandidate = (base: TaskRecord, proposalId: string, workflow: WorkflowProposalInfo, message: {id: string; runId: string; ordinal: number; text: string},
@@ -105,14 +110,12 @@ const scenario = (inflightRun: "running" | "completed" | "absent"): Scenario => 
     inflightRun === "completed" ? JSON.stringify({objective, reason, sourceMessageIds: [inflight.sourceMessageId], startRequested: true}) : undefined);
   const formal = interpreted(task("formal"));
   const formalAnswer = interpretationRun(projection, formal.task, 2, "completed", formal.answer).message!;
-  const formalTask: TaskRecord = {...formal.task, agreement: {status: "agreed", message: "Agreed.", proposalId: formal.task.id, agreedAt: baseTime + 500,
-    supervisorMessageId: formalAnswer.id, agentMessageId: "operative-acceptance-formal", workflow: {...formal.task.workflow!, status: "proposed"}}};
+  const formalTask: TaskRecord = {...formal.task, agreement: legacyAgreement(formal.task.id, formalAnswer.id, "operative-acceptance-formal", formal.task.workflow!)};
   const later = appendMessageToRun(projection, projection.runs.find((run) => run.id === formal.task.supervisorRunId)!,
     {id: "later-proposal-formal", role: "assistant", text: "```workflow-proposal\n{}\n```", now: baseTime + 2_500});
   const changed = interpreted(task("changed"));
   const changedAnswer = interpretationRun(projection, changed.task, 3, "completed", changed.answer.replace(objective, "Implement another workflow")).message!;
-  const changedTask: TaskRecord = {...changed.task, agreement: {status: "agreed", message: "Agreed.", proposalId: changed.task.id, agreedAt: baseTime + 500,
-    supervisorMessageId: changedAnswer.id, agentMessageId: "operative-acceptance-changed", workflow: {...changed.task.workflow!, status: "proposed"}}};
+  const changedTask: TaskRecord = {...changed.task, agreement: legacyAgreement(changed.task.id, changedAnswer.id, "operative-acceptance-changed", changed.task.workflow!)};
   const states = [["ready", "ready", {}], ["sent", "sent", {commandId: "command-sent", dispatchMode: {type: "queue_after_active"}, acceptedAt: baseTime + 700}],
     ["accepted", "accepted", {commandId: "command-accepted", dispatchMode: {type: "queue_after_active"}, acceptedAt: baseTime + 700}],
     ["unknown", "uncertain", {commandId: "command-unknown", dispatchMode: {type: "queue_after_active"}}]] as const;

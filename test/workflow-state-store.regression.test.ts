@@ -80,7 +80,7 @@ const sourceBinding = (proposal: WorkflowProposalInfo): WorkflowStateSourceBindi
 const acceptedAgreement = (proposal: WorkflowProposalInfo): WorkflowAgreementImport => ({
   taskId: "task-a", sourceThreadId: "main-a", sourceRunId: "run-a", sourceMessageId: "message-a", sourceHash: taskSourceHash, objective: "Prepare the export workflow.",
   agreement: {status: "agreed", message: "The complete workflow was echoed by the operative assistant.", proposalId: "proposal-a", agreedAt: 123,
-    supervisorMessageId: "supervisor-message-a", agentMessageId: "agent-message-a", workflow: proposal},
+    evidence: {kind: "supervisor_message", messageId: "supervisor-message-a"}, agentMessageId: "agent-message-a", workflow: proposal},
 });
 
 const validationFor = (fixture: StoreFixture) => ({

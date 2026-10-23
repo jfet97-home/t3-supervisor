@@ -41,7 +41,7 @@ import {
   type WorkflowStateRequirement,
   type WorkflowStateSourceBinding,
 } from "./workflow-state-contract.js";
-import type {WorkflowAgreementInfo, WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
+import {AgreementEvidence, type WorkflowAgreementInfo, type WorkflowPlanGroupInfo, type WorkflowPlanNodeInfo, type WorkflowProposalInfo, type WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
 import type {ProposalContext, WorkflowApplyDiagnostic} from "./supervisor-workflow.js";
 
 export type WorkflowApplyValidationContext = {
@@ -584,10 +584,11 @@ const workflowStatusEvidenceProblem = (current: WorkflowStateDocument, input: Wo
   return null;
 };
 
+const isAgreementEvidence = Schema.is(AgreementEvidence);
 const validWorkflowAgreementImport = (source: WorkflowAgreementImport): boolean => {
   if (!isRecord(source) || !validId(source.taskId) || !validId(source.sourceThreadId) || !validId(source.sourceRunId) || !validId(source.sourceMessageId) ||
     !validText(source.sourceHash) || !validText(source.objective) || !isRecord(source.agreement) || source.agreement.status !== "agreed" ||
-    !validId(source.agreement.proposalId) || !validText(source.agreement.supervisorMessageId) || !validText(source.agreement.agentMessageId) ||
+    !validId(source.agreement.proposalId) || !isAgreementEvidence(source.agreement.evidence) || !validText(source.agreement.agentMessageId) ||
     !Number.isFinite(source.agreement.agreedAt) || !isRecord(source.agreement.workflow) || source.agreement.workflow.status !== "proposed") return false;
   const workflow = source.agreement.workflow;
   const binding = sourceBindingOf(source.agreement.workflow, source.taskId, source.agreement.proposalId, source.sourceHash);

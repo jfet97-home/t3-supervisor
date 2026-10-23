@@ -56,7 +56,7 @@ const document = (): WorkflowStateDocument => ({
       definitionsComplete: true, requirementsKnown: true, taskId: "task", proposalId: "proposal", sourceHash: "source-hash"},
     requirements: [], issues: [], plan: null,
     agreement: {status: "agreed", message: "Historical", proposalId: "proposal", agreedAt: 1,
-      supervisorMessageId: "supervisor-message", agentMessageId: "agent-message", workflow: {
+      evidence: {kind: "supervisor_message", messageId: "supervisor-message"}, agentMessageId: "agent-message", workflow: {
         status: "proposed", message: "Historical", workspaceRoot: "/workspace", revision: null, globalRevision: null,
         definitionsStatus: "ready", definitionsComplete: true, requirementsKnown: true, requirements: [], issues: [], plan: null,
       }},

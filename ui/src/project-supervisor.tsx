@@ -343,7 +343,9 @@ function WorkflowAgreementView({agreement}: {agreement: WorkflowAgreementInfo}) 
         : "Unknown"}</p>
       <p><strong>Workspace root:</strong> {agreement.workflow.workspaceRoot === null ? "Not recorded" : <code>{agreement.workflow.workspaceRoot}</code>}</p>
       <p><strong>Definition revision:</strong> {agreement.workflow.revision === null ? "Not recorded" : <code>{agreement.workflow.revision}</code>}</p>
-      <p><strong>Supervisor message ID:</strong> <code>{agreement.supervisorMessageId}</code></p>
+      {agreement.evidence.kind === "supervisor_message"
+        ? <p><strong>Supervisor message ID:</strong> <code>{agreement.evidence.messageId}</code></p>
+        : <p><strong>Interpretation submission:</strong> attempt <code>{agreement.evidence.attemptId}</code>, item <code>{agreement.evidence.itemId}</code></p>}
       <p><strong>Agent message ID:</strong> <code>{agreement.agentMessageId}</code></p>
     </details>
   </section>;

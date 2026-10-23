@@ -78,7 +78,7 @@ const agreement = (overrides: Partial<WorkflowAgreementInfo> = {}): WorkflowAgre
   message: "The Supervisor and agent agreed on this plan.",
   proposalId: "proposal-1",
   agreedAt: 1_800_000_000_000,
-  supervisorMessageId: "supervisor-message-1",
+  evidence: {kind: "supervisor_message", messageId: "supervisor-message-1"},
   agentMessageId: "agent-message-1",
   workflow: workflow(),
   ...overrides,
@@ -431,7 +431,7 @@ it("an active agreement is primary for the matching proposal and escapes all sou
     agreement: agreement({
       message: "<script>agreement message</script>",
       proposalId: "proposal-<1>",
-      supervisorMessageId: "supervisor-<2>",
+      evidence: {kind: "supervisor_message", messageId: "supervisor-<2>"},
       agentMessageId: "agent-&-3",
       workflow: unsafeWorkflow,
     }),
@@ -454,6 +454,13 @@ it("an active agreement is primary for the matching proposal and escapes all sou
   assert.doesNotMatch(html, /<script>|<img src=x/);
   assert.match(html, /does not verify that any steps were completed/);
   assert.doesNotMatch(html, /compliance confirmed|compliant/i);
+});
+
+it("an agreement resting on a typed submission names its interpretation attempt and item, not a Supervisor message", () => {
+  const html = renderTaskView({...snapshot.tasks[0]!, agreement: agreement({evidence: {kind: "interpretation_submission", taskId: "task-1",
+    attemptId: "interpretation-attempt:<1>", itemId: "item-&-2", runId: "run-3", argumentsHash: "arguments-hash"}})});
+  assert.match(html, /Interpretation submission:<\/strong> attempt <code>interpretation-attempt:&lt;1&gt;<\/code>, item <code>item-&amp;-2<\/code>/);
+  assert.doesNotMatch(html, /Supervisor message ID/);
 });
 
 it("a stale agreement remains historical while a newer proposal stays current", () => {

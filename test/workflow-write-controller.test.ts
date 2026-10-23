@@ -1083,7 +1083,7 @@ it("an unchanged-source accepted fixed workflow survives when the mutable plan h
         message: "The operative Supervisor accepted the fixed review plan.",
         proposalId: "proposal-accepted-fixed",
         agreedAt: Date.now(),
-        supervisorMessageId: "accepted-fixed-supervisor-message",
+        evidence: {kind: "supervisor_message", messageId: "accepted-fixed-supervisor-message"},
         agentMessageId: "accepted-fixed-agent-message",
         workflow: acceptedProposal,
       },
@@ -1161,7 +1161,7 @@ it("a same-source accepted TaskRecord plan is protected when live agreement impo
       message: "The accepted plan is retained in task history.",
       proposalId: "proposal-task-record-accepted",
       agreedAt: Date.now(),
-      supervisorMessageId: "task-record-agreement-supervisor-message",
+      evidence: {kind: "supervisor_message", messageId: "task-record-agreement-supervisor-message"},
       agentMessageId: "task-record-agreement-agent-message",
       workflow: acceptedProposal,
     }, agreementSourceHash: task.sourceHash, updatedAt: Date.now()});

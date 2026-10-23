@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { Schema } from "effect";
 import { InterpretationAttempt, InterpretationAttemptId, InterpretationSourcePin } from "./interpretation-submission.js";
+import { AgreementEvidence } from "./project-supervisor-contract.js";
 import type { WorkflowPlanValue } from "./supervisor-workflow.js";
 
 // the evidence an interpretation or a proposal rests on (plan 3.12 item 8). a new interpretation rests on its attempt's
@@ -38,6 +39,16 @@ export type SupervisorMessageEvidence = typeof SupervisorMessageEvidence.Type;
 
 export const InterpretationEvidence = Schema.Union([InterpretationSubmissionEvidence, SupervisorMessageEvidence]);
 export type InterpretationEvidence = typeof InterpretationEvidence.Type;
+
+// the identity an agreement records of its proposal's evidence; currency (text hash, pin, digest, staleness) stays with the candidate's
+export const agreementEvidenceOf = (evidence: InterpretationEvidence): AgreementEvidence => evidence.kind === "supervisor_message"
+  ? {kind: "supervisor_message", messageId: evidence.messageId}
+  : {kind: "interpretation_submission", taskId: evidence.taskId, attemptId: evidence.attemptId, itemId: evidence.itemId, runId: evidence.runId,
+    argumentsHash: evidence.argumentsHash};
+const sameAgreementEvidence = Schema.toEquivalence(AgreementEvidence);
+// whether an agreement's recorded evidence names exactly this evidence
+export const agreementEvidenceNames = (agreement: AgreementEvidence, evidence: InterpretationEvidence): boolean =>
+  sameAgreementEvidence(agreement, agreementEvidenceOf(evidence));
 
 // the two TaskRecord fields S6e adds (project-supervisor-store.ts): the pointer to the task's current attempt and, for a
 // candidate-free interpretation, its evidence

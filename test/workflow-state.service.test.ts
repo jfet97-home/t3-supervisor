@@ -181,7 +181,7 @@ const acceptedAgreement = (proposal: WorkflowProposalInfo): WorkflowAgreementImp
     message: "The complete workflow was echoed by the operative assistant.",
     proposalId: "proposal-a",
     agreedAt: 123,
-    supervisorMessageId: "supervisor-message-a",
+    evidence: {kind: "supervisor_message", messageId: "supervisor-message-a"},
     agentMessageId: "agent-message-a",
     workflow: proposal,
   },

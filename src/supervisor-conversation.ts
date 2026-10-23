@@ -25,7 +25,7 @@ import { GuidanceDb } from "./db.js";
 import { guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
 import { ProjectSupervisorMonitorStore, type InvalidMonitorObservation } from "./supervisor-monitor-store.js";
 import { SupervisorTeamStore } from "./supervisor-team-store.js";
-import { interpretationPlanDigest, type InterpretationEvidence, type InterpretationSubmissionEvidence, type SupervisorMessageEvidence } from "./interpretation-evidence.js";
+import { agreementEvidenceNames, agreementEvidenceOf, interpretationPlanDigest, type InterpretationEvidence, type InterpretationSubmissionEvidence, type SupervisorMessageEvidence } from "./interpretation-evidence.js";
 import { interpretationSourcePin, type InterpretationSourcePin } from "./interpretation-submission.js";
 import { verifyWorkflowToolEvidence, workflowRequestHash, workflowToolNames, workflowTurnItemDetailMaxBytes } from "./workflow-write-evidence.js";
 
@@ -268,15 +268,6 @@ const taskEvidenceState = (task: TaskRecord, view: EvidenceView): EvidenceState 
   if (evidence.kind === "supervisor_message") return evidenceMessage(evidence, view.messages) ? "current" : "changed";
   return evidence.taskId === task.id && evidence.attemptId === task.attempt?.attemptId
     ? submissionEvidenceState(evidence, view.supervisor, view.details.get(evidence.itemId)) : "changed";
-};
-
-// the Supervisor conversation message an agreement cites for its proposal: the message publishing it or, for a tool submission, the
-// interpretation request message whose run made it; a tool item is never cited as a message
-const proposalMessageId = (candidate: WorkflowAgreementCandidate, supervisor: Projection): string | null => {
-  const evidence = candidate.evidence;
-  if (evidence.kind === "supervisor_message") return evidence.messageId;
-  const run = supervisor.runs.find(item => item.id === evidence.runId && item.threadId === supervisor.thread.id);
-  return typeof run?.userMessageId === "string" && run.userMessageId.length > 0 ? run.userMessageId : null;
 };
 
 const sourcePinMatchesContext = (value: Pick<WorkflowProposalInfo,
@@ -1435,7 +1426,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       revision: agreement.workflow.revision, workflow: workflowValue(agreement.workflow)} : null;
     const agreementHash = !agreedValue ? null : candidate?.compact
       ? compactProposalDigest({taskId: task.id, taskRevision: task.agreementSourceHash ?? task.sourceHash}, agreedValue) : workflowAgreementPlanHash(agreedValue);
-    if (!candidate || agreementHash !== candidate.planHash || agreement.supervisorMessageId !== proposalMessageId(candidate, view.supervisor) ||
+    if (!candidate || agreementHash !== candidate.planHash || !agreementEvidenceNames(agreement.evidence, candidate.evidence) ||
       agreement.agentMessageId !== candidate.agentMessageId || !acceptanceEvidenceCurrent(task, introduction, candidate, agentMessages, context, agent)) return "changed";
     return proposalEvidenceState(task, candidate, view, context);
   });
@@ -1651,8 +1642,6 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if (freshSupervisor.thread.id !== binding.threadId || freshSupervisor.thread.projectId !== task.projectId || freshSupervisor.thread.deletedAt || freshSupervisor.thread.archivedAt) return null;
       const supervisorMessages = completedAssistantMessages(freshSupervisor, task.supervisorThreadId);
       if (proposalEvidenceState(currentTask, candidate, {supervisor: freshSupervisor, messages: supervisorMessages, details: evidenceDetails}, context) !== "current") return null;
-      const proposalMessage = proposalMessageId(candidate, freshSupervisor);
-      if (proposalMessage === null) return null;
       const operativeMessages = completedAssistantMessages(agent, task.threadId);
       const acceptanceMessage = operativeMessages.find(message => message.messageId === agentMessageId);
       if (!acceptanceMessage) return null;
@@ -1664,7 +1653,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       const agreedWorkflow: WorkflowProposalInfo = {...candidate.workflow, message: "The operative chat accepted this exact proposal; this remains semantic guidance, not execution evidence."};
       const agreement: WorkflowAgreementInfo = {status: "agreed", message: "The operative assistant accepted the Supervisor's exact proposal by its digest; this is semantic agreement, not execution evidence.",
         proposalId: candidate.proposalId, agreedAt: acceptanceMessage.createdAt ?? now,
-        supervisorMessageId: proposalMessage, agentMessageId, workflow: agreedWorkflow};
+        evidence: agreementEvidenceOf(candidate.evidence), agentMessageId, workflow: agreedWorkflow};
       const current = yield* store.task(task.threadId);
       const liveBinding = yield* store.bindingForSupervisor(task.supervisorThreadId);
       const liveIntroduction = yield* requests.introduction(task.id);

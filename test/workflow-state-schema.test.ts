@@ -55,7 +55,7 @@ it.live("documents and receipts written by the store decode with the stored-shap
   const imported = yield* transaction(workflows.importAcceptedAgreement(ownerA, {taskId: "task-a", sourceThreadId: "main-a",
     sourceRunId: "run-a", sourceMessageId: "message-a", sourceHash, objective: "Prepare the export workflow.", agreement: {status: "agreed",
       message: "The complete workflow was echoed by the operative assistant.", proposalId: "proposal-a", agreedAt: 123,
-      supervisorMessageId: "supervisor-message-a", agentMessageId: "agent-message-a", workflow: proposal}}, 100));
+      evidence: {kind: "supervisor_message", messageId: "supervisor-message-a"}, agentMessageId: "agent-message-a", workflow: proposal}}, 100));
   assert.equal(imported.status, "applied");
   const main = (yield* workflows.get("project-a", "main-a"))!;
   const nodeId = (main.plan!.nodes[0] as {nodeId: string}).nodeId;
