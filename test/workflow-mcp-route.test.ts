@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import {createServer, request as httpRequest, type ClientRequest} from "node:http";
 import { NodeHttpServer } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
-import { Context, Effect, Fiber, Layer } from "effect";
+import { Context, Deferred, Effect, Exit, Fiber, Layer } from "effect";
 import { HttpRouter, HttpServer } from "effect/http";
 import { TestClock } from "effect/testing";
-import {WorkflowMcp, WorkflowMcpRoute} from "../src/workflow-mcp.js";
+import {WorkflowMcp} from "../src/workflow-mcp.js";
 import type {WorkflowWriteController} from "../src/workflow-write-controller.js";
 
 // target regressions of the effect MCP route (plan 3.7, CC-MCP): request fiber interruption aborts the in-flight call,
-// close() interrupts in-flight calls through the endpoint's FiberSet, the 9 s deadline runs on the effect clock and a
-// handler failure is a 500 answer
+// close() interrupts and completes in-flight requests, the 9 s deadline runs on the effect clock and a handler failure is
+// a 500 answer
 
 const headers = {"Content-Type": "application/json", Accept: "application/json, text/event-stream"};
 const callBody = JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
@@ -43,57 +43,80 @@ const abortWaitingTool = (): Gate => {
   };
 };
 
-// serves the route on a loopback port 0 next to a shared endpoint; the test scope closes both
+// serves the endpoint's route on a loopback port 0; each request fiber's start and exit are recorded around mcp.route
 const serveRoute = (controller: WorkflowWriteController) => Effect.gen(function* () {
-  const context = yield* Layer.build(HttpRouter.serve(WorkflowMcpRoute, {disableLogger: true, disableListenLog: true}).pipe(
+  const started = yield* Deferred.make<void>();
+  const ended = yield* Deferred.make<Exit.Exit<unknown, unknown>>();
+  const route = HttpRouter.use(router => Effect.gen(function* () {
+    const mcp = yield* WorkflowMcp;
+    yield* router.add("*", "/mcp/workflows", Deferred.succeed(started, undefined).pipe(
+      Effect.andThen(mcp.route), Effect.onExit(exit => Deferred.succeed(ended, exit))));
+  }));
+  const context = yield* Layer.build(HttpRouter.serve(route, {disableLogger: true, disableListenLog: true}).pipe(
     Layer.provideMerge(WorkflowMcp.layer(controller)),
     Layer.provideMerge(NodeHttpServer.layer(createServer, {port: 0, host: "127.0.0.1"})),
   ));
   const address = Context.get(context, HttpServer.HttpServer).address;
   assert.ok(address._tag === "InetAddressV4");
-  return {port: address.port, mcp: Context.get(context, WorkflowMcp)};
+  return {port: address.port, mcp: Context.get(context, WorkflowMcp), started: Deferred.await(started), ended: Deferred.await(ended),
+    endedNow: Deferred.isDone(ended)};
 });
 
-// one raw tools/call whose connection the test can drop; the scope drops it unless the test already did
-const rawCall = (port: number) => Effect.acquireRelease(Effect.sync(() => {
+type RawAnswer = {status: number; body: string} | {closed: true};
+
+// one raw POST whose connection the test can drop; the scope drops it unless the test already did
+const rawPost = (port: number, body: string, contentLength = Buffer.byteLength(body)) => Effect.acquireRelease(Effect.sync(() => {
+  let settle!: (answer: RawAnswer) => void;
+  const answer = new Promise<RawAnswer>(resolve => {settle = resolve;});
   const client: ClientRequest = httpRequest({host: "127.0.0.1", port, path: "/mcp/workflows", method: "POST",
-    headers: {...headers, "Content-Length": Buffer.byteLength(callBody)}});
-  const state = {responded: false};
-  client.once("response", () => {state.responded = true;});
-  client.on("error", () => undefined);
-  client.end(callBody);
-  return {client, state};
+    headers: {...headers, "Content-Length": contentLength}}, response => {
+    const chunks: Buffer[] = [];
+    response.on("data", (chunk: Buffer) => chunks.push(chunk));
+    response.once("end", () => settle({status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8")}));
+    response.once("error", () => settle({closed: true}));
+  });
+  client.on("error", () => settle({closed: true}));
+  client.once("close", () => settle({closed: true}));
+  client.write(body);
+  if (Buffer.byteLength(body) === contentLength) client.end();
+  return {client, answer};
 }), ({client}) => Effect.sync(() => client.destroy()));
 
 describe("workflow MCP route", () => {
   it.live("MCP-ROUTE-01: a client disconnect interrupts the request fiber and aborts the controller signal of its call", () => Effect.gen(function* () {
     const gate = abortWaitingTool();
-    const {port} = yield* serveRoute({readTool: gate.tool} as unknown as WorkflowWriteController);
-    const {client} = yield* rawCall(port);
+    const {port, ended} = yield* serveRoute({readTool: gate.tool} as unknown as WorkflowWriteController);
+    const {client} = yield* rawPost(port, callBody);
     const signal = yield* Effect.promise(() => gate.entered);
     assert.equal(signal.aborted, false);
     client.destroy();
     assert.equal(((yield* Effect.promise(() => gate.aborted)) as {name?: string}).name, "AbortError");
+    // the request fiber itself completes, interrupted
+    assert.equal(Exit.hasInterrupts(yield* ended), true);
   }), { timeout: 10_000 });
 
-  it.live("MCP-ROUTE-02: close() interrupts the in-flight call, leaves its request unanswered and answers later requests 503 without the controller", () => Effect.gen(function* () {
+  it.live("MCP-ROUTE-02: close() interrupts the in-flight call and completes its request without an MCP answer, and later requests get 503 without the controller", () => Effect.gen(function* () {
     const gate = abortWaitingTool();
     let calls = 0;
     const controller = {readTool: (args: unknown, signal: AbortSignal) => {calls++;return gate.tool(args, signal);}} as unknown as WorkflowWriteController;
-    const {port, mcp} = yield* serveRoute(controller);
-    const inflight = yield* rawCall(port);
+    const {port, mcp, ended, endedNow} = yield* serveRoute(controller);
+    const inflight = yield* rawPost(port, callBody);
     yield* Effect.promise(() => gate.entered);
 
     yield* mcp.close;
+    // close() returns after the request fiber ended, interrupted; its client gets the platform's empty interrupted
+    // answer, never a result
+    assert.equal(yield* endedNow, true);
+    assert.equal(Exit.hasInterrupts(yield* ended), true);
     assert.equal(((yield* Effect.promise(() => gate.aborted)) as {name?: string}).name, "AbortError");
     assert.equal(gate.returned(), true);
+    const answer = yield* Effect.promise(() => inflight.answer).pipe(Effect.timeout("2 seconds"));
+    assert.deepEqual(answer, {status: 503, body: ""});
     const closed = yield* Effect.promise(() => fetch(`http://127.0.0.1:${port}/mcp/workflows`, {method: "POST", headers, body: callBody}));
     assert.equal(closed.status, 503);
     assert.match(closed.headers.get("content-type") ?? "", /^application\/json/u);
     assert.equal(closed.headers.get("cache-control"), "no-store");
     assert.deepEqual(yield* Effect.promise(() => closed.json()), {error: "workflow_mcp_closed"});
-    // the interrupted call's answer was discarded: its request is still unanswered after the later 503 round trip
-    assert.equal(inflight.state.responded, false);
     assert.equal(calls, 1);
   }), { timeout: 10_000 });
 
@@ -123,5 +146,16 @@ describe("workflow MCP route", () => {
     assert.equal(response.status, 500);
     assert.equal(response.headers.get("cache-control"), "no-store");
     assert.deepEqual(yield* Effect.promise(() => response.json()), {error: "workflow_mcp_unavailable"});
+  }), { timeout: 10_000 });
+
+  it.live("MCP-ROUTE-05: a client disconnect while the body is still arriving completes the request fiber without a controller call", () => Effect.gen(function* () {
+    let calls = 0;
+    const {port, started, ended} = yield* serveRoute({readTool: async () => {calls++;return {status: "ok"};}} as unknown as WorkflowWriteController);
+    // the declared length is never reached, so the sdk is still reading the body when the client goes away
+    const {client} = yield* rawPost(port, callBody.slice(0, 20), Buffer.byteLength(callBody));
+    yield* started;
+    client.destroy();
+    assert.equal(Exit.hasInterrupts(yield* ended.pipe(Effect.timeout("2 seconds"))), true);
+    assert.equal(calls, 0);
   }), { timeout: 10_000 });
 });
