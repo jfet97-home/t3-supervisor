@@ -1,3 +1,4 @@
+import {alignmentLabel, hasCurrentAgreement, PlanJourney, planSteps, TaskAlignment, TaskOutcome} from "./workflow-journey.js";
 import {StopNotice} from "./stop-notice.js";
 import { assessmentForTask } from "../../src/workflow-assessment.js";
 import { workAttention } from "../../src/dashboard-overview.js";
@@ -301,9 +302,13 @@ function WorkflowPlanNode({node, liveAssessment = false, contributions}: {node: 
   </article>;
 }
 
-function WorkflowProposalDetails({workflow, title}: {workflow: WorkflowProposalInfo; title: string}) {
+function WorkflowProposalDetails({workflow, title, context = "proposed"}: {workflow: WorkflowProposalInfo; title: string; context?: "proposed" | "agreed" | "historical"}) {
   const requirementsMayBeEmpty = workflow.requirementsKnown && workflow.definitionsComplete && workflow.definitionsStatus === "ready";
   return <div className="stack">
+    <div className="workflow-plan-surface"><h6>{title}</h6>
+      {workflow.plan ? <PlanJourney node={workflow.plan} context={context}/> : <p className="muted">No plan structure is available for this proposal.</p>}
+    </div>
+    <details><summary>Definitions and plan provenance</summary><div className="stack">
     <div className="stack">
       <h6>Definition status</h6>
       <p><strong>Collection:</strong> {definitionStatusText[workflow.definitionsStatus]} · <strong>Read complete:</strong> {workflow.definitionsComplete ? "Yes" : "No"}</p>
@@ -326,13 +331,9 @@ function WorkflowProposalDetails({workflow, title}: {workflow: WorkflowProposalI
         </li>)}</ol>
         : <p className="muted">{requirementsMayBeEmpty ? "No required definitions are configured." : "No requirement entries are available. Requirements may be unknown because the definitions are missing, invalid or incompletely read."}</p>}
     </div>
-    <div className="stack">
-      <h6>{title}</h6>
-      {workflow.plan
-        ? <WorkflowPlanNode node={workflow.plan}/>
-        : <p className="muted">No plan structure is available for this proposal.</p>}
-      <p className="muted">Reported plan status is not independent execution evidence. A template reference or agreement does not prove that work was performed.</p>
-    </div>
+    <details><summary>Full definition structure</summary>{workflow.plan && <WorkflowPlanNode node={workflow.plan}/>}<p className="small muted">A template reference or agreement does not prove that work was performed.</p></details>
+    </div></details>
+    <p className="small muted">{context === "proposed" ? "This plan is proposed for agreement." : context === "agreed" ? "These commitments are agreed." : "These commitments belong to an earlier agreement."} Execution assessments appear in Overview.</p>
   </div>;
 }
 
@@ -342,14 +343,15 @@ function WorkflowAgreementView({agreement}: {agreement: WorkflowAgreementInfo}) 
 
   return <section className="stack">
     <h5>{stale ? "Previous agreement (stale)" : "Agreed workflow"}</h5>
-    <p><strong>Agreement status:</strong> {stale ? "Stale" : "Agreed"}</p>
+    <p className={`pill ${stale ? "amber" : "green"}`}><strong>Agreement status:</strong> {stale ? "Stale" : "Agreed"}</p>
     <p>{agreement.message}</p>
     {stale
       ? <p className="muted">This agreement is retained as history and is not the current agreed workflow.</p>
-      : <p className="muted">Agreement records an accepted plan; it does not verify that any steps were completed.</p>}
-    <WorkflowProposalDetails workflow={agreement.workflow} title={stale ? "Plan in this historical agreement" : "Agreed plan"}/>
+      : null}
+    <WorkflowProposalDetails workflow={agreement.workflow} title={stale ? "Plan in this historical agreement" : "Agreed plan"} context={stale ? "historical" : "agreed"}/>
     <details className="stack">
       <summary>{stale ? "Historical agreement details" : "Agreement details"}</summary>
+      <p className="muted">Agreement records an accepted plan; it does not verify that any steps were completed.</p>
       <p><strong>Proposal ID:</strong> <code>{agreement.proposalId}</code></p>
       <p><strong>Agreed at:</strong> {agreedAt
         ? <time dateTime={agreedAt.toISOString()}>{agreedAt.toLocaleString()}</time>
@@ -408,7 +410,7 @@ function WorkflowProposalView({workflow, proposalId, agreement, definitionReview
   const noWorkflowRecord = workflow == null && agreement == null;
 
   return <section className="stack" aria-labelledby="workflow-proposal-title">
-    <h4 id="workflow-proposal-title">Workflow proposal</h4>
+    <h4 id="workflow-proposal-title" className="sr-only">Workflow proposal</h4>
     {definitionReview != null && <DefinitionReviewView review={definitionReview} />}
     {noWorkflowRecord && <p className="muted">No workflow proposal was recorded for this task.</p>}
     {hasAgreement && <WorkflowAgreementView agreement={agreement} />}
@@ -631,29 +633,30 @@ function WorkflowAssignee({coverage}: {coverage: WorkflowProgressCoverage | unde
   return <p className="small muted"><strong>Assigned to:</strong> Unknown; the current owner could not be confirmed.</p>;
 }
 
-function currentPlanSteps(node: WorkflowPlanNodeInfo | null): Array<Extract<WorkflowPlanNodeInfo, {kind: "step"}>> {
-  if (!node) return [];
-  if ("nodes" in node) return node.nodes.flatMap(currentPlanSteps);
-  if (node.kind === "workflow") return currentPlanSteps(node.plan);
-  return node.kind === "step" ? [node] : [];
-}
-
-function WorkflowProgressDetails({workflow, scopeThread}: {workflow: WorkflowProgressWorkflow; scopeThread?: WorkflowProgressScopeThread}) {
+function WorkflowProgressDetails({workflow, scopeThread, currentTask, supervisorThreadId}: {workflow: WorkflowProgressWorkflow; scopeThread?: WorkflowProgressScopeThread; currentTask?: TaskInterpretationInfo | undefined; supervisorThreadId?: string}) {
   const lifecycle = scopeThread ? lifecyclePresentation(scopeThread) : null;
   const contributions = new Map<string, WorkflowProgressContribution[]>();
   for (const item of workflow.contributions) if (item.inCurrentPlan) contributions.set(item.nodeId, [...(contributions.get(item.nodeId) ?? []), item]);
   const removedContributions = workflow.contributions.filter(item => !item.inCurrentPlan);
   return <article className="stack workflow-progress-document">
-    <div className="row between">
+    <div className={workflow.parentThreadId ? "row between" : "row between sr-only"}>
       <h5>{workflow.parentThreadId ? "Child workflow" : "Main workflow"}</h5>
       <span className={`pill ${workflow.status === "needs_attention" ? "amber" : workflow.status === "completed" ? "green" : "blue"}`}>
         {workflowExecutionStatusText[workflow.status]}
       </span>
     </div>
-    <p>{workflow.objective ?? "No workflow objective was recorded."}</p>
+    {workflow.parentThreadId && <p>{workflow.objective ?? "No workflow objective was recorded."}</p>}
+
+    <div className="workflow-journey-layout">
+      <div className="workflow-plan-surface"><div className="row between"><h5>Step by step</h5><span className="small muted">{planSteps(workflow.plan).filter(step => step.status === "completed").length} of {planSteps(workflow.plan).length} steps assessed complete</span></div>
+        {workflow.plan ? <PlanJourney node={workflow.plan} live/> : <p className="muted">No current plan structure was recorded for this conversation.</p>}
+      </div>
+      <aside className="workflow-context">
+        {!workflow.parentThreadId && currentTask && <TaskAlignment task={currentTask} {...(supervisorThreadId ? {supervisorThreadId} : {})}/>}
+        <section className="workflow-observation-summary"><h5>Latest observation</h5>{workflow.observations.length > 0 ? <><p>{workflow.observations.at(-1)!.note}</p><p className="small muted">{formatProgressTime(workflow.observations.at(-1)!.recordedAt)}</p></> : <p className="muted">No observation recorded yet.</p>}</section>
+      </aside>
+    </div>
     <p className="small muted"><a href={threadHref(workflow.threadId)}>Open {scopeThread?.title || "conversation"} in T3</a> · Updated {formatProgressTime(workflow.updatedAt)}</p>
-    {currentPlanSteps(workflow.plan).length > 0 && <ol className="current-steps" aria-label="Current step assessments">{currentPlanSteps(workflow.plan).slice(0, 8).map(step => <li key={step.nodeId}><strong>{step.name}</strong><span className={`pill ${step.status === "completed" ? "green" : step.status === "underway" ? "blue" : ""}`}>{step.status === "underway" ? "Underway" : step.status === "completed" ? "Completed" : planStatusText[step.status]}</span>{step.reason && <p>{step.reason}</p>}</li>)}</ol>}
-    {currentPlanSteps(workflow.plan).length > 8 && <p className="small muted">Showing the first 8 step assessments. Open the full details for every step.</p>}
     <details><summary>Full plan, evidence and observations</summary><div className="stack">
     {scopeThread && <div className="small muted">
       <p><strong>Native lifecycle:</strong> {lifecycle!.label}</p>
@@ -727,30 +730,36 @@ export function WorkflowProgressPanel({mainThreadId, currentTask, connected, pro
   const scopeIssues = latest?.scope?.issues ?? [];
   const canLoadMore = Boolean(latest && (latest.workflowHasMore || latest.lineageHasMore));
 
-  return <section className="panel stack" aria-labelledby="workflow-progress-title">
+  return <section className="workflow-progress-section stack" aria-labelledby="workflow-progress-title">
     <div className="row between">
-      <h3 id="workflow-progress-title">Live workflow progress</h3>
+      <h3 id="workflow-progress-title">Plan and progress</h3>
       <button type="button" disabled={!connected || !mainThreadId || progress.loading} onClick={onRefresh}>Refresh live progress</button>
     </div>
     {!mainThreadId
       ? <p className="muted">Select a main conversation to inspect its current workflow and connected children.</p>
       : <>
-        <details><summary>How progress is assessed</summary><p className="muted">Current Supervisor workflow state, kept separate from proposals and saved agreements. Statuses and explanations are Supervisor assessments; they are not independent proof of execution. Parent steps do not complete automatically when a child finishes.</p></details>
+
         {progress.loading && pages.length === 0 && <p role="status">Loading the selected main conversation’s live progress…</p>}
         {progress.error && hasSuccessfulPage && <p role="status">Showing the last successful progress snapshot. {progress.error}</p>}
         {progress.error && !hasSuccessfulPage && <p role="alert">{progress.error}</p>}
         {!progress.error && apiFailure && <p role="alert">{progressStatusText[apiFailure.status]}. {apiFailure.message}</p>}
+        {!assessmentForTask(workflowByThreadId.get(mainThreadId)?.assessment, currentTask) && currentTask?.workflow?.plan && <div className="workflow-journey-layout">
+          <div className="workflow-plan-surface"><h4>{hasCurrentAgreement(currentTask) ? "Agreed plan" : "Proposed plan"}</h4><PlanJourney node={currentTask.workflow.plan} context={hasCurrentAgreement(currentTask) ? "agreed" : "proposed"}/></div>
+          <TaskAlignment task={currentTask} {...(latest?.scope?.supervisorThreadId ? {supervisorThreadId: latest.scope.supervisorThreadId} : {})}/>
+        </div>}
         {latest?.scope && <>
-          <p className="small">Observed {formatProgressTime(latest.observedAt)} · Main <code>{mainThreadId}</code></p>
+          <p className="small muted">Last read {formatProgressTime(latest.observedAt)} · Supervisor assessments</p>
           {!latest.scope.complete && <div className="panel" role="status">
             <p>Connected child observation is incomplete. Some lifecycle or activity details may be missing.</p>
             {scopeIssues.length > 0 && <ul>{scopeIssues.map((issue, index) => <li key={`${issue.code}:${index}`}>{issue.message}</li>)}</ul>}
           </div>}
           {workflows.length > 0 && <div className="stack">
-            <h4>Workflow records</h4>
+            <h4 className="sr-only">Workflow records</h4>
             {workflows.map(workflow => {
               const scopeThread = threadById.get(workflow.threadId);
-              return <div className="stack" key={workflow.workflowId}>{workflow.threadId === mainThreadId && !assessmentForTask(workflow.assessment, currentTask) && <p className="notice">Retained workflow record. It is not linked to the current task.</p>}<WorkflowProgressDetails workflow={workflow} {...(scopeThread ? {scopeThread} : {})}/></div>;
+              const retained = workflow.threadId === mainThreadId && !assessmentForTask(workflow.assessment, currentTask);
+              if (retained) return <details key={workflow.workflowId} className="retained-workflow"><summary>Earlier workflow: {workflow.objective ?? "Objective not recorded"}</summary><p className="notice">Retained workflow record. It is not linked to the current task.</p><WorkflowProgressDetails workflow={workflow} {...(scopeThread ? {scopeThread} : {})}/></details>;
+              return <WorkflowProgressDetails key={workflow.workflowId} workflow={workflow} currentTask={currentTask} {...(latest.scope?.supervisorThreadId ? {supervisorThreadId: latest.scope.supervisorThreadId} : {})} {...(scopeThread ? {scopeThread} : {})}/>;
             })}
           </div>}
           {threads.length > 0 && <div className="stack">
@@ -799,6 +808,7 @@ export function WorkflowProgressPanel({mainThreadId, currentTask, connected, pro
             <p>Some retained workflow records use an incompatible format and remain read-only.</p>
             <ul>{latest.incompatibleWorkflows.map(item => <li key={item.workflowId}><code>{item.workflowId}</code> · format {item.formatVersion ?? "unknown"}</li>)}</ul>
           </div>}
+        <details><summary>How progress is assessed</summary><p className="muted">Current Supervisor workflow state, kept separate from proposals and saved agreements. Statuses and explanations are Supervisor assessments; they are not independent proof of execution. Parent steps do not complete automatically when a child finishes.</p></details>
           {canLoadMore && <button type="button" disabled={!connected || progress.loading} onClick={onLoadMore}>Load more connected workflows and activity</button>}
         </>}
       </>}
@@ -875,7 +885,7 @@ export function ProjectSupervisorView({
   const providerGroups = [...new Set(snapshot.models.map(model => model.providerName))];
   const selectedTask = threadId ? snapshot.tasks.find(task => task.threadId === threadId && task.projectId === snapshot.projectId) : undefined;
   const progressPages = workflowProgress?.pages ?? [];
-  const mainWorkflow = progressPages.flatMap(page => page.workflows).find(workflow => workflow.threadId === threadId);
+  const mainWorkflow = progressPages.flatMap(page => page.workflows).filter(workflow => workflow.threadId === threadId).sort((a, b) => b.updatedAt - a.updatedAt)[0];
   const currentAssessment = assessmentForTask(mainWorkflow?.assessment, selectedTask);
   const progressComplete = progressPages.length > 0 && progressPages.every(page => page.status === "ok") && !progressPages.at(-1)?.workflowHasMore;
   const assessmentSummary = currentAssessment ? currentAssessment.status.replaceAll("_", " ")
@@ -898,34 +908,24 @@ export function ProjectSupervisorView({
     {(section === "all" || section === "progress" || section === "plan") &&
       (snapshot.monitoringStatus?.state === "unavailable" || snapshot.monitoringStatus?.state === "uncertain") &&
       <p className="panel" role="alert"><strong>{snapshot.monitoringStatus.state === "uncertain" ? "Supervision has an uncertain operation." : "Supervision is blocked."}</strong> {snapshot.monitoringStatus.message}</p>}
-    {attention.length > 0 && (section === "progress" || section === "all") && <section className="notice stack" aria-labelledby="conversation-attention-title"><h3 id="conversation-attention-title">Needs attention</h3><ul>{attention.map(reason => <li key={reason}>{reason}</li>)}</ul></section>}
+    {attention.filter(reason => reason !== currentAssessment?.summary).length > 0 && (section === "progress" || section === "all") && <section className="notice stack" aria-labelledby="conversation-attention-title"><h3 id="conversation-attention-title">Needs attention</h3><ul>{attention.filter(reason => reason !== currentAssessment?.summary).map(reason => <li key={reason}>{reason}</li>)}</ul></section>}
     <section hidden={section !== "all" && section !== "progress"} className="task-focus stack" aria-labelledby="current-objective-title">
       <div className="row between"><h3 id="current-objective-title">Current task</h3><span className="pill">{selectedTask ? taskLabels[selectedTask.status] ?? selectedTask.status : "Not interpreted"}</span></div>
       <p className="task-objective">{selectedTask?.objective ?? (threadId ? "No task objective has been recorded for this conversation." : "Choose a conversation to inspect its task.")}</p>
-      {selectedTask?.reason && <p className="muted">{selectedTask.reason}</p>}
-      <ol className="task-path" aria-label="Task, agreement and assessment">
-        <li><strong>Task interpretation</strong><span>{selectedTask ? selectedTask.status === "inferred" ? "Interpreted" : selectedTask.status.replaceAll("_", " ") : "Not recorded"}</span></li>
-        <li><strong>Plan agreement</strong><span>{selectedTask?.agreement?.status === "agreed" ? "Agreed" : selectedTask?.agreement?.status === "stale" ? "Needs review" : selectedTask?.workflow?.status === "proposed" ? "Awaiting acceptance" : "Not agreed"}</span></li>
-        <li><strong>Supervisor assessment</strong><span>{assessmentSummary}{currentAssessment && <small>Read {new Date(progressPages[0]!.observedAt).toLocaleTimeString()}</small>}{workflowProgress?.loading && currentAssessment && <small>Refreshing retained assessment…</small>}{workflowProgress?.error && <small>{workflowProgress.error} {currentAssessment ? "Showing the retained assessment." : "Current status is unknown."}</small>}</span></li>
-      </ol>
+      {selectedTask?.reason && selectedTask.status !== "inferred" && <p className="muted">{selectedTask.reason}</p>}
+      <TaskOutcome {...(currentAssessment && mainWorkflow ? {currentStep: planSteps(mainWorkflow.plan).filter(step => step.status === "underway" || step.status === "needs_attention").map(step => step.name).join(" · ")} : {})} assessment={currentAssessment} fallback={selectedTask?.status === "not_supervised" ? "Supervision not needed" : hasCurrentAgreement(selectedTask) ? "Plan agreed" : selectedTask?.agreement?.status === "stale" ? "Plan needs agreement again" : selectedTask?.workflow ? "Agreeing a plan" : selectedTask?.status === "waiting" || selectedTask?.status === "queued" || selectedTask?.status === "dispatching" ? "Reading the request" : assessmentSummary} stopped={Boolean(snapshot.chatSupervision?.stopped)}/>
+      <div className="task-reading"><span>Plan: <strong>{alignmentLabel(selectedTask)}</strong></span><span>{currentAssessment ? `Assessed ${formatProgressTime(currentAssessment.updatedAt)}` : assessmentSummary}</span></div>
+      {workflowProgress?.loading && currentAssessment && <p className="small muted">Refreshing retained assessment…</p>}
+      {workflowProgress?.error && <p role="status">{workflowProgress.error} {currentAssessment ? "Showing the retained assessment." : "Current status is unknown."}</p>}
+      {!workflowProgress && <TaskAlignment task={selectedTask} {...(snapshot.binding ? {supervisorThreadId: snapshot.binding.threadId} : {})}/> }
     </section>
-    {snapshot.mainThreadId && snapshot.chatSupervision?.stopped && snapshot.chatSupervision.stoppedAt !== null && <StopNotice title={threadId ?? snapshot.mainThreadId} audit={{route: snapshot.chatSupervision.stoppedBy ?? "unknown", stoppedAt: snapshot.chatSupervision.stoppedAt, callerThreadId: snapshot.chatSupervision.stoppedCallerThreadId ?? null, userMessageId: snapshot.chatSupervision.stoppedUserMessageId ?? null}} onEnable={() => onChatSupervision(true)} busy={!connected || chatSupervisionBusy || chatSupervisionLocked}/>}
-    <div hidden={section !== "all" && section !== "progress" && section !== "supervision"} className="conversation-supervision stack">      {snapshot.mainThreadId && snapshot.chatSupervision && <div className="stack">
-        <h4>Chat supervision</h4>
-        <p>{snapshot.chatSupervision.stopped
-          ? `Supervision is stopped for this chat${snapshot.chatSupervision.stoppedBy ? ` (${{direct: "asked directly in the Supervisor conversation", relay: "asked in this chat", chat: "asked from another chat", ui: "stopped here"}[snapshot.chatSupervision.stoppedBy]})` : ""}. It stays off until you enable it again; the chat itself is not changed.`
-          : snapshot.chatSupervision.activation === "not_started" ? "Not started. Choose this chat from Home to start supervision." : snapshot.chatSupervision.activation === "pending" ? "Start pending. No supervision effects are authorized yet." : "Allowed for this chat; project/global settings still apply."}</p>
-        {(!snapshot.chatSupervision.stopped || snapshot.chatSupervision.stoppedAt === null) && <div><button type="button" disabled={!connected || chatSupervisionBusy || chatSupervisionLocked} aria-busy={chatSupervisionBusy || undefined}
-          onClick={() => onChatSupervision(snapshot.chatSupervision!.stopped)}>
-          {chatSupervisionBusy ? "Saving…" : snapshot.chatSupervision.stopped ? "Enable supervision" : "Stop supervision"}</button></div>}
-        <p role="status">{chatSupervisionMessage ?? ""}</p>
-      </div>}
-    </div>
+    {(section === "all" || section === "supervision") && snapshot.mainThreadId && snapshot.chatSupervision?.stopped && snapshot.chatSupervision.stoppedAt !== null && <StopNotice title={threadId ?? snapshot.mainThreadId} audit={{route: snapshot.chatSupervision.stoppedBy ?? "unknown", stoppedAt: snapshot.chatSupervision.stoppedAt, callerThreadId: snapshot.chatSupervision.stoppedCallerThreadId ?? null, userMessageId: snapshot.chatSupervision.stoppedUserMessageId ?? null}} onEnable={() => onChatSupervision(true)} busy={!connected || chatSupervisionBusy || chatSupervisionLocked}/>}
     <div hidden={section !== "all" && section !== "supervision"} className="panel stack">
       <div className="row between">
-        <h3>Supervisor conversation</h3>
+        <h3>Supervisor health</h3>
         {snapshot.binding && <span className={`pill ${snapshot.binding.state === "ready" ? "green" : "amber"}`}>{{creating: "Creating conversation", ready: "Ready", uncertain: "Outcome uncertain", rejected: "Access rejected", missing: "Conversation deleted"}[snapshot.binding.state]}</span>}
       </div>
+      <p className="supervision-health">{snapshot.monitoringStatus?.state === "unavailable" || snapshot.monitoringStatus?.state === "uncertain" ? snapshot.monitoringStatus.message : snapshot.binding?.state === "ready" ? snapshot.monitoringStatus?.state === "busy" ? "Supervisor is reviewing recent activity." : "Supervisor is ready and waiting for new activity." : "Supervisor is not ready. Review its connection and recovery options."}</p>
       {snapshot.binding?.state === "missing"
         ? <p>Deleted Supervisor conversation: <code>{snapshot.binding.threadId}</code></p>
         : snapshot.binding
@@ -950,13 +950,13 @@ export function ProjectSupervisorView({
 
     <div hidden={section !== "all" && section !== "supervision"} className="panel stack">
         {snapshot.monitoringStatus && <section className="stack" aria-labelledby="supervisor-monitoring-status-title">
-          <h4 id="supervisor-monitoring-status-title">Current monitoring status</h4>
+          <h4 id="supervisor-monitoring-status-title">Monitoring</h4><p>{snapshot.monitoringStatus.message}</p><details><summary>Monitoring details and check-ins</summary><div className="stack">
           <p><strong>Status:</strong> {snapshot.monitoringStatus.state}</p>
           <p><strong>Pending activities:</strong> {snapshot.monitoringStatus.pendingItems}</p>
           <p><strong>Next review:</strong> {formatMonitoringTime(snapshot.monitoringStatus.nextReviewAt)}</p>
           <p><strong>Last notice:</strong> {formatMonitoringTime(snapshot.monitoringStatus.lastNoticeAt)}</p>
           <p>{snapshot.monitoringStatus.message}</p>
-          {snapshot.monitoringStatus.review && <ReviewOutcomes review={snapshot.monitoringStatus.review} />}
+          {snapshot.monitoringStatus.review && <ReviewOutcomes review={snapshot.monitoringStatus.review} />}</div></details>
         </section>}
     </div>
 
@@ -1036,17 +1036,27 @@ export function ProjectSupervisorView({
       <button type="button" disabled={!canRetry || saving || blocked} onClick={onRetry}>{retryButtonLabel}</button>
     </div>}
 
-    {selectedTask && <section hidden={section !== "all" && section !== "plan"} className="panel stack" aria-labelledby="supervisor-task-title">
-      <h3 id="supervisor-task-title">Task interpretation for the selected conversation</h3>
-      <p><strong>Status:</strong> {selectedTask.status}</p>
-      {selectedTask.objective && <p><strong>Interpreted task:</strong> {selectedTask.objective}</p>}
-      <p>{selectedTask.reason}</p>
-      <WorkflowProtocolDiagnosticView diagnostic={selectedTask.workflowProtocolDiagnostic} />
-      <WorkflowProposalView workflow={selectedTask.workflow} proposalId={selectedTask.workflowProposalId} agreement={selectedTask.agreement} definitionReview={selectedTask.definitionReview} />
+    {selectedTask && <section hidden={section !== "all" && section !== "plan"} className="negotiation-workspace stack" aria-labelledby="supervisor-task-title">
+      <div className="task-focus"><h3 id="supervisor-task-title">Plan and agreement</h3>{selectedTask.objective && <p className="task-objective">{selectedTask.objective}</p>}</div>
+      <div className="negotiation-layout"><div className="stack"><WorkflowProtocolDiagnosticView diagnostic={selectedTask.workflowProtocolDiagnostic} />
+      <WorkflowProposalView workflow={selectedTask.workflow} proposalId={selectedTask.workflowProposalId} agreement={selectedTask.agreement} definitionReview={selectedTask.definitionReview} /></div>
+      <TaskAlignment task={selectedTask} {...(snapshot.binding ? {supervisorThreadId: snapshot.binding.threadId} : {})}/></div>
+      <details><summary>Task interpretation for the selected conversation</summary><p><strong>Status:</strong> {selectedTask.status}</p><p>{selectedTask.reason}</p></details>
     </section>}
     {!selectedTask && section === "plan" && <p className="panel muted">{!threadId ? "Select a main conversation to inspect its task and plan." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>}
     <div hidden={section !== "all" && section !== "progress"}>{workflowProgress && <WorkflowProgressPanel mainThreadId={snapshot.mainThreadId} currentTask={selectedTask} connected={connected} progress={workflowProgress}
       onRefresh={onWorkflowProgressRefresh ?? (() => {})} onLoadMore={onWorkflowProgressLoadMore ?? (() => {})}/>}</div>
+    <div hidden={section !== "all" && section !== "supervision"} className="conversation-supervision stack">      {snapshot.mainThreadId && snapshot.chatSupervision && <div className="stack">
+        <h4>Chat supervision</h4>
+        <p>{snapshot.chatSupervision.stopped
+          ? `Supervision is stopped for this chat${snapshot.chatSupervision.stoppedBy ? ` (${{direct: "asked directly in the Supervisor conversation", relay: "asked in this chat", chat: "asked from another chat", ui: "stopped here"}[snapshot.chatSupervision.stoppedBy]})` : ""}. It stays off until you enable it again; the chat itself is not changed.`
+          : snapshot.chatSupervision.activation === "not_started" ? "Not started. Choose this chat from Home to start supervision." : snapshot.chatSupervision.activation === "pending" ? "Start pending. No supervision effects are authorized yet." : "Allowed for this chat; project/global settings still apply."}</p>
+        {(!snapshot.chatSupervision.stopped || snapshot.chatSupervision.stoppedAt === null) && <div><button type="button" disabled={!connected || chatSupervisionBusy || chatSupervisionLocked} aria-busy={chatSupervisionBusy || undefined}
+          onClick={() => onChatSupervision(snapshot.chatSupervision!.stopped)}>
+          {chatSupervisionBusy ? "Saving…" : snapshot.chatSupervision.stopped ? "Enable supervision" : "Stop supervision"}</button></div>}
+        <p role="status">{chatSupervisionMessage ?? ""}</p>
+      </div>}
+    </div>
     <div hidden={section !== "all" && section !== "supervision"}><ProjectSupervisorTeamPanel team={snapshot.team} settings={readTeamSettings(snapshot)} mainThreadId={snapshot.mainThreadId}/></div>
   </div>;
 }
@@ -1509,8 +1519,8 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
     {!projectId && <p className="panel muted">Select a project to manage its Supervisor settings.</p>}
     {projectId && !connected && <p className="panel" role="status">T3 is disconnected. Any unsaved Supervisor settings draft is kept.</p>}
     {projectId && connected && !activeSnapshot && isLoading && <p className="panel" role="status">Loading Supervisor status…</p>}
-    {projectId && connected && loadError && <p className="panel" role="alert">Could not refresh Supervisor state. The previous snapshot remains visible; refresh to try again or check the T3 connection.</p>}
-    {projectId && activeSnapshot && view.readAt && <p className="small muted">Supervisor status read at {new Date(view.readAt).toLocaleTimeString()}. Live workflow progress has its own observation time below.</p>}
+    {projectId && connected && loadError && <p className="panel" role="alert">{activeSnapshot ? "Could not refresh Supervisor state. The previous snapshot remains visible." : "Could not load Supervisor state. No snapshot is available."} <button type="button" onClick={refresh}>Retry Supervisor read</button></p>}
+    {projectId && activeSnapshot && view.readAt && section !== "progress" && <p className="small muted">Supervisor read {new Date(view.readAt).toLocaleTimeString()}</p>}
     {projectId && activeSnapshot && activeDraft && <ProjectSupervisorView
       section={section}
       attentionEnabled={attentionEnabled}

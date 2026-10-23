@@ -99,7 +99,7 @@ export function NoProjectPanel({active, onStateChange}: {active: boolean; onStat
       {([ ["off", "Off", "No supervision, including explicit Start requests."], ["on_request", "On request", "Start only the chat you choose. New and replacement chats stay off."], ["automatic", "Automatic", "Follow new requests in every eligible No Project chat."] ] as const).map(([value, label, help]) =>
         <label className="toggle" key={value}><input type="radio" name="noProjectMode" value={value} checked={mode === value} onChange={() => setMode(value)}/><span>{label}<small>{help}</small></span></label>)}
     </fieldset>
-    <p className="small muted">On request is the default. Start remains enabled until Stop; a settled Supervisor is only parked. Shared definitions supply policy independently. With shared definitions off, plans use task-local steps.</p>
+    <details><summary>How activation works</summary><p className="small muted">On request is the default. Start remains enabled until Stop; a settled Supervisor is only parked. Shared definitions supply policy independently. With shared definitions off, plans use task-local steps.</p></details>
     <div className="row"><button type="submit" disabled={busy || uncertain || !dirty}>Save No Project mode</button><button type="button" disabled={busy} onClick={() => reload()}>Reload mode</button>{dirty && <button type="button" disabled={busy} onClick={() => setMode(control!.mode)}>Discard mode draft</button>}</div>
     <p role="status">{message}</p>
   </form>;

@@ -1,3 +1,4 @@
+import {journeyCases, type JourneyCase} from "./journey.js";
 import { ByteSize, Cause, Context, Deferred, Effect, Layer } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
 import { HttpIncomingMessage, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
@@ -164,6 +165,8 @@ export class FixtureController {
   apply(name: ScenarioName, params: ScenarioParams = {path: null, apply: false, ms: null}) {
     const plan = scenarioCatalog[name].plan(params);
     this.scenario = name;
+    if (name === "baseline") this.model.setJourney(null);
+    else if (name.startsWith("journey-") && journeyCases.includes(name.slice(8) as JourneyCase)) this.model.setJourney(name.slice(8) as JourneyCase);
     this.arms = plan.arms;
     if (plan.revokeSessions) this.sessions = [];
   }

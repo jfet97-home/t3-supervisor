@@ -1,3 +1,4 @@
+import {fixtureJourney, type JourneyCase} from "./journey.js";
 import { createHash } from "node:crypto";
 import { stringify } from "yaml";
 import type { GuidanceActivity, GuidanceSnapshot } from "../../src/guidance-contract.js";
@@ -195,6 +196,8 @@ const withForced = <R>(forced: ForcedOutcome | null, run: () => R, conflict: () 
 export class FixtureModel {
   private datasets = {a: initialFixtureData("a"), b: initialFixtureData("b")};
   private current: FixtureEnvironmentName = "a";
+  private journey: JourneyCase | null = null;
+  setJourney(phase: JourneyCase | null) {this.journey = phase;}
   constructor(private readonly now: () => number = Date.now) {}
 
   // the data of the environment the fixture answers for
@@ -209,6 +212,7 @@ export class FixtureModel {
   }
 
   reset() {
+    this.journey = null;
     this.datasets = {a: initialFixtureData("a"), b: initialFixtureData("b")};
     this.current = "a";
   }
@@ -402,6 +406,7 @@ export class FixtureModel {
     const project = this.project(projectId);
     const thread = mainThreadId === null ? null : this.thread(projectId, mainThreadId);
     const scratch = project.classification === "scratch";
+    const journeyTask = this.current === "a" && this.journey && thread?.id === fixtureIds.threadA1 ? fixtureJourney(this.journey, projectId, thread.id, thread.binding!.threadId, this.now()).task : null;
     const stop = thread ? this.data.stops[thread.id] : undefined;
     const stopped = thread ? this.data.threadPolicy.excludedThreadIds.includes(thread.id) : false;
     return {
@@ -410,7 +415,7 @@ export class FixtureModel {
       binding: thread?.binding ?? null, modelSelection: thread?.binding ? thread.selectedModel : null, models,
       monitoringStatus: {state: "idle", message: "Fixture: monitoring is idle; synthetic status.", pendingItems: 0, nextReviewAt: null, lastNoticeAt: null},
       available: true, message: "Fixture: synthetic Supervisor status; no T3 connection is used.",
-      tasks: this.data.threads.flatMap(item => item.projectId === projectId && item.task ? [item.task] : []),
+      tasks: this.data.threads.flatMap(item => item.projectId === projectId && item.task ? [journeyTask && item.id === fixtureIds.threadA1 ? journeyTask : item.task] : []),
       ...(thread ? {chatSupervision: {
         stopped, policyGeneration: this.data.threadPolicy.generation, stoppedBy: stopped ? stop?.stoppedBy ?? null : null,
         stoppedCallerThreadId: null, stoppedUserMessageId: null, effectiveEnabled: scratch ? this.data.noProject.mode !== "off" && this.data.global.enabled : this.effective(project),
@@ -482,7 +487,8 @@ export class FixtureModel {
   workflowProgress(query: WorkflowProgressPagingQuery, now: number): WorkflowProgressSnapshot {
     const page = parseWorkflowProgressPageQuery(query);
     if (!page) throw new FixtureFailure("Fixture: invalid workflow progress page.");
-    this.thread(page.projectId, page.mainThreadId);
+    const thread = this.thread(page.projectId, page.mainThreadId);
+    if (this.current === "a" && this.journey && thread.id === fixtureIds.threadA1) return {...fixtureJourney(this.journey, page.projectId, thread.id, thread.binding!.threadId, now).progress, workflowOffset: page.workflowOffset, lineageOffset: page.lineageOffset};
     return {status: "ok", message: null, projectId: page.projectId, mainThreadId: page.mainThreadId, observedAt: now, scope: null, coverage: [],
       incompatibleWorkflows: [], workflows: [], workflowOffset: page.workflowOffset, workflowHasMore: false, lineageOffset: page.lineageOffset, lineageHasMore: false};
   }
@@ -538,6 +544,7 @@ export class FixtureModel {
 }
 
 export const scenarioNames = [
+  "journey-request", "journey-proposal", "journey-agreed", "journey-working", "journey-completed", "journey-attention", "journey-stale", "journey-nested", "journey-retained",
   "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
   "save-401", "save-403", "save-409", "save-413", "editor-conflict", "editor-uncertain", "slow-reads", "setup-race", "reload",
 ] as const;
@@ -561,6 +568,15 @@ const setupPath = "/api/guidance/supervision-setup";
 const plan = (arms: Arm[], revokeSessions = false): ScenarioPlan => ({arms, revokeSessions});
 
 export const scenarioCatalog: Record<ScenarioName, {description: string; plan: (params: ScenarioParams) => ScenarioPlan}> = {
+  "journey-request": {description: "synthetic duplicate-email task: request", plan: () => plan([])},
+  "journey-proposal": {description: "synthetic duplicate-email task: proposal", plan: () => plan([])},
+  "journey-agreed": {description: "synthetic duplicate-email task: agreed", plan: () => plan([])},
+  "journey-working": {description: "synthetic duplicate-email task: working", plan: () => plan([])},
+  "journey-completed": {description: "synthetic duplicate-email task: completed", plan: () => plan([])},
+  "journey-attention": {description: "synthetic duplicate-email task: attention", plan: () => plan([])},
+  "journey-stale": {description: "synthetic duplicate-email task: stale", plan: () => plan([])},
+  "journey-retained": {description: "a current plan beside an unlinked earlier completed workflow", plan: () => plan([])},
+  "journey-nested": {description: "synthetic duplicate-email task: nested", plan: () => plan([])},
   "baseline": {description: "normal synthetic behaviour", plan: () => plan([])},
   "session-expiry-next-call": {description: "the next /api/ call with a valid session revokes that session and answers 401", plan: () => plan([{kind: "session-expiry"}])},
   "signout-other-tab": {description: "revokes every fixture session now, as a sign-out in another tab does server-side", plan: () => plan([], true)},

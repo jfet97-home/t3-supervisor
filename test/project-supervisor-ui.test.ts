@@ -187,7 +187,7 @@ it("Supervisor settings markup explains automatic conversation reuse and separat
   assert.match(html, /aria-describedby="supervisor-monitoring-interval-help supervisor-monitoring-interval-error"/);
   assert.match(html, /Supervisor cooldown:<\/strong> 30 seconds between monitoring sends/);
   assert.match(html, /Enter 1 or 2 minutes; 2 is the default and the upper bound/);
-  assert.match(html, /Current monitoring status/);
+  assert.match(html, /Monitoring details and check-ins/);
   assert.match(html, /Status:<\/strong> busy/);
   assert.match(html, /Pending activities:<\/strong> 4/);
   assert.match(html, /Next review:<\/strong>/);
@@ -873,7 +873,7 @@ it("live progress separates the current workflow from agreement history and pres
     onRefresh: () => {},
     onLoadMore: () => {},
   }));
-  assert.match(html, /Live workflow progress/);
+  assert.match(html, /Plan and progress/);
   assert.match(html, /Current Supervisor workflow state, kept separate from proposals and saved agreements/);
   assert.match(html, />Underway<\/span>/);
   assert.doesNotMatch(html, /native driver.*verified|workflow updates.*verified/i);
@@ -1079,7 +1079,7 @@ it("an external contribution diagnostic explains the record without implying a s
 
 it("the selected chat shows its saved supervision state with one native Stop supervision or Enable supervision button", () => {
   const render = (stopped: boolean, busy = false, message: string | null = null) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
-    ...viewDefaults, section: "progress", snapshot: {...snapshot, chatSupervision: {stopped, policyGeneration: 4, stoppedBy: stopped ? "relay" : null, stoppedAt: stopped ? 1 : null}},
+    ...viewDefaults, section: "supervision", snapshot: {...snapshot, chatSupervision: {stopped, policyGeneration: 4, stoppedBy: stopped ? "relay" : null, stoppedAt: stopped ? 1 : null}},
     selection, monitoring, threadId: "task-thread", connected: true, saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false,
     shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false, chatSupervisionBusy: busy, chatSupervisionMessage: message,
     onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
@@ -1094,7 +1094,7 @@ it("the selected chat shows its saved supervision state with one native Stop sup
   assert.match(stopped, /<p role="status">Supervision is stopped for this chat\.<\/p>/u);
   assert.match(render(true, true), /<button type="button" disabled=""[^>]*>Enable supervision<\/button>/u, "a pending change cannot be submitted twice");
   const locked = renderToStaticMarkup(createElement(ProjectSupervisorView, {
-    ...viewDefaults, section: "progress", snapshot: {...snapshot, chatSupervision: {stopped: false, policyGeneration: 4, stoppedBy: null, stoppedAt: null}},
+    ...viewDefaults, section: "supervision", snapshot: {...snapshot, chatSupervision: {stopped: false, policyGeneration: 4, stoppedBy: null, stoppedAt: null}},
     selection, monitoring, threadId: "task-thread", connected: true, saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false,
     shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false, chatSupervisionLocked: true,
     onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
@@ -1157,6 +1157,20 @@ it("task-path assessments keep unknown reads distinct from absence and retain as
   const current = render([page], false, "Refresh failed.");
   assert.match(current, /Resolve the current review blocker/);
   assert.match(current, /Showing the retained assessment/);
-  assert.match(current, /needs attention/);
+  assert.match(current, /Needs attention/);
   assert.match(render([{...page, workflows: page.workflows.map(workflow => ({...workflow, assessment: {...workflow.assessment, taskId: "old-task"}}))}]), /Retained workflow; not linked to this task/);
+});
+
+
+it("an earlier workflow cannot borrow the current task's agreement panel", () => {
+  const task = {...snapshot.tasks[0]!, id: "new-task", sourceHash: "new-source", workflow: workflow(), workflowProposalId: "proposal-1", agreement: agreement({message: "Current task acceptance only"})};
+  const html = renderToStaticMarkup(createElement(WorkflowProgressPanel, {mainThreadId: "task-thread", currentTask: task, connected: true,
+    progress: {key: "history-scope", pages: [progressSnapshot], loading: false, error: null}, onRefresh: () => {}, onLoadMore: () => {}}));
+  const history = html.indexOf('class="retained-workflow"');
+  assert.ok(history > 0);
+  assert.match(html.slice(0, history), /Current task acceptance only/);
+  assert.match(html.slice(0, history), /Agreed plan|In agreed plan/);
+  assert.doesNotMatch(html.slice(0, history), /Proposed plan|>Proposed</);
+  assert.match(html.slice(history), /Earlier workflow: Review the source change/);
+  assert.doesNotMatch(html.slice(history), /Current task acceptance only|Agent and Supervisor/);
 });

@@ -101,7 +101,7 @@ function Example({label, value}: {label: string; value: string}) {
 
 function Topic({id, title, children}: {id: string; title: string; children: React.ReactNode}) {
   return <div className="stack guide-topic">
-    <h2 id={id}>{title}</h2>
+    <h2 id={id} tabIndex={-1}>{title}</h2>
     {children}
   </div>;
 }
@@ -183,6 +183,12 @@ export function StepsAndWorkflowsGuide() {
       <h1 id="steps-guide-title">Steps and workflows</h1>
       <p className="muted">A reference for repository definitions, workflow planning and recovery when definitions need attention.</p>
     </div>
+
+
+    <p className="guide-introduction">Turn a request into an agreed plan. Follow the agent’s work step by step, see what the Supervisor has assessed, and find out when your input is needed.</p>
+    <nav className="guide-contents" aria-label="Guide topics"><strong>Find what you need</strong><ul>{[
+      ["layout", "Definition files"], ["step", "Steps"], ["workflow", "Workflow structure"], ["references", "References"], ["config", "Project configuration"], ["fixed", "Fixed commitments"], ["delegation", "Review and delegation"], ["children", "Child tasks"], ["team", "Supervisor team"], ["errors", "Recovery"], ["evidence", "Plans and evidence"], ["faq", "Common questions"],
+    ].map(([id, title]) => <li key={id}><button type="button" onClick={() => {const heading = document.getElementById(`guide-${id}-title`);heading?.focus();heading?.scrollIntoView({block: "start"});}}>{title}</button></li>)}</ul></nav>
 
     <Topic id="guide-layout-title" title="Where definitions live">
       <p>Project definitions belong to the operative checkout, so another checkout can have a different configuration. The opt-in global scope uses the same file layout. The Projects page shows the active scope, source paths and origin.</p>

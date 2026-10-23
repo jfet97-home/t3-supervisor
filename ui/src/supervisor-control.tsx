@@ -216,8 +216,9 @@ export const startGlobalDefinitionsChange = (registry: AtomRegistry.AtomRegistry
     input: {expectedGeneration: current.control.generation, enabled: !current.control.enabled}});
 };
 
-export function SupervisionControlView({control, busy, blocked, message, onToggle, onReload}: {
+export function SupervisionControlView({control, busy, blocked, message, onToggle, onReload, readAt}: {
   control: SupervisionControlInfo;
+  readAt?: number | null;
   busy: boolean;
   blocked: boolean;
   message: string;
@@ -226,15 +227,14 @@ export function SupervisionControlView({control, busy, blocked, message, onToggl
 }) {
   const global = control.projectId === null;
   const Heading = global ? "h2" : "h3";
-  return <section className="panel stack" aria-label={global ? "Global supervision" : "Project supervision"}>
-    <Heading>{global ? "Global supervision" : "Project supervision"}</Heading>
-    <p><strong>{control.enabled ? "Enabled" : "Disabled"}</strong>{!global && control.enabled && !control.globallyEnabled ? " — global supervision is off" : ""}</p>
+  return <section className="panel stack settings-control" aria-label={global ? "Global supervision" : "Project supervision"}>
+    <div className="row between control-heading"><Heading>{global ? "Global supervision" : "Project supervision"}</Heading><span className="pill">{control.enabled ? "On" : "Off"}</span></div>{!global && control.enabled && !control.globallyEnabled && <p className="notice">The global supervision switch is off.</p>}
     <p>{global ? "The master switch controls semantic supervision across every project and starts enabled." : "This project is supervised only when both its switch and the master switch are enabled. An existing .t3-supervisor folder enables a project initially; your manual choice is remembered."}</p>
-    {!global && <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>}
-    <p>Disabling stops new supervisory work. An already-running model turn may finish. Chats, settings and recorded history are retained.</p>
+    <details><summary>How this switch works</summary>{!global && <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>}
+    <p>Disabling stops new supervisory work. An already-running model turn may finish. Chats, settings and recorded history are retained.</p></details>
     <div className="row">
-      <button type="button" disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable supervision" : "Enable supervision"}</button>
-      <button type="button" disabled={busy} onClick={onReload}>Reload status</button>
+      <button type="button" className={control.enabled ? "danger-button" : "primary"} disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable supervision" : "Enable supervision"}</button>
+      <button type="button" className="quiet-button" title={readAt ? `Last read ${new Date(readAt).toLocaleTimeString()}` : undefined} disabled={busy} onClick={onReload}>Reload status</button>
     </div>
     <p role="status">{message}</p>
   </section>;
@@ -278,11 +278,11 @@ export function SupervisionControlPanel({projectId = null, onChanged, onStateCha
     else if (AsyncResult.isFailure(read)) setState(current => ({...current, blocked: true, message: "Supervision status unavailable. Reload before changing it."}));
   }, [read, setState]);
   if (!control) return <section className="panel"><p role="status">{message || "Loading supervision status…"}</p><button type="button" onClick={() => setRevision(value => value + 1)}>Reload status</button></section>;
-  return <div className="stack"><SupervisionControlView control={control} busy={busy || setupBusy} blocked={blocked || setupUncertain} message={message}
+  return <div className="stack"><SupervisionControlView readAt={state.readAt} control={control} busy={busy || setupBusy} blocked={blocked || setupUncertain} message={message}
     onReload={() => setRevision(value => value + 1)} onToggle={() => {
       if (!setupBusy && !setupUncertain) startControlChange(registry, stateKey, projectId);
     }} />
-    {state.readAt && <p className="small muted">Status read at {new Date(state.readAt).toLocaleTimeString()}. Reload status after changes in another tab.</p>}
+
     {setupUncertain && !setupActivity.uncertain && <p className="notice" role="status">The last setup outcome is not confirmed. Reload setup to check the selected checkout before other changes.</p>}
     {setupRequested && projectId && <SupervisionSetupPanel projectId={projectId} stateKey={stateKey} locked={setupBusy && !setupActivity.busy || fenceState.fenced && !setupActivity.uncertain} />}</div>;
 }
@@ -354,19 +354,18 @@ function SupervisionSetupPanel({projectId, stateKey, locked}: {projectId: string
     onSelect={setSelected} onSetup={setup} onReload={() => setRevision(value => value + 1)} />;
 }
 
-export function GlobalDefinitionsControlView({control, busy, blocked, message, onToggle, onReload}: {
-  control: GlobalDefinitionsControlInfo; busy: boolean; blocked: boolean; message: string; onToggle: () => void; onReload: () => void;
+export function GlobalDefinitionsControlView({control, busy, blocked, message, onToggle, onReload, readAt}: {
+  control: GlobalDefinitionsControlInfo; readAt?: number | null; busy: boolean; blocked: boolean; message: string; onToggle: () => void; onReload: () => void;
 }) {
-  return <section className="panel stack" aria-label="Use global steps and workflows">
-    <h2>Use global steps and workflows</h2>
-    <p><strong>{control.enabled ? "Enabled" : "Disabled"}</strong>{control.enabled && !control.effectiveEnabled ? " — the master supervision switch is off" : ""}</p>
-    <p>Shared definitions: <code>~/.t3-supervisor/project.yaml</code>, <code>steps/</code>, and <code>workflows/</code> in the T3 server user's home.</p>
+  return <section className="panel stack settings-control" aria-label="Use global steps and workflows">
+    <div className="row between control-heading"><h2>Use global steps and workflows</h2><span className="pill">{control.enabled ? "On" : "Off"}</span></div>{control.enabled && !control.effectiveEnabled && <p className="notice">The master supervision switch is off.</p>}
+    <p>Share reusable steps and workflows across enabled projects and No Project chats.</p><details><summary>Shared definition files and behavior</summary><p>Shared definitions: <code>~/.t3-supervisor/project.yaml</code>, <code>steps/</code>, and <code>workflows/</code> in the T3 server user's home.</p>
     <p>This starts disabled. First enabling creates the shared project.yaml and empty steps/ and workflows/ directories if needed. Existing definitions are preserved, and the files are left uncommitted.</p>
     <p>These definitions supply policy to enabled Supervisors. This switch never activates a chat or changes No Project mode. Disabling them leaves project definitions available; No Project plans use task-local steps.</p>
-    <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>
+    <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p></details>
     <div className="row">
-      <button type="button" disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable global definitions" : "Enable global definitions"}</button>
-      <button type="button" disabled={busy} onClick={onReload}>Reload global definitions status</button>
+      <button type="button" className={control.enabled ? "danger-button" : "primary"} disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable global definitions" : "Enable global definitions"}</button>
+      <button type="button" className="quiet-button" title={readAt ? `Last read ${new Date(readAt).toLocaleTimeString()}` : undefined} disabled={busy} onClick={onReload}>Reload global definitions status</button>
     </div><p role="status">{message}</p>
   </section>;
 }
@@ -395,6 +394,6 @@ export function GlobalDefinitionsControlPanel({refreshKey = 0, onStateChange, ac
     else if (AsyncResult.isFailure(read)) setState(current => ({...current, blocked: true, message: "Global definitions status unavailable. Reload before changing it."}));
   }, [read, setState]);
   if (!control) return <section className="panel"><p role="status">{message || "Loading global definitions status…"}</p><button type="button" onClick={() => setRevision(value => value + 1)}>Reload status</button></section>;
-  return <div className="stack"><GlobalDefinitionsControlView control={control} busy={busy} blocked={blocked} message={message} onReload={() => setRevision(value => value + 1)}
-    onToggle={() => startGlobalDefinitionsChange(registry, stateKey)} />{state.readAt && <p className="small muted">Status read at {new Date(state.readAt).toLocaleTimeString()}. Reload global definitions status after changes in another tab.</p>}</div>;
+  return <div className="stack"><GlobalDefinitionsControlView readAt={state.readAt} control={control} busy={busy} blocked={blocked} message={message} onReload={() => setRevision(value => value + 1)}
+    onToggle={() => startGlobalDefinitionsChange(registry, stateKey)} /></div>;
 }

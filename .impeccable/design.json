@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-21T21:13:43.047293Z",
+  "generatedAt": "2026-10-23T21:39:29.502Z",
   "title": "Design System: Supervisor",
   "extensions": {
     "colorMeta": {
@@ -207,6 +207,104 @@
       "dark-status-critical-ink": {
         "role": "tertiary",
         "displayName": "status critical ink (dark)"
+      },
+      "journey-current-bg": {
+        "role": "tertiary",
+        "displayName": "Current journey surface",
+        "tonalRamp": [
+          "oklch(15.00% 0.0163 182.71)",
+          "oklch(26.43% 0.0163 182.71)",
+          "oklch(37.86% 0.0163 182.71)",
+          "oklch(49.29% 0.0163 182.71)",
+          "oklch(60.71% 0.0163 182.71)",
+          "oklch(72.14% 0.0163 182.71)",
+          "oklch(83.57% 0.0163 182.71)",
+          "oklch(95.00% 0.0163 182.71)"
+        ]
+      },
+      "journey-current-label-bg": {
+        "role": "tertiary",
+        "displayName": "Current journey label surface",
+        "tonalRamp": [
+          "oklch(15.00% 0.0353 178.71)",
+          "oklch(26.43% 0.0353 178.71)",
+          "oklch(37.86% 0.0353 178.71)",
+          "oklch(49.29% 0.0353 178.71)",
+          "oklch(60.71% 0.0353 178.71)",
+          "oklch(72.14% 0.0353 178.71)",
+          "oklch(83.57% 0.0353 178.71)",
+          "oklch(95.00% 0.0353 178.71)"
+        ]
+      },
+      "journey-current-ring": {
+        "role": "tertiary",
+        "displayName": "Current journey ring",
+        "tonalRamp": [
+          "oklch(15.00% 0.0459 182.68)",
+          "oklch(26.43% 0.0459 182.68)",
+          "oklch(37.86% 0.0459 182.68)",
+          "oklch(49.29% 0.0459 182.68)",
+          "oklch(60.71% 0.0459 182.68)",
+          "oklch(72.14% 0.0459 182.68)",
+          "oklch(83.57% 0.0459 182.68)",
+          "oklch(95.00% 0.0459 182.68)"
+        ]
+      },
+      "dark-journey-current-ring": {
+        "role": "tertiary",
+        "displayName": "Dark current journey ring",
+        "tonalRamp": [
+          "oklch(15.00% 0.0496 182.28)",
+          "oklch(26.43% 0.0496 182.28)",
+          "oklch(37.86% 0.0496 182.28)",
+          "oklch(49.29% 0.0496 182.28)",
+          "oklch(60.71% 0.0496 182.28)",
+          "oklch(72.14% 0.0496 182.28)",
+          "oklch(83.57% 0.0496 182.28)",
+          "oklch(95.00% 0.0496 182.28)"
+        ]
+      },
+      "journey-attention-line": {
+        "role": "tertiary",
+        "displayName": "Journey attention boundary",
+        "tonalRamp": [
+          "oklch(15.00% 0.1083 68.53)",
+          "oklch(26.43% 0.1083 68.53)",
+          "oklch(37.86% 0.1083 68.53)",
+          "oklch(49.29% 0.1083 68.53)",
+          "oklch(60.71% 0.1083 68.53)",
+          "oklch(72.14% 0.1083 68.53)",
+          "oklch(83.57% 0.1083 68.53)",
+          "oklch(95.00% 0.1083 68.53)"
+        ]
+      },
+      "danger-line": {
+        "role": "tertiary",
+        "displayName": "Disable action boundary",
+        "tonalRamp": [
+          "oklch(15.00% 0.0988 25.78)",
+          "oklch(26.43% 0.0988 25.78)",
+          "oklch(37.86% 0.0988 25.78)",
+          "oklch(49.29% 0.0988 25.78)",
+          "oklch(60.71% 0.0988 25.78)",
+          "oklch(72.14% 0.0988 25.78)",
+          "oklch(83.57% 0.0988 25.78)",
+          "oklch(95.00% 0.0988 25.78)"
+        ]
+      },
+      "dark-danger-line": {
+        "role": "tertiary",
+        "displayName": "Dark disable action boundary",
+        "tonalRamp": [
+          "oklch(15.00% 0.0745 24.49)",
+          "oklch(26.43% 0.0745 24.49)",
+          "oklch(37.86% 0.0745 24.49)",
+          "oklch(49.29% 0.0745 24.49)",
+          "oklch(60.71% 0.0745 24.49)",
+          "oklch(72.14% 0.0745 24.49)",
+          "oklch(83.57% 0.0745 24.49)",
+          "oklch(95.00% 0.0745 24.49)"
+        ]
       }
     },
     "typographyMeta": {
@@ -232,11 +330,7 @@
       },
       "objective": {
         "displayName": "Objective",
-        "purpose": "Focused task statement."
-      },
-      "objective-mobile": {
-        "displayName": "Objective Mobile",
-        "purpose": "Focused task statement at widths up to 760px."
+        "purpose": "Fluid task meaning; later CSS supersedes the former desktop/mobile fixed sizes."
       },
       "body": {
         "displayName": "Body",
@@ -265,6 +359,54 @@
       "code": {
         "displayName": "Code",
         "purpose": "Literal source, identifiers and paths."
+      },
+      "journey-heading": {
+        "displayName": "Journey Heading",
+        "purpose": "Plan and progress section heading."
+      },
+      "workflow-title": {
+        "displayName": "Workflow Title",
+        "purpose": "Titles inside workflow documents and plan surfaces."
+      },
+      "context-title": {
+        "displayName": "Context Title",
+        "purpose": "Alignment, latest observation and compact definition headings."
+      },
+      "outcome": {
+        "displayName": "Outcome",
+        "purpose": "Semantic task result title, separate from the current step and assessment text."
+      },
+      "guide-introduction": {
+        "displayName": "Guide Introduction",
+        "purpose": "Guide introduction at regular body weight and line height."
+      },
+      "health-summary": {
+        "displayName": "Health Summary",
+        "purpose": "Leading Supervisor health explanation."
+      },
+      "detail": {
+        "displayName": "Detail",
+        "purpose": "Step explanations, alignment messages and supporting workflow prose."
+      },
+      "reading": {
+        "displayName": "Reading",
+        "purpose": "Task freshness, agreement notes and links."
+      },
+      "alignment-speaker": {
+        "displayName": "Alignment Speaker",
+        "purpose": "Attributed Supervisor and Agent labels."
+      },
+      "breadcrumb": {
+        "displayName": "Breadcrumb",
+        "purpose": "Quiet linked project scope above the single conversation navigation row."
+      },
+      "assessment-label": {
+        "displayName": "Assessment Label",
+        "purpose": "Bold Supervisor assessment label inside the step explanation."
+      },
+      "step-state": {
+        "displayName": "Step State",
+        "purpose": "Compact textual journey status; color is supplementary."
       }
     },
     "shadows": [],
@@ -273,6 +415,11 @@
         "name": "control-border",
         "value": "border-color 140ms ease-out",
         "purpose": "Buttons and links only when reduced motion is not requested; no lift or entrance animation."
+      },
+      {
+        "name": "journey-marker-state",
+        "value": "background-color 180ms ease-out, border-color 180ms ease-out",
+        "purpose": "Journey markers only when reduced motion is not requested; no pulse, lift or automatic progress animation."
       }
     ],
     "breakpoints": [
@@ -283,6 +430,21 @@
       {
         "name": "mobile",
         "value": "760px"
+      },
+      {
+        "name": "workflow-stack",
+        "value": "760px",
+        "purpose": "Named workflow inline-size container; plan stacks and context becomes two columns."
+      },
+      {
+        "name": "workflow-narrow",
+        "value": "500px",
+        "purpose": "Named workflow inline-size container; context and step metadata stack."
+      },
+      {
+        "name": "negotiation-stack",
+        "value": "760px",
+        "purpose": "Named negotiation inline-size container; plan/alignment stack and sticky alignment becomes static."
       }
     ]
   },
@@ -312,6 +474,14 @@
       "css": ".ds-quiet{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-quiet{display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 42px; min-width: 0; border: 1px solid var(--control-line, #8796a9); border-radius: 7px; background: var(--surface, #fff); padding: 8px 13px; cursor: pointer; touch-action: manipulation; font-size: 14px; font-weight: 550; line-height: 1.4; text-decoration: none; color: var(--ink, #202c3c);}.ds-quiet:hover:not(:disabled){background: var(--soft, #edf2f7); border-color: var(--blue, #215eb2);}.ds-quiet:disabled{cursor: default; opacity: .55;}.ds-quiet.ds-quiet-fill{border-color: transparent; background: transparent;}.ds-quiet:focus-visible{outline: 3px solid var(--blue, #215eb2); outline-offset: 3px;}@media (pointer: coarse){.ds-quiet{min-height:48px;}}@media (prefers-reduced-motion: no-preference){.ds-quiet{transition: border-color 140ms ease-out;}}@media (prefers-color-scheme: dark){.ds-quiet{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}"
     },
     {
+      "name": "Disable button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "Explicit disable action; status reload is a separate quiet control.",
+      "html": "<button type=\"button\" class=\"ds-danger\">Disable supervision</button>",
+      "css": ".ds-danger{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-danger{display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 42px; min-width: 0; border: 1px solid var(--control-line, #8796a9); border-radius: 7px; background: var(--surface, #fff); padding: 8px 13px; cursor: pointer; touch-action: manipulation; font-size: 14px; font-weight: 550; line-height: 1.4; text-decoration: none; color: var(--ink, #202c3c);}.ds-danger:hover:not(:disabled){background: var(--soft, #edf2f7); border-color: var(--blue, #215eb2);}.ds-danger:disabled{cursor: default; opacity: .55;}.ds-danger:focus-visible{outline: 3px solid var(--blue, #215eb2); outline-offset: 3px;}@media (pointer: coarse){.ds-danger{min-height:48px;}}@media (prefers-reduced-motion: no-preference){.ds-danger{transition: border-color 140ms ease-out;}}@media (prefers-color-scheme: dark){.ds-danger{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}.ds-danger{color:#92332b;border-color:#be716a}.ds-danger:hover:not(:disabled){color:#92332b;border-color:#92332b;background:#fbe6e4}@media(prefers-color-scheme:dark){.ds-danger{color:#ffcfcb;border-color:#c58984}.ds-danger:hover:not(:disabled){color:#ffcfcb;border-color:#ffcfcb;background:#512e30}}"
+    },
+    {
       "name": "Search field",
       "kind": "input",
       "refersTo": "input-field",
@@ -331,9 +501,9 @@
       "name": "Conversation navigation",
       "kind": "nav",
       "refersTo": "section-navigation",
-      "description": "Text links with a tonal teal current view.",
-      "html": "<nav class=\"ds-section-nav\" aria-label=\"Conversation views\"><a href=\"#overview\" aria-current=\"page\">Overview</a><a href=\"#plan\">Plan &amp; agreement</a><a href=\"#supervision\">Supervision</a></nav>",
-      "css": ".ds-section-nav{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-section-nav{display: flex; gap: 5px; border-bottom: 1px solid var(--line, #dce3eb); padding-bottom: 8px;}.ds-section-nav a{display: flex; align-items: center; min-height: 42px; padding: 8px 14px; border-radius: 7px; text-decoration: none; color: var(--quiet, #53657a); font-size: 14px;}.ds-section-nav a:hover{background: var(--soft, #edf2f7);}.ds-section-nav a[aria-current=\"page\"]{background: #e0eeef; color: #125d58; font-weight: 600;}@media (max-width: 760px){.ds-section-nav{gap: 2px;}}@media (max-width: 760px){.ds-section-nav a{justify-content: center; padding: 8px 10px; font-size: 13px;}}@media (prefers-color-scheme: dark){.ds-section-nav a[aria-current=\"page\"]{background: #254846; color: #b9eee5;}}@media (prefers-color-scheme: dark){.ds-section-nav{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}.ds-section-nav a:focus-visible{outline:3px solid var(--blue, #215eb2);outline-offset:3px;} @media(pointer:coarse){.ds-section-nav a{min-height:48px;}} @media(prefers-reduced-motion:no-preference){.ds-section-nav a{transition:border-color 140ms ease-out;}} @media(forced-colors:active){.ds-section-nav a[aria-current=\"page\"]{border:1px solid CanvasText;}}"
+      "description": "Linked project breadcrumbs and one conversation view row; project tabs and checkout controls belong on their scoped pages.",
+      "html": "<div class=\"ds-conversation-nav\"><nav class=\"ds-breadcrumb\" aria-label=\"Workspace breadcrumb\"><a href=\"#projects\">Projects</a><span aria-hidden=\"true\">/</span><a href=\"#project\">Example project</a><span aria-hidden=\"true\">/</span><span>Conversation</span></nav><nav class=\"ds-section-nav\" aria-label=\"Conversation views\"><a href=\"#overview\" aria-current=\"page\">Overview</a><a href=\"#plan\">Plan &amp; agreement</a><a href=\"#supervision\">Supervision</a></nav></div>",
+      "css": ".ds-section-nav{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-section-nav{display: flex; gap: 5px; border-bottom: 1px solid var(--line, #dce3eb); padding-bottom: 8px;}.ds-section-nav a{display: flex; align-items: center; min-height: 42px; padding: 8px 14px; border-radius: 7px; text-decoration: none; color: var(--quiet, #53657a); font-size: 14px;}.ds-section-nav a:hover{background: var(--soft, #edf2f7);}.ds-section-nav a[aria-current=\"page\"]{background: #e0eeef; color: #125d58; font-weight: 600;}@media (max-width: 760px){.ds-section-nav{gap: 2px;}}@media (max-width: 760px){.ds-section-nav a{justify-content: center; padding: 8px 10px; font-size: 13px;}}@media (prefers-color-scheme: dark){.ds-section-nav a[aria-current=\"page\"]{background: #254846; color: #b9eee5;}}@media (prefers-color-scheme: dark){.ds-section-nav{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}.ds-section-nav a:focus-visible{outline:3px solid var(--blue, #215eb2);outline-offset:3px;} @media(pointer:coarse){.ds-section-nav a{min-height:48px;}} @media(prefers-reduced-motion:no-preference){.ds-section-nav a{transition:border-color 140ms ease-out;}} @media(forced-colors:active){.ds-section-nav a[aria-current=\"page\"]{border:1px solid CanvasText;}}.ds-breadcrumb{display:flex;align-items:center;flex-wrap:wrap;gap:8px;color:var(--quiet,#53657a);font-size:.8rem;min-height:32px;margin-bottom:12px;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}.ds-breadcrumb a{color:inherit;text-decoration:none}.ds-breadcrumb a:hover{color:var(--blue,#215eb2);text-decoration:underline}.ds-breadcrumb a:focus-visible{outline:3px solid var(--blue,#215eb2);outline-offset:3px}.ds-section-nav{flex-wrap:wrap}.ds-section-nav a{overflow-wrap:normal;white-space:nowrap}@media(prefers-color-scheme:dark){.ds-breadcrumb{--quiet:#adbed1;--blue:#a0c4ff}}"
     },
     {
       "name": "Status labels",
@@ -344,36 +514,30 @@
       "css": ".ds-pill{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-pill{display: inline-flex; align-items: center; width: fit-content; border-radius: 5px; padding: 3px 7px; background: var(--soft, #edf2f7); color: var(--quiet, #53657a); font-size: 12px; font-weight: 550; line-height: 1.5;}.ds-pill.ds-blue{background: #e7effc; color: #244b88;}.ds-pill.ds-green{background: #e2f1eb; color: #1d5d4b;}.ds-pill.ds-amber{background: #fcf0d9; color: #7b4b0d;}.ds-pill.ds-critical{background: #fbe6e4; color: #92332b;}@media (prefers-color-scheme: dark){.ds-pill.ds-blue{background: #263e64; color: #c6ddff;}}@media (prefers-color-scheme: dark){.ds-pill.ds-green{background: #203f3a; color: #b6e7d6;}}@media (prefers-color-scheme: dark){.ds-pill.ds-amber{background: #4c3a1c; color: #f4d699;}}@media (prefers-color-scheme: dark){.ds-pill.ds-critical{background: #512e30; color: #ffcfcb;}}@media (prefers-color-scheme: dark){.ds-pill{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}@media(forced-colors:active){.ds-pill{border:1px solid CanvasText;}}"
     },
     {
-      "name": "Work panel",
+      "name": "Task outcome and connected workflow journey",
+      "kind": "custom",
+      "refersTo": "workflow-plan-surface",
+      "description": "Static Overview fixture: task meaning, semantic outcome, complete sequence/parallel/nested topology, current-step disclosures, separate agreement and latest observation. Native details can be opened; records are examples, not live evidence.",
+      "html": "<section class=\"ds-example\"><div class=\"ds-task-focus\"><h3>Current task</h3><p class=\"ds-task-objective\">Fixture: stop duplicate order-confirmation emails when a payment webhook retries.</p><div class=\"ds-task-outcome\"><span class=\"ds-step-mark ds-mark-underway\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"10\" cy=\"10\" r=\"3\" fill=\"currentColor\" stroke=\"none\"/></svg></span><div><strong>Work in progress</strong><p>Now: Make the send idempotent</p><p>Fixture: the duplicate is reproduced. The agent is adding an event-ID guard.</p></div></div><div class=\"ds-task-reading\"><span>Plan: <strong>Agreed</strong></span><span>Example assessment record</span></div></div><div class=\"ds-journey-layout\"><div class=\"ds-plan-surface\"><h5>Step by step</h5><ol class=\"ds-journey-track\" role=\"list\" aria-label=\"Plan sequence\"><li><div class=\"ds-journey-stop ds-stop-completed\"><details class=\"ds-journey-step\"><summary><span class=\"ds-step-mark ds-mark-completed\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m5 10 3 3 7-7\"/></svg></span><span class=\"ds-step-name\">Reproduce the duplicate email</span><span class=\"ds-step-state\">Completed</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Example plan commitment.</p></div></details></div></li><li><div class=\"ds-journey-stop ds-stop-underway\"><details class=\"ds-journey-step\" open><summary aria-current=\"step\"><span class=\"ds-step-mark ds-mark-underway\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"10\" cy=\"10\" r=\"3\" fill=\"currentColor\" stroke=\"none\"/></svg></span><span class=\"ds-step-name\">Verify retry behavior<small>Workflow</small></span><span class=\"ds-step-state\">In progress</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Fixture: the branch still needs its own assessment.</p></div><div class=\"ds-nested-journey\"><div class=\"ds-group-parallel\"><p class=\"ds-parallel-label\">In parallel<span>These branches have no declared order</span></p><ul class=\"ds-journey-track\" role=\"list\" aria-label=\"Parallel branches\"><li><div class=\"ds-journey-stop ds-stop-underway\"><details class=\"ds-journey-step\" open><summary aria-current=\"step\"><span class=\"ds-step-mark ds-mark-underway\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"10\" cy=\"10\" r=\"3\" fill=\"currentColor\" stroke=\"none\"/></svg></span><span class=\"ds-step-name\">Make the send idempotent</span><span class=\"ds-step-state\">In progress</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Record the webhook event ID before queuing the confirmation email.</p><div class=\"ds-step-assessment\"><strong>Supervisor assessment</strong><p>Fixture: the event-ID guard is being added.</p></div></div></details></div></li><li><div class=\"ds-journey-stop ds-stop-planned\"><details class=\"ds-journey-step\"><summary><span class=\"ds-step-mark ds-mark-planned\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></svg></span><span class=\"ds-step-name\">Run retry tests</span><span class=\"ds-step-state\">Planned</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Example plan commitment.</p></div></details></div></li></ul></div></div></details></div></li><li><div class=\"ds-journey-stop ds-stop-planned\"><details class=\"ds-journey-step\"><summary><span class=\"ds-step-mark ds-mark-planned\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></svg></span><span class=\"ds-step-name\">Cover the refund webhook</span><span class=\"ds-step-state\">Planned</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Example plan commitment.</p></div></details></div></li></ol></div><aside class=\"ds-context\"><section class=\"ds-task-alignment\"><div class=\"ds-row\"><h4>Agent and Supervisor</h4><span class=\"ds-pill ds-pill-green\">Plan agreed</span></div><ol class=\"ds-alignment-exchange\" role=\"list\"><li><span class=\"ds-step-mark ds-mark-completed\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m5 10 3 3 7-7\"/></svg></span><div><strong>Supervisor</strong><p>Prepared the plan</p><p class=\"ds-alignment-note\">Fixture: reproduce the issue, guard the send path and verify retries.</p></div></li><li><span class=\"ds-step-mark ds-mark-completed\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m5 10 3 3 7-7\"/></svg></span><div><strong>Agent</strong><p>Accepted this plan</p></div></li></ol><p class=\"ds-alignment-message\">Fixture: the agent and Supervisor agreed to the current proposal.</p><div class=\"ds-alignment-links\"><a href=\"#supervisor\">Open Supervisor</a><a href=\"#agent\">Open agent conversation</a></div><details><summary>Agreement record</summary><p>Example record: proposal, acceptance time and message provenance.</p></details></section><section class=\"ds-observation\"><h5>Latest observation</h5><p>Fixture: one replayed webhook queued two messages.</p></section></aside></div><details class=\"ds-provenance\"><summary>Full plan, evidence and observations</summary><p>Source paths, references, contributions, native lifecycle and observations are disclosed here.</p></details><details class=\"ds-retained\"><summary>Earlier workflow: fixture request</summary><p class=\"ds-retained-notice\">Retained workflow record. It is not linked to the current task.</p><div class=\"ds-plan-surface\"><h5>Step by step</h5><ol class=\"ds-journey-track\" role=\"list\"><li><div class=\"ds-journey-stop ds-stop-completed\"><details class=\"ds-journey-step\"><summary><span class=\"ds-step-mark ds-mark-completed\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m5 10 3 3 7-7\"/></svg></span><span class=\"ds-step-name\">Earlier assessed step</span><span class=\"ds-step-state\">Completed</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Example plan commitment.</p></div></details></div></li></ol></div><p class=\"ds-muted\">This earlier record has no current-task alignment panel.</p></details></section>",
+      "css": ".ds-example{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;color:var(--ink,#202c3c);font-size:15px;line-height:1.55;container:workflow / inline-size}.ds-example h3,.ds-example h4,.ds-example h5,.ds-example h6,.ds-example p{margin:0}.ds-example h4,.ds-example h5,.ds-example h6{font-size:15px;font-weight:650;line-height:1.55}.ds-nested-journey .ds-journey-track{margin-top:0}.ds-example p,.ds-step-name,.ds-example a{overflow-wrap:anywhere}.ds-example a{color:var(--blue,#215eb2);text-underline-offset:3px}.ds-example :focus-visible{outline:3px solid var(--blue,#215eb2);outline-offset:3px}.ds-example summary{cursor:pointer;min-height:44px;padding-block:10px;font-size:14px;font-weight:550}.ds-example details[open]>summary{margin-bottom:12px}.ds-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.ds-task-focus{display:grid;gap:16px;padding:8px 0 24px}.ds-task-focus h3{font-size:17px;line-height:1.4;font-weight:650}.ds-task-objective{font-size:clamp(1.35rem,1rem + 1cqi,1.8rem);line-height:1.35;font-weight:650;max-width:64ch;text-wrap:pretty}.ds-task-outcome{display:flex;align-items:flex-start;gap:16px;padding:20px 24px;border-radius:12px;background:#e2f1eb;color:#1d5d4b}.ds-task-outcome strong{display:block;font-size:1.15rem;line-height:1.4}.ds-task-outcome p{margin-top:5px;max-width:72ch}.ds-task-outcome>.ds-step-mark{width:34px;height:34px;margin-top:2px}.ds-task-reading{display:flex;justify-content:space-between;gap:12px 24px;flex-wrap:wrap;color:var(--quiet,#53657a);font-size:.85rem}.ds-journey-layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(260px,1fr);gap:24px;align-items:start;margin-top:12px}.ds-plan-surface{min-inline-size:0;padding:24px;border:1px solid var(--line,#dce3eb);border-radius:12px;background:var(--surface,#fff)}.ds-plan-surface h5,.ds-plan-surface h6{font-size:1.05rem;font-weight:650;line-height:1.55}.ds-journey-track{list-style:none;padding:0;margin:20px 0 0}.ds-journey-track>li{position:relative;padding-bottom:6px}.ds-journey-track>li::before{content:\"\";position:absolute;inset-inline-start:12px;inset-block:24px -4px;width:2px;background:var(--line,#dce3eb)}.ds-journey-track>li:last-child::before{display:none}.ds-journey-stop{position:relative}.ds-journey-step{border-radius:9px}.ds-journey-step>summary{display:grid;grid-template-columns:26px minmax(0,1fr) auto 14px;align-items:start;gap:12px;padding:14px 8px 14px 0;list-style:none;min-height:56px;border-radius:8px}.ds-journey-step>summary::-webkit-details-marker{display:none}.ds-journey-step>summary:hover{background:var(--soft,#edf2f7)}.ds-step-name{font-weight:600;line-height:1.5}.ds-step-name small{display:block;font-size:13px;line-height:1.5;font-weight:400;color:var(--quiet,#53657a)}.ds-step-mark{position:relative;z-index:1;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;inline-size:26px;block-size:26px;border:2px solid var(--control-line,#8796a9);border-radius:50%;background:var(--surface,#fff);color:var(--quiet,#53657a)}.ds-step-mark svg{width:100%;height:100%}.ds-mark-completed{background:var(--teal,#007a70);border-color:var(--teal,#007a70);color:var(--surface,#fff)}.ds-mark-underway{color:var(--teal,#007a70);border-color:var(--teal,#007a70);outline:4px solid #bce7df;outline-offset:2px}.ds-mark-proposed{border-style:dashed}.ds-mark-attention{border-color:#99631b;color:#7b4b0d;background:#fcf0d9;border-radius:6px}.ds-step-state{font-size:.75rem;font-weight:600;color:var(--quiet,#53657a);padding:3px 7px;background:var(--soft,#edf2f7);border-radius:5px;white-space:nowrap}.ds-stop-underway>.ds-journey-step{background:#e4f3f0}.ds-stop-underway>.ds-journey-step>summary{padding-inline-start:6px}.ds-stop-underway>.ds-journey-step .ds-step-state{background:#c8e8e0;color:#125d58}.ds-stop-completed>.ds-journey-step .ds-step-state{background:#e2f1eb;color:#1d5d4b}.ds-stop-attention>.ds-journey-step .ds-step-state{background:#fcf0d9;color:#7b4b0d}.ds-step-chevron{width:14px;height:20px;margin-top:3px;color:var(--quiet,#53657a)}.ds-journey-step[open]>summary .ds-step-chevron{transform:rotate(90deg)}.ds-step-explanation{display:grid;gap:14px;padding:0 16px 20px 44px;font-size:.9rem;max-width:75ch}.ds-step-assessment{border-top:1px solid var(--line,#dce3eb);padding-top:12px}.ds-step-assessment strong{font-size:.8rem;color:var(--teal,#007a70)}.ds-step-assessment p{margin-top:5px}.ds-parallel-label{padding:10px 12px;margin-bottom:8px;background:var(--soft,#edf2f7);border-radius:7px;font-size:.9rem;font-weight:600}.ds-parallel-label span{display:block;color:var(--quiet,#53657a);font-size:.8rem;font-weight:400}.ds-group-parallel{padding-inline-start:22px;border-inline-start:1px dashed var(--control-line,#8796a9)}.ds-group-parallel>.ds-journey-track>li::before{display:none}.ds-nested-journey{margin-inline-start:32px;padding-inline-start:12px;padding-bottom:12px;border-inline-start:1px solid var(--line,#dce3eb)}.ds-context{display:grid;gap:28px;min-inline-size:0;align-items:start}.ds-task-alignment{padding:24px;border-radius:12px;background:var(--soft,#edf2f7);display:grid;gap:18px}.ds-task-alignment h4{font-size:1rem;font-weight:650}.ds-alignment-exchange{display:grid;gap:22px;padding:0;margin:0;list-style:none}.ds-alignment-exchange li{display:grid;grid-template-columns:26px minmax(0,1fr);gap:12px}.ds-alignment-exchange strong{display:block;font-size:.85rem}.ds-alignment-exchange p{font-size:.9rem}.ds-alignment-exchange .ds-alignment-note{color:var(--quiet,#53657a);margin-top:7px;font-size:.85rem}.ds-alignment-message{padding-top:16px;border-top:1px solid var(--line,#dce3eb);font-size:.9rem}.ds-alignment-links{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:.85rem}.ds-alignment-links a{display:inline-flex;align-items:center;min-height:32px}.ds-observation{padding-inline:8px;display:grid;gap:10px}.ds-observation h5{font-size:1rem;font-weight:650}.ds-muted{color:var(--quiet,#53657a)}.ds-pill{display:inline-flex;align-items:center;width:fit-content;border-radius:5px;padding:3px 7px;background:var(--soft,#edf2f7);color:var(--quiet,#53657a);font-size:12px;font-weight:550;line-height:1.5}.ds-pill-green{background:#e2f1eb;color:#1d5d4b}.ds-retained{padding:16px 20px;border:1px dashed var(--control-line,#8796a9);border-radius:9px;margin-top:20px}.ds-retained-notice{padding:15px 18px;border:1px solid #b9cddd;border-radius:9px;background:#edf3f9;font-size:14px;margin-block:12px}.ds-provenance{border-top:1px solid var(--line,#dce3eb);padding-top:12px;margin-top:16px}.ds-negotiation{container:negotiation / inline-size}.ds-negotiation .ds-task-focus{padding-bottom:4px}.ds-negotiation .ds-task-objective{margin-top:12px}.ds-negotiation-layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(260px,1fr);gap:28px;align-items:start}.ds-negotiation .ds-task-alignment{position:sticky;top:20px}.ds-plan-stack{display:grid;gap:20px}@container workflow (max-width:760px){.ds-journey-layout{grid-template-columns:minmax(0,1fr)}.ds-context{grid-template-columns:repeat(2,minmax(0,1fr))}}@container workflow (max-width:500px){.ds-context{grid-template-columns:minmax(0,1fr)}.ds-plan-surface,.ds-task-alignment{padding:18px}.ds-journey-step>summary{grid-template-columns:26px minmax(0,1fr) 14px;gap:9px}.ds-journey-step .ds-step-state{grid-column:2;justify-self:start;white-space:normal}.ds-journey-step .ds-step-chevron{grid-column:3;grid-row:1}.ds-step-explanation{padding-inline-start:35px}.ds-group-parallel{padding-inline-start:12px}}@container negotiation (max-width:760px){.ds-negotiation-layout{grid-template-columns:minmax(0,1fr)}.ds-negotiation .ds-task-alignment{position:static}}@media(max-width:760px){.ds-task-outcome{padding:18px}}@media(prefers-color-scheme:dark){.ds-example{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;color-scheme:dark}.ds-task-outcome{background:#203f3a;color:#b6e7d6}.ds-stop-underway>.ds-journey-step{background:#203f3a}.ds-stop-underway>.ds-journey-step .ds-step-state,.ds-stop-completed>.ds-journey-step .ds-step-state{background:#254846;color:#b9eee5}.ds-stop-attention>.ds-journey-step .ds-step-state,.ds-mark-attention{background:#4c3a1c;color:#f4d699;border-color:#f4d699}.ds-mark-underway{outline-color:#315c55}.ds-mark-completed{color:#152032}.ds-pill-green{background:#203f3a;color:#b6e7d6}.ds-retained-notice{background:#263b53;border-color:#537190}}@media(prefers-reduced-motion:no-preference){.ds-step-mark{transition:background-color 180ms ease-out,border-color 180ms ease-out}.ds-example a{transition:border-color 140ms ease-out}}@media(forced-colors:active){.ds-step-mark{border-color:CanvasText}.ds-mark-underway{outline-color:Highlight}.ds-step-state,.ds-pill{border:1px solid CanvasText}}"
+    },
+    {
+      "name": "Plan and agreement workspace",
       "kind": "card",
-      "refersTo": "panel",
-      "description": "Flat bordered surface; nested panels become separated sections.",
-      "html": "<section class=\"ds-panel\"><h3>Supervisor conversation</h3><p class=\"ds-panel-muted\">Conversation and model details</p></section>",
-      "css": ".ds-panel{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-panel{padding: 24px; border: 1px solid var(--line, #dce3eb); border-radius: var(--radius, 12px); background: var(--surface, #fff);}.ds-panel .ds-panel{padding: 16px 0; border: 0; border-top: 1px solid var(--line, #dce3eb); border-radius: 0;}@media (prefers-color-scheme: dark){.ds-panel{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}.ds-panel{display:grid;gap:20px;} .ds-panel h3{margin:0;font-size:17px;font-weight:650;line-height:1.4;} .ds-panel p{margin:0;overflow-wrap:anywhere;} .ds-panel-muted{color:var(--quiet, #53657a);} @media(max-width:760px){.ds-panel{padding:19px;}}"
-    },
-    {
-      "name": "Attention row",
-      "kind": "custom",
-      "refersTo": "attention-list",
-      "description": "A linked attention reason in one amber-bordered list.",
-      "html": "<div class=\"ds-attention-list\"><a class=\"ds-attention-row\" href=\"#conversation\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" focusable=\"false\"><path d=\"M12 3 2 21h20Z M12 9v5 M12 17v1\"/></svg><div><strong>Needs attention</strong><p>Supervision has an uncertain operation.</p></div><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" focusable=\"false\"><path d=\"M5 12h14 m-6-6 6 6-6 6\"/></svg></a></div>",
-      "css": ".ds-attention-list{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-attention-list{border: 1px solid #dac697; border-radius: 12px; overflow: hidden; background: var(--surface, #fff);}.ds-attention-row{display: flex; align-items: center; gap: 15px; padding: 17px 20px; color: var(--ink, #202c3c); text-decoration: none;}.ds-attention-row:not(:last-child){border-bottom: 1px solid var(--line, #dce3eb);}.ds-attention-row > svg:first-child{color: #8b5712; flex-shrink: 0;}.ds-attention-row > svg:last-child{margin-left: auto; flex-shrink: 0;}.ds-attention-row p{margin: 3px 0 0; font-size: 14px;}.ds-attention-row:hover{background: #fff9ec;}@media (max-width: 760px){.ds-attention-row{padding: 16px; gap: 10px;}}@media (max-width: 760px){.ds-attention-row > svg:first-child{display: none;}}@media (prefers-color-scheme: dark){.ds-attention-list{border-color: #7d6945;}}@media (prefers-color-scheme: dark){.ds-attention-row:hover{background: #35404c;}}@media (prefers-color-scheme: dark){.ds-attention-list{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}.ds-attention-row:focus-visible{outline:3px solid var(--blue, #215eb2);outline-offset:3px;} .ds-attention-row strong,.ds-attention-row p{overflow-wrap:anywhere;} @media(prefers-color-scheme:dark){.ds-attention-row>svg:first-child{color:#f4cf8b;}} @media(forced-colors:active){.ds-attention-list{border:1px solid CanvasText;}} @media(prefers-reduced-motion:no-preference){.ds-attention-row{transition:border-color 140ms ease-out;}}"
-    },
-    {
-      "name": "Task path",
-      "kind": "custom",
-      "refersTo": "task-path",
-      "description": "Task, agreement and assessment records in three stages that stack on mobile.",
-      "html": "<ol class=\"ds-task-path\" aria-label=\"Task, agreement and assessment\"><li><strong>Task interpretation</strong><span>Interpreted</span></li><li><strong>Plan agreement</strong><span>Awaiting acceptance</span></li><li><strong>Supervisor assessment</strong><span>Underway</span></li></ol>",
-      "css": ".ds-task-path{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink, #202c3c);font-size:15px;line-height:1.55;color-scheme:light;}.ds-task-path{display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); list-style: none; padding: 0; margin: 24px 0 0; background: var(--soft, #edf2f7); border-radius: 9px;}.ds-task-path li{padding: 14px 18px;}.ds-task-path li:not(:last-child){border-right: 1px solid var(--line, #dce3eb);}.ds-task-path strong{display: block; margin-bottom: 4px; font-size: 13px;}.ds-task-path span{font-size: 13px; color: var(--quiet, #53657a);}@media (max-width: 760px){.ds-task-path{grid-template-columns: minmax(0, 1fr);}}@media (max-width: 760px){.ds-task-path li{padding: 12px 15px;}}@media (max-width: 760px){.ds-task-path li:not(:last-child){border: 0; border-bottom: 1px solid var(--line, #dce3eb);}}@media (prefers-color-scheme: dark){.ds-task-path{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--canvas:#152032;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;--rail:#182138;color-scheme:dark;}}.ds-task-path li{overflow-wrap:anywhere;}"
+      "refersTo": "task-alignment",
+      "description": "Static negotiation fixture: task meaning first, agreed plan left and actual attributed alignment right. Separate proposed and historical disclosures use contextual labels without execution completion marks.",
+      "html": "<section class=\"ds-example\"><div class=\"ds-negotiation\"><div class=\"ds-task-focus\"><h3>Plan and agreement</h3><p class=\"ds-task-objective\">Fixture: stop duplicate order-confirmation emails when a payment webhook retries.</p></div><div class=\"ds-negotiation-layout\"><div class=\"ds-plan-stack\"><h5>Agreed workflow</h5><div class=\"ds-plan-surface\"><h6>Agreed plan</h6><ol class=\"ds-journey-track\" role=\"list\" aria-label=\"Plan sequence\"><li><div class=\"ds-journey-stop ds-stop-planned\"><details class=\"ds-journey-step\"><summary><span class=\"ds-step-mark ds-mark-planned\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></svg></span><span class=\"ds-step-name\">Reproduce the duplicate email</span><span class=\"ds-step-state\">In agreed plan</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Example plan commitment.</p></div></details></div></li><li><div class=\"ds-journey-stop ds-stop-planned\"><details class=\"ds-journey-step\"><summary><span class=\"ds-step-mark ds-mark-planned\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></svg></span><span class=\"ds-step-name\">Make the send idempotent</span><span class=\"ds-step-state\">In agreed plan</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Example plan commitment.</p></div></details></div></li><li><div class=\"ds-journey-stop ds-stop-planned\"><details class=\"ds-journey-step\"><summary><span class=\"ds-step-mark ds-mark-planned\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></svg></span><span class=\"ds-step-name\">Run the retry tests</span><span class=\"ds-step-state\">In agreed plan</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Example plan commitment.</p></div></details></div></li></ol></div><details><summary>Definitions and plan provenance</summary><p>Definition status, requirements and full source structure are disclosed here.</p></details><details><summary>Current workflow draft: example context</summary><div class=\"ds-plan-surface\"><h6>Current plan</h6><ol class=\"ds-journey-track\" role=\"list\" aria-label=\"Plan sequence\"><li><div class=\"ds-journey-stop ds-stop-proposed\"><details class=\"ds-journey-step\"><summary><span class=\"ds-step-mark ds-mark-proposed\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></svg></span><span class=\"ds-step-name\">Reproduce the duplicate email</span><span class=\"ds-step-state\">Proposed</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Example plan commitment.</p></div></details></div></li><li><div class=\"ds-journey-stop ds-stop-proposed\"><details class=\"ds-journey-step\"><summary><span class=\"ds-step-mark ds-mark-proposed\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></svg></span><span class=\"ds-step-name\">Make the send idempotent</span><span class=\"ds-step-state\">Proposed</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Example plan commitment.</p></div></details></div></li><li><div class=\"ds-journey-stop ds-stop-proposed\"><details class=\"ds-journey-step\"><summary><span class=\"ds-step-mark ds-mark-proposed\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></svg></span><span class=\"ds-step-name\">Run the retry tests</span><span class=\"ds-step-state\">Proposed</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Example plan commitment.</p></div></details></div></li></ol></div></details><details><summary>Previous agreement: example context</summary><p class=\"ds-muted\">This earlier agreement is history.</p><div class=\"ds-plan-surface\"><h6>Plan in this historical agreement</h6><ol class=\"ds-journey-track\" role=\"list\" aria-label=\"Plan sequence\"><li><div class=\"ds-journey-stop ds-stop-planned\"><details class=\"ds-journey-step\"><summary><span class=\"ds-step-mark ds-mark-planned\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></svg></span><span class=\"ds-step-name\">Reproduce the duplicate email</span><span class=\"ds-step-state\">In earlier plan</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Example plan commitment.</p></div></details></div></li><li><div class=\"ds-journey-stop ds-stop-planned\"><details class=\"ds-journey-step\"><summary><span class=\"ds-step-mark ds-mark-planned\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></svg></span><span class=\"ds-step-name\">Make the send idempotent</span><span class=\"ds-step-state\">In earlier plan</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Example plan commitment.</p></div></details></div></li><li><div class=\"ds-journey-stop ds-stop-planned\"><details class=\"ds-journey-step\"><summary><span class=\"ds-step-mark ds-mark-planned\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></svg></span><span class=\"ds-step-name\">Run the retry tests</span><span class=\"ds-step-state\">In earlier plan</span><svg class=\"ds-step-chevron\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"m7 5 5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg></summary><div class=\"ds-step-explanation\"><p>Example plan commitment.</p></div></details></div></li></ol></div></details><p class=\"ds-muted\">These commitments are agreed. Execution assessments appear in Overview.</p></div><section class=\"ds-task-alignment\"><div class=\"ds-row\"><h4>Agent and Supervisor</h4><span class=\"ds-pill ds-pill-green\">Plan agreed</span></div><ol class=\"ds-alignment-exchange\" role=\"list\"><li><span class=\"ds-step-mark ds-mark-completed\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m5 10 3 3 7-7\"/></svg></span><div><strong>Supervisor</strong><p>Prepared the plan</p><p class=\"ds-alignment-note\">Fixture: reproduce the issue, guard the send path and verify retries.</p></div></li><li><span class=\"ds-step-mark ds-mark-completed\" aria-hidden=\"true\"><svg viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m5 10 3 3 7-7\"/></svg></span><div><strong>Agent</strong><p>Accepted this plan</p></div></li></ol><p class=\"ds-alignment-message\">Fixture: the agent and Supervisor agreed to the current proposal.</p><div class=\"ds-alignment-links\"><a href=\"#supervisor\">Open Supervisor</a><a href=\"#agent\">Open agent conversation</a></div><details><summary>Agreement record</summary><p>Example record: proposal, acceptance time and message provenance.</p></details></section></div></div></section>",
+      "css": ".ds-example{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;color:var(--ink,#202c3c);font-size:15px;line-height:1.55;container:workflow / inline-size}.ds-example h3,.ds-example h4,.ds-example h5,.ds-example h6,.ds-example p{margin:0}.ds-example h4,.ds-example h5,.ds-example h6{font-size:15px;font-weight:650;line-height:1.55}.ds-nested-journey .ds-journey-track{margin-top:0}.ds-example p,.ds-step-name,.ds-example a{overflow-wrap:anywhere}.ds-example a{color:var(--blue,#215eb2);text-underline-offset:3px}.ds-example :focus-visible{outline:3px solid var(--blue,#215eb2);outline-offset:3px}.ds-example summary{cursor:pointer;min-height:44px;padding-block:10px;font-size:14px;font-weight:550}.ds-example details[open]>summary{margin-bottom:12px}.ds-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.ds-task-focus{display:grid;gap:16px;padding:8px 0 24px}.ds-task-focus h3{font-size:17px;line-height:1.4;font-weight:650}.ds-task-objective{font-size:clamp(1.35rem,1rem + 1cqi,1.8rem);line-height:1.35;font-weight:650;max-width:64ch;text-wrap:pretty}.ds-task-outcome{display:flex;align-items:flex-start;gap:16px;padding:20px 24px;border-radius:12px;background:#e2f1eb;color:#1d5d4b}.ds-task-outcome strong{display:block;font-size:1.15rem;line-height:1.4}.ds-task-outcome p{margin-top:5px;max-width:72ch}.ds-task-outcome>.ds-step-mark{width:34px;height:34px;margin-top:2px}.ds-task-reading{display:flex;justify-content:space-between;gap:12px 24px;flex-wrap:wrap;color:var(--quiet,#53657a);font-size:.85rem}.ds-journey-layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(260px,1fr);gap:24px;align-items:start;margin-top:12px}.ds-plan-surface{min-inline-size:0;padding:24px;border:1px solid var(--line,#dce3eb);border-radius:12px;background:var(--surface,#fff)}.ds-plan-surface h5,.ds-plan-surface h6{font-size:1.05rem;font-weight:650;line-height:1.55}.ds-journey-track{list-style:none;padding:0;margin:20px 0 0}.ds-journey-track>li{position:relative;padding-bottom:6px}.ds-journey-track>li::before{content:\"\";position:absolute;inset-inline-start:12px;inset-block:24px -4px;width:2px;background:var(--line,#dce3eb)}.ds-journey-track>li:last-child::before{display:none}.ds-journey-stop{position:relative}.ds-journey-step{border-radius:9px}.ds-journey-step>summary{display:grid;grid-template-columns:26px minmax(0,1fr) auto 14px;align-items:start;gap:12px;padding:14px 8px 14px 0;list-style:none;min-height:56px;border-radius:8px}.ds-journey-step>summary::-webkit-details-marker{display:none}.ds-journey-step>summary:hover{background:var(--soft,#edf2f7)}.ds-step-name{font-weight:600;line-height:1.5}.ds-step-name small{display:block;font-size:13px;line-height:1.5;font-weight:400;color:var(--quiet,#53657a)}.ds-step-mark{position:relative;z-index:1;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;inline-size:26px;block-size:26px;border:2px solid var(--control-line,#8796a9);border-radius:50%;background:var(--surface,#fff);color:var(--quiet,#53657a)}.ds-step-mark svg{width:100%;height:100%}.ds-mark-completed{background:var(--teal,#007a70);border-color:var(--teal,#007a70);color:var(--surface,#fff)}.ds-mark-underway{color:var(--teal,#007a70);border-color:var(--teal,#007a70);outline:4px solid #bce7df;outline-offset:2px}.ds-mark-proposed{border-style:dashed}.ds-mark-attention{border-color:#99631b;color:#7b4b0d;background:#fcf0d9;border-radius:6px}.ds-step-state{font-size:.75rem;font-weight:600;color:var(--quiet,#53657a);padding:3px 7px;background:var(--soft,#edf2f7);border-radius:5px;white-space:nowrap}.ds-stop-underway>.ds-journey-step{background:#e4f3f0}.ds-stop-underway>.ds-journey-step>summary{padding-inline-start:6px}.ds-stop-underway>.ds-journey-step .ds-step-state{background:#c8e8e0;color:#125d58}.ds-stop-completed>.ds-journey-step .ds-step-state{background:#e2f1eb;color:#1d5d4b}.ds-stop-attention>.ds-journey-step .ds-step-state{background:#fcf0d9;color:#7b4b0d}.ds-step-chevron{width:14px;height:20px;margin-top:3px;color:var(--quiet,#53657a)}.ds-journey-step[open]>summary .ds-step-chevron{transform:rotate(90deg)}.ds-step-explanation{display:grid;gap:14px;padding:0 16px 20px 44px;font-size:.9rem;max-width:75ch}.ds-step-assessment{border-top:1px solid var(--line,#dce3eb);padding-top:12px}.ds-step-assessment strong{font-size:.8rem;color:var(--teal,#007a70)}.ds-step-assessment p{margin-top:5px}.ds-parallel-label{padding:10px 12px;margin-bottom:8px;background:var(--soft,#edf2f7);border-radius:7px;font-size:.9rem;font-weight:600}.ds-parallel-label span{display:block;color:var(--quiet,#53657a);font-size:.8rem;font-weight:400}.ds-group-parallel{padding-inline-start:22px;border-inline-start:1px dashed var(--control-line,#8796a9)}.ds-group-parallel>.ds-journey-track>li::before{display:none}.ds-nested-journey{margin-inline-start:32px;padding-inline-start:12px;padding-bottom:12px;border-inline-start:1px solid var(--line,#dce3eb)}.ds-context{display:grid;gap:28px;min-inline-size:0;align-items:start}.ds-task-alignment{padding:24px;border-radius:12px;background:var(--soft,#edf2f7);display:grid;gap:18px}.ds-task-alignment h4{font-size:1rem;font-weight:650}.ds-alignment-exchange{display:grid;gap:22px;padding:0;margin:0;list-style:none}.ds-alignment-exchange li{display:grid;grid-template-columns:26px minmax(0,1fr);gap:12px}.ds-alignment-exchange strong{display:block;font-size:.85rem}.ds-alignment-exchange p{font-size:.9rem}.ds-alignment-exchange .ds-alignment-note{color:var(--quiet,#53657a);margin-top:7px;font-size:.85rem}.ds-alignment-message{padding-top:16px;border-top:1px solid var(--line,#dce3eb);font-size:.9rem}.ds-alignment-links{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:.85rem}.ds-alignment-links a{display:inline-flex;align-items:center;min-height:32px}.ds-observation{padding-inline:8px;display:grid;gap:10px}.ds-observation h5{font-size:1rem;font-weight:650}.ds-muted{color:var(--quiet,#53657a)}.ds-pill{display:inline-flex;align-items:center;width:fit-content;border-radius:5px;padding:3px 7px;background:var(--soft,#edf2f7);color:var(--quiet,#53657a);font-size:12px;font-weight:550;line-height:1.5}.ds-pill-green{background:#e2f1eb;color:#1d5d4b}.ds-retained{padding:16px 20px;border:1px dashed var(--control-line,#8796a9);border-radius:9px;margin-top:20px}.ds-retained-notice{padding:15px 18px;border:1px solid #b9cddd;border-radius:9px;background:#edf3f9;font-size:14px;margin-block:12px}.ds-provenance{border-top:1px solid var(--line,#dce3eb);padding-top:12px;margin-top:16px}.ds-negotiation{container:negotiation / inline-size}.ds-negotiation .ds-task-focus{padding-bottom:4px}.ds-negotiation .ds-task-objective{margin-top:12px}.ds-negotiation-layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(260px,1fr);gap:28px;align-items:start}.ds-negotiation .ds-task-alignment{position:sticky;top:20px}.ds-plan-stack{display:grid;gap:20px}@container workflow (max-width:760px){.ds-journey-layout{grid-template-columns:minmax(0,1fr)}.ds-context{grid-template-columns:repeat(2,minmax(0,1fr))}}@container workflow (max-width:500px){.ds-context{grid-template-columns:minmax(0,1fr)}.ds-plan-surface,.ds-task-alignment{padding:18px}.ds-journey-step>summary{grid-template-columns:26px minmax(0,1fr) 14px;gap:9px}.ds-journey-step .ds-step-state{grid-column:2;justify-self:start;white-space:normal}.ds-journey-step .ds-step-chevron{grid-column:3;grid-row:1}.ds-step-explanation{padding-inline-start:35px}.ds-group-parallel{padding-inline-start:12px}}@container negotiation (max-width:760px){.ds-negotiation-layout{grid-template-columns:minmax(0,1fr)}.ds-negotiation .ds-task-alignment{position:static}}@media(max-width:760px){.ds-task-outcome{padding:18px}}@media(prefers-color-scheme:dark){.ds-example{--ink:#e6edf6;--quiet:#adbed1;--surface:#1d293a;--line:#3c4c60;--soft:#29384c;--blue:#a0c4ff;--control-line:#7e91ac;--teal:#73dbcb;color-scheme:dark}.ds-task-outcome{background:#203f3a;color:#b6e7d6}.ds-stop-underway>.ds-journey-step{background:#203f3a}.ds-stop-underway>.ds-journey-step .ds-step-state,.ds-stop-completed>.ds-journey-step .ds-step-state{background:#254846;color:#b9eee5}.ds-stop-attention>.ds-journey-step .ds-step-state,.ds-mark-attention{background:#4c3a1c;color:#f4d699;border-color:#f4d699}.ds-mark-underway{outline-color:#315c55}.ds-mark-completed{color:#152032}.ds-pill-green{background:#203f3a;color:#b6e7d6}.ds-retained-notice{background:#263b53;border-color:#537190}}@media(prefers-reduced-motion:no-preference){.ds-step-mark{transition:background-color 180ms ease-out,border-color 180ms ease-out}.ds-example a{transition:border-color 140ms ease-out}}@media(forced-colors:active){.ds-step-mark{border-color:CanvasText}.ds-mark-underway{outline-color:Highlight}.ds-step-state,.ds-pill{border:1px solid CanvasText}}"
     }
   ],
   "narrative": {
     "northStar": "Transport Interchange Wayfinding",
-    "overview": "Transport interchange wayfinding gives Supervisor a stable midnight-indigo navigation field and clear work surfaces. Teal marks the selected route; action blue identifies links, controls and keyboard focus. The personality comes from aligned information, restrained geometry and readable operational type.\n\nThe workspace is compact without compressing the meaning of work. Objectives, supervision, native activity and read times have separate places. Borders and tonal insets organize detail; the same structure changes into stacked reading on narrow screens and follows the system color preference.",
+    "overview": "Transport interchange wayfinding gives Supervisor a stable midnight-indigo navigation field and clear work surfaces. Teal marks the selected route; action blue identifies links, controls and keyboard focus. The personality comes from aligned information, restrained geometry and readable operational type.\n\nThe workspace is compact without compressing the meaning of work. A task statement, semantic outcome, connected workflow and actual plan alignment each have a distinct reading role. Native activity, Supervisor assessment and agreement remain separate facts. Borders and tonal insets organize detail; narrow containers stack the same content and follow the system color preference. This is an extension of the existing Operate system, with the existing application mark and source assets unchanged.\n\nThis record is extracted from the current local UI source, with retained fixture captures as supporting visual evidence. The surface direction contract owns the page strategy and online pattern references. No new visual-world seed was rolled for this extension; the inherited seed is not verified provenance, and no approved raster comp or new raster is involved. Shared review paths can be overwritten by later recaptures; this document does not establish their freshness, installed behavior or deployment status.",
     "keyCharacteristics": [
       "A persistent indigo navigation field beside a quiet work canvas.",
       "Aligned rows and explicit text labels for state, scope and freshness.",
+      "Connected, collapsible workflow branches with a named current step.",
+      "A separate agreement region and clearly disclosed retained history.",
       "Blue actions, teal selection and semantic amber/red attention.",
       "Flat bordered surfaces, modest corners and minimal motion."
     ],
@@ -385,7 +549,7 @@
       },
       {
         "name": "The State Needs Words Rule",
-        "body": "Pair every status color or activity dot with text. Amber and red describe an actual issue or state, and native activity remains separate from supervision and assessment.",
+        "body": "Pair every status color or activity dot with text. Amber and red describe an actual issue, state or explicit disable action; native activity remains separate from supervision and assessment.",
         "section": "colors"
       },
       {
@@ -397,18 +561,31 @@
         "name": "The Single Boundary Rule",
         "body": "Give a work surface one quiet border. Inside an existing panel, separate sections with rules and spacing instead of another rounded card.",
         "section": "elevation"
+      },
+      {
+        "name": "The Topology Before Totals Rule",
+        "body": "Preserve sequence, parallel and nested workflow boundaries, and keep parent assessment independent from child completion.",
+        "section": "components"
+      },
+      {
+        "name": "The Current Task Rule",
+        "body": "Bind current outcome and alignment to the selected task; retain unrelated workflow records as explicitly labeled history without presenting their agreement as the current task's agreement.",
+        "section": "components"
       }
     ],
     "dos": [
       "Do preserve the indigo navigation field and the distinction between canvas, work surface and tonal inset in both color schemes.",
       "Do keep state labels, native activity, read times and uncertainty readable together.",
+      "Do preserve full workflow topology, explicit proposal/agreed/historical contexts and the distinction between current-task alignment and retained history.",
+      "Do lead with task meaning and a named semantic outcome before exposing provenance.",
       "Do use visible keyboard focus, labeled controls and the existing narrow-screen reflow.",
       "Do draw icons as consistent stroked SVG and keep monospace for literal technical content."
     ],
     "donts": [
       "Don't use amber or red as decoration, or let a color alone communicate status.",
       "Don't add decorative shadows, gradients or nested rounded cards to the flat work surfaces.",
-      "Don't turn the task interpretation, agreement and assessment path into a percentage-complete indicator.",
+      "Don't infer completed work from an accepted plan, a completed child, quiet native activity or an assessed-step count.",
+      "Don't repeat project navigation inside the conversation navigation or expose checkout selection outside Definitions.",
       "Don't reuse the sign-in display scale for workspace labels."
     ]
   }

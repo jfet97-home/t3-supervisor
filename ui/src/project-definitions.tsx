@@ -90,7 +90,7 @@ function EffectiveConfiguration({definitions}: {definitions: ProjectDefinitionSn
   const config = definitions.config;
   const required = requiredReferences(config);
   return <section className="stack" aria-labelledby="effective-config-title">
-    <div><h3 id="effective-config-title">Effective requirements <span className="muted">({required.length} references)</span></h3>
+    <div><h3 id="effective-config-title">Effective requirements <span className="muted">({required.length} {required.length === 1 ? "reference" : "references"})</span></h3>
       <p className="muted">This view combines the selected checkout with enabled global definitions. The project editor below changes only the checkout's project.yaml.</p></div>
     {required.length === 0
       ? <p className="panel muted">{readable ? "No effective required references are configured." : "No readable required references are available. Invalid or incomplete source may contain additional requirements."}</p>
@@ -116,8 +116,8 @@ function DefinitionCatalog({kind, definitions}: {kind: "workflows" | "steps"; de
     {entries.map(entry => {
       const step = kind === "steps" ? definitions.steps.find(item => item.id === entry.id && item.origin === entry.origin) : undefined;
       const workflow = kind === "workflows" ? definitions.workflows.find(item => item.id === entry.id && item.origin === entry.origin) : undefined;
-      return <div className="panel stack" key={`${entry.origin}:${entry.id}`}>
-        <div className="row between"><h4 className="definition-path"><code>{entry.sourceId}</code></h4><div className="row">
+      return <div className="definition-index-row stack" key={`${entry.origin}:${entry.id}`}>
+        <div className="row between"><h4 className="definition-path">{step?.name ?? workflow?.name ?? entry.sourceId}</h4><div className="row">
           <span className="muted small">{entry.origin === "global" ? "Global · read-only" : "Project"}</span>
           <span className={`pill ${entry.required ? "blue" : ""}`}>{entry.required ? "Required" : "Optional"}</span>
           {workflow?.fixed && <span className="pill blue">Fixed</span>}
@@ -148,8 +148,8 @@ export function DefinitionsContent({definitions}: {definitions: ProjectDefinitio
       {definitions.workspaceRoot && <p className="muted definition-path">Working checkout: <code>{definitions.workspaceRoot}</code></p>}
       {definitions.workspaceRoot && !definitions.globalOnly && <p className="muted definition-path">Project source: <code>{definitions.workspaceRoot}/.t3-supervisor</code></p>}
       {definitions.globalOnly && <p>Global-only scope. Project editing does not write global definitions.</p>}
-      <p>Start with <code>project.yaml</code>, the index of all reusable definitions in this checkout, then read relevant full definitions. Enabled global definitions use the same layout and their origin is shown with each item.</p>
-      <p className="muted">The index inventories reusable files; task plans can add local steps and new combinations while preserving required and fixed commitments.</p>
+      <details><summary>How these definitions are used</summary><p>Start with <code>project.yaml</code>, the index of all reusable definitions in this checkout, then read relevant full definitions. Enabled global definitions use the same layout and their origin is shown with each item.</p>
+      <p className="muted">The index inventories reusable files; task plans can add local steps and new combinations while preserving required and fixed commitments.</p></details>
       {definitions.status === "missing" && <p>No definitions were found in the selected scope. The expected layout is <code>.t3-supervisor/project.yaml</code>, <code>steps/</code> and <code>workflows/</code>. A missing scope does not establish that another enabled scope is empty.</p>}
       {definitions.status === "invalid" && <p>This collection has invalid files or references. Readable definitions are shown below, but an invalid or incomplete collection never means requirements are absent.</p>}
       {!definitions.complete && <p>The read was incomplete. The items shown may be only part of the requirements; resolve the access or source issues and refresh.</p>}
@@ -355,14 +355,14 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
       </div>
       {!data.projects.some(project => project.title.toLowerCase().includes(projectQuery.toLowerCase())) && <p className="empty-state muted">{projectQuery ? "No projects match your search." : "No T3 projects are available. Add a project in T3 to begin."}</p>}
     </div>
-    <div hidden={!inWorkspace} className="stack">
-      <div className="page-heading"><RouteLink to={directoryRoute} navigate={navigate} className="back-link">Projects / {selectedProject?.title ?? "Unavailable project"}</RouteLink><div className="row between"><div><h1>{threadId && ["progress", "plan", "supervision"].includes(route.section) ? threads.find(thread => thread.id === threadId)?.title ?? "Unavailable conversation" : selectedProject?.title ?? "Unavailable project"}</h1>{threadId && ["progress", "plan", "supervision"].includes(route.section) && <p className="muted small">Main conversation · {selectedProject?.title}</p>}</div>{threadId && ["progress", "plan", "supervision"].includes(route.section) && <a className="button-link" href={`t3-thread://v1/${threadId}`}><Icon name="external" size={16}/>Open in T3</a>}</div></div>
-      <nav className="project-nav" aria-label="Project sections">
+    <div hidden={!inWorkspace} className={`stack ${threadId && ["progress", "plan", "supervision"].includes(route.section) ? "conversation-workspace" : ""}`}>
+      <div className="page-heading"><nav className="workspace-breadcrumb" aria-label="Workspace breadcrumb"><RouteLink to={directoryRoute} navigate={navigate}>Projects</RouteLink><span aria-hidden="true">/</span><RouteLink to={{...workspaceRoute, main: null, section: "conversations"}} navigate={navigate}>{selectedProject?.title ?? "Unavailable project"}</RouteLink>{threadId && ["progress", "plan", "supervision"].includes(route.section) && <span className="muted">/ Conversation</span>}</nav><div className="row between"><div><h1>{threadId && ["progress", "plan", "supervision"].includes(route.section) ? threads.find(thread => thread.id === threadId)?.title ?? "Unavailable conversation" : selectedProject?.title ?? "Unavailable project"}</h1>{threadId && ["progress", "plan", "supervision"].includes(route.section) && <p className="muted small">Main conversation · {selectedProject?.title}</p>}</div>{threadId && ["progress", "plan", "supervision"].includes(route.section) && <a className="button-link" href={`t3-thread://v1/${threadId}`}><Icon name="external" size={16}/>Open in T3</a>}</div></div>
+      <nav className="project-nav" aria-label="Project sections" hidden={Boolean(threadId && ["progress", "plan", "supervision"].includes(route.section))}>
         <RouteLink to={{...workspaceRoute, section: "conversations"}} navigate={navigate} aria-current={["progress", "plan", "supervision", "conversations"].includes(route.section) ? "page" : undefined}>Conversations</RouteLink>
         <RouteLink to={{...workspaceRoute, section: "definitions"}} navigate={navigate} aria-current={route.section === "definitions" ? "page" : undefined}>Definitions</RouteLink>
         <RouteLink to={{...workspaceRoute, section: "settings"}} navigate={navigate} aria-current={route.section === "settings" ? "page" : undefined}>Project settings</RouteLink>
       </nav>
-      <details className="context-switcher" hidden={route.section === "settings" || route.section === "conversations" || route.main === null && route.section !== "definitions"} open={route.section === "definitions"}><summary>{route.section === "definitions" ? "Definitions checkout" : "Switch conversation or inspect checkout"}</summary><div className="context-bar stack">
+      <details className="context-switcher" hidden={route.section !== "definitions"}><summary>{route.section === "definitions" ? "Definitions checkout" : "Switch conversation or inspect checkout"}</summary><div className="context-bar stack">
         <div className="definition-controls">
           <label className="context-project" htmlFor="definition-project">Project<select id="definition-project" value={selection.projectId} disabled={saving} onChange={event => navigate(openProject(event.target.value))}>
             {!projectId && <option value={selection.projectId}>Project unavailable</option>}{projects.map(project => <option key={project.id} value={project.id}>{project.title}</option>)}

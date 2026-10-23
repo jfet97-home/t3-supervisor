@@ -1,6 +1,7 @@
+import {activityTitle} from "./activity-presentation.js";
 import {NoProjectPanel, StartSupervisionPanel, useChatCandidates} from "./no-project.js";
 import { SessionAccess } from "./access.js";
-import { useEffect, useState, useRef } from "react";
+import { Fragment, useEffect, useState, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import {
   RegistryProvider,
@@ -205,10 +206,10 @@ const labels: Record<string, string> = {
 const label = (value: string) => labels[value] ?? value.replaceAll("_", " ");
 function History({
   items,
-  title,
+  title, data, navigate,
 }: {
   items: ReadonlyArray<GuidanceActivity>;
-  title: string;
+  title: string; data: GuidanceSnapshot; navigate: (route: Route) => void;
 }) {
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<GuidanceActivity | null>(null);
@@ -232,26 +233,14 @@ function History({
         </label>
       </div>
       <div className="panel audit">
-        {items
-          .filter((item) =>
-            JSON.stringify(item).toLowerCase().includes(filter.toLowerCase()),
-          )
-          .map((item) => (
-            <article key={item.id}>
-              <div>
-                <div className="row">
-                  <strong>{label(item.kind)}</strong>
-                  <span className="pill">{label(item.state)}</span>
-                </div>
-                <p>{label(item.reason)}</p>
-                <small className="muted">
-                  {new Date(item.createdAt).toLocaleString()} ·{" "}
-                  {item.threadId ?? "Supervisor"}
-                </small>
-              </div>
-              <button onClick={() => inspect(item)}>Inspect</button>
-            </article>
-          ))}
+        {[...items].filter(item => JSON.stringify(item).toLowerCase().includes(filter.toLowerCase())).sort((a, b) => b.createdAt - a.createdAt).map((item, index, rows) => {
+          const thread = data.threads.find(thread => thread.id === item.threadId);
+          const day = new Date(item.createdAt).toLocaleDateString();
+          return <Fragment key={item.id}>
+            {(index === 0 || new Date(rows[index - 1]!.createdAt).toLocaleDateString() !== day) && <h2 className="activity-day">{day}</h2>}
+            <article><div><strong>{activityTitle(item)}</strong><p>{thread?.projectId ? <RouteLink to={{...directoryRoute, projectId: thread.projectId, main: thread.id}} navigate={navigate}>{thread.title}</RouteLink> : "Supervisor"}</p><small className="muted"><time dateTime={new Date(item.createdAt).toISOString()}>{new Date(item.createdAt).toLocaleTimeString()}</time></small></div><button type="button" onClick={() => inspect(item)}>Inspect</button></article>
+          </Fragment>;
+        })}
         {!items.some(item => JSON.stringify(item).toLowerCase().includes(filter.toLowerCase())) && (
           <p className="muted">{items.length ? "No activity matches this filter." : "No retained activity yet."}</p>
         )}
@@ -348,7 +337,7 @@ function ChatSettings({ data, onDirtyChange }: { data: GuidanceSnapshot; onDirty
   return <form className="panel stack" method="post" onSubmit={event => {
     event.preventDefault(); save(form);
   }}>
-    <h2>Chat settings</h2>
+    <h2>Chat exclusions</h2>
     <p>Saved for this Supervisor instance. Changes apply without restarting.</p>
     <fieldset><legend>Excluded chats</legend>
       <p>Project Supervisors skip excluded chats. Existing project, workflow and conversation state is retained.</p>
@@ -371,7 +360,7 @@ function Settings({data, active, onDirtyChange}: {data: GuidanceSnapshot; active
   const [definitionsActivity, setDefinitionsActivity] = useState(idleControlActivity);
   const [noProjectActivity, setNoProjectActivity] = useState(idleControlActivity);
   useEffect(() => onDirtyChange(noProjectActivity.busy || noProjectActivity.dirty || noProjectActivity.uncertain || chatDirty || masterActivity.busy || masterActivity.uncertain || definitionsActivity.busy || definitionsActivity.uncertain), [noProjectActivity, chatDirty, masterActivity, definitionsActivity, onDirtyChange]);
-  return <section className="stack settings-workspace"><div className="page-heading"><h1>Instance settings</h1><p className="muted">Controls shared across this Supervisor installation. Project defaults live with each project.</p></div><SupervisionControlPanel active={active} onStateChange={setMasterActivity} onChanged={() => setControlRevision(value => value + 1)} /><NoProjectPanel active={active} onStateChange={setNoProjectActivity}/><GlobalDefinitionsControlPanel active={active} refreshKey={controlRevision} onStateChange={setDefinitionsActivity}/><ChatSettings data={data} onDirtyChange={setChatDirty}/>
+  return <section className="stack settings-workspace"><div className="page-heading"><h1>Instance settings</h1><p className="muted">Controls shared across this Supervisor installation. Project defaults live with each project.</p><p className="connection-summary"><span className={`dot ${data.connected ? "online" : ""}`}/>{data.connected ? "T3 connected" : "T3 disconnected"}</p></div><section className="settings-group stack"><h2>Where supervision runs</h2><SupervisionControlPanel active={active} onStateChange={setMasterActivity} onChanged={() => setControlRevision(value => value + 1)} /><NoProjectPanel active={active} onStateChange={setNoProjectActivity}/><GlobalDefinitionsControlPanel active={active} refreshKey={controlRevision} onStateChange={setDefinitionsActivity}/></section><section className="settings-group stack"><h2>Exceptions for individual chats</h2><ChatSettings data={data} onDirtyChange={setChatDirty}/></section>
     <div className="panel stack"><h2>T3 connection</h2><p>{data.connected ? "Connected" : "Disconnected"} · Build: {data.serverVersion ?? "Unavailable"}</p><p>{data.coverage}</p>
       <details><summary>Advanced connection and editing details</summary><div className="stack"><h3>Project configuration editing</h3><p>Configure a dedicated credential with filesystem:read and filesystem:write at T3_PROJECT_WRITE_TOKEN_FILE through deployment setup. The editor writes only .t3-supervisor/project.yaml in the selected working directory. Step and workflow definitions are read-only in the dashboard.</p>
       <p>Native dialogue can record plan proposals and agreement; those records do not prove step execution.</p></div></details>
@@ -446,7 +435,7 @@ function Dashboard({onSignedOut}: {onSignedOut: () => void}) {
         <div hidden={view !== "home"}><Home data={data} overview={overview} navigate={navigate} startPanel={<StartSupervisionPanel active={view === "home"} onStateChange={setStartPending} onChanged={refresh}/>}/></div>
         <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} overview={overview} route={route} navigate={navigate} guard={guard} onDirtyChange={setProjectDirty} onDraftTargetChange={setProjectDraftTarget}/></div>
         {view === "guide" && <StepsAndWorkflowsGuide />}
-        {view === "activity" && <History items={data.activity} title="Supervision activity" />}
+        {view === "activity" && <History items={data.activity} title="Supervision activity" data={data} navigate={navigate} />}
         {settingsOpened && <div hidden={view !== "settings"}><Settings data={data} active={view === "settings"} onDirtyChange={setSettingsDirty}/></div>}
       </main>
       <footer><span>Supervisor</span><span>Native activity · agreed plans · assessed progress</span></footer>

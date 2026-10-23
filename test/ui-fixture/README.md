@@ -12,24 +12,13 @@ session, setting and mutation in memory. It writes no files. Every response carr
 
 ## Assets
 
-The assets must be the compiled `ui/` of `3b8129a`. In this tree `ui/`, `src/`,
-`vite.config.ts`, `package.json` and `package-lock.json` are unchanged from `3b8129a`,
-so either build them here or copy the deployed `ui-dist/` from the native host:
+Build the current checkout with its lockfile dependencies and pass that `ui-dist/`
+directory to the fixture. The fixture serves those files unchanged and prints their
+SHA256 hashes at startup. Compare that manifest with the revision being reviewed;
+do not reuse hashes from a previous UI build.
 
 ```sh
-npm ci && npm run build          # writes ui-dist/ (and dist/); neither is committed
-```
-
-The local build (Node 24.22.1, lockfile dependencies) produced these files. The fixture
-prints the same list with sha256 at startup, so it can be compared with the deployed files:
-
-```text
-e2b26ff22b851bd982c06e57e852aac2571139edc948c623144e78d65fa4aaf5     50117  app-icon.png
-5c81923629f6ca4e9988c0153b7f23cfab36bf48fb6140094349a258fd7272ee     22912  assets/index-CNGMgSGC.css
-188e1b821e49ebf1633f8a0bfef51a70d2f16ddb43a41d9902091701eac36b35    618784  assets/index-D4cd0v1Y.js
-c772744b0ed2f00528ed65c44eb44c257b476d40c940bd8da85836a698d476d5      5461  favicon.png
-840636218bf63313562d548ccfe240d892d9e2a75b66f1b11194de4cce9c1161       498  index.html
-a00960958af01d4675a4d255a94f3bfbe842098a6cdbf8b853377f4c8e688fa1   1130323  supervisor-icon.png
+npm ci && npm run build
 ```
 
 Compare the files on disk. The baseline server adds a per-response script nonce to
@@ -62,8 +51,12 @@ baseline single-use behaviour. The session is a random 43-character value kept i
 | `fixture-project-b` "Fixture project B (setup)", `fixture-thread-b1` | disabled, folder missing: Enable gives `setup_required` and two checkouts (`/fixture/project-b` on `main`, Git; `/fixture/project-b-worktree`, not Git) |
 | `fixture-no-project` "Fixture No Project", `fixture-thread-n1`, `fixture-thread-n2` | No Project mode `on_request`; Start candidates on Home |
 
-Global supervision is on and global definitions are off. Workflow progress is an empty
-`ok` page. Synthetic text starts with "Fixture" or "Fixture:".
+Global supervision is on and global definitions are off. The baseline has an empty
+`ok` workflow page. The `journey-*` scenarios replace chat A1's task with a synthetic
+duplicate-email example using the production proposal, agreement and progress schemas.
+They cover request, proposal, agreement, work, completion, attention, stale agreement,
+and a nested/parallel plan with more than eight steps. Synthetic text starts with
+"Fixture" or "Fixture:". These scenes record no actual work or native messages.
 
 ### Environments
 
