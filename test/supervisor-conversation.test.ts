@@ -869,7 +869,7 @@ it.effect("an oversized stale-agreement recovery is visible without a definition
   const task = yield* installNestedCatalog(fixture);
   yield* appendNoticeForTask(fixture, task, fixture.operative);
   yield* fixture.projectStore.saveTask({...task, agreement: {status: "stale", message: "Earlier evidence is no longer current.", proposalId: "earlier",
-    agreedAt: clock.now, supervisorMessageId: "earlier-root", agentMessageId: "earlier-main", workflow: task.workflow!}});
+    agreedAt: clock.now, evidence: {kind: "supervisor_message", messageId: "earlier-root"}, agentMessageId: "earlier-main", workflow: task.workflow!}});
   fixture.setDefinitions({...task.definitionSnapshot!, revision: "changed-large-catalog", sources: task.definitionSnapshot!.sources.map(source =>
     ({...source, content: `${source.content}\n# ${"Full changed source material. ".repeat(400)}`}))});
   yield* fixture.run();
@@ -2493,7 +2493,7 @@ it.effect("an exact null-plan initial echo confirms provisional introduction and
   const updated = yield* fixture.projectStore.task(freshTask.threadId);
   assert.equal(updated?.agreement?.status, "agreed");
   assert.equal(updated?.agreement?.proposalId, proposalId);
-  assert.equal(updated?.agreement?.supervisorMessageId, supervisorProposal.message.id);
+  assert.deepEqual(updated?.agreement?.evidence, {kind: "supervisor_message", messageId: supervisorProposal.message.id});
   assert.equal(updated?.agreement?.agentMessageId, acceptance.id);
   assert.equal((yield* fixture.conversation.requests.agreementCandidate(freshTask.id, proposalId))?.workflow.plan !== null, true);
 }));
@@ -2571,7 +2571,9 @@ it.effect("a restarted source run still gets its introduction in two startup cyc
   assert.equal(agreed?.status, "agreed");
   assert.equal(agreed?.proposalId, fixture.task.id);
   assert.equal((yield* fixture.conversation.requests.agreementCandidate(fixture.task.id, fixture.task.id))?.evidence.kind, "interpretation_submission");
-  assert.equal(agreed?.supervisorMessageId, fixture.task.messageId, "a submission-based agreement cites the interpretation request its run answered");
+  const {evidence: submitted} = recordedSubmission(fixture, task);
+  assert.deepEqual(agreed?.evidence, {kind: "interpretation_submission", taskId: fixture.task.id, attemptId: submitted.attemptId, itemId: submitted.itemId,
+    runId: submitted.runId, argumentsHash: submitted.argumentsHash}, "a submission-based agreement names the recorded submission its run made");
   assert.ok(agreed?.agentMessageId);
   const workflowState = yield* fixture.workflows.get(projectId, operativeThreadId);
   assert.ok(workflowState);
@@ -5101,7 +5103,7 @@ it.effect("a full-format record is exempt from the compact-protocol diagnostic o
   const clock = {now: baseTime};
   const fixture = yield* makeFixture(clock);
   const task = {...fixture.task, agreement: {status: "stale" as const, message: "Retained agreement", proposalId: "retained-agreed", agreedAt: clock.now,
-    supervisorMessageId: "original-evidence", agentMessageId: "original-acceptance", workflow: fixture.task.workflow!}};
+    evidence: {kind: "supervisor_message" as const, messageId: "original-evidence"}, agentMessageId: "original-acceptance", workflow: fixture.task.workflow!}};
   const exact = workflowRecord(task, "retained-agreed");
   yield* fixture.conversation.requests.saveAgreementCandidate({taskId: task.id, projectId, proposalId: "retained-agreed", planHash: workflowAgreementPlanHash(parseWorkflowAgreementRecord(exact, task.id, task.definitionContext!)!),
     workflow: task.workflow!, evidence: {kind: "supervisor_message", messageId: "original-evidence", runId: "old-run", runOrdinal: 1, textHash: "original-text-hash"}, proposedAt: clock.now - 1});
@@ -5252,8 +5254,10 @@ it.effect("CT-ISUB-16: agreement on a recorded submission goes stale when its na
     yield* observeAgreement(fixture, clock.now + 30_000);
     const agreed = (yield* fixture.projectStore.task(fixture.task.threadId))?.agreement;
     assert.equal(agreed?.status, "agreed", variant);
-    assert.equal(agreed?.supervisorMessageId, fixture.task.messageId, "the agreement cites the interpretation request the submission answered");
     const submission = recordedSubmission(fixture);
+    assert.deepEqual(agreed?.evidence, {kind: "interpretation_submission", taskId: fixture.task.id, attemptId: submission.evidence.attemptId,
+      itemId: submission.evidence.itemId, runId: submission.evidence.runId, argumentsHash: submission.evidence.argumentsHash},
+      "the agreement names the recorded submission it rests on");
     // a changed snapshot whose detail cannot be read is no evidence either way
     submission.item.updatedAt = iso(clock.now + 1);
     fixture.setItemReadFailure(true);
@@ -5337,7 +5341,7 @@ it.effect("cut-over evidence: a converted answer message stays current by its un
   yield* observeAgreement(fixture, clock.now + 30_000);
   const agreed = (yield* fixture.projectStore.task(fixture.task.threadId))?.agreement;
   assert.equal(agreed?.status, "agreed");
-  assert.equal(agreed?.supervisorMessageId, answer.id, "a message-based agreement cites its proposal message");
+  assert.deepEqual(agreed?.evidence, {kind: "supervisor_message", messageId: answer.id}, "a message-based agreement names its proposal message");
   answer.text = "A legacy answer, edited.";
   yield* observeAgreement(fixture, clock.now + 60_000);
   assert.equal((yield* fixture.projectStore.task(fixture.task.threadId))?.agreement?.status, "stale", "a changed converted answer is no longer evidence");
