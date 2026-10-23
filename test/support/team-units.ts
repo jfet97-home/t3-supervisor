@@ -502,7 +502,9 @@ export const buildProjectSupervisor = (input: {services: SupervisionUnitContext;
 // when given, is the run's policy store in place of the stores' own, and `scope` the scope they live in (else the test process)
 export const supervisionServices = (input: {config: SupervisorConfig; store: Promised<ProjectSupervisorStore["Service"]>; operate: NativeRpcShape | null;
   t3: T3ClientShape; definitions?: ProjectDefinitions["Service"] | undefined; fetch?: typeof globalThis.fetch | undefined;
-  policy?: ThreadPolicyStore["Service"] | undefined; scope?: Scope.Scope | undefined}) => {
+  policy?: ThreadPolicyStore["Service"] | undefined; scope?: Scope.Scope | undefined;
+  // the read credential's native reads the conversation uses (an interpretation submission's item detail), as the root provides them
+  read?: NativeRpcShape | undefined}) => {
   const built = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>): A => input.scope ? Effect.runSync(Scope.provide(input.scope)(effect)) : build(effect);
   const {policy, definitions} = input;
   const scope = new SupervisionScope(input.config, scopeStores(input.store, policy), input.operate !== null);
@@ -512,6 +514,7 @@ export const supervisionServices = (input: {config: SupervisorConfig; store: Pro
     (context) => policy ? Context.add(context, ThreadPolicyStore, policy) : context);
   const team = built(supervisorTeamServices(input.config.t3Url).pipe(
     (effect) => input.operate ? Effect.provideService(effect, NativeOperateRpc, input.operate) : effect,
+    (effect) => input.read ? Effect.provideService(effect, NativeRpc, input.read) : effect,
     (effect) => definitions ? Effect.provideService(effect, ProjectDefinitions, definitions) : effect,
     Effect.provideService(T3Client, input.t3),
     Effect.provide(FetchHttpClient.layer),
@@ -532,7 +535,8 @@ export const projectSupervisorUnit = (config: SupervisorConfig, store: Promised<
   activationSnapshot: (signal: AbortSignal) => Promise<SupervisorBaseline>, definitions?: ProjectSupervisorUnitDefinitions,
   now?: () => number, options: {locks?: (locks: ScopeLocksShape) => ScopeLocksShape; policy?: ThreadPolicyStore["Service"]} = {}): ProjectSupervisorUnit => {
   const operate = operateRpc ? operateClient(operateRpc) : null;
-  const {scope, services} = supervisionServices({config, store, operate, policy: options.policy,
+  const read = operateClient(readRpc);
+  const {scope, services} = supervisionServices({config, store, operate, policy: options.policy, read,
     definitions: definitions && definitionsService(definitions),
     t3: {descriptor: () => Effect.die(new Error("unused")), watch: () => Effect.die(new Error("unused")), projection: (threadId) => Effect.suspend(() => t3.projection(threadId))}});
   const built = buildProjectSupervisor({services, source, t3, read: operateClient(readRpc), shell: activationShell(activationSnapshot), definitions,

@@ -337,16 +337,15 @@ const makeFixture = async (initialDefinitions: ProjectDefinitionSnapshot = defin
 };
 
 type WorkflowFixture = Awaited<ReturnType<typeof makeFixture>>;
-// the root's typed submission (its executed tool item in the request run, through the write controller) and the run's completion;
-// the run's final chat text repeats the fields only as the conversation's final-answer proposal evidence, which moves to the
-// recorded submission with the conversation's evidence switch; the interpretation itself never reads it
+// the root's typed submission (its executed tool item in the request run, through the write controller) and the run's completion with
+// a final chat answer in prose, which neither the interpretation nor its proposal evidence reads
 const submitAndComplete = async (fixture: WorkflowFixture, supervisor: {workflowStates: Parameters<typeof interpretationSubmitter>[0]["workflows"]} | null,
   task: TaskRecord, fields: Record<string, unknown>) => {
   const workflows = (supervisor ?? fixture.makeSupervisor()).workflowStates;
   const submitted = await interpretationSubmitter({supervisors: fixture.store, workflows, projections: fixture.projections})
     .submit(task, submissionArguments(task, fields));
   assert.equal(submitted.status, "submitted", JSON.stringify(submitted));
-  completeSupervisorRequest(fixture.projections.get(task.supervisorThreadId)!, task.messageId, JSON.stringify(fields));
+  completeSupervisorRequest(fixture.projections.get(task.supervisorThreadId)!, task.messageId, "I submitted the interpretation through the tool.");
 };
 
 it("dispatch uses complete definitions from the operative source worktree", async (t) => {
@@ -692,7 +691,6 @@ it("a link-only request stays context for the next genuine request instead of be
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const first = (await fixture.task())!;
-  const native = fixture.projections.get((await fixture.binding())!.threadId)!;
   await submitAndComplete(fixture, supervisor, first, {objective: null, reason: "Only an issue link was supplied.", sourceMessageIds: [],
     supervision: "needed", workflow: null});
   await supervisor.runOnce();
@@ -717,7 +715,6 @@ it("a semantic not-needed decision is persisted without negotiation and the next
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const first = (await fixture.task())!;
-  const native = fixture.projections.get((await fixture.binding())!.threadId)!;
   await submitAndComplete(fixture, supervisor, first, {objective: "Thank the colleague and ask for the missing document",
     reason: "A short self-contained message with no workflow obligations.", sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null});
   await supervisor.runOnce();
@@ -745,7 +742,6 @@ it("after an explicit Enable only a request written after it is interpreted", as
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const first = (await fixture.task())!;
-  const native = fixture.projections.get((await fixture.binding())!.threadId)!;
   await submitAndComplete(fixture, supervisor, first, {objective: "Thank the colleague and ask for the missing document",
     reason: "A short self-contained message with no workflow obligations.", sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null});
   await supervisor.runOnce();
@@ -893,7 +889,6 @@ it("the interpretation request carries the concise standing role once, permits r
   assert.match(submission, /supervision_interpretation_submit/u);
   assert.ok(submission.length < 1000, `submission block ${submission.length} characters`);
   assert.ok(text.length - submission.length < 5000, `interpretation request ${text.length - submission.length} characters without the submission block`);
-  const native = fixture.projections.get((await fixture.binding())!.threadId)!;
   await submitAndComplete(fixture, supervisor, task, workflowFields(sourceMessageId));
   await supervisor.runOnce();
   assert.equal((await fixture.binding())!.deliveredRoleVersion, task.roleVersion, "the completed interpretation delivered the standing role");
@@ -922,7 +917,6 @@ it("an Enable or re-enable saved during the final awaits leaves the request undi
     const supervisor = fixture.makeSupervisor();
     await supervisor.runOnce();
     const first = (await fixture.task())!;
-    const native = fixture.projections.get((await fixture.binding())!.threadId)!;
     await submitAndComplete(fixture, supervisor, first, workflowFields(sourceMessageId));
     const internal = supervisor as unknown as {definitions: {load: (...args: unknown[]) => Promise<unknown>}};
     const stores = serviceOf(supervisor.store);
@@ -953,7 +947,6 @@ it("an earlier unresolved request carries forward only from the current supervis
   const supervisor = fixture.makeSupervisor();
   await supervisor.runOnce();
   const first = (await fixture.task())!;
-  const native = fixture.projections.get((await fixture.binding())!.threadId)!;
   await submitAndComplete(fixture, supervisor, first, {objective: null, reason: "Only an issue link was supplied.", sourceMessageIds: [],
     supervision: "needed", workflow: null});
   await supervisor.runOnce();

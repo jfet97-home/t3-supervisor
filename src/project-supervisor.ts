@@ -15,8 +15,8 @@ import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, Proj
 import { prepareWorkflowRequest } from "./supervisor-workflow.js";
 import { interpretationChecks, interpretationSubmissionEvidence, readInterpretationReceipt, taskPendingStart, taskReceiptOwner, workflowWriteReceiptsTable,
   type InterpretationReceipt } from "./interpretation-intake.js";
-import { interpretationAttemptId, interpretationAttemptKey, interpretationSourcePin, retainedInterpretationAttempt, sameInterpretationAttemptKey,
-  verifyInterpretationProof, type InterpretationAttempt, type InterpretationProofVerdict } from "./interpretation-submission.js";
+import { interpretationAttemptId, interpretationAttemptKey, interpretationSourcePin, interpretationTextHash, retainedInterpretationAttempt,
+  sameInterpretationAttemptKey, verifyInterpretationProof, type InterpretationAttempt, type InterpretationProofVerdict } from "./interpretation-submission.js";
 import { InterpretationWake, type InterpretationWakeScope } from "./interpretation-wake.js";
 import { logEvent } from "./logging.js";
 import { ProjectDefinitions, type DefinitionCheckoutTarget, type DefinitionCheckoutUnavailable, type DefinitionPresence, type DefinitionSourceFailure, type ProjectDefinitionGlobalSetupOutcome,
@@ -1090,6 +1090,9 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
             reason: stopped ? "Supervision was stopped for this chat before dispatch; this task identity remains unsent." : "Supervision was disabled before dispatch; this task identity remains queued.", updatedAt: now()});
           return {_tag: "Answer", value: undefined};
         }
+        // only a typed request whose attempt pins exactly this message and text is ever sent; a legacy request text never is
+        if (!job.attempt || job.attempt.key.requestMessageId !== job.messageId || job.attempt.key.requestTextHash !== interpretationTextHash(job.requestText))
+          return {_tag: "Answer", value: undefined};
         if (fresh && (yield* beforeBoundary(job, fresh.source))) {yield* complete(job, "expired", null, enabledAgainReason);return {_tag: "Answer", value: undefined};}
         // the classification writes are plain statements of the in-flight operation; a failed one is its defect, as a thrown write was
         const uncertain = () => store.saveTask({...job, status: "uncertain", reason: "Interpretation dispatch is uncertain; retry native access to reconcile the original request identity.", updatedAt: now()}).pipe(Effect.orDie);
@@ -1254,8 +1257,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         return yield* transaction(Effect.gen(function* (): Effect.fn.Return<TaskRecord["status"], SupervisionStoreError> {
           const start = yield* store.start(finished.threadId);
           const pendingStart = start?.status === "pending" && start.taskId === finished.id ? start : null;
-          // the applied submission is the task's interpretation evidence
-          const applied: TaskRecord = {...finished, interpretationEvidence: interpretationSubmissionEvidence(receipt)};
+          // every applied submission is the task's interpretation evidence, pinned to its attempt, source and applied workflow
+          const applied: TaskRecord = {...finished, interpretationEvidence: interpretationSubmissionEvidence({...finished, attempt: retained.attempt!}, receipt)};
           // a negative verdict activates nothing
           if (payload.kind === "start_rejected") {
             if (pendingStart) yield* control.rejectStart(pendingStart, "The original human message did not request supervision.");
@@ -1379,7 +1382,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       return false;
     }));
     if (closed) return;
-    if (job.definitionContext == null) {
+    // a task prepared without a typed attempt (never dispatched under the old prompt) is prepared again; its stored text is never sent
+    if (job.definitionContext == null || !job.attempt || job.attempt.key.requestMessageId !== job.messageId) {
       const queued = job;
       const loaded = definitions ? yield* attempt(definitions.load(queued.projectId, queued.threadId)) : {ok: true as const, value: unavailableDefinitions(queued)};
       const owner = binding;

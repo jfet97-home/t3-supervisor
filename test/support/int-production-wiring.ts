@@ -77,12 +77,12 @@ export const openIntSupervision = async (input: {directory: string; peerUrl: str
   const scope = Effect.runSync(Scope.make());
   const operate = Effect.runSync(NativeRpc.make({baseUrl: config.t3Url, token: operateToken}).pipe(Effect.provide(NativeEnvelope.layer)));
   const withDefinitions = <A, E, R>(effect: Effect.Effect<A, E, R>) => input.definitions ? Effect.provideService(effect, ProjectDefinitions, definitionsService(input.definitions)) : effect;
-  const {scope: supervisorScope, services: runServices} = supervisionServices({config, store, operate, t3, scope, fetch: input.fetch,
+  // the read credential's native reads: the conversation's item details, the workflow controllers' proof and scope, the shell boundary
+  const nativeRead = Effect.runSync(NativeRpc.make({baseUrl: config.t3Url, token: readToken}).pipe(Effect.provide(NativeEnvelope.layer)));
+  const {scope: supervisorScope, services: runServices} = supervisionServices({config, store, operate, t3, scope, fetch: input.fetch, read: nativeRead,
     definitions: input.definitions && definitionsService(input.definitions)});
   // the run's interpretation wake, as supervision-live.ts builds it before the controllers (which signal it) and the supervisor (which serves it)
   const services = Context.add(runServices, InterpretationWake, Effect.runSync(InterpretationWake.make));
-  // the read credential's native reads, the shell boundary and the workflow controllers' proof and scope
-  const nativeRead = Effect.runSync(NativeRpc.make({baseUrl: config.t3Url, token: readToken}).pipe(Effect.provide(NativeEnvelope.layer)));
   const nativeShell = Effect.runSync(NativeShell.make({baseUrl: config.t3Url, token: readToken}).pipe(
     Effect.provideService(NativeRpc, nativeRead), Effect.provide(FetchHttpClient.layer)));
   const built = buildProjectSupervisor({services, source, t3, read: nativeRead, shell: nativeShell, operate, definitions: input.definitions,

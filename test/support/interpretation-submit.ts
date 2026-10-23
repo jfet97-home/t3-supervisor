@@ -68,10 +68,12 @@ export const installSubmission = (root: Projection, task: TaskRecord, args: Reco
   root.nodes = nodes;
   nodes.push({id: nodeId, kind: "dynamic_tool", threadId: root.thread.id, runId: run.id, rootNodeId: run.rootNodeId, parentNodeId: run.rootNodeId,
     providerThreadId: run.providerThreadId, status: options.nodeStatus ?? status});
-  const item = {id: itemId, type: "dynamic_tool", threadId: root.thread.id, runId: run.id, nodeId, providerThreadId: run.providerThreadId,
-    parentItemId: null, ordinal: 500 + byItem.size, status, toolName, input};
-  root.turnItems = [...(root.turnItems ?? []), item];
-  byItem.set(itemId, {...item, nativeItemRef: {driver: "codex", nativeId: `native-${itemId}`, strength: "strong"}, toolNonExecutionKind: null});
+  // the projection's turn item carries the complete detail, so a reader serving details from the projection answers it as well
+  const detail: Record<string, unknown> = {id: itemId, type: "dynamic_tool", threadId: root.thread.id, runId: run.id, nodeId, providerThreadId: run.providerThreadId,
+    parentItemId: null, ordinal: 500 + byItem.size, status, toolName, input, nativeItemRef: {driver: "codex", nativeId: `native-${itemId}`, strength: "strong"},
+    toolNonExecutionKind: null};
+  root.turnItems = [...(root.turnItems ?? []), detail as NonNullable<Projection["turnItems"]>[number]];
+  byItem.set(itemId, detail);
   return itemId;
 };
 
@@ -80,8 +82,6 @@ export const setSubmissionStatus = (root: Projection, itemId: string, status: "r
   const detail = details.get(root)?.get(itemId);
   assert.ok(detail, "a recorded submission item");
   detail.status = status;
-  const item = (root.turnItems ?? []).find(value => value.id === itemId);
-  if (item) item.status = status;
   const node = (Array.isArray(root.nodes) ? root.nodes as Array<Record<string, unknown>> : []).find(value => value.id === detail.nodeId);
   if (node) node.status = nodeStatus;
 };

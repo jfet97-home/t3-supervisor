@@ -9,6 +9,7 @@ import {
   InterpretationAttemptKey,
   interpretationAttemptGate,
   InterpretationPayload,
+  interpretationSourcePin,
   InterpretationProofReference,
   type InterpretationAttempt,
   type InterpretationEnvelope,
@@ -99,14 +100,11 @@ export const rawInterpretationArguments = (raw: unknown, withDefinitions: boolea
   return {ok: true, raw, canonical, hash: workflowRequestHash(raw)};
 };
 
-// the plan digest an applied submission's evidence carries: none for a bare Start, a not-needed result or a submission without a workflow
-export const submissionPlanDigest = (payload: InterpretationPayload): string | null =>
-  payload.kind === "interpretation" && payload.workflow && payload.supervision !== "not_needed" ? interpretationPlanDigest(payload.workflow) : null;
-
-// the evidence a finalized submission leaves on its task (TaskRecord.interpretationEvidence)
-export const interpretationSubmissionEvidence = (receipt: InterpretationReceipt): InterpretationSubmissionEvidence => ({
-  kind: "interpretation_submission", taskId: receipt.attempt.taskId, attemptId: receipt.attemptId, itemId: receipt.proof.itemId,
-  runId: receipt.proof.runId, argumentsHash: receipt.argumentsHash, sourcePin: receipt.attempt.source, planDigest: submissionPlanDigest(receipt.payload),
+// the evidence every applied submission leaves on its task (TaskRecord.interpretationEvidence), pinned to what the task then holds:
+// its attempt, its source revision and the digest of the workflow it applied (null without one)
+export const interpretationSubmissionEvidence = (task: TaskRecord & {readonly attempt: InterpretationAttempt}, receipt: InterpretationReceipt): InterpretationSubmissionEvidence => ({
+  kind: "interpretation_submission", taskId: task.id, attemptId: task.attempt.attemptId, itemId: receipt.proof.itemId, runId: receipt.proof.runId,
+  argumentsHash: receipt.argumentsHash, sourcePin: interpretationSourcePin(task), planDigest: interpretationPlanDigest(task.workflow ?? null),
 });
 
 // whether a Start is the task's own pending one: its task ID and pinned source revision
