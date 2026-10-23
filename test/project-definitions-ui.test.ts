@@ -1,26 +1,22 @@
 import assert from "node:assert/strict";
-import { afterAll, beforeAll, it } from "vitest";
+import { beforeAll, it } from "@effect/vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Effect } from "effect";
-import { FetchHttpClient } from "effect/http";
+import { Effect, Fiber } from "effect";
 import { DefinitionsContent } from "../ui/src/project-definitions.js";
 import { ProjectCatalogFields, ProjectConfigurationEditor } from "../ui/src/project-configuration-editor.js";
 import { loadProjectDefinitions } from "../ui/src/project-definitions-api.js";
 import { ProjectConfigRequestError, saveProjectConfiguration } from "../ui/src/project-definitions-api.js";
 import { normalizeProjectConfiguration, projectConfigurationError, type ProjectConfigSave, type ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import type { SessionAccess } from "../ui/src/access.js";
-import type { ApiClient } from "../ui/src/api.js";
-import { clearAccess, loadAccess, pageContext } from "./support/ui-run.js";
+import { SessionAccess } from "../ui/src/access.js";
+import { installGlobal, rejects } from "./support/g7-page.js";
+import { keepGlobals, pageLayer } from "./support/g7-runtime.js";
 
 // the client helpers are effects on the dashboard page runtime; its requests resolve their paths against the page origin
-// and, as the baseline helpers did, call the fetch installed when they are sent
-const onPage = <A, E>(effect: Effect.Effect<A, E, ApiClient | SessionAccess>, signal?: AbortSignal) =>
-  Effect.runPromise(effect.pipe(Effect.provide(pageContext()), Effect.provideService(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init))),
-    signal ? {signal} : undefined);
+// and, as the baseline helpers did, call the fetch installed when they are sent. the client tests wait only for the
+// stubbed fetch, so they are it.effect; the rendering tests are plain synchronous tests
 const pageOrigin = "http://supervisor.test";
-beforeAll(() => {Object.defineProperty(globalThis, "location", {configurable: true, writable: true, value: {origin: pageOrigin, pathname: "/"}});});
-afterAll(() => {Reflect.deleteProperty(globalThis, "location");});
+beforeAll(() => installGlobal("location", {origin: pageOrigin, pathname: "/"}));
 
 // presents a request of the effect http client in the call shape of the baseline fetch helpers: a same-origin request as
 // its path, the request headers by name and the encoded body as text
@@ -219,77 +215,72 @@ it("editor shared validation enforces summary and canonical path boundaries with
   assert.equal("required" in valid, false);
 });
 
-it("definition client reads the selected configuration scope and rejects mismatched snapshots", async () => {
-  const previous = globalThis.fetch;
-  const controller = new AbortController();
-  try {
-    let seen = "";
-    globalThis.fetch = async (input, init) => {
-      seen = String(input);
-      assert.ok(init?.signal instanceof AbortSignal);
-      assert.equal(init?.credentials, "omit");
-      return new Response(JSON.stringify({...definitions, projectId: "project & other", threadId: "thread?#"}), {status: 200});
-    };
-    const result = await onPage(loadProjectDefinitions("project & other", "thread?#"), controller.signal);
-    assert.equal(result.threadId, "thread?#");
-    const query = new URL(seen, "http://localhost").searchParams;
-    assert.equal(new URL(seen, "http://localhost").pathname, "/api/guidance/project-configuration");
-    assert.equal(query.get("projectId"), "project & other");
-    assert.equal(query.get("threadId"), "thread?#");
-    globalThis.fetch = async () => new Response(JSON.stringify({...definitions, projectId: "wrong"}));
-    await assert.rejects(onPage(loadProjectDefinitions("project", null), controller.signal));
-    globalThis.fetch = async () => new Response(JSON.stringify({status: "ready"}));
-    await assert.rejects(onPage(loadProjectDefinitions("project", null), controller.signal));
-    globalThis.fetch = async () => new Response(JSON.stringify(definitions));
-    controller.abort();
-    await assert.rejects(onPage(loadProjectDefinitions("project", null), controller.signal));
-  } finally {globalThis.fetch = previous;}
-});
+it.effect("definition client reads the selected configuration scope and rejects mismatched snapshots", () => Effect.gen(function* () {
+  yield* keepGlobals(["fetch"]);
+  let seen = "";
+  globalThis.fetch = async (input, init) => {
+    seen = String(input);
+    assert.ok(init?.signal instanceof AbortSignal);
+    assert.equal(init?.credentials, "omit");
+    return new Response(JSON.stringify({...definitions, projectId: "project & other", threadId: "thread?#"}), {status: 200});
+  };
+  const result = yield* loadProjectDefinitions("project & other", "thread?#");
+  assert.equal(result.threadId, "thread?#");
+  const query = new URL(seen, "http://localhost").searchParams;
+  assert.equal(new URL(seen, "http://localhost").pathname, "/api/guidance/project-configuration");
+  assert.equal(query.get("projectId"), "project & other");
+  assert.equal(query.get("threadId"), "thread?#");
+  globalThis.fetch = async () => new Response(JSON.stringify({...definitions, projectId: "wrong"}));
+  yield* rejects(loadProjectDefinitions("project", null));
+  globalThis.fetch = async () => new Response(JSON.stringify({status: "ready"}));
+  yield* rejects(loadProjectDefinitions("project", null));
+  globalThis.fetch = async () => new Response(JSON.stringify(definitions));
+  // the selection is cancelled before its read runs: the read is interrupted
+  yield* rejects(Effect.forkChild(loadProjectDefinitions("project", null)).pipe(Effect.tap(Fiber.interrupt), Effect.flatMap(Fiber.join)));
+}).pipe(Effect.provide(pageLayer)));
 
-it("configuration client posts local project.yaml config and preserves the origin session header", async () => {
-  const previous = globalThis.fetch;
+it.effect("configuration client posts local project.yaml config and preserves the origin session header", () => Effect.gen(function* () {
+  yield* keepGlobals(["fetch"]);
   const input: ProjectConfigSave = {projectId: "project", threadId: null, expectedRevision: definitions.revision!, config: definitions.projectConfig!};
-  try {
-    globalThis.fetch = baselineCall(async (url, init) => {
-      assert.equal(String(url), "/api/guidance/project-configuration");
-      assert.equal(init?.method, "POST");
-      assert.equal(init?.credentials, "omit");
-      assert.equal((init?.headers as Record<string, string>)["Content-Type"], "application/json");
-      assert.deepEqual(JSON.parse(String(init?.body)), input);
-      return new Response(JSON.stringify({status: "saved", message: "Saved project.yaml.", definitions}), {status: 200});
-    });
-    const result = await onPage(saveProjectConfiguration(input));
-    assert.equal(result.status, "saved");
-    assert.equal(result.definitions?.projectId, "project");
-  } finally {globalThis.fetch = previous;}
-});
+  globalThis.fetch = baselineCall(async (url, init) => {
+    assert.equal(String(url), "/api/guidance/project-configuration");
+    assert.equal(init?.method, "POST");
+    assert.equal(init?.credentials, "omit");
+    assert.equal((init?.headers as Record<string, string>)["Content-Type"], "application/json");
+    assert.deepEqual(JSON.parse(String(init?.body)), input);
+    return new Response(JSON.stringify({status: "saved", message: "Saved project.yaml.", definitions}), {status: 200});
+  });
+  const result = yield* saveProjectConfiguration(input);
+  assert.equal(result.status, "saved");
+  assert.equal(result.definitions?.projectId, "project");
+}).pipe(Effect.provide(pageLayer)));
 
-it("a CSRF token rotated by a restart leaves the save unknown, never replays the POST, and the next explicit save uses the new token", async () => {
-  const previous = globalThis.fetch;
+it.effect("a CSRF token rotated by a restart leaves the save unknown, never replays the POST, and the next explicit save uses the new token", () => Effect.gen(function* () {
+  yield* keepGlobals(["fetch"]);
+  const access = yield* SessionAccess;
   const input: ProjectConfigSave = {projectId: "project", threadId: null, expectedRevision: definitions.revision!, config: definitions.projectConfig!};
-  clearAccess();
+  yield* access.clear();
+  yield* Effect.addFinalizer(() => access.clear());
   let currentToken = "first-session";
   let writes = 0;
-  try {
-    globalThis.fetch = async (url, init) => {
-      if (String(url) === "/api/csrf") return new Response(JSON.stringify({csrf: currentToken}));
-      writes++;
-      if ((init?.headers as Record<string, string>)["x-csrf-token"] !== currentToken) return new Response("{}", {status: 403});
-      return new Response(JSON.stringify({status: "saved", message: "Saved", definitions}), {status: 200});
-    };
-    assert.equal(await loadAccess(), true);
-    currentToken = "after-restart";
-    // target change (story03): the baseline reported this 403 as a definite no-save; a 403 for a token the process no
-    // longer issues may answer a browser resend after the first attempt applied before the restart, so it is unknown
-    await assert.rejects(onPage(saveProjectConfiguration(input)), (error: unknown) => error instanceof ProjectConfigRequestError && !error.definitelyNotSaved && /could not be confirmed/.test(error.message));
-    assert.equal(writes, 1);
-    assert.equal((await onPage(saveProjectConfiguration(input))).status, "saved");
-    assert.equal(writes, 2);
-    for (const status of [413, 415]) {
-      globalThis.fetch = async () => new Response("{}", {status});
-      await assert.rejects(onPage(saveProjectConfiguration(input)), (error: unknown) => error instanceof ProjectConfigRequestError && error.definitelyNotSaved);
-    }
-    globalThis.fetch = async () => new Response("{}", {status: 500});
-    await assert.rejects(onPage(saveProjectConfiguration(input)), (error: unknown) => error instanceof ProjectConfigRequestError && !error.definitelyNotSaved);
-  } finally {globalThis.fetch = previous;clearAccess();}
-});
+  globalThis.fetch = async (url, init) => {
+    if (String(url) === "/api/csrf") return new Response(JSON.stringify({csrf: currentToken}));
+    writes++;
+    if ((init?.headers as Record<string, string>)["x-csrf-token"] !== currentToken) return new Response("{}", {status: 403});
+    return new Response(JSON.stringify({status: "saved", message: "Saved", definitions}), {status: 200});
+  };
+  assert.equal(yield* access.load, true);
+  currentToken = "after-restart";
+  // target change (story03): the baseline reported this 403 as a definite no-save; a 403 for a token the process no
+  // longer issues may answer a browser resend after the first attempt applied before the restart, so it is unknown
+  yield* rejects(saveProjectConfiguration(input), (error: unknown) => error instanceof ProjectConfigRequestError && !error.definitelyNotSaved && /could not be confirmed/.test(error.message));
+  assert.equal(writes, 1);
+  assert.equal((yield* saveProjectConfiguration(input)).status, "saved");
+  assert.equal(writes, 2);
+  for (const status of [413, 415]) {
+    globalThis.fetch = async () => new Response("{}", {status});
+    yield* rejects(saveProjectConfiguration(input), (error: unknown) => error instanceof ProjectConfigRequestError && error.definitelyNotSaved);
+  }
+  globalThis.fetch = async () => new Response("{}", {status: 500});
+  yield* rejects(saveProjectConfiguration(input), (error: unknown) => error instanceof ProjectConfigRequestError && !error.definitelyNotSaved);
+}).pipe(Effect.provide(pageLayer)));
