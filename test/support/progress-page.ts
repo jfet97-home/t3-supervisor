@@ -19,7 +19,8 @@ export const readWorkflowProgressPage = (supervision: unknown, workflowReader: u
   const fake = supervision as SupervisionFake;
   const reader = workflowReader as ReaderFake;
   const supervisor = {
-    workflowLocator: (projectId: string, mainThreadId: string) => fake.workflowLocator(projectId, mainThreadId),
+    // the locator is the supervisor's effect; the fake answers when the reader runs it, as the baseline call did
+    workflowLocator: (projectId: string, mainThreadId: string) => Effect.sync(() => fake.workflowLocator(projectId, mainThreadId)),
     scopeSnapshot: (projectId: string, mainThreadId: string, options?: ProjectSupervisorScopeSnapshotOptions) =>
       Effect.promise((read) => fake.scopeSnapshot(projectId, mainThreadId, read, options)),
   } as unknown as ProjectSupervisor["Service"];
