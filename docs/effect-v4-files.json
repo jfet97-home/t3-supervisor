@@ -24000,9 +24000,9 @@
   }
  ],
  "completion": {
-  "scannedCommit": "30745e24eb4881aec87e874a023db17c9942557d",
-  "note": "current tracked-file inventory after SQL workers and typed monitoring; historical baseline sections remain unchanged; this record-only commit changes no executable file",
-  "generator": "retained owner scan plus explicit review of the ten added worker/outcome files and changed database boundary",
+  "scannedCommit": "bb366fd15a661bcef0907e60cc218026999480a0",
+  "note": "current tracked-file inventory after SQL workers, typed monitoring, portable references and fixture-cost repairs; historical baseline sections remain unchanged",
+  "generator": "retained owner scan plus explicit classification of worker/outcome/reference additions and the Effect SQL test-seeding helper",
   "statuses": {
    "effect": "uses Effect services, layers or effects",
    "pure": "plain calculations, types or JSX without async machinery",
@@ -25797,6 +25797,13 @@
     "reason": "access SQL child worker with declarative admission barrier",
     "facadeImports": []
    },
+   "test/support/agreement-candidates.ts": {
+    "kind": "test-fixture",
+    "baselineDisposition": null,
+    "status": "effect",
+    "reason": null,
+    "facadeImports": []
+   },
    "test/support/c1-conversation-fixture.ts": {
     "kind": "test-fixture",
     "baselineDisposition": null,
@@ -26721,7 +26728,7 @@
    "doc": 22,
    "entry": 15,
    "pure": 25,
-   "effect": 118,
+   "effect": 119,
    "adapter": 16,
    "effect-test": 139,
    "pure-test": 11,
