@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { NodeFileSystem } from "@effect/platform-node";
 import { it } from "@effect/vitest";
-import {Context, Effect, FileSystem, Layer, Redacted, Ref} from "effect";
+import {Context, Deferred, Effect, FileSystem, Fiber, Layer, Redacted, Ref} from "effect";
+import {FetchHttpClient, HttpBody, HttpClient, HttpClientRequest, type HttpClientError, type HttpClientResponse} from "effect/http";
+import {createServer} from "node:http";
 import {WebSocketServer} from "ws";
 import {NativeEnvelope} from "../src/native-envelope.js";
 import {ProjectConfigEditorService, type ProjectConfigWriter} from "../src/project-config-editor.js";
 import {ProjectDefinitions} from "../src/project-definitions.js";
-import {released} from "./support/http.js";
 import type {ProjectConfigSave} from "../src/project-definitions-contract.js";
 import {ProjectFileError, ProjectWriter} from "../src/project-files.js";
 import {forgeDashboardToken} from "../src/service-auth.js";
-import {cancelAfter} from "./support/g5a-bounds.js";
+import {cancelAfter, within} from "./support/g5a-bounds.js";
 import {guidanceUi} from "./support/service-auth-harness.js";
 import type {GuidanceRuntime} from "../src/guidance.js";
 import type {SupervisorConfig} from "../src/types.js";
@@ -28,10 +29,21 @@ const seedProject = (f: ReturnType<typeof makeDefinitionFixture>, config = index
 // the definitions and the config editor over the fixture's in-memory checkout, built for the test's scope
 const services = (layer: Layer.Layer<ProjectDefinitions | ProjectConfigEditorService>) => Effect.map(Layer.build(layer),
   context => ({definitions: Context.get(context, ProjectDefinitions), editor: Context.get(context, ProjectConfigEditorService)}));
-// the dashboard's http boundary: one fetch from the suite, its json body, or the response with its body released
-const request = (url: string, init?: RequestInit) => Effect.promise(() => fetch(url, init));
-const json = <A>(response: Response) => Effect.promise(() => response.json() as Promise<A>);
-const release = (response: Response) => Effect.promise(() => released(response));
+// the dashboard's http boundary over the effect http client: each exchange owns its request in its own scope from the request
+// through the reading of its body; an interruption or a failure at any point, or the end of the exchange, aborts the request,
+// so no loopback request outlives its exchange and an unread body is released
+interface Init {readonly method?: "GET" | "POST"; readonly headers?: Record<string, string>; readonly body?: string}
+const exchange = <A>(url: string, init: Init,
+  read: (response: HttpClientResponse.HttpClientResponse) => Effect.Effect<A, HttpClientError.HttpClientError>) => Effect.scoped(Effect.gen(function* () {
+  const client = HttpClient.withScope(yield* HttpClient.HttpClient);
+  const request = HttpClientRequest.make(init.method ?? "GET")(url, {headers: init.headers ?? {},
+    ...(init.body === undefined ? {} : {body: HttpBody.text(init.body, "application/json")})});
+  return yield* read(yield* client.execute(request));
+}));
+// the status of a response whose body is released unread
+const status = (url: string, init: Init = {}) => exchange(url, init, response => Effect.succeed(response.status));
+// the status and the json body of a response
+const json = <A>(url: string, init: Init = {}) => exchange(url, init, response => Effect.map(response.json, body => ({status: response.status, body: body as A})));
 // a real loopback socket; the finalizer terminates its clients and closes it
 const loopbackServer = Effect.acquireRelease(Effect.promise(async () => {
   const listening = new WebSocketServer({host: "127.0.0.1", port: 0});
@@ -231,18 +243,18 @@ it.live("project-configuration endpoint keeps session, origin and CSRF checks", 
   assert.ok(ui.port > 0);
   const origin = `http://127.0.0.1:${ui.port}`;
   const grant = yield* forgeDashboardToken(directory).pipe(Effect.provide(NodeFileSystem.layer));
-  const login = yield* request(origin + "/auth/login", {
+  const login = yield* json<{session: string}>(origin + "/auth/login", {
     method: "POST", headers: {Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify({token: Redacted.value(grant.token)}),
   });
   assert.equal(login.status, 200);
-  const session = (yield* json<{session: string}>(login)).session;
+  const session = login.body.session;
   const headers = {"x-supervisor-session": session};
   const path = "/api/guidance/project-configuration?projectId=project";
-  assert.equal((yield* request(origin + path).pipe(Effect.flatMap(release))).status, 401);
-  assert.equal((yield* request(origin + path, {headers: {...headers, Origin: "https://foreign.invalid"}}).pipe(Effect.flatMap(release))).status, 403);
-  const observedResponse = yield* request(origin + path, {headers});
+  assert.equal(yield* status(origin + path), 401);
+  assert.equal(yield* status(origin + path, {headers: {...headers, Origin: "https://foreign.invalid"}}), 403);
+  const observedResponse = yield* json<{status: string; revision: string; projectConfig: unknown}>(origin + path, {headers});
   assert.equal(observedResponse.status, 200);
-  const observed = yield* json<{status: string; revision: string; projectConfig: unknown}>(observedResponse);
+  const observed = observedResponse.body;
   assert.equal(observed.status, "ready");
   assert.ok(observed.revision);
   // the dashboard may omit a false required flag; only the required row carries it
@@ -251,29 +263,27 @@ it.live("project-configuration endpoint keeps session, origin and CSRF checks", 
   const index = localIndex([{step: "local-step"}]);
   const payload = {projectId: "project", threadId: null, expectedRevision: observed.revision,
     config: {workflows: compactRows(index.workflows), steps: compactRows(index.steps)}};
-  const rejected = yield* request(origin + "/api/guidance/project-configuration", {
+  const rejected = yield* status(origin + "/api/guidance/project-configuration", {
     method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json"}, body: JSON.stringify(payload),
   });
-  assert.equal(rejected.status, 403);
-  yield* release(rejected);
+  assert.equal(rejected, 403);
   assert.equal(f.writes.length, 0);
-  const csrf = yield* request(origin + "/api/csrf", {headers}).pipe(Effect.flatMap(json<{csrf: string}>));
+  const csrf = (yield* json<{csrf: string}>(origin + "/api/csrf", {headers})).body;
   // legacy or unknown fields are rejected while decoding the request, before any normalization or write
   for (const config of [{...localIndex(), required: [{step: "local-step"}]}, {...localIndex(), steps: [{...localIndex().steps[0]!, extra: true}, localIndex().steps[1]!]},
     {...localIndex(), steps: [{id: "local-step", ...localIndex().steps[0]!}, localIndex().steps[1]!]}]) {
-    const strict = yield* request(origin + "/api/guidance/project-configuration", {
+    const strict = yield* status(origin + "/api/guidance/project-configuration", {
       method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf.csrf},
       body: JSON.stringify({...payload, config}),
     });
-    assert.notEqual(strict.status, 200, JSON.stringify(config));
-    yield* release(strict);
+    assert.notEqual(strict, 200, JSON.stringify(config));
     assert.equal(f.writes.length, 0, "nothing is written for a request with an unknown field");
   }
-  const saved = yield* request(origin + "/api/guidance/project-configuration", {
+  const saved = yield* json<{status: string; definitions: {projectConfig: {steps: Array<{path: string; required: boolean}>; workflows: Array<{required: boolean}>}}}>(origin + "/api/guidance/project-configuration", {
     method: "POST", headers: {...headers, Origin: origin, "Content-Type": "application/json", "x-csrf-token": csrf.csrf}, body: JSON.stringify(payload),
   });
   assert.equal(saved.status, 200);
-  const savedBody = yield* json<{status: string; definitions: {projectConfig: {steps: Array<{path: string; required: boolean}>; workflows: Array<{required: boolean}>}}}>(saved);
+  const savedBody = saved.body;
   assert.equal(savedBody.status, "saved");
   assert.deepEqual(f.writes.map(write => write.path), [".t3-supervisor/project.yaml"]);
   assert.deepEqual(savedBody.definitions.projectConfig.steps.map(row => [row.path, row.required]), [["steps/local-step.md", true], ["steps/second-step.md", false]],
@@ -283,4 +293,45 @@ it.live("project-configuration endpoint keeps session, origin and CSRF checks", 
   assert.doesNotMatch(writtenIndex, /required: false/u);
   assert.equal(writtenIndex.match(/required: true/gu)?.length, 1);
   assert.doesNotMatch(writtenIndex, /\bid:/u, "the saved index is path-only");
-}));
+}).pipe(Effect.provide(FetchHttpClient.layer)));
+
+// a loopback peer that receives one request and holds it: without headers, or after the headers and an incomplete json body;
+// it reports the request's arrival and the end of its connection, and closes every connection at teardown
+const heldPeer = (hold: "headers" | "body") => Effect.gen(function* () {
+  const arrived = yield* Deferred.make<void>();
+  const closed = yield* Deferred.make<void>();
+  const server = yield* Effect.acquireRelease(Effect.promise(() => new Promise<ReturnType<typeof createServer>>(resolve => {
+    const listening = createServer((request, response) => {
+      request.socket.once("close", () => Deferred.doneUnsafe(closed, Effect.void));
+      if (hold === "body") {
+        response.writeHead(200, {"content-type": "application/json"});
+        response.write("{\"partial\":");
+      }
+      Deferred.doneUnsafe(arrived, Effect.void);
+    });
+    listening.listen(0, "127.0.0.1", () => resolve(listening));
+  })), listening => Effect.promise(() => {
+    listening.closeAllConnections();
+    return new Promise<void>(resolve => listening.close(() => resolve()));
+  }));
+  const address = server.address();
+  return {url: `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}/held`, arrived, closed};
+});
+
+it.live("A-R33-G5-01: an exchange interrupted while it waits for the response headers ends its loopback request before the peer's teardown", () => Effect.gen(function* () {
+  const peer = yield* heldPeer("headers");
+  const fiber = yield* Effect.forkChild(status(peer.url));
+  yield* within(Deferred.await(peer.arrived), 5_000, "the held request");
+  yield* Fiber.interrupt(fiber);
+  yield* within(Deferred.await(peer.closed), 2_000, "interrupting the headers adapter must close its request before server teardown");
+}).pipe(Effect.provide(FetchHttpClient.layer)));
+
+it.live("A-R33-G5-01: an exchange interrupted while it reads an incomplete json body ends its loopback request before the peer's teardown", () => Effect.gen(function* () {
+  const peer = yield* heldPeer("body");
+  // the json helper's read, entered after the headers arrived
+  const reading = yield* Deferred.make<void>();
+  const fiber = yield* Effect.forkChild(exchange(peer.url, {}, response => Effect.andThen(Deferred.succeed(reading, undefined), response.json)));
+  yield* within(Deferred.await(reading), 5_000, "the body read");
+  yield* Fiber.interrupt(fiber);
+  yield* within(Deferred.await(peer.closed), 2_000, "interrupting the body adapter must close its request before server teardown");
+}).pipe(Effect.provide(FetchHttpClient.layer)));
