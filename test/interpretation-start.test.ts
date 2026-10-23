@@ -95,3 +95,46 @@ it("CT-ISUB-07: a mode change, a later Stop or a rolled-back tool item before ac
     assert.equal(f.operativeSends().length, 0, change);
   }
 });
+
+// the final proof read awaits getTurnItem after its main snapshot. a genuine source edit inside that await is a later revision
+const editSourceAtProof = (f: InterpretationFixture, task: TaskRecord) => {
+  let changed = 0;
+  f.native.beforeTurnItem = () => {
+    if (changed++) return;
+    f.main().messages.find(message => message.id === task.sourceMessageId)!.text = "Hello, I do not request supervision.";
+  };
+  return () => changed;
+};
+
+it("SOL-R42-01: a genuine source edit during the final proof read does not activate a bare Start", {timeout: 60_000}, async (t) => {
+  const {f, task} = await pendingStart(t);
+  assert.equal((await f.submit(task, verdict(task, true))).value.status, "submitted");
+  f.endRun(task, "completed");
+  const changed = editSourceAtProof(f, task);
+  await f.runOnce();
+  assert.ok(changed() > 0, "mutation crossed actual getTurnItem boundary");
+  const closed = await f.task();
+  assert.notEqual((await f.core.store.start(f.mainThreadId))?.status, "active", "edited source must be checked after final native proof read");
+  assert.equal(closed.status, "unavailable");
+  assert.equal(closed.reason, "The task source changed before the interpretation completed.");
+  assert.equal(closed.interpretationEvidence, undefined);
+  assert.equal((await f.receipts()).length, 1, "the recorded receipt stays; nothing is resent");
+  assert.equal(f.interpretationDispatches().length, 1);
+  assert.equal(f.operativeSends().length, 0);
+});
+
+it("SOL-R42-01: a genuine source edit during the final proof read does not apply a negative Start", {timeout: 60_000}, async (t) => {
+  const {f, task} = await pendingStart(t);
+  assert.equal((await f.submit(task, verdict(task, false))).value.status, "submitted");
+  f.endRun(task, "completed");
+  const changed = editSourceAtProof(f, task);
+  await f.runOnce();
+  assert.ok(changed() > 0, "mutation crossed actual getTurnItem boundary");
+  const closed = await f.task();
+  assert.notEqual((await f.core.store.start(f.mainThreadId))?.status, "active");
+  assert.equal(closed.status, "unavailable");
+  assert.equal(closed.reason, "The task source changed before the interpretation completed.");
+  assert.equal((await f.receipts()).length, 1);
+  assert.equal(f.interpretationDispatches().length, 1);
+  assert.equal(f.operativeSends().length, 0);
+});

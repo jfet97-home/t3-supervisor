@@ -106,6 +106,37 @@ it("CT-ISUB-10: a run that does not complete discards its submission, a rolled-b
   }
 });
 
+// the final proof read awaits getTurnItem after its main snapshot. a genuine source edit inside that await is a later revision
+const editSourceAtProof = (f: InterpretationFixture, task: {sourceMessageId: string}) => {
+  let changed = 0;
+  f.native.beforeTurnItem = () => {
+    if (changed++) return;
+    f.main().messages.find(message => message.id === task.sourceMessageId)!.text = "Hello, I do not request supervision.";
+  };
+  return () => changed;
+};
+
+it("SOL-R42-01: a genuine source edit during the final proof read applies neither a needed nor a not-needed result", {timeout: 60_000}, async (t) => {
+  for (const outcome of ["needed", "not_needed"] as const) {
+    const f = await fixture(t);
+    const task = await dispatched(f);
+    const fields = outcome === "needed" ? planFields(task) : {...planFields(task), supervision: "not_needed" as const, workflow: null};
+    assert.equal((await f.submitFields(task, fields)).value.status, "submitted", outcome);
+    f.endRun(task, "completed");
+    const changed = editSourceAtProof(f, task);
+    await f.runOnce();
+    assert.ok(changed() > 0, outcome);
+    const closed = await f.task();
+    assert.equal(closed.status, "unavailable", outcome);
+    assert.equal(closed.reason, "The task source changed before the interpretation completed.", outcome);
+    assert.equal(closed.objective, null, outcome);
+    assert.equal(closed.interpretationEvidence, undefined, outcome);
+    assert.equal((await f.receipts()).length, 1, outcome);
+    assert.equal(f.interpretationDispatches().length, 1, outcome);
+    assert.equal(f.operativeSends().length, 0, outcome);
+  }
+});
+
 it("CT-ISUB-11: a restart after the commit and before the wake finalizes the recorded submission exactly once", {timeout: 60_000}, async (t) => {
   const f = await fixture(t);
   const task = await dispatched(f);

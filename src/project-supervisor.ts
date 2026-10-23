@@ -1235,8 +1235,11 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         }));
         return "unavailable";
       }
-      // from the last await, the result's authority, the boundary recheck, the Start activation and the result commit as one
-      // admission section
+      // the genuine main, read again after the final proof await: the snapshot from before that await is not the source a
+      // verified result may apply. the read stays outside the admission section
+      source = yield* projection(job.threadId);
+      // from this read, the result's authority, the boundary recheck, the source check, the Start activation and the result
+      // commit as one admission section
       const settled = source;
       const finished = job;
       return yield* admitted((guard) => Effect.gen(function* (): Effect.fn.Return<TaskRecord["status"] | null, SupervisionStoreError> {
@@ -1257,6 +1260,12 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         return yield* transaction(Effect.gen(function* (): Effect.fn.Return<TaskRecord["status"], SupervisionStoreError> {
           const start = yield* store.start(finished.threadId);
           const pendingStart = start?.status === "pending" && start.taskId === finished.id ? start : null;
+          // every outcome, including a negative start, a bare start and an ordinary needed or not-needed result, applies only
+          // while this snapshot is still the task's genuine source. a stale result closes on the existing reason and receipt
+          if (!(yield* currentSource(finished, settled))) {
+            yield* complete(finished, "unavailable", null, "The task source changed before the interpretation completed.");
+            return "unavailable";
+          }
           // every applied submission is the task's interpretation evidence, pinned to its attempt, source and applied workflow
           const applied: TaskRecord = {...finished, interpretationEvidence: interpretationSubmissionEvidence({...finished, attempt: retained.attempt!}, receipt)};
           // a negative verdict activates nothing
@@ -1264,7 +1273,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
             if (pendingStart) yield* control.rejectStart(pendingStart, "The original human message did not request supervision.");
             yield* complete(applied, "not_supervised", null, "Start was not authorized by the user.");return "not_supervised";
           }
-          if (payload.startRequested && (!pendingStart || !(yield* scope.validPendingStart(pendingStart)) || !(yield* currentSource(finished, settled)) || !(yield* control.activateStart(pendingStart)))) {
+          if (payload.startRequested && (!pendingStart || !(yield* scope.validPendingStart(pendingStart)) || !(yield* control.activateStart(pendingStart)))) {
             if (pendingStart) yield* control.rejectStart(pendingStart, "Start was superseded or could not be committed.");
             yield* complete(finished, "expired", null, "Start was not activated.");return "expired";
           }
