@@ -1,22 +1,29 @@
 import assert from "node:assert/strict";
 import type { IncomingMessage } from "node:http";
-import { it, type TestContext } from "vitest";
+import { it } from "@effect/vitest";
+import { Deferred, Effect, Fiber } from "effect";
 import { WebSocketServer, type WebSocket } from "ws";
-import { ProjectFileError } from "../src/project-files.js";
-import { makeProjectCommitter, makeProjectFiles, makeProjectWriter } from "./support/native-files-promise.js";
-import { defer, deferred, within } from "./support/c3b-http.js";
+import { NativeEnvelope } from "../src/native-envelope.js";
+import { ProjectCommitter, ProjectFileError, ProjectFiles, ProjectWriter } from "../src/project-files.js";
+import { cancelAfter, within } from "./support/g5a-bounds.js";
 
 type Frame = {_tag?: string; id?: string; tag?: string; payload?: Record<string, unknown>};
 
-// a loopback T3 websocket endpoint whose behaviour per request frame is chosen by the test
-const nativePeer = async (t: TestContext, options: {
+// a loopback T3 websocket endpoint whose behaviour per request frame is chosen by the test; it closes with the test's scope
+const nativePeer = (options: {
   onRequest?: (socket: WebSocket, frame: Frame) => void;
   verifyClient?: (info: {req: IncomingMessage}) => boolean;
-} = {}) => {
+} = {}) => Effect.gen(function* () {
   const connections: string[] = [];
   const requests: Frame[] = [];
-  const server = new WebSocketServer({host: "127.0.0.1", port: 0, ...(options.verifyClient ? {verifyClient: options.verifyClient} : {})});
-  await new Promise<void>(resolve => server.once("listening", () => resolve()));
+  const server = yield* Effect.acquireRelease(Effect.promise(async () => {
+    const listening = new WebSocketServer({host: "127.0.0.1", port: 0, ...(options.verifyClient ? {verifyClient: options.verifyClient} : {})});
+    await new Promise<void>(resolve => listening.once("listening", () => resolve()));
+    return listening;
+  }), listening => Effect.promise(async () => {
+    for (const client of listening.clients) client.terminate();
+    await new Promise<void>(resolve => listening.close(() => resolve()));
+  }));
   server.on("connection", (socket, upgrade) => {
     connections.push(String(upgrade.url));
     socket.on("message", data => {
@@ -26,57 +33,57 @@ const nativePeer = async (t: TestContext, options: {
       options.onRequest?.(socket, frame);
     });
   });
-  defer(t, async () => {
-    for (const client of server.clients) client.terminate();
-    await new Promise<void>(resolve => server.close(() => resolve()));
-  });
   const address = server.address();
   assert.ok(address && typeof address === "object");
   return {url: `http://127.0.0.1:${address.port}`, connections, requests};
-};
+});
 
 const failWith = (cause: unknown) => (socket: WebSocket, frame: Frame) =>
   socket.send(JSON.stringify({_tag: "Exit", requestId: frame.id, exit: {_tag: "Failure", cause}}));
 
+// one native call whose cancel trigger completes after 5 s
+const timed = <A, E>(call: (cancel: Deferred.Deferred<void>) => Effect.Effect<A, E>) => Effect.scoped(Effect.flatMap(cancelAfter("5 seconds"), call));
 const commitArgs = [["/workspace", [".t3-supervisor/project.yaml"], "Initialize T3 Supervisor definitions", "supervisor-setup-c3b"]] as const;
-const commit = (url: string, signal: AbortSignal) => makeProjectCommitter(url, "commit-token").commitFiles(...commitArgs[0], signal);
+const commit = (url: string, cancel: Deferred.Deferred<void>) => ProjectCommitter.make({baseUrl: url, token: "commit-token"}).pipe(
+  Effect.provide(NativeEnvelope.layer), Effect.flatMap(committer => committer.commitFiles(...commitArgs[0], cancel)));
 
-it("CT-FILES-01: a commit whose connection drops after the request frame is uncertain; any close, even before open, is uncertain; a pre-aborted signal never connects", {timeout: 10_000}, async t => {
-  const received = deferred<Frame>();
-  const dropping = await nativePeer(t, {onRequest: (socket, frame) => {received.resolve(frame);socket.terminate();}});
-  assert.deepEqual(await within(commit(dropping.url, AbortSignal.timeout(5_000)), 5_000, "dropped commit"), {status: "uncertain"});
-  const frame = await received.promise;
+it.live("CT-FILES-01: a commit whose connection drops after the request frame is uncertain; any close, even before open, is uncertain; a pre-aborted signal never connects", () => Effect.gen(function* () {
+  const received = yield* Deferred.make<Frame>();
+  const dropping = yield* nativePeer({onRequest: (socket, frame) => {Deferred.doneUnsafe(received, Effect.succeed(frame));socket.terminate();}});
+  assert.deepEqual(yield* within(timed(cancel => commit(dropping.url, cancel)), 5_000, "dropped commit"), {status: "uncertain"});
+  const frame = yield* Deferred.await(received);
   assert.equal(frame.tag, "git.runStackedAction");
   assert.deepEqual(frame.payload, {actionId: "supervisor-setup-c3b", cwd: "/workspace", action: "commit",
     commitMessage: "Initialize T3 Supervisor definitions", filePaths: [".t3-supervisor/project.yaml"]});
   assert.equal(dropping.requests.length, 1);
 
   // a refused upgrade closes before open and is still reported as uncertain, never as unsent
-  const refusing = await nativePeer(t, {verifyClient: () => false});
-  assert.deepEqual(await within(commit(refusing.url, AbortSignal.timeout(5_000)), 5_000, "refused commit"), {status: "uncertain"});
+  const refusing = yield* nativePeer({verifyClient: () => false});
+  assert.deepEqual(yield* within(timed(cancel => commit(refusing.url, cancel)), 5_000, "refused commit"), {status: "uncertain"});
   assert.deepEqual(refusing.connections, []);
 
-  // a signal aborted while the request is in flight is uncertain as well
-  const holding = deferred();
-  const silent = await nativePeer(t, {onRequest: () => holding.resolve()});
-  const cancel = new AbortController();
-  const pending = commit(silent.url, cancel.signal);
-  await within(holding.promise, 5_000, "commit request frame");
-  cancel.abort();
-  assert.deepEqual(await within(pending, 5_000, "aborted commit"), {status: "uncertain"});
+  // a cancel trigger completed while the request is in flight is uncertain as well
+  const holding = yield* Deferred.make<void>();
+  const silent = yield* nativePeer({onRequest: () => {Deferred.doneUnsafe(holding, Effect.void);}});
+  const cancel = yield* Deferred.make<void>();
+  const pending = yield* Effect.forkChild(commit(silent.url, cancel));
+  yield* within(Deferred.await(holding), 5_000, "commit request frame");
+  yield* Deferred.succeed(cancel, undefined);
+  assert.deepEqual(yield* within(Fiber.join(pending), 5_000, "aborted commit"), {status: "uncertain"});
 
-  const untouched = await nativePeer(t);
-  const aborted = new AbortController();
-  aborted.abort();
-  await assert.rejects(commit(untouched.url, aborted.signal), (error: unknown) =>
-    error instanceof ProjectFileError && error.code === "unavailable" && error.message === "T3 project file access is unavailable.");
+  // a cancel trigger completed before the call never connects
+  const untouched = yield* nativePeer();
+  const aborted = yield* Deferred.make<void>();
+  yield* Deferred.succeed(aborted, undefined);
+  const error = yield* Effect.flip(commit(untouched.url, aborted));
+  assert.ok(error instanceof ProjectFileError && error.code === "unavailable" && error.message === "T3 project file access is unavailable.");
   assert.deepEqual(untouched.connections, [], "no connection was opened");
   assert.deepEqual(untouched.requests, []);
-});
+}), {timeout: 10_000});
 
 const authorization = {failures: [{_tag: "Fail", error: {_tag: "RpcClientError", cause: {_tag: "EnvironmentAuthorizationError", message: "denied"}}}]};
 
-it("CT-FILES-02: native failure classification maps nested authorization, ENOENT, access and file failures to the golden codes and messages", {timeout: 10_000}, async t => {
+it.live("CT-FILES-02: native failure classification maps nested authorization, ENOENT, access and file failures to the golden codes and messages", () => Effect.gen(function* () {
   const causes: Record<string, unknown> = {
     authorization,
     enoentMessage: {failures: [{_tag: "Fail", error: {message: "ENOENT: no such file or directory, open '/workspace/.t3-supervisor/project.yaml'"}}]},
@@ -90,14 +97,15 @@ it("CT-FILES-02: native failure classification maps nested authorization, ENOENT
     unknown: {failures: [{_tag: "Die", defect: "boom"}]},
     tooDeep: [[[[[[[[[[[[[{_tag: "EnvironmentAuthorizationError"}]]]]]]]]]]]]],
   };
-  const peer = await nativePeer(t, {onRequest: (socket, frame) => failWith(causes[String(frame.payload?.relativePath ?? frame.payload?.actionId).split("/").at(-1)!])(socket, frame)});
-  const files = makeProjectFiles(peer.url, "read-token");
-  const writer = makeProjectWriter(peer.url, "write-token");
-  const outcome = async (operation: Promise<unknown>) => {
-    try {await operation;return "resolved";}
-    catch (error) {return error instanceof ProjectFileError ? [error.code, error.message] : String(error);}
-  };
-  const read = (name: string) => outcome(files.read("/workspace", `.t3-supervisor/${name}`, AbortSignal.timeout(5_000)));
+  const peer = yield* nativePeer({onRequest: (socket, frame) => failWith(causes[String(frame.payload?.relativePath ?? frame.payload?.actionId).split("/").at(-1)!])(socket, frame)});
+  const files = yield* ProjectFiles.make({baseUrl: peer.url, token: "read-token"}).pipe(Effect.provide(NativeEnvelope.layer));
+  const writer = yield* ProjectWriter.make({baseUrl: peer.url, token: "write-token"}).pipe(Effect.provide(NativeEnvelope.layer));
+  // an operation's outcome: resolved, or its native file failure's code and message
+  const outcome = (operation: Effect.Effect<unknown, ProjectFileError>) => Effect.match(operation, {
+    onSuccess: (): unknown => "resolved",
+    onFailure: (error): unknown => error instanceof ProjectFileError ? [error.code, error.message] : String(error),
+  });
+  const read = (name: string) => timed(cancel => outcome(files.read("/workspace", `.t3-supervisor/${name}`, cancel)));
   const readMessages = {
     permission_required: "Enable filesystem:read on the Supervisor read credential through deployment setup.",
     missing: "The requested project path does not exist.",
@@ -109,17 +117,17 @@ it("CT-FILES-02: native failure classification maps nested authorization, ENOENT
     binary: "invalid_file", directory: "invalid_file", authorizationBeatsEnoent: "permission_required", accessBeatsEnoent: "invalid_file",
     unknown: "unavailable", tooDeep: "unavailable",
   };
-  for (const [name, code] of Object.entries(golden)) assert.deepEqual(await read(name), [code, readMessages[code]], name);
+  for (const [name, code] of Object.entries(golden)) assert.deepEqual(yield* read(name), [code, readMessages[code]], name);
 
   // the write scope names the write credential; the committer only distinguishes permission from an unconfirmed failure
-  assert.deepEqual(await outcome(writer.writeFile!("/workspace", ".t3-supervisor/authorization", "x", AbortSignal.timeout(5_000))),
+  assert.deepEqual(yield* timed(cancel => outcome(writer.writeFile("/workspace", ".t3-supervisor/authorization", "x", cancel))),
     ["permission_required", "Enable filesystem:write on the Supervisor write credential through deployment setup."]);
-  assert.deepEqual(await outcome(writer.writeFile!("/workspace", ".t3-supervisor/enoentMessage", "x", AbortSignal.timeout(5_000))),
+  assert.deepEqual(yield* timed(cancel => outcome(writer.writeFile("/workspace", ".t3-supervisor/enoentMessage", "x", cancel))),
     ["missing", "The requested project path does not exist."]);
-  const committer = makeProjectCommitter(peer.url, "commit-token");
-  const commitWith = (actionId: string) => outcome(committer.commitFiles("/workspace", [".t3-supervisor/project.yaml"], "message", actionId, AbortSignal.timeout(5_000)));
-  assert.deepEqual(await commitWith("authorization"), ["permission_required", "Enable filesystem:write on the Supervisor write credential through deployment setup."]);
-  assert.deepEqual(await commitWith("enoentMessage"), ["unavailable", "T3 project file access is unavailable."]);
-  assert.deepEqual(await commitWith("unknown"), ["unavailable", "T3 project file access is unavailable."]);
+  const committer = yield* ProjectCommitter.make({baseUrl: peer.url, token: "commit-token"}).pipe(Effect.provide(NativeEnvelope.layer));
+  const commitWith = (actionId: string) => timed(cancel => outcome(committer.commitFiles("/workspace", [".t3-supervisor/project.yaml"], "message", actionId, cancel)));
+  assert.deepEqual(yield* commitWith("authorization"), ["permission_required", "Enable filesystem:write on the Supervisor write credential through deployment setup."]);
+  assert.deepEqual(yield* commitWith("enoentMessage"), ["unavailable", "T3 project file access is unavailable."]);
+  assert.deepEqual(yield* commitWith("unknown"), ["unavailable", "T3 project file access is unavailable."]);
   assert.equal(peer.requests.length, Object.keys(golden).length + 5);
-});
+}), {timeout: 10_000});
