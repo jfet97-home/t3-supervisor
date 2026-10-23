@@ -10,6 +10,10 @@ import type { StoreShape } from "../../src/store.js";
 import { makeT3Client, T3Client, type T3ClientShape } from "../../src/t3.js";
 import type { ProjectInfo, SupervisorConfig, ThreadInfo } from "../../src/types.js";
 import { freePort, within } from "./g8-process.js";
+import { SupervisorConfig as Configuration } from "../../src/config.js";
+import { policyDbLayer } from "../../src/db.js";
+import { SupervisorOwnership } from "../../src/project-supervisor-store.js";
+import { ThreadPolicyStore } from "../../src/thread-policy.js";
 
 // a loopback T3 peer and the unchanged runGuidanceApplication (src/guidance-application.ts) over it, as scoped effects
 // (test harness only): the peer is a node http and websocket server (the native boundary) closed with the caller's scope
@@ -91,8 +95,12 @@ export interface RunningApp {
 export const runApp = (config: SupervisorConfig, t3: T3ClientShape, catalog: () => AppCatalog) => Effect.gen(function* () {
   const ready = yield* Deferred.make<void>();
   const source = { catalog: () => Effect.succeed(catalog()) } as unknown as StoreShape;
+  // the process's services the run reads, as the root provides them (src/supervisor.ts): the configuration, the thread-policy
+  // store on its own client and the ownership set
+  const processServices = Layer.mergeAll(Layer.succeed(Configuration, config), SupervisorOwnership.layer,
+    ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(config.dataDirectory)), Layer.provide(Layer.succeed(Configuration, config))));
   const application = Effect.scoped(runGuidanceApplication(config, source, t3, () => Deferred.doneUnsafe(ready, Exit.void)))
-    .pipe(Effect.provide(Layer.merge(NativeTransportLive, NodeFileSystem.layer)));
+    .pipe(Effect.provide(Layer.mergeAll(NativeTransportLive, processServices).pipe(Layer.provideMerge(NodeFileSystem.layer))));
   const fiber = yield* Effect.forkScoped(application);
   const interrupt = within(Fiber.interrupt(fiber), 10_000, "application interruption");
   // the bounded interruption runs before the scope's own

@@ -234,7 +234,6 @@ const uiConfig = (directory: string): SupervisorConfig => ({
   uiPort: 0,
   uiHost: "127.0.0.1",
   uiAssetsDirectory: directory,
-  supervisorOwnedThreadIds: new Set(),
 });
 
 it.live("CT-AUTH-05: concurrent HTTP logins and child-process forges keep one session per grant and the delete-mode schema", () => Effect.gen(function* () {
