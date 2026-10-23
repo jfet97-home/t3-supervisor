@@ -1001,7 +1001,8 @@ it.effect("parallel main worktrees retain distinct ownership and scoped recovery
     {threadId: "tree-b", projectId: "project-a", turns: [{id: "b-task", sequence: 12, text: "Implement in tree B"}]}]);
   fixture.projections.get("tree-a")!.thread.worktreePath = "/work/a/tree-a";
   fixture.projections.get("tree-b")!.thread.worktreePath = "/work/a/tree-b";
-  fixture.setUnknownDispatches(1);
+  // the two mains dispatch concurrently: only tree A's interpretation request loses its response
+  fixture.setUnknownDispatchMatching((payload) => String(payload.text).includes("Implement in tree A"));
   const supervisor = yield* fixture.makeSupervisor();
   yield* supervisor.runOnce;
   const a = (yield* fixture.store.binding("project-a", "tree-a"))!;

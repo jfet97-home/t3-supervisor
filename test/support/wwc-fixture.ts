@@ -22,6 +22,7 @@ import type { Projection, ThreadInfo } from "../../src/types.js";
 import type { WorkflowOwner } from "../../src/workflow-state-contract.js";
 import { WorkflowNativeAccess, WorkflowWriteController, type SupervisorContextViewInput, type SupervisorContextViewResult, type WorkflowApplyPatch } from "../../src/workflow-write-controller.js";
 import { workflowToolNames } from "../../src/workflow-write-evidence.js";
+import { forkObserved } from "./clock-sleeps.js";
 import { atWallClock, definitionsService, t3Projections, wallClock } from "./g1a-conversation.js";
 import { temporaryDirectory } from "./g12-stores.js";
 import { effectiveIndex, projectIndex } from "../project-definitions-fixture.js";
@@ -331,12 +332,13 @@ export const reconcileAt = (controller: SupervisorTeamController["Service"], bin
   atWallClock(now)(controller.reconcile(binding));
 
 /**
- * Forks `work` and advances the test clock by `duration` once it has reached its first sleep.
- * durations here stay under the 10 s tool deadline, so that sleep is not woken.
+ * Forks `work` and advances the test clock by `duration` once it has registered its first sleep within `duration` (or ended):
+ * the store reads before it are real i/o in the database worker. durations here stay under the 10 s tool deadline, so that
+ * sleep is neither waited for nor woken.
  */
 export const drive = <A, E, R>(work: Effect.Effect<A, E, R>, duration: Duration.Input) => Effect.gen(function* () {
-  const fiber = yield* Effect.forkChild(work);
-  yield* Effect.yieldNow;
+  const {fiber, asleep} = yield* forkObserved(work, duration);
+  yield* asleep;
   yield* TestClock.adjust(duration);
   return yield* Fiber.join(fiber);
 });

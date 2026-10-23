@@ -10,6 +10,7 @@ import type { Projection, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
 import { workflowToolNames } from "../src/workflow-write-evidence.js";
+import { forkObserved } from "./support/clock-sleeps.js";
 import { openGuidance, openSupervisors, openWorkflows, temporaryDirectory } from "./support/psx-stores.js";
 
 // CT-WWC-07 (target regression): the 400 ms evidence budget runs on the Effect clock (monotonic time, 50 ms pauses) instead of
@@ -56,8 +57,10 @@ it.effect("CT-WWC-07: with a 400 ms budget a pending write polls the projection 
     Effect.provideService(WorkflowNativeAccess, native), Effect.provideService(SupervisionScopeService, display),
     Effect.provide(Context.add(stores.context, WorkflowStateStore, workflows)));
 
-  const writing = yield* Effect.forkChild(controller.write(args));
-  yield* Effect.yieldNow;
+  // the binding and receipt reads before the first poll are real i/o in the database worker: wait until the write is at its
+  // first 50 ms pause, with no virtual time passed
+  const {fiber: writing, asleep} = yield* forkObserved(controller.write(args), "50 millis");
+  yield* asleep;
   assert.deepEqual([polls, details], [[0], [0]], "the first poll and its detail read happen at once");
   for (let step = 1; step <= 7; step++) {
     yield* TestClock.adjust("50 millis");

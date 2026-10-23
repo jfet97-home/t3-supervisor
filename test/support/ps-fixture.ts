@@ -304,6 +304,8 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
   const operations: Array<{ tag: string; payload: Record<string, unknown> }> = [];
   const projectionReads: string[] = [];
   let unknownDispatches = 0;
+  // one lost response for the first message dispatch this predicate selects, whatever order concurrent mains dispatch in
+  let unknownDispatchMatching: ((payload: Record<string, unknown>) => boolean) | null = null;
   let acceptedDispatchesWithoutRun = 0;
   let unknownLaunchResponses = 0;
   let launchFailuresBeforeCreate = 0;
@@ -414,6 +416,10 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
         unknownDispatches -= 1;
         throw new Error("simulated lost response");
       }
+      if (unknownDispatchMatching?.(payload)) {
+        unknownDispatchMatching = null;
+        throw new Error("simulated lost response");
+      }
       const projection = projections.get(String(payload.threadId));
       assert.ok(projection);
       if (acceptedDispatchesWithoutRun > 0) {
@@ -520,6 +526,7 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
     },
     setSnapshotSequence: (value: number) => { snapshotSequence = value; },
     setUnknownDispatches: (count: number) => { unknownDispatches = count; },
+    setUnknownDispatchMatching: (predicate: (payload: Record<string, unknown>) => boolean) => { unknownDispatchMatching = predicate; },
     setAcceptedDispatchesWithoutRun: (count: number) => { acceptedDispatchesWithoutRun = count; },
     setUnknownLaunchResponses: (count: number) => { unknownLaunchResponses = count; },
     setLaunchFailuresBeforeCreate: (count: number) => { launchFailuresBeforeCreate = count; },
