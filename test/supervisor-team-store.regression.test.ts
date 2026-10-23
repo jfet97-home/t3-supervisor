@@ -1,19 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { NodeServices } from "@effect/platform-node";
 import { it } from "@effect/vitest";
 import { Deferred, Effect, Exit, Fiber } from "effect";
 import type { SqlClient } from "effect/sql";
 import { TestClock } from "effect/testing";
-import { GuidanceStore } from "../src/guidance-store.js";
-import { defaultSupervisorModel, ProjectSupervisorStore } from "../src/project-supervisor-store.js";
-import { SupervisorTeamStore, TeamStoreError, type SupervisorTeamStoreShape, type TeamBinding } from "../src/supervisor-team-store.js";
+import { defaultSupervisorModel } from "../src/project-supervisor-store.js";
+import { TeamStoreError, type SupervisorTeamStoreShape, type TeamBinding } from "../src/supervisor-team-store.js";
 import { countingIds, guidanceStoresFixture, type StatementInterposer } from "./support/guidance-store-services.js";
 
 // target regressions of the SupervisorTeamStore service (s6d step 1): CT-TSTORE-01 and CT-TSTORE-02 (manifest) and CT-TCTRL-03
-// at service level (cc-owned, the d-21 fix), with its old-code control on the synchronous class
+// at service level (cc-owned, the d-21 fix); its old-code control ran on the synchronous class (154ad9c), deleted by the switch
 
 const parents = new Map<string, string | null>([["branch-a", "main"], ["branch-b", "main"], ["leaf-a", "branch-a"], ["leaf-b", "branch-b"]]);
 const live = <A, E, R>(body: Effect.Effect<A, E, R>) => body.pipe(Effect.provide(NodeServices.layer));
@@ -168,29 +164,6 @@ it.live("CT-TCTRL-03: a helper registered inside a caller's transaction that the
   yield* f.team.registerMember(f.binding, {threadId: "helper-alone", taskId: "task-alone", bootstrapRunId: "run-alone", now: 30});
   assert.equal(f.supervisors.ownedIds.has("helper-alone"), true);
 })), {timeout: 10_000});
-
-it("CT-TCTRL-03 old-code control: the synchronous registerMember inside a rolled-back transaction leaves the helper in ownedIds (d-21)", {timeout: 10_000}, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "team-sync-control-"));
-  const guidance = new GuidanceStore(directory);
-  try {
-    const owned = new Set<string>();
-    const supervisors = new ProjectSupervisorStore(guidance, owned);
-    const root = supervisors.reserve("project", "main", "Main", defaultSupervisorModel, 0, 1);
-    const team = new SupervisorTeamStore(supervisors);
-    const binding: TeamBinding = {projectId: root.projectId, mainThreadId: root.mainThreadId, threadId: root.threadId, generation: root.generation};
-    assert.throws(() => guidance.transaction(() => {
-      team.registerMember(binding, {threadId: "helper-phantom", taskId: "task-phantom", bootstrapRunId: "run-phantom", now: 10});
-      throw new Error("receipt_write_failed");
-    }), /receipt_write_failed/u);
-    assert.equal(guidance.db.prepare("SELECT count(*) AS n FROM supervisor_team_members").get()?.n, 0, "the rows roll back");
-    assert.equal(guidance.db.prepare("SELECT count(*) AS n FROM supervisor_owned_threads WHERE id='helper-phantom'").get()?.n, 0);
-    // the target assertion of CT-TCTRL-03 (no phantom owned id) fails on the synchronous class
-    assert.equal(owned.has("helper-phantom"), true, "the synchronous class keeps the rolled-back helper in ownedIds");
-  } finally {
-    guidance.close();
-    await rm(directory, {recursive: true, force: true});
-  }
-});
 
 it.effect("CC-CLOCK-WALL and CC-IDS: team times default to Clock and assignment, notice and event identities come from SupervisorIds", () => live(Effect.gen(function* () {
   const f = yield* guidanceStoresFixture("team-service-clock-", {ids: countingIds});
