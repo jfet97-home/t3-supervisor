@@ -120,6 +120,11 @@ remain independent. Neutral updates retain authorization; explicit pause returns
 following without deleting the agreement, occurrence IDs or valid progress. Same-scope
 resume preserves acceptance. A changed outcome gets a new scope revision and realigns
 affected commitments. Newer requester messages defer obsolete decisions and writes.
+The original scope sources remain pinned across same-scope resume; the resume has
+its own state source. A retained plan can receive its first introduction after a
+pause or neutral update only with the same recorded authorization revision and
+fresh, unchanged native submission evidence. A changed scope cannot reuse that
+proof. Missing revision evidence stays held for explicit replanning.
 Agreement acceptance rechecks the requester watermark after its evidence reads.
 An active human turn in the Supervisor takes priority over service wakes; terminal
 human turns, including interrupted or failed ones, release that hold. Quiet or stale

@@ -60,7 +60,7 @@ export const resolveConversationDecision = (input: {
     const same = authorization !== null && decision.scope === "same" && decision.outcome === authorization.outcome && fingerprint(decision.limits) === fingerprint(authorization.limits);
     if (decision.scope === "same" && !same) return {ok: false, reason: "scope_changed"};
     scopeChanged = !same;
-    authorization = {...(same ? {...authorization!, scopeSources} : {scopeRevision: prior.authorization ? fingerprint({outcome: decision.outcome, limits: decision.limits, scopeSources}) : input.initialRevision,
+    authorization = {...(same ? authorization! : {scopeRevision: prior.authorization ? fingerprint({outcome: decision.outcome, limits: decision.limits, scopeSources}) : input.initialRevision,
       outcome: decision.outcome, limits: [...decision.limits], scopeSources}), state: "authorized", stateSource: watermark, attemptId: input.attemptId};
   } else if (decision.intent === "pause" && authorization && !(authorization.state === "paused" && authorization.stateSource.requester === "human" && watermark.requester === "launching_agent")) {
     // returning to discussion pauses participation without disabling Supervisor or discarding the accepted scope.

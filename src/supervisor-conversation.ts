@@ -267,15 +267,18 @@ const interpretationProposal = (candidate: WorkflowAgreementCandidate): boolean 
 // recorded tool submissions
 type EvidenceView = {readonly supervisor: Projection; readonly messages: readonly CompletedMessage[]; readonly details: ReadonlyMap<string, unknown>};
 
-// the task's own interpretation evidence, which stands for a candidate-free interpretation: the current attempt's recorded tool
-// submission, or the answer message validated once at the s6e deployment, for the task's current source revision and exactly its plan
+// the task's candidate-free plan evidence: the current attempt, or a retained native submission within the same authorization
+// revision after the requester advances. converted message evidence always requires the current source
 const taskEvidenceState = (task: TaskRecord, view: EvidenceView): EvidenceState => {
   const evidence = task.interpretationEvidence;
-  if (!evidence || view.supervisor.thread.id !== task.supervisorThreadId || !evidence.sourcePin || !samePin(evidence.sourcePin, interpretationSourcePin(task)) ||
+  if (!evidence || view.supervisor.thread.id !== task.supervisorThreadId || !evidence.sourcePin ||
     evidence.planDigest === undefined || evidence.planDigest !== interpretationPlanDigest(task.workflow)) return "changed";
-  if (evidence.kind === "supervisor_message") return evidenceMessage(evidence, view.messages) ? "current" : "changed";
-  return evidence.taskId === task.id && evidence.attemptId === task.attempt?.attemptId
-    ? submissionEvidenceState(evidence, view.supervisor, view.details.get(evidence.itemId)) : "changed";
+  const currentSource = samePin(evidence.sourcePin, interpretationSourcePin(task));
+  if (evidence.kind === "supervisor_message") return currentSource && evidenceMessage(evidence, view.messages) ? "current" : "changed";
+  const authorization = task.conversation?.authorization;
+  const attemptMatches = currentSource ? evidence.attemptId === task.attempt?.attemptId : authorization?.state === "authorized" &&
+    evidence.scopeRevision === authorization.scopeRevision && authorization.scopeSources.some(pin => samePin(pin, evidence.sourcePin));
+  return evidence.taskId === task.id && attemptMatches ? submissionEvidenceState(evidence, view.supervisor, view.details.get(evidence.itemId)) : "changed";
 };
 
 const sourcePinMatchesContext = (value: Pick<WorkflowProposalInfo,
