@@ -2,7 +2,7 @@ name: t3-supervisor
 
 services:
   t3-supervisor:
-    image: ghcr.io/jfet97-home/t3-supervisor:${SUPERVISOR_VERSION:-latest}
+    image: ghcr.io/jfet97/t3-supervisor:${SUPERVISOR_VERSION:-latest}
     restart: unless-stopped
     init: true
     read_only: true

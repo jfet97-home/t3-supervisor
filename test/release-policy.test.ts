@@ -3,8 +3,8 @@ import { it } from "@effect/vitest";
 import { Schema } from "effect";
 import { assertAliasAdvance, assertRegistryIdentity, planRelease, releaseNotes, ReleaseManifest, ReleaseRequest, ReleaseStatus } from "../scripts/release-policy.js";
 
-const manifest = Schema.decodeUnknownSync(ReleaseManifest)({ name: "t3-supervisor", version: "0.1.0" });
-const pending = Schema.decodeUnknownSync(ReleaseStatus)({ releases: [{ name: "t3-supervisor", newVersion: "0.2.0" }] });
+const manifest = Schema.decodeUnknownSync(ReleaseManifest)({ name: "@jfet97/t3-supervisor", version: "0.1.0" });
+const pending = Schema.decodeUnknownSync(ReleaseStatus)({ releases: [{ name: "@jfet97/t3-supervisor", newVersion: "0.2.0" }] });
 const empty = { releases: [] };
 const revision = "a".repeat(40);
 const request = (channel: typeof ReleaseRequest.Type.channel, commitTime = "2026-10-24T14:00:00Z") =>

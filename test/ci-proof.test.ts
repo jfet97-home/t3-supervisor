@@ -4,7 +4,7 @@ import { newestPrRun, proveMergedValidation, requiredFullJobs, type CiRun } from
 
 const head = "a".repeat(40);
 const tree = "b".repeat(40);
-const repository = "jfet97-home/t3-supervisor";
+const repository = "jfet97/t3-supervisor";
 const expected = { repository, workflowId: 42, head, branch: "feature", tree };
 const run = (id = 10): typeof CiRun.Type => ({ id, workflow_id: 42, head_sha: head, head_branch: "feature",
   repository: { full_name: repository }, head_repository: { full_name: repository }, event: "pull_request", status: "completed", conclusion: "success" });

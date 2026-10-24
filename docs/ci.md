@@ -6,7 +6,7 @@ through a PR; ordinary direct pushes are blocked. `git push --force` cannot
 override server-side rules. No additional approving reviewer is required by
 the current solo-maintainer ruleset.
 
-The active [main ruleset](https://github.com/jfet97-home/t3-supervisor/rules/25781536)
+The active [main ruleset](https://github.com/jfet97/t3-supervisor/rules/25781536)
 owns this server-side protection; local hooks are not the enforcement boundary.
 
 ## Full validation on PRs

@@ -81,7 +81,7 @@ jobs:
         run: |
           node -e 'const fs=require("node:fs");const p=JSON.parse(fs.readFileSync("package.json","utf8"));p.gitHead=process.env.REVISION;fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n");fs.appendFileSync(process.env.GITHUB_OUTPUT,"version="+p.version+"\n")'
           mkdir -p "$RUNNER_TEMP/release-package" "$RUNNER_TEMP/release-install"
-          pnpm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/release-package"
+          pnpm pack --ignore-scripts --out "$RUNNER_TEMP/release-package/t3-supervisor-$(node -p 'require("./package.json").version').tgz"
           pnpm --dir "$RUNNER_TEMP/release-install" add --prod --offline --ignore-scripts "$RUNNER_TEMP/release-package/t3-supervisor-$(node -p 'require("./package.json").version').tgz"
           node --import tsx scripts/smoke-release.ts package "$RUNNER_TEMP/release-install/node_modules/.bin/t3-supervisor"
       - uses: docker/setup-buildx-action@v3

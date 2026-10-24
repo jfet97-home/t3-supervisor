@@ -82,7 +82,11 @@ success or substitutes a newer, different source tree.
 ## One-time setup and first release
 
 No account credentials, repository settings or publishing flags are changed by
-this PR. The maintainer must own the npm package name before enabling publication.
+this PR. The maintainer must own the npm scope and package name before enabling
+publication. The package is **`@jfet97/t3-supervisor`**: use the npm account
+`jfet97`, or an npm organization named `jfet97` with publishing rights. GitHub
+account ownership does not grant ownership of the matching npm scope. The CLI
+command remains `t3-supervisor`; the image is `ghcr.io/jfet97/t3-supervisor`.
 
 1. Create a GitHub Actions environment named **`release`**, with **Selected
    branches and tags** allowing only branch **`main`**. This environment is for
@@ -100,9 +104,11 @@ this PR. The maintainer must own the npm package name before enabling publicatio
    checkout so its repository metadata matches the archive. Do not create a dummy
    package or commit a publishing token.
 4. In npm's package settings, configure a GitHub Actions trusted publisher for
-   owner `jfet97-home`, repository `t3-supervisor`, workflow **`release.yml`**,
+   owner `jfet97`, repository `t3-supervisor`, workflow **`release.yml`**,
    environment **`release`**. Keep the main-only environment restriction in place;
    a filename-only trusted publisher does not restrict publishing to main.
+   Enable direct publishing (`npm publish`) in the trusted publisher's allowed
+   actions; staged publishing alone does not authorize this workflow.
    Use OIDC rather than a long-lived registry token. GitHub-hosted runners are
    required by this workflow. Make the GHCR package public after its first push
    if it was created private; repository visibility does not imply package visibility.

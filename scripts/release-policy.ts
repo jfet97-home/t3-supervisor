@@ -10,7 +10,7 @@ export const ReleaseRequest = Schema.Struct({
 export const ReleaseStatus = Schema.Struct({
   releases: Schema.Array(Schema.Struct({ name: Schema.String, newVersion: StableVersion })),
 });
-export const ReleaseManifest = Schema.Struct({ name: Schema.Literal("t3-supervisor"), version: StableVersion });
+export const ReleaseManifest = Schema.Struct({ name: Schema.Literal("@jfet97/t3-supervisor"), version: StableVersion });
 export const ReleasePlan = Schema.Struct({
   channel: ReleaseRequest.fields.channel,
   version: Schema.String,
@@ -60,8 +60,8 @@ export const assertRegistryIdentity = (existing: typeof RegistryVersion.Type, pl
 
 export const releaseNotes = (plan: typeof ReleasePlan.Type, changelog: string): string => {
   if (plan.channel !== "stable") return `Preview of checked main commit ${plan.revision}.\n\n` +
-    `See [pending release notes](https://github.com/jfet97-home/t3-supervisor/tree/${plan.revision}/.changeset) and ` +
-    `[the changelog](https://github.com/jfet97-home/t3-supervisor/blob/${plan.revision}/CHANGELOG.md).`;
+    `See [pending release notes](https://github.com/jfet97/t3-supervisor/tree/${plan.revision}/.changeset) and ` +
+    `[the changelog](https://github.com/jfet97/t3-supervisor/blob/${plan.revision}/CHANGELOG.md).`;
   const section = changelog.replace(/\r\n/gu, "\n").split(`## ${plan.version}\n`)[1]?.split(/\n## /u)[0]?.trim();
   if (!section) throw new Error("stable release has no changelog entry");
   return section;
