@@ -250,10 +250,14 @@ jobs:
           VERSION: ${{ steps.plan.outputs.version }}
         run: |
           docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' > release/image-manifest.json
-          digest=$(jq -er '.digest | select(test("^sha256:[a-f0-9]{64}$"))' release/image-manifest.json)
+          jq -e '.digest | test("^sha256:[a-f0-9]{64}$")' release/image-manifest.json > /dev/null
           for platform in linux/amd64 linux/arm64; do
-            docker pull --platform "$platform" "$IMAGE@$digest"
-            SMOKE_PLATFORM="$platform" node --import tsx scripts/smoke-release.ts image "$IMAGE@$digest"
+            variant=$(jq -er --arg architecture "${platform#linux/}" '
+              [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $architecture) | .digest]
+              | if length == 1 then .[0] else error("expected exactly one image variant") end
+              | select(test("^sha256:[a-f0-9]{64}$"))' release/image-manifest.json)
+            docker pull --platform "$platform" "$IMAGE@$variant"
+            SMOKE_PLATFORM="$platform" node --import tsx scripts/smoke-release.ts image "$IMAGE@$variant"
           done
       - name: Publish the immutable package with provenance
         if: ${{ env.PUBLISH == 'true' && steps.registry.outputs.exists != 'true' }}
