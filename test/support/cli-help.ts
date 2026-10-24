@@ -2,7 +2,7 @@
 // detail a usage error adds on stderr (BC-CLI-02)
 
 const flags = "FLAGS\n  --data-dir absolute-path    State directory of the instance; overrides DATA_DIRECTORY\n\n";
-const globalFlags = "GLOBAL FLAGS\n  --help, -h    Show help information\n";
+const globalFlags = "GLOBAL FLAGS\n  --help, -h       Show help information\n  --version, -v    Show version information\n";
 
 export const rootHelp =
   "DESCRIPTION\n  T3 Supervisor\n\n" +

@@ -14,6 +14,8 @@ import { privatelyEffect } from "./support/g8-private.js";
 import { dataFiles, InstalledBin, installedBinLayer, listenerStates, quickChecks, supervisorHarness, waitUntilDescriptorRetry,
   waitUntilReady, type SupervisorHarness } from "./support/g8-cli.js";
 import { forgeHelp, relativeDataDirectory, rootHelp, usageError } from "./support/cli-help.js";
+import { buildInfo } from "../src/version.js";
+import { verifyReleaseDashboard } from "./support/release-smoke.js";
 
 // process-level characterization of the supervisor entries: tsx source (main.ts, cli.ts) and the built/installed bin.
 // every case runs on the live clock: it.live, and inside the installed bin layer it.effect without the test services,
@@ -126,6 +128,20 @@ layer(installedBinLayer.pipe(Layer.provideMerge(NodeFileSystem.layer)), { timeou
   const entry = (bin: InstalledBin["Service"], variant: "built dist/cli.js" | "installed bin"): [string, string[]] =>
     variant === "installed bin" ? [bin.installedBin, []] : [process.execPath, [bin.builtCli]];
 
+  it.effect("CT-PACK-01: the installed archive serves the dashboard and its hashed asset outside the checkout", () => Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const bin = yield* InstalledBin;
+    const files = yield* fs.readDirectory(bin.packageDirectory);
+    for (const excluded of ["src", "test", "scripts", "knowledge", ".github"]) assert.equal(files.includes(excluded), false, excluded);
+    const harness = yield* supervisorHarness();
+    const child = yield* harness.start(bin.installedBin, ["start"]);
+    yield* verifyReleaseDashboard(harness, child);
+    const result = yield* signalAndWait(child, "SIGTERM");
+    assert.deepEqual({ code: result.code, signal: result.signal }, interruptExit);
+    assert.deepEqual(leakedSecrets(result.stdout + result.stderr, [harness.token]), []);
+    yield* assertReleased(harness, child.pid, readyFiles, readyDatabases);
+  }), { timeout: 60_000 });
+
   // a private home with an initialized instance whose auth state stays open in this process
   const forgeState = (prefix: string) => Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -143,6 +159,8 @@ layer(installedBinLayer.pipe(Layer.provideMerge(NodeFileSystem.layer)), { timeou
       // recorded from today's build; the target differs only by BC-CLI-01..04: effect/cli renders the help (01) and a
       // usage error prints it on stdout with the parse error, if any, on stderr, still exit 2 (02)
       const table: ReadonlyArray<{ argv: string[]; expected: Omit<ProcessResult, "signal"> }> = [
+        { argv: ["--version"], expected: { code: 0, stdout: `t3-supervisor v${buildInfo.version}\n`, stderr: "" } },
+        { argv: ["-v"], expected: { code: 0, stdout: `t3-supervisor v${buildInfo.version}\n`, stderr: "" } },
         { argv: ["--help"], expected: { code: 0, stdout: rootHelp, stderr: "" } },
         { argv: ["-h"], expected: { code: 0, stdout: rootHelp, stderr: "" } },
         { argv: [], expected: { code: 2, stdout: rootHelp, stderr: "" } },

@@ -2,18 +2,17 @@ name: t3-supervisor
 
 services:
   t3-supervisor:
-    build: .
-    image: t3-supervisor:0.1.0
+    image: ghcr.io/jfet97-home/t3-supervisor:${SUPERVISOR_VERSION:-latest}
     restart: unless-stopped
     init: true
     read_only: true
-    user: "${LOCAL_UID:-501}:${LOCAL_GID:-20}"
+    user: "${LOCAL_UID:?set LOCAL_UID}:${LOCAL_GID:?set LOCAL_GID}"
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 64
     mem_limit: 768m
     environment:
-      T3_URL: http://host.docker.internal:3773
+      T3_URL: "${T3_URL:-http://host.docker.internal:3773}"
       T3_TOKEN_FILE: /run/secrets/t3-read-token
       DATA_DIRECTORY: /data
       HEALTH_PORT: "9007"
@@ -26,8 +25,9 @@ services:
       T3_GIT_PROBE_TOKEN_FILE: /run/secrets/t3-git-probe-token
       T3_MANAGED_SCRATCH_ROOT: "${T3_MANAGED_SCRATCH_ROOT:-/tmp/t3-scratch}"
     volumes:
-      - state:/data
+      - ${SUPERVISOR_DATA_DIR:?set SUPERVISOR_DATA_DIR}:/data
       - ${SUPERVISOR_SECRETS_DIR:?set SUPERVISOR_SECRETS_DIR}:/run/secrets:ro
+    extra_hosts: ["host.docker.internal:host-gateway"]
     tmpfs:
       - /tmp:size=128m,mode=1777
     ports: ["127.0.0.1:9007:9007", "127.0.0.1:9008:9008"]
@@ -40,6 +40,3 @@ services:
     logging:
       driver: json-file
       options: {max-size: 5m, max-file: "3"}
-
-volumes:
-  state:
